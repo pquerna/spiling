@@ -260,6 +260,34 @@ impl<'d> PreparedSolid<'d> {
             retained_owner_bytes: self.retained_bytes(),
         })
     }
+    /// Unposed support of the same selected source, without preparing it again.
+    /// Retained owner and query scratch share the frozen directional byte cap.
+    pub fn material_bounds(
+        &self,
+        direction: [f64; 3],
+        policy: BoundsPolicy,
+        query_byte_limit: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<super::MaterialProjectedBounds, GeometryError> {
+        let remaining = super::bounds::MAX_SCRATCH_ALLOCATION_BYTES
+            .checked_sub(self.retained_bytes())
+            .ok_or_else(|| {
+                GeometryError::new(
+                    GeometryErrorCode::ResourceLimit,
+                    "retained native material source exhausts directional allocation cap",
+                )
+            })?
+            .min(query_byte_limit);
+        super::bounds::material_projected_bounds_with_scratch_limit(
+            self.source_view()?,
+            direction,
+            policy,
+            remaining,
+            work,
+            cancel,
+        )
+    }
     pub fn placed_material_bounds(
         &self,
         pose: RigidPoseMm,

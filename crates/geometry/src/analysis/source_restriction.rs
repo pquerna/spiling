@@ -210,6 +210,7 @@ enum SourceEndpoint {
         branch: usize,
         turns: i32,
     },
+    ClosedFence(roots::ClosedFenceEndpoint),
     FirstShift {
         turns: i32,
     },
@@ -534,6 +535,9 @@ impl<'a> SourceSpatialRestriction<'a> {
                                 ..
                             },
                         ) => a == b && at == bt,
+                        (SourceEndpoint::ClosedFence(a), SourceEndpoint::ClosedFence(b)) => {
+                            a.parameter() == b.parameter()
+                        }
                         (
                             SourceEndpoint::FirstShift { turns: a },
                             SourceEndpoint::FirstShift { turns: b },
@@ -550,6 +554,7 @@ impl EndpointRestrictedOriginal<'_> {
         let (base, turns) = match self.endpoints[index] {
             SourceEndpoint::Literal { value, turns } => (Interval::point(value), turns),
             SourceEndpoint::Root { root, turns, .. } => (root.enclosure(), turns),
+            SourceEndpoint::ClosedFence(fence) => (Interval::point(fence.parameter()), 0),
             SourceEndpoint::FirstShift { turns } => (self.endpoint(0)?, turns),
         };
         if turns == 0 {
@@ -666,11 +671,33 @@ fn endpoint_root(
     vertex: [f64; 3],
     search: [f64; 2],
     period: Option<Interval>,
+    closed_domain: Option<selection::ClosedEndpointDomain>,
     allowance: f64,
     remaining: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SourceEndpoint, GeometryError> {
+    // Active equality alone is not provenance: carrier-derived PCURVE LINE
+    // proposals also install active==search. Require selector-owned bounds.
+    // This complete-domain theorem proves strict monotonic distance and thus
+    // excludes EVERY stationary root. It is disjoint from successful existing
+    // stationary recipes, so it may precede their isolator without changing
+    // those choices. Nonproof enters the unchanged isolator; errors propagate.
+    if period.is_none() {
+        if let Some(domain) = closed_domain.filter(|domain| domain.range() == search) {
+            if let Some(fence) = roots::closed_fence_endpoint(
+                curve,
+                vertex,
+                domain.range(),
+                allowance,
+                remaining,
+                work,
+                cancel,
+            )? {
+                return Ok(SourceEndpoint::ClosedFence(fence));
+            }
+        }
+    }
     let mut roots =
         roots::isolate_endpoint(curve, vertex, search, allowance, remaining, work, cancel)?;
     work.charge(
@@ -679,8 +706,12 @@ fn endpoint_root(
     )?;
     roots.sort_unstable_by(|a, b| a.enclosure().lo.total_cmp(&b.enclosure().lo));
     let Some(first) = roots.first().copied() else {
-        return Err(source_unavailable(
-            "original endpoint has no proved source-curve root",
+        return Err(GeometryError::new(
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+            format!(
+                "original endpoint has no proved stationary root or closed-domain endpoint: target={vertex:?}, active={:?}, search={search:?}, closed_domain={closed_domain:?}, allowance_mm={allowance:?}, stationary_roots=0",
+                curve.active_range(),
+            ),
         ));
     };
     for root in roots.iter().skip(1) {
@@ -707,6 +738,24 @@ fn endpoint_root(
         branch: 0,
         turns: 0,
     })
+}
+fn endpoint_context(
+    error: GeometryError,
+    source: &OriginalCoedgeSource,
+    endpoint: usize,
+) -> GeometryError {
+    GeometryError::new(
+        error.code,
+        format!(
+            "original source face {:?}, coedge {:?}, edge {:?}, curve {:?}, endpoint {endpoint}, vertex {:?}: {}",
+            source.source_face,
+            source.oriented_edge_id,
+            source.edge_curve_id,
+            source.curve_id,
+            source.vertex_ids[endpoint],
+            error.message,
+        ),
+    )
 }
 impl<'a> EndpointRestrictedOriginal<'a> {
     fn new(
@@ -799,12 +848,16 @@ impl<'a> EndpointRestrictedOriginal<'a> {
                     source.vertex_points_mm[0],
                     selection.search,
                     selection.periodic,
+                    selection.closed_domain,
                     allowance,
                     root_bytes,
                     work,
                     cancel,
-                )? {
+                )
+                .map_err(|error| endpoint_context(error, source, 0))?
+                {
                     SourceEndpoint::Root { root, .. } => root.enclosure(),
+                    SourceEndpoint::ClosedFence(fence) => Interval::point(fence.parameter()),
                     _ => {
                         return Err(source_unavailable(
                             "original master direction has no bounded source endpoint",
@@ -925,11 +978,13 @@ impl<'a> EndpointRestrictedOriginal<'a> {
                         targets[endpoint],
                         selection.search,
                         selection.periodic,
+                        selection.closed_domain,
                         allowance,
                         root_bytes,
                         work,
                         cancel,
-                    )?
+                    )
+                    .map_err(|error| endpoint_context(error, source, endpoint))?
                 };
             }
             endpoints
@@ -997,7 +1052,11 @@ impl<'a> EndpointRestrictedOriginal<'a> {
                 cancel,
             )?;
             operator.source_error_mm = operator.source_error_mm.max(error);
-            operator.exact_endpoints &= error == 0.0;
+            if let SourceEndpoint::ClosedFence(fence) = operator.endpoints[endpoint] {
+                operator.source_error_mm = operator.source_error_mm.max(fence.source_error_mm());
+            }
+            operator.exact_endpoints &= error == 0.0
+                && !matches!(operator.endpoints[endpoint], SourceEndpoint::ClosedFence(_));
         }
         if operator.source_error_mm > allowance {
             return Err(source_unavailable(
@@ -1059,6 +1118,7 @@ impl CurveEvaluator for EndpointRestrictedOriginal<'_> {
         let parameter = |endpoint: SourceEndpoint| match endpoint {
             SourceEndpoint::Literal { value, turns: 0 } => Some(value),
             SourceEndpoint::Root { root, turns: 0, .. } => root.exact_parameter(),
+            SourceEndpoint::ClosedFence(fence) => Some(fence.parameter()),
             _ => None,
         };
         let (Some(a), Some(b)) = (parameter(self.endpoints[0]), parameter(self.endpoints[1]))
@@ -1570,6 +1630,389 @@ mod tests {
             magnitude: 3.0,
         }
     }
+
+    #[test]
+    fn finite_carrier_line_proposal_cannot_become_closed_endpoint_authority() {
+        use solidcraft_step::geom as s;
+        use spiling_contracts::geometry::StepEntityId;
+        use std::sync::Arc;
+
+        let placement = s::Placement {
+            origin: [0.0; 3],
+            axis: [0.0, 0.0, 1.0],
+            ref_direction: [1.0, 0.0, 0.0],
+        };
+        let carrier = Arc::new(s::Surface::RectangularTrimmed {
+            basis: Arc::new(s::Surface::Cylinder {
+                position: placement,
+                radius: 2.0,
+            }),
+            u1: 0.0,
+            u2: 1.0,
+            v1: 0.0,
+            v2: 1.0,
+            u_sense: true,
+            v_sense: true,
+        });
+        let xy = [2.0 * 0.5_f64.cos(), 2.0 * 0.5_f64.sin()];
+        let source = OriginalCoedgeSource {
+            source_face: StepEntityId(1),
+            bound_id: StepEntityId(2),
+            loop_id: StepEntityId(3),
+            oriented_edge_id: StepEntityId(4),
+            edge_curve_id: StepEntityId(5),
+            curve_id: StepEntityId(6),
+            vertex_ids: [StepEntityId(7), StepEntityId(8)],
+            vertex_points_mm: [[xy[0], xy[1], 0.2], [xy[0], xy[1], 1.0 + 1.0e-8]],
+            forward: true,
+            same_sense: true,
+            spatial_curve: Arc::new(Curve::SurfaceCurve {
+                kind: s::SurfaceCurveKind::Surface,
+                curve_3d: Arc::new(Curve::Line {
+                    origin: [xy[0], xy[1], 0.0],
+                    direction: [0.0, 0.0, 1.0],
+                    magnitude: 1.0,
+                }),
+                associated: vec![s::Associated::Pcurve(s::Pcurve {
+                    surface: carrier,
+                    curve: Arc::new(Curve::Line {
+                        origin: [0.5, 0.0, 0.0],
+                        direction: [0.0, 1.0, 0.0],
+                        magnitude: 1.0,
+                    }),
+                })],
+                master: s::PreferredRep::PcurveS1,
+            }),
+            pcurves: Vec::new(),
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(10_000_000);
+        let bytes = 2 * 1024 * 1024;
+        let selected = selection::select(&source, 1.0e-7, bytes, &mut work, &cancel).unwrap();
+        assert_eq!(selected.active, selected.search);
+        assert!(selected.periodic.is_none());
+        assert!(selected.closed_domain.is_none());
+        assert!(selected.active[0] > 0.0 && selected.active[1] < 1.0);
+        let curve = PreparedOriginalCurve::new(
+            &source.spatial_curve,
+            selected.active,
+            bytes,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        // These numerical premises all hold at the inward carrier proposal.
+        // They do not prove it is a genuine closed parameter incidence.
+        assert!(
+            roots::closed_fence_endpoint(
+                &curve,
+                source.vertex_points_mm[1],
+                selected.active,
+                1.0e-7,
+                bytes,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            endpoint_root(
+                &curve,
+                source.vertex_points_mm[1],
+                selected.search,
+                selected.periodic,
+                selected.closed_domain,
+                1.0e-7,
+                bytes,
+                &mut work,
+                &cancel,
+            )
+            .is_err()
+        );
+        assert!(
+            SourceSpatialRestriction::new(&source, 1.0e-7, bytes, &mut work, &cancel,).is_err()
+        );
+    }
+
+    #[test]
+    fn original_bracket_spatial_endpoints_preserve_the_captured_source_allowance() {
+        const BYTES: usize = 2 * 1024 * 1024;
+        let definition = crate::from_step_bytes(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-ribbed-bracket-mm.step"
+        ))
+        .unwrap();
+        let topology = definition.original_source();
+        let allowance = definition.provenance().uncertainty_mm.unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        for (index, source) in topology.coedges.iter().enumerate() {
+            work.charge(index as u64 + 1, &cancel).unwrap();
+            if topology.coedges[..index]
+                .iter()
+                .any(|previous| previous.edge_curve_id == source.edge_curve_id)
+            {
+                continue;
+            }
+            let operator =
+                SourceSpatialRestriction::new(source, allowance, BYTES, &mut work, &cancel)
+                    .unwrap_or_else(|error| {
+                        panic!("original edge {:?}: {error}", source.edge_curve_id)
+                    });
+            assert!(operator.source_error_mm() <= allowance);
+            for (end, vertex) in source.vertex_points_mm.iter().enumerate() {
+                let position = operator
+                    .tensor([end as f64; 2], 0, &mut work, &cancel)
+                    .unwrap()[0];
+                let residual = position
+                    .iter()
+                    .zip(vertex)
+                    .fold(Interval::point(0.0), |sum, (p, v)| {
+                        sum.add(p.sub(Interval::point(*v)).square())
+                    })
+                    .sqrt()
+                    .unwrap();
+                assert!(residual.hi <= allowance);
+                if operator.exact_source_endpoints() {
+                    assert!(position.iter().zip(vertex).all(|(p, v)| p.contains(*v)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn original_bracket_preferred_pcurve_closed_fence_endpoint_witness() {
+        use solidcraft_step::geom::{PreferredRep, Surface};
+        use spiling_contracts::geometry::StepEntityId;
+
+        const BYTES: usize = 2 * 1024 * 1024;
+        let definition = crate::from_step_bytes(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-ribbed-bracket-mm.step"
+        ))
+        .unwrap();
+        let topology = definition.original_source();
+        let face = topology
+            .faces
+            .iter()
+            .find(|face| face.source_face == StepEntityId(17))
+            .unwrap();
+        let wire = &face.wires[0];
+        let local = 4;
+        let source = topology.coedge(wire.coedges[local]).unwrap();
+        let Curve::SurfaceCurve { master, .. } = source.spatial_curve.as_ref() else {
+            panic!("original bracket operand lost its declared preferred master");
+        };
+        assert!(matches!(master, PreferredRep::PcurveS1));
+        let association = source
+            .pcurves
+            .iter()
+            .find(|association| association.association_index == 0)
+            .unwrap();
+        let preferred =
+            crate::kernel::source_operand::preferred_source_pcurve(&source.spatial_curve)
+                .unwrap()
+                .unwrap();
+        let Curve::BSpline(spline) = preferred.curve.as_ref() else {
+            panic!("selected original master is not its finite spline");
+        };
+        let Surface::Plane { .. } = preferred.surface.as_ref() else {
+            panic!("selected original master lost its plane carrier");
+        };
+        let allowance = definition.provenance().uncertainty_mm.unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let selection = selection::select(source, allowance, BYTES, &mut work, &cancel).unwrap();
+        let operand = PreparedOriginalCurve::new(
+            &source.spatial_curve,
+            selection.active,
+            BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let endpoint = 1;
+        let vertex = source.vertex_points_mm[endpoint];
+        let parameter = selection.active[1];
+        let jet = operand
+            .tensor([parameter; 2], 1, &mut work, &cancel)
+            .unwrap();
+        let delta = std::array::from_fn(|axis| jet[0][axis].sub(Interval::point(vertex[axis])));
+        let g = dot(delta, jet[1]);
+        let residual = endpoint_error(
+            &operand,
+            Interval::point(parameter),
+            vertex,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let whole = operand
+            .tensor(selection.search, 2, &mut work, &cancel)
+            .unwrap();
+        let whole_delta =
+            std::array::from_fn(|axis| whole[0][axis].sub(Interval::point(vertex[axis])));
+        let derivative = dot(whole[1], whole[1]).add(dot(whole_delta, whole[2]));
+        let stationary = roots::isolate_endpoint(
+            &operand,
+            vertex,
+            selection.search,
+            allowance,
+            BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let exact = endpoint_identity(&operand, parameter, vertex, &mut work, &cancel).unwrap();
+
+        assert_eq!(source.oriented_edge_id, StepEntityId(139));
+        assert_eq!(source.edge_curve_id, StepEntityId(140));
+        assert_eq!(source.curve_id, StepEntityId(143));
+        assert_eq!(source.vertex_ids[endpoint], StepEntityId(141));
+        assert_eq!(association.source_pcurve, StepEntityId(148));
+        assert_eq!(association.carrier_id, StepEntityId(32));
+        assert_eq!(spline.degree, 1);
+        assert_eq!(selection.active, [-19.7537037037, 6.646296296296]);
+        assert_eq!(selection.search, selection.active);
+        assert_eq!(
+            selection.closed_domain.map(|domain| domain.range()),
+            Some(selection.active)
+        );
+        assert!(selection.periodic.is_none());
+        assert_eq!(allowance, 1.0e-7);
+        assert_eq!(vertex, [1.8, 1.8, 7.6]);
+        assert!(
+            stationary.is_empty(),
+            "diagnosis falsified: there is a stationary root"
+        );
+        assert!(!exact);
+        assert!(
+            g.hi < 0.0,
+            "diagnosis falsified: outward upper-fence sign is unresolved"
+        );
+        assert!(derivative.lo > 0.0);
+        assert!(residual > 0.0 && residual <= allowance);
+        let endpoint = endpoint_root(
+            &operand,
+            vertex,
+            selection.search,
+            None,
+            selection.closed_domain,
+            allowance,
+            BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let SourceEndpoint::ClosedFence(fence) = endpoint else {
+            panic!("a constrained endpoint was mislabeled as stationary-root authority");
+        };
+        assert_eq!(fence.parameter(), parameter);
+        assert!(fence.source_error_mm() >= residual);
+        assert!(
+            endpoint_root(
+                &operand,
+                vertex,
+                selection.search,
+                None,
+                selection.closed_domain,
+                residual / 2.0,
+                BYTES,
+                &mut work,
+                &cancel,
+            )
+            .is_err()
+        );
+        // A periodic search seam must not gain the same closed-fence authority.
+        assert!(
+            endpoint_root(
+                &operand,
+                vertex,
+                selection.search,
+                Some(Interval::point(1.0)),
+                selection.closed_domain,
+                allowance,
+                BYTES,
+                &mut work,
+                &cancel,
+            )
+            .is_err()
+        );
+
+        let operator =
+            SourceSpatialRestriction::new(source, allowance, BYTES, &mut work, &cancel).unwrap();
+        assert!(operator.source_error_mm() >= residual);
+        assert!(operator.source_error_mm() <= allowance);
+        assert!(!operator.exact_source_endpoints());
+        assert_eq!(
+            operator.endpoint_parameters().unwrap()[1],
+            Interval::point(parameter)
+        );
+        assert!(
+            operator
+                .parameter_derivative(&mut work, &cancel)
+                .unwrap()
+                .lo
+                > 0.0
+        );
+        let end = operator.tensor([1.0; 2], 0, &mut work, &cancel).unwrap()[0];
+        for axis in 0..3 {
+            assert!(end[axis].intersection(jet[0][axis]).is_some());
+        }
+    }
+    #[test]
+    fn closed_fence_does_not_replace_stationary_or_ambiguous_source_endpoints() {
+        use solidcraft_step::geom::Placement;
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(10_000_000);
+        let bytes = 2 * 1024 * 1024;
+        let source = line();
+        let curve =
+            PreparedOriginalCurve::new(&source, [0.0, 1.0], bytes, &mut work, &cancel).unwrap();
+        let endpoint = endpoint_root(
+            &curve,
+            [1.5, 1.0e-8, 0.0],
+            [0.0, 1.0],
+            None,
+            None,
+            1.0e-7,
+            bytes,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let SourceEndpoint::Root { root, .. } = endpoint else {
+            panic!("an existing stationary endpoint changed authority");
+        };
+        assert!(root.source_error_mm() >= 1.0e-8);
+
+        let source = Curve::Circle {
+            position: Placement {
+                origin: [0.0; 3],
+                axis: [0.0, 0.0, 1.0],
+                ref_direction: [1.0, 0.0, 0.0],
+            },
+            radius: 2.0,
+        };
+        let range = [-0.4, 2.0 * std::f64::consts::TAU - 0.4];
+        let curve = PreparedOriginalCurve::new(&source, range, bytes, &mut work, &cancel).unwrap();
+        // Two distinct source parameters own equally near stationary points;
+        // allowing residual does not authorize selecting either or a fence.
+        assert!(
+            endpoint_root(
+                &curve,
+                [2.0, 1.0, 0.0],
+                range,
+                None,
+                None,
+                0.3,
+                bytes,
+                &mut work,
+                &cancel,
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn selected_nonperiodic_pcurve_line_keeps_its_finite_source_restriction() {
         let definition = crate::from_step_bytes(include_bytes!(

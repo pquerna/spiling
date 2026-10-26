@@ -59,10 +59,21 @@ pub(crate) fn tessellate(
         measure_deviation: false,
         ..TessellateOptions::default()
     };
+    let mut first_refinement = None;
     for attempt in 0..=8 {
         work.charge(1, cancel)?;
         let edges = candidate_query(0, &mut work, cancel, |native| {
             solidcore_mesh::tessellate_edge_set_with_budget(&kernel, brep, &options, native)
+        })
+        .map_err(|cause| {
+            display_context(
+                cause,
+                definition,
+                None,
+                attempt,
+                work.consumed(),
+                first_refinement.as_deref(),
+            )
         })?;
         check_cancel(cancel)?;
         if let Some(failure) = edges.failures().first() {
@@ -99,19 +110,41 @@ pub(crate) fn tessellate(
                         &candidate_options,
                         native,
                     )
+                })
+                .map_err(|cause| {
+                    display_context(
+                        cause,
+                        definition,
+                        Some(ordinal),
+                        attempt,
+                        work.consumed(),
+                        None,
+                    )
                 })?;
                 check_cancel(cancel)?;
                 if candidate.face != face {
                     return Err(invalid("native mesher changed source face identity"));
                 }
                 let data = audit::face(
-                    definition, ordinal, &candidate, &edges, builder.remaining_budget(),
-                    occupied, &mut work, cancel,
-                ).map_err(|cause| GeometryError::new(cause.code, format!(
-                    "native display source={} face={ordinal} source_face={} attempt={attempt} work={}: {}",
-                    definition.id().as_str(), definition.faces()[ordinal].face_id.as_str(),
-                    work.consumed(), cause.message,
-                )))?;
+                    definition,
+                    ordinal,
+                    &candidate,
+                    &edges,
+                    builder.remaining_budget(),
+                    occupied,
+                    &mut work,
+                    cancel,
+                )
+                .map_err(|cause| {
+                    display_context(
+                        cause,
+                        definition,
+                        Some(ordinal),
+                        attempt,
+                        work.consumed(),
+                        None,
+                    )
+                })?;
                 builder.push_face(
                     ordinal as u32,
                     &data.positions,
@@ -128,13 +161,53 @@ pub(crate) fn tessellate(
             Err(cause) if cause.code == GeometryErrorCode::ShapeErrorExceeded && attempt < 8 => {
                 // A completed audit, never sampled mesher statistics, requests
                 // refinement. All attempts share the same cumulative allowance.
+                if first_refinement.is_none() {
+                    first_refinement = Some(cause.message);
+                }
                 options.chord_tolerance =
                     Tolerance::Absolute(MESH_CARRIER_TOLERANCE_MM * 0.25_f64.powi(attempt + 2));
             }
-            result => return result,
+            Err(cause) => {
+                return Err(match first_refinement.as_deref() {
+                    Some(previous) => GeometryError::new(
+                        cause.code,
+                        format!("{}; first refinement: {previous}", cause.message,),
+                    ),
+                    None => cause,
+                });
+            }
+            Ok(mesh) => return Ok(mesh),
         }
     }
     unreachable!("the last candidate returns its actual audit result")
+}
+
+fn display_context(
+    cause: GeometryError,
+    definition: &Definition,
+    ordinal: Option<usize>,
+    attempt: i32,
+    work: u64,
+    refinement: Option<&str>,
+) -> GeometryError {
+    let stage = match ordinal {
+        Some(ordinal) => format!(
+            "face={ordinal} source_face={}",
+            definition.faces()[ordinal].face_id.as_str(),
+        ),
+        None => "edges".to_owned(),
+    };
+    let previous = refinement.map_or_else(String::new, |previous| {
+        format!("; first refinement: {previous}")
+    });
+    GeometryError::new(
+        cause.code,
+        format!(
+            "native display source={} {stage} attempt={attempt} work={work}: {}{previous}",
+            definition.id().as_str(),
+            cause.message,
+        ),
+    )
 }
 
 fn candidate_query<T>(
@@ -154,9 +227,10 @@ fn candidate_query<T>(
             GeometryErrorCode::Cancelled,
             "native display candidate cancelled",
         ),
-        QueryError::Limit(limit) => {
-            resource(format!("native display candidate allowance: {limit:?}"))
-        }
+        QueryError::Limit(limit) => resource(format!(
+            "native display candidate allowance: {limit:?}; candidate_work={}",
+            native.consumed(),
+        )),
     })
 }
 

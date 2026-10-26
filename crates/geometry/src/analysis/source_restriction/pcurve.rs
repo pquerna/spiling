@@ -7,7 +7,7 @@
 //! are aligned only by calibration of their actual lifted world geometry.
 use super::{
     SourceSpatialRestriction, admit_vec,
-    roots::{self, EndpointRoot},
+    roots::{self, ClosedFenceEndpoint, EndpointRoot},
 };
 use crate::kernel::source::{OriginalCoedgeSource, OriginalFaceSource, OriginalPcurveSource};
 use crate::kernel::source_operand::{PreparedOriginalCurve, preferred_source_pcurve};
@@ -52,7 +52,10 @@ pub(super) fn selected_master_window(
     let window = window::select_operand(source, pcurve, allowance, remaining, work, cancel)?;
     Ok(super::selection::SourceSelection {
         active: window.raw,
-        search: window.raw,
+        search: window.search,
+        // Preserve only selector-owned provenance. Carrier-derived LINE
+        // proposals carry None even when active == search.
+        closed_domain: window.closed_domain,
         declared_endpoints: window.declared_endpoints,
         endpoint_targets: None,
         declared_turns: window.declared_turns,
@@ -64,7 +67,8 @@ pub(super) fn selected_master_window(
 #[derive(Clone, Copy)]
 enum RawEndpoint {
     Literal { value: f64, turns: i32 },
-    Root(EndpointRoot),
+    Root { root: EndpointRoot, turns: i32 },
+    ClosedFence(ClosedFenceEndpoint),
     FirstShift { turns: i32 },
 }
 #[derive(Clone, Copy)]
@@ -75,7 +79,15 @@ struct RawRestriction {
 impl RawRestriction {
     fn endpoint(&self, index: usize) -> Result<Interval, GeometryError> {
         match self.endpoints[index] {
-            RawEndpoint::Root(root) => Ok(root.enclosure()),
+            RawEndpoint::Root { root, turns: 0 } => Ok(root.enclosure()),
+            RawEndpoint::Root { root, turns } => Ok(root.enclosure().add(
+                self.period
+                    .ok_or_else(|| {
+                        unavailable("original PCurve root turn has no actual UV period")
+                    })?
+                    .mul(Interval::point(f64::from(turns))),
+            )),
+            RawEndpoint::ClosedFence(fence) => Ok(Interval::point(fence.parameter())),
             RawEndpoint::FirstShift { turns } => Ok(self.endpoint(0)?.add(
                 self.period
                     .ok_or_else(|| {
@@ -136,6 +148,166 @@ impl RawRestriction {
     }
 }
 
+/// A genuine closed-domain minimum excludes every stationary root by the same
+/// complete-domain theorem used by the spatial owner. Otherwise retain the
+/// unchanged COMPLETE stationary inventory, including all competing branches.
+enum RawEndpointCandidates {
+    ClosedFence(ClosedFenceEndpoint),
+    Stationary(Vec<EndpointRoot>),
+}
+impl RawEndpointCandidates {
+    fn iter(&self) -> impl Iterator<Item = RawEndpoint> + '_ {
+        let (fence, roots) = match self {
+            Self::ClosedFence(fence) => (Some(RawEndpoint::ClosedFence(*fence)), &[][..]),
+            Self::Stationary(roots) => (None, roots.as_slice()),
+        };
+        fence.into_iter().chain(
+            roots
+                .iter()
+                .copied()
+                .map(|root| RawEndpoint::Root { root, turns: 0 }),
+        )
+    }
+    fn retained_bytes(&self) -> Result<usize, GeometryError> {
+        let root_capacity = match self {
+            Self::ClosedFence(_) => 0,
+            Self::Stationary(roots) => roots.capacity(),
+        };
+        root_capacity
+            .checked_mul(std::mem::size_of::<EndpointRoot>())
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>()))
+            .ok_or_else(capacity)
+    }
+}
+
+fn endpoint_candidates(
+    lifted: &LiftedPcurve<'_>,
+    vertex: [f64; 3],
+    selected: &window::PcurveWindow,
+    allowance: f64,
+    remaining: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<RawEndpointCandidates, GeometryError> {
+    let remaining = available(remaining, std::mem::size_of::<RawEndpointCandidates>())?;
+    if selected.period.is_none() {
+        if let Some(domain) = selected
+            .closed_domain
+            .filter(|domain| domain.range() == selected.search)
+        {
+            if let Some(fence) = roots::closed_fence_endpoint(
+                lifted,
+                vertex,
+                domain.range(),
+                allowance,
+                remaining,
+                work,
+                cancel,
+            )? {
+                return Ok(RawEndpointCandidates::ClosedFence(fence));
+            }
+        }
+    }
+    roots::isolate_endpoint(
+        lifted,
+        vertex,
+        selected.search,
+        allowance,
+        remaining,
+        work,
+        cancel,
+    )
+    .map(RawEndpointCandidates::Stationary)
+}
+
+fn endpoint_turns(
+    endpoint: RawEndpoint,
+    period: Option<Interval>,
+    active: [f64; 2],
+) -> Result<std::ops::RangeInclusive<i32>, GeometryError> {
+    let Some(period) = period else {
+        return Ok(0..=0);
+    };
+    let RawEndpoint::Root { root, turns: 0 } = endpoint else {
+        return Err(unavailable(
+            "periodic PCurve turn inventory needs an established base root",
+        ));
+    };
+    // Necessary integer cover only. Each complete shifted endpoint/path still
+    // must lie in the unchanged actual selected coefficient domain below.
+    let turns = Interval::new(active[0], active[1])?
+        .sub(root.enclosure())
+        .div(period)?;
+    let lower = turns.lo.ceil();
+    let upper = turns.hi.floor();
+    if lower < f64::from(i32::MIN) || upper > f64::from(i32::MAX) {
+        return Err(capacity());
+    }
+    Ok(lower as i32..=upper as i32)
+}
+
+fn with_turns(endpoint: RawEndpoint, turns: i32) -> Result<RawEndpoint, GeometryError> {
+    match endpoint {
+        RawEndpoint::Root { root, turns: 0 } => Ok(RawEndpoint::Root { root, turns }),
+        endpoint if turns == 0 => Ok(endpoint),
+        _ => Err(unavailable(
+            "PCurve coefficient turn lacks a retained base-root expression",
+        )),
+    }
+}
+
+/// A common integer turn of the ACTUAL UV curve preserves its complete
+/// normalized image, not merely the lifted world endpoints. Each transported
+/// stationary endpoint must additionally equal the candidate's established
+/// root by whole-hull uniqueness. Different winding is never quotiented away.
+fn same_periodic_branch(
+    first: RawRestriction,
+    second: RawRestriction,
+    uv_period: Option<Interval>,
+    lifted: &LiftedPcurve<'_>,
+    vertices: [[f64; 3]; 2],
+    remaining: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let Some(period) = uv_period else {
+        // A LINE on a periodic carrier may repeat in world space but not UV.
+        return Ok(false);
+    };
+    if !first
+        .endpoints
+        .iter()
+        .chain(&second.endpoints)
+        .all(|endpoint| matches!(endpoint, RawEndpoint::Root { .. }))
+    {
+        return Ok(false);
+    }
+    let turns = second
+        .endpoint(0)?
+        .sub(first.endpoint(0)?)
+        .div(period)?
+        .mid()
+        .round();
+    if !turns.is_finite() || turns.abs() > f64::from(i32::MAX) {
+        return Ok(false);
+    }
+    let shift = period.mul(Interval::point(turns));
+    for (index, vertex) in vertices.into_iter().enumerate() {
+        if !roots::same_stationary_root(
+            lifted,
+            vertex,
+            first.endpoint(index)?.add(shift),
+            second.endpoint(index)?,
+            remaining,
+            work,
+            cancel,
+        )? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// The Arc is the already admitted spatial payload, not a new root recipe or a
 /// second allocation. Its bytes are charged once by the owning trim cache.
 enum ParameterRecipe<'d> {
@@ -178,10 +350,11 @@ impl CurveEvaluator for SourcePcurveGeometry<'_, '_> {
         use crate::exact_coefficient::ExactCoefficient as E;
         work.charge(1, cancel)?;
         // Root enclosures and periodic turn bounds are not exact parameters.
-        // Only the retained literal/root identity may supply this algebra.
+        // Literal coefficient fences are exact parameters, not vertex identities.
         let exact = |endpoint| match endpoint {
             RawEndpoint::Literal { value, turns: 0 } => Some(value),
-            RawEndpoint::Root(root) => root.exact_parameter(),
+            RawEndpoint::Root { root, turns: 0 } => root.exact_parameter(),
+            RawEndpoint::ClosedFence(fence) => Some(fence.parameter()),
             _ => None,
         };
         let [Some(a), Some(b)] = self.raw.endpoints.map(exact) else {
@@ -607,16 +780,22 @@ impl<'d> SourcePcurveRestriction<'d> {
                 work,
                 cancel,
             )?;
+            let branch_fixed = fixed
+                .checked_add(std::mem::size_of::<window::PcurveWindow>())
+                .ok_or_else(capacity)?;
             let lifted = LiftedPcurve::new(
                 &pcurve.operands,
                 &selected,
-                available(remaining, fixed)?,
+                available(remaining, branch_fixed)?,
                 work,
                 cancel,
             )?;
-            let live = fixed
+            let live = branch_fixed
                 .checked_add(lifted.retained_bytes())
                 .ok_or_else(capacity)?;
+            // Only the actual UV expression licenses root turns and UV branch
+            // equivalence. A carrier's world period is insufficient.
+            let uv_period = angular_uv_period(&pcurve.operands.curve, work, cancel)?;
             let mut raw: Option<(RawRestriction, SourceCurveCalibration)> = None;
             let mut first_rejection = None;
             let mut candidate_cuts = Vec::new();
@@ -625,15 +804,38 @@ impl<'d> SourcePcurveRestriction<'d> {
             let mut consider = |candidate: RawRestriction,
                                 root_bytes: usize,
                                 work: &mut GeometryWorkBudget|
-             -> Result<(), GeometryError> {
-                if !directed(candidate, &lifted, spatial, work, cancel)? {
-                    return Ok(());
-                }
+             -> Result<bool, GeometryError> {
                 let retained = raw.as_ref().map_or(0, |(_, proof)| proof.retained_bytes());
                 let branch_live = live
                     .checked_add(root_bytes)
                     .and_then(|bytes| bytes.checked_add(retained))
                     .ok_or_else(capacity)?;
+                if let Some((previous, _)) = &raw {
+                    let cut_bytes = candidate_cuts
+                        .capacity()
+                        .checked_mul(std::mem::size_of::<f64>())
+                        .ok_or_else(capacity)?;
+                    if same_periodic_branch(
+                        *previous,
+                        candidate,
+                        uv_period,
+                        &lifted,
+                        coedge.vertex_points_mm,
+                        available(
+                            remaining,
+                            branch_live.checked_add(cut_bytes).ok_or_else(capacity)?,
+                        )?,
+                        work,
+                        cancel,
+                    )? {
+                        // The already qualified complete UV expression and
+                        // its calibration are unchanged, not a second branch.
+                        return Ok(true);
+                    }
+                }
+                if !directed(candidate, &lifted, spatial, work, cancel)? {
+                    return Ok(false);
+                }
                 match calibrate_raw_branch(
                     spatial,
                     &lifted,
@@ -652,7 +854,7 @@ impl<'d> SourcePcurveRestriction<'d> {
                             ));
                         }
                         raw = Some((candidate, calibration));
-                        Ok(())
+                        Ok(true)
                     }
                     Err(error)
                         if matches!(
@@ -664,7 +866,7 @@ impl<'d> SourcePcurveRestriction<'d> {
                     }
                     Err(error) => {
                         first_rejection.get_or_insert(error);
-                        Ok(())
+                        Ok(false)
                     }
                 }
             };
@@ -705,19 +907,18 @@ impl<'d> SourcePcurveRestriction<'d> {
                 }
             } else if coedge.vertex_ids[0] == coedge.vertex_ids[1]
                 && coedge.vertex_points_mm[0] == coedge.vertex_points_mm[1]
-                && angular_uv_period(&pcurve.operands.curve, work, cancel)?.is_some()
+                && uv_period.is_some()
             {
                 // The vertex ownership selects the closed source branch; only
                 // the actual UV coefficient period licenses this shared-root
                 // shift. World periodicity alone would not license it.
-                let period = angular_uv_period(&pcurve.operands.curve, work, cancel)?;
-                let selection =
-                    super::selection::select_curve(&pcurve.operands.curve, true, work, cancel)?;
+                let period = uv_period;
                 let endpoint = super::endpoint_root(
                     &lifted,
                     coedge.vertex_points_mm[0],
-                    selection.search,
+                    selected.search,
                     period,
+                    None,
                     allowance,
                     available(remaining, live)?,
                     work,
@@ -730,7 +931,10 @@ impl<'d> SourcePcurveRestriction<'d> {
                 };
                 for turns in [-1, 1] {
                     let candidate = RawRestriction {
-                        endpoints: [RawEndpoint::Root(root), RawEndpoint::FirstShift { turns }],
+                        endpoints: [
+                            RawEndpoint::Root { root, turns: 0 },
+                            RawEndpoint::FirstShift { turns },
+                        ],
                         period,
                     };
                     let image = candidate.image([0.0, 1.0])?;
@@ -740,23 +944,20 @@ impl<'d> SourcePcurveRestriction<'d> {
                     consider(candidate, 0, work)?;
                 }
             } else {
-                let first = roots::isolate_endpoint(
+                let first = endpoint_candidates(
                     &lifted,
                     coedge.vertex_points_mm[0],
-                    selected.raw,
+                    &selected,
                     allowance,
                     available(remaining, live)?,
                     work,
                     cancel,
                 )?;
-                let first_bytes = first
-                    .capacity()
-                    .checked_mul(std::mem::size_of::<EndpointRoot>())
-                    .ok_or_else(capacity)?;
-                let second = roots::isolate_endpoint(
+                let first_bytes = first.retained_bytes()?;
+                let second = endpoint_candidates(
                     &lifted,
                     coedge.vertex_points_mm[1],
-                    selected.raw,
+                    &selected,
                     allowance,
                     available(
                         remaining,
@@ -766,18 +967,49 @@ impl<'d> SourcePcurveRestriction<'d> {
                     cancel,
                 )?;
                 let root_bytes = second
-                    .capacity()
-                    .checked_mul(std::mem::size_of::<EndpointRoot>())
-                    .and_then(|bytes| bytes.checked_add(first_bytes))
+                    .retained_bytes()?
+                    .checked_add(first_bytes)
                     .ok_or_else(capacity)?;
-                for &a in &first {
-                    for &b in &second {
-                        work.charge(1, cancel)?;
-                        let candidate = RawRestriction {
-                            endpoints: [RawEndpoint::Root(a), RawEndpoint::Root(b)],
-                            period: None,
-                        };
-                        consider(candidate, root_bytes, work)?;
+                for a in first.iter() {
+                    for b in second.iter() {
+                        let a_turns = endpoint_turns(a, uv_period, selected.raw)?;
+                        let b_turns = endpoint_turns(b, uv_period, selected.raw)?;
+                        if a_turns.is_empty() || b_turns.is_empty() {
+                            continue;
+                        }
+                        let first_winding = b_turns
+                            .start()
+                            .checked_sub(*a_turns.end())
+                            .ok_or_else(capacity)?;
+                        let last_winding = b_turns
+                            .end()
+                            .checked_sub(*a_turns.start())
+                            .ok_or_else(capacity)?;
+                        for winding in first_winding..=last_winding {
+                            for a_turn in a_turns.clone() {
+                                work.charge(1, cancel)?;
+                                let b_turn = a_turn.checked_add(winding).ok_or_else(capacity)?;
+                                if !b_turns.contains(&b_turn) {
+                                    continue;
+                                }
+                                let candidate = RawRestriction {
+                                    endpoints: [with_turns(a, a_turn)?, with_turns(b, b_turn)?],
+                                    period: uv_period,
+                                };
+                                let image = candidate.image([0.0, 1.0])?;
+                                if image.lo < selected.raw[0] || image.hi > selected.raw[1] {
+                                    continue;
+                                }
+                                if consider(candidate, root_bytes, work)? {
+                                    // These SAME base-root expressions with
+                                    // equal winding differ only by a common
+                                    // coefficient-proved UV turn. Once one is
+                                    // qualified, no duplicate proof/allocation
+                                    // or new ambiguity authority is needed.
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -957,7 +1189,8 @@ impl<'d> SourcePcurveRestriction<'d> {
                 }
                 let exact = |endpoint| match endpoint {
                     RawEndpoint::Literal { value, turns: 0 } => Some(value),
-                    RawEndpoint::Root(root) => root.exact_parameter(),
+                    RawEndpoint::Root { root, turns: 0 } => root.exact_parameter(),
+                    RawEndpoint::ClosedFence(fence) => Some(fence.parameter()),
                     _ => None,
                 };
                 [exact(raw.endpoints[0]), exact(raw.endpoints[1])]
@@ -1267,5 +1500,255 @@ impl CurveEvaluator for SourcePcurveRestriction<'_> {
     }
     fn original_curve(&self) -> Option<&Curve> {
         Some(self.chart.source())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spiling_contracts::geometry::StepEntityId;
+
+    #[test]
+    fn independent_pcurve_keeps_its_genuine_coefficient_fence_and_nonzero_residual() {
+        const BYTES: usize = 2 * 1024 * 1024;
+        let definition = crate::from_step_bytes(include_bytes!(
+            "../../../../../fixtures/geometry/independent-exporters/occt-ribbed-bracket-mm.step"
+        ))
+        .unwrap();
+        let topology = definition.original_source();
+        let face = topology
+            .faces
+            .iter()
+            .find(|face| face.carrier_id == StepEntityId(605))
+            .unwrap();
+        let source = topology
+            .coedges
+            .iter()
+            .find(|source| {
+                source.source_face == face.source_face && source.edge_curve_id == StepEntityId(592)
+            })
+            .unwrap();
+        let pcurve = source
+            .pcurves
+            .iter()
+            .find(|pcurve| pcurve.carrier_id == face.carrier_id)
+            .unwrap();
+        let allowance = definition.provenance().uncertainty_mm.unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let spatial = Arc::new(
+            SourceSpatialRestriction::new(source, allowance, BYTES, &mut work, &cancel).unwrap(),
+        );
+        assert!(!preferred_identity(face, pcurve, &spatial, &mut work, &cancel).unwrap());
+        let mut selected = window::select(
+            face, source, pcurve, &spatial, allowance, BYTES, &mut work, &cancel,
+        )
+        .unwrap();
+        assert_eq!(
+            selected.closed_domain.unwrap().range(),
+            [-19.7537037037, 6.646296296296]
+        );
+        let lifted =
+            LiftedPcurve::new(&pcurve.operands, &selected, BYTES, &mut work, &cancel).unwrap();
+        let candidates = endpoint_candidates(
+            &lifted,
+            source.vertex_points_mm[0],
+            &selected,
+            allowance,
+            BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let RawEndpointCandidates::ClosedFence(fence) = &candidates else {
+            panic!("original nonpreferred PCurve lost its typed closed coefficient fence");
+        };
+        let fence = *fence;
+        assert_eq!(fence.parameter(), selected.raw[0]);
+        assert!(fence.source_error_mm() > 0.0 && fence.source_error_mm() <= allowance);
+
+        // Identical numeric active/search bounds without selector provenance
+        // must not acquire that constrained-minimum authority.
+        selected.closed_domain = None;
+        match endpoint_candidates(
+            &lifted,
+            source.vertex_points_mm[0],
+            &selected,
+            allowance,
+            BYTES,
+            &mut work,
+            &cancel,
+        ) {
+            Ok(candidates) => assert_eq!(candidates.iter().count(), 0),
+            Err(error) => assert_eq!(
+                error.code,
+                GeometryErrorCode::ParameterCorrespondenceUnavailable
+            ),
+        }
+        drop((candidates, lifted));
+
+        let curve = SourcePcurveRestriction::new(
+            face, source, pcurve, &spatial, allowance, BYTES, &mut work, &cancel,
+        )
+        .unwrap();
+        let ParameterRecipe::Calibrated { raw, .. } = &curve.recipe else {
+            panic!("independently gauged original PCurve borrowed a preferred-master recipe");
+        };
+        assert!(matches!(raw.endpoints[0], RawEndpoint::ClosedFence(_)));
+        assert!(matches!(
+            raw.endpoints[1],
+            RawEndpoint::Root { turns: 0, .. }
+        ));
+        assert_eq!(raw.endpoint(0).unwrap(), Interval::point(fence.parameter()));
+        assert!(!curve.exact_source_endpoints());
+        assert!(curve.source_error_mm() > 0.0 && curve.source_error_mm() <= allowance);
+        let start = curve.parameter_image([0.0; 2], &mut work, &cancel).unwrap();
+        assert_eq!(start, raw.endpoint(0).unwrap());
+        assert!(
+            curve
+                .geometric_path(&mut work, &cancel)
+                .unwrap()
+                .unwrap()
+                .exact_affine_coefficients(&mut work, &cancel)
+                .unwrap()
+                .is_some()
+                == raw.endpoints.iter().all(|endpoint| match endpoint {
+                    RawEndpoint::ClosedFence(_) => true,
+                    RawEndpoint::Root { root, turns: 0 } => root.exact_parameter().is_some(),
+                    _ => false,
+                })
+        );
+    }
+
+    #[test]
+    fn periodic_pcurve_root_cover_identifies_uv_turns_without_erasing_winding() {
+        const BYTES: usize = 2 * 1024 * 1024;
+        let definition = crate::from_step_bytes(include_bytes!(
+            "../../../../../fixtures/geometry/independent-exporters/occt-ribbed-bracket-mm.step"
+        ))
+        .unwrap();
+        let topology = definition.original_source();
+        let allowance = definition.provenance().uncertainty_mm.unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        // Independent circular UV on an offset plane (duplicate whole-turn
+        // proposals), then a seam root with nonzero translated radial residual.
+        for (edge, carrier) in [(2294, 2311), (2440, 2459)] {
+            let face = topology
+                .faces
+                .iter()
+                .find(|face| face.carrier_id == StepEntityId(carrier))
+                .unwrap();
+            let source = topology
+                .coedges
+                .iter()
+                .find(|source| {
+                    source.source_face == face.source_face
+                        && source.edge_curve_id == StepEntityId(edge)
+                })
+                .unwrap();
+            let pcurve = source
+                .pcurves
+                .iter()
+                .find(|pcurve| pcurve.carrier_id == face.carrier_id)
+                .unwrap();
+            let spatial = Arc::new(
+                SourceSpatialRestriction::new(source, allowance, BYTES, &mut work, &cancel)
+                    .unwrap(),
+            );
+            let selected = window::select(
+                face, source, pcurve, &spatial, allowance, BYTES, &mut work, &cancel,
+            )
+            .unwrap();
+            assert!(selected.raw[0] < selected.search[0]);
+            assert!(selected.search[1] < selected.raw[1]);
+            assert!(selected.closed_domain.is_none());
+            let curve = SourcePcurveRestriction::new(
+                face, source, pcurve, &spatial, allowance, BYTES, &mut work, &cancel,
+            )
+            .unwrap();
+            assert!(curve.source_error_mm() <= allowance);
+            let ParameterRecipe::Calibrated { raw, .. } = &curve.recipe else {
+                panic!("independent circular PCurve borrowed the spatial gauge");
+            };
+            let uv_period = angular_uv_period(&pcurve.operands.curve, &mut work, &cancel).unwrap();
+            let lifted =
+                LiftedPcurve::new(&pcurve.operands, &selected, BYTES, &mut work, &cancel).unwrap();
+            assert!(
+                same_periodic_branch(
+                    *raw,
+                    *raw,
+                    uv_period,
+                    &lifted,
+                    source.vertex_points_mm,
+                    BYTES,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+            );
+            let mut shifted = None;
+            for turn in [-1, 1] {
+                let candidate = RawRestriction {
+                    endpoints: raw.endpoints.map(|endpoint| match endpoint {
+                        RawEndpoint::Root { root, turns } => RawEndpoint::Root {
+                            root,
+                            turns: turns + turn,
+                        },
+                        _ => panic!("circular arc lost its stationary endpoint recipe"),
+                    }),
+                    period: raw.period,
+                };
+                let image = candidate.image([0.0, 1.0]).unwrap();
+                if selected.raw[0] <= image.lo && image.hi <= selected.raw[1] {
+                    shifted = Some(candidate);
+                    break;
+                }
+            }
+            let shifted = shifted.expect("periodic source extension has no interior turn witness");
+            assert!(
+                same_periodic_branch(
+                    *raw,
+                    shifted,
+                    uv_period,
+                    &lifted,
+                    source.vertex_points_mm,
+                    BYTES,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+            );
+            let different_winding = RawRestriction {
+                endpoints: [raw.endpoints[0], shifted.endpoints[1]],
+                period: raw.period,
+            };
+            assert!(
+                !same_periodic_branch(
+                    *raw,
+                    different_winding,
+                    uv_period,
+                    &lifted,
+                    source.vertex_points_mm,
+                    BYTES,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+            );
+            assert!(
+                !same_periodic_branch(
+                    *raw,
+                    shifted,
+                    None,
+                    &lifted,
+                    source.vertex_points_mm,
+                    BYTES,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+            );
+        }
     }
 }

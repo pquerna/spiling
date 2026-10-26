@@ -19,8 +19,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// Binds complete immutable original-source realization and wall authority.
-pub const PLANNER_VERSION: &str = "20";
+/// Binds source-only realization, including constrained PCurve endpoint selection.
+pub const PLANNER_VERSION: &str = "21";
 pub const EMITTER_VERSION: &str = "7";
 pub const VERIFIER_VERSION: &str = "9";
 

@@ -12,6 +12,12 @@
 //! and edge IDs belong to the same borrowed definition as the incidence
 //! inventory; arena-ID equality alone is not ownership. Native loop traversal,
 //! material shell sense, and source-provider direction remain distinct.
+//!
+//! The current embedding lane requires one positive degree-one planar
+//! projection for the complete star. Original manifold incidence does not
+//! imply that sufficient condition: opposed incident carrier normals can
+//! exclude every such plane. Refusal remains mandatory without an independent
+//! three-dimensional link embedding and source-complement gluing proof.
 
 use super::*;
 use crate::analysis::material_source::MaterialSourceView;
@@ -61,6 +67,52 @@ pub(super) struct CompletePositionCoverFailure {
     pub(super) phase: &'static str,
     pub(super) source_face: usize,
     pub(super) position: Box3,
+}
+
+/// Bounded refusal evidence only. Neither interval midpoints nor these
+/// rejected candidates supply source/embedding authority.
+#[derive(Clone, Copy)]
+struct FiniteBoundaryFailure {
+    piece: &'static str,
+    parameter: [f64; 2],
+    depth: u8,
+    projected_ray: Box2,
+    projected_orientation: Interval,
+    source_error_mm: Option<f64>,
+}
+
+impl std::fmt::Debug for FiniteBoundaryFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FiniteBoundaryFailure")
+            .field("piece", &self.piece)
+            .field("parameter", &self.parameter)
+            .field("depth", &self.depth)
+            .field("projected_ray", &self.projected_ray)
+            .field("projected_orientation", &self.projected_orientation)
+            .field("source_error_mm", &self.source_error_mm)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SourceSelectionFailure {
+    stage: &'static str,
+    fraction: f64,
+    face_coedges: (usize, [usize; 2]),
+    candidate: Option<usize>,
+    boundary: Option<FiniteBoundaryFailure>,
+}
+
+impl std::fmt::Debug for SourceSelectionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceSelectionFailure")
+            .field("stage", &self.stage)
+            .field("fraction", &self.fraction)
+            .field("face_coedges", &self.face_coedges)
+            .field("candidate", &self.candidate)
+            .field("boundary", &self.boundary)
+            .finish()
+    }
 }
 
 /// A complete immutable source star, with the actual finite outer boundary
@@ -504,6 +556,9 @@ impl<'d> SourceVertexTransportPlan<'d> {
         let mut current_fraction = None;
         let mut current_candidate = None;
         let mut last_source_cost = None;
+        let mut first_rejection = None;
+        let mut first_boundary_rejections = [None; 8];
+        let mut first_fan_rejection = None;
         let result = (|| {
             work.charge(1, cancel)?;
             if !incidence.owns_definition(source.definition()) {
@@ -514,7 +569,13 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     CONICAL_STACK_BYTES
                         .saturating_add(std::mem::size_of::<Self>())
                         .saturating_add(std::mem::size_of::<Vec<Corner>>())
-                        .saturating_add(std::mem::size_of::<Vec<Box2>>()),
+                        .saturating_add(std::mem::size_of::<Vec<Box2>>())
+                        .saturating_add(
+                            9 * std::mem::size_of::<Option<SourceSelectionFailure>>()
+                                + std::mem::size_of::<
+                                    Option<(SourceSelectionFailure, usize, [Box3; 2])>,
+                                >(),
+                        ),
                 )
                 .ok_or_else(|| {
                     GeometryError::new(
@@ -616,6 +677,13 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     )?
                     else {
                         accepted = false;
+                        first_rejection.get_or_insert(SourceSelectionFailure {
+                            stage,
+                            fraction,
+                            face_coedges: face_coedges.unwrap(),
+                            candidate: None,
+                            boundary: None,
+                        });
                         break;
                     };
                     stage = "incoming end evaluation";
@@ -630,6 +698,13 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     )?
                     else {
                         accepted = false;
+                        first_rejection.get_or_insert(SourceSelectionFailure {
+                            stage,
+                            fraction,
+                            face_coedges: face_coedges.unwrap(),
+                            candidate: None,
+                            boundary: None,
+                        });
                         break;
                     };
                     last_exit = Some((
@@ -646,6 +721,13 @@ impl<'d> SourceVertexTransportPlan<'d> {
                         // A failed point bound rejects the radius, never just one
                         // bulge, and the existing finer-fraction schedule continues.
                         accepted = false;
+                        first_rejection.get_or_insert(SourceSelectionFailure {
+                            stage,
+                            fraction,
+                            face_coedges: face_coedges.unwrap(),
+                            candidate: None,
+                            boundary: None,
+                        });
                         break;
                     }
                     recipes.push(CornerRecipe {
@@ -738,7 +820,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
                                 {
                                     continue;
                                 }
-                                if !cover_piece(
+                                if let Err(boundary) = cover_piece(
                                     &domain,
                                     outgoing,
                                     incoming,
@@ -755,6 +837,15 @@ impl<'d> SourceVertexTransportPlan<'d> {
                                     cancel,
                                 )? {
                                     candidate_accepted = false;
+                                    let failure = SourceSelectionFailure {
+                                        stage,
+                                        fraction,
+                                        face_coedges: face_coedges.unwrap(),
+                                        candidate: Some(candidate),
+                                        boundary: Some(boundary),
+                                    };
+                                    first_rejection.get_or_insert(failure);
+                                    first_boundary_rejections[candidate].get_or_insert(failure);
                                     break;
                                 }
                             }
@@ -779,10 +870,21 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 if accepted {
                     stage = "projected vertex fan";
                 }
-                if accepted
+                let fan_accepted = accepted
                     && !cells.is_empty()
-                    && super::vertex_fan::projected_vertex_fan(&rays, work, cancel)?
-                {
+                    && super::vertex_fan::projected_vertex_fan(&rays, work, cancel)?;
+                if accepted && !fan_accepted {
+                    let failure = SourceSelectionFailure {
+                        stage,
+                        fraction,
+                        face_coedges: face_coedges.unwrap(),
+                        candidate: None,
+                        boundary: None,
+                    };
+                    first_rejection.get_or_insert(failure);
+                    first_fan_rejection.get_or_insert((failure, rays.len(), rows));
+                }
+                if fan_accepted {
                     drop(rays);
                     let retained = recipes
                         .capacity()
@@ -844,7 +946,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
             )))
         })();
         result.map_err(|error| work.annotate_error(error, before, format_args!(
-            "SourceVertexTransportPlan stage={stage} vertex_mm={source_point:?} source_face_coedges={face_coedges:?} fraction={current_fraction:?} candidate={current_candidate:?}"
+            "SourceVertexTransportPlan stage={stage} vertex_mm={source_point:?} source_face_coedges={face_coedges:?} fraction={current_fraction:?} candidate={current_candidate:?} first_rejection={first_rejection:?} first_boundary_rejections={first_boundary_rejections:?} first_fan_rejection={first_fan_rejection:?}"
         )))
     }
 
@@ -2300,11 +2402,19 @@ fn prepare_end(
             } else {
                 (range[1] - range[0]) * fraction
             };
+        spatial_endpoint_exit = Some((endpoint, exit));
+        if exit == endpoint {
+            // The deterministic schedule only decreases this positive offset.
+            // Once rounded back to its literal endpoint, no later fraction
+            // can supply an interior exit for this same source provider.
+            return Err(refusal(
+                "source conical endpoint fraction has no representable interior exit; further fraction refinement cannot repair the rejected source star",
+            ));
+        }
         if exit <= range[0] || exit >= range[1] {
             return Ok(None);
         }
         let delta_t = Interval::point(exit).sub(Interval::point(endpoint));
-        spatial_endpoint_exit = Some((endpoint, exit));
         stage = "end chart evaluation";
         let joint_uv = chart_jet(domain, use_.coedge, [endpoint; 2], work, cancel)?.position;
         stage = "end collar evaluation";
@@ -2911,7 +3021,7 @@ fn cover_piece(
     rays: &mut Vec<Box2>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<bool, GeometryError> {
+) -> Result<Result<(), FiniteBoundaryFailure>, GeometryError> {
     let before = work.consumed();
     let mut parameter_window = [0.0, 1.0];
     let mut stage = "finite B subdivision";
@@ -2935,6 +3045,26 @@ fn cover_piece(
             let projected_box = projected(ray, rows);
             let orientation = determinant(projected_box, projected(boundary.derivative, rows));
             let mut candidate = None;
+            let mut source_error_mm = None;
+            let failure = |source_error_mm| FiniteBoundaryFailure {
+                piece: match piece {
+                    Piece::Outgoing => "outgoing",
+                    Piece::Middle => "middle",
+                    Piece::Incoming => "incoming",
+                },
+                parameter: range,
+                depth,
+                projected_ray: projected_box,
+                projected_orientation: orientation,
+                source_error_mm,
+            };
+            // A certified nonpositive upper bound already refutes this fixed
+            // projected recipe. Subdivision cannot turn its actual determinant
+            // strictly positive; retain the coefficient witness, not a final
+            // machine-small interval after exhausting the depth schedule.
+            if orientation.hi <= 0.0 {
+                return Ok(Err(failure(None)));
+            }
             if orientation.lo > 0.0
                 && !(projected_box[0].contains_zero() && projected_box[1].contains_zero())
             {
@@ -2993,6 +3123,7 @@ fn cover_piece(
                         let error_mm = length(displacement).map_err(|error| work.annotate_error(
                     error, radius_before, format_args!("SourceVertexTransportPlan physical radius evaluation vertex_mm={point:?} source_face={} coedges={:?} parameter_window={range:?}", a.use_.face, [a.use_.coedge, b.use_.coedge]),
                 ))?.hi;
+                        source_error_mm = Some(error_mm);
                         if !error_mm.is_finite() || error_mm > allowance {
                             return Ok(None);
                         }
@@ -3054,13 +3185,13 @@ fn cover_piece(
             }
             let mid = t.mid();
             if depth >= MAX_DEPTH || mid <= t.lo || mid >= t.hi {
-                return Ok(false);
+                return Ok(Err(failure(source_error_mm)));
             }
             stack[pending] = ([mid, t.hi], depth + 1);
             stack[pending + 1] = ([t.lo, mid], depth + 1);
             pending += 2;
         }
-        Ok(true)
+        Ok(Ok(()))
     })();
     result.map_err(|error| work.annotate_error(error, before, format_args!(
         "SourceVertexTransportPlan {stage} vertex_mm={point:?} source_face={} coedges={:?} spatial_endpoint_exit={:?} parameter_window={parameter_window:?} piece={}",

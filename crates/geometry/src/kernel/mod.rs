@@ -187,7 +187,7 @@ impl MaterialRealizationIdentity {
     }
     pub(crate) fn with_allowance(source_allowance_mm: Option<f64>) -> Self {
         Self {
-            version: 4,
+            version: 5,
             variant: MaterialRealizationVariant::OriginalSpatialGTransport,
             source_allowance_bits: source_allowance_mm.map(f64::to_bits),
             collar_parameter_fraction_bits: (1.0_f64 / 1024.0).to_bits(),

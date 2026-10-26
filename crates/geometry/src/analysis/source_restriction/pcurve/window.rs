@@ -15,7 +15,9 @@ use std::sync::atomic::AtomicBool;
 
 pub(super) struct PcurveWindow {
     pub(super) raw: [f64; 2],
+    pub(super) search: [f64; 2],
     pub(super) surface_domain: [[f64; 2]; 2],
+    pub(super) closed_domain: Option<selection::ClosedEndpointDomain>,
     pub(super) period: Option<Interval>,
     pub(super) declared_endpoints: Option<[f64; 2]>,
     pub(super) declared_turns: [i32; 2],
@@ -227,136 +229,145 @@ pub(super) fn select_operand(
     let available = remaining.checked_sub(fixed).ok_or_else(capacity)?;
     let curve = pcurve.curve.as_ref();
     let (carrier, natural) = carrier_domain(&pcurve.surface, work, cancel)?;
-    let (raw, period, declared_endpoints, declared_turns) = if let Curve::Line {
-        origin,
-        direction,
-        magnitude,
-    } = curve
-    {
-        for value in origin.iter().chain(direction).copied().chain([*magnitude]) {
-            Interval::new(value, value)?;
-        }
-        let slope = direction.map(|v| Interval::point(v).mul(Interval::point(*magnitude)));
-        if slope[0].contains_zero() && slope[1].contains_zero() {
-            return Err(unavailable(
-                "original PCURVE LINE has no nonzero chart velocity",
-            ));
-        }
-        let period = angular_period(carrier, *direction, *magnitude)?;
-        let finite_axis = (0..2).any(|i| {
-            natural[i][0].is_finite() && natural[i][1].is_finite() && !slope[i].contains_zero()
-        });
-        let raw = if finite_axis {
-            // The division gives an enclosure, not an exact natural-boundary
-            // incidence. Choose inward FLOAT proposals, then prove their whole
-            // coefficient image below. Root/forward owners retain authority.
-            let mut bounds = [f64::NEG_INFINITY, f64::INFINITY];
-            for axis in 0..2 {
-                if slope[axis].contains_zero() {
-                    if origin[axis] < natural[axis][0] || origin[axis] > natural[axis][1] {
-                        return Err(unavailable(
-                            "constant original PCURVE coordinate is outside its carrier",
-                        ));
-                    }
-                    continue;
-                }
-                if natural[axis][0].is_finite() && natural[axis][1].is_finite() {
-                    let a = Interval::point(natural[axis][0])
-                        .sub(Interval::point(origin[axis]))
-                        .div(slope[axis])?;
-                    let b = Interval::point(natural[axis][1])
-                        .sub(Interval::point(origin[axis]))
-                        .div(slope[axis])?;
-                    let (lo, hi) = if slope[axis].lo > 0.0 {
-                        (a.hi, b.lo)
-                    } else {
-                        (b.hi, a.lo)
-                    };
-                    bounds[0] = bounds[0].max(up(lo));
-                    bounds[1] = bounds[1].min(down(hi));
-                }
-            }
-            bounds
-        } else if let Some(period) = period {
-            let margin = period.hi / 16.0;
-            [down(-margin), up(period.hi + margin)]
-        } else if let Surface::Cylinder { position, .. } | Surface::Cone { position, .. } = carrier
+    let (raw, search, closed_domain, period, declared_endpoints, declared_turns) =
+        if let Curve::Line {
+            origin,
+            direction,
+            magnitude,
+        } = curve
         {
-            // V is the actual source placement's axial coordinate, not a UV
-            // alias for the spatial parameter or a normalized native chart.
-            if slope[1].contains_zero() {
+            for value in origin.iter().chain(direction).copied().chain([*magnitude]) {
+                Interval::new(value, value)?;
+            }
+            let slope = direction.map(|v| Interval::point(v).mul(Interval::point(*magnitude)));
+            if slope[0].contains_zero() && slope[1].contains_zero() {
                 return Err(unavailable(
-                    "nonperiodic source angular LINE lacks an axial seed law",
+                    "original PCURVE LINE has no nonzero chart velocity",
                 ));
             }
-            let x = position.ref_direction.map(Interval::point);
-            let z = position.axis.map(Interval::point);
-            let y = cross(z, x);
-            let cofactor = cross(x, y);
-            let determinant = dot(z, cofactor);
-            if determinant.contains_zero() {
-                return Err(unavailable("original carrier placement is singular"));
-            }
-            let inverse = [
-                cofactor[0].div(determinant)?,
-                cofactor[1].div(determinant)?,
-                cofactor[2].div(determinant)?,
-            ];
-            let uncertainty = dot(inverse, inverse)
-                .sqrt()?
-                .mul(Interval::point(allowance));
-            let mut range: Option<Interval> = None;
-            for point in coedge.vertex_points_mm {
-                let displacement = std::array::from_fn(|i| {
-                    Interval::point(point[i]).sub(Interval::point(position.origin[i]))
+            let period = angular_period(carrier, *direction, *magnitude)?;
+            let finite_axis = (0..2).any(|i| {
+                natural[i][0].is_finite() && natural[i][1].is_finite() && !slope[i].contains_zero()
+            });
+            let raw = if finite_axis {
+                // The division gives an enclosure, not an exact natural-boundary
+                // incidence. Choose inward FLOAT proposals, then prove their whole
+                // coefficient image below. Root/forward owners retain authority.
+                let mut bounds = [f64::NEG_INFINITY, f64::INFINITY];
+                for axis in 0..2 {
+                    if slope[axis].contains_zero() {
+                        if origin[axis] < natural[axis][0] || origin[axis] > natural[axis][1] {
+                            return Err(unavailable(
+                                "constant original PCURVE coordinate is outside its carrier",
+                            ));
+                        }
+                        continue;
+                    }
+                    if natural[axis][0].is_finite() && natural[axis][1].is_finite() {
+                        let a = Interval::point(natural[axis][0])
+                            .sub(Interval::point(origin[axis]))
+                            .div(slope[axis])?;
+                        let b = Interval::point(natural[axis][1])
+                            .sub(Interval::point(origin[axis]))
+                            .div(slope[axis])?;
+                        let (lo, hi) = if slope[axis].lo > 0.0 {
+                            (a.hi, b.lo)
+                        } else {
+                            (b.hi, a.lo)
+                        };
+                        bounds[0] = bounds[0].max(up(lo));
+                        bounds[1] = bounds[1].min(down(hi));
+                    }
+                }
+                bounds
+            } else if let Some(period) = period {
+                let margin = period.hi / 16.0;
+                [down(-margin), up(period.hi + margin)]
+            } else if let Surface::Cylinder { position, .. } | Surface::Cone { position, .. } =
+                carrier
+            {
+                // V is the actual source placement's axial coordinate, not a UV
+                // alias for the spatial parameter or a normalized native chart.
+                if slope[1].contains_zero() {
+                    return Err(unavailable(
+                        "nonperiodic source angular LINE lacks an axial seed law",
+                    ));
+                }
+                let x = position.ref_direction.map(Interval::point);
+                let z = position.axis.map(Interval::point);
+                let y = cross(z, x);
+                let cofactor = cross(x, y);
+                let determinant = dot(z, cofactor);
+                if determinant.contains_zero() {
+                    return Err(unavailable("original carrier placement is singular"));
+                }
+                let inverse = [
+                    cofactor[0].div(determinant)?,
+                    cofactor[1].div(determinant)?,
+                    cofactor[2].div(determinant)?,
+                ];
+                let uncertainty = dot(inverse, inverse)
+                    .sqrt()?
+                    .mul(Interval::point(allowance));
+                let mut range: Option<Interval> = None;
+                for point in coedge.vertex_points_mm {
+                    let displacement = std::array::from_fn(|i| {
+                        Interval::point(point[i]).sub(Interval::point(position.origin[i]))
+                    });
+                    let v = dot(inverse, displacement)
+                        .add(Interval::new(-uncertainty.hi, uncertainty.hi)?);
+                    let t = v.sub(Interval::point(origin[1])).div(slope[1])?;
+                    range = Some(range.map_or(t, |old| old.hull(t)));
+                }
+                let range =
+                    range.ok_or_else(|| unavailable("original PCURVE axial seed is absent"))?;
+                [down(range.lo), up(range.hi)]
+            } else if matches!(carrier, Surface::Plane { .. }) {
+                // Evaluate the actual affine S(gamma) law at raw zero. This is a
+                // coefficient reference point, not an arbitrary search interval.
+                let uv = [[origin[0]; 2], [origin[1]; 2]];
+                let surface =
+                    PreparedOriginalSurface::new(&pcurve.surface, uv, available, work, cancel)?;
+                let jet = surface.evaluate_order(uv, 1, work, cancel)?;
+                let velocity = std::array::from_fn(|i| {
+                    jet[1][0][i].mul(slope[0]).add(jet[0][1][i].mul(slope[1]))
                 });
-                let v =
-                    dot(inverse, displacement).add(Interval::new(-uncertainty.hi, uncertainty.hi)?);
-                let t = v.sub(Interval::point(origin[1])).div(slope[1])?;
-                range = Some(range.map_or(t, |old| old.hull(t)));
-            }
-            let range = range.ok_or_else(|| unavailable("original PCURVE axial seed is absent"))?;
-            [down(range.lo), up(range.hi)]
-        } else if matches!(carrier, Surface::Plane { .. }) {
-            // Evaluate the actual affine S(gamma) law at raw zero. This is a
-            // coefficient reference point, not an arbitrary search interval.
-            let uv = [[origin[0]; 2], [origin[1]; 2]];
-            let surface =
-                PreparedOriginalSurface::new(&pcurve.surface, uv, available, work, cancel)?;
-            let jet = surface.evaluate_order(uv, 1, work, cancel)?;
-            let velocity =
-                std::array::from_fn(|i| jet[1][0][i].mul(slope[0]).add(jet[0][1][i].mul(slope[1])));
-            let norm = dot(velocity, velocity);
-            if norm.lo <= 0.0 {
-                return Err(unavailable("original lifted LINE velocity is singular"));
-            }
-            let error = Interval::point(allowance).div(norm.sqrt()?)?;
-            let mut bounds: Option<Interval> = None;
-            for point in coedge.vertex_points_mm {
-                let delta = std::array::from_fn(|i| Interval::point(point[i]).sub(jet[0][0][i]));
-                let t = dot(delta, velocity)
-                    .div(norm)?
-                    .add(Interval::new(-error.hi, error.hi)?);
-                bounds = Some(bounds.map_or(t, |old| old.hull(t)));
-            }
-            let bounds =
-                bounds.ok_or_else(|| unavailable("original lifted LINE seed is absent"))?;
-            [down(bounds.lo), up(bounds.hi)]
+                let norm = dot(velocity, velocity);
+                if norm.lo <= 0.0 {
+                    return Err(unavailable("original lifted LINE velocity is singular"));
+                }
+                let error = Interval::point(allowance).div(norm.sqrt()?)?;
+                let mut bounds: Option<Interval> = None;
+                for point in coedge.vertex_points_mm {
+                    let delta =
+                        std::array::from_fn(|i| Interval::point(point[i]).sub(jet[0][0][i]));
+                    let t = dot(delta, velocity)
+                        .div(norm)?
+                        .add(Interval::new(-error.hi, error.hi)?);
+                    bounds = Some(bounds.map_or(t, |old| old.hull(t)));
+                }
+                let bounds =
+                    bounds.ok_or_else(|| unavailable("original lifted LINE seed is absent"))?;
+                [down(bounds.lo), up(bounds.hi)]
+            } else {
+                return Err(unavailable(
+                    "unbounded nonperiodic PCURVE LINE carrier has no supported finite coefficient seed law",
+                ));
+            };
+            // Carrier-derived inward/expanded bounds remain numerical proposals,
+            // never natural coefficient fences or authored parameter incidences.
+            (raw, raw, None, period, None, [0; 2])
         } else {
-            return Err(unavailable(
-                "unbounded nonperiodic PCURVE LINE carrier has no supported finite coefficient seed law",
-            ));
+            let selected = selection::select_curve(curve, coedge.same_sense, work, cancel)?;
+            (
+                selected.active,
+                selected.search,
+                selected.closed_domain,
+                selected.periodic,
+                selected.declared_endpoints,
+                selected.declared_turns,
+            )
         };
-        (raw, period, None, [0; 2])
-    } else {
-        let selected = selection::select_curve(curve, coedge.same_sense, work, cancel)?;
-        (
-            selected.active,
-            selected.periodic,
-            selected.declared_endpoints,
-            selected.declared_turns,
-        )
-    };
     Interval::new(raw[0], raw[1])?;
     if !raw[0].is_finite() || !raw[1].is_finite() || raw[0] >= raw[1] {
         return Err(unavailable(
@@ -386,7 +397,9 @@ pub(super) fn select_operand(
     )?;
     Ok(PcurveWindow {
         raw,
+        search,
         surface_domain,
+        closed_domain,
         period,
         declared_endpoints,
         declared_turns,

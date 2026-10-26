@@ -9,9 +9,21 @@ use solidcraft_step::geom::{BSplineCurve, Curve, PreferredRep, Trim, TrimPrefere
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 
+/// Literal natural/coefficient or authored parameter bounds. Only selector
+/// inventory can create this token; a finite evaluator/search window is not
+/// evidence of a closed source domain.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ClosedEndpointDomain([f64; 2]);
+impl ClosedEndpointDomain {
+    pub(super) fn range(self) -> [f64; 2] {
+        self.0
+    }
+}
+
 pub(super) struct SourceSelection {
     pub(super) active: [f64; 2],
     pub(super) search: [f64; 2],
+    pub(super) closed_domain: Option<ClosedEndpointDomain>,
     pub(super) declared_endpoints: Option<[f64; 2]>,
     pub(super) endpoint_targets: Option<[[f64; 3]; 2]>,
     pub(super) declared_turns: [i32; 2],
@@ -359,6 +371,7 @@ pub(super) fn select_curve(
         return Ok(SourceSelection {
             active: bounds,
             search: bounds,
+            closed_domain: None,
             declared_endpoints,
             endpoint_targets,
             declared_turns,
@@ -388,6 +401,7 @@ pub(super) fn select_curve(
         return Ok(SourceSelection {
             active: bounds,
             search: bounds,
+            closed_domain: Some(ClosedEndpointDomain(bounds)),
             declared_endpoints,
             endpoint_targets,
             declared_turns,
@@ -399,6 +413,7 @@ pub(super) fn select_curve(
         return Ok(SourceSelection {
             active: domain,
             search: domain,
+            closed_domain: Some(ClosedEndpointDomain(domain)),
             declared_endpoints,
             endpoint_targets,
             declared_turns,
@@ -415,6 +430,7 @@ pub(super) fn select_curve(
         return Ok(SourceSelection {
             active,
             search,
+            closed_domain: None,
             declared_endpoints,
             endpoint_targets,
             declared_turns,

@@ -16,6 +16,10 @@
 //! prove those identities. Original operands are retained separately from native
 //! generated charts; source admission must qualify their complete selected
 //! restrictions and every correction joint before exposing material queries.
+//! Incident source restrictions may meet inside their existing masked correction
+//! cell. Whole exact-affine intersection ownership or a nonsingular smooth-pair
+//! contraction proves only separation outside that cell, never a welded anchor
+//! or the later spatial/material vertex link.
 
 use super::Definition;
 use super::source_operand::PreparedOriginalSurface;
@@ -714,6 +718,45 @@ impl<'d> PreparedFaceTrimDomain<'d> {
     pub(crate) fn uv_domain(&self) -> [[f64; 2]; 2] {
         self.domain
     }
+
+    /// Exclusion-only cover of the filled chart, never an Inside witness.
+    /// The admitted native circuits are finite, exactly C0-closed and simple:
+    /// their bounded winding regions lie within the whole-boundary coordinate
+    /// hull. Natural plane domains can be arbitrarily larger than that hull.
+    pub(crate) fn bounded_uv_cover(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[[f64; 2]; 2], GeometryError> {
+        // Selected source domains already include every literal coedge,
+        // correction joint and pole completion. Preserve that admitted cover.
+        if self.original_surface.is_some() {
+            work.charge(1, cancel)?;
+            return Ok(self.domain);
+        }
+        let mut boundary: Option<[Interval; 2]> = None;
+        for span in &self.spans {
+            let curve = self.boundary_operand(span.boundary)?;
+            let image =
+                parametric::curve2d_piecewise_jet(&curve, span.range, work, cancel)?.position;
+            boundary = Some(match boundary {
+                None => image,
+                Some(old) => std::array::from_fn(|axis| old[axis].hull(image[axis])),
+            });
+        }
+        let boundary = boundary
+            .ok_or_else(|| unavailable("native filled trim has no complete boundary cover"))?;
+        let cover = std::array::from_fn(|axis| {
+            [
+                self.domain[axis][0].max(boundary[axis].lo),
+                self.domain[axis][1].min(boundary[axis].hi),
+            ]
+        });
+        for axis in cover {
+            Interval::new(axis[0], axis[1])?;
+        }
+        Ok(cover)
+    }
     pub(crate) fn face(&self) -> FaceId {
         self.face
     }
@@ -1262,6 +1305,19 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         false
     }
 
+    fn shared_joint(&self, a: BoundaryCurve, b: BoundaryCurve) -> Option<usize> {
+        (0..2).find_map(|ae| {
+            let BoundaryEndpoint::Joint(joint, _) = self.boundary_endpoint(a, ae) else {
+                return None;
+            };
+            (0..2)
+                .any(|be| {
+                    matches!(self.boundary_endpoint(b, be), BoundaryEndpoint::Joint(other, _) if other == joint)
+                })
+                .then_some(joint)
+        })
+    }
+
     fn owned_joint_germs_separate(
         &self,
         a: TrimSpan,
@@ -1272,19 +1328,42 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
-        let shared = (0..2).any(|ae| {
-            let BoundaryEndpoint::Joint(joint, _) = self.boundary_endpoint(a.boundary, ae) else {
-                return false;
-            };
-            (0..2).any(|be| {
-                matches!(self.boundary_endpoint(b.boundary, be), BoundaryEndpoint::Joint(other, _) if other == joint)
-            })
-        });
-        if !shared {
+        let Some(joint) = self.shared_joint(a.boundary, b.boundary) else {
             return Ok(false);
-        }
+        };
         let ac = self.boundary_operand(a.boundary)?;
         let bc = self.boundary_operand(b.boundary)?;
+        if let (Some(affine_a), Some(affine_b)) = (
+            ac.exact_affine_coefficients(work, cancel)?,
+            bc.exact_affine_coefficients(work, cancel)?,
+        ) {
+            // Independent endpoint projections can genuinely cross rather than
+            // share an exact anchor. Prove the complete affine intersection
+            // belongs to this already-masked cell; adjacency alone proves none.
+            if exact_affine_pair_in_joint(
+                &affine_a,
+                a.range,
+                &affine_b,
+                b.range,
+                self.original_joints[joint].enclosure,
+                work,
+                cancel,
+            )? {
+                return Ok(true);
+            }
+        }
+        if smooth_pair_in_joint(
+            &ac,
+            a.range,
+            &bc,
+            b.range,
+            self.original_joints[joint].enclosure,
+            overlap,
+            work,
+            cancel,
+        )? {
+            return Ok(true);
+        }
         for axis in 0..2 {
             if aj.derivative[axis].contains_zero() || bj.derivative[axis].contains_zero() {
                 continue;
@@ -1319,6 +1398,128 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             }
         }
         Ok(false)
+    }
+
+    /// A complete-path set proof, never a conversion of calibrated leaf ranges.
+    /// Removing a sealed endpoint-preserving calibration changes speed only.
+    /// Every calibrated subset therefore inherits this stronger whole-pair
+    /// exclusion, while retained spans keep their original query gauge.
+    fn geometric_joint_pair_separates(
+        &self,
+        a: BoundaryCurve,
+        b: BoundaryCurve,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        let (BoundaryCurve::Coedge(ai), BoundaryCurve::Coedge(bi)) = (a, b) else {
+            return Ok(false);
+        };
+        if ai == bi {
+            return Ok(false);
+        }
+        let Some(joint) = self.shared_joint(a, b) else {
+            return Ok(false);
+        };
+        let ac = self.coedge_geometric_operand(ai, work, cancel)?;
+        let bc = self.coedge_geometric_operand(bi, work, cancel)?;
+        if !matches!(ac, PreparedTrimCurve::GeometricPcurve(_))
+            && !matches!(bc, PreparedTrimCurve::GeometricPcurve(_))
+        {
+            return Ok(false);
+        }
+        for (line, circle) in [(&ac, &bc), (&bc, &ac)] {
+            if let (Some(affine), Some(original)) = (
+                line.exact_affine_coefficients(work, cancel)?,
+                circle.original_curve(),
+            ) {
+                if exact_affine_literal_circle_disjoint(
+                    &affine,
+                    line.active_range(),
+                    original,
+                    work,
+                    cancel,
+                )? {
+                    return Ok(true);
+                }
+            }
+        }
+        let cell = self.original_joints[joint].enclosure;
+        let mut stack = [(ac.active_range(), bc.active_range(), 0u8); MAX_DEPTH as usize + 1];
+        let mut live = 1;
+        while live != 0 {
+            live -= 1;
+            let (ar, br, depth) = stack[live];
+            work.charge(1, cancel)?;
+            let aj = parametric::curve2d_piecewise_jet(&ac, ar, work, cancel)?;
+            let bj = parametric::curve2d_piecewise_jet(&bc, br, work, cancel)?;
+            if (0..2).any(|axis| {
+                aj.position[axis].hi < bj.position[axis].lo
+                    || bj.position[axis].hi < aj.position[axis].lo
+            }) {
+                continue;
+            }
+            let overlap = [
+                aj.position[0].intersect(bj.position[0])?,
+                aj.position[1].intersect(bj.position[1])?,
+            ];
+            if (0..2)
+                .all(|axis| cell[axis].lo <= overlap[axis].lo && overlap[axis].hi <= cell[axis].hi)
+                || smooth_pair_in_joint(&ac, ar, &bc, br, cell, overlap, work, cancel)?
+            {
+                continue;
+            }
+            if depth == MAX_DEPTH {
+                // No calibrated range is ever substituted into this witness.
+                let mut context = SmoothPairContext {
+                    ranges: [ar, br],
+                    common: overlap,
+                    smooth: [None; 2],
+                    determinant: None,
+                    newton: None,
+                };
+                if smooth_pair_in_joint_with_context(
+                    &ac,
+                    ar,
+                    &bc,
+                    br,
+                    cell,
+                    overlap,
+                    Some(&mut context),
+                    work,
+                    cancel,
+                )? {
+                    continue;
+                }
+                let raw = [
+                    ac.source_parameter_image(context.ranges[0], work, cancel)?,
+                    bc.source_parameter_image(context.ranges[1], work, cancel)?,
+                ];
+                return Err(unavailable(format!(
+                    "original geometric whole-pair exclusion unproved at bounded depth: source_face={} a={a:?} b={b:?} joint={joint} cell={cell:?} contraction={context:?} raw_parameter_boxes={raw:?} complete_ranges={:?} derivative_a={:?} derivative_b={:?}",
+                    self.face_index,
+                    [ac.active_range(), bc.active_range()],
+                    aj.derivative,
+                    bj.derivative,
+                )));
+            }
+            if ar[1] - ar[0] >= br[1] - br[0] {
+                let middle = ar[0] * 0.5 + ar[1] * 0.5;
+                if middle <= ar[0] || middle >= ar[1] {
+                    return Ok(false);
+                }
+                stack[live] = ([ar[0], middle], br, depth + 1);
+                stack[live + 1] = ([middle, ar[1]], br, depth + 1);
+            } else {
+                let middle = br[0] * 0.5 + br[1] * 0.5;
+                if middle <= br[0] || middle >= br[1] {
+                    return Ok(false);
+                }
+                stack[live] = (ar, [br[0], middle], depth + 1);
+                stack[live + 1] = (ar, [middle, br[1]], depth + 1);
+            }
+            live += 2;
+        }
+        Ok(true)
     }
 
     fn separate_spans(
@@ -1379,8 +1580,22 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                 continue;
             }
             if depth == MAX_DEPTH {
+                if self.geometric_joint_pair_separates(a.boundary, b.boundary, work, cancel)? {
+                    return Ok(());
+                }
+                let smooth = [
+                    ac.smooth(a.range, work, cancel)?,
+                    bc.smooth(b.range, work, cancel)?,
+                ];
+                let determinant = aj.derivative[0]
+                    .mul(bj.derivative[1])
+                    .sub(aj.derivative[1].mul(bj.derivative[0]));
+                let joint = self.shared_joint(a.boundary, b.boundary).map(|index| {
+                    let joint = &self.original_joints[index];
+                    (index, joint.enclosure, joint.endpoint_uv)
+                });
                 return Err(unavailable(format!(
-                    "original chart pair separation unproved at bounded subdivision depth: source_face={} a={:?} parameter={:?} position={:?} b={:?} parameter={:?} position={:?}",
+                    "original chart pair separation unproved at bounded subdivision depth: source_face={} a={:?} parameter={:?} position={:?} b={:?} parameter={:?} position={:?} smooth={smooth:?} derivative_a={:?} derivative_b={:?} determinant={determinant:?} joint={joint:?}",
                     self.face_index,
                     a.boundary,
                     a.range,
@@ -1388,6 +1603,8 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                     b.boundary,
                     b.range,
                     bj.position,
+                    aj.derivative,
+                    bj.derivative,
                 )));
             }
             let aw = a.range[1] - a.range[0];
@@ -1618,6 +1835,313 @@ fn exact_product(
     a.product(b, work, cancel)?.ok_or_else(|| {
         unavailable("native endpoint coefficient product exceeds exact exponent/expansion limits")
     })
+}
+
+/// Whole affine-pair separation outside an existing, incident correction cell.
+/// A nonparallel pair has exactly one common point. Exact rational comparisons
+/// locate that point without rounding an intersection parameter or enlarging the
+/// cell. This supplies no exact join, vertex-link or filled-material authority.
+fn exact_affine_pair_in_joint(
+    a: &parametric::ExactAffineCurve,
+    ar: [f64; 2],
+    b: &parametric::ExactAffineCurve,
+    br: [f64; 2],
+    cell: [Interval; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    if a.denominator.sign() == 0 || b.denominator.sign() == 0 {
+        return Ok(false);
+    }
+    let mut delta = std::array::from_fn::<_, 2, _>(|_| ExactCoefficient::point(0.0));
+    let mut u = std::array::from_fn::<_, 2, _>(|_| ExactCoefficient::point(0.0));
+    let mut v = std::array::from_fn::<_, 2, _>(|_| ExactCoefficient::point(0.0));
+    for axis in 0..2 {
+        delta[axis] = exact_product(&b.position[axis], &a.denominator, work, cancel)?;
+        delta[axis]
+            .subtract(&exact_product(
+                &a.position[axis],
+                &b.denominator,
+                work,
+                cancel,
+            )?)
+            .ok_or_else(|| unavailable("affine pair difference exceeds exact capacity"))?;
+        u[axis] = exact_product(&a.derivative[axis], &b.denominator, work, cancel)?;
+        v[axis] = exact_product(&b.derivative[axis], &a.denominator, work, cancel)?;
+    }
+    let mut cross = |x: &[ExactCoefficient; 2], y: &[ExactCoefficient; 2]| {
+        let mut value = exact_product(&x[0], &y[1], work, cancel)?;
+        value
+            .subtract(&exact_product(&x[1], &y[0], work, cancel)?)
+            .ok_or_else(|| unavailable("affine pair determinant exceeds exact capacity"))?;
+        Ok::<_, GeometryError>(value)
+    };
+    let determinant = cross(&u, &v)?;
+    if determinant.sign() == 0 {
+        return Ok(false);
+    }
+    let ta = cross(&delta, &v)?;
+    let tb = cross(&delta, &u)?;
+    for (numerator, range) in [(&ta, ar), (&tb, br)] {
+        if exact_ratio_compare(numerator, &determinant, range[0], work, cancel)? < 0
+            || exact_ratio_compare(numerator, &determinant, range[1], work, cancel)? > 0
+        {
+            return Ok(true);
+        }
+    }
+    let denominator = exact_product(&a.denominator, &determinant, work, cancel)?;
+    for axis in 0..2 {
+        let mut numerator = exact_product(&a.position[axis], &determinant, work, cancel)?;
+        exact_accumulate(
+            &mut numerator,
+            &exact_product(&a.derivative[axis], &ta, work, cancel)?,
+        )?;
+        if exact_ratio_compare(&numerator, &denominator, cell[axis].lo, work, cancel)? < 0
+            || exact_ratio_compare(&numerator, &denominator, cell[axis].hi, work, cancel)? > 0
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Exclude the entire literal circle, hence every selected arc, without a
+/// rounded trigonometric intersection or a root-existence/endpoint receipt.
+/// `source_operand::curve_jet_selected` uses c+r(x cos(t)+y sin(t)), where x is
+/// the literal reference direction and y=axis cross x, without normalization.
+/// Only an exact XY Gram identity licenses the circular implicit equation.
+fn exact_affine_literal_circle_disjoint(
+    line: &parametric::ExactAffineCurve,
+    range: [f64; 2],
+    curve: &solidcraft_step::geom::Curve,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let solidcraft_step::geom::Curve::Circle { position, radius } = curve else {
+        return Ok(false);
+    };
+    Interval::new(range[0], range[1])?;
+    if line.denominator.sign() == 0 || range[0] >= range[1] || *radius <= 0.0 {
+        return Ok(false);
+    }
+    for value in position
+        .origin
+        .into_iter()
+        .chain(position.axis)
+        .chain(position.ref_direction)
+        .chain([*radius])
+    {
+        Interval::new(value, value)?;
+    }
+    let x = position.ref_direction.map(ExactCoefficient::point);
+    let mut y = std::array::from_fn::<_, 2, _>(|_| ExactCoefficient::point(0.0));
+    for axis in 0..2 {
+        let j = (axis + 1) % 3;
+        let k = (axis + 2) % 3;
+        y[axis] = exact_product(
+            &ExactCoefficient::point(position.axis[j]),
+            &x[k],
+            work,
+            cancel,
+        )?;
+        y[axis]
+            .subtract(&exact_product(
+                &ExactCoefficient::point(position.axis[k]),
+                &x[j],
+                work,
+                cancel,
+            )?)
+            .ok_or_else(|| unavailable("literal circle frame exceeds exact capacity"))?;
+    }
+    for (left, right, expected) in [
+        ([&x[0], &x[1]], [&x[0], &x[1]], 1.0),
+        ([&y[0], &y[1]], [&y[0], &y[1]], 1.0),
+        ([&x[0], &x[1]], [&y[0], &y[1]], 0.0),
+    ] {
+        let mut gram = ExactCoefficient::point(-expected);
+        for axis in 0..2 {
+            exact_accumulate(
+                &mut gram,
+                &exact_product(left[axis], right[axis], work, cancel)?,
+            )?;
+        }
+        if gram.sign() != 0 {
+            return Ok(false);
+        }
+    }
+    // W² H(t) = |P+tD-cW|²-(rW)² = a t²+2 b t+c0.
+    // W need not be positive; its nonzero square preserves every sign.
+    let mut a = ExactCoefficient::point(0.0);
+    let mut b = ExactCoefficient::point(0.0);
+    let mut c0 = ExactCoefficient::point(0.0);
+    for axis in 0..2 {
+        let mut q = exact_product(
+            &ExactCoefficient::point(position.origin[axis]),
+            &line.denominator,
+            work,
+            cancel,
+        )?;
+        q.subtract(&line.position[axis])
+            .ok_or_else(|| unavailable("circle affine offset exceeds exact capacity"))?;
+        // q=cW-P; negate its product with D for the coefficient b.
+        let mut term = ExactCoefficient::point(0.0);
+        term.subtract(&exact_product(&q, &line.derivative[axis], work, cancel)?)
+            .ok_or_else(|| unavailable("circle affine coefficient exceeds exact capacity"))?;
+        exact_accumulate(&mut b, &term)?;
+        exact_accumulate(
+            &mut a,
+            &exact_product(&line.derivative[axis], &line.derivative[axis], work, cancel)?,
+        )?;
+        exact_accumulate(&mut c0, &exact_product(&q, &q, work, cancel)?)?;
+    }
+    if a.sign() <= 0 {
+        return Ok(false);
+    }
+    let rw = exact_product(
+        &ExactCoefficient::point(*radius),
+        &line.denominator,
+        work,
+        cancel,
+    )?;
+    c0.subtract(&exact_product(&rw, &rw, work, cancel)?)
+        .ok_or_else(|| unavailable("circle affine constant exceeds exact capacity"))?;
+    let twice_b = exact_product(&b, &ExactCoefficient::point(2.0), work, cancel)?;
+    let mut signs = [0i8; 2];
+    for (index, t) in range.into_iter().enumerate() {
+        let t = ExactCoefficient::point(t);
+        let mut value = exact_product(&a, &t, work, cancel)?;
+        exact_accumulate(&mut value, &twice_b)?;
+        value = exact_product(&value, &t, work, cancel)?;
+        exact_accumulate(&mut value, &c0)?;
+        signs[index] = value.sign();
+    }
+    if signs == [-1, -1] {
+        // Strict convexity puts the whole closed restriction below its
+        // endpoint chord: no point can lie on the circle.
+        return Ok(true);
+    }
+    if signs != [1, 1] {
+        return Ok(false);
+    }
+    let mut derivative_signs = [0i8; 2];
+    for (index, t) in range.into_iter().enumerate() {
+        let mut half_derivative = exact_product(&a, &ExactCoefficient::point(t), work, cancel)?;
+        exact_accumulate(&mut half_derivative, &b)?;
+        derivative_signs[index] = half_derivative.sign();
+    }
+    Ok(derivative_signs == [-1, -1] || derivative_signs == [1, 1])
+}
+
+fn exact_ratio_compare(
+    numerator: &ExactCoefficient,
+    denominator: &ExactCoefficient,
+    value: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<i8, GeometryError> {
+    let mut difference = exact_product(&ExactCoefficient::point(value), denominator, work, cancel)?;
+    difference
+        .subtract(numerator)
+        .ok_or_else(|| unavailable("affine pair comparison exceeds exact capacity"))?;
+    Ok(-difference.sign() * denominator.sign())
+}
+
+#[derive(Debug)]
+struct SmoothPairContext {
+    ranges: [[f64; 2]; 2],
+    common: [Interval; 2],
+    smooth: [Option<bool>; 2],
+    determinant: Option<Interval>,
+    newton: Option<[Interval; 2]>,
+}
+
+/// Enclose every possible common point, not merely a proposed intersection.
+/// The two independent mean-value columns enclose the averaged Jacobian for
+/// every root in the complete parameter rectangle. A strict determinant makes
+/// its interval inverse valid; no root existence or endpoint identity follows.
+fn smooth_pair_in_joint<C: parametric::CurveEvaluator + ?Sized>(
+    a: &C,
+    ar: [f64; 2],
+    b: &C,
+    br: [f64; 2],
+    cell: [Interval; 2],
+    overlap: [Interval; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    smooth_pair_in_joint_with_context(a, ar, b, br, cell, overlap, None, work, cancel)
+}
+
+fn smooth_pair_in_joint_with_context<C: parametric::CurveEvaluator + ?Sized>(
+    a: &C,
+    mut ar: [f64; 2],
+    b: &C,
+    mut br: [f64; 2],
+    cell: [Interval; 2],
+    mut overlap: [Interval; 2],
+    mut context: Option<&mut SmoothPairContext>,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    for (index, curve, range) in [(0, a, ar), (1, b, br)] {
+        let smooth = curve.smooth(range, work, cancel)?;
+        if let Some(context) = context.as_deref_mut() {
+            context.smooth[index] = Some(smooth);
+        }
+        if !smooth {
+            return Ok(false);
+        }
+    }
+    // One contraction plus one refresh removes first-box curvature wrapping.
+    // Unresolved pairs still use the caller's unchanged bounded subdivision.
+    for _ in 0..2 {
+        let aj = parametric::curve2d_piecewise_jet(a, ar, work, cancel)?;
+        let bj = parametric::curve2d_piecewise_jet(b, br, work, cancel)?;
+        let [u, v] = [aj.derivative, bj.derivative];
+        let determinant = u[0].mul(v[1]).sub(u[1].mul(v[0]));
+        if let Some(context) = context.as_deref_mut() {
+            context.determinant = Some(determinant);
+        }
+        if determinant.contains_zero() {
+            return Ok(false);
+        }
+        let am = ar[0] * 0.5 + ar[1] * 0.5;
+        let bm = br[0] * 0.5 + br[1] * 0.5;
+        let ap = a.tensor([am; 2], 0, work, cancel)?[0];
+        let bp = b.tensor([bm; 2], 0, work, cancel)?[0];
+        let f = [ap[0].sub(bp[0]), ap[1].sub(bp[1])];
+        let ta = Interval::point(am).add(v[0].mul(f[1]).sub(v[1].mul(f[0])).div(determinant)?);
+        let tb = Interval::point(bm).add(u[0].mul(f[1]).sub(u[1].mul(f[0])).div(determinant)?);
+        if let Some(context) = context.as_deref_mut() {
+            context.newton = Some([ta, tb]);
+        }
+        let Some(ta) = Interval::new(ar[0], ar[1])?.intersection(ta) else {
+            return Ok(true);
+        };
+        let Some(tb) = Interval::new(br[0], br[1])?.intersection(tb) else {
+            return Ok(true);
+        };
+        ar = [ta.lo, ta.hi];
+        br = [tb.lo, tb.hi];
+        for (curve, range) in [(a, ar), (b, br)] {
+            let position = curve.tensor(range, 0, work, cancel)?[0];
+            for axis in 0..2 {
+                let Some(common) = overlap[axis].intersection(position[axis]) else {
+                    return Ok(true);
+                };
+                overlap[axis] = common;
+            }
+        }
+        if let Some(context) = context.as_deref_mut() {
+            context.ranges = [ar, br];
+            context.common = overlap;
+        }
+        if (0..2).all(|axis| cell[axis].lo <= overlap[axis].lo && overlap[axis].hi <= cell[axis].hi)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 fn split_span(span: TrimSpan, middle: f64) -> (TrimSpan, TrimSpan) {
     (
@@ -3558,25 +4082,32 @@ impl CurveCalibrationMap {
 fn compose_curve_jet(
     target: &dyn parametric::CurveEvaluator,
     map: [Interval; 4],
+    order: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<[[Interval; 3]; 4], GeometryError> {
-    let raw = target.tensor([map[0].lo, map[0].hi], 3, work, cancel)?;
+    let raw = target.tensor([map[0].lo, map[0].hi], order, work, cancel)?;
     let mut result = raw;
     for axis in 0..3 {
-        result[1][axis] = raw[1][axis].mul(map[1]);
-        result[2][axis] = raw[2][axis]
-            .mul(map[1].square())
-            .add(raw[1][axis].mul(map[2]));
-        result[3][axis] = raw[3][axis]
-            .mul(map[1].square().mul(map[1]))
-            .add(
-                raw[2][axis]
-                    .mul(map[1])
-                    .mul(map[2])
-                    .mul(Interval::point(3.0)),
-            )
-            .add(raw[1][axis].mul(map[3]));
+        if order >= 1 {
+            result[1][axis] = raw[1][axis].mul(map[1]);
+        }
+        if order >= 2 {
+            result[2][axis] = raw[2][axis]
+                .mul(map[1].square())
+                .add(raw[1][axis].mul(map[2]));
+        }
+        if order >= 3 {
+            result[3][axis] = raw[3][axis]
+                .mul(map[1].square().mul(map[1]))
+                .add(
+                    raw[2][axis]
+                        .mul(map[1])
+                        .mul(map[2])
+                        .mul(Interval::point(3.0)),
+                )
+                .add(raw[1][axis].mul(map[3]));
+        }
     }
     Ok(result)
 }
@@ -3770,6 +4301,22 @@ fn calibrate_curves(
             "source/native calibration lacks complete literal C0 coefficient continuity",
         ));
     }
+    if theorem == CurveCalibrationTheorem::NativeDirectedPosition
+        && let (Some(chart), Some(curve)) = (reference.native_chart_curve(), target.native_curve())
+        && chart.isoparametric_coefficient_identity(curve, target_range, work, cancel)?
+    {
+        // This private affine map has literal complete endpoint and knot
+        // coverage. It grants no original-source relative-tangent authority.
+        return Ok(CurveCalibrationMap {
+            segments: Vec::new(),
+            cuts: Vec::new(),
+            source_range,
+            target_range,
+            affine: true,
+            maximum_position_error_mm: 0.0,
+            relative_derivative_error_bound: None,
+        });
+    }
     if let (Some(a), Some(b)) = (
         reference.exact_affine_coefficients(work, cancel)?,
         target.exact_affine_coefficients(work, cancel)?,
@@ -3848,17 +4395,73 @@ fn calibrate_curves(
         if monotone {
             let map = segment.jet(range)?;
             let at_middle = segment.jet([middle; 2])?;
-            let c = reference.tensor(range, 2, work, cancel)?;
-            let n = compose_curve_jet(target, map, work, cancel)?;
-            let c0 = reference.tensor([middle; 2], 1, work, cancel)?;
-            let n0 = compose_curve_jet(target, at_middle, work, cancel)?;
+            let native_position = theorem == CurveCalibrationTheorem::NativeDirectedPosition;
+            let third_order = if native_position
+                && let (Some(chart), Some(curve)) =
+                    (reference.native_chart_curve(), target.native_curve())
+            {
+                chart.single_open_span(range, work, cancel)?
+                    && parametric::curve_prepared::native_curve_single_open_span(
+                        curve,
+                        [map[0].lo, map[0].hi],
+                        work,
+                        cancel,
+                    )?
+            } else {
+                false
+            };
+            // Request only consumed orders. The native single-open-cell lane
+            // uses a cubic positional Taylor enclosure; merely C1 joins keep
+            // the original quadratic/piecewise bound. Source proof is unchanged.
+            let c = reference.tensor(range, if third_order { 3 } else { 2 }, work, cancel)?;
+            let n = compose_curve_jet(
+                target,
+                map,
+                if third_order || !native_position {
+                    3
+                } else {
+                    2
+                },
+                work,
+                cancel,
+            )?;
+            let c0 =
+                reference.tensor([middle; 2], if third_order { 2 } else { 1 }, work, cancel)?;
+            let n0 = compose_curve_jet(
+                target,
+                at_middle,
+                if !native_position {
+                    3
+                } else if third_order {
+                    2
+                } else {
+                    1
+                },
+                work,
+                cancel,
+            )?;
             let delta = Interval::new(range[0], range[1])?.sub(Interval::point(middle));
             let difference: [Interval; 3] = std::array::from_fn(|i| n[1][i].sub(c[1][i]));
             let smooth = reference.smooth(range, work, cancel)?
                 && target.smooth([map[0].lo, map[0].hi], work, cancel)?;
+            let third_factor = if third_order {
+                delta.square().mul(delta).div(Interval::point(6.0))?
+            } else {
+                Interval::point(0.0)
+            };
             let residual = std::array::from_fn(|i| {
                 let value = n0[0][i].sub(c0[0][i]);
-                if smooth {
+                if smooth && third_order {
+                    value
+                        .add(n0[1][i].sub(c0[1][i]).mul(delta))
+                        .add(
+                            n0[2][i]
+                                .sub(c0[2][i])
+                                .mul(delta.square())
+                                .mul(Interval::point(0.5)),
+                        )
+                        .add(n[3][i].sub(c[3][i]).mul(third_factor))
+                } else if smooth {
                     value.add(n0[1][i].sub(c0[1][i]).mul(delta)).add(
                         n[2][i]
                             .sub(c[2][i])
@@ -5281,7 +5884,18 @@ impl<'d> PreparedNativeTrimSource<'d> {
                         }
                         Err(error) => {
                             if first_failure.is_none() {
-                                first_failure = Some(error);
+                                first_failure = Some(GeometryError::new(
+                                    error.code,
+                                    format!(
+                                        "first rejected assignment: source_face={:?}, source_wire={source_wire}, rotation={offset}, native_local_coedge={local}, source_local_coedge={position}, coedge={:?}, edge={:?}, curve={:?}, vertices={:?}: {}",
+                                        original.source_face,
+                                        source.oriented_edge_id,
+                                        source.edge_curve_id,
+                                        source.curve_id,
+                                        source.vertex_ids,
+                                        error.message,
+                                    ),
+                                ));
                             }
                             admissible = false;
                             break;
@@ -6829,6 +7443,316 @@ mod tests {
                 "query={query:?}",
             );
         }
+    }
+
+    #[test]
+    fn literal_circle_exclusion_requires_strict_whole_affine_coefficient_signs() {
+        use solidcraft_step::geom::{Curve as C, Placement};
+        let frame = Placement {
+            origin: [0.0; 3],
+            axis: [0.0, 0.0, 1.0],
+            ref_direction: [1.0, 0.0, 0.0],
+        };
+        let circle = C::Circle {
+            position: frame.clone(),
+            radius: 1.0,
+        };
+        let affine = |p: [f64; 2], d: [f64; 2], w| parametric::ExactAffineCurve {
+            position: [p[0], p[1], 0.0].map(ExactCoefficient::point),
+            derivative: [d[0], d[1], 0.0].map(ExactCoefficient::point),
+            denominator: ExactCoefficient::point(w),
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        for (line, expected) in [
+            (affine([-0.5, 0.0], [1.0, 0.0], 1.0), true),
+            (affine([-3.0, 0.0], [1.0, 0.0], 1.0), true),
+            (affine([0.5, 0.0], [-1.0, 0.0], -1.0), true),
+            // A tiny exact negative residual is not rounded into contact.
+            (affine([1.0 - f64::EPSILON, 0.0], [-0.125, 0.0], 1.0), true),
+            // Positive endpoints alone do not exclude two interior crossings.
+            (affine([-2.0, 0.0], [4.0, 0.0], 1.0), false),
+            (affine([-1.0, 1.0], [2.0, 0.0], 1.0), false),
+            (affine([-1.0, 0.0], [0.5, 0.0], 1.0), false),
+            (affine([0.0, 0.0], [0.0, 0.0], 1.0), false),
+            (affine([-3.0, 0.0], [1.0, 0.0], 0.0), false),
+        ] {
+            assert_eq!(
+                exact_affine_literal_circle_disjoint(
+                    &line,
+                    [0.0, 1.0],
+                    &circle,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap(),
+                expected,
+            );
+        }
+        // This source law actually draws radius two. Treating its descriptor's
+        // radius one as an implicit equation would wrongly exclude a crossing.
+        let nonorthonormal = C::Circle {
+            position: Placement {
+                ref_direction: [2.0, 0.0, 0.0],
+                ..frame.clone()
+            },
+            radius: 1.0,
+        };
+        let crossing = affine([1.5, 0.0], [1.0, 0.0], 1.0);
+        assert!(
+            !exact_affine_literal_circle_disjoint(
+                &crossing,
+                [0.0, 1.0],
+                &nonorthonormal,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        let ellipse = C::Ellipse {
+            position: frame,
+            semi_axis_1: 1.0,
+            semi_axis_2: 2.0,
+        };
+        assert!(
+            !exact_affine_literal_circle_disjoint(
+                &crossing,
+                [0.0, 1.0],
+                &ellipse,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn smooth_incident_pair_contracts_both_parameters_without_root_authority() {
+        let p = Interval::point;
+        let a = SourceEndpointConnector {
+            endpoints: [[p(0.0), p(0.0)], [p(0.0), p(1.0)]],
+            collapsed: false,
+        };
+        let b = SourceEndpointConnector {
+            endpoints: [[p(-1.0), p(0.0)], [p(1.0), p(1.0)]],
+            collapsed: false,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        let overlap = [p(0.0), Interval::new(0.0, 1.0).unwrap()];
+        let cell = [p(0.0), Interval::new(0.25, 0.75).unwrap()];
+        assert!(
+            smooth_pair_in_joint(
+                &a,
+                [0.0, 1.0],
+                &b,
+                [0.0, 1.0],
+                cell,
+                overlap,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        assert!(
+            smooth_pair_in_joint(
+                &b,
+                [0.0, 1.0],
+                &a,
+                [0.0, 1.0],
+                cell,
+                overlap,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        let too_small = [p(0.0), Interval::new(0.0, 0.25).unwrap()];
+        assert!(
+            !smooth_pair_in_joint(
+                &a,
+                [0.0, 1.0],
+                &b,
+                [0.0, 1.0],
+                too_small,
+                overlap,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        assert!(
+            !smooth_pair_in_joint(
+                &a,
+                [0.0, 1.0],
+                &a,
+                [0.0, 1.0],
+                cell,
+                overlap,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn affine_incident_crossing_requires_the_existing_whole_joint_cell() {
+        let affine = |position: [f64; 3], derivative: [f64; 3]| parametric::ExactAffineCurve {
+            position: position.map(ExactCoefficient::point),
+            derivative: derivative.map(ExactCoefficient::point),
+            denominator: ExactCoefficient::point(1.0),
+        };
+        let a = affine([0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let b = affine([1.0, 1.0, 0.0], [-2.0, -1.0, 0.0]);
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        // The unique intersection is (0, 1/2), in both open restrictions.
+        // An endpoint connector from A(0) to B(1) does not cover it.
+        let connector_cell = [Interval::new(-1.0, 0.0).unwrap(), Interval::point(0.0)];
+        assert!(
+            !exact_affine_pair_in_joint(
+                &a,
+                [0.0, 1.0],
+                &b,
+                [0.0, 1.0],
+                connector_cell,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        let masked_cell = [
+            Interval::new(-1.0, 0.0).unwrap(),
+            Interval::new(0.0, 0.5).unwrap(),
+        ];
+        assert!(
+            exact_affine_pair_in_joint(
+                &a,
+                [0.0, 1.0],
+                &b,
+                [0.0, 1.0],
+                masked_cell,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        // Querying a restriction that stops before the intersection is disjoint
+        // without any cell enlargement, even with a negative determinant.
+        assert!(
+            exact_affine_pair_in_joint(
+                &b,
+                [0.0, 0.25],
+                &a,
+                [0.0, 1.0],
+                connector_cell,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        assert!(
+            !exact_affine_pair_in_joint(
+                &a,
+                [0.0, 1.0],
+                &a,
+                [0.0, 1.0],
+                masked_cell,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn original_bracket_projected_line_joint_keeps_its_crossing_boundary_only() {
+        // Edges #1737/#1760 project the same authored vertex independently.
+        // Their exact affine restrictions cross just beyond the literal
+        // connector, but inside its retained outward endpoint uncertainty cell.
+        // Preparing the actual complete face must prove exclusion outside that
+        // cell; the owned cell itself must never become an Inside witness.
+        assert_original_face_regions(
+            include_bytes!(
+                "../../../../fixtures/geometry/independent-exporters/occt-ribbed-bracket-mm.step"
+            ),
+            spiling_contracts::geometry::StepEntityId(1732),
+            &[([[11.5; 2], [9.653372093023256; 2]], Boundary)],
+        );
+    }
+
+    #[test]
+    fn original_bracket_all_source_faces_keep_owned_joint_cells_boundary_only() {
+        let definition = crate::from_step_bytes(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-ribbed-bracket-mm.step"
+        ))
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let bytes = 32 * 1024 * 1024;
+        let mut incidence = crate::analysis::source_incidence::SourceEdgeIncidence::new(
+            &definition,
+            bytes,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        incidence
+            .prepare_vertices(bytes, &mut work, &cancel)
+            .unwrap();
+        let live = bytes - incidence.owned_bytes();
+        let mut source = PreparedNativeTrimSource {
+            definition: &definition,
+            faces: Vec::new(),
+            allowance: live,
+            spatial_operators: Vec::new(),
+            source_vertices: Vec::new(),
+            source_inventory: None,
+        };
+        let mut lookup = SourceSpatialLookup::new();
+        let mut failures = Vec::new();
+        for &face in definition.face_ids() {
+            let skeleton = NativeFaceSkeleton::new(
+                &definition,
+                face,
+                &incidence,
+                live - source.retained_bytes(),
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            let domain =
+                match source.prepare_source_face(skeleton, &mut lookup, 1.0e-7, &mut work, &cancel)
+                {
+                    Ok(domain) => domain,
+                    Err(error) => {
+                        assert!(
+                            !matches!(
+                                error.code,
+                                GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
+                            ),
+                            "{error:?}"
+                        );
+                        failures.push(format!("{face:?}: {error:?}"));
+                        continue;
+                    }
+                };
+            for joint in domain.original_joints().unwrap() {
+                let query = joint.enclosure.map(|axis| [axis.lo, axis.hi]);
+                assert_eq!(
+                    domain.classify(query, &mut work, &cancel).unwrap(),
+                    Boundary,
+                    "face={face:?}, source_vertex={:?}, joint={query:?}",
+                    joint.source_vertex_id,
+                );
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "original bracket source face embeddings remain unproved:\n{}",
+            failures.join("\n"),
+        );
     }
 
     #[test]

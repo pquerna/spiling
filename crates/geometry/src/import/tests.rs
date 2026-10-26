@@ -844,3 +844,145 @@ fn exact_normalization_retains_the_original_periodic_cylinder_seam_without_scrat
     let z = solid.brep.vertices[source.vertices[1] as usize].point;
     assert!((z[2] - a[2]).abs() > 7.0);
 }
+
+#[test]
+fn original_implicit_carrier_edges_import_display_bound_and_section_without_branch_reselection() {
+    use crate::{AnalysisPolicy, BoundsPolicy, PlaneFrameMm, SlabRequest};
+    use spiling_contracts::geometry::RigidPoseMm;
+    let frame = PlaneFrameMm {
+        origin_mm: [0.0; 3],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
+    };
+    for (name, sample, expected_area, minimum, maximum) in [
+        ("box-mm.step", 4.0, 200.0, [0.0; 3], [20.0, 10.0, 8.0]),
+        ("box-inch.step", 4.0, 200.0, [0.0; 3], [20.0, 10.0, 8.0]),
+        (
+            "cylinder.step",
+            4.0,
+            25.0 * std::f64::consts::PI,
+            [-5.0, -5.0, 0.0],
+            [5.0, 5.0, 8.0],
+        ),
+        (
+            "independent-exporters/occt-tapered-fitting-mm.step",
+            6.0,
+            21.0 * std::f64::consts::PI,
+            [-6.0, -6.0, 0.0],
+            [6.0, 6.0, 12.0],
+        ),
+    ] {
+        let original = fixture(name);
+        let source = corpus::implicit_intersections(
+            std::str::from_utf8(&original).unwrap(),
+            "implicit.step",
+        );
+        let cancel = cancelled();
+        let definition = from_step_bytes_with_cancel(source.as_bytes(), &cancel).expect(name);
+        let mesh = crate::tessellate(
+            &definition,
+            crate::DisplayProfile::MeshTrimmedMm005V2,
+            &cancel,
+        )
+        .unwrap_or_else(|error| panic!("original implicit source {name} display: {error}"));
+        assert_eq!(mesh.chunks[0].descriptor.definition_id, definition.id);
+        for chunk in &mesh.chunks {
+            let receipt = &chunk.descriptor;
+            assert!(
+                receipt.carrier_deviation_mm
+                    + receipt.trim_deviation_mm
+                    + receipt.quantization_error_mm
+                    <= spiling_contracts::geometry::MESH_SURFACE_TOLERANCE_MM
+            );
+        }
+        let mut work = GeometryWorkBudget::new(50_000_000);
+        let prepared = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap_or_else(|error| panic!("original implicit source {name} preparation: {error}"));
+        let query_bytes = crate::MAX_PREPARED_SECTION_BYTES
+            .checked_sub(prepared.retained_bytes())
+            .unwrap();
+        for (axis, direction) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+            .into_iter()
+            .enumerate()
+        {
+            let support = prepared
+                .material_bounds(
+                    direction,
+                    BoundsPolicy {
+                        maximum_endpoint_uncertainty_mm: 1e-6,
+                    },
+                    query_bytes,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("original implicit source {name} axis {axis}: {error}")
+                });
+            let bounds = support.bounds();
+            assert!(bounds.minimum[0] <= minimum[axis] && minimum[axis] <= bounds.minimum[1]);
+            assert!(bounds.maximum[0] <= maximum[axis] && maximum[axis] <= bounds.maximum[1]);
+        }
+        let interval = [sample - 0.01, sample + 0.01];
+        let height = prepared
+            .analyze_placed_height_domain(
+                RigidPoseMm::IDENTITY,
+                interval,
+                AnalysisPolicy {
+                    maximum_height_uncertainty_mm: 1e-6,
+                    maximum_shape_error_mm: 0.1,
+                },
+                query_bytes,
+                &mut work,
+                &cancel,
+            )
+            .unwrap_or_else(|error| {
+                panic!("original implicit source {name} height transport: {error}")
+            });
+        assert!(height.event_brackets_mm().is_empty());
+        drop(height);
+        let slab = prepared
+            .analyze_slab(
+                SlabRequest {
+                    frame,
+                    height_interval_mm: interval,
+                    sample_height_mm: sample,
+                    native_shape_error_mm: 0.1,
+                },
+                query_bytes,
+                &mut work,
+                &cancel,
+            )
+            .unwrap_or_else(|error| {
+                panic!("original implicit source {name} material slab: {error}")
+            });
+        let section = slab.section();
+        assert_eq!(
+            section.loops().len(),
+            if name.contains("fitting") { 2 } else { 1 }
+        );
+        assert!(slab.occupied().is_some());
+        let mut signed_area = 0.0;
+        let mut perimeter = 0.0;
+        for boundary in section.loops() {
+            for pair in boundary.points_mm.windows(2) {
+                signed_area += (pair[0][0] * pair[1][1] - pair[1][0] * pair[0][1]) * 0.5;
+                perimeter +=
+                    ((pair[1][0] - pair[0][0]).powi(2) + (pair[1][1] - pair[0][1]).powi(2)).sqrt();
+            }
+        }
+        let tolerance = section.sampling_tolerance_mm();
+        assert!(
+            (signed_area.abs() - expected_area).abs()
+                <= 2.0 * perimeter * tolerance
+                    + std::f64::consts::TAU * tolerance * tolerance
+                    + 1e-8,
+            "independent analytic material-area oracle: {name}"
+        );
+    }
+}

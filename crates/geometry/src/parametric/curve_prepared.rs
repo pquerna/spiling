@@ -653,16 +653,271 @@ impl<'a> PreparedValidatedCurve<'a> {
     }
 }
 
+/// A third-order Taylor remainder needs no interior native knot, not merely
+/// the existing C1 join receipt. Closed endpoint jets may include both sides;
+/// the bound still contains the derivatives approached from this open cell.
+pub(crate) fn native_curve_single_open_span(
+    curve: &Curve,
+    range: [f64; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
+    Interval::new(range[0], range[1])?;
+    if matches!(curve.kind(), CurveKind::Line(_)) {
+        return Ok(true);
+    }
+    if matches!(curve.kind(), CurveKind::CrvOnSurf(_)) {
+        return Ok(false);
+    }
+    let Some(n) = native_curve_nurbs(curve)? else {
+        return Ok(false);
+    };
+    validate_knots(n.knots(), n.degree(), n.cpts().len(), range, work, cancel)?;
+    for &knot in n.knots() {
+        work.charge(1, cancel)?;
+        if range[0] < knot && knot < range[1] {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Borrow the literal native chart composition without copying either operand.
 /// The chart's parameter is independent of the spatial edge's gauge.
 pub(crate) struct NativeChartCurve<'a> {
     pub(crate) surface: &'a solidcore::surface::surface::Surface,
     pub(crate) chart: &'a Curve,
 }
+impl NativeChartCurve<'_> {
+    pub(crate) fn single_open_span(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        if !native_curve_single_open_span(self.chart, range, work, cancel)? {
+            return Ok(false);
+        }
+        let Some(surface) = super::analytic_eval::native_surface_nurbs(self.surface)? else {
+            // The literal affine/trigonometric native chart evaluator has no
+            // piecewise knot interfaces. Its denominator/domain obligations
+            // remain in the actual tensor and continuity evaluations.
+            return Ok(true);
+        };
+        let uv = curve_jet_order(self.chart, range, 0, 0, work, cancel)?[0];
+        let bounds = chart_image_box(self.surface, self.chart, range, uv, work, cancel)?;
+        for (axis, knots) in [surface.u_knots(), surface.v_knots()]
+            .into_iter()
+            .enumerate()
+        {
+            for &knot in knots {
+                work.charge(1, cancel)?;
+                if bounds[axis][0] < knot && knot < bounds[axis][1] {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// A literal clamped tensor boundary and the same rational curve basis
+    /// define the identical whole trace. This is positional authority only:
+    /// the affine gauge is private and no original-source receipt is produced.
+    pub(crate) fn isoparametric_coefficient_identity(
+        &self,
+        target: &Curve,
+        target_range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        use super::CurveEvaluator;
+        use crate::exact_coefficient::ExactCoefficient as E;
+
+        fn products_equal(
+            a: f64,
+            b: f64,
+            c: f64,
+            d: f64,
+            work: &mut GeometryWorkBudget,
+            cancel: &AtomicBool,
+        ) -> Result<bool, GeometryError> {
+            for value in [a, b, c, d] {
+                Interval::new(value, value)?;
+            }
+            let Some(mut left) = E::point(a).product(&E::point(b), work, cancel)? else {
+                return Ok(false);
+            };
+            let Some(right) = E::point(c).product(&E::point(d), work, cancel)? else {
+                return Ok(false);
+            };
+            Ok(left.subtract(&right).is_some() && left.sign() == 0)
+        }
+
+        work.charge(1, cancel)?;
+        let Some(surface) = super::analytic_eval::native_surface_nurbs(self.surface)? else {
+            return Ok(false);
+        };
+        let Some(spatial) = native_curve_nurbs(target)? else {
+            return Ok(false);
+        };
+        // Do not infer an affine chart from endpoint samples. Only one literal
+        // linear polynomial span (or the native affine LINE law) can use this
+        // lane; its complete second derivative must vanish.
+        if !matches!(self.chart.kind(), CurveKind::Line(_)) {
+            let Some(chart) = native_curve_nurbs(self.chart)? else {
+                return Ok(false);
+            };
+            if chart.degree() != 1 || chart.cpts().len() != 2 || chart.knots().len() != 4 {
+                return Ok(false);
+            }
+        }
+        let range = self.active_range();
+        let chart = curve_jet_order(self.chart, range, 2, 0, work, cancel)?;
+        if chart[2] != [ZERO; 3] {
+            return Ok(false);
+        }
+        let first = curve_jet_order(self.chart, [range[0]; 2], 0, 0, work, cancel)?[0];
+        let last = curve_jet_order(self.chart, [range[1]; 2], 0, 0, work, cancel)?[0];
+        if first.iter().chain(&last).any(|value| !value.is_point()) {
+            return Ok(false);
+        }
+        let Some(axis) = (0..2).find(|&axis| first[axis] != last[axis]) else {
+            return Ok(false);
+        };
+        let fixed = 1 - axis;
+        if first[fixed] != last[fixed] {
+            return Ok(false);
+        }
+        let degrees = [surface.p(), surface.q()];
+        let counts = [surface.n() + 1, surface.m() + 1];
+        let knots = [surface.u_knots(), surface.v_knots()];
+        let domain = self.surface.natural_uv_domain();
+        let lo = domain.min();
+        let hi = domain.max();
+        for (i, interval) in [[lo.x, hi.x], [lo.y, hi.y]].into_iter().enumerate() {
+            validate_knots(knots[i], degrees[i], counts[i], interval, work, cancel)?;
+        }
+        let a = first[axis].lo;
+        let b = last[axis].lo;
+        let limits = [knots[axis][degrees[axis]], knots[axis][counts[axis]]];
+        if [a.min(b), a.max(b)] != limits
+            || spatial.degree() != degrees[axis]
+            || spatial.cpts().len() != counts[axis]
+            || spatial.knots().len() != knots[axis].len()
+        {
+            return Ok(false);
+        }
+        let fixed_value = first[fixed].lo;
+        let row = if fixed_value == knots[fixed][degrees[fixed]]
+            && knots[fixed][..=degrees[fixed]]
+                .iter()
+                .all(|k| *k == fixed_value)
+        {
+            0
+        } else if fixed_value == knots[fixed][counts[fixed]]
+            && knots[fixed][counts[fixed]..]
+                .iter()
+                .all(|k| *k == fixed_value)
+        {
+            counts[fixed] - 1
+        } else {
+            return Ok(false);
+        };
+        let sorted_target = [
+            target_range[0].min(target_range[1]),
+            target_range[0].max(target_range[1]),
+        ];
+        validate_knots(
+            spatial.knots(),
+            spatial.degree(),
+            spatial.cpts().len(),
+            sorted_target,
+            work,
+            cancel,
+        )?;
+        if sorted_target
+            != [
+                spatial.knots()[spatial.degree()],
+                spatial.knots()[spatial.cpts().len()],
+            ]
+        {
+            return Ok(false);
+        }
+        let reverse = (b > a) != (target_range[1] > target_range[0]);
+        let Some(source_length) = E::difference(b, a) else {
+            return Ok(false);
+        };
+        let Some(target_length) = E::difference(target_range[1], target_range[0]) else {
+            return Ok(false);
+        };
+        // Exact affine knot transport, including every repeated knot and both
+        // literal endpoints. This fixes the complete branch and its direction.
+        for (i, &knot) in knots[axis].iter().enumerate() {
+            work.charge(1, cancel)?;
+            let j = if reverse {
+                spatial.knots().len() - 1 - i
+            } else {
+                i
+            };
+            let Some(source_delta) = E::difference(knot, a) else {
+                return Ok(false);
+            };
+            let Some(target_delta) = E::difference(spatial.knots()[j], target_range[0]) else {
+                return Ok(false);
+            };
+            let Some(mut left) = source_delta.product(&target_length, work, cancel)? else {
+                return Ok(false);
+            };
+            let Some(right) = target_delta.product(&source_length, work, cancel)? else {
+                return Ok(false);
+            };
+            if left.subtract(&right).is_none() || left.sign() != 0 {
+                return Ok(false);
+            }
+        }
+        let mut first_weights = None;
+        for i in 0..counts[axis] {
+            work.charge(1, cancel)?;
+            let c = if axis == 0 {
+                surface.cpt(i, row)
+            } else {
+                surface.cpt(row, i)
+            }
+            .map_err(|_| conditioning("missing native isoparametric coefficient"))?;
+            let d = spatial.cpts()[if reverse { counts[axis] - 1 - i } else { i }];
+            let cw = if surface.is_rational() { c.w } else { 1.0 };
+            let dw = if spatial.is_rational() { d.w } else { 1.0 };
+            if cw <= 0.0 || dw <= 0.0 || target.dim() != 3 {
+                return Ok(false);
+            }
+            let (c0, d0) = *first_weights.get_or_insert((cw, dw));
+            if !products_equal(cw, d0, dw, c0, work, cancel)? {
+                return Ok(false);
+            }
+            for (x, y) in [c.x, c.y, c.z].into_iter().zip([d.x, d.y, d.z]) {
+                if !products_equal(x, dw, y, cw, work, cancel)? {
+                    return Ok(false);
+                }
+            }
+        }
+        // Identical rational coefficients still need complete C0 and active
+        // chart authority; a discontinuous or out-of-domain row is no receipt.
+        Ok(self.continuous(range, work, cancel)?
+            && target.continuous(sorted_target, work, cancel)?)
+    }
+}
+
 impl super::CurveEvaluator for NativeChartCurve<'_> {
     fn active_range(&self) -> [f64; 2] {
         let d = self.chart.natural_interval();
         [d.min(), d.max()]
+    }
+    fn native_chart_curve(&self) -> Option<NativeChartCurve<'_>> {
+        Some(NativeChartCurve {
+            surface: self.surface,
+            chart: self.chart,
+        })
     }
     fn tensor(
         &self,

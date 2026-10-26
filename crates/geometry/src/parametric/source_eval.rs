@@ -103,6 +103,9 @@ pub(crate) trait CurveEvaluator {
     fn native_curve(&self) -> Option<&Curve> {
         None
     }
+    fn native_chart_curve(&self) -> Option<curve_prepared::NativeChartCurve<'_>> {
+        None
+    }
     fn original_curve(&self) -> Option<&solidcraft_step::geom::Curve> {
         None
     }

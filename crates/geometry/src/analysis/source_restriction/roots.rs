@@ -39,6 +39,118 @@ impl EndpointRoot {
     }
 }
 
+/// A constrained minimum at a declared closed domain fence, NOT a zero of g.
+/// Its parameter is the unchanged coefficient fence; its residual is nonzero
+/// source uncertainty, never coefficient-exact vertex incidence.
+#[derive(Clone, Copy)]
+pub(super) struct ClosedFenceEndpoint {
+    parameter: f64,
+    error_mm: f64,
+}
+impl ClosedFenceEndpoint {
+    pub(super) fn parameter(&self) -> f64 {
+        self.parameter
+    }
+    pub(super) fn source_error_mm(&self) -> f64 {
+        self.error_mm
+    }
+}
+
+/// The caller must supply selector-proved natural/authored closed bounds, not
+/// a periodic search cover or a subdivision/carrier proposal. Active equality
+/// below checks containment consistency only; it does NOT establish provenance.
+pub(super) fn closed_fence_endpoint(
+    curve: &dyn CurveEvaluator,
+    vertex: [f64; 3],
+    closed_domain: [f64; 2],
+    maximum_source_error_mm: f64,
+    maximum_live_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<ClosedFenceEndpoint>, GeometryError> {
+    work.charge(1, cancel)?;
+    // This proof has no retained allocation or subdivision stack. Admit its
+    // bounded provider and interval scratch before calling any evaluator.
+    if maximum_live_bytes
+        < SOURCE_OPERAND_SCRATCH_BYTES
+            + 256 * std::mem::size_of::<Interval>()
+            + 32 * std::mem::size_of::<ExactCoefficient>()
+    {
+        return Err(resource());
+    }
+    let domain = Interval::new(closed_domain[0], closed_domain[1])?;
+    for coordinate in vertex {
+        Interval::new(coordinate, coordinate)?;
+    }
+    if !maximum_source_error_mm.is_finite() || maximum_source_error_mm < 0.0 {
+        return Err(unavailable(
+            "closed endpoint needs finite nonnegative source admission",
+        ));
+    }
+    if closed_domain != curve.active_range() || domain.is_point() {
+        return Ok(None);
+    }
+    if !curve.continuous(closed_domain, work, cancel)?
+        || !curve.smooth(closed_domain, work, cancel)?
+    {
+        return Ok(None);
+    }
+    let jet = curve.tensor(closed_domain, 2, work, cancel)?;
+    let delta = displacement(jet[0], vertex);
+    let derivative = finite(dot(jet[1], jet[1]).add(dot(delta, jet[2])))?;
+    if derivative.lo <= 0.0 {
+        return Ok(None);
+    }
+    // Strict g' > 0 on the COMPLETE selected domain and the strict outward
+    // one-sided sign imply g > 0 everywhere (lower fence), or g < 0 everywhere
+    // (upper fence). Squared distance is therefore strictly monotone towards
+    // this unique constrained minimum. There is no interior stationary root,
+    // opposite-fence alternative or unsearched branch to merge with it.
+    for (parameter, lower) in [(domain.lo, true), (domain.hi, false)] {
+        work.charge(1, cancel)?;
+        let jet = curve.tensor([parameter; 2], 1, work, cancel)?;
+        let delta = displacement(jet[0], vertex);
+        let error_mm = distance(delta)?.hi;
+        if error_mm > maximum_source_error_mm {
+            continue;
+        }
+        let g = finite(dot(delta, jet[1]))?;
+        let outward = if lower { g.lo > 0.0 } else { g.hi < 0.0 };
+        let outward = if outward {
+            true
+        } else if g.contains_zero() {
+            // A singleton enclosure can straddle zero even when the actual
+            // coefficient expression has a strict outward sign. Prove that
+            // SAME sign exactly for supported affine operands; overlap itself
+            // supplies no existence or stationarity authority.
+            match curve.exact_affine_coefficients(work, cancel)? {
+                Some(affine) => {
+                    match affine_stationarity_sign(&affine, vertex, parameter, work, cancel)? {
+                        Some(sign) => {
+                            if lower {
+                                sign > 0
+                            } else {
+                                sign < 0
+                            }
+                        }
+                        None => false,
+                    }
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        if outward {
+            return Ok(Some(ClosedFenceEndpoint {
+                parameter,
+                error_mm,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 fn unavailable(message: &'static str) -> GeometryError {
     GeometryError::new(
         GeometryErrorCode::ParameterCorrespondenceUnavailable,
@@ -89,6 +201,54 @@ fn exact_vertex(
     Ok(true)
 }
 
+/// Sign of w² g at one literal affine parameter, using exact coefficient
+/// expansions. `None` means the bounded expansion provider supplies no proof.
+pub(super) fn affine_stationarity_sign(
+    affine: &crate::parametric::ExactAffineCurve,
+    vertex: [f64; 3],
+    parameter: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<i8>, GeometryError> {
+    work.charge(1, cancel)?;
+    if affine.denominator.sign() == 0 {
+        return Ok(None);
+    }
+    // For C(t)=(P+tD)/w, w² g(t)=(P+tD-wV)·D.
+    let mut value = ExactCoefficient::point(0.0);
+    for axis in 0..3 {
+        let Some(mut delta) =
+            affine.derivative[axis].product(&ExactCoefficient::point(parameter), work, cancel)?
+        else {
+            return Ok(None);
+        };
+        for &term in &affine.position[axis].terms[..affine.position[axis].len] {
+            if delta.push(term).is_none() {
+                return Ok(None);
+            }
+        }
+        let Some(reference) =
+            affine
+                .denominator
+                .product(&ExactCoefficient::point(vertex[axis]), work, cancel)?
+        else {
+            return Ok(None);
+        };
+        if delta.subtract(&reference).is_none() {
+            return Ok(None);
+        }
+        let Some(term) = delta.product(&affine.derivative[axis], work, cancel)? else {
+            return Ok(None);
+        };
+        for &coefficient in &term.terms[..term.len] {
+            if value.push(coefficient).is_none() {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(value.sign()))
+}
+
 fn affine_closed_existence(
     curve: &dyn CurveEvaluator,
     vertex: [f64; 3],
@@ -99,51 +259,49 @@ fn affine_closed_existence(
     let Some(affine) = curve.exact_affine_coefficients(work, cancel)? else {
         return Ok(false);
     };
-    if affine.denominator.sign() == 0 {
-        return Ok(false);
-    }
-    // For C(t)=(P+tD)/w, w² g(t)=(P+tD-wV)·D.
-    // Evaluate its closed-fence signs as exact expansions, not outward
-    // singleton overlap. The caller separately proves g' > 0 on this tube;
-    // these signs then establish existence by the intermediate value theorem.
+    // The caller separately proves g' > 0 on this tube. Exact closed-fence
+    // signs, not outward singleton overlap, establish existence by IVT.
     for (fence, lower) in [(range.lo, true), (range.hi, false)] {
-        work.charge(1, cancel)?;
-        let mut value = ExactCoefficient::point(0.0);
-        for axis in 0..3 {
-            let Some(mut delta) =
-                affine.derivative[axis].product(&ExactCoefficient::point(fence), work, cancel)?
-            else {
-                return Ok(false);
-            };
-            for &term in &affine.position[axis].terms[..affine.position[axis].len] {
-                if delta.push(term).is_none() {
-                    return Ok(false);
-                }
-            }
-            let Some(reference) =
-                affine
-                    .denominator
-                    .product(&ExactCoefficient::point(vertex[axis]), work, cancel)?
-            else {
-                return Ok(false);
-            };
-            if delta.subtract(&reference).is_none() {
-                return Ok(false);
-            }
-            let Some(term) = delta.product(&affine.derivative[axis], work, cancel)? else {
-                return Ok(false);
-            };
-            for &coefficient in &term.terms[..term.len] {
-                if value.push(coefficient).is_none() {
-                    return Ok(false);
-                }
-            }
-        }
-        if (lower && value.sign() > 0) || (!lower && value.sign() < 0) {
+        let Some(sign) = affine_stationarity_sign(&affine, vertex, fence, work, cancel)? else {
+            return Ok(false);
+        };
+        if (lower && sign > 0) || (!lower && sign < 0) {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+/// Both intervals must already enclose established roots of this SAME
+/// stationary function (possibly transported by a coefficient-proved period).
+/// Overlap alone is not equality: complete closed-hull C1 and g' > 0 prove it.
+pub(super) fn same_stationary_root(
+    curve: &dyn CurveEvaluator,
+    vertex: [f64; 3],
+    first: Interval,
+    second: Interval,
+    maximum_live_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
+    if maximum_live_bytes < SOURCE_OPERAND_SCRATCH_BYTES + 256 * std::mem::size_of::<Interval>() {
+        return Err(resource());
+    }
+    if first.intersection(second).is_none() {
+        return Ok(false);
+    }
+    let hull = first.hull(second);
+    let active = curve.active_range();
+    if hull.lo < active[0] || hull.hi > active[1] {
+        return Ok(false);
+    }
+    let range = [hull.lo, hull.hi];
+    if !curve.continuous(range, work, cancel)? || !curve.smooth(range, work, cancel)? {
+        return Ok(false);
+    }
+    let jet = curve.tensor(range, 2, work, cancel)?;
+    Ok(finite(dot(jet[1], jet[1]).add(dot(displacement(jet[0], vertex), jet[2])))?.lo > 0.0)
 }
 
 fn retain(
@@ -534,6 +692,136 @@ mod tests {
     }
 
     #[test]
+    fn closed_fence_is_not_a_stationary_root_or_an_artificial_search_boundary() {
+        let source = Curve::Line {
+            origin: [0.0; 3],
+            direction: [1.0, 0.0, 0.0],
+            magnitude: 1.0,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(10_000_000);
+        let domain = [0.0, 1.0];
+        let curve = PreparedOriginalCurve::new(&source, domain, BYTES, &mut work, &cancel).unwrap();
+        for (vertex, parameter) in [
+            ([-1.0e-8, 2.0e-8, 0.0], 0.0),
+            ([1.0 + 1.0e-8, 2.0e-8, 0.0], 1.0),
+        ] {
+            assert!(
+                isolate_endpoint(&curve, vertex, domain, 1.0e-7, BYTES, &mut work, &cancel)
+                    .unwrap()
+                    .is_empty()
+            );
+            let fence =
+                closed_fence_endpoint(&curve, vertex, domain, 1.0e-7, BYTES, &mut work, &cancel)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(fence.parameter(), parameter);
+            assert!(fence.source_error_mm() >= vertex[1]);
+            assert!(fence.source_error_mm() <= 1.0e-7);
+            assert!(
+                closed_fence_endpoint(&curve, vertex, domain, 1.0e-9, BYTES, &mut work, &cancel,)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // This vertex lies just beyond a subdivision boundary, but inside the
+        // true branch. Only the ordinary interior stationary root owns it.
+        let interior = [0.5 + 1.0e-8, 2.0e-8, 0.0];
+        assert!(
+            closed_fence_endpoint(
+                &curve,
+                interior,
+                [0.0, 0.5],
+                1.0e-7,
+                BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            closed_fence_endpoint(&curve, interior, domain, 1.0e-7, BYTES, &mut work, &cancel,)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            isolate_endpoint(&curve, interior, domain, 1.0e-7, BYTES, &mut work, &cancel)
+                .unwrap()
+                .len(),
+            1,
+        );
+        // Exactly stationary at a genuine fence is still root authority, not
+        // a constrained (strictly outward) endpoint obligation.
+        assert!(
+            closed_fence_endpoint(
+                &curve,
+                [1.0, 2.0e-8, 0.0],
+                domain,
+                1.0e-7,
+                BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn closed_fence_rejects_nonunique_distance_and_obeys_resource_policy() {
+        let source = circle();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(10_000_000);
+        let domain = [0.0, TAU];
+        let curve = PreparedOriginalCurve::new(&source, domain, BYTES, &mut work, &cancel).unwrap();
+        // Every point is equally near the center. Proximity to both fences
+        // cannot select one original parameter branch.
+        assert!(
+            closed_fence_endpoint(&curve, [0.0; 3], domain, 3.0, BYTES, &mut work, &cancel,)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            closed_fence_endpoint(&curve, [0.0; 3], domain, 3.0, 0, &mut work, &cancel,)
+                .err()
+                .unwrap()
+                .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        assert_eq!(
+            closed_fence_endpoint(
+                &curve,
+                [0.0; 3],
+                domain,
+                3.0,
+                BYTES,
+                &mut GeometryWorkBudget::new(0),
+                &cancel,
+            )
+            .err()
+            .unwrap()
+            .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        assert_eq!(
+            closed_fence_endpoint(
+                &curve,
+                [0.0; 3],
+                domain,
+                3.0,
+                BYTES,
+                &mut work,
+                &AtomicBool::new(true),
+            )
+            .err()
+            .unwrap()
+            .code,
+            GeometryErrorCode::Cancelled,
+        );
+    }
+
+    #[test]
     fn exact_stationary_parameter_preserves_nonzero_source_residual() {
         let source = circle();
         let cancel = AtomicBool::new(false);
@@ -615,6 +903,28 @@ mod tests {
         assert_eq!(roots[0].exact_parameter(), None);
         assert!(roots[0].source_error_mm() >= vertex[1]);
         assert!(roots[0].source_error_mm() <= 1.0e-6);
+        let selected =
+            super::super::selection::select_curve(&source, true, &mut work, &cancel).unwrap();
+        let preserved = super::super::endpoint_root(
+            &curve,
+            vertex,
+            range,
+            None,
+            selected.closed_domain,
+            1.0e-6,
+            BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let super::super::SourceEndpoint::Root {
+            root: preserved, ..
+        } = preserved
+        else {
+            panic!("an existing interior stationary recipe acquired fence authority");
+        };
+        assert_eq!(preserved.enclosure(), roots[0].enclosure());
+        assert_eq!(preserved.source_error_mm(), roots[0].source_error_mm());
 
         // The adjacent literal lies above exact 0.1+0.2: proximity and the
         // source allowance must not manufacture an out-of-domain root.
@@ -632,6 +942,48 @@ mod tests {
         assert!(
             isolate_endpoint(&curve, outside, range, 1.0e-6, BYTES, &mut work, &cancel)
                 .map_or(true, |roots| roots.is_empty())
+        );
+        let fence_jet = curve.tensor([1.0; 2], 1, &mut work, &cancel).unwrap();
+        assert!(dot(displacement(fence_jet[0], outside), fence_jet[1]).contains_zero());
+        let affine = curve
+            .exact_affine_coefficients(&mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            affine_stationarity_sign(&affine, outside, 1.0, &mut work, &cancel).unwrap(),
+            Some(-1),
+        );
+        let closed = super::super::endpoint_root(
+            &curve,
+            outside,
+            range,
+            None,
+            selected.closed_domain,
+            1.0e-6,
+            BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let super::super::SourceEndpoint::ClosedFence(closed) = closed else {
+            panic!("exact outward sign manufactured a stationary root");
+        };
+        assert_eq!(closed.parameter(), 1.0);
+        assert!(closed.source_error_mm() >= outside[1]);
+        assert!(closed.source_error_mm() <= 1.0e-6);
+        assert!(
+            super::super::endpoint_root(
+                &curve,
+                outside,
+                range,
+                None,
+                selected.closed_domain,
+                1.0e-9,
+                BYTES,
+                &mut work,
+                &cancel,
+            )
+            .is_err()
         );
         assert!(
             isolate_endpoint(&curve, vertex, range, 1.0e-9, BYTES, &mut work, &cancel)

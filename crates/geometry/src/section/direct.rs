@@ -1978,6 +1978,182 @@ mod correspondence_tests {
     }
 
     #[test]
+    fn native_boundary_matches_complete_rational_row_and_checked_reverse_gauge() {
+        let w = 0.5_f64.sqrt();
+        let row = [
+            CPoint::new(1.0, 0.0, 0.0, 1.0),
+            CPoint::new(w, w, 0.0, w),
+            CPoint::new(0.0, 1.0, 0.0, 1.0),
+        ];
+        let surface = Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(
+            srf_basic::Surface::new(
+                row.iter()
+                    .map(|p| vec![*p, CPoint::new(p.x, p.y, 2.0 * p.w, p.w)])
+                    .collect(),
+                2,
+                1,
+                vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                vec![0.0, 0.0, 1.0, 1.0],
+            )
+            .unwrap(),
+            true,
+        )));
+        let spatial = curve(row.to_vec(), 2, vec![7.0, 7.0, 7.0, 11.0, 11.0, 11.0], 3);
+        let cancel = AtomicBool::new(false);
+        for (uv, target_range) in [([0.0, 1.0], [7.0, 11.0]), ([1.0, 0.0], [11.0, 7.0])] {
+            let chart = curve(
+                uv.map(|u| CPoint::new(u, 0.0, NOZ, NOW)).to_vec(),
+                1,
+                vec![2.0, 2.0, 5.0, 5.0],
+                2,
+            );
+            let boundary = Boundary {
+                surface: &surface,
+                curve: &spatial,
+                uv_curve: Some(&chart),
+                edge_range: target_range,
+                scale: 1.0,
+            };
+            // A whole rational span with a distinct literal gauge must not
+            // spend the raw query's work on thousands of local calibrations.
+            let mut work = GeometryWorkBudget::new(50_000);
+            boundary
+                .prove_correspondence(0.0, 1024 * 1024, &mut work, &cancel)
+                .unwrap();
+        }
+
+        let chart = curve(
+            vec![
+                CPoint::new(0.0, 0.0, NOZ, NOW),
+                CPoint::new(1.0, 0.0, NOZ, NOW),
+            ],
+            1,
+            vec![2.0, 2.0, 5.0, 5.0],
+            2,
+        );
+        let reference = p::curve_prepared::NativeChartCurve {
+            surface: &surface,
+            chart: &chart,
+        };
+        let mut changed = row;
+        changed[1].x = changed[1].x.next_up();
+        let near = curve(
+            changed.to_vec(),
+            2,
+            vec![7.0, 7.0, 7.0, 11.0, 11.0, 11.0],
+            3,
+        );
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        assert!(
+            !reference
+                .isoparametric_coefficient_identity(&near, [7.0, 11.0], &mut work, &cancel)
+                .unwrap()
+        );
+        assert!(
+            !reference
+                .isoparametric_coefficient_identity(&spatial, [11.0, 7.0], &mut work, &cancel)
+                .unwrap()
+        );
+        assert!(
+            !reference
+                .isoparametric_coefficient_identity(&spatial, [7.0, 9.0], &mut work, &cancel)
+                .unwrap()
+        );
+
+        let wrong_chart = curve(
+            vec![
+                CPoint::new(0.0, 1.0, NOZ, NOW),
+                CPoint::new(1.0, 1.0, NOZ, NOW),
+            ],
+            1,
+            vec![2.0, 2.0, 5.0, 5.0],
+            2,
+        );
+        let mut displaced = row;
+        displaced[1].x += 0.001;
+        let near = curve(
+            displaced.to_vec(),
+            2,
+            vec![7.0, 7.0, 7.0, 11.0, 11.0, 11.0],
+            3,
+        );
+        for (curve, chart, edge_range) in [
+            (&near, &chart, [7.0, 11.0]),
+            (&spatial, &chart, [11.0, 7.0]),
+            (&spatial, &wrong_chart, [7.0, 11.0]),
+        ] {
+            let wrong = Boundary {
+                surface: &surface,
+                curve,
+                uv_curve: Some(chart),
+                edge_range,
+                scale: 1.0,
+            };
+            let mut work = GeometryWorkBudget::new(1_000_000);
+            assert_eq!(
+                wrong
+                    .prove_correspondence(1e-6, 1024 * 1024, &mut work, &cancel)
+                    .unwrap_err()
+                    .code,
+                GeometryErrorCode::AnalysisIndeterminate,
+            );
+        }
+    }
+
+    #[test]
+    fn original_fitting_whole_coedge_correspondence_fits_raw_query_work() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step");
+        let cancel = AtomicBool::new(false);
+        let definition =
+            crate::from_step_bytes_with_cancel(&std::fs::read(path).unwrap(), &cancel).unwrap();
+        let brep = definition.brep();
+        let face_id = definition.face_ids()[0];
+        let face = brep.face(face_id).unwrap();
+        let surface = definition.face_surface(face_id).unwrap();
+        // This is the actual original cap/rim correspondence which precedes
+        // the Z6 raw section. No prepared receipt or plane-root work is reused.
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let mut proved = 0;
+        for &loop_id in &face.loops {
+            let loop_ = brep.loop_(loop_id).unwrap();
+            let lu = brep.loopuse(loop_.loopuse.unwrap()).unwrap();
+            let solidcore::topology::LoopuseStart::Edgeuse(Some(first)) = lu.start else {
+                panic!("original fitting has an explicit native coedge cycle");
+            };
+            let mut id = first;
+            for _ in 0..brep.edgeuses().len() {
+                let eu = brep.edgeuse(id).unwrap();
+                let boundary = Boundary::new(
+                    &definition,
+                    surface,
+                    id,
+                    eu.edge.unwrap(),
+                    1.0,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+                boundary
+                    .prove_correspondence(
+                        SECTION_SAMPLING_TOLERANCE_MM / 64.0,
+                        1024 * 1024,
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap();
+                proved += 1;
+                id = eu.ccw.unwrap();
+                if id == first {
+                    break;
+                }
+            }
+            assert_eq!(id, first);
+        }
+        assert!(proved > 0);
+    }
+
+    #[test]
     fn native_boundary_covers_stationary_germs_at_either_endpoint() {
         let surface = carrier();
         let spatial = spatial();

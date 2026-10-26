@@ -578,22 +578,47 @@ fn curve_chord(
         .curve()
         .native_curve()
         .ok_or_else(|| invalid("display trim lost its original native coefficient binding"))?;
+    let continuous = if let Some(surface) = surface {
+        parametric::CurveEvaluator::continuous(
+            &parametric::curve_prepared::NativeChartCurve {
+                surface,
+                chart: native,
+            },
+            range,
+            work,
+            cancel,
+        )?
+    } else {
+        curve.curve().continuous(range, work, cancel)?
+    };
+    if !continuous {
+        return Err(invalid(
+            "complete native display trim interval is not coefficient-continuous",
+        ));
+    }
     let mut stack = [([0.0; 2], 0u8); 33];
     stack[0] = (range, 0);
     let mut len = 1;
     let mut maximum = 0.0_f64;
+    let mut endpoint_error = None;
     while len > 0 {
         len -= 1;
         let (part, depth) = stack[len];
         work.charge(1, cancel)?;
         let jet = curve.jet(part, work, cancel)?;
         let mut position = jet.position;
+        let mut derivative = jet.derivative;
         let mut second = jet.second_derivative;
         let mut smooth = curve.is_smooth_on(part, work, cancel)?;
         if let Some(surface) = surface {
             let domain = bounded_uv(native, part, surface, position, work, cancel)?;
             let s = parametric::surface_piecewise_enclosure(surface, domain, work, cancel)?;
             smooth &= parametric::surface_parameter_span_smooth(surface, domain, work, cancel)?;
+            derivative = std::array::from_fn(|i| {
+                s.du[i]
+                    .mul(jet.derivative[0])
+                    .add(s.dv[i].mul(jet.derivative[1]))
+            });
             second = std::array::from_fn(|i| {
                 s.duu[i]
                     .mul(jet.derivative[0].square())
@@ -619,9 +644,10 @@ fn curve_chord(
                 )
             }))
         };
-        let error = if smooth {
+        let mut leaf_endpoints = [[Interval::point(0.0); 3]; 2];
+        let mut error = if smooth {
             let mut residual = [Interval::point(0.0); 3];
-            for t in part {
+            for (endpoint, t) in part.into_iter().enumerate() {
                 let p = curve.position_bounds([t, t], work, cancel)?;
                 let p = if let Some(s) = surface {
                     let domain = bounded_uv(native, [t, t], s, p, work, cancel)?;
@@ -629,6 +655,7 @@ fn curve_chord(
                 } else {
                     p
                 };
+                leaf_endpoints[endpoint] = p;
                 let line = chord_at(Interval::point(t))?;
                 for i in 0..3 {
                     residual[i] = residual[i].hull(p[i].sub(line[i]));
@@ -648,14 +675,47 @@ fn curve_chord(
             let line = chord_at(Interval::new(part[0], part[1])?)?;
             norm_upper(std::array::from_fn(|i| position[i].sub(line[i])))
         };
+        if error > MESH_CARRIER_TOLERANCE_MM * 0.25 {
+            work.charge(1, cancel)?;
+            let endpoints = match endpoint_error {
+                Some(error) => error,
+                None => {
+                    let mut error = 0.0_f64;
+                    for endpoint in 0..2 {
+                        let p = curve.position_bounds([range[endpoint]; 2], work, cancel)?;
+                        let p = if let Some(s) = surface {
+                            let domain =
+                                bounded_uv(native, [range[endpoint]; 2], s, p, work, cancel)?;
+                            parametric::surface_position_enclosure(s, domain, work, cancel)?
+                        } else {
+                            p
+                        };
+                        error = error.max(norm_upper(std::array::from_fn(|i| {
+                            p[i].sub(Interval::point(chord[endpoint][i]))
+                        })));
+                    }
+                    endpoint_error = Some(error);
+                    error
+                }
+            };
+            let projected = if smooth {
+                projected_chord_error(chord, leaf_endpoints, derivative, second, part)?
+            } else {
+                position_chord_error(chord, position)?
+            };
+            if let Some(projected) = projected {
+                error = error.min(projected.max(endpoints));
+            }
+        }
         if error.is_finite() && error <= MESH_CARRIER_TOLERANCE_MM * 0.25 {
             maximum = maximum.max(error);
             continue;
         }
         if depth == 32 {
-            return Err(shape(
-                "complete original trim interval exceeds display transport tolerance",
-            ));
+            return Err(shape(format!(
+                "complete original trim interval exceeds display transport tolerance: surface_lift={} range={range:?} leaf={part:?} smooth={smooth} error={error} chord={chord:?}",
+                surface.is_some(),
+            )));
         }
         let middle = part[0] * 0.5 + part[1] * 0.5;
         if middle <= part[0] || middle >= part[1] {
@@ -668,6 +728,104 @@ fn curve_chord(
         len += 2;
     }
     Ok(maximum)
+}
+
+/// Bound geometric displacement, not an artificial affine parameter match.
+/// Closed-leaf coefficient bounds enclose the complete projected curve. Its
+/// continuous clamped projection, together with the separately checked literal
+/// endpoint gaps, also covers every point of the chord. No parameter map or
+/// source-correspondence authority is created.
+fn projected_chord_error(
+    chord: [[f64; 3]; 2],
+    endpoints: [[Interval; 3]; 2],
+    derivative: [Interval; 3],
+    second: [Interval; 3],
+    part: [f64; 2],
+) -> Result<Option<f64>, GeometryError> {
+    let direction = std::array::from_fn::<_, 3, _>(|i| {
+        Interval::point(chord[1][i]).sub(Interval::point(chord[0][i]))
+    });
+    let dot = |a: [Interval; 3], b: [Interval; 3]| {
+        (0..3).fold(Interval::point(0.0), |sum, i| sum.add(a[i].mul(b[i])))
+    };
+    let length_squared = dot(direction, direction);
+    if length_squared.lo <= 0.0 || !length_squared.hi.is_finite() {
+        return Ok(None);
+    }
+    let project = |v: [Interval; 3]| -> Result<([Interval; 3], Interval), GeometryError> {
+        let along = dot(v, direction).div(length_squared)?;
+        Ok((
+            std::array::from_fn(|i| v[i].sub(direction[i].mul(along))),
+            along,
+        ))
+    };
+    let relative =
+        |p: [Interval; 3]| std::array::from_fn(|i| p[i].sub(Interval::point(chord[0][i])));
+    let (a, along_a) = project(relative(endpoints[0]))?;
+    let (b, along_b) = project(relative(endpoints[1]))?;
+    let (first, along_first) = project(derivative)?;
+    let (second, along_second) = project(second)?;
+    let factor = Interval::point(part[1])
+        .sub(Interval::point(part[0]))
+        .square()
+        .mul(Interval::point(0.125));
+    let bound = |a: Interval, b: Interval, first: Interval, second: Interval| {
+        let ends = a.hull(b);
+        if first.lo >= 0.0 || first.hi <= 0.0 {
+            // A whole-leaf derivative sign places the extrema at its endpoints.
+            ends
+        } else {
+            // f - its endpoint interpolant = -f''(xi)*(t-a)*(b-t)/2.
+            ends.add(second.mul(Interval::new_unchecked(-factor.hi, 0.0)))
+        }
+    };
+    let perpendicular = std::array::from_fn(|i| bound(a[i], b[i], first[i], second[i]));
+    let along = bound(along_a, along_b, along_first, along_second);
+    let excess = along
+        .neg()
+        .hi
+        .max(along.sub(Interval::point(1.0)).hi)
+        .max(0.0);
+    Ok(Some(
+        Interval::point(norm_upper(perpendicular))
+            .add(Interval::point(excess).mul(length_squared.sqrt()?))
+            .hi,
+    ))
+}
+
+/// Complete image bound for a C0 leaf, without any derivative or Taylor claim.
+/// The caller separately proves whole-range continuity and both endpoint gaps.
+fn position_chord_error(
+    chord: [[f64; 3]; 2],
+    position: [Interval; 3],
+) -> Result<Option<f64>, GeometryError> {
+    let direction = std::array::from_fn::<_, 3, _>(|i| {
+        Interval::point(chord[1][i]).sub(Interval::point(chord[0][i]))
+    });
+    let length_squared = direction
+        .iter()
+        .fold(Interval::point(0.0), |sum, d| sum.add(d.square()));
+    if length_squared.lo <= 0.0 || !length_squared.hi.is_finite() {
+        return Ok(None);
+    }
+    let relative =
+        std::array::from_fn::<_, 3, _>(|i| position[i].sub(Interval::point(chord[0][i])));
+    let along = (0..3)
+        .fold(Interval::point(0.0), |sum, i| {
+            sum.add(relative[i].mul(direction[i]))
+        })
+        .div(length_squared)?;
+    let perpendicular = std::array::from_fn(|i| relative[i].sub(direction[i].mul(along)));
+    let excess = along
+        .neg()
+        .hi
+        .max(along.sub(Interval::point(1.0)).hi)
+        .max(0.0);
+    Ok(Some(
+        Interval::point(norm_upper(perpendicular))
+            .add(Interval::point(excess).mul(length_squared.sqrt()?))
+            .hi,
+    ))
 }
 
 fn circuits(
@@ -827,4 +985,233 @@ fn bounded_uv(
             proposed[a][1].min(domain[a][1]),
         ]
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solidcore::nurbs::{b_spline_curve::BSplineCurve, crv_basic, math::CPoint};
+
+    fn native_curve(points: Vec<CPoint>, degree: usize, knots: Vec<f64>) -> Curve {
+        let raw = crv_basic::Curve::new(points, degree, knots).unwrap();
+        BSplineCurve::from_nurb(raw, 3, true).into()
+    }
+
+    fn bound(curve: &Curve, range: [f64; 2], chord: [[f64; 3]; 2]) -> Result<f64, GeometryError> {
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let owner = PreparedValidatedCurve::new(
+            curve,
+            range,
+            1.0,
+            super::super::PROOF_BYTES,
+            &mut work,
+            &cancel,
+        )?;
+        curve_chord(&owner, range, None, chord, &mut work, &cancel)
+    }
+
+    #[test]
+    fn geometric_chord_proof_preserves_nonuniform_rational_circle_trace() {
+        let w = std::f64::consts::FRAC_1_SQRT_2;
+        let curve = native_curve(
+            vec![
+                CPoint::new(6.0, 0.0, 0.0, 1.0),
+                CPoint::new(6.0 * w, 6.0 * w, 0.0, w),
+                CPoint::new(0.0, 6.0, 0.0, 1.0),
+            ],
+            2,
+            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        );
+        let end = 1.0 / 16.0;
+        let a = 1.0 - end;
+        let denominator = a * a + 2.0 * w * end * a + end * end;
+        let chord = [
+            [6.0, 0.0, 0.0],
+            [
+                6.0 * (a * a + 2.0 * w * end * a) / denominator,
+                6.0 * (2.0 * w * end * a + end * end) / denominator,
+                0.0,
+            ],
+        ];
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let owner = PreparedValidatedCurve::new(
+            &curve,
+            [0.0, end],
+            1.0,
+            super::super::PROOF_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let midpoint = owner
+            .position_bounds([end * 0.5; 2], &mut work, &cancel)
+            .unwrap();
+        let parameter_error = (0..3)
+            .fold(Interval::point(0.0), |sum, i| {
+                sum.add(
+                    midpoint[i]
+                        .sub(Interval::point(0.5 * (chord[0][i] + chord[1][i])))
+                        .square(),
+                )
+            })
+            .sqrt()
+            .unwrap();
+        assert!(parameter_error.lo > MESH_CARRIER_TOLERANCE_MM * 0.25);
+        assert!(
+            curve_chord(&owner, [0.0, end], None, chord, &mut work, &cancel).unwrap()
+                <= MESH_CARRIER_TOLERANCE_MM * 0.25,
+        );
+        // The same literal chart on a rotated affine carrier exercises the
+        // composed physical first jet, not the unlifted UV derivative.
+        use solidcore::{
+            nurbs::{b_spline_surface::BSplineSurface, math::NOZ, srf_basic},
+            surface::surface::p2::SurfaceKind,
+        };
+        let chart: Curve = BSplineCurve::from_nurb(
+            crv_basic::Curve::new(
+                vec![
+                    CPoint::new(6.0, 0.0, NOZ, 1.0),
+                    CPoint::new(6.0 * w, 6.0 * w, NOZ, w),
+                    CPoint::new(0.0, 6.0, NOZ, 1.0),
+                ],
+                2,
+                vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            )
+            .unwrap(),
+            2,
+            true,
+        )
+        .into();
+        let raw = srf_basic::Surface::new(
+            vec![
+                vec![
+                    CPoint::new(0.0, 0.0, 0.0, 1.0),
+                    CPoint::new(8.0, 0.0, 0.0, 1.0),
+                ],
+                vec![
+                    CPoint::new(0.0, 0.0, 8.0, 1.0),
+                    CPoint::new(8.0, 0.0, 8.0, 1.0),
+                ],
+            ],
+            1,
+            1,
+            vec![0.0, 0.0, 8.0, 8.0],
+            vec![0.0, 0.0, 8.0, 8.0],
+        )
+        .unwrap();
+        let surface = Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(raw, true)));
+        let owner = PreparedValidatedCurve::new(
+            &chart,
+            [0.0, end],
+            1.0,
+            super::super::PROOF_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            curve_chord(
+                &owner,
+                [0.0, end],
+                Some(&surface),
+                chord.map(|p| [p[1], 0.0, p[0]]),
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+                <= MESH_CARRIER_TOLERANCE_MM * 0.25,
+        );
+    }
+
+    #[test]
+    fn geometric_chord_proof_rejects_overlong_chord_and_finite_segment_overshoot() {
+        let short = native_curve(
+            vec![
+                CPoint::new(0.4, 0.0, 0.0, 1.0),
+                CPoint::new(0.6, 0.0, 0.0, 1.0),
+            ],
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+        );
+        let overshoot = native_curve(
+            vec![
+                CPoint::new(0.0, 0.0, 0.0, 1.0),
+                CPoint::new(-1.0, 0.0, 0.0, 1.0),
+                CPoint::new(1.0, 0.0, 0.0, 1.0),
+            ],
+            2,
+            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        );
+        for curve in [&short, &overshoot] {
+            let error = bound(curve, [0.0, 1.0], [[0.0; 3], [1.0, 0.0, 0.0]]).unwrap_err();
+            assert_eq!(error.code, GeometryErrorCode::ShapeErrorExceeded);
+        }
+    }
+
+    #[test]
+    fn geometric_chord_proof_handles_c0_speed_knot_without_claiming_c1() {
+        let curve = native_curve(
+            vec![
+                CPoint::new(0.0, 0.0, 0.0, 1.0),
+                CPoint::new(0.75, 0.0, 0.0, 1.0),
+                CPoint::new(1.0, 0.0, 0.0, 1.0),
+            ],
+            1,
+            vec![0.0, 0.0, 0.5, 1.0, 1.0],
+        );
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let owner = PreparedValidatedCurve::new(
+            &curve,
+            [0.0, 1.0],
+            1.0,
+            super::super::PROOF_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(!owner.is_smooth_on([0.0, 1.0], &mut work, &cancel).unwrap());
+        assert!(
+            curve_chord(
+                &owner,
+                [0.0, 1.0],
+                None,
+                [[0.0; 3], [1.0, 0.0, 0.0]],
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+                <= MESH_CARRIER_TOLERANCE_MM * 0.25,
+        );
+        // The C0-only route retains both literal endpoint and finite endcap
+        // obligations; it must not authorize an overlong or overshot chord.
+        for xs in [[0.4, 0.55, 0.6], [0.0, -0.1, 1.0]] {
+            let bad = native_curve(
+                xs.map(|x| CPoint::new(x, 0.0, 0.0, 1.0)).to_vec(),
+                1,
+                vec![0.0, 0.0, 0.5, 1.0, 1.0],
+            );
+            let error = bound(&bad, [0.0, 1.0], [[0.0; 3], [1.0, 0.0, 0.0]]).unwrap_err();
+            assert_eq!(error.code, GeometryErrorCode::ShapeErrorExceeded);
+        }
+    }
+
+    #[test]
+    fn geometric_chord_proof_requires_complete_literal_c0() {
+        let jump = native_curve(
+            vec![
+                CPoint::new(0.0, 0.0, 0.0, 1.0),
+                CPoint::new(0.4, 0.0, 0.0, 1.0),
+                CPoint::new(0.6, 0.0, 0.0, 1.0),
+                CPoint::new(1.0, 0.0, 0.0, 1.0),
+            ],
+            1,
+            vec![0.0, 0.0, 0.5, 0.5, 1.0, 1.0],
+        );
+        let error = bound(&jump, [0.0, 1.0], [[0.0; 3], [1.0, 0.0, 0.0]]).unwrap_err();
+        assert_eq!(error.code, GeometryErrorCode::InvalidGeometry);
+        assert!(error.message.contains("coefficient-continuous"));
+    }
 }

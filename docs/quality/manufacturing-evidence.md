@@ -369,7 +369,7 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project10/manufacturing11/process3/surface3, planner20,
+Current identities are project10/manufacturing11/process3/surface3, planner21,
 emitter7/verifier9 and SPLR5; executable constants and exact native pin remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.

@@ -179,6 +179,14 @@ active closed original knot span, including both incident sides at exact knots,
 with its actual controls, denominator, derivatives and charged work. Interval
 owners and construction scratch share the existing bounded audit workspace.
 
+Trim deviation bounds geometric traces, not equal-parameter interpolation.
+Project complete coefficient images onto the finite chord, retain endcap
+overshoot and actual curve/chord endpoint gaps, and require complete C0 for
+reverse coverage. Closed C1 leaves may use composed first/second derivatives;
+C0 knot leaves use position enclosures only. Lifted PCurves use physical 3D
+positions and jets. A nonuniform parameter speed must not force mesh refinement
+when the complete geometric trace already satisfies the unchanged error cap.
+
 Triangle proof stopping criteria consume the remaining carrier allowance after
 certified trim and auxiliary transport, rather than the full publication cap.
 Existing proof-only subdivisions retain the original mesh triangle's affine
@@ -190,6 +198,13 @@ keeps native admission independent of display failure: `DefinitionDisplay::Unava
 means no mesh artifact or GPU face picking, not an empty successful mesh.
 Native source records and supported queries remain available; cancellation
 must never be converted into display unavailability.
+
+One `PreparedSolid` owns the selected source for a captured definition.
+`material_bounds`, placed bounds/height analysis and slab queries borrow that
+same preparation; repeated XYZ queries do not rebuild it or reselect implicit
+branches. Unposed directional bounds retain the frozen combined 32 MiB
+owner/query cap. The standalone material-bounds function composes the same
+prepared path for one-off consumers.
 
 ## Source material and proof boundaries
 
@@ -313,6 +328,13 @@ preferred-master selection and PCurve association order. Source restriction
 preparation must prove a complete correspondence to the actual retained native
 use; endpoint proximity and native labels cannot replace whole-range evidence.
 
+Literal native-boundary correspondence proves a directed positional trace, not
+parameter-speed equality or original-source relative-tangent authority. Evaluate
+only the requested jet order; cubic positional residuals require one genuine
+open original knot cell, while joins retain the qualified piecewise bound.
+An exact native boundary-row shortcut requires complete homogeneous coefficients,
+matching knots/affine gauge and chart/domain identity, not endpoint samples.
+
 Untrimmed nonperiodic selected PCurve LINEs reuse the finite source-coefficient
 window provider with the edge's captured original vertices. A search cover stays
 in that declared master's gauge; it does not borrow the independently gauged 3D
@@ -326,11 +348,31 @@ candidate must pass complete world-position and relative-derivative calibration
 in its own gauge before it counts as qualified. Distinct qualified branches
 refuse; cumulative work and peak root/proof/workspace bytes stay bounded.
 
+Independently gauged PCurves retain their own selector-proved natural/authored
+closed-domain token. Before stationary isolation, the complete lifted domain may
+prove strictly increasing distance derivative and a strict outward fence sign
+(interval or coefficient-exact affine), with the full admitted physical residual.
+This unique constrained minimum is a typed closed fence, not a stationary root
+or exact vertex coincidence. Its literal parameter remains available to affine
+and knot consumers; full world/relative-derivative calibration is unchanged.
+Numerical carrier-derived LINE windows never acquire that token.
+
+Actual UV Circle/Ellipse periods can identify one common whole-turn translation
+of two independently established endpoint roots. Closed-hull C1 and strict
+stationary-root uniqueness remain required at both ends; different winding is
+not the same branch. A carrier's world periodicity does not make a UV LINE
+periodic. Preserve selector search separately from a wider evaluable turn cover.
+
+Realization identity 5 and planner21 bind this selectable source recipe.
+Admitting an earlier PCurve can change the chosen chart and joint costs even
+when a later candidate previously succeeded; persisted planner20 artifacts
+therefore cannot retain current inspection/export authority.
+
 Endpoint proposals include finite coefficient fences, midpoints and reference
 zero. Recheck representable candidates after Newton contraction: an initial
-search midpoint need not hit the contracted root. Every singleton still requires
-exact outward stationarity and its full physical residual bound; proximity or a
-small interval is not parameter identity.
+search midpoint need not hit the contracted root. A stationary singleton still
+requires exact outward stationarity and its full physical residual bound;
+proximity or a small interval is not parameter identity.
 
 An exactly isolated stationary parameter is not exact vertex coincidence.
 Its nonzero physical source residual remains charged to the source allowance.
@@ -410,10 +452,16 @@ scene with its immutable program; this does not create a source display mesh.
 General STEP, bracket and affected workbench remain unqualified. Source metrics,
 material/void topology and the union guard remain independent.
 
-Standalone raw inspection retains whole-coedge correspondence-work refusals,
-including the housing upper cap, tapered fitting and selected cylinder/bracket
-cuts. A prepared manufacturing-query positive does not qualify these different
-query/resource scopes; their positive gates and numerical limits remain unchanged.
+Standalone engine/CLI sections exercise the unchanged fitting at Z=6 and housing
+at Z=8.05 under their frozen query limits. Primitive/void and original bracket
+cut controls retain independent area, orientation and lineage obligations.
+Literal native-chart bounds search the complete coefficient-backed boundary
+hull rather than an arbitrary large natural plane domain; that exclusion cover
+never supplies an Inside witness. Nonclosed native coefficient circuits can
+still refuse even when source uncertainty permits a separately qualified
+selected material realization. Original-source bounds consume that realization,
+not an implicitly healed raw chart. Prepared positives do not waive unrelated
+raw-query, source-material or resource obligations.
 
 The workspace has no Monstertruck runtime, development, test or tooling dependency.
 Retained historical STEP provenance may name that producer; the data is not a

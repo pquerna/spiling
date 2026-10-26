@@ -23,7 +23,7 @@ use std::{cmp::Ordering, collections::BinaryHeap, sync::atomic::AtomicBool};
 
 const MAX_LIVE_CELLS: usize = 131_072;
 const MAX_CREATED_CELLS: u64 = 2_000_000;
-const MAX_SCRATCH_ALLOCATION_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_SCRATCH_ALLOCATION_BYTES: usize = 32 * 1024 * 1024;
 const MAX_DEPTH: u16 = 96;
 
 /// Enclose the minimum and maximum of mathematically normalized `direction`
@@ -119,19 +119,10 @@ pub fn material_projected_bounds(
         work,
         cancel,
     )?;
-    let remaining = MAX_SCRATCH_ALLOCATION_BYTES
-        .checked_sub(prepared.retained_bytes())
-        .ok_or_else(|| {
-            error(
-                GeometryErrorCode::ResourceLimit,
-                "retained native material source exhausts directional allocation cap",
-            )
-        })?;
-    material_projected_bounds_with_scratch_limit(
-        prepared.source_view()?,
+    prepared.material_bounds(
         direction,
         policy,
-        remaining,
+        MAX_SCRATCH_ALLOCATION_BYTES,
         work,
         cancel,
     )
@@ -472,7 +463,7 @@ fn native_projected_bounds(
         // degree-parameterized Surface::Step by looking up only its FaceId.
         let surface = trim.surface_operand();
         let before = work.consumed();
-        let uv = trim.uv_domain();
+        let uv = trim.bounded_uv_cover(work, cancel)?;
         let native_boxes = match &surface {
             PreparedTrimSurface::Native(native) => Some(parametric::surface_parameter_boxes(
                 *native, uv, work, cancel,
