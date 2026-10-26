@@ -149,6 +149,12 @@ authority; strict smoothness and second-order consumers retain their own queries
 Taylor qualification treats a spline's terminal coefficient extension as one
 piece, not an interior C0 join. Genuine internal and reflected uncertain knot
 bands still need original C1 proof.
+Height-event curve census likewise distinguishes strictly internal parameter
+knots from the selected coedge's closed endpoints. The complete knot visitor
+retains endpoints, but only internal joins have two nonempty neighborhoods;
+physical endpoint vertices keep their separate source-incidence inventory.
+This does not promote a C0 parameter join to a physical critical event or erase
+an internal extremum.
 Constant-height admission follows the complete selected curve, not an unselected
 spatial line or its entire surface carrier. Whole-operator C0 and an identically
 zero projected first hull can prove constancy; only then may a tight anchor

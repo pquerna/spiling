@@ -2518,6 +2518,12 @@ fn isolate_curve_events(
         work,
         cancel,
         &mut |next, work, cancel| {
+            // Closed knot inventories include the selected coedge's endpoints.
+            // Those belong to the separately inventoried physical vertex
+            // strata, not an interior join with two nonempty neighborhoods.
+            if next <= original_range.0 || next >= original_range.1 {
+                return Ok(());
+            }
             if let Some(knot) = pending {
                 inventory_curve_joint_height(
                     &OriginalCurveSpan {
