@@ -353,10 +353,25 @@ fn plane(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<CarrierRecord>, GeometryError> {
+    affine_source(
+        exact_source_frame(position, work, cancel)?,
+        native,
+        domain,
+        work,
+        cancel,
+    )
+}
+
+fn affine_source(
+    source: [[E; 3]; 4],
+    native: &NativeSurface,
+    domain: Option<[[f64; 2]; 2]>,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<CarrierRecord>, GeometryError> {
     let Some(native) = native_affine(native, work, cancel)? else {
         return Ok(None);
     };
-    let source = exact_source_frame(position, work, cancel)?;
     let denominator = enclose(&native.denominator)?;
     if denominator.contains_zero() {
         return Ok(None);
@@ -436,7 +451,7 @@ fn plane(
     let errors = source_errors(map, errors, work, cancel)?;
     Ok(Some(CarrierRecord {
         from_native: map,
-        original_domain: domain,
+        original_domain: domain.map_or([None; 2], |d| d.map(Some)),
         error_coefficients: errors,
         literal,
     }))
@@ -860,7 +875,7 @@ fn analytic(
     }
     Ok(Some(CarrierRecord {
         from_native: map,
-        original_domain: domain,
+        original_domain: domain.map_or([None; 2], |d| d.map(Some)),
         error_coefficients: errors,
         literal,
     }))
@@ -908,6 +923,62 @@ pub(super) fn try_associate(
                 });
                 original = basis;
             }
+            Surface::Extrusion {
+                profile,
+                direction,
+                magnitude,
+            } => {
+                if let Some(circle) =
+                    crate::kernel::source_operand::original_circular_extrusion(original)
+                {
+                    let cylinder = Surface::Cylinder {
+                        position: circle.position.clone(),
+                        radius: circle.radius_mm,
+                    };
+                    let Some(mut record) = analytic(&cylinder, native, None, work, cancel)? else {
+                        return Ok(None);
+                    };
+                    let scale = Interval::point(circle.axial_scale_mm);
+                    for coefficient in &mut record.from_native[1] {
+                        *coefficient = coefficient.div(scale)?;
+                    }
+                    for index in [2, 3] {
+                        record.error_coefficients[index] =
+                            Interval::point(record.error_coefficients[index])
+                                .mul(scale)
+                                .hi;
+                    }
+                    record.original_domain = domain.map_or([None; 2], |d| d.map(Some));
+                    return Ok(Some(record));
+                }
+                if let solidcraft_step::geom::Curve::Line {
+                    origin,
+                    direction: profile_direction,
+                    magnitude: profile_scale,
+                } = profile.as_ref()
+                {
+                    let mut frame: [[E; 3]; 4] =
+                        std::array::from_fn(|_| std::array::from_fn(|_| E::point(0.0)));
+                    for k in 0..3 {
+                        Interval::new(origin[k], origin[k])?;
+                        Interval::new(profile_direction[k], profile_direction[k])?;
+                        Interval::new(direction[k], direction[k])?;
+                        Interval::new(*profile_scale, *profile_scale)?;
+                        Interval::new(*magnitude, *magnitude)?;
+                        frame[0][k] = E::point(origin[k]);
+                        frame[1][k] = product(
+                            &E::point(profile_direction[k]),
+                            &E::point(*profile_scale),
+                            work,
+                            cancel,
+                        )?;
+                        frame[2][k] =
+                            product(&E::point(direction[k]), &E::point(*magnitude), work, cancel)?;
+                    }
+                    return affine_source(frame, native, domain, work, cancel);
+                }
+                return Ok(None);
+            }
             Surface::Plane { position } => return plane(position, native, domain, work, cancel),
             _ => return analytic(original, native, domain, work, cancel),
         }
@@ -932,6 +1003,149 @@ mod tests {
             axis: [0.0, 0.0, 1.0],
             ref_direction: [1.0, 0.0, 0.0],
         }
+    }
+    #[test]
+    fn circular_extrusion_requires_literal_positive_axis_and_consumes_axial_scale() {
+        let cancel = AtomicBool::new(false);
+        let source = Surface::Extrusion {
+            profile: std::sync::Arc::new(solidcraft_step::geom::Curve::Circle {
+                position: source_placement(),
+                radius: 2.0,
+            }),
+            direction: [0.0, 0.0, 1.0],
+            magnitude: 8.0,
+        };
+        let native = cylinder([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 2.0, true);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let record = try_associate(&source, &native, &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(record.from_native[1][2].contains(0.125));
+        assert!(record.literal);
+        for (direction, magnitude) in [
+            ([0.0, 0.0, -1.0], 8.0),
+            ([0.0, 0.0, 1.0], -8.0),
+            ([0.0, 0.0, 1.0], 0.0),
+            ([0.0, 0.0, 1.0], f64::INFINITY),
+            ([0.0, f64::EPSILON, 1.0], 8.0),
+        ] {
+            let mut changed = source.clone();
+            if let Surface::Extrusion {
+                direction: d,
+                magnitude: m,
+                ..
+            } = &mut changed
+            {
+                *d = direction;
+                *m = magnitude;
+            }
+            assert!(
+                try_associate(&changed, &native, &mut work, &cancel)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn line_extrusion_proves_nonunit_source_parameter_coefficients() {
+        let source = Surface::Extrusion {
+            profile: std::sync::Arc::new(solidcraft_step::geom::Curve::Line {
+                origin: [1.0, 2.0, 3.0],
+                direction: [0.0, 1.0, 0.0],
+                magnitude: 2.0,
+            }),
+            direction: [0.0, 0.0, 1.0],
+            magnitude: 8.0,
+        };
+        let native = patch(
+            [
+                [[1.0, 2.0, 3.0], [1.0, 2.0, 11.0]],
+                [[1.0, 4.0, 3.0], [1.0, 4.0, 11.0]],
+            ],
+            [[0.0, 0.0, 1.0, 1.0]; 2],
+            1.0,
+        );
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let cancel = AtomicBool::new(false);
+        let record = try_associate(&source, &native, &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(record.literal);
+        assert_eq!(record.error_coefficients, [0.0; 4]);
+    }
+
+    #[test]
+    fn spline_extrusion_preserves_knots_and_bounds_changed_coefficients() {
+        use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
+        let mut source = Surface::Extrusion {
+            profile: std::sync::Arc::new(Curve::BSpline(Box::new(BSplineCurve {
+                degree: 1,
+                points: vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+                weights: None,
+                knots: vec![2.0, 4.0],
+                multiplicities: vec![2, 2],
+                form: CurveForm::PolylineForm,
+                closed: Logical::False,
+                self_intersect: Logical::False,
+                knot_spec: KnotSpec::QuasiUniformKnots,
+            }))),
+            direction: [0.0, 0.0, 1.0],
+            magnitude: 8.0,
+        };
+        let native = patch(
+            [
+                [[0.0, 0.0, -8.0], [0.0, 0.0, 16.0]],
+                [[2.0, 0.0, -8.0], [2.0, 0.0, 16.0]],
+            ],
+            [[2.0, 2.0, 4.0, 4.0], [-1.0, -1.0, 2.0, 2.0]],
+            1.0,
+        );
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let cancel = AtomicBool::new(false);
+        let exact = super::super::spline::try_associate(&source, &native, &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(exact.literal);
+        assert_eq!(exact.error_coefficients, [0.0; 4]);
+        assert!(exact.from_native[1][2].contains(1.0));
+        let association =
+            super::super::SourceCarrierAssociation::new(&source, &native, &mut work, &cancel)
+                .unwrap();
+        assert_eq!(
+            association.original_natural_domain(),
+            [Some([2.0, 4.0]), None]
+        );
+        // Even literal equality cannot license profile-basis extrapolation.
+        assert!(
+            association
+                .position_error_mm([[1.0, 4.0], [-100.0, 100.0]], &mut work, &cancel,)
+                .is_err()
+        );
+        assert_eq!(
+            association
+                .position_error_mm([[2.0, 4.0], [-100.0, 100.0]], &mut work, &cancel,)
+                .unwrap(),
+            0.0
+        );
+        if let Surface::Extrusion { magnitude, .. } = &mut source {
+            *magnitude = 9.0;
+        }
+        let changed = super::super::spline::try_associate(&source, &native, &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(!changed.literal);
+        assert!(changed.error_coefficients[2] >= 1.0);
+        if let Surface::Extrusion { profile, .. } = &mut source {
+            if let Curve::BSpline(profile) = std::sync::Arc::make_mut(profile) {
+                profile.multiplicities[0] = 1;
+            }
+        }
+        assert!(
+            super::super::spline::try_associate(&source, &native, &mut work, &cancel)
+                .unwrap()
+                .is_none()
+        );
     }
     fn patch(points: [[[f64; 3]; 2]; 2], knots: [[f64; 4]; 2], weight: f64) -> NativeSurface {
         let net = points

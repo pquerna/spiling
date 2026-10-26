@@ -6100,16 +6100,21 @@ fn source_binding(
 }
 fn source_uv_image(
     curve: &PreparedOriginalUvCurve<'_>,
-    natural: Option<[[f64; 2]; 2]>,
+    natural: [Option<[f64; 2]>; 2],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<[Interval; 2], GeometryError> {
     let range = curve.active_range();
     let p = curve.tensor(range, 0, work, cancel)?[0];
     let mut image = [p[0], p[1]];
-    let Some(natural) = natural else {
+    if natural.iter().all(Option::is_none) {
         return Ok(image);
-    };
+    }
+    // An unrestricted carrier axis takes this finite query image as its box,
+    // not an invented finite natural domain. Declared axes retain their exact
+    // source knot limits throughout the existing whole-image refinement.
+    let natural =
+        std::array::from_fn(|axis| natural[axis].unwrap_or([image[axis].lo, image[axis].hi]));
     if parametric::curve2d_image_within_box(curve, range, natural, work, cancel)? {
         for axis in 0..2 {
             image[axis] =

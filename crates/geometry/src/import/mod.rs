@@ -374,10 +374,15 @@ pub(crate) fn import_step(
     // untouched; source/native correspondence still requires every source use.
     let mut normalized = solid.brep;
     brep_data_bridge::strip_lamina_spurs(&mut normalized, query_proof_byte_limit, cancel)?;
+    let mut source_reader = source::reader(&ex, scale);
+    let original_carriers =
+        source::face_carriers(&entities, &mut source_reader, &solid.face_origin, cancel)?;
+    let native_surface_maps = compute_face_surface_maps(&normalized, &original_carriers);
 
     let mut k = crate::kernel::make_kernel_context();
-    let mut brep = brep_data_bridge::from_schema4_brep(&mut k, &normalized, false)
-        .map_err(|e| kernel(&format!("B-rep bridge failure: {e}")))?;
+    let mut brep =
+        brep_data_bridge::from_schema4_brep(&mut k, &normalized, &original_carriers, false)
+            .map_err(|e| kernel(&format!("B-rep bridge failure: {e}")))?;
 
     if !solidcore::topology::brep::p2::is_manifold_solid(&brep).unwrap_or(false) {
         return Err(invalid("solid B-rep is not a valid 2-manifold solid"));
@@ -392,23 +397,28 @@ pub(crate) fn import_step(
         ));
     }
     let mut source_faces = std::collections::BTreeMap::new();
-    for (native, source) in native_faces.into_iter().zip(&solid.face_origin) {
-        if source_faces.insert(*source, native).is_some() {
+    for ((native, source), map) in native_faces
+        .into_iter()
+        .zip(&solid.face_origin)
+        .zip(native_surface_maps)
+    {
+        if source_faces.insert(*source, (native, map)).is_some() {
             return Err(invalid("native face provenance is ambiguous"));
         }
     }
     let mut face_ids = Vec::with_capacity(faces.len());
     let mut face_step_ids = Vec::with_capacity(faces.len());
+    let mut face_surface_maps = Vec::with_capacity(faces.len());
     for info in &faces {
         let source = info
             .surface_face_entity
             .parse::<u64>()
             .map_err(|_| invalid("original face provenance is not a STEP entity"))?;
-        face_ids.push(
-            source_faces
-                .remove(&source)
-                .ok_or_else(|| invalid("native face lost its original source identity"))?,
-        );
+        let (native, map) = source_faces
+            .remove(&source)
+            .ok_or_else(|| invalid("native face lost its original source identity"))?;
+        face_ids.push(native);
+        face_surface_maps.push(map);
         face_step_ids.push(StepEntityId(info.face_id.step_entity()));
     }
     if !source_faces.is_empty() {
@@ -418,15 +428,13 @@ pub(crate) fn import_step(
     }
     prepare_loop_edge_cache(&mut brep, &face_ids, query_proof_byte_limit, cancel)?;
 
-    let face_surface_maps: Vec<crate::kernel::SurfaceParameterMap> =
-        compute_face_surface_maps(&normalized);
-
     let shell_id = brep
         .shells()
         .ids()
         .next()
         .ok_or_else(|| invalid("native solid has no shell"))?;
-    let original_source = source::capture(&entities, &ex, &faces, &face_ids, scale, cancel)?;
+    let original_source =
+        source::capture(&entities, &mut source_reader, &faces, &face_ids, cancel)?;
 
     let digest: [u8; 32] = Sha256::digest(bytes).into();
     let definition = Definition {
@@ -596,10 +604,25 @@ fn prepare_loop_edge_cache(
 
 fn compute_face_surface_maps(
     brep: &solidcraft_geom::brep::Brep,
+    original_carriers: &[std::sync::Arc<solidcraft_step::geom::Surface>],
 ) -> Vec<crate::kernel::SurfaceParameterMap> {
     brep.faces
         .iter()
-        .map(|face| {
+        .zip(original_carriers)
+        .map(|(face, original)| {
+            if let Some(extrusion) =
+                crate::kernel::source_operand::original_circular_extrusion(original)
+            {
+                // This maps literal source UV, not the decoder's domain:
+                // canonical circular extrusion domains are already axial mm.
+                // Only source-v still needs the original magnitude factor.
+                return crate::kernel::SurfaceParameterMap::ScaleOffset {
+                    u_scale: 180.0 / std::f64::consts::PI,
+                    u_offset: 0.0,
+                    v_scale: extrusion.axial_scale_mm,
+                    v_offset: 0.0,
+                };
+            }
             let u0 = face.domain[0][0];
             let v0 = face.domain[1][0];
             match &face.surface {

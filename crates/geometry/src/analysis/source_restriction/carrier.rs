@@ -17,7 +17,7 @@ mod spline;
 
 pub(super) struct CarrierRecord {
     pub(super) from_native: [[Interval; 3]; 2],
-    pub(super) original_domain: Option<[[f64; 2]; 2]>,
+    pub(super) original_domain: [Option<[f64; 2]>; 2],
     /// Upper bounds c0 + cU |u| + cV |v| + cUV |uv|, derived from actual
     /// position-law coefficients, not any requested/admitted tolerance.
     pub(super) error_coefficients: [f64; 4],
@@ -67,10 +67,8 @@ impl SourceCarrierAssociation {
                 "native/original carrier gauge has no proved nonsingular affine map",
             ));
         }
-        if let Some(domain) = record.original_domain {
-            for range in domain {
-                Interval::new(range[0], range[1])?;
-            }
+        for range in record.original_domain.into_iter().flatten() {
+            Interval::new(range[0], range[1])?;
         }
         Ok(Self { record })
     }
@@ -82,7 +80,7 @@ impl SourceCarrierAssociation {
     pub(crate) fn is_literal(&self) -> bool {
         self.record.literal
     }
-    pub(crate) fn original_natural_domain(&self) -> Option<[[f64; 2]; 2]> {
+    pub(crate) fn original_natural_domain(&self) -> [Option<[f64; 2]>; 2] {
         self.record.original_domain
     }
     /// Bound corresponding valid native/original coefficient parameters in this
@@ -99,16 +97,16 @@ impl SourceCarrierAssociation {
         let v = Interval::new(source_uv_box[1][0], source_uv_box[1][1])?;
         // The spline coefficient/cage theorem requires its actual natural
         // domain; analytic laws have no such restriction on this bound.
-        if let Some(domain) = self.record.original_domain {
-            if source_uv_box
-                .iter()
-                .zip(domain)
-                .any(|(query, natural)| query[0] < natural[0] || query[1] > natural[1])
-            {
-                return Err(unavailable(
-                    "carrier comparison exceeds its proved original coefficient domain",
-                ));
-            }
+        if source_uv_box
+            .iter()
+            .zip(self.record.original_domain)
+            .any(|(query, natural)| {
+                natural.is_some_and(|natural| query[0] < natural[0] || query[1] > natural[1])
+            })
+        {
+            return Err(unavailable(
+                "carrier comparison exceeds its proved original coefficient domain",
+            ));
         }
         if self.record.literal {
             return Ok(0.0);

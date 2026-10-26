@@ -114,7 +114,7 @@ pub(super) fn try_associate(
 ) -> Result<Option<super::CarrierRecord>, GeometryError> {
     work.charge(1, cancel)?;
     let Surface::BSpline(source) = original else {
-        return Ok(None);
+        return extrusion(original, native, work, cancel);
     };
     let Some(native) = native_surface_nurbs(native)? else {
         return Ok(None);
@@ -247,8 +247,150 @@ pub(super) fn try_associate(
     }
     Ok(Some(super::CarrierRecord {
         from_native: [[u[0], u[1], ZERO], [v[0], ZERO, v[1]]],
-        original_domain: Some([ud, vd]),
+        original_domain: [Some(ud), Some(vd)],
         error_coefficients: [error, 0.0, 0.0, 0.0],
+        literal,
+    }))
+}
+
+/// A borrowed profile and two native tensor rows prove the entire extrusion
+/// law. No profile is materialized, and no angular/rational chart is inferred.
+fn extrusion(
+    original: &Surface,
+    native: &NativeSurface,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<super::CarrierRecord>, GeometryError> {
+    let Surface::Extrusion {
+        profile,
+        direction,
+        magnitude: axial,
+    } = original
+    else {
+        return Ok(None);
+    };
+    let solidcraft_step::geom::Curve::BSpline(profile) = profile.as_ref() else {
+        return Ok(None);
+    };
+    let Some(native) = native_surface_nurbs(native)? else {
+        return Ok(None);
+    };
+    let count = profile.points.len();
+    if count == 0
+        || native.degrees() != (profile.degree, 1)
+        || native.indices().n.checked_add(1) != Some(count)
+        || native.indices().m != 1
+        || profile.weights.as_ref().is_some_and(|w| w.len() != count)
+        || !direction.iter().chain([axial]).all(|x| x.is_finite())
+    {
+        return Ok(None);
+    }
+    let (u, ud) = available!(axis(
+        &profile.knots,
+        &profile.multiplicities,
+        native.u_knots(),
+        profile.degree,
+        count,
+        work,
+        cancel
+    )?);
+    // Source extrusion v is the literal profile displacement multiplier.
+    let vk = native.v_knots();
+    if vk.len() != 4
+        || !vk.iter().all(|x| x.is_finite())
+        || vk[0] != vk[1]
+        || vk[2] != vk[3]
+        || vk[0] >= vk[3]
+    {
+        return Ok(None);
+    }
+    let v = [ZERO, Interval::point(1.0)];
+    let anchor = match native.cpt(0, 0) {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+    let nw0 = if native.is_rational() { anchor.w } else { 1.0 };
+    let sw0 = profile.weights.as_ref().map_or(1.0, |w| w[0]);
+    if !nw0.is_finite() || nw0 <= 0.0 || !sw0.is_finite() || sw0 <= 0.0 {
+        return Ok(None);
+    }
+    let mut errors = [0.0_f64; 2];
+    let mut literal = true;
+    for i in 0..count {
+        work.charge(1, cancel)?;
+        let sw = profile.weights.as_ref().map_or(1.0, |w| w[i]);
+        if !sw.is_finite() || sw <= 0.0 || !profile.points[i].iter().all(|x| x.is_finite()) {
+            return Ok(None);
+        }
+        let mut residuals = [[ZERO; 3]; 2];
+        for j in 0..2 {
+            let c = match native.cpt(i, j) {
+                Ok(c) => c,
+                Err(_) => return Ok(None),
+            };
+            if (c.w != solidcore::nurbs::math::NOW) != native.is_rational()
+                || c.z == solidcore::nurbs::math::NOZ
+            {
+                return Ok(None);
+            }
+            let nw = if native.is_rational() { c.w } else { 1.0 };
+            if !nw.is_finite() || nw <= 0.0 || ![c.x, c.y, c.z].iter().all(|x| x.is_finite()) {
+                return Ok(None);
+            }
+            let mut weight =
+                available!(Exact::point(nw).product(&Exact::point(sw0), work, cancel)?);
+            let source_weight =
+                available!(Exact::point(sw).product(&Exact::point(nw0), work, cancel)?);
+            available!(weight.subtract(&source_weight));
+            // Equal rational denominator is required for extrapolation in the
+            // unbounded source extrusion axis, not merely a cage-distance bound.
+            if weight.sign() != 0 {
+                return Ok(None);
+            }
+            for (k, h) in [c.x, c.y, c.z].into_iter().enumerate() {
+                work.charge(1, cancel)?;
+                let mut point = Exact::point(profile.points[i][k]);
+                let displacement = available!(Exact::point(direction[k]).product(
+                    &Exact::point(*axial),
+                    work,
+                    cancel
+                )?);
+                let displacement =
+                    available!(displacement.product(&Exact::point(vk[j * 2]), work, cancel)?);
+                for &term in &displacement.terms[..displacement.len] {
+                    available!(point.push(term));
+                }
+                let weighted = available!(point.product(&Exact::point(nw), work, cancel)?);
+                let mut delta = Exact::point(h);
+                available!(delta.subtract(&weighted));
+                literal &= delta.sign() == 0;
+                residuals[j][k] = enclosure(&delta).div(Interval::point(nw))?;
+            }
+        }
+        let span = Interval::point(vk[2]).sub(Interval::point(vk[0]));
+        let slopes: [Interval; 3] = std::array::from_fn(|k| residuals[1][k].sub(residuals[0][k]));
+        let mut base = ZERO;
+        let mut slope = ZERO;
+        for k in 0..3 {
+            let delta = slopes[k].div(span)?;
+            slope = slope.add(Interval::point(magnitude(delta)));
+            base = base.add(Interval::point(magnitude(
+                residuals[0][k].sub(delta.mul(Interval::point(vk[0]))),
+            )));
+        }
+        errors[0] = errors[0].max(base.hi);
+        errors[1] = errors[1].max(slope.hi);
+    }
+    Ok(Some(super::CarrierRecord {
+        from_native: [[u[0], u[1], ZERO], [v[0], ZERO, v[1]]],
+        // Convex profile-basis bounds require source u inside its actual knot
+        // domain; the affine source-v coefficient law permits unbounded v.
+        original_domain: [Some(ud), None],
+        error_coefficients: if literal {
+            [0.0; 4]
+        } else {
+            [errors[0], 0.0, errors[1], 0.0]
+        },
         literal,
     }))
 }

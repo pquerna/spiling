@@ -1186,8 +1186,15 @@ fn exact_normalization_retains_the_original_periodic_cylinder_seam_without_scrat
         )
     );
     solid.brep.validate().unwrap();
+    let cancel = cancelled();
+    let ast = step_p21::parser::parse(text).unwrap();
+    let entities = Entities::new(&ast.data[0], &cancel).unwrap();
+    let mut reader = source::reader(&exchange, 1.0);
+    let carriers =
+        source::face_carriers(&entities, &mut reader, &solid.face_origin, &cancel).unwrap();
     let mut kernel = crate::kernel::make_kernel_context();
-    let native = brep_data_bridge::from_schema4_brep(&mut kernel, &solid.brep, false).unwrap();
+    let native =
+        brep_data_bridge::from_schema4_brep(&mut kernel, &solid.brep, &carriers, false).unwrap();
     assert!(solidcore::topology::brep::p2::is_manifold_solid(&native).unwrap());
     let source = &solid.brep.edges[seam];
     assert_ne!(
@@ -1339,4 +1346,148 @@ fn original_implicit_carrier_edges_import_display_bound_and_section_without_bran
             "independent analytic material-area oracle: {name}"
         );
     }
+}
+
+#[test]
+fn original_circular_extrusion_preserves_angular_law_axial_mm_and_native_uv() {
+    use crate::analysis::test_source;
+    use crate::kernel::source_operand::original_circular_extrusion;
+    use solidcore::topology::edgeuse::p1 as edgeuse;
+    use solidcraft_step::geom::Surface as OriginalSurface;
+
+    for rotated in [false, true] {
+        let mut bore_axial_domains = None;
+        for magnitude in [4.0, 8.0, 16.0] {
+            let mut source = test_source::bezier_extrusion(true, rotated);
+            for carrier in source.face_surfaces.iter_mut().flatten() {
+                if let OriginalSurface::Extrusion {
+                    magnitude: scale, ..
+                } = carrier
+                {
+                    // This changes the source-v gauge, not the infinite carrier
+                    // or the authored spatial trims of the eight-mm solid.
+                    *scale = magnitude;
+                }
+            }
+            let definition = test_source::original_definition(source);
+            let native = definition.brep();
+            let k = crate::kernel::make_kernel_context();
+            let cancel = cancelled();
+            let mut work = GeometryWorkBudget::new(1_000_000);
+            let mut circular_faces = 0;
+            let mut axial_domains = Vec::new();
+            for original in &definition.original_source().faces {
+                let Some(extrusion) = original_circular_extrusion(&original.carrier) else {
+                    continue;
+                };
+                circular_faces += 1;
+                assert_eq!(extrusion.axial_scale_mm, magnitude);
+                let ordinal = definition.face_ordinal(original.native_face).unwrap();
+                assert_eq!(
+                    definition.faces()[ordinal].geometry.family,
+                    SurfaceFamily::LinearExtrusion
+                );
+                let map = definition.face_surface_maps()[ordinal];
+                let native_uv = map.step_to_core([0.37, 4.0 / magnitude]);
+                assert!((native_uv[0] - 0.37_f64.to_degrees()).abs() < 1e-12);
+                assert_eq!(native_uv[1], 4.0);
+                let face = native.face(original.native_face).unwrap();
+                let lo = face.uv_domain.min();
+                let hi = face.uv_domain.max();
+                assert_eq!([lo.x, hi.x], [0.0, 360.0]);
+                assert!(lo.y <= 0.0 && hi.y >= 8.0);
+                axial_domains.push([lo.y, hi.y]);
+                let position = crate::parametric::surface_position_enclosure(
+                    face.surface.as_ref().unwrap(),
+                    [[native_uv[0]; 2], [native_uv[1]; 2]],
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+                let expected = extrusion.position.at(
+                    extrusion.radius_mm * 0.37_f64.cos(),
+                    extrusion.radius_mm * 0.37_f64.sin(),
+                    4.0,
+                );
+                for axis in 0..3 {
+                    assert!(position[axis].lo <= expected[axis]);
+                    assert!(position[axis].hi >= expected[axis]);
+                }
+                let mut checked_uv = 0;
+                for (id, eu) in native.edgeuses().iter() {
+                    if edgeuse::face(native, id).unwrap() != Some(original.native_face) {
+                        continue;
+                    }
+                    let uv = definition.edgeuse_uv_trim_curve(id).unwrap();
+                    let edge = native.edge(eu.edge.unwrap()).unwrap();
+                    let t =
+                        edge.interval.min() + 0.37 * (edge.interval.max() - edge.interval.min());
+                    let uv = uv.evaluate_point(&k, t).unwrap();
+                    let spatial = edge.curve.as_ref().unwrap().evaluate_point(&k, t).unwrap();
+                    let angle = uv.x.to_radians();
+                    let projected = extrusion.position.at(
+                        extrusion.radius_mm * angle.cos(),
+                        extrusion.radius_mm * angle.sin(),
+                        uv.y,
+                    );
+                    let residual = (projected[0] - spatial.x)
+                        .hypot((projected[1] - spatial.y).hypot(projected[2] - spatial.z));
+                    assert!(residual <= native.tolerance());
+                    checked_uv += 1;
+                }
+                assert!(
+                    checked_uv > 0,
+                    "the angular carrier needs regenerated native trims"
+                );
+            }
+            assert!(circular_faces > 0, "the actual original bore must survive");
+            if let Some(expected) = &bore_axial_domains {
+                assert_eq!(
+                    &axial_domains, expected,
+                    "changing source-v magnitude must not rescale decoded cylinder-mm domains"
+                );
+            } else {
+                bore_axial_domains = Some(axial_domains);
+            }
+        }
+    }
+}
+
+#[test]
+fn negative_axis_circular_extrusion_does_not_acquire_positive_gauge_authority() {
+    use crate::analysis::test_source;
+    use solidcraft_step::geom::{Curve, Surface};
+
+    let mut source = test_source::bezier_extrusion(true, false);
+    let mut changed = 0;
+    for carrier in source.face_surfaces.iter_mut().flatten() {
+        if let Surface::Extrusion {
+            profile, direction, ..
+        } = carrier
+        {
+            if matches!(profile.as_ref(), Curve::Circle { .. }) {
+                *direction = [0.0, 0.0, -1.0];
+                changed += 1;
+            }
+        }
+    }
+    assert!(changed > 0);
+    let definition = test_source::original_definition(source);
+    let cancel = cancelled();
+    let mut work = GeometryWorkBudget::new(50_000_000);
+    let prepared = crate::prepare_solid(
+        &definition,
+        crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    let error = match prepared.source_view() {
+        Ok(_) => panic!("negative-axis source has no admitted circular-extrusion gauge"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.code,
+        GeometryErrorCode::ParameterCorrespondenceUnavailable
+    );
 }

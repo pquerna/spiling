@@ -357,6 +357,24 @@ preferred-master selection and PCurve association order. Source restriction
 preparation must prove a complete correspondence to the actual retained native
 use; endpoint proximity and native labels cannot replace whole-range evidence.
 
+`analysis/source_restriction/carrier/` admits coefficient-checked original
+line, circle and B-spline extrusion gauges. Profile knots, controls, rational
+weights and finite profile domains remain independent of the unbounded source-v
+axis; extrusion magnitude is a parameter scale, not another physical-size scale.
+Position-error queries enforce every finite axis even for literal-zero residuals.
+The importer shares its original-carrier reader with source capture and maps
+decoded carriers into canonical face order. An exact positive coaxial circular
+extrusion uses native angular degrees/axial millimetres with regenerated native
+UV, while the original source remains an extrusion in radians/scaled v. Trimmed,
+opposed-axis and unproved carrier matches acquire no such correspondence.
+
+Original circular-extrusion import, display, section and source-deleted project
+reopen are exercised independently of manufacturing. Generic extrusion material
+queries still need complete declared-PCurve or original inverse/branch authority.
+The curved-profile control without a PCurve retains that refusal; a separately
+authored PCurve does not by itself discharge material endpoint bounds or native
+active-chart containment. These gauges do not qualify generic-extrusion Compile.
+
 Literal native-boundary correspondence proves a directed positional trace, not
 parameter-speed equality or original-source relative-tangent authority. Evaluate
 only the requested jet order; cubic positional residuals require one genuine

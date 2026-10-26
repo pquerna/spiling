@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use solidcore::FaceId;
-use solidcraft_step::geom::{Associated, Curve, Pcurve};
+use solidcraft_step::geom::{Associated, Curve, Pcurve, Surface};
 use solidcraft_step::p21::Exchange;
 use solidcraft_step::read::{Reader, Units};
 use spiling_contracts::geometry::{FaceInfo, GeometryError, StepEntityId};
@@ -20,20 +20,50 @@ use crate::kernel::source::{
     OriginalWireSource,
 };
 
+pub(super) fn reader(exchange: &Exchange, length_scale_to_mm: f64) -> Reader<'_> {
+    let mut units = Units::default();
+    units.len = length_scale_to_mm;
+    Reader::new(exchange, units)
+}
+
+/// Read the decoder's exact face origins, not its portable fitted carriers.
+pub(super) fn face_carriers(
+    entities: &Entities<'_>,
+    reader: &mut Reader<'_>,
+    face_origin: &[u64],
+    cancel: &AtomicBool,
+) -> Result<Vec<Arc<Surface>>, GeometryError> {
+    let mut carriers = Vec::with_capacity(face_origin.len());
+    for &origin in face_origin {
+        check_cancel(cancel)?;
+        let (resolved, _) = resolve_face(entities, origin)?;
+        let face = entities
+            .records(resolved)?
+            .iter()
+            .copied()
+            .find(|record| matches!(record.name.as_str(), "ADVANCED_FACE" | "FACE_SURFACE"))
+            .ok_or_else(|| invalid("original face has no surface-use record"))?;
+        let carrier_id = reference(at(face, 2)?)?;
+        carriers.push(
+            reader
+                .surface(carrier_id)
+                .map_err(|cause| invalid(&format!("original surface #{carrier_id}: {cause}")))?,
+        );
+    }
+    Ok(carriers)
+}
+
 pub(super) fn capture(
     entities: &Entities<'_>,
-    exchange: &Exchange,
+    reader: &mut Reader<'_>,
     faces: &[FaceInfo],
     native_faces: &[FaceId],
-    length_scale_to_mm: f64,
     cancel: &AtomicBool,
 ) -> Result<OriginalSourceTopology, GeometryError> {
     if faces.len() != native_faces.len() {
         return Err(invalid("original/native face census mismatch"));
     }
-    let mut units = Units::default();
-    units.len = length_scale_to_mm;
-    let mut reader = Reader::new(exchange, units);
+    // Reuse the reader that supplied the bridge; its cached operands remain literal.
     let mut result = OriginalSourceTopology {
         faces: Vec::with_capacity(faces.len()),
         coedges: Vec::new(),

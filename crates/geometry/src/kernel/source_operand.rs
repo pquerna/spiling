@@ -80,6 +80,48 @@ fn placement(p: &source::Placement) -> Result<[[Interval; 3]; 4], GeometryError>
     // Do not round Placement::y() before enclosing its defining cross product.
     Ok([p.origin.map(Interval::point), x, cross(z, x), z])
 }
+/// Exact positive axial circular extrusion; no rational-chart angular inference.
+pub(crate) struct OriginalCircularExtrusion<'a> {
+    pub(crate) position: &'a source::Placement,
+    pub(crate) radius_mm: f64,
+    pub(crate) axial_scale_mm: f64,
+}
+pub(crate) fn original_circular_extrusion(
+    surface: &source::Surface,
+) -> Option<OriginalCircularExtrusion<'_>> {
+    let source::Surface::Extrusion {
+        profile,
+        direction,
+        magnitude,
+    } = surface
+    else {
+        return None;
+    };
+    let source::Curve::Circle { position, radius } = profile.as_ref() else {
+        return None;
+    };
+    if !radius.is_finite()
+        || *radius <= 0.0
+        || !magnitude.is_finite()
+        || *magnitude <= 0.0
+        || !position
+            .origin
+            .iter()
+            .chain(&position.axis)
+            .chain(&position.ref_direction)
+            .all(|x| x.is_finite())
+        || *direction != position.axis
+        || position.axis == [0.0; 3]
+    {
+        return None;
+    }
+    Some(OriginalCircularExtrusion {
+        position,
+        radius_mm: *radius,
+        axial_scale_mm: *magnitude,
+    })
+}
+
 /// The declared ordinal is authoritative; never substitute a neighboring PCURVE.
 pub(crate) fn preferred_source_pcurve(
     curve: &Curve,

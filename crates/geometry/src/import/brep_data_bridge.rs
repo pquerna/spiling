@@ -146,8 +146,13 @@ pub fn parse_step_exchange(step_text: &str) -> Result<solidcraft_step::p21::Exch
 }
 
 /// Converts a validated Schema 4 [`solidcraft_geom::brep::Brep`] into a [`solidcore::topology::Brep`].
-pub fn from_schema4_brep(k: &mut Kernel, brep: &b::Brep, heal: bool) -> R<Brep> {
-    let mut data = to_brep_data(k, brep, true)?;
+pub fn from_schema4_brep(
+    k: &mut Kernel,
+    brep: &b::Brep,
+    original_carriers: &[std::sync::Arc<solidcraft_step::geom::Surface>],
+    heal: bool,
+) -> R<Brep> {
+    let mut data = to_brep_data(k, brep, original_carriers, true)?;
     if !heal {
         data.healer_version = HEALER_VERSION;
     }
@@ -204,8 +209,16 @@ pub fn from_schema4_brep(k: &mut Kernel, brep: &b::Brep, heal: bool) -> R<Brep> 
 }
 
 /// Builds a [`solidcore::topology::brep_data::BrepData`] from a Schema 4 `Brep`.
-pub fn to_brep_data(k: &mut Kernel, brep: &b::Brep, analytic_planes: bool) -> R<BrepData> {
+pub fn to_brep_data(
+    k: &mut Kernel,
+    brep: &b::Brep,
+    original_carriers: &[std::sync::Arc<solidcraft_step::geom::Surface>],
+    analytic_planes: bool,
+) -> R<BrepData> {
     brep.validate().map_err(|e| BridgeError::Invalid(e.0))?;
+    if original_carriers.len() != brep.faces.len() {
+        return Err(BridgeError::Invalid("original/native carrier census"));
+    }
 
     // Manifold flag 0 tells `make_topology_from_data` to use the explicit regions,
     // shells, and `relink_radial_lists` (`next_eu` / `mate_next_eu`) we construct below.
@@ -354,13 +367,19 @@ pub fn to_brep_data(k: &mut Kernel, brep: &b::Brep, analytic_planes: bool) -> R<
 
     // 3. Faces, surfaces, loops, and edgeuses.
     let mut eu_cursor = 0usize;
-    for f in &brep.faces {
-        let (surf, uv_domain, is_spline_face) = match &f.nurbs {
-            Some(n) => {
-                let (s, dom, _) = build_surface(k, n, f.domain, analytic_planes)?;
-                (s, dom, true)
+    for (f, original) in brep.faces.iter().zip(original_carriers) {
+        let (surf, uv_domain, is_spline_face) = if let Some(extrusion) =
+            crate::kernel::source_operand::original_circular_extrusion(original)
+        {
+            build_circular_extrusion(k, f, extrusion)?
+        } else {
+            match &f.nurbs {
+                Some(n) => {
+                    let (s, dom, _) = build_surface(k, n, f.domain, analytic_planes)?;
+                    (s, dom, true)
+                }
+                None => build_surface(k, &f.surface, f.domain, analytic_planes)?,
             }
-            None => build_surface(k, &f.surface, f.domain, analytic_planes)?,
         };
         let surf_idx = d.surfaces.len() as u64;
         d.surfaces.push(Keyed {
@@ -857,6 +876,49 @@ fn turned(c: &b::Curve, interval: [f64; 2]) -> ([f64; 2], f64) {
         0.0
     };
     ([lo + shift, hi + shift], shift)
+}
+
+/// Keep the original angular law without the bridge's usual domain-start frame
+/// rotation. The pinned STEP decoder canonicalizes this exact extrusion class
+/// to a cylinder before generating its pcurves/domain: its v is already axial
+/// mm, not the source extrusion's dimensionless v.
+fn build_circular_extrusion(
+    k: &Kernel,
+    face: &b::Face,
+    extrusion: crate::kernel::source_operand::OriginalCircularExtrusion<'_>,
+) -> R<(Surface, Extent2d, bool)> {
+    let position = extrusion.position;
+    let b::Surface::Cylinder { frame, radius } = &face.surface else {
+        return Err(BridgeError::NotYet("original circular extrusion cylinder"));
+    };
+    // Only this known decoded chart has the required axial-domain law. A NURBS
+    // override makes the stored domain belong to a different chart, even when
+    // the declared surface still names a cylinder.
+    if face.nurbs.is_some()
+        || frame.origin != position.origin
+        || frame.x_axis != position.ref_direction
+        || frame.y_axis != position.y()
+        || *radius != extrusion.radius_mm
+    {
+        return Err(BridgeError::NotYet(
+            "original circular extrusion cylinder chart",
+        ));
+    }
+    let [v0, v1] = face.domain[1];
+    if !v0.is_finite() || !v1.is_finite() || v0 >= v1 {
+        return Err(BridgeError::Invalid(
+            "original circular extrusion axial domain",
+        ));
+    }
+    let ax = placement(position.origin, position.axis, position.ref_direction)?;
+    let cylinder = Cone::create_canonical_cylinder(k, &ax, extrusion.radius_mm)?;
+    Ok((
+        Surface::from(StepSurface::new(Surface::from(cylinder), true)?),
+        Extent2d::from_bounds(0.0, v0, 360.0, v1),
+        // Reproject the decoder's pcurves in the selected full-turn chart.
+        // They are not forwarded with a stale domain-start angular shift.
+        false,
+    ))
 }
 
 fn build_surface(
@@ -2130,8 +2192,16 @@ mod tests {
             .unwrap_or_else(|e| panic!("{name}: STEP extraction failed: {e}"));
             assert!(!solid.sheet, "{name}: expected closed solid");
 
+            let mut reader = crate::import::source::reader(&ex, unit.scale_to_mm());
+            let carriers = crate::import::source::face_carriers(
+                &entities,
+                &mut reader,
+                &solid.face_origin,
+                &cancel,
+            )
+            .unwrap();
             let mut k = Kernel::default();
-            let brep = from_schema4_brep(&mut k, &solid.brep, false)
+            let brep = from_schema4_brep(&mut k, &solid.brep, &carriers, false)
                 .unwrap_or_else(|e| panic!("{name}: from_schema4_brep failed: {e}"));
 
             let faces = solidcore::topology::brep::p1::faces(&brep, None).unwrap();
