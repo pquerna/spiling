@@ -369,7 +369,7 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project10/manufacturing11/process3/surface3, planner22,
+Current identities are project10/manufacturing11/process3/surface3, planner23,
 emitter7/verifier9 and SPLR5; executable constants and exact native pin remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
@@ -407,12 +407,17 @@ native conservative Z, genuine penetration and XY obstacle refusals remain.
 Placed closed-endpoint translation uses the same directed arithmetic as bed
 placement; exact contact is not a downward-rounding artifact.
 
-Planar finish certificates do not establish complete planar-rib manufacturing:
-the canonical box still refuses its unchanged source-local wall-overlap budget.
-Partial finite-turn contraction preserves endpoint recovery constraints, but does
-not establish recovery across arbitrary source-cell boundaries. The split-cylinder
-baseline's material-bound precision gate also remains separate from full-cylinder
-finish qualification.
+The canonical `box-mm.step` with `solid-fill.intent.json` and definition-owned
+vertical ribs (depth0.1mm, pitch2mm, edge margin1mm, phase0) also completes
+Compile, independent Verify/export, Undo/Redo, save and fresh source-deleted
+recovery with changed actual extrusion and the baseline physical Z schedule.
+Existing sharp-corner fields retain priority; a source-owned nominal-width
+inner bevel is a separately qualified finite construction, not extra overlap
+credit. Source/void/mandatory coverage, local and aggregate dose, finite-command
+resolution and gradient gates remain unchanged. This bounded operator does not
+qualify arbitrary planar finishes, image carriers or a new micro-texture family.
+The unchanged split-cylinder baseline compiles; split-face finishing still
+requires separate eligibility and does not inherit full-cylinder authority.
 
 The default native box also exercises the actual local AMD/CEF production panel:
 physical native-face picking, consumed maximum-width Apply/Undo/Redo/recompile,

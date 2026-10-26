@@ -412,9 +412,9 @@ periodic. Preserve selector search separately from a wider evaluable turn cover.
 
 Realization identity 5 binds this selectable source recipe. Admitting an earlier
 PCurve can change the chosen chart and joint costs even when a later candidate
-previously succeeded. Planner22 additionally binds selected-master-preserving
-finish-support admission; earlier programs cannot retain current inspection/export
-authority.
+previously succeeded. Current planner23 additionally binds selected-master finish
+support and continuing source-stroke width recovery; earlier programs cannot
+retain current inspection/export authority.
 
 Endpoint proposals include finite coefficient fences, midpoints and reference
 zero. Recheck representable candidates after Newton contraction: an initial
@@ -521,9 +521,9 @@ retain finite edge intervals, selected-master authority, source frames and
 orientation/refusal checks. Source-only support exclusion does not require a
 native LINE enum or raw UV-chart qualification; it also does not supply a raw
 directional-bounds receipt or waive separate exact-arithmetic/domain refusals.
-The full-cylinder rib operator has independent emitted-program and source-deleted
-recovery evidence. Complete planar-rib manufacturing remains a separate
-[wall-allocation gate](manufacturing-evidence.md#current-support-and-refusal-boundary).
+The full-cylinder and canonical box planar-rib operators have independent
+emitted-program, history and source-deleted recovery evidence within the
+[bounded manufacturing envelope](manufacturing-evidence.md#current-support-and-refusal-boundary).
 
 General STEP documents/assemblies, unproved charts, arbitrary freeform finishes,
 singular/nonmanifold material and unqualified critical interfaces remain outside

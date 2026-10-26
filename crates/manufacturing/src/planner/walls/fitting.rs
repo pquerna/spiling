@@ -630,13 +630,16 @@ fn contained_gradient(
                 continue;
             }
             let prior = (index + count - 1) % count;
-            let upper = runs[prior].mean
+            // Direct the bound before comparing: a rounded sum can equal the
+            // current mean while its subtraction still exceeds the allowance.
+            let upper = (runs[prior].mean
                 + program_coordinates::MAX_WALL_WIDTH_GRADIENT
                     * 0.9
                     * (chord_length(runs[prior]) + chord_length(runs[index]))
-                    * 0.5;
+                    * 0.5)
+                .next_down();
             if upper < runs[index].mean {
-                runs[index].mean = upper.next_down();
+                runs[index].mean = upper;
             }
         }
         for index in (0..count).rev() {
@@ -646,13 +649,14 @@ fn contained_gradient(
                 continue;
             }
             let next = (index + 1) % count;
-            let upper = runs[next].mean
+            let upper = (runs[next].mean
                 + program_coordinates::MAX_WALL_WIDTH_GRADIENT
                     * 0.9
                     * (chord_length(runs[next]) + chord_length(runs[index]))
-                    * 0.5;
+                    * 0.5)
+                .next_down();
             if upper < runs[index].mean {
-                runs[index].mean = upper.next_down();
+                runs[index].mean = upper;
             }
         }
     }
@@ -1303,6 +1307,67 @@ pub(super) fn coalesce(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contained_gradient_directs_equal_rounded_bounds_inside_the_closed_predicate() {
+        let points = [
+            [100.675, 106.274126, 0.2],
+            [100.675, 106.305467, 0.2],
+            [100.675, 106.336808, 0.2],
+        ];
+        let fields = [
+            (0.4260406793175658, 0.42886136931756624, 0.4274510693175659),
+            (0.43168205931756665, 0.4345027493175671, 0.43309235931756634),
+        ];
+        for reverse in [false, true] {
+            let mut runs = std::array::from_fn::<_, 2, _>(|index| {
+                let (minimum, maximum, source_mean) =
+                    fields[if reverse { 1 - index } else { index }];
+                Run {
+                    a: points[index],
+                    b: points[index + 1],
+                    length: norm(sub(xy(points[index + 1]), xy(points[index]))),
+                    mean: minimum,
+                    source_mean,
+                    minimum,
+                    maximum,
+                    geometric_error: 0.0,
+                    owner: BoundaryCorrespondence {
+                        path_index: 0,
+                        edge_index: index,
+                        supports: [0, 0],
+                        facing_boundary: Some(0),
+                        ordinal: 1,
+                    },
+                    first: (index, 0),
+                    first_fraction: 0.0,
+                    last: (index, 0),
+                    last_fraction: 1.0,
+                    source_count: 1,
+                }
+            });
+            // The sum rounds onto the proposed command, although the equivalent
+            // subtraction lies strictly outside the same unchanged allowance.
+            assert!(!gradient_admitted(runs[0], runs[1]));
+            let original = runs;
+            contained_gradient(&mut runs, false, 0.302, &mut 0, &AtomicBool::new(false)).unwrap();
+            assert!(gradient_admitted(runs[0], runs[1]));
+            for (run, prior) in runs.into_iter().zip(original) {
+                assert_eq!(run.a, prior.a);
+                assert_eq!(run.b, prior.b);
+                assert!(run.mean <= prior.mean);
+                assert!(prior.mean - run.mean <= f64::EPSILON);
+                assert!(
+                    run.geometric_error
+                        + (run.mean - run.minimum)
+                            .abs()
+                            .max((run.maximum - run.mean).abs())
+                            * 0.5
+                        <= MERGE_ENCLOSURE_MM
+                );
+            }
+        }
+    }
 
     #[test]
     fn pocket_ring_handoff_retains_source_union_and_contained_short_tail() {

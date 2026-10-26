@@ -188,13 +188,20 @@ struct CornerEvent {
     position_error_mm: f64,
     residual_bound_mm: f64,
     cap_radius_mm: f64,
-    /// Actual source-width cone; nominal contour depth and birth remain fixed.
-    compensation: Option<[f64; 2]>,
+    /// Nominal-width turn owned by this birth and its literal source corner.
+    bevel: Option<InnerBevel>,
 }
 
-/// Immutable source walks/events survive candidate qualification. Only the
-/// finite, admitted whole-arm count choices advance; neither the skeleton nor
-/// the independent material target is reconstructed from a candidate sweep.
+#[derive(Clone, Copy, Debug)]
+struct InnerBevel {
+    parameters: [f64; 2],
+    points: [[f64; 2]; 2],
+    width_mm: f64,
+}
+
+/// Immutable source walks/events survive candidate qualification. Finite
+/// whole-arm counts and source-owned inner-turn constructions advance without
+/// reconstructing the skeleton or independent material target.
 pub(super) struct SourcePlan {
     cells: Vec<Option<f64>>,
     adjacency: Adjacency,
@@ -206,6 +213,8 @@ pub(super) struct SourcePlan {
     source_permissions: usize,
     emission_bytes: usize,
     complete_joints: bool,
+    bevel_available: bool,
+    bevel_corners: bool,
 }
 
 pub(super) fn construct(
@@ -285,7 +294,15 @@ pub(super) fn construct(
             )?);
         }
     }
+    let mut bevel_available = false;
     for index in 0..graph.edges.len() {
+        if !bevel_available
+            && request.recipe.perimeter_count > 1
+            && cells[index].is_some()
+            && contours::source_corner(&graph.edges[index], graph).is_some()
+        {
+            bevel_available = true;
+        }
         if visited[index] || cells[index].is_some() {
             continue;
         }
@@ -410,6 +427,8 @@ pub(super) fn construct(
         source_permissions: permissions.len(),
         emission_bytes: event_staging + choice_bytes,
         complete_joints: false,
+        bevel_available,
+        bevel_corners: false,
     })
 }
 
@@ -432,9 +451,9 @@ pub(super) fn retained_bytes(plan: &SourcePlan) -> usize {
             .sum::<usize>()
 }
 
-/// A bounded mixed-radix enumeration over only the arms whose pointwise
-/// objective had no finite admitted event. Every candidate still goes through
-/// the complete original-D/R/ports/command/excess qualifier.
+/// Preserve all existing sharp-corner field candidates first, then enumerate
+/// the same finite fields with source-owned inner bevels. Every construction
+/// retains the complete original-D/R/ports/command/excess qualifier.
 pub(super) fn advance(plan: &mut SourcePlan) -> bool {
     if !plan.complete_joints {
         // Try the source-predeclared joint construction for this nearer count
@@ -455,6 +474,10 @@ pub(super) fn advance(plan: &mut SourcePlan) -> bool {
         }
         arm.choice = 0;
         arm.count = Some(arm.choices[0].1);
+    }
+    if plan.bevel_available && !plan.bevel_corners {
+        plan.bevel_corners = true;
+        return true;
     }
     false
 }
@@ -480,6 +503,8 @@ pub(super) fn emit(
         source_permissions,
         emission_bytes,
         complete_joints,
+        bevel_available: _,
+        bevel_corners,
     } = plan;
     let incidence = SourceIncidence {
         graph,
@@ -611,6 +636,7 @@ pub(super) fn emit(
         &junction_caps,
         nominal_fill,
         *complete_joints,
+        *bevel_corners,
         request,
         edges,
         permissions,
@@ -644,99 +670,153 @@ fn contour_width(widths: [f64; 2], t: f64) -> f64 {
     }
 }
 
-/// Propose finite-turn compensation on the existing nominal inner contour.
-/// Segment-foot rays bind the half-angle contraction to the original sites.
-/// Narrowing at fixed depth makes every bead disk a subset of its original
-/// disk; it grants no coverage, arm connectivity or local dose authority.
-fn compensate_corner(
+/// Same source-parameter contour point used by the ordinary straight branches.
+/// Only a birth-owned bevel can replace their central finite turn.
+#[allow(clippy::too_many_arguments)]
+fn nominal_corner_point(
+    incidence: SourceIncidence<'_>,
+    curve: &MedialEdge,
+    t: f64,
+    site: BoundarySupport,
+    ordinal: usize,
+    width: f64,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<[f64; 2], ManufacturingError> {
+    let p = curve.at(t);
+    let foot = canonical_foot(incidence, curve, t, site, p, work, cancel)?;
+    let delta = sub(p, foot);
+    let length = norm(delta);
+    if !length.is_finite() || length <= 0.0 {
+        return Err(unsupported(
+            "source inner contour has no positive finite radius",
+        ));
+    }
+    Ok(add(
+        foot,
+        mul(delta, (ordinal as f64 + 0.5) * width / length),
+    ))
+}
+
+/// Retain the nominal-radius tangent ports of one literal convex source birth,
+/// but connect them with one finite straight command. No continuous-tube area
+/// theorem substitutes for the independent finite-command dose qualification.
+#[allow(clippy::too_many_arguments)]
+fn bevel_corner(
+    incidence: SourceIncidence<'_>,
     curve: &MedialEdge,
     widths: [f64; 2],
     event: &mut CornerEvent,
     request: &WallRequest<'_>,
+    work: &mut usize,
+    cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    if event.ordinal == 0 || curve.supports.iter().any(|site| site.point.is_some()) {
+    if event.ordinal == 0 || widths[0] != widths[1] {
         return Ok(());
     }
-    let rays = curve
-        .supports
-        .map(|site| sub(site.foot(curve.endpoints[1]), site.foot(curve.endpoints[0])));
+    let Some((_, terminal, _)) = contours::source_corner(curve, incidence.graph) else {
+        return Ok(());
+    };
+    check_cancel(cancel)?;
+    boolean::charge(work, 64)?;
+    let present = 1 - terminal;
+    let birth = curve.at(event.parameter);
+    let width = widths[0];
+    let mut ends = [[0.0; 2]; 2];
+    for (side, site) in curve.supports.into_iter().enumerate() {
+        ends[side] = nominal_corner_point(
+            incidence,
+            curve,
+            present as f64,
+            site,
+            event.ordinal,
+            width,
+            work,
+            cancel,
+        )?;
+    }
+    let rays = ends.map(|p| sub(p, birth));
     let lengths = rays.map(norm);
     if lengths
         .into_iter()
-        .any(|length| !length.is_finite() || length <= FIT_ERROR_MM)
+        .any(|length| !length.is_finite() || length <= 0.0)
     {
         return Ok(());
     }
-    // Only affine interior segment feet supply the finite source metric.
-    for site in curve.supports {
-        let direction = sub(site.b, site.a);
-        let squared = dot(direction, direction);
-        if curve.endpoints.into_iter().any(|p| {
-            let projection = dot(sub(p, site.a), direction);
-            projection < 0.0 || projection > squared
-        }) {
-            return Ok(());
-        }
-    }
-    let cosine = (dot(rays[0], rays[1]) / (lengths[0] * lengths[1])).clamp(-1.0, 1.0);
-    let nominal = contour_width(widths, event.parameter);
-    let mut proposed = (nominal * ((1.0 - cosine) * 0.5).sqrt())
-        .max(admitted_width_range(request)?[0])
-        .min(nominal);
-    let travel = lengths[0].min(lengths[1]) * program_coordinates::MAX_WALL_WIDTH_GRADIENT * 0.9;
-    // Present ports keep their incoming width. Project the preferred finite-turn
-    // contraction onto their recovery cones: a short source cell can admit a
-    // partial contraction even when the full half-angle objective cannot fit.
-    // Discarding that feasible interval would emit the uncompensated turn.
-    for end in 0..2 {
-        let t = end as f64;
-        let depth = (event.ordinal as f64 + 0.5) * widths[end];
-        if curve.supports[0].radius(curve.endpoints[end]) >= depth {
-            proposed = proposed.max((widths[end] - travel * (t - event.parameter).abs()).next_up());
-        }
-    }
-    let deficit = (nominal - proposed) * 0.5;
-    let extent = request.nozzle_diameter_mm * 0.25 - super::super::OFFSET_TOLERANCE_MM * 0.5;
-    if deficit <= 0.0 || deficit + event.position_error_mm + FIT_ERROR_MM >= extent {
+    let units = std::array::from_fn::<_, 2, _>(|side| mul(rays[side], lengths[side].recip()));
+    let cosine = dot(units[0], units[1]);
+    if !cosine.is_finite() || !(-1.0..1.0).contains(&cosine) {
         return Ok(());
     }
-    let cap = (event.cap_radius_mm - deficit).next_down();
+    let radius_mm = width * 0.5;
+    let travel = radius_mm * ((1.0 + cosine) / (1.0 - cosine)).sqrt();
+    if !travel.is_finite() || travel <= 0.0 || lengths.into_iter().any(|length| travel > length) {
+        return Ok(());
+    }
+    let parameters = std::array::from_fn::<_, 2, _>(|side| {
+        let fraction = travel / lengths[side];
+        if fraction == 1.0 {
+            present as f64
+        } else {
+            event.parameter + (present as f64 - event.parameter) * fraction
+        }
+    });
+    let targets = units.map(|unit| add(birth, mul(unit, travel)));
+    let mut points = [[0.0; 2]; 2];
+    for (side, site) in curve.supports.into_iter().enumerate() {
+        points[side] = nominal_corner_point(
+            incidence,
+            curve,
+            parameters[side],
+            site,
+            event.ordinal,
+            width,
+            work,
+            cancel,
+        )?;
+    }
+    let magnitude = curve
+        .endpoints
+        .into_iter()
+        .flatten()
+        .map(f64::abs)
+        .fold(1.0, f64::max);
+    let arithmetic = (1024.0 * f64::EPSILON * magnitude).next_up();
+    let endpoint_error = (norm(sub(points[0], targets[0])).max(norm(sub(points[1], targets[1])))
+        + arithmetic)
+        .next_up();
+    if endpoint_error > FIT_ERROR_MM * 0.5 {
+        return Ok(());
+    }
+    let permission_radius =
+        (request.limits.max_bead_width_mm - event.position_error_mm).next_down();
+    if !qualification::junction_contains_capsule(
+        birth,
+        targets,
+        radius_mm + FIT_ERROR_MM + program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM,
+        permission_radius,
+    ) {
+        return Ok(());
+    }
+    let bevel = InnerBevel {
+        parameters,
+        points,
+        width_mm: width,
+    };
+    let midpoint = add(points[0], mul(sub(points[1], points[0]), 0.5));
+    // Replacing a sharp birth also replaces its source endcap witness. Never
+    // lend the old larger central ball to completion after moving the contour.
+    let cap = (event.cap_radius_mm
+        - norm(sub(midpoint, birth))
+        - arithmetic
+        - endpoint_error
+        - program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM)
+        .next_down();
     if cap > 0.0 {
         event.cap_radius_mm = cap;
-        event.compensation = Some([proposed, travel]);
+        event.bevel = Some(bevel);
     }
     Ok(())
-}
-
-fn inner_contour_width(widths: [f64; 2], events: &[CornerEvent], ordinal: usize, t: f64) -> f64 {
-    events
-        .iter()
-        .filter(|event| event.ordinal == ordinal)
-        .filter_map(|event| {
-            event
-                .compensation
-                .map(|[width, travel]| width + travel * (t - event.parameter).abs())
-        })
-        .fold(contour_width(widths, t), f64::min)
-}
-
-fn compensation_knots(widths: [f64; 2], event: &CornerEvent) -> [f64; 3] {
-    let Some([width, travel]) = event.compensation else {
-        return [event.parameter; 3];
-    };
-    let slope = widths[1] - widths[0];
-    [
-        event.parameter,
-        (width + travel * event.parameter - widths[0]) / (travel + slope),
-        (widths[0] - width + travel * event.parameter) / (travel - slope),
-    ]
-    .map(|t| {
-        if t.is_finite() {
-            t.clamp(0.0, 1.0)
-        } else {
-            event.parameter
-        }
-    })
 }
 
 /// Locate only an already endpoint-bracketed birth in the original site field.
@@ -888,7 +968,7 @@ fn corner_birth(
         position_error_mm,
         residual_bound_mm,
         cap_radius_mm,
-        compensation: None,
+        bevel: None,
     })
 }
 
@@ -904,6 +984,7 @@ fn emit_corners(
     junction_caps: &[f64],
     nominal_fill: &MultiPolygon<f64>,
     complete_joints: bool,
+    bevel_corners: bool,
     request: &WallRequest<'_>,
     output: &mut Vec<BoundaryEdge>,
     permissions: &mut Vec<Junction>,
@@ -974,7 +1055,9 @@ fn emit_corners(
                     continue;
                 }
                 prior_parameter = Some(event.parameter);
-                compensate_corner(curve, widths, &mut event, request)?;
+                if bevel_corners {
+                    bevel_corner(incidence, curve, widths, &mut event, request, work, cancel)?;
+                }
                 permissions.push(Junction {
                     center: curve.at(event.parameter),
                     radius_mm: (request.limits.max_bead_width_mm - event.position_error_mm)
@@ -1042,50 +1125,19 @@ fn emit_corners(
         )?;
         // Keep every affine width switch before subdivision. Constant-section
         // cells use the exact same field for events and commanded edge widths.
-        let mut basic_knots = corner.outer.knots();
-        let mut extra_knots = Vec::new();
-        if events.iter().any(|event| event.compensation.is_some()) {
-            reserve_stage(
-                &mut extra_knots,
-                8 + events.len() * 3,
-                &sampling_request,
-                samples.capacity() * std::mem::size_of::<(f64, [f64; 2])>(),
-            )?;
-            extra_knots.extend(basic_knots);
-            for event in events {
-                extra_knots.extend(compensation_knots(corner.widths, event));
-            }
-        }
-        let knot_bytes = extra_knots.capacity() * std::mem::size_of::<f64>();
-        let knots = if extra_knots.is_empty() {
-            basic_knots.as_mut_slice()
-        } else {
-            extra_knots.as_mut_slice()
-        };
-        boolean::sort_by(knots, |t| *t, work, cancel)?;
-        let sampling_request = staged_request(&sampling_request, knot_bytes)?;
+        let mut knots = corner.outer.knots();
+        boolean::sort_by(&mut knots, |t| *t, work, cancel)?;
         for interval in knots.windows(2) {
             if interval[0] == interval[1] {
                 continue;
             }
-            let mut change = (corner.outer.at(interval[1]) - corner.outer.at(interval[0]))
+            let change = (corner.outer.at(interval[1]) - corner.outer.at(interval[0]))
                 .abs()
                 .max(
                     (contour_width(corner.widths, interval[1])
                         - contour_width(corner.widths, interval[0]))
                     .abs(),
                 );
-            boolean::charge(
-                work,
-                events.len().saturating_mul(events.len()).saturating_mul(2),
-            )?;
-            for event in events {
-                change = change.max(
-                    (inner_contour_width(corner.widths, events, event.ordinal, interval[1])
-                        - inner_contour_width(corner.widths, events, event.ordinal, interval[0]))
-                    .abs(),
-                );
-            }
             let steps = (change / (2.0 * FIT_ERROR_MM)).ceil().max(1.0) as usize;
             for step in 0..steps {
                 let t = interval[0] + (interval[1] - interval[0]) * step as f64 / steps as f64;
@@ -1107,10 +1159,20 @@ fn emit_corners(
             }
             reserve_stage(&mut samples, 1, &sampling_request, 0)?;
             samples.push((event.parameter, curve.at(event.parameter)));
+            if let Some(bevel) = event.bevel.as_ref() {
+                for t in bevel.parameters {
+                    if samples.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                        return Err(resource(
+                            "source inner bevel port subdivision limit exceeded",
+                        ));
+                    }
+                    reserve_stage(&mut samples, 1, &sampling_request, 0)?;
+                    samples.push((t, curve.at(t)));
+                }
+            }
         }
         boolean::sort_by(&mut samples, |sample| sample.0, work, cancel)?;
         samples.dedup_by(|a, b| a.0 == b.0);
-        drop(extra_knots);
         let ids = curve.supports.map(|site| site.boundary_index);
         let command_request = staged_request(
             request,
@@ -1122,19 +1184,30 @@ fn emit_corners(
             let pairs = ((radius / contour_width(corner.widths, midpoint) + 0.5).floor() as usize)
                 .min(request.recipe.perimeter_count as usize);
             let outer_present = radius >= corner.outer.at(midpoint) * 0.5;
-            for site in curve.supports {
+            for (side, site) in curve.supports.into_iter().enumerate() {
                 for ordinal in 0..pairs.max(usize::from(outer_present)) {
                     if ordinal == 0 && !outer_present {
+                        continue;
+                    }
+                    boolean::charge(work, events.len())?;
+                    if events.iter().any(|event| {
+                        event.ordinal == ordinal
+                            && event.bevel.as_ref().is_some_and(|bevel| {
+                                let port = bevel.parameters[side];
+                                event.parameter.min(port) < midpoint
+                                    && midpoint < event.parameter.max(port)
+                            })
+                    }) {
                         continue;
                     }
                     let widths = [interval[0].0, interval[1].0].map(|t| {
                         if ordinal == 0 {
                             corner.outer.at(t)
                         } else {
-                            inner_contour_width(corner.widths, events, ordinal, t)
+                            contour_width(corner.widths, t)
                         }
                     });
-                    boolean::charge(work, events.len().saturating_mul(2).saturating_add(1))?;
+                    boolean::charge(work, events.len().saturating_mul(4).saturating_add(1))?;
                     let mut points = [[0.0; 2]; 2];
                     for end in 0..2 {
                         let (t, p) = interval[end];
@@ -1143,7 +1216,17 @@ fn emit_corners(
                             1.0 => Some(curve.vertex_ids[1]),
                             _ => None,
                         };
-                        points[end] = if events
+                        let bevel_port = events
+                            .iter()
+                            .filter(|event| event.ordinal == ordinal)
+                            .find_map(|event| {
+                                event.bevel.as_ref().and_then(|bevel| {
+                                    (bevel.parameters[side] == t).then_some(bevel.points[side])
+                                })
+                            });
+                        points[end] = if let Some(port) = bevel_port {
+                            port
+                        } else if events
                             .iter()
                             .any(|event| event.parameter == t && event.ordinal == ordinal)
                             || vertex.and_then(|vertex| vertex_fields[vertex]).is_some_and(
@@ -1153,7 +1236,8 @@ fn emit_corners(
                                         && ordinal == field.pairs
                                         && field.width == widths[end]
                                 },
-                            ) {
+                            )
+                        {
                             p
                         } else {
                             let foot = canonical_foot(incidence, curve, t, site, p, work, cancel)?;
@@ -1183,6 +1267,22 @@ fn emit_corners(
                         &command_request,
                     )?;
                 }
+            }
+        }
+        for event in events {
+            if let Some(bevel) = event.bevel.as_ref() {
+                check_cancel(cancel)?;
+                boolean::charge(work, 1)?;
+                push_edge(
+                    output,
+                    bevel.points,
+                    bevel.width_mm,
+                    ids,
+                    Some(ids[0]),
+                    event.ordinal,
+                    [bevel.width_mm; 2],
+                    &command_request,
+                )?;
             }
         }
         if !corner.spines.is_empty() {
@@ -1370,7 +1470,10 @@ fn corner_completion(
     reserve_stage(&mut breaks, events.len() * 3 + 8, request, 0)?;
     breaks.extend(outer.knots());
     for event in events {
-        breaks.extend(compensation_knots(widths, event));
+        breaks.push(event.parameter);
+        if let Some(bevel) = event.bevel.as_ref() {
+            breaks.extend(bevel.parameters);
+        }
     }
     boolean::sort_by(&mut breaks, |t| *t, work, cancel)?;
     breaks.dedup();
@@ -1431,7 +1534,7 @@ fn corner_completion(
                         outer.at(t)
                     } else {
                         (pairs as f64 - 0.5) * contour_width(widths, t)
-                            + inner_contour_width(widths, events, pairs - 1, t) * 0.5
+                            + contour_width(widths, t) * 0.5
                     }
                     - super::super::OFFSET_TOLERANCE_MM
             });
@@ -1606,12 +1709,7 @@ fn corner_completion(
                         let birth_width = if ordinal == 0 {
                             corner.outer.at(t)
                         } else {
-                            inner_contour_width(
-                                corner.widths,
-                                &all_events[corner.events[0]..corner.events[1]],
-                                ordinal,
-                                t,
-                            )
+                            contour_width(corner.widths, t)
                         };
                         let distance = points
                             .into_iter()
@@ -3390,85 +3488,57 @@ mod corner_width_tests {
     }
 
     #[test]
-    fn inner_turn_compensation_keeps_nominal_birth_and_recovers_source_ports() {
-        // The short cell cannot recover the ideal half-angle contraction before
-        // its incoming port. It still has a nonempty feasible contraction range.
-        for side_mm in [2.0, 20.0] {
-            let material = MultiPolygon(vec![geo::polygon![
-                (x: 0.0, y: 0.0), (x: side_mm, y: 0.0),
-                (x: side_mm, y: side_mm), (x: 0.0, y: side_mm),
-                (x: 0.0, y: 0.0),
-            ]]);
-            let mut recipe = crate::planner::tests::recipe(0.25);
-            recipe.bead_width_mm = 0.45;
-            recipe.perimeter_count = 2;
-            let limits = DepositionLimits {
-                min_bead_width_mm: 0.30,
-                max_bead_width_mm: 0.70,
-                min_bead_height_mm: 0.000001,
-                max_bead_height_mm: 0.30,
-            };
-            let required = region::RequiredMaterial::from_section(&material);
-            let request = WallRequest {
-                material: &material,
-                required: &required,
-                recipe: &recipe,
-                limits: &limits,
-                nozzle_diameter_mm: 0.4,
-                lower_z: 0.0,
-                upper_z: 0.2,
-                retained_points: region::point_count(&material),
-                owned_bytes: 0,
-            };
-            let cancel = AtomicBool::new(false);
-            let mut work = 0;
-            let graph =
-                skeleton::construct(&material, request.retained_points, 0, &mut work, &cancel)
-                    .unwrap();
-            let depth = 1.5 * recipe.bead_width_mm;
-            let curve = graph
-                .edges
-                .iter()
-                .find(|curve| {
-                    curve.supports.iter().all(|site| site.point.is_none())
-                        && curve.supports[0].radius(curve.endpoints[0]) > depth
-                        && curve.supports[0].radius(curve.endpoints[1]) < depth
-                })
-                .unwrap();
-            let values = curve.endpoints.map(|p| curve.supports[0].radius(p) - depth);
-            let mut event = corner_birth(
-                curve,
-                contours::OuterWidth::new([0.45; 2], 0.45, None),
-                1,
-                [0.0, 1.0],
-                values,
-                &mut work,
-                &cancel,
-            )
-            .unwrap();
-            let parameter = event.parameter;
-            let prior_cap = event.cap_radius_mm;
-            compensate_corner(curve, [0.45; 2], &mut event, &request).unwrap();
-            assert!(event.compensation.is_some());
-            assert_eq!(event.parameter, parameter);
-            assert!((curve.supports[0].radius(curve.at(parameter)) - depth).abs() <= FIT_ERROR_MM);
-            let width = inner_contour_width([0.45; 2], &[event], 1, parameter);
-            let ideal = 0.45 * 0.5_f64.sqrt();
-            assert!(width >= ideal && width < 0.45);
-            if side_mm == 2.0 {
-                assert!(
-                    width > ideal,
-                    "the short cell must retain its incoming port"
-                );
-            }
-            assert!(event.cap_radius_mm < prior_cap);
-            assert_eq!(inner_contour_width([0.45; 2], &[event], 1, 0.0), 0.45);
-            assert_eq!(inner_contour_width([0.45; 2], &[event], 0, parameter), 0.45);
-            let [_, travel] = event.compensation.unwrap();
-            for t in compensation_knots([0.45; 2], &event) {
-                let actual = inner_contour_width([0.45; 2], &[event], 1, t);
-                assert!(actual >= width && actual <= 0.45);
-                assert!((actual - width).abs() <= travel * (t - parameter).abs() + f64::EPSILON);
+    fn nominal_inner_turns_preserve_material_and_protected_hole() {
+        let material = MultiPolygon(vec![geo::Polygon::new(
+            geo::LineString::from(vec![
+                (0.0, 0.0),
+                (20.0, 0.0),
+                (20.0, 20.0),
+                (0.0, 20.0),
+                (0.0, 0.0),
+            ]),
+            vec![geo::LineString::from(vec![
+                (8.0, 8.0),
+                (8.0, 12.0),
+                (12.0, 12.0),
+                (12.0, 8.0),
+                (8.0, 8.0),
+            ])],
+        )]);
+        let mut recipe = crate::planner::tests::recipe(0.25);
+        recipe.bead_width_mm = 0.45;
+        recipe.perimeter_count = 2;
+        let limits = DepositionLimits {
+            min_bead_width_mm: 0.30,
+            max_bead_width_mm: 0.70,
+            min_bead_height_mm: 0.000001,
+            max_bead_height_mm: 0.30,
+        };
+        let required = region::RequiredMaterial::from_section(&material);
+        let request = WallRequest {
+            material: &material,
+            required: &required,
+            recipe: &recipe,
+            limits: &limits,
+            nozzle_diameter_mm: 0.4,
+            lower_z: 0.0,
+            upper_z: 0.2,
+            retained_points: region::point_count(&material),
+            owned_bytes: 0,
+        };
+        let plan = plan_section_walls(request, &mut 0, &AtomicBool::new(false)).unwrap();
+        assert_eq!(plan.protected_hole_area_mm2, 16.0);
+        assert!(plan.correspondence.iter().any(|owner| owner.ordinal == 0));
+        assert!(plan.correspondence.iter().any(|owner| owner.ordinal == 1));
+        for path in plan.paths {
+            for edge in path.checked_edges().unwrap() {
+                let length = norm(sub(
+                    [edge.points_mm[1][0], edge.points_mm[1][1]],
+                    [edge.points_mm[0][0], edge.points_mm[0][1]],
+                ));
+                assert!(length >= program_coordinates::MIN_DEPOSITION_COMMAND_MM);
+                assert!(edge.width_mm >= admitted_width_range(&request).unwrap()[0]);
+                assert!(edge.width_mm <= limits.max_bead_width_mm);
             }
         }
     }

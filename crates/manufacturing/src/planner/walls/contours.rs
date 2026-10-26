@@ -73,23 +73,16 @@ impl OuterWidth {
     }
 }
 
-/// Only a retained terminal cell with two original segments sharing a literal
-/// convex vertex supplies this proposal. No coordinate match creates incidence.
-pub(super) fn corner_seed(
+/// Retained literal convex-corner incidence, never a coordinate-created join.
+pub(super) fn source_corner(
     curve: &MedialEdge,
     graph: &skeleton::Skeleton,
-    widths: &[f64],
-    request: &WallRequest<'_>,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<Option<(usize, f64)>, ManufacturingError> {
+) -> Option<([f64; 2], usize, [[f64; 2]; 2])> {
     let [a, b] = curve.supports;
     if a.point.is_some() || b.point.is_some() || a.boundary_index != b.boundary_index {
-        return Ok(None);
+        return None;
     }
-    let Some(vertex) = [a.a, a.b].into_iter().find(|p| *p == b.a || *p == b.b) else {
-        return Ok(None);
-    };
+    let vertex = [a.a, a.b].into_iter().find(|p| *p == b.a || *p == b.b)?;
     let rays = [
         if a.a == vertex {
             sub(a.b, vertex)
@@ -102,17 +95,31 @@ pub(super) fn corner_seed(
             sub(b.a, vertex)
         },
     ];
-    let Some(end) = (0..2).find(|&end| {
+    let end = (0..2).find(|&end| {
         graph.junctions[curve.vertex_ids[end]].valence == 1
             && norm(sub(curve.endpoints[end], vertex))
                 <= 0.000001 + curve.chord_error_bound(0.0, 1.0)
-    }) else {
-        return Ok(None);
-    };
+    })?;
     let direction = sub(curve.endpoints[1 - end], vertex);
     if rays.into_iter().any(|ray| dot(direction, ray) <= 0.0) {
-        return Ok(None);
+        return None;
     }
+    Some((vertex, end, rays))
+}
+
+/// Only a retained terminal cell with two original segments sharing a literal
+/// convex vertex supplies this proposal. No coordinate match creates incidence.
+pub(super) fn corner_seed(
+    curve: &MedialEdge,
+    graph: &skeleton::Skeleton,
+    widths: &[f64],
+    request: &WallRequest<'_>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<(usize, f64)>, ManufacturingError> {
+    let Some((vertex, end, rays)) = source_corner(curve, graph) else {
+        return Ok(None);
+    };
     let cosine = dot(rays[0], rays[1]) / (norm(rays[0]) * norm(rays[1]));
     if !cosine.is_finite() || !(-1.0..1.0).contains(&cosine) {
         return Ok(None);

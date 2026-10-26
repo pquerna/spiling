@@ -666,15 +666,12 @@ fn key(p: [f64; 2]) -> Result<Key, ManufacturingError> {
 fn point(k: Key) -> [f64; 2] {
     k.map(|v| v as f64 / SITE_SCALE)
 }
-fn assemble(
+/// Pair continuing source ordinals before walking or fitting actual commands.
+fn source_mates(
     edges: &[BoundaryEdge],
-    permissions: &[Junction],
-    request: &WallRequest<'_>,
     work: &mut usize,
     cancel: &AtomicBool,
-) -> Result<(Vec<DepositionPath>, Vec<BoundaryCorrespondence>), ManufacturingError> {
-    let [minimum_width_mm, _] = admitted_width_range(request)?;
-    let (lower_z, upper_z) = (request.lower_z, request.upper_z);
+) -> Result<Vec<[Option<(usize, usize)>; 2]>, ManufacturingError> {
     let mut incidence = BTreeMap::<Key, Vec<(usize, usize)>>::new();
     for (index, edge) in edges.iter().enumerate() {
         for side in 0..2 {
@@ -684,10 +681,6 @@ fn assemble(
                 .push((index, side));
         }
     }
-    // Pair continuing source ordinals at every actual endpoint before walking.
-    // A graph junction is not an instruction to emit each microscopic cell
-    // fragment as a separate extrusion. Prefer the straightest compatible
-    // continuation; unmatched arms remain legal explicit stroke endpoints.
     let mut mate = vec![[None::<(usize, usize)>; 2]; edges.len()];
     for (&node, incident) in &incidence {
         loop {
@@ -722,10 +715,6 @@ fn assemble(
                     let continuous_source = same_supports
                         && edges[a].facing_boundary == edges[b].facing_boundary
                         && edges[a].source_widths[a_side] == edges[b].source_widths[b_side];
-                    // Uneven subdivisions of one continuous field can have
-                    // unequal one-sided MIN command widths. Keep that source
-                    // walk intact for fitting; only final commands must meet
-                    // the actual gradient, enclosure and occupancy gates.
                     if !continuous_source
                         && (edges[a].width_mm - edges[b].width_mm).abs()
                             > program_coordinates::MAX_WALL_WIDTH_GRADIENT
@@ -752,6 +741,19 @@ fn assemble(
             mate[b.0][b.1] = Some(a);
         }
     }
+    Ok(mate)
+}
+
+fn assemble(
+    edges: &[BoundaryEdge],
+    permissions: &[Junction],
+    request: &WallRequest<'_>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(Vec<DepositionPath>, Vec<BoundaryCorrespondence>), ManufacturingError> {
+    let [minimum_width_mm, _] = admitted_width_range(request)?;
+    let (lower_z, upper_z) = (request.lower_z, request.upper_z);
+    let mate = source_mates(edges, work, cancel)?;
     let mut used = vec![false; edges.len()];
     let mut paths = Vec::new();
     let mut correspondence = Vec::with_capacity(edges.len());
