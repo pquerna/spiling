@@ -6,6 +6,7 @@ mod source;
 
 mod ast;
 pub(crate) mod brep_data_bridge;
+mod closed_spline_decode;
 #[cfg(test)]
 mod tests;
 mod units;
@@ -346,7 +347,7 @@ pub(crate) fn import_step(
         });
     }
     check_cancel(cancel)?;
-    let ex = brep_data_bridge::parse_step_exchange(text)
+    let mut ex = brep_data_bridge::parse_step_exchange(text)
         .map_err(|e| invalid(&format!("invalid ISO-10303-21 exchange: {e}")))?;
     check_cancel(cancel)?;
     // The exact single root was validated above. Decode it once, directly in
@@ -354,11 +355,13 @@ pub(crate) fn import_step(
     let mut context = solidcraft_step::units::Context::default();
     context.units.len = scale;
     context.uncertainty = uncertainty_mm;
-    let solid = solidcraft_step::topology::read_solid(&ex, solid_id, context).map_err(|cause| {
-        invalid(&format!(
-            "normalized STEP topology extraction failed: {cause:?}"
-        ))
-    })?;
+    let solid = closed_spline_decode::read_solid(
+        &mut ex,
+        solid_id,
+        context,
+        query_proof_byte_limit,
+        cancel,
+    )?;
     check_cancel(cancel)?;
     if solid.sheet {
         return Err(invalid(

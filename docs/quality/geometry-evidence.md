@@ -47,6 +47,18 @@ bounded, reciprocal, owner-checked Loopuse/Edgeuse cycles and charges its retain
 capacity. Consumers still cross-check native incidence; the cache does not supply
 original-source correspondence or material authority.
 
+[`import/closed_spline_decode.rs`](../../crates/geometry/src/import/closed_spline_decode.rs)
+admits the narrow closed-spline decoder case with exact complete endpoint-row
+and weight identity, multiplicity equal to degree and one inactive exterior
+knot per end. A shared whole-active-domain basis identity permits temporary
+decoder normalization; exchange/source coefficients are restored before capture.
+Native construction retains exact operand copies, not analytic recognition, and
+restores only checked inactive slots before topology publication. Original
+PCurve/seam genealogy and literal native/source association remain mandatory.
+The independent spline housing supports source import, save and source-deleted
+reopen; its display and section still refuse active-chart obligations. This is
+not general spline display, native-query or manufacturing qualification.
+
 Before native conversion and chart-map construction, exact adjacent null uses
 may cancel only for the same edge, opposite directions, identical PCurves and
 exactly two uses in one face/wire. Owned normalization preserves surviving

@@ -182,7 +182,11 @@ pub fn from_schema4_brep(k: &mut Kernel, brep: &b::Brep, heal: bool) -> R<Brep> 
     };
     let opts = MakeTopologyOptions {
         make_uv_trim_curves: true,
-        add_analytics: true,
+        // Declared analytics were already constructed by build_surface/curve.
+        // Shape recognition here may rebuild a spline as a canonical analytic
+        // carrier with a different parameter law and discard its original
+        // knots, while retaining the old UV trims/domain. Copy exact operands.
+        add_analytics: false,
         force_same_tol: true,
         check_uv_trim_curves: false,
         always_heal: heal,
@@ -1080,7 +1084,7 @@ fn build_bspline_surface(
         .ok_or(BridgeError::Invalid("spline v order"))?;
     let (u_knots, u_mults) = unique_knots_and_multiplicities(u_knots_flat);
     let (v_knots, v_mults) = unique_knots_and_multiplicities(v_knots_flat);
-    BSplineSurface::create_canonical(&CanonicalSurfaceData {
+    let mut surface = BSplineSurface::create_canonical(&CanonicalSurfaceData {
         u_degree: u_order - 1,
         v_degree: v_order - 1,
         control_points: cps,
@@ -1093,7 +1097,97 @@ fn build_bspline_surface(
         weights,
         uv_domain: None,
     })
-    .map_err(BridgeError::from)
+    .map_err(BridgeError::from)?;
+
+    // CreateCanonical routes through IGES clamping, which discards unused
+    // exterior slots even after the decoder's original-vector restoration.
+    // Keep all canonical validation; undo ONLY that proven inactive-slot
+    // replacement, after checking the entire resulting coefficient owner.
+    let native = surface.get_or_create_gw_nurb()?;
+    let original = [u_knots_flat, v_knots_flat];
+    let degrees = [u_order - 1, v_order - 1];
+    let counts = [nu, nv];
+    let native_knots = [native.u_knots(), native.v_knots()];
+    let changed = [
+        native_knots[0] != original[0],
+        native_knots[1] != original[1],
+    ];
+    if !changed.into_iter().any(|changed| changed) {
+        return Ok(surface);
+    }
+    let weight = |i: usize| weights.map_or(1.0, |w| w[i]);
+    let equal_control = |a: usize, b: usize| {
+        cps[a].x == cps[b].x
+            && cps[a].y == cps[b].y
+            && cps[a].z == cps[b].z
+            && weight(a) == weight(b)
+    };
+    let equal_end_rows = [
+        (0..nv).all(|j| equal_control(j, (nu - 1) * nv + j)),
+        (0..nu).all(|i| equal_control(i * nv, i * nv + nv - 1)),
+    ];
+    let restore = [0, 1].map(|d| {
+        changed[d]
+            && equal_end_rows[d]
+            && super::closed_spline_decode::same_active_basis_with_inactive_end_slots(
+                original[d],
+                native_knots[d],
+                degrees[d],
+                counts[d],
+            )
+    });
+    if !restore.into_iter().any(|restore| restore) {
+        return Ok(surface);
+    }
+    let indices = native.indices();
+    if native.degrees() != (degrees[0], degrees[1])
+        || indices.n.checked_add(1) != Some(nu)
+        || indices.m.checked_add(1) != Some(nv)
+        || (0..2).any(|d| changed[d] && !restore[d])
+    {
+        return Err(BridgeError::Invalid(
+            "canonical spline changed its original active basis",
+        ));
+    }
+    // IGES stores exactly constant-weight nets as nonrational. This exact
+    // homogeneous gauge is allowed; near-constant or altered weights are not.
+    let constant_weights = weights.is_none_or(|w| w.iter().all(|x| *x == w[0]));
+    for i in 0..nu {
+        for j in 0..nv {
+            let index = i * nv + j;
+            let c = native.cpt(i, j)?;
+            let p = cps[index];
+            let w = if c.w == solidcore::nurbs::math::NOW && constant_weights {
+                1.0
+            } else {
+                let w = weight(index);
+                if c.w != w {
+                    return Err(BridgeError::Invalid(
+                        "canonical spline changed an original weight",
+                    ));
+                }
+                w
+            };
+            if c.x != p.x * w || c.y != p.y * w || c.z != p.z * w {
+                return Err(BridgeError::Invalid(
+                    "canonical spline changed an original control coefficient",
+                ));
+            }
+        }
+    }
+    if restore[0] {
+        let knots = native.u_knots_mut();
+        knots[0] = u_knots_flat[0];
+        let last = knots.len() - 1;
+        knots[last] = u_knots_flat[last];
+    }
+    if restore[1] {
+        let knots = native.v_knots_mut();
+        knots[0] = v_knots_flat[0];
+        let last = knots.len() - 1;
+        knots[last] = v_knots_flat[last];
+    }
+    Ok(surface)
 }
 
 fn quarter_param(phi: f64) -> f64 {
@@ -2014,16 +2108,26 @@ mod tests {
     #[test]
     fn phase0_step_to_solidcore_tessellate_and_section_all_6_fixtures() {
         for &(name, step_text) in FIXTURES {
-            let ex = parse_step_exchange(step_text)
+            let mut ex = parse_step_exchange(step_text)
                 .unwrap_or_else(|e| panic!("{name}: p21 parse failed: {e}"));
-            let solids = solidcraft_step::topology::read_solids(&ex);
-            assert!(
-                solids.failures.is_empty(),
-                "{name}: solidcraft_step failures: {:?}",
-                solids.failures
-            );
-            assert_eq!(solids.solids.len(), 1, "{name}: expected 1 solid");
-            let solid = &solids.solids[0];
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let ast = step_p21::parser::parse(step_text).unwrap();
+            let entities = crate::import::ast::Entities::new(&ast.data[0], &cancel).unwrap();
+            let roots = entities.named("MANIFOLD_SOLID_BREP", &cancel).unwrap();
+            assert_eq!(roots.len(), 1, "{name}: expected 1 solid");
+            let (unit, uncertainty) =
+                crate::import::units::resolve(&entities, roots[0], &cancel).unwrap();
+            let mut context = solidcraft_step::units::Context::default();
+            context.units.len = unit.scale_to_mm();
+            context.uncertainty = uncertainty;
+            let solid = crate::import::closed_spline_decode::read_solid(
+                &mut ex,
+                roots[0],
+                context,
+                crate::import::MAX_QUERY_PROOF_BYTES,
+                &cancel,
+            )
+            .unwrap_or_else(|e| panic!("{name}: STEP extraction failed: {e}"));
             assert!(!solid.sheet, "{name}: expected closed solid");
 
             let mut k = Kernel::default();

@@ -477,6 +477,287 @@ fn unclamped_rational_closed_edge_preserves_shared_original_parameter_restrictio
         solidcore::topology::brep::p2::is_manifold_solid(definition.brep()).unwrap_or(false),
         "closed oriented manifold"
     );
+    let face_id = definition
+        .original_source()
+        .faces
+        .iter()
+        .find(|face| face.face_entity.0 == 1301)
+        .unwrap()
+        .native_face;
+    let original = definition.original_source().face(face_id).unwrap();
+    assert_eq!(original.carrier_id.0, 822);
+    let exchange =
+        brep_data_bridge::parse_step_exchange(std::str::from_utf8(&source).unwrap()).unwrap();
+    let expected =
+        solidcraft_step::read::Reader::new(&exchange, solidcraft_step::read::Units::default())
+            .surface(822)
+            .unwrap();
+    assert_eq!(
+        original.carrier.as_ref(),
+        expected.as_ref(),
+        "literal original coefficients and closure declaration"
+    );
+    let solidcraft_step::geom::Surface::BSpline(spline) = expected.as_ref() else {
+        panic!("original rational spline carrier")
+    };
+    let native = definition
+        .brep()
+        .face(face_id)
+        .unwrap()
+        .surface
+        .as_ref()
+        .unwrap();
+    let native_spline = crate::parametric::analytic_eval::native_surface_nurbs(native)
+        .unwrap()
+        .unwrap();
+    let expand = |knots: &[f64], multiplicities: &[usize]| -> Vec<f64> {
+        knots
+            .iter()
+            .zip(multiplicities)
+            .flat_map(|(&k, &m)| std::iter::repeat_n(k, m))
+            .collect()
+    };
+    assert_eq!(
+        native_spline.u_knots(),
+        expand(&spline.u_knots, &spline.u_multiplicities)
+    );
+    assert_eq!(
+        native_spline.v_knots(),
+        expand(&spline.v_knots, &spline.v_multiplicities)
+    );
+    let association = crate::analysis::source_restriction::carrier::SourceCarrierAssociation::new(
+        &original.carrier,
+        native,
+        &mut GeometryWorkBudget::new(20_000_000),
+        &cancelled(),
+    )
+    .unwrap();
+    assert!(
+        association.is_literal(),
+        "decoder closure must not replace original carrier authority"
+    );
+    let seam: Vec<_> = original
+        .wires
+        .iter()
+        .flat_map(|w| &w.coedges)
+        .map(|&i| definition.original_source().coedge(i).unwrap())
+        .filter(|edge| edge.edge_curve_id.0 == 1306)
+        .collect();
+    assert_eq!(
+        seam.len(),
+        2,
+        "both uses of the original physical seam survive"
+    );
+    assert_ne!(seam[0].forward, seam[1].forward);
+    for use_ in seam {
+        assert_eq!(use_.curve_id.0, 1309);
+        assert!(matches!(
+            use_.spatial_curve.as_ref(),
+            solidcraft_step::geom::Curve::SurfaceCurve {
+                kind: solidcraft_step::geom::SurfaceCurveKind::Seam,
+                ..
+            }
+        ));
+        assert_eq!(
+            use_.pcurves
+                .iter()
+                .map(|p| p.source_pcurve.0)
+                .collect::<Vec<_>>(),
+            [1313, 1320]
+        );
+        assert!(use_.pcurves.iter().all(|p| p.carrier_id.0 == 822));
+    }
+}
+
+#[test]
+fn closed_spline_decoder_preserves_active_domain_and_distinct_physical_seam_branches() {
+    use solidcraft_geom::brep::{Loop, Surface};
+    let source = fixture("independent-exporters/occt-spline-housing-mm.step");
+    let mut exchange =
+        brep_data_bridge::parse_step_exchange(std::str::from_utf8(&source).unwrap()).unwrap();
+    let carrier = exchange.get(822).unwrap().clone();
+    let root = *exchange
+        .entities
+        .iter()
+        .find(|(_, e)| e.name() == "MANIFOLD_SOLID_BREP")
+        .unwrap()
+        .0;
+    let mut solid = closed_spline_decode::read_solid(
+        &mut exchange,
+        root,
+        solidcraft_step::units::Context::default(),
+        MAX_QUERY_PROOF_BYTES,
+        &cancelled(),
+    )
+    .unwrap();
+    assert_eq!(
+        exchange.get(822),
+        Some(&carrier),
+        "source exchange restored before capture"
+    );
+    let mut reader =
+        solidcraft_step::read::Reader::new(&exchange, solidcraft_step::read::Units::default());
+    let source_edge = exchange.get(1306).unwrap().params();
+    let seam_vertices = [1, 2].map(|i| {
+        let vertex = exchange.get(source_edge[i].as_ref_id().unwrap()).unwrap();
+        reader
+            .point(vertex.params()[1].as_ref_id().unwrap())
+            .unwrap()
+    });
+    let slot = solid.face_origin.iter().position(|&id| id == 1301).unwrap();
+    let face = &solid.brep.faces[slot];
+    let Surface::RationalSpline {
+        u_knots,
+        v_knots,
+        homogeneous,
+    } = &face.surface
+    else {
+        panic!("original rational carrier type")
+    };
+    assert_eq!(
+        face.domain,
+        [
+            [u_knots[2], u_knots[homogeneous.len()]],
+            [v_knots[1], v_knots[homogeneous[0].len()]]
+        ]
+    );
+    assert!(
+        u_knots[0] < face.domain[0][0] && *u_knots.last().unwrap() > face.domain[0][1],
+        "native retains exterior ghost support, not decoder clamping"
+    );
+    let mut physical_seam = None;
+    for (edge, record) in solid.brep.edges.iter().enumerate() {
+        let [a, z] = record.uses.as_slice() else {
+            continue;
+        };
+        if a.face as usize != slot || z.face as usize != slot || a.r#loop != z.r#loop {
+            continue;
+        }
+        let Loop::Edges { edges } = &face.loops[a.r#loop as usize] else {
+            continue;
+        };
+        let (a, z) = (&edges[a.position as usize], &edges[z.position as usize]);
+        if a.forward != z.forward && a.pcurve != z.pcurve {
+            assert_ne!(
+                record.vertices[0], record.vertices[1],
+                "positive-length seam, not a closed rim"
+            );
+            let endpoints = record
+                .vertices
+                .map(|v| solid.brep.vertices[v as usize].point);
+            assert!(
+                endpoints == seam_vertices || endpoints == [seam_vertices[1], seam_vertices[0]],
+                "the native seam retains the original shared physical vertices"
+            );
+            assert!(
+                physical_seam.replace(edge).is_none(),
+                "no fabricated additional seam on the original face"
+            );
+        }
+    }
+    let seam = physical_seam.expect("real opposite seam uses retain distinct parameter branches");
+    brep_data_bridge::strip_lamina_spurs(&mut solid.brep, MAX_QUERY_PROOF_BYTES, &cancelled())
+        .unwrap();
+    assert_eq!(
+        solid.brep.edges[seam].uses.len(),
+        2,
+        "real seam must not be stripped as a null spur"
+    );
+    solid.brep.validate().unwrap();
+    solid.brep.check_geometry().unwrap();
+}
+
+#[test]
+fn invalid_closed_spline_declarations_cannot_supply_decoder_periodicity() {
+    use solidcraft_step::p21::Param;
+    let source = fixture("independent-exporters/occt-spline-housing-mm.step");
+    for defect in [
+        "not declared closed",
+        "unequal endpoint position",
+        "unequal endpoint weight",
+        "lesser endpoint multiplicity",
+    ] {
+        let mut exchange =
+            brep_data_bridge::parse_step_exchange(std::str::from_utf8(&source).unwrap()).unwrap();
+        match defect {
+            "not declared closed" => {
+                let record = exchange
+                    .entities
+                    .get_mut(&822)
+                    .unwrap()
+                    .records
+                    .iter_mut()
+                    .find(|r| r.name == "B_SPLINE_SURFACE")
+                    .unwrap();
+                record.params[4] = Param::Enum("F".into());
+            }
+            "unequal endpoint position" => {
+                let record = &mut exchange.entities.get_mut(&835).unwrap().records[0];
+                let Param::List(p) = &mut record.params[1] else {
+                    panic!("original point")
+                };
+                p[0] = Param::Real(16.0);
+            }
+            "unequal endpoint weight" => {
+                let record = exchange
+                    .entities
+                    .get_mut(&822)
+                    .unwrap()
+                    .records
+                    .iter_mut()
+                    .find(|r| r.name == "RATIONAL_B_SPLINE_SURFACE")
+                    .unwrap();
+                let Param::List(rows) = &mut record.params[0] else {
+                    panic!("original weights")
+                };
+                let Param::List(last) = rows.last_mut().unwrap() else {
+                    panic!("original weight row")
+                };
+                last[0] = Param::Real(0.5);
+            }
+            "lesser endpoint multiplicity" => {
+                let record = exchange
+                    .entities
+                    .get_mut(&822)
+                    .unwrap()
+                    .records
+                    .iter_mut()
+                    .find(|r| r.name == "B_SPLINE_SURFACE_WITH_KNOTS")
+                    .unwrap();
+                let Param::List(m) = &mut record.params[0] else {
+                    panic!("original multiplicities")
+                };
+                // Same vector length/degree/control net, but clamping the
+                // ghost now changes active basis functions: outside the theorem.
+                m[1] = Param::Int(1);
+                m[2] = Param::Int(3);
+            }
+            _ => unreachable!(),
+        }
+        let root = *exchange
+            .entities
+            .iter()
+            .find(|(_, e)| e.name() == "MANIFOLD_SOLID_BREP")
+            .unwrap()
+            .0;
+        let original = exchange.get(822).unwrap().clone();
+        assert!(
+            closed_spline_decode::read_solid(
+                &mut exchange,
+                root,
+                solidcraft_step::units::Context::default(),
+                MAX_QUERY_PROOF_BYTES,
+                &cancelled(),
+            )
+            .is_err(),
+            "{defect}: no periodic authority from an unqualified declaration"
+        );
+        assert_eq!(
+            exchange.get(822),
+            Some(&original),
+            "{defect}: original carrier must survive even refusal"
+        );
+    }
 }
 
 #[test]
