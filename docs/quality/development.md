@@ -244,6 +244,12 @@ SPILING_ENGINE_PATH="$ENGINE" node tools/smoke-desktop.mjs \
 
 The manufacturing runner exercises intent/placement/history, Compile, actual-byte
 report/motion, cancellation, export, source-independent reopen and child cleanup.
+Geometry clicks target visible viewport interiors from the captured rendered
+surface, then require a real native face inspection from physical pointer events.
+A missed sparse coordinate grid is not evidence that production picking failed.
+`--evidence-directory NEW_DIRECTORY` retains screenshots and failure state;
+native section/query refusal remains independent of a successful pick.
+
 `--manufacturing-source RELATIVE_STEP` selects `housing-ordinary.intent.json`
 for the rounded-housing and ribbed-bracket references; other sources retain the
 runner's explicit complete intent. Refused geometry never becomes success.

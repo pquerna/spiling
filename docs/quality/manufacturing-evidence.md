@@ -414,6 +414,13 @@ not establish recovery across arbitrary source-cell boundaries. The split-cylind
 baseline's material-bound precision gate also remains separate from full-cylinder
 finish qualification.
 
+The default native box also exercises the actual local AMD/CEF production panel:
+physical native-face picking, consumed maximum-width Apply/Undo/Redo/recompile,
+fresh actual-program report/preview, export/save and source-deleted fresh read-only
+reopen. Historical artifacts do not regain fresh authority through Undo.
+This bounded workbench result is not qualification of the broader multi-part
+geometry section, arbitrary GPU/platforms, packaging or physical deposition.
+
 The tapered-fitting CLI uses the same source/query authority and independent
 replay, not a fitting-specific planner. A geometry-only restored scene may
 publish its saved manufacturing bundle without a source display mesh; native

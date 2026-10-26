@@ -499,7 +499,10 @@ Inspect `DefinitionDisplay` as well as the command status: an explicit unavailab
 display is not proof of a working mesh. The CLI validates transferred mesh and
 section payloads; raw inspection does not qualify manufacturing.
 
-The broader fitting/housing scene and hardware picking control remain separate:
+The broader fitting/housing scene uses actual rendered-interior pointer targeting.
+Native source-face picking is exercised on the local AMD/CEF surface; the next
+whole-scene section still reaches the cumulative geometry-work cap. Picking does
+not qualify that native query or the complete scene workflow:
 
 ```sh
 node tools/smoke-desktop.mjs --executable "$PWD/target/debug/spiling-desktop" \

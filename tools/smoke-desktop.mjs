@@ -498,24 +498,63 @@ async function inspectGeometry() {
   }
   await click("fit-scene");
   await selectOccurrence(partIds.get(recipe.parts[0].key));
-  const bounds = await evaluate(
-    `(() => { const r=document.querySelector('[data-testid="viewport"]').getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height}; })()`,
-  );
-  let picked;
-  for (const y of [0.5, 0.35, 0.65, 0.2, 0.8]) {
-    for (const x of [0.5, 0.35, 0.65, 0.2, 0.8, 0.1, 0.9]) {
-      const position = {
-        x: bounds.x + bounds.width * x,
-        y: bounds.y + bounds.height * y,
-        button: "left",
-        clickCount: 1,
-      };
-      await cdp("Input.dispatchMouseEvent", { ...position, type: "mousePressed" });
-      await cdp("Input.dispatchMouseEvent", { ...position, type: "mouseReleased" });
-      await delay(100);
-      picked = (await geometryState()).inspection;
-      if (picked) break;
+  const capture = await cdp("Page.captureScreenshot", { format: "png" });
+  // Aim physical clicks at visible interiors, not a sparse grid that can miss
+  // every small fitted part. No renderer/native hit is injected or substituted.
+  const candidates = await evaluate(`(async () => {
+    const bytes = Uint8Array.from(atob(${JSON.stringify(capture.data)}), c => c.charCodeAt(0));
+    const bitmap = await createImageBitmap(new Blob([bytes], {type: "image/png"}));
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const context = canvas.getContext("2d");
+    context.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const {width, height} = canvas;
+    const pixels = context.getImageData(0, 0, width, height).data;
+    const rect = document.querySelector('[data-testid="viewport"]').getBoundingClientRect();
+    const sx = width / innerWidth, sy = height / innerHeight;
+    const left = Math.max(0, Math.ceil(rect.left * sx));
+    const top = Math.max(0, Math.ceil(rect.top * sy));
+    const right = Math.min(width, Math.floor(rect.right * sx));
+    const bottom = Math.min(height, Math.floor(rect.bottom * sy));
+    const histogram = new Uint32Array(4096);
+    let background = 0;
+    for (let y = top; y < bottom; y += 4) {
+      for (let x = left; x < right; x += 4) {
+        const i = (y * width + x) * 4;
+        const bucket = (pixels[i] >> 4) * 256 + (pixels[i + 1] >> 4) * 16 + (pixels[i + 2] >> 4);
+        if (++histogram[bucket] > histogram[background]) background = bucket;
+      }
     }
+    const color = [background >> 8, (background >> 4) & 15, background & 15].map(v => v * 16 + 8);
+    const interiors = [];
+    for (let y = top + 2; y < bottom - 2; y += 4) {
+      for (let x = left + 2; x < right - 2; x += 4) {
+        let contrast = Infinity;
+        for (const dy of [-2, 0, 2]) {
+          for (const dx of [-2, 0, 2]) {
+            const i = ((y + dy) * width + x + dx) * 4;
+            contrast = Math.min(contrast, color.reduce((sum, c, k) => sum + Math.abs(pixels[i + k] - c), 0));
+          }
+        }
+        if (contrast >= 48) interiors.push({x: x / sx, y: y / sy, contrast});
+      }
+    }
+    interiors.sort((a, b) => b.contrast - a.contrast);
+    const selected = [];
+    for (const point of interiors) {
+      if (selected.every(other => Math.hypot(point.x - other.x, point.y - other.y) >= 12)) selected.push(point);
+      if (selected.length === 32) break;
+    }
+    return selected;
+  })()`);
+  assert.ok(candidates.length, "Rendered viewport contains visible interior click candidates");
+  let picked;
+  for (const { x, y } of candidates) {
+    const position = { x, y, button: "left", clickCount: 1 };
+    await cdp("Input.dispatchMouseEvent", { ...position, type: "mousePressed" });
+    await cdp("Input.dispatchMouseEvent", { ...position, type: "mouseReleased" });
+    await delay(150);
+    picked = (await geometryState()).inspection;
     if (picked) break;
   }
   assert.ok(picked, "Actual canvas click resolves a native source face");
@@ -3289,10 +3328,16 @@ try {
   if (enginePid) assert.equal(alive(enginePid), false, "Native window close releases engine child");
   console.log("PASS: native window close exits application and engine");
 } catch (error) {
-  if (manufacturingScenario && socket && !childExited) {
+  if (socket && !childExited) {
     try {
-      console.error("Manufacturing failure surface:", await evaluate("document.body.innerText"));
-      await screenshot("manufacturing-failure");
+      console.error(`${scenario} failure surface:`, await evaluate("document.body.innerText"));
+      await screenshot(`${scenario}-failure`);
+      if (scenario === "geometry") {
+        const state = await geometryState();
+        console.error("Geometry failure state:", JSON.stringify(state));
+        if (evidenceDirectory)
+          await writeFile(resolve(evidenceDirectory, "geometry-failure-state.json"), JSON.stringify(state, null, 2));
+      }
     } catch (captureError) {
       console.error("Failure capture unavailable:", String(captureError));
     }
