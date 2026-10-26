@@ -4,6 +4,9 @@
 
 //! Direct intersections of the immutable native BREP. No Boolean clipping solid,
 //! meshing seed, fitted STEP chart or tolerance-labelled root grants authority.
+mod atlas;
+mod continuation;
+mod cuts;
 mod direct;
 mod roots;
 #[cfg(test)]
@@ -15,7 +18,10 @@ use spiling_contracts::geometry::{
     GeometryErrorCode, SECTION_PLANE_TOLERANCE_MM, SECTION_SAMPLING_TOLERANCE_MM,
 };
 use std::{cell::Cell, sync::atomic::AtomicBool};
-pub use types::{NativeSection, SectionCurve, SectionEndpoint, SectionLoopMm, SectionSpan};
+pub use types::{
+    NativeSection, SectionChartEndpoint, SectionCurve, SectionEndpoint, SectionGraphChart,
+    SectionLoopMm, SectionSpan,
+};
 pub(crate) use types::{NativeSectionCertificate, SectionAuthority};
 
 pub const MAX_PREPARED_SECTION_BYTES: usize = 64 * 1024 * 1024;

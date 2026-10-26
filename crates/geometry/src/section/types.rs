@@ -20,18 +20,55 @@ pub enum SectionEndpoint {
     Vertex(VertexId),
 }
 
-/// The exact curve is the zero set of the section plane functional on the
-/// original native surface, restricted to this uniquely solved graph chart.
-/// The independent/dependent intervals are enclosures, not rounded exact trim
-/// limits. Exact limits are the two directed roots of `trim_edgeuses` below.
-/// This is neither a fitted spline nor a sampled intersection curve.
+/// An exact endpoint expression in the immutable native surface/plane chart.
 #[derive(Debug, Clone, Copy)]
+pub enum SectionChartEndpoint {
+    TrimRoot {
+        edgeuse: EdgeuseId,
+        parameter: [f64; 2],
+    },
+    /// Root ordinal over the original face's entire other-coordinate domain.
+    ParameterCut {
+        axis: u8,
+        coordinate: f64,
+        root: u32,
+        parameter: [f64; 2],
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SectionGraphChart {
+    pub independent_axis: u8,
+    pub independent: [f64; 2],
+    pub dependent: [f64; 2],
+    pub endpoints: [SectionChartEndpoint; 2],
+    /// Traversal relative to increasing independent parameter.
+    pub reversed: bool,
+}
+
+/// Exact native surface/plane zero-set expressions, not fitted curves.
+/// Parameter intervals enclose roots; exact limits retain their root expressions.
+#[derive(Debug, Clone)]
 pub enum SectionCurve {
     SurfacePlaneGraph {
         independent_axis: u8,
         independent: [f64; 2],
         dependent: [f64; 2],
     },
+    SurfacePlaneAtlas {
+        charts: Vec<SectionGraphChart>,
+    },
+}
+
+impl SectionCurve {
+    pub(super) fn allocated_bytes(&self) -> usize {
+        match self {
+            Self::SurfacePlaneGraph { .. } => 0,
+            Self::SurfacePlaneAtlas { charts } => {
+                charts.capacity() * std::mem::size_of::<SectionGraphChart>()
+            }
+        }
+    }
 }
 #[derive(Debug, Clone)]
 pub struct SectionSpan {
@@ -43,7 +80,8 @@ pub struct SectionSpan {
     pub section_pose: spiling_contracts::geometry::RigidPoseMm,
     pub curve: SectionCurve,
     pub endpoints: [SectionEndpoint; 2],
-    /// Ordered in increasing independent parameter, regardless of `reversed`.
+    /// Underlying curve traversal, regardless of `reversed`; a single graph
+    /// uses increasing independent parameter, an atlas its connected chart order.
     pub trim_edgeuses: [EdgeuseId; 2],
     /// Root isolators in the native edgeuse normalized parameter law [0,1].
     pub trim_parameters: [[f64; 2]; 2],
@@ -156,6 +194,12 @@ impl NativeSection {
                 .loop_spans
                 .iter()
                 .map(|s| s.capacity() * std::mem::size_of::<SectionSpan>())
+                .sum::<usize>()
+            + self
+                .loop_spans
+                .iter()
+                .flatten()
+                .map(|span| span.curve.allocated_bytes())
                 .sum::<usize>()
     }
 }

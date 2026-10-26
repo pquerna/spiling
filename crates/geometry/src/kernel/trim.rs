@@ -230,6 +230,12 @@ enum BoundaryCurve {
     Coedge(usize),
     Joint(usize),
 }
+
+enum BoundaryWinding {
+    Count(i64),
+    Contact,
+    Unresolved,
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BoundaryEndpoint {
     ExactJoin(usize),
@@ -960,12 +966,13 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                         work,
                         cancel,
                     )? {
-                        Some(value) => {
+                        BoundaryWinding::Count(value) => {
                             winding = winding
                                 .checked_add(value)
                                 .ok_or_else(|| resource("native trim winding count overflow"))?
                         }
-                        None => {
+                        BoundaryWinding::Contact => return Ok(TrimClassification::Boundary),
+                        BoundaryWinding::Unresolved => {
                             resolved = false;
                             break;
                         }
@@ -985,12 +992,13 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                             work,
                             cancel,
                         )? {
-                            Some(value) => {
+                            BoundaryWinding::Count(value) => {
                                 winding = winding.checked_add(value).ok_or_else(|| {
                                     resource("source joint winding count overflow")
                                 })?
                             }
-                            None => {
+                            BoundaryWinding::Contact => return Ok(TrimClassification::Boundary),
+                            BoundaryWinding::Unresolved => {
                                 resolved = false;
                                 break;
                             }
@@ -1025,7 +1033,7 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         shear: f64,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<Option<i64>, GeometryError> {
+    ) -> Result<BoundaryWinding, GeometryError> {
         let before = work.consumed();
         let mut active = ([0.0; 2], 0_u8);
         let mut last_split = None;
@@ -1081,6 +1089,47 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                 }
                 let disjoint =
                     (0..2).any(|a| image[a].hi < uv_box[a][0] || image[a].lo > uv_box[a][1]);
+                if !disjoint {
+                    // A coefficient-enclosed point on the actual boundary can
+                    // refute whole-box interior/exterior immediately. The
+                    // Newton-like parameter is only a proposal; containment
+                    // is checked afresh, with no root or winding authority.
+                    if (0..2).all(|axis| {
+                        uv_box[axis][0] <= image[axis].lo && image[axis].hi <= uv_box[axis][1]
+                    }) {
+                        return Ok(BoundaryWinding::Contact);
+                    }
+                    let middle = part[0] * 0.5 + part[1] * 0.5;
+                    let midpoint =
+                        parametric::curve2d_piecewise_jet(&curve, [middle; 2], work, cancel)?
+                            .position;
+                    if (0..2).all(|axis| {
+                        uv_box[axis][0] <= midpoint[axis].lo && midpoint[axis].hi <= uv_box[axis][1]
+                    }) {
+                        return Ok(BoundaryWinding::Contact);
+                    }
+                    for axis in 0..2 {
+                        work.charge(1, cancel)?;
+                        let derivative = whole.derivative[axis];
+                        if derivative.contains_zero() {
+                            continue;
+                        }
+                        let proposal =
+                            middle + (point[axis] - midpoint[axis].mid()) / derivative.mid();
+                        if !proposal.is_finite() || proposal < part[0] || proposal > part[1] {
+                            continue;
+                        }
+                        let witness =
+                            parametric::curve2d_piecewise_jet(&curve, [proposal; 2], work, cancel)?
+                                .position;
+                        if (0..2).all(|axis| {
+                            uv_box[axis][0] <= witness[axis].lo
+                                && witness[axis].hi <= uv_box[axis][1]
+                        }) {
+                            return Ok(BoundaryWinding::Contact);
+                        }
+                    }
+                }
                 if disjoint {
                     let a = parametric::curve2d_piecewise_jet(&curve, [part[0]; 2], work, cancel)?
                         .position;
@@ -1095,17 +1144,17 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                 }
                 last_split = Some((part, depth, image, disjoint));
                 if depth == MAX_DEPTH {
-                    return Ok(None);
+                    return Ok(BoundaryWinding::Unresolved);
                 }
                 let middle = part[0] * 0.5 + part[1] * 0.5;
                 if middle <= part[0] || middle >= part[1] {
-                    return Ok(None);
+                    return Ok(BoundaryWinding::Unresolved);
                 }
                 stack[live] = ([middle, part[1]], depth + 1);
                 stack[live + 1] = ([part[0], middle], depth + 1);
                 live += 2;
             }
-            Ok(Some(if forward { total } else { -total }))
+            Ok(BoundaryWinding::Count(if forward { total } else { -total }))
         })();
         outcome.map_err(|error| work.annotate_error(error, before, format_args!(
             "original trim winding boundary={boundary:?} shear={shear} active={active:?} last_split={last_split:?} query={uv_box:?}",
@@ -6655,12 +6704,17 @@ impl PreparedFaceTrimDomain<'_> {
                     work,
                     cancel,
                 )? {
-                    Some(value) => {
+                    BoundaryWinding::Count(value) => {
                         winding = winding
                             .checked_add(value)
                             .ok_or_else(|| resource("source hole winding overflow"))?
                     }
-                    None => {
+                    BoundaryWinding::Contact => {
+                        return Err(unavailable(
+                            "complete original hole-containment winding cannot exclude its boundary",
+                        ));
+                    }
+                    BoundaryWinding::Unresolved => {
                         resolved = false;
                         break;
                     }
@@ -6679,12 +6733,17 @@ impl PreparedFaceTrimDomain<'_> {
                         work,
                         cancel,
                     )? {
-                        Some(value) => {
+                        BoundaryWinding::Count(value) => {
                             winding = winding.checked_add(value).ok_or_else(|| {
                                 resource("source hole completion winding overflow")
                             })?
                         }
-                        None => {
+                        BoundaryWinding::Contact => {
+                            return Err(unavailable(
+                                "complete original hole-containment winding cannot exclude its boundary",
+                            ));
+                        }
+                        BoundaryWinding::Unresolved => {
                             resolved = false;
                             break;
                         }
@@ -6834,6 +6893,62 @@ mod tests {
                     ([[-0.2, -0.1], [3.0, 4.0]], Outside),
                     ([[3.4, 3.5], [3.0, 4.0]], Outside),
                 ],
+            );
+        }
+    }
+
+    #[test]
+    fn original_boundary_contact_preserves_classification_with_bounded_work() {
+        let definition = crate::from_step_bytes(HOUSING).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let bytes = 32 * 1024 * 1024;
+        let mut incidence = crate::analysis::source_incidence::SourceEdgeIncidence::new(
+            &definition,
+            bytes,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        incidence
+            .prepare_vertices(bytes, &mut work, &cancel)
+            .unwrap();
+        let live = bytes - incidence.owned_bytes();
+        let mut source = PreparedNativeTrimSource {
+            definition: &definition,
+            faces: Vec::new(),
+            allowance: live,
+            spatial_operators: Vec::new(),
+            source_vertices: Vec::new(),
+            source_inventory: None,
+        };
+        let skeleton = NativeFaceSkeleton::new(
+            &definition,
+            definition.face_ids()[19],
+            &incidence,
+            live - source.retained_bytes(),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let domain = source
+            .prepare_source_face(
+                skeleton,
+                &mut SourceSpatialLookup::new(),
+                1e-7,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        let mut query_work = GeometryWorkBudget::new(100_000);
+        for (query, expected) in [
+            ([[-1.5, 0.0], [9.0, 10.75]], Boundary),
+            ([[-1.5, -0.1], [9.0, 10.75]], Inside),
+            ([[0.1, 0.2], [9.0, 10.75]], Outside),
+        ] {
+            assert_eq!(
+                domain.classify(query, &mut query_work, &cancel).unwrap(),
+                expected
             );
         }
     }

@@ -13,16 +13,14 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
 [native-material contract](../adr/004-native-geometry-parity.md) define authority.
 
 The **SolidCore development cutover is not general manufacturing parity**.
-Native inspection/recovery, original-plane software manufacturing and the
-source-backed through-hole journey have real CLI evidence through Compile,
-fresh saved-byte verification and replay. Missing declared PCurves may use a
-checked inverse of the actual original plane or admitted cylinder family;
-generated native UV curves and failed declared associations cannot substitute.
-Rounded-housing spherical quotient cuts, narrow-pocket endpoint correspondence
-and tapered-fitting closed-seam proofs remain unqualified. Broader mechanical-part
-journeys retain independent qualification. Historical Monstertruck operator
-journeys below keep their original producer provenance, not transferred
-SolidCore acceptance.
+Native box/protected-bore and unchanged ordinary rounded-housing journeys have
+real CLI evidence through placement, Preflight, Compile, fresh saved-byte
+verification/export and source-deleted recovery. This does not requalify the
+zoned plate, genuine H1, fitting, bracket or broader mechanical-part journeys.
+Missing declared PCurves may use a checked inverse of the actual original plane
+or admitted cylinder family; generated native UV curves and failed declared
+associations cannot substitute. Historical Monstertruck evidence below retains
+its original producer provenance, not transferred SolidCore acceptance.
 
 ## Entry points and immutable capture
 
@@ -377,18 +375,18 @@ evidence does not qualify the current producer. Current software admission is
 not general manufacturing or G0–G3 qualification; the executable refusal
 boundaries and freshly verified outputs remain authoritative.
 
-The SolidCore software Compile/fresh Verify/export/save controls are the native
-box and protected bore with `solid-fill.intent.json`; source-deleted read-only
-reopen independently verifies and preserves their program/replay bytes. Unchanged
-fitting and ordinary housing import, bed preparation, Preflight, save and
-source-deleted reopen are exercised, not manufacturing completion. Housing's
-source-corner band can use the existing complete variable-radius polar sweep;
-measured chart error is not an admissible source-error ceiling. Raw pocket
-sections retain the hole and plane reversal, but full Compile currently refuses
-at the upper rounded-cap native section near Z=8.05 mm. This is not completed
-manufacturing or a waiver of the union gate. Fitting closed-source metric coverage,
-original spline-carrier gauge/correspondence and closed-spline seam controls remain
-cutover obligations, not newly waived input classes.
+The SolidCore software controls include native box/protected bore with
+`solid-fill.intent.json` and unchanged rounded housing with
+`housing-ordinary.intent.json`. Placement/Preflight/Compile, independent saved-byte
+Verify/export/save and source-deleted fresh-engine recovery are exercised.
+Recovered program/replay bytes remain identical; box/bore outputs also preserve
+the preceding main programs. Housing uses the existing variable-radius source
+sweep, complete local native section charts and conservative boundary-contact
+classification without increasing source/error/work limits. These constructions
+do not waive source metrics, void topology or the union gate.
+
+Fitting closed-source metrics, original spline-carrier gauge/correspondence,
+closed-spline seams, the explicit plate and genuine H1 remain cutover obligations.
 
 Broader STEP conversion still has explicit closed-edge refusals. Mixed-source
 contact, tilted-placement/critical collars, inward-ramp conditioning and broader

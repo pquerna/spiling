@@ -82,12 +82,14 @@ specified by the [RFC](../adr/004-native-geometry-parity.md) and
 | --- | --- |
 | `PreparedSolid` / `prepare_solid` | [`analysis/material_source.rs`](../../crates/geometry/src/analysis/material_source.rs): one definition-borrowed owner for original domains, source-vertex plans and query preparation. No promotion to a second material owner or native Boolean seed phase. |
 | `PreparedSectionSource` | Definition-borrowed raw inspection owner in [`section/mod.rs`](../../crates/geometry/src/section/mod.rs), retained by `PreparedSolid`; direct native surface/plane graphs do not require original-material admission. |
+| Native face sections | [`section/atlas.rs`](../../crates/geometry/src/section/atlas.rs) exhausts local graph coverage; [`cuts.rs`](../../crates/geometry/src/section/cuts.rs) owns whole-line cut roots; [`continuation.rs`](../../crates/geometry/src/section/continuation.rs) assembles original trim/material and checked spans. The single-graph case remains in `direct.rs`. |
 | Placed queries | [`analysis/placed.rs`](../../crates/geometry/src/analysis/placed.rs): actual accepted quaternion-polynomial transforms, not an assumed exactly orthogonal transpose. |
 
-`NativeSection` in the facade carries plane/frame, original-face lineage and
-achieved chord/plane errors. A raw native intersection is not closure of
-source material. Conservative slab envelopes are explicitly distinguishable
-from intersections and cannot be promoted into manufactured layers.
+`NativeSection` carries plane/frame, face lineage, exact single/piecewise native
+surface-plane expressions and achieved chord/plane errors. Internal chart limits
+retain exact cut-root expressions, not invented BREP edges. Owned chart capacities
+are charged and moved through assembly. A raw intersection is not source-material
+closure; conservative slab envelopes cannot be promoted to manufactured layers.
 
 Sections intersect the retained native carriers directly. Complete root/span
 inventories, original face lineage, ordered closure, Jordan and achieved
@@ -343,6 +345,11 @@ containment and projection qualification. A looser outward recomputation cannot
 turn a tighter earlier enclosure into a new tolerance policy. Metric sealing
 remains independent of this topology qualification.
 
+An original boundary image or coefficient-enclosed boundary point contained in a
+query box proves only conservative `Boundary`. It supplies no winding, interior,
+exterior or source-hole nesting authority. Distinguish this ray-independent contact
+from an unresolved ray so known contact cannot repeatedly exhaust winding work.
+
 Numerical knot/cut leaves are not new source endpoints. A leaf can use its
 complete boundary's exact shared C0 anchor only after opposite monotone germs
 are certified over both entire leaf-to-anchor parameter hulls. This preserves
@@ -391,18 +398,17 @@ SolidCore parity. The unchanged original fixtures and operator workflows remain
 the reproduction inputs; report the SolidCore paths actually exercised and their
 explicit refusals before expanding support claims.
 
-Rounded-housing source-corner disk sweeps and raw pocket-interior sections have
-bounded native coverage, but complete ordinary-housing manufacturing remains
-unqualified. The current Compile reaches the upper rounded-cap section near
-Z=8.05 mm, where the whole-face uniform-coordinate graph gate refuses. Native
-root coverage refines both parameters; independent-parameter uncertainty cannot
-be eliminated by dependent-only subdivision. A closed-source shape bound alone
-still grants no topology authority. The union guard remains required.
+Prepared native housing sections preserve the pocket and material under plane
+reversal through the rounded cap. The unchanged ordinary housing exercises
+SolidCore placement, Preflight, Compile, independent saved-byte Verify/export/save
+and source-deleted fresh-engine recovery under the frozen operator policies.
+This does not qualify general STEP, the plate/H1 or fitting/bracket journeys.
+Source metrics, material/void topology and the union guard remain independent.
 
-The raw section matrix also retains unresolved correspondence-work refusals for
-the tapered fitting and selected cylinder/bracket cuts under its existing work
-allowance. Those positives are not qualified by nearby successful sections;
-their tests and limits remain unchanged.
+Standalone raw inspection retains whole-coedge correspondence-work refusals,
+including the housing upper cap, tapered fitting and selected cylinder/bracket
+cuts. A prepared manufacturing-query positive does not qualify these different
+query/resource scopes; their positive gates and numerical limits remain unchanged.
 
 The workspace has no Monstertruck runtime, development, test or tooling dependency.
 Retained historical STEP provenance may name that producer; the data is not a

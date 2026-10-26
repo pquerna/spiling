@@ -62,26 +62,25 @@ fn topology<T>(value: solidcore::error::Result<T>) -> Result<T, GeometryError> {
     value.map_err(|e| indeterminate(format!("native section topology: {e:?}")))
 }
 #[derive(Clone, Copy)]
-struct EdgeRoot {
-    edge: EdgeId,
-    ordinal: u32,
-    parameter: Interval,
-    position: [Interval; 3],
-    point: [f64; 3],
+pub(super) struct EdgeRoot {
+    pub(super) edge: EdgeId,
+    pub(super) ordinal: u32,
+    pub(super) parameter: Interval,
+    pub(super) position: [Interval; 3],
+    pub(super) point: [f64; 3],
 }
 #[derive(Clone, Copy)]
-struct Event {
-    edgeuse: EdgeuseId,
-    root_index: usize,
-    parameter: Interval,
-    uv: [Interval; 2],
-    crossing: i8,
+pub(super) struct Event {
+    pub(super) edgeuse: EdgeuseId,
+    pub(super) root_index: usize,
+    pub(super) parameter: Interval,
+    pub(super) uv: [Interval; 2],
+    pub(super) crossing: i8,
 }
-struct Arc {
-    span: SectionSpan,
-    points: Vec<[f64; 3]>,
-    tangents: Vec<[Interval; 3]>,
-    used: bool,
+pub(super) struct Arc {
+    pub(super) span: Option<SectionSpan>,
+    pub(super) points: Vec<[f64; 3]>,
+    pub(super) tangents: Vec<[Interval; 3]>,
 }
 
 pub(super) fn intersect(
@@ -144,16 +143,17 @@ pub(super) fn intersect(
         let lo = face.uv_domain.min();
         let hi = face.uv_domain.max();
         let domain = [[lo.x, hi.x], [lo.y, hi.y]];
-        let Some((axis, dependent_sign, root_domain)) =
-            classify_graph(surface, domain, scale, plane, work, cancel).map_err(|mut error| {
+        let graph = match classify_graph(surface, domain, scale, plane, work, cancel) {
+            Ok(None) => continue,
+            Ok(Some(graph)) => Some(graph),
+            Err(error) if error.code == GeometryErrorCode::AnalysisIndeterminate => None,
+            Err(mut error) => {
                 error.message = format!(
                     "native section face={ordinal} id={face_id:?}: {}",
                     error.message
                 );
-                error
-            })?
-        else {
-            continue;
+                return Err(error);
+            }
         };
         let outward = face_orientation(brep, face_id)?;
         let mut events = Vec::new();
@@ -267,11 +267,7 @@ pub(super) fn intersect(
                             "native edge/chart plane roots lack a bounded common endpoint",
                         ));
                     }
-                    let independent = 1 - axis;
-                    let crossing = sign(chart_root.derivative)
-                        * dependent_sign
-                        * if forward { 1 } else { -1 }
-                        * if independent == 0 { 1 } else { -1 };
+                    let crossing = sign(chart_root.derivative) * if forward { 1 } else { -1 };
                     if crossing == 0 {
                         return Err(indeterminate("native trim root lacks a directed crossing"));
                     }
@@ -303,6 +299,36 @@ pub(super) fn intersect(
                     "native trim coedge cycle exceeds its declared census",
                 ));
             }
+        }
+        let Some((axis, dependent_sign, root_domain)) = graph else {
+            super::continuation::intersect_face(
+                surface,
+                domain,
+                scale,
+                plane,
+                outward,
+                face_id,
+                ordinal,
+                &events,
+                &edge_roots,
+                query,
+                &mut admission,
+                &mut arcs,
+                work,
+                cancel,
+            )
+            .map_err(|mut error| {
+                error.message = format!(
+                    "native section atlas face={ordinal} id={face_id:?}: {}",
+                    error.message
+                );
+                error
+            })?;
+            continue;
+        };
+        for event in &mut events {
+            work.charge(1, cancel)?;
+            event.crossing *= dependent_sign * if axis == 1 { 1 } else { -1 };
         }
         if events.is_empty() {
             return Err(indeterminate(format!(
@@ -406,7 +432,7 @@ pub(super) fn intersect(
             admission.push(
                 &mut arcs,
                 Arc {
-                    span: SectionSpan {
+                    span: Some(SectionSpan {
                         face: face_id,
                         source_face_ordinal: ordinal,
                         definition_plane: plane,
@@ -426,10 +452,9 @@ pub(super) fn intersect(
                         reversed: reverse,
                         maximum_chord_error_mm: achieved[0],
                         maximum_plane_error_mm: achieved[1],
-                    },
+                    }),
                     points,
                     tangents,
-                    used: false,
                 },
             )?;
         }
@@ -990,13 +1015,13 @@ impl<'a> Boundary<'a> {
     }
 }
 
-struct Graph<'a> {
-    surface: &'a Surface,
-    domain: [[f64; 2]; 2],
-    axis: usize,
-    scale: f64,
-    plane: PlaneMm,
-    dependent_sign: i8,
+pub(super) struct Graph<'a> {
+    pub(super) surface: &'a Surface,
+    pub(super) domain: [[f64; 2]; 2],
+    pub(super) axis: usize,
+    pub(super) scale: f64,
+    pub(super) plane: PlaneMm,
+    pub(super) dependent_sign: i8,
 }
 impl Graph<'_> {
     fn box_uv(&self, x: [f64; 2], y: Interval) -> [[f64; 2]; 2] {
@@ -1007,7 +1032,7 @@ impl Graph<'_> {
     }
     /// Strict endpoint signs and a uniform nonzero partial derivative prove
     /// existence and uniqueness for every independent parameter in this box.
-    fn enclose(
+    pub(super) fn enclose(
         &self,
         x: [f64; 2],
         work: &mut GeometryWorkBudget,
@@ -1094,7 +1119,7 @@ impl Graph<'_> {
         }
         Ok((point, error))
     }
-    fn velocity(&self, jet: SurfaceEnclosure) -> Result<[Interval; 3], GeometryError> {
+    pub(super) fn velocity(&self, jet: SurfaceEnclosure) -> Result<[Interval; 3], GeometryError> {
         let (dx, dy) = if self.axis == 1 {
             (jet.du, jet.dv)
         } else {
@@ -1152,7 +1177,7 @@ impl Graph<'_> {
         }))
     }
     #[allow(clippy::too_many_arguments)]
-    fn sample(
+    pub(super) fn sample(
         &self,
         x: [f64; 2],
         a: [f64; 3],
@@ -1253,7 +1278,7 @@ impl Graph<'_> {
             cancel,
         )
     }
-    fn material_reverse(
+    pub(super) fn material_reverse(
         &self,
         x: f64,
         orientation: f64,
@@ -1293,15 +1318,28 @@ fn assemble(
     // The manifold condition is exact degree one in each direction at each
     // native edge root. Nearby endpoints are never clustered or repaired.
     for a in arcs.iter() {
-        for endpoint in a.span.endpoints {
+        for endpoint in a
+            .span
+            .as_ref()
+            .ok_or_else(|| indeterminate("native section span was consumed before assembly"))?
+            .endpoints
+        {
             work.charge(2 * arcs.len() as u64, cancel)?;
             let incoming = arcs
                 .iter()
-                .filter(|b| b.span.endpoints[1] == endpoint)
+                .filter(|b| {
+                    b.span
+                        .as_ref()
+                        .is_some_and(|span| span.endpoints[1] == endpoint)
+                })
                 .count();
             let outgoing = arcs
                 .iter()
-                .filter(|b| b.span.endpoints[0] == endpoint)
+                .filter(|b| {
+                    b.span
+                        .as_ref()
+                        .is_some_and(|span| span.endpoints[0] == endpoint)
+                })
                 .count();
             if incoming != 1 || outgoing != 1 {
                 return Err(indeterminate(
@@ -1310,9 +1348,13 @@ fn assemble(
             }
         }
     }
-    while let Some(start) = arcs.iter().position(|a| !a.used) {
+    while let Some(start) = arcs.iter().position(|a| a.span.is_some()) {
         work.charge(1, cancel)?;
-        let first_key = arcs[start].span.endpoints[0];
+        let first_key = arcs[start]
+            .span
+            .as_ref()
+            .ok_or_else(|| indeterminate("native section start span was already consumed"))?
+            .endpoints[0];
         let first_point = arcs[start].points[0];
         let mut points = std::mem::take(&mut arcs[start].points);
         let mut tangents = std::mem::take(&mut arcs[start].tangents);
@@ -1321,13 +1363,10 @@ fn assemble(
         let mut current = start;
         loop {
             work.charge(1, cancel)?;
-            if arcs[current].used {
-                return Err(indeterminate(
-                    "native section topology revisits a span before closure",
-                ));
-            }
             let arc = &mut arcs[current];
-            arc.used = true;
+            let span = arc.span.take().ok_or_else(|| {
+                indeterminate("native section topology revisits a span before closure")
+            })?;
             if current != start {
                 for &point in &arc.points[1..] {
                     admission.push(&mut points, point)?;
@@ -1336,24 +1375,28 @@ fn assemble(
                     admission.push(&mut tangents, tangent)?;
                 }
             }
-            admission.push(&mut faces, arc.span.source_face_ordinal)?;
+            admission.push(&mut faces, span.source_face_ordinal)?;
             result.certificate.maximum_chord_error_mm = result
                 .certificate
                 .maximum_chord_error_mm
-                .max(arc.span.maximum_chord_error_mm);
+                .max(span.maximum_chord_error_mm);
             result.certificate.maximum_plane_error_mm = result
                 .certificate
                 .maximum_plane_error_mm
-                .max(arc.span.maximum_plane_error_mm);
-            admission.push(&mut spans, arc.span.clone())?;
-            let next_key = arc.span.endpoints[1];
+                .max(span.maximum_plane_error_mm);
+            let next_key = span.endpoints[1];
+            admission.push(&mut spans, span)?;
             if next_key == first_key {
                 break;
             }
             work.charge(arcs.len() as u64, cancel)?;
             current = arcs
                 .iter()
-                .position(|a| a.span.endpoints[0] == next_key)
+                .position(|a| {
+                    a.span
+                        .as_ref()
+                        .is_some_and(|span| span.endpoints[0] == next_key)
+                })
                 .ok_or_else(|| indeterminate("native section incidence is open"))?;
         }
         if points.len() < 4 || points.last() != Some(&first_point) {

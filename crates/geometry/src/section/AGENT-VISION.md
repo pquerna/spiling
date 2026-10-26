@@ -6,11 +6,10 @@ Licensed under the Open Software License version 3.0
 
 # Native planar section queries vision
 
-Provide deterministic owned native sections for bounded valid trimmed geometry while preserving immutable BREP authority. Queries return definition-local f64 boundaries with explicit sampling/Boolean tolerances; downstream engine composition places and packs them without source-face identity claims. Whole-domain support and critical-set analysis distinguish empty, regular and unresolved queries, including sections wholly inside a curved face's trim.
+Provide bounded native BREP plane sections without Boolean clipping or a display-derived slicing path. Literal coefficients, original trims and exact shared roots establish curve authority; independently bounded polygons serve downstream geometry and display.
 
-Keep native planar/cylindrical analytic extrema as narrow optimizations behind the shared analysis substrate. Descriptive family/analytic metadata never authorizes a generic operation. Actual native intersection curves require whole-interval approximation and, for implicit curves, validated continuation; search leaders and display meshes remain nonauthoritative.
+A face may need several local coordinate graphs. Complete native chart coverage and connected trim/material assembly preserve actual curve expressions across those graphs, rather than requiring one convenient imported UV orientation. General periodic-interior, singular or conditioning cases remain explicit refusals until qualified.
 
-Repeated layer queries borrow one immutable native BREP through bounded preparation, without a second source owner or Boolean search mesh. Root expressions and original face/edgeuse identities survive beside independently bounded polygons; placement remains in the shared geometry adapter.
+Repeated queries borrow one immutable native owner and reusable correspondence, not stale roots or a second geometry model. Retain face/edgeuse genealogy, actual definition-plane expressions and placement beside the owned contours. Bound capacities, work and cancellation through publication.
 
-
-Box, cylinder, through-hole and bounded curved-family sections in multiple directions must pass original and frozen independent numerical/topology evidence before support is claimed. Direct plane/face coverage, trim correspondence, actual native shared-edge incidence and whole-curve bounds must all qualify. A genuine conditioning, critical-set or completeness failure receives a typed refusal with its source witness rather than sampled-extrema repair, display-derived sections or omitted curved geometry. Occurrence union and manufacturing planning remain outside this module.
+Raw section success does not establish source-material equivalence, occurrence-union attachment or manufacturing. [Geometry evidence](../../../../docs/quality/geometry-evidence.md) owns exercised cases and limits; native operations and mesh/search proposals never silently expand that scope.

@@ -50,8 +50,8 @@ pub use kernel::{BBox3Mm, Definition, SurfaceParameterMap, make_kernel_context};
 pub use parametric::{Interval, IntervalVec2, IntervalVec3};
 pub use section::{
     MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES, NativeSection,
-    PreparedSectionSource, SectionCurve, SectionEndpoint, SectionLoopMm, SectionSpan,
-    prepare_section_source,
+    PreparedSectionSource, SectionChartEndpoint, SectionCurve, SectionEndpoint, SectionGraphChart,
+    SectionLoopMm, SectionSpan, prepare_section_source,
 };
 pub(crate) use section::{NativeSectionCertificate, SectionAuthority};
 pub use spiling_contracts::display::EncodedMesh as MeshArtifact;
