@@ -112,6 +112,7 @@ fn original_parts_preserve_all_source_faces_analytic_normals_and_profile_precisi
         "independent-exporters/occt-through-hole-mm.step",
         "independent-exporters/occt-rounded-housing-mm.step",
         "independent-exporters/occt-tapered-fitting-mm.step",
+        "independent-exporters/occt-ribbed-bracket-mm.step",
     ] {
         let definition = fixture(name);
         let mesh = tessellate(

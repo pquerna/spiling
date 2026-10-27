@@ -319,12 +319,7 @@ fn box_inventory(
         work.charge(1, cancel)?;
         let d = uv_box(triangle_uv(mesh, triangle)?);
         keys.push((
-            [
-                d[0][0].to_bits(),
-                d[0][1].to_bits(),
-                d[1][0].to_bits(),
-                d[1][1].to_bits(),
-            ],
+            DisplayMeshBox::key_for(d),
             u32::try_from(index).map_err(|_| resource("native UV-box ordinal overflow"))?,
         ));
         ids.push(0);

@@ -1041,6 +1041,12 @@ pub(crate) struct DisplayMeshBox {
     conditioned: Option<DisplayConditionedHessian>,
 }
 impl DisplayMeshBox {
+    pub(crate) fn key_for(domain: [[f64; 2]; 2]) -> [u64; 4] {
+        // Signed zeros are the same geometric endpoint. Keep every nonzero
+        // bit unchanged; this is cache identity, never UV quantization.
+        [domain[0][0], domain[0][1], domain[1][0], domain[1][1]]
+            .map(|value| if value == 0.0 { 0 } else { value.to_bits() })
+    }
     pub(crate) fn new(key: [u64; 4]) -> Self {
         Self {
             key,
@@ -1296,12 +1302,7 @@ impl<'a> DisplayTriangleProof<'a> {
                 uv.iter().map(|p| p[axis]).fold(f64::NEG_INFINITY, f64::max),
             ]
         });
-        let key = [
-            domain[0][0].to_bits(),
-            domain[0][1].to_bits(),
-            domain[1][0].to_bits(),
-            domain[1][1].to_bits(),
-        ];
+        let key = DisplayMeshBox::key_for(domain);
         let box_index = if let Some((ordinal, _)) = uv_indices {
             let index = *self.triangle_boxes.get(ordinal).ok_or_else(|| {
                 GeometryError::new(
@@ -1318,7 +1319,10 @@ impl<'a> DisplayTriangleProof<'a> {
             if entry.key != key {
                 return Err(GeometryError::new(
                     GeometryErrorCode::InvalidGeometry,
-                    "display triangle changed its exact captured UV box",
+                    format!(
+                        "display triangle changed its exact captured UV box: triangle={ordinal}; captured={:?}; actual={key:?}; uv={uv:?}",
+                        entry.key,
+                    ),
                 ));
             }
             DisplayBoxIndex::Mesh(index)
