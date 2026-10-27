@@ -116,6 +116,14 @@ chord/plane checks remain independent requirements; unresolved tangencies or
 branch ambiguities refuse rather than synthesize a closed loop. There is no
 SolidCore Boolean-clipping or old-kernel fallback.
 
+Native scalar roots may retain one continuous parent across an uncertain
+subdivision-point value. Strict opposite outer endpoint signs prove existence;
+a complete same-sign derivative cover proves uniqueness before either child is
+published. Refinement intersects fresh derivative bounds with that whole-parent
+cover. A partial, zero or mixed-sign cover supplies no authority; existing
+isolation/refusal, depth, cumulative work and cancellation remain in force.
+No split-point snap or plane shift is used.
+
 Spatial edges and chart lifts keep independent parameter gauges. Native
 correspondence proves a complete directed position map with strict interior
 monotonicity; stationary outer endpoints need coefficient proof, not a forced
