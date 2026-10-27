@@ -1,0 +1,103 @@
+<!--
+SPDX-FileCopyrightText: 2026 Spiling contributors
+SPDX-License-Identifier: OSL-3.0
+Licensed under the Open Software License version 3.0
+-->
+
+# ADR005: native-first DEVELOPMENT geometry
+
+Status: **adopted decision; implementation and operator qualification pending**.
+This decision supersedes ADR004's custom original-source material reconstruction
+requirements. It does not declare the native cutover complete or broaden supported
+STEP, finishes, processes or machines.
+
+Current production remains source5/planner23 with its existing material path and
+verification report. The native route is not active. Activation requires working
+trimmed-face classifier context, a coherent geometry cutover and preserved
+operators; do not publish a partial native owner or relabel current reports.
+
+## Decision
+
+The imported SolidCore BREP is the single material geometry authority for
+DEVELOPMENT builds. Import, bounds, placement, sections, material classification,
+slab/occupancy queries and manufacturing consume that same immutable native
+material through the geometry facade. SolidCraft decodes STEP operands; it is
+not a second material kernel. Pin SolidCore and solidcore-mesh to one exact
+published revision, with matching lockfile sources and `geometry::KERNEL_REVISION`.
+Bind material results to that producer, source identity, units, tolerance policy,
+occurrence pose, query scope and approximation bounds.
+
+Original STEP bytes, source hash, canonical face/use identity, declared units and
+uncertainty remain immutable identity and provenance. Preserve the original finish
+input operands, selected-master/declared associations, source-local frames and
+face targets required by the existing narrow planar/full-cylinder finish lanes.
+These inputs do not constitute a separately reconstructed whole material or an
+independent original-STEP topology/embedding certificate.
+
+Query-private mutation, native caches and derived trims must not invisibly alter
+the authoritative BREP or choose a different material for different consumers.
+Derived charts/curves are query aids tied to the unchanged native geometry, not
+original STEP declarations. A geometry-changing operation needs an explicit
+owned result and new identity/admission; it cannot be published as an unchanged
+query result. Do not hide repair, seam welding, topology replacement or tolerance
+relaxation behind a query API.
+
+Unsupported, indeterminate, ill-conditioned and invalid operations refuse
+explicitly. Keep cumulative work, live-byte admission and cancellation through
+native calls and derived output. A native method's name, successful import or
+finite sample is not evidence of its required behavior. There is no mesh slicing
+fallback, alternate material path, or inference of physical support from native
+occupancy. Actual prior deposited strokes remain software anchor evidence.
+
+## Why this boundary
+
+`OriginalSpatialGTransport` and the associated F/G, seam/corner and material-link
+construction attempted to independently reassemble a toleranced original-source
+solid alongside the kernel's imported BREP. That duplicates topology, embedding,
+trim and geometric-evaluation work, requires two material interpretations to stay
+consistent, and makes delivery of ordinary mechanical-part workflows depend on
+an open-ended second kernel/proof effort.
+
+The chosen alternative accepts explicit reliance on SolidCore material semantics.
+It retains bounded operation admission, source traceability, native-to-output
+error accounting and independent emitted-program/process verification. It does
+**not** claim the same independent original-source proof under a new name. Keeping
+the custom reconstruction as a fallback would preserve the duplicate authority;
+a mesh-derived material would change the product contract. Neither is adopted.
+
+## Claims, identity and qualification
+
+Use the existing `ManufacturingProvenance.kernel` (`KernelIdentity`) and planner
+identity, plus `VerificationReport.coverage` and `limitations`; no parallel
+provenance schema is introduced. Independent decoding still checks actual
+commands, dimensions, extrusion, lifecycle, declared process limits and the
+supported nominal ownership/contact obligations. Geometry-dependent checks rely
+on the captured native material and plan. Fresh Verify does not independently
+reconstruct or certify original STEP topology or embedding.
+
+At activation, report coverage must state reliance on captured native-kernel BREP
+material and independent decoding of actual program/process semantics. Report
+limitations must explicitly say: **DEVELOPMENT native-first geometry relies on
+the pinned kernel/tolerance policy; no independent original-STEP topology or
+material-embedding certification**. Until then, runtime report text stays unchanged.
+
+The native-material semantic cutover is source6/planner24. Historical
+source5/planner23 exercised results remain valid for their recorded producer and
+contract, not qualification for the new authority. Storage/binary generations do
+not change merely because this decision is adopted; executable constants own
+freshness and old artifacts must not acquire new authority by relabeling.
+
+Qualification requires the unchanged ribbed bracket with ordinary-housing intent
+and default automatic walls through Compile → fresh Verify → export, width edit
+and history, save and source-deleted recovery. Preserve the fitting, housing,
+physical plate, genuine H1 fine/combined and planar/full-cylinder finish operators.
+No easier fixture or intent substitutes. Record exact producer/input identity,
+resource observations, exercised stages and remaining refusals in commit/PR
+notes or ignored evidence. Those gates are requirements, **not performed results
+of this ADR**.
+
+Programs remain **SOFTWARE VALIDATION ONLY, NOT MACHINE READY**. This decision
+provides no physical printability, adhesion/support, collision, calibration,
+firmware or machine-readiness certification. See [geometry boundaries](../quality/geometry-evidence.md),
+[manufacturing boundaries](../quality/manufacturing-evidence.md) and the
+[verification contract](../protocol/manufacturing.md#emitted-program-and-independent-replay).

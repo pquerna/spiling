@@ -26,6 +26,13 @@ Spiling is software-only. Programs are **not machine ready** or physically quali
 
 Only some STEP models are supported; general STEP documents and assemblies are not. Tool or material switching and printer execution are not supported today. Some CAD models, and jobs that combine several complex parts, fail current compute or support limits. See [measured manufacturing status and limits](docs/quality/manufacturing-evidence.md) for the exercised envelope.
 
+The [native-first DEVELOPMENT geometry decision](docs/adr/ADR005-native-first-development-geometry.md)
+is adopted, not yet activated or operator-qualified. It will rely on the imported
+SolidCore BREP while preserving original STEP identity and finish inputs, without
+independent original-STEP topology/embedding certification. Existing workflows and
+their recorded producer remain the current baseline, not qualification of this
+new material authority.
+
 ## Experimental installation from source
 
 This setup is for contributors evaluating the unfinished native workbench and software workflows, not for manufacturing or operating a machine.
@@ -62,6 +69,7 @@ Design decisions:
 - [Architecture and bootstrap acceptance](docs/quality/B0-plan.md)
 - [Cylindrical finish interfaces and general-purpose foundations](docs/adr/002-cylindrical-grip-ribs.md)
 - [Mapped image relief, durable assets, and final-shape support flow](docs/adr/003-spatial-image-relief.md)
+- [Native-first DEVELOPMENT material authority and evidence limits](docs/adr/ADR005-native-first-development-geometry.md)
 
 ## License
 

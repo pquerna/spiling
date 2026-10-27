@@ -45,6 +45,23 @@ is live. Reuse one disk-backed Cargo target/profile; development/test profiles
 already disable debug information and incremental compilation. Selected numerical
 crates are optimized independently of the desktop stack.
 
+## Material authority and qualification
+
+[ADR005](../adr/ADR005-native-first-development-geometry.md) adopts native-first
+DEVELOPMENT geometry: one imported SolidCore BREP, exact kernel/tolerance binding,
+original STEP identity/provenance and original finish inputs. Implementation and
+operator qualification are pending; source5/planner23 remains production. Keep
+current operating limits and operators until a coherent cutover; do not publish a
+partial native owner or relabel current runtime reports/evidence.
+
+The eventual native route retains independent actual-program/process replay,
+not independent original-STEP topology/embedding certification or physical
+readiness. Query-private mutation and derived trims cannot silently redefine the
+authoritative BREP. Unsupported/indeterminate operations refuse; display meshes
+and custom original-source reconstruction are not alternative material paths.
+Work, live-byte admission and cancellation remain bounded. Exact pins and builds
+are provenance/prerequisites, not complete operator acceptance.
+
 ## SolidCore fork freshness
 
 The integration owner refreshes upstream at the start of each active UTC workday

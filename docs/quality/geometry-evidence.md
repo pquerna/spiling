@@ -7,12 +7,17 @@ Licensed under the Open Software License version 3.0
 # Geometry authority and code map
 
 Geometry has separate admission, inspection, display and material-proof boundaries.
-A successful import, pick or section is **not manufacturing acceptance**. The
-[parity RFC](../adr/004-native-geometry-parity.md) defines the intended G0–G3
-contract; those gates are not completely qualified. See
+A successful import, pick or section is **not manufacturing acceptance**.
+[ADR005](../adr/ADR005-native-first-development-geometry.md) adopts native-first
+DEVELOPMENT geometry, but implementation and operator qualification are pending.
+Current production remains source5/planner23. The source-realization details below
+describe its operating constraints and evidence, not required independent
+original-STEP reconstruction for the adopted replacement. The
+[parity RFC](../adr/004-native-geometry-parity.md) is superseded on that authority.
+Current evidence does not transfer to source6/planner24. See
 [manufacturing](manufacturing-evidence.md) for the compiler/replay boundary and
-[development](development.md) for build and desktop prerequisites. No geometry
-result establishes physical printability or machine readiness.
+[development](development.md) for build prerequisites. No geometry result
+establishes physical printability or machine readiness.
 
 ## Entry points and immutable source identity
 
@@ -236,6 +241,16 @@ owner/query cap. The standalone material-bounds function composes the same
 prepared path for one-off consumers.
 
 ## Source material and proof boundaries
+
+For the pending native-first route, imported SolidCore BREP will be the sole
+material authority, bound to source identity, exact producer, units, tolerance
+policy, pose and query scope. Original STEP and finish operands remain provenance;
+no independent original-STEP topology/embedding certificate is claimed. Private
+query mutation, caches and derived trims must not silently change the BREP.
+Unsupported/indeterminate operations refuse, with bounded work/bytes/cancellation.
+The source-only G and correspondence obligations below remain scoped to current
+source5 implementation and existing finish inputs, not a second material path
+for the adopted route.
 
 - **Source-only G:** `OriginalMaterialRealization` / `MaterialRealizationIdentity`
   in `kernel/mod.rs` bind the implemented source-relative transport recipe and

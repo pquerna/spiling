@@ -70,8 +70,8 @@ GitHub session and is not implied by their publication.
 | --- | --- | --- |
 | Independent copies of `StepSurface` wrappers | Upstream [`Surface::copy`](https://github.com/tangency-labs/solidcore/blob/2d37267fea023715d4e15e3baf59bef7b4e399f9/crates/solidcore/src/surface/surface/p2.rs#L1317-L1330) and `copy_and_add_analytics` intentionally route `Step` to the failing base implementation. The identical native consumer refuses on upstream and succeeds on the rebased patch. The original [owned-copy overlay](https://github.com/pquerna/solidcore/commit/18ad8bd1b9d6a1db5e51cf0439bb3db5df31dcd4) is small and independent of the unmerged mesher. | **Yes: a narrow capability issue/proposal.** Do not describe it as corruption in a successful copy or as a demonstrated C++-parity regression. Confirm maintainers want this Rust-owned-wrapper behavior before proposing a PR. |
 | Cumulative work, cooperative cancellation and visible-storage admission for meshing | The [resource-control overlay](https://github.com/pquerna/solidcore/commit/1fef444cbaad61c0f414fe126314c079175da046) extends inherited `solidcore-mesh`, which is absent from the reviewed upstream `main`. It also controls optional grid/deviation work. Its backend trait changes are not purely additive. | **Feature/API discussion, not a proven correctness bug.** Coordinate with [draft mesher PR #636](https://github.com/tangency-labs/solidcore/pull/636); keep the large implementation in the fork until the contract and dependency path are agreed. |
-| Housing source/domain/section qualification | Source allowance provenance, complete native zero-set coverage and original operand/material correspondence are Spiling-owned. Existing variable-radius source authority plus bounded local charts qualify the current ordinary/plate/H1 CLI flows, not arbitrary quotient cuts. | **Do not file upstream.** No independently established native primitive violation is demonstrated. |
-| Source corner reference-star construction | A linear radial ribbon can fold at opposed curved germs. Spiling owns the quadratic comparison, complete closed-apex proof, source-only cost admission and whole-original cap enclosure. | **Spiling change, not a kernel bug.** The source-backed bore now has real Compile/fresh-verification/export/replay evidence; this does not qualify spherical quotient cuts. |
+| Housing source/domain/section qualification in source5/planner23 | Source allowance provenance, native zero-set coverage and original operand/material correspondence are Spiling-owned in the current reconstructed-source producer. Existing bounded charts qualify ordinary/plate/H1 flows, not arbitrary quotient cuts. | **Do not file upstream.** No independently established native primitive violation is demonstrated. ADR005's pending native-first material law does not inherit the custom reconstruction requirement. |
+| Source5 corner reference-star construction | Spiling owns the reconstructed material's quadratic comparison, closed-apex proof, source-only cost admission and original cap enclosure. | **Not a kernel bug.** This construction is being retired under the adopted native-first decision, not ported into SolidCore. |
 
 ### Existing related upstream work
 
@@ -189,12 +189,14 @@ the dependency returns. Cancellation is cooperative, not hard preemption or a
 wall-time guarantee. Process limits and independent geometry/display audits remain
 Spiling obligations. Do not advertise bounded total RAM from this interface.
 
-## Source-material obligations remain Spiling-owned
+## Current source5 reconstruction is Spiling-owned
 
-The local source-star construction, original trim/curve correspondence,
-comparison homotopy, admitted error and material-degree proof belong to
-[`material_link.rs`](../../crates/geometry/src/analysis/critical/material_link.rs)
-and its owners, not the kernel mesher or STEP surface copy API.
+The source-star construction, original trim/curve correspondence, comparison
+homotopy, admitted error and material-degree proof belong to the current
+source5/planner23 [`material_link.rs`](../../crates/geometry/src/analysis/critical/material_link.rs)
+and its owners, not the kernel mesher or STEP surface copy API. These remain
+current-producer operating limits, not requirements for the pending native-first
+material law adopted in [ADR005](../adr/ADR005-native-first-development-geometry.md).
 
 - [`uv_ownership.rs`](../../crates/geometry/src/analysis/critical/material_link/vertex_transport/uv_ownership.rs)
   owns the complete reference-star Jacobian and boundary proof. Quadratic radial

@@ -202,28 +202,46 @@ Preflight admits exact native face metadata and process bounds, expands conserva
 
 `ManufacturingProvenance` contains `project_id`, captured `input_revision`, `input_hash`, `definitions:StoredDefinition[]`, `occurrences:OccurrenceRecord[]`, explicit `intent`, full ordered `surface_overlays` and `process_document`, `surface_images:SurfaceImageContent[]`, `kernel:{name,version,revision}`, and explicit planner/emitter/verifier versions. The bounded unique image content table contains canonical PGM bytes once per referenced image, including disabled layers, making exported provenance self-contained. Immutable capture shares canonical content. Inspection/status provenance contains metadata only. Captured source labels/units/uncertainty remain authoritative; native reimport labels must not replace them.
 
-The planner binds Native M to original-material realization contract `1`:
-immutable source topology and coefficients, an identity-bound seam/vertex
-realization inside the admitted source uncertainty, and the same versioned
-source-relative recipe across all slab queries. Geometry's compact completed
-source/union authority remains alive through continuous-occupancy consumers;
-realized D and deposited anchors retain separate dependencies. A small source-map
-residual does not establish exact seam coincidence or material closure. See the
-[native material contract](../adr/004-native-geometry-parity.md#514-certify-toleranced-source-material-not-fictitious-exact-seams).
-Producer/kernel versions are checked independently of the authoring input hash;
-changing realization semantics requires a producer cutover, not a compatibility
-interpretation of an older bundle.
+Current production uses source5/planner23 material admission. Its source-relative
+realization and completed source/union receipts describe that implementation,
+not a permanent requirement to independently reconstruct original STEP material.
+The adopted [native-first DEVELOPMENT decision](../adr/ADR005-native-first-development-geometry.md)
+will replace that path with the imported SolidCore BREP as the single material
+authority. Implementation and operator qualification are pending; the current
+runtime verification report remains unchanged until coherent activation.
 
-Adjacent regular slabs may obtain registered actual-pair authority only for the
-same occurrence, source recipe and pose at their bitwise-identical shared cut.
-Both per-source actual material/void loop buffers are checked independently;
-the candidate union or an invariance declaration cannot substitute for either.
-Globally disjoint two-sided collars cover the complete Jordan forest, with a
-one-turn transverse graph rather than a shared visibility-kernel assumption.
-The union binding ledger consumes bounded geometry/source fingerprints, not
-retained contours. Critical endpoints, coface incidence and whole closed-cut
-obligations remain independent; a refused regular pair grants no authority.
-Pending receipts and temporary scratch share the existing all-live byte bound.
+In current source5/planner23, Native M retains original-material realization
+contract `1`: immutable source topology/coefficients, identity-bound seam/vertex
+realization inside admitted source uncertainty and the same versioned
+source-relative recipe across slab queries. Completed source/union authority
+remains alive through continuous-occupancy consumers; realized D and deposited
+anchors retain separate dependencies. A small source-map residual is not exact
+seam coincidence or material closure.
+
+Current adjacent regular slabs may obtain registered actual-pair authority only
+for the same occurrence, source recipe and pose at their bitwise-identical shared
+cut. Both per-source actual material/void buffers are checked independently;
+candidate union or invariance cannot substitute. Globally disjoint two-sided
+collars cover the complete Jordan forest with a one-turn transverse graph, not
+a shared visibility-kernel assumption. The ledger consumes bounded fingerprints,
+not retained contours. Critical endpoints, coface incidence and whole closed-cut
+obligations remain independent; refused pairs grant no authority. Pending
+receipts and temporary scratch share the all-live byte bound. These are current
+implementation constraints, not native-first original-source proof requirements.
+
+For the native-first route, original STEP bytes, face/use identity, units,
+uncertainty and original finish inputs remain captured provenance, not a second
+solid. Query-private mutation or derived trims cannot silently redefine that
+BREP. Geometry-dependent checks rely on the pinned kernel and admitted tolerance
+policy; independent command replay supplies no independent original-STEP
+topology/embedding certificate. Use the existing kernel/planner identity and
+report coverage/limitations, without a parallel schema.
+
+Producer/kernel versions are checked independently of the authoring input hash.
+The source6/planner24 native-material activation requires a coherent cutover and
+fresh operator qualification; existing source5/planner23 evidence does not
+transfer and older bundles cannot be relabeled into new authority. Realized D,
+continuous occupancy and actual deposited anchors retain separate dependencies.
 
 `input_fingerprint(project_id,definitions,occurrences,intent,surface_overlays,process_document)` validates these inputs, sorts definitions/occurrences by identity, then SHA-256 hashes compact UTF-8 Rust serde_json in this field order:
 

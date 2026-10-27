@@ -10,20 +10,25 @@ Manufacturing is **software validation only, not machine readiness or physical p
 Import, display, Preflight, Compile and fresh replay are distinct operations; success
 at one boundary does not qualify the next. The [protocol](../protocol/manufacturing.md),
 executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
-[native-material contract](../adr/004-native-geometry-parity.md) define authority.
+[native-first decision](../adr/ADR005-native-first-development-geometry.md) separate
+adopted authority from implementation and qualification.
 
-The **SolidCore development cutover is not general manufacturing parity**.
-Native box/protected-bore, unchanged ordinary rounded housing, source-zoned
-centered physical plate and paired fine/genuine combined H1 journeys have real
-CLI evidence through placement, Preflight, Compile, independent saved-byte
-verification/export/save and source-deleted recovery. The unchanged tapered
-fitting also completes that journey with `complete-sparse.intent.json`, including
-fresh recovery of a geometry-only scene and its saved program. This does not
-qualify original bracket, affected workbench or broader mechanical-part journeys.
-Missing declared PCurves may use a checked inverse of the actual original plane
-or admitted cylinder family; generated native UV curves and failed declared
-associations cannot substitute. Historical Monstertruck evidence below retains
-its original producer provenance, not transferred SolidCore acceptance.
+**Current production remains source5/planner23.** Native box/protected-bore,
+ordinary rounded housing, source-zoned centered plate, genuine H1 fine/combined,
+tapered fitting and narrow planar/full-cylinder finish workflows retain their
+recorded software evidence under that material path and exact producer. These
+results do not qualify the adopted source6/planner24 native-first route, original
+bracket, affected workbench or general mechanical-part support. Historical
+Monstertruck evidence likewise retains its original producer.
+
+The native-first DEVELOPMENT cutover is adopted but not active or operator
+qualified. Its single material authority will be the imported SolidCore BREP,
+with original STEP identity/provenance and original finish inputs preserved.
+Independent actual-program/process decoding remains mandatory, but does not
+independently certify original STEP topology/embedding. Runtime reports stay
+unchanged until coherent activation; proposed claims live in ADR005. The
+implementation descriptions below refer to current source5/planner23, not
+requirements to revive custom original-source material reconstruction.
 
 ## Entry points and immutable capture
 
@@ -220,9 +225,10 @@ a general radial metric seal or outer envelope does not. All native outer/hole
 boundaries, including a boundary wholly inside the candidate, participate.
 Actual outer XYZ6 Z scope and strict bead/projection/error margin are mandatory.
 Final-D/field invariance, skins/events, process ownership and actual deposited
-support remain separate gates. The [native decision](../adr/004-native-geometry-parity.md#constant-inner-material-for-eligible-deposition)
-and [band contract](../protocol/manufacturing.md#same-nozzle-combined-sparse-bands)
-own the theorem and construction details.
+support remain separate gates. The
+[band contract](../protocol/manufacturing.md#same-nozzle-combined-sparse-bands)
+owns the current construction details; ADR005 does not independently qualify
+this operation under the pending native-first authority.
 
 Nominal width and physical `[lower,upper]` are path data throughout hatch pitch,
 stadium area/volume, capsules, clearance, backend E/flow and independent replay.
@@ -375,8 +381,8 @@ Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
 Raw inspection, an older producer's successful job or historical hardware
 evidence does not qualify the current producer. Current software admission is
-not general manufacturing or G0–G3 qualification; the executable refusal
-boundaries and freshly verified outputs remain authoritative.
+not general manufacturing or native-first cutover qualification; executable
+refusal boundaries and freshly verified outputs remain authoritative.
 
 The SolidCore software controls include native box/protected bore with
 `solid-fill.intent.json` and unchanged rounded housing with

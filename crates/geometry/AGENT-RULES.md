@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Native geometry boundary rules
 
-Own immutable STEP admission, native queries, source-mapped display and the private kernel facade. Original topology, parameter maps and oriented trims are authoritative. Descriptive metadata, nearest points and display meshes never grant operations. Keep wall/cylinder finish certificates narrow.
+Own immutable STEP admission, native queries, source-mapped display and the private kernel facade. [ADR005](../../docs/adr/ADR005-native-first-development-geometry.md) adopts the imported SolidCore BREP as the single DEVELOPMENT material authority, with original STEP identity/provenance and original finish inputs preserved. Implementation/qualification are pending; source5/planner23 remains production. The detailed source-realization rules below describe that current implementation only, not independent original-STEP proof requirements for the adopted native route. Do not activate a partial replacement or relabel current evidence. Descriptive metadata, nearest points and display meshes never grant operations; keep finish certificates narrow.
 
 Native admission and display publication are independent. Preserve admitted geometry, source identity, metadata and conservative bounds on display failure; report the typed failure, not an empty successful mesh or invalid-source diagnosis.
 
@@ -28,5 +28,5 @@ Prepared section analyses and deferred protected-void projections borrow their a
 
 Directional source-cone extrema use the literal affine radial law `V+s(B(t)-V)`: bound the complete selected boundary `B` in one parameter and retain feasible apex/boundary witnesses. Query refinement must preserve the immutable BASE/comparison/displacement inventory and source cost; tight scalar extrema are not a new physical OriginalF/G correspondence or material admission.
 
-Canonical mathematics and scope: [native parity](../../docs/adr/004-native-geometry-parity.md). Exercise geometry tests and real corpus paths in [geometry evidence](../../docs/quality/geometry-evidence.md); metadata and same-producer roundtrips are not acceptance.
+Canonical authority and qualification: [native-first decision](../../docs/adr/ADR005-native-first-development-geometry.md), [geometry evidence](../../docs/quality/geometry-evidence.md). Native-first queries must not invisibly mutate authoritative BREP through private state or derived trims. Unsupported/indeterminate operations refuse explicitly; independent command replay does not certify original-STEP topology/embedding or physical readiness.
 

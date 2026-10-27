@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Native geometry parity: trimmed BREP through manufacturing
 
-Status: SolidCore kernel cutover in development; operation qualification incomplete. Generic native faces and independent display availability retain `step-native-trimmed-v2` and `mesh-trimmed-mm-0.05-v2`; executable project/manufacturing constants identify the strict storage generation. Earlier Monstertruck evidence does not automatically qualify SolidCore operations. This RFC's full G0–G3 gates remain targets, not a claim that every declared family can manufacture. [Current evidence](../quality/geometry-evidence.md) owns exercised flows and explicit limits. No mesh slicing fallback or physical printer qualification is introduced.
+Status: **native-first DEVELOPMENT replacement adopted in [ADR005](ADR005-native-first-development-geometry.md); implementation and qualification pending**. Current production remains source5/planner23. The source-reconstruction and G0–G3 designs below document its existing implementation constraints and the superseded parity approach, not required material law for ADR005's native route. Keep current operating limits until a coherent cutover preserves the existing operators; no partial native owner or transferred evidence is authorized. [Current evidence](../quality/geometry-evidence.md) owns exercised flows and explicit limits. No mesh fallback or physical qualification is introduced.
 
 ## 1. Decision and user outcome
 
@@ -16,11 +16,11 @@ The target is **operation parity on bounded, valid trimmed geometry**, not an en
 
 Decisions:
 
-1. Keep one geometry crate/facade and one runtime kernel. SolidCore owns native BREP geometry; SolidCraft decodes original STEP operands; Spiling owns admission policy, source/native correspondence, query contracts, approximation certification and diagnostics. Required native query controls belong in the public SolidCore fork, not a second planner-side kernel. Declared tolerances and generated native pcurves are not original-source certificates.
+1. Keep one geometry crate/facade and one runtime kernel. SolidCore owns native BREP geometry; SolidCraft decodes original STEP operands; Spiling owns admission, identity/provenance, query contracts, approximation policy and diagnostics. ADR005 adopts the imported BREP as the sole material authority after activation. Its native route does not require the custom original-source reconstruction below, and supplies no independent original-STEP topology/embedding certification. Required native query controls belong in the public fork, not a second planner-side kernel.
 2. Replace the plane/cylinder-only source model with generic trimmed-face records and optional analytic descriptions. Classification is descriptive; it is never permission to slice, texture or reuse a slab.
 3. Implement one bounded parametric/interval substrate inside geometry, with analytic specializations for exact or tighter results. Native sections remain authoritative. Auxiliary boxes, patch tessellations and search meshes never become the slicing representation.
 4. Distinguish source conversion, display, native section queries, slab fidelity, manufacturing and surface-finish eligibility. One unsupported operation must not masquerade as an invalid STEP file.
-5. Preserve immutable source identity, source/native topology correspondence, occurrence transforms, final-realized-material support dependencies and independent emitted-byte replay.
+5. Preserve immutable original STEP identity/provenance, original finish inputs, occurrence transforms, final-realized-material support dependencies and independent emitted-byte replay. Source/native correspondence below remains necessary where consumed by current source5 or narrow finish admission; it is not independent whole-source material proof for the adopted native route.
 6. Do not make AP242, assemblies or arbitrary freeform texturing prerequisites for primitive parity. Specify their interfaces now; ship them as separately accepted extensions through the same pipeline.
 
 Non-goals: a general CAD editor/healer; arbitrary nonmanifold mesh repair; alternate kernels; continuous multi-axis deposition; a new printer backend; color mixing; physically certified output. Broader source geometry does not imply those capabilities.
@@ -701,7 +701,7 @@ This changes traversal cost, not branch, smoothness or endpoint authority.
 
 ### 5.14 Certify toleranced source material, not fictitious exact seams
 
-**Material interpretation: accepted; implementation and qualification pending.**
+**Scope: current source5/planner23 material interpretation and its proof design.** [ADR005](ADR005-native-first-development-geometry.md) supersedes this reconstruction as required material law for the pending native-first route. Current operating constraints remain until coherent activation; the native route must not claim the same independent original-source proof.
 Native M denotes the oriented original BREP with its admitted, bounded
 source-chart uncertainty. It is not the literal union of independently evaluated
 carrier patches that disagree inside that uncertainty. Stored STEP, BREP,
@@ -1945,7 +1945,7 @@ This RFC does not reserve or require new schema numbers for implementation cutov
 
 ## 15. Delivery order and acceptance contracts
 
-Execution is organized around a complete mechanical-part operator workflow, not a succession of isolated numerical fixes. The independently exported tapered fitting and rounded/filleted housing are leading examples, not production dispatch keys. G0–G3 and their full acceptance properties below remain required; this ordering does not narrow them.
+The preserved delivery design below organized complete mechanical-part workflows around original-source proof gates. ADR005 supersedes G0–G3 as required gates for the adopted native-first route; these sections remain a reference for current source5 constraints and the earlier parity design, not permission to resume its proof R&D or claim unexercised support. The unchanged bracket and protected existing operators must instead qualify ADR005's coherent native-material cutover.
 
 | Priority | Integrated deliverable | Exit condition |
 | --- | --- | --- |
