@@ -157,6 +157,7 @@ pub(super) fn intersect(
         };
         let outward = face_orientation(brep, face_id)?;
         let mut events = Vec::new();
+        let mut boundary_root_free_side: Option<i8> = None;
         for &loop_id in &face.loops {
             let loop_ = topology(brep.loop_(loop_id))?;
             let lu_id = loop_
@@ -227,12 +228,19 @@ pub(super) fn intersect(
                         bound.set(bound.get().min(correspondence_allowance));
                     }
                 }
+                let mut boundary_side = 0;
                 let chart_roots = roots::isolate(
                     std::iter::once([0.0, 1.0]),
                     &mut |range, work, cancel| {
                         let (position, derivative, _, _) = binding.evaluate(range, work, cancel)?;
+                        let value = functional(position, plane);
+                        if range == [0.0, 1.0] {
+                            // Reuse the complete coedge enclosure. A sampled
+                            // endpoint or an empty root list supplies no side.
+                            boundary_side = sign(value);
+                        }
                         Ok(ScalarJet {
-                            value: functional(position, plane),
+                            value,
                             derivative: dot(derivative, plane.normal),
                         })
                     },
@@ -241,6 +249,11 @@ pub(super) fn intersect(
                     work,
                     cancel,
                 )?;
+                boundary_root_free_side = Some(match boundary_root_free_side {
+                    None => boundary_side,
+                    Some(previous) if previous == boundary_side => previous,
+                    Some(_) => 0,
+                });
                 let mut native_index = 0;
                 for chart_root in chart_roots {
                     let root_index = edge_roots
@@ -331,6 +344,15 @@ pub(super) fn intersect(
             event.crossing *= dependent_sign * if axis == 1 { 1 } else { -1 };
         }
         if events.is_empty() {
+            // The complete carrier has a strict height derivative. On the
+            // compact native face a height extremum therefore lies on its
+            // boundary. If all complete boundary curves are strictly on one
+            // side, the trimmed face has no root, even when the inflated
+            // carrier box does. This also requires periodic boundaries to
+            // agree; a cylinder cut between its caps cannot pass this gate.
+            if boundary_root_free_side.is_some_and(|side| side != 0) {
+                continue;
+            }
             // A necessary root overcover is not root-existence authority. Before
             // requiring trim incidences, try complete coefficient exclusion at
             // finer parameter resolution; absent crossings alone grants nothing.

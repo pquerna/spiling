@@ -1324,10 +1324,17 @@ async fn equivalent_world_planes_preserve_sections_for_accepted_near_unit_poses(
         let Some(JobResult::Section { artifact_id }) = operation.result else {
             panic!("expected a native world section");
         };
-        let (_, loops) = section_loops(&mut client, artifact_id).await;
+        let (summary, loops) = section_loops(&mut client, artifact_id).await;
         assert_eq!(loops.len(), 1);
         assert!(!loops[0].0.is_hole);
-        let points = &loops[0].1;
+        let mut points = loops.into_iter().next().unwrap().1;
+        // Packed section points are relative to the captured plane origin.
+        // Compare physical cuts, not coordinates in different translated frames.
+        for point in &mut points {
+            for (coordinate, origin) in point.iter_mut().zip(summary.frame.origin_mm) {
+                *coordinate += origin;
+            }
+        }
         if let Some(expected) = &reference {
             assert_eq!(points.len(), expected.len());
             for (actual, expected) in points.iter().zip(expected) {
@@ -1339,7 +1346,7 @@ async fn equivalent_world_planes_preserve_sections_for_accepted_near_unit_poses(
                 }
             }
         } else {
-            reference = Some(points.clone());
+            reference = Some(points);
         }
         assert_eq!(scene(&mut client).await, captured);
     }

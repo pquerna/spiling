@@ -504,9 +504,13 @@ the reproduction inputs; report the SolidCore paths actually exercised and their
 explicit refusals before expanding support claims.
 
 Prepared native housing sections preserve material before/after the corner event
-and the pocket through the rounded cap under plane reversal. A necessary root
-overcover is not existence authority: a face without trim incidences is empty
-only after complete whole-coefficient exclusion, never from missing crossings.
+and the pocket through the rounded cap under plane reversal. A necessary carrier
+root overcover is not existence authority. A complete strict height derivative
+and whole native boundary coefficients on one strict side exclude the trimmed
+face even when its inflated carrier box crosses the plane. Otherwise, a face
+without trim incidences still requires complete carrier-root exclusion; missing
+crossings alone grant nothing. Packed section points are relative to the captured
+plane origin: compare physical cuts only after restoring that world origin.
 The unchanged ordinary housing, source-zoned centered physical plate, paired
 fine/genuine combined H1 and tapered fitting exercise SolidCore placement,
 Preflight, Compile, independent saved-byte Verify/export/save and byte-identical
