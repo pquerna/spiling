@@ -18,27 +18,32 @@ violation before they become upstream bug candidates.
 
 | Role | Exact identity |
 | --- | --- |
-| Upstream and fast-forwarded fork `main` | [`6969b491f82a8fe166d12c3e335e802c688cab7c`](https://github.com/tangency-labs/solidcore/commit/6969b491f82a8fe166d12c3e335e802c688cab7c) |
-| Maintained integration tip | [`b5d4012ea91df694a8b7657cf9d6f7725b18accb`](https://github.com/pquerna/solidcore/commit/b5d4012ea91df694a8b7657cf9d6f7725b18accb), branch [`pquerna/integration-spiling-tracking`](https://github.com/pquerna/solidcore/tree/pquerna/integration-spiling-tracking) |
-| Qualified Spiling consumer pin | [`b5d4012ea91df694a8b7657cf9d6f7725b18accb`](https://github.com/pquerna/solidcore/commit/b5d4012ea91df694a8b7657cf9d6f7725b18accb); both declarations in [`Cargo.toml`](../../Cargo.toml), their lockfile sources and `geometry::KERNEL_REVISION` agree |
+| Upstream and fast-forwarded fork `main` | [`7fc08a98c0e814f40908b45a6f3cf06b9ec390d7`](https://github.com/tangency-labs/solidcore/commit/7fc08a98c0e814f40908b45a6f3cf06b9ec390d7) |
+| Maintained integration tip | [`5d85d5818b144a3a115abb1cff21c23bf08de17e`](https://github.com/pquerna/solidcore/commit/5d85d5818b144a3a115abb1cff21c23bf08de17e), branch [`pquerna/integration-spiling-tracking`](https://github.com/pquerna/solidcore/tree/pquerna/integration-spiling-tracking) |
+| Qualified Spiling consumer pin | [`5d85d5818b144a3a115abb1cff21c23bf08de17e`](https://github.com/pquerna/solidcore/commit/5d85d5818b144a3a115abb1cff21c23bf08de17e); both declarations in [`Cargo.toml`](../../Cargo.toml), their lockfile sources and `geometry::KERNEL_REVISION` agree |
 
 Refreshing the fork does not automatically promote its moving tip into Spiling.
 Promotion requires native source/query controls and real engine/CLI consumer
 workflows, not merely a successful build. The current pin preserves fitting,
 ordinary housing, source-zoned physical plate and paired fine/genuine combined
 H1 compilation, independent verification, export and source-deleted recovery.
-These flows do not qualify the remaining bracket, finish or closed-spline gates.
+Housing/fitting/bracket native import, display and discrete sections also remain exercised. These flows do not qualify original-bracket manufacturing, the native-first material cutover or the remaining closed-spline gates.
 
 Keep upstream `Kernel::fixes` at its default opt-out policy; new optional fixes
 require their own consumer qualification. Retain the pinned SolidCraft
 `kernel-smlib` companion: its current `main` removes the consumed STEP stack and
 is not an interchangeable version upgrade.
 
-The standalone native tight-box query on imported housing is not qualified by
-this promotion. It is not the current Spiling coefficient-enclosure import path;
-never replace that path with a vertex hull or a failed tight-box fallback.
-Neither an unqualified query nor a consumer refusal independently establishes
-an upstream regression.
+Standalone native tight-box queries remain unqualified. Imported STEP-wrapped
+analytic faces also expose a concrete native point-classification limit:
+`BrepClassifier::point_3d_classify` refuses while constructing `BrepQuery`'s cache,
+through loose face bounds, with an unbound face-owned surface handle
+(`topology.face_p2`). Contextual face-cache preparation alone does not clear it.
+The current Spiling coefficient-enclosure import and source5 manufacturing paths
+do not consume this classifier. The upstream lazy-analytic query fixes do not
+establish that it works on these imports. Do not replace current paths with a
+vertex hull, ignored native error or failed tight-box fallback. A standalone
+valid-domain kernel reproducer is required before attributing an upstream defect.
 
 The integration contains inherited tessellator work plus the separate Spiling
 budget and STEP-copy overlays. Preserve the tessellator's original authors and
