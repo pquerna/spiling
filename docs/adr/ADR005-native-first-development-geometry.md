@@ -12,9 +12,11 @@ requirements. It does not declare the native cutover complete or broaden support
 STEP, finishes, processes or machines.
 
 Current production remains source5/planner24 with its existing material path and
-verification report. The native route is not active. Activation requires working
-trimmed-face classifier context, a coherent geometry cutover and preserved
-operators; do not publish a partial native owner or relabel current reports.
+verification report. The native route is not active. Activation requires a
+coherent geometry cutover, matching published dependency/producer identities
+and preserved qualified operators and source-safety controls; do not publish a
+partial native owner or relabel current reports. A stronger standalone native
+API is a prerequisite only when the actual consumer needs its contract.
 
 ## Decision
 
@@ -82,19 +84,30 @@ the pinned kernel/tolerance policy; no independent original-STEP topology or
 material-embedding certification**. Until then, runtime report text stays unchanged.
 
 The native-material semantic cutover is source6/planner25. Historical
-source5/planner23 exercised results remain valid for their recorded producer and
+source5/planner23–24 exercised results remain valid for their recorded producer and
 contract, not qualification for the new authority. Storage/binary generations do
 not change merely because this decision is adopted; executable constants own
 freshness and old artifacts must not acquire new authority by relabeling.
 
-Qualification requires the unchanged ribbed bracket with ordinary-housing intent
-and default automatic walls through Compile → fresh Verify → export, width edit
-and history, save and source-deleted recovery. Preserve the fitting, housing,
-physical plate, genuine H1 fine/combined and planar/full-cylinder finish operators.
-No easier fixture or intent substitutes. Record exact producer/input identity,
-resource observations, exercised stages and remaining refusals in commit/PR
-notes or ignored evidence. Those gates are requirements, **not performed results
-of this ADR**.
+Native-first activation and full W1 bracket qualification are separate gates.
+Preserve the fitting, ordinary housing, centered physical plate, genuine H1
+fine/combined and planar/full-cylinder finish operators, their relevant workbench
+flows, fresh verification/export/save and source-deleted recovery. Source identity,
+units, protected material/voids, closed-height scope, resource limits and
+cancellation remain required. No easier fixture, intent or all-fine substitute
+replaces these preserved positives.
+
+The original ribbed bracket remains explicitly unqualified for manufacturing.
+Its default-wall Compile → fresh Verify → export, useful variable width/count
+regions and junctions, width/history and source-deleted recovery remain the full
+W1 acceptance, not prerequisites for this native-first development activation.
+Do not add the missing material-sector incidence lemma to this cut or claim W1
+complete. Preserve honest refusals and the bracket's separate display/picking
+support.
+
+Record exact producer/input identity, resource observations, exercised stages
+and remaining refusals in commit/PR notes or ignored evidence. These gates are
+requirements, **not performed results of this ADR**.
 
 Programs remain **SOFTWARE VALIDATION ONLY, NOT MACHINE READY**. This decision
 provides no physical printability, adhesion/support, collision, calibration,
