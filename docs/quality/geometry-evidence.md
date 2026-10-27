@@ -10,11 +10,11 @@ Geometry has separate admission, inspection, display and material-proof boundari
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) adopts native-first
 DEVELOPMENT geometry, but implementation and operator qualification are pending.
-Current production remains source5/planner23. The source-realization details below
+Current production remains source5/planner24. The source-realization details below
 describe its operating constraints and evidence, not required independent
 original-STEP reconstruction for the adopted replacement. The
 [parity RFC](../adr/004-native-geometry-parity.md) is superseded on that authority.
-Current evidence does not transfer to source6/planner24. See
+Current evidence does not transfer to source6/planner25. See
 [manufacturing](manufacturing-evidence.md) for the compiler/replay boundary and
 [development](development.md) for build prerequisites. No geometry result
 establishes physical printability or machine readiness.
@@ -427,9 +427,9 @@ periodic. Preserve selector search separately from a wider evaluable turn cover.
 
 Realization identity 5 binds this selectable source recipe. Admitting an earlier
 PCurve can change the chosen chart and joint costs even when a later candidate
-previously succeeded. Current planner23 additionally binds selected-master finish
-support and continuing source-stroke width recovery; earlier programs cannot
-retain current inspection/export authority.
+previously succeeded. Current planner24 additionally binds selected-master finish
+support, continuing source-stroke width recovery and source-tube corner fitting;
+earlier programs cannot retain current inspection/export authority.
 
 Endpoint proposals include finite coefficient fences, midpoints and reference
 zero. Recheck representable candidates after Newton contraction: an initial

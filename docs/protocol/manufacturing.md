@@ -55,7 +55,7 @@ Required `rectilinear_axis` and independent `top_skin_axis` each use `"x"`, `"y"
 
 ## Normalized plan
 
-`NormalizedPrintPlan` uses schema11/planner23. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
+`NormalizedPrintPlan` uses schema11/planner24. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
 
 Native sampling and offset construction bounds are each 0.005 mm; finish XY construction has a separate 0.001 mm bound. The explicit recipe `native_shape_error_mm` bounds source-target approximation independently of those construction tolerances. Each mapped image additionally declares its own vertical displacement-error bound.
 
@@ -90,7 +90,7 @@ Count candidates require whole-arm width enclosures; a contained uniform-width a
 Existing sharp-corner count/completion fields retain priority. If none qualifies, a bounded alternative joins an inner contour's nominal-radius tangent ports with one straight bevel. Eligibility requires a literal convex source corner, affine segment feet, the already bracketed birth and finite ports inside its retained cell. Nominal width, lane depth, count and birth stay fixed; fine exterior contours are unchanged. Only the replaced source intervals disappear. Completion reduces the original birth-cap witness by the bevel's displacement and admitted endpoint/command error; it never borrows the former larger cap. The shared target, cumulative work allowance and independent coverage/dose/gradient/command gates do not reset between constructions.
 
 Ordinary adjacent source lanes, including same-side offsets, must pack their actual XYZ6 proposal chords. Packing reserves each immutable continuing endpoint radius against the opposite chord; uneven source subdivisions cannot independently spend the same clearance. A fitted ordinary capsule is contained in the original connected sweep: its radius plus a conservative bidirectional chain-to-chord distance cannot exceed the original minimum radius. Convex distance on every original chord and continuous projection of the connected chain establish that distance; a centerline error tube at unchanged minimum width is not containment. The same total0.0024 mm fit enclosure, process floor, endpoints and support/ordinal ownership remain. A centered fit, even at constant width, requires the complete candidate capsule inside a source permission declared before beads; independent D/R qualification still applies.
-Short-tail repartition may split an original source edge at a finite interior fraction, but retains its original parameter interval, geometric/width enclosures and cumulative source correspondence. Fitted endpoints still obey the continuing original width field.
+Short-tail fitting may split original source edges at finite interior fractions while retaining a complete, ordered partition of their geometry and width fields. A curved corner may propose three commands with shared joins off the source polyline; its end tangents propose coordinates, not material authority. Every original interval and both command-endpoint displacements enter the same bidirectional fit enclosure. Ordinary inward containment or an independently admitted centered-fit corridor, unchanged minimum command length, width gradients and support/ordinal obligations still qualify each command. Lookahead is bounded by the command minimum and the existing source walk; it neither moves open path endpoints nor drops source intervals.
 
 Qualification independently compares commanded inner/outer occupancy with original D/R and protected holes, preserving native/C and certified image-only exceptions. Inward rounded-corner/endcap/local-joint underfill is bounded by nozzle/4 in extent and2% per required component, with component/arm protection. Source-derived junction/count permissions bound local excess by `.5*(valence-1)*max_width²`, with5% aggregate required-band excess and no duplicate credit where permissions overlap. Local dose compares summed clipped finite-command rectangles with the clipped union of nominal command capsules, never separately summed endcaps or an inferred smooth-tube area. A nonfolding turn or same-path label grants no exemption. Positive XYZ6 collinear duplicate, partial, reversed and cyclic retraces fail independently of area accounting. Existing0.005 mm geometric policies are not enlarged.
 
@@ -202,7 +202,7 @@ Preflight admits exact native face metadata and process bounds, expands conserva
 
 `ManufacturingProvenance` contains `project_id`, captured `input_revision`, `input_hash`, `definitions:StoredDefinition[]`, `occurrences:OccurrenceRecord[]`, explicit `intent`, full ordered `surface_overlays` and `process_document`, `surface_images:SurfaceImageContent[]`, `kernel:{name,version,revision}`, and explicit planner/emitter/verifier versions. The bounded unique image content table contains canonical PGM bytes once per referenced image, including disabled layers, making exported provenance self-contained. Immutable capture shares canonical content. Inspection/status provenance contains metadata only. Captured source labels/units/uncertainty remain authoritative; native reimport labels must not replace them.
 
-Current production uses source5/planner23 material admission. Its source-relative
+Current production uses source5/planner24 material admission. Its source-relative
 realization and completed source/union receipts describe that implementation,
 not a permanent requirement to independently reconstruct original STEP material.
 The adopted [native-first DEVELOPMENT decision](../adr/ADR005-native-first-development-geometry.md)
@@ -210,7 +210,7 @@ will replace that path with the imported SolidCore BREP as the single material
 authority. Implementation and operator qualification are pending; the current
 runtime verification report remains unchanged until coherent activation.
 
-In current source5/planner23, Native M retains original-material realization
+In current source5/planner24, Native M retains original-material realization
 contract `1`: immutable source topology/coefficients, identity-bound seam/vertex
 realization inside admitted source uncertainty and the same versioned
 source-relative recipe across slab queries. Completed source/union authority
@@ -238,8 +238,8 @@ topology/embedding certificate. Use the existing kernel/planner identity and
 report coverage/limitations, without a parallel schema.
 
 Producer/kernel versions are checked independently of the authoring input hash.
-The source6/planner24 native-material activation requires a coherent cutover and
-fresh operator qualification; existing source5/planner23 evidence does not
+The source6/planner25 native-material activation requires a coherent cutover and
+fresh operator qualification; existing source5/planner23 or planner24 evidence does not
 transfer and older bundles cannot be relabeled into new authority. Realized D,
 continuous occupancy and actual deposited anchors retain separate dependencies.
 
@@ -269,7 +269,7 @@ An independent verifier decodes command state from emitted bytes, not emitter he
 
 Current Cartesian XYZ admission binds independently parsed coordinates to the checked XYZ6 projection of each captured expected point. Raw-plan half-step tolerance cannot authorize an alternate neighboring lattice point. The explicit `contracts::manufacturing::program_coordinates` module owns this fixed output precision, coordinate-conditioning range and outward decimal/height enclosures; backend serialization and verifier command parsing remain independent. Projection multiplies the binary64 input by `1_000_000`, rounds ties away from zero, divides by `1_000_000` and normalizes signed zero; it is not exact-real decimal rounding of the original input. Accepted absolute coordinates are at most `2^52 / 1_000_000` mm, preserving distinct adjacent parsed micrometre lattice points. Compensated gap subtraction checks every intermediate and its outward result for finiteness. Unrepresentable arithmetic refuses with `program_coordinate_conditioning_failure`, not a widened clearance tolerance.
 
-Current inspection/reopen requires planner23, which binds source-continuation wall-width recovery as well as selected-master-preserving finish admission. Input fingerprints bind complete ordered authoring documents, source/pose and explicit printer/recipe policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, Wall and mixed skin ownership, permanent plate extent/attachment and actual lower Bridge/rib anchors; it does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3, emitter7/verifier9 and SPLR5 form one consumed cutover without aliases or missing-policy defaults.
+Current inspection/reopen requires planner24, which binds complete source-tube minimum-command fitting as well as source-continuation wall-width recovery and selected-master-preserving finish admission. Input fingerprints bind complete ordered authoring documents, source/pose and explicit printer/recipe policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, Wall and mixed skin ownership, permanent plate extent/attachment and actual lower Bridge/rib anchors; it does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3, emitter7/verifier9 and SPLR5 form one consumed cutover without aliases or missing-policy defaults.
 
 Final normalized-plan admission checks ordinary projected axes during its existing coordinate pass. Independent fresh verification separately checks preferred perimeter seam dot/distance/coordinate ordering before matching actual emitted commands. A mutually matching program and plan that ignore either consumed policy do not earn semantic success; stored `verified` metadata remains descriptive.
 

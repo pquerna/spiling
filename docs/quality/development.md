@@ -50,7 +50,7 @@ crates are optimized independently of the desktop stack.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) adopts native-first
 DEVELOPMENT geometry: one imported SolidCore BREP, exact kernel/tolerance binding,
 original STEP identity/provenance and original finish inputs. Implementation and
-operator qualification are pending; source5/planner23 remains production. Keep
+operator qualification are pending; source5/planner24 remains production. Keep
 current operating limits and operators until a coherent cutover; do not publish a
 partial native owner or relabel current runtime reports/evidence.
 

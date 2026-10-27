@@ -19,8 +19,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// Binds source, finish and continuing source-stroke wall-width admission.
-pub const PLANNER_VERSION: &str = "23";
+/// Binds source, finish, width and source-tube minimum-command fitting admission.
+pub const PLANNER_VERSION: &str = "24";
 pub const EMITTER_VERSION: &str = "7";
 pub const VERIFIER_VERSION: &str = "9";
 

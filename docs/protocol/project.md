@@ -115,7 +115,7 @@ target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project ins
   --appearance-report "$work/reopened-report.json" --appearance-compare
 ```
 
-`--appearance-accept-report` explicitly accepts a complete report without selecting a candidate; it is not a reserved candidate-key sentinel. `--appearance-limits FILE` supplies strict `max_visited`/`max_alternatives` JSON after a target. Exports use the shared exclusive output transaction and commit only after observed child reap. Inspect opens fresh read-only and uses captured assets after source deletion. Project10/manufacturing11/process3/surface3/SPLR5 remain unchanged; current producer freshness uses planner23/emitter7/verifier9.
+`--appearance-accept-report` explicitly accepts a complete report without selecting a candidate; it is not a reserved candidate-key sentinel. `--appearance-limits FILE` supplies strict `max_visited`/`max_alternatives` JSON after a target. Exports use the shared exclusive output transaction and commit only after observed child reap. Inspect opens fresh read-only and uses captured assets after source deletion. Project10/manufacturing11/process3/surface3/SPLR5 remain unchanged; current producer freshness uses planner24/emitter7/verifier9.
 
 ## Writer ownership and reader snapshots
 

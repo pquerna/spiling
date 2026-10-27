@@ -13,13 +13,13 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
 [native-first decision](../adr/ADR005-native-first-development-geometry.md) separate
 adopted authority from implementation and qualification.
 
-**Current production remains source5/planner23.** Native box/protected-bore,
-ordinary rounded housing, source-zoned centered plate, genuine H1 fine/combined,
-tapered fitting and narrow planar/full-cylinder finish workflows retain their
-recorded software evidence under that material path and exact producer. These
-results do not qualify the adopted source6/planner24 native-first route, original
-bracket, affected workbench or general mechanical-part support. Historical
-Monstertruck evidence likewise retains its original producer.
+**Current production remains source5/planner24.** Its software operator scope is
+tapered fitting, ordinary rounded housing, source-zoned centered plate, genuine H1
+fine/combined and narrow planar/full-cylinder finish workflows. Box/protected-bore
+geometry retains the source5 boundary; manufacturing outputs require the current
+planner and fresh replay. These results do not qualify the adopted
+source6/planner25 native-first route, original bracket, affected workbench or
+general mechanical-part support. Historical evidence retains its exact producer.
 
 The native-first DEVELOPMENT cutover is adopted but not active or operator
 qualified. Its single material authority will be the imported SolidCore BREP,
@@ -27,7 +27,7 @@ with original STEP identity/provenance and original finish inputs preserved.
 Independent actual-program/process decoding remains mandatory, but does not
 independently certify original STEP topology/embedding. Runtime reports stay
 unchanged until coherent activation; proposed claims live in ADR005. The
-implementation descriptions below refer to current source5/planner23, not
+implementation descriptions below refer to current source5/planner24, not
 requirements to revive custom original-source material reconstruction.
 
 ## Entry points and immutable capture
@@ -375,7 +375,7 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project10/manufacturing11/process3/surface3, planner23,
+Current identities are project10/manufacturing11/process3/surface3, planner24,
 emitter7/verifier9 and SPLR5; executable constants and exact native pin remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.

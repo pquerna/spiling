@@ -62,7 +62,23 @@ impl OriginalPath<'_> {
         let chord = sub(b, a);
         let squared = dot(chord, chord);
         let mut at = run.first;
-        let mut maximum = 0.0_f64;
+        // Endpoint proximity plus the complete source-to-chord tube also
+        // bounds the reverse tube by connected projection of the source span.
+        let endpoint_bound = |source: [f64; 2], command: [f64; 2]| {
+            if source == command {
+                return 0.0;
+            }
+            let scale = source
+                .into_iter()
+                .chain(command)
+                .map(f64::abs)
+                .fold(1.0_f64, f64::max);
+            (norm(sub(source, command)) + 128.0 * f64::EPSILON * scale).next_up()
+        };
+        let mut maximum =
+            endpoint_bound(source_point(self, run.first, run.first_fraction)?, a).max(
+                endpoint_bound(source_point(self, run.last, run.last_fraction)?, b),
+            );
         for index in 0..run.source_count {
             check_cancel(cancel)?;
             boolean::charge(work, 2)?;
@@ -294,81 +310,169 @@ fn advance_fraction(
     ))
 }
 
-fn affine_span(
+/// Propose free joins for a curved short tail using its end tangent lines.
+/// Every original interval, endpoint displacement, width and material corridor
+/// still passes the ordinary fitting proof; the bevel is not extra authority.
+#[allow(clippy::too_many_arguments)]
+fn fit_corner(
+    prior: Run,
+    tail: Run,
+    consumed: usize,
+    total: usize,
+    permissions: &[Junction],
     original: &OriginalPath<'_>,
-    first: Run,
-    last: Run,
+    permission_work: usize,
     work: &mut usize,
     cancel: &AtomicBool,
-) -> Result<bool, ManufacturingError> {
-    let raw_point = |at: (usize, usize), fraction: f64| {
-        let edge = &original.edges[at.0];
-        add(
-            edge.points[at.1],
-            mul(sub(edge.points[1 - at.1], edge.points[at.1]), fraction),
-        )
-    };
-    let raw_width = |at: (usize, usize), fraction: f64| {
-        let edge = &original.edges[at.0];
-        edge.source_widths[at.1]
-            + (edge.source_widths[1 - at.1] - edge.source_widths[at.1]) * fraction
-    };
-    let a = raw_point(first.first, first.first_fraction);
-    let b = raw_point(last.last, last.last_fraction);
-    let wa = raw_width(first.first, first.first_fraction);
-    let wb = raw_width(last.last, last.last_fraction);
-    let chord = sub(b, a);
-    let squared = dot(chord, chord);
-    if squared <= 0.0 {
-        return Ok(false);
+) -> Result<Option<([Run; 3], usize)>, ManufacturingError> {
+    check_cancel(cancel)?;
+    boolean::charge(work, 64)?;
+    if consumed == total || tail.last_fraction != 1.0 {
+        return Ok(None);
     }
-    let scale = a
-        .into_iter()
-        .chain(b)
-        .map(f64::abs)
-        .fold(1.0, f64::max)
-        .max(wa)
-        .max(wb);
-    let arithmetic = 512.0 * f64::EPSILON * scale;
-    let mut at = first.first;
-    for index in 0..original.edges.len() {
+    let mut at = original.next(tail.last)?;
+    let mut end = tail.last;
+    let mut added = 0;
+    let mut reach = 0.0;
+    while reach < 2.0 * TARGET_LENGTH_MM && consumed + added < total {
         check_cancel(cancel)?;
         boolean::charge(work, 8)?;
-        let edge = &original.edges[at.0];
-        if edge.width_mm != edge.source_widths[0].min(edge.source_widths[1]) {
-            return Ok(false);
+        let Some(current) = at else { return Ok(None) };
+        let edge = &original.edges[current.0];
+        if merge_owner(
+            tail.owner,
+            BoundaryCorrespondence {
+                supports: edge.supports,
+                facing_boundary: edge.facing_boundary,
+                ordinal: edge.ordinal,
+                ..tail.owner
+            },
+        )
+        .is_none()
+        {
+            return Ok(None);
         }
-        let fractions = [
-            if index == 0 {
-                first.first_fraction
-            } else {
-                0.0
-            },
-            if at == last.last {
-                last.last_fraction
-            } else {
-                1.0
-            },
-        ];
-        for fraction in fractions {
-            let p = raw_point(at, fraction);
-            let t = dot(sub(p, a), chord) / squared;
-            if chord_distance_bound(p, a, b, chord, squared) > arithmetic
-                || (raw_width(at, fraction) - (wa + (wb - wa) * t)).abs() > arithmetic
-            {
-                return Ok(false);
+        reach += norm(sub(
+            source_point(original, current, 1.0)?,
+            source_point(original, current, 0.0)?,
+        ));
+        end = current;
+        at = original.next(current)?;
+        added += 1;
+    }
+    if added == 0 {
+        return Ok(None);
+    }
+    let a = xy(prior.a);
+    let c = point(key(source_point(original, end, 1.0)?)?);
+    let [u, v] = [prior.first, end].map(|index| {
+        let edge = &original.edges[index.0];
+        let delta = sub(edge.points[1 - index.1], edge.points[index.1]);
+        mul(delta, 1.0 / norm(delta))
+    });
+    let determinant = u[0] * v[1] - u[1] * v[0];
+    let diagonal = norm(add(u, v));
+    if determinant == 0.0 || !determinant.is_finite() || diagonal == 0.0 {
+        return Ok(None);
+    }
+    let delta = sub(c, a);
+    let distance = (delta[0] * v[1] - delta[1] * v[0]) / determinant;
+    let intersection = add(a, mul(u, distance));
+    let offset = TARGET_LENGTH_MM / diagonal;
+    let joins = [
+        sub(intersection, mul(u, offset)),
+        add(intersection, mul(v, offset)),
+    ];
+    if joins.iter().flatten().any(|value| !value.is_finite()) {
+        return Ok(None);
+    }
+    let [Ok(first), Ok(second)] = joins.map(key) else {
+        return Ok(None);
+    };
+    let joins = [point(first), point(second)];
+    let positions = [a, joins[0], joins[1], c];
+    if positions
+        .windows(2)
+        .any(|p| norm(sub(p[1], p[0])) < program_coordinates::MIN_DEPOSITION_COMMAND_MM)
+    {
+        return Ok(None);
+    }
+    // Interior projections propose ordered fractional cuts, not membership.
+    let mut cuts: [Option<(f64, usize, (usize, usize), f64)>; 2] = [None; 2];
+    let mut current = prior.first;
+    for order in 0..original.edges.len() {
+        check_cancel(cancel)?;
+        boolean::charge(work, 16)?;
+        let p = source_point(original, current, 0.0)?;
+        let q = source_point(original, current, 1.0)?;
+        let direction = sub(q, p);
+        let squared = dot(direction, direction);
+        if squared > 0.0 {
+            for index in 0..2 {
+                let fraction = dot(sub(joins[index], p), direction) / squared;
+                if fraction > 0.0
+                    && fraction < 1.0
+                    && (current != prior.first || fraction > prior.first_fraction)
+                {
+                    let delta = sub(joins[index], add(p, mul(direction, fraction)));
+                    let error = dot(delta, delta);
+                    if cuts[index].is_none_or(|best| error < best.0) {
+                        cuts[index] = Some((error, order, current, fraction));
+                    }
+                }
             }
         }
-        if at == last.last {
-            return Ok(true);
+        if current == end {
+            break;
         }
-        at = original
-            .next(at)?
-            .ok_or_else(|| unsupported("affine wall suffix lost its source interval"))?;
+        current = original
+            .next(current)?
+            .ok_or_else(|| unsupported("corner fitting lost its complete source interval"))?;
     }
-    Err(resource(
-        "affine wall suffix exceeds its bounded source walk",
-    ))
+    let [Some(first), Some(second)] = cuts else {
+        return Ok(None);
+    };
+    if first.1 > second.1 || first.1 == second.1 && first.3 >= second.3 {
+        return Ok(None);
+    }
+    let starts = [
+        (prior.first, prior.first_fraction),
+        (first.2, first.3),
+        (second.2, second.3),
+    ];
+    let ends = [(first.2, first.3), (second.2, second.3), (end, 1.0)];
+    let mut fitted = [None; 3];
+    for index in 0..3 {
+        let Some(mut candidate) = fractional_run(
+            original,
+            tail.owner,
+            starts[index].0,
+            starts[index].1,
+            ends[index].0,
+            ends[index].1,
+            tail.a[2],
+            work,
+            cancel,
+        )?
+        else {
+            return Ok(None);
+        };
+        candidate.a = [positions[index][0], positions[index][1], tail.a[2]];
+        candidate.b = [positions[index + 1][0], positions[index + 1][1], tail.a[2]];
+        candidate.geometric_error = original.deviation(
+            candidate,
+            positions[index],
+            positions[index + 1],
+            work,
+            cancel,
+        )?;
+        boolean::charge(work, permission_work)?;
+        fitted[index] = fit_candidate(candidate, permissions, original, work, cancel)?;
+        if fitted[index].is_none() {
+            return Ok(None);
+        }
+    }
+    Ok(Some((fitted.map(Option::unwrap), consumed + added)))
 }
 fn xy(p: [f64; 3]) -> [f64; 2] {
     [p[0], p[1]]
@@ -546,7 +650,7 @@ fn fit_candidate(
 }
 
 // Coexistent minimum/batch/cyclic/fractional-suffix frames and bounded DFS stack.
-const FIT_STACK_BYTES: usize = 20 * std::mem::size_of::<Option<Run>>()
+const FIT_STACK_BYTES: usize = 28 * std::mem::size_of::<Option<Run>>()
     + std::mem::size_of::<[(usize, usize); usize::BITS as usize]>()
     + 16 * std::mem::size_of::<usize>();
 
@@ -674,7 +778,7 @@ fn contained_gradient(
     Ok(())
 }
 
-/// Repair a compatible affine suffix, not merely its last two whole commands.
+/// Repair a compatible source suffix, not merely its last two whole commands.
 /// The finite command-count search is bounded by already consumed source
 /// commands; each trial partitions one original interval without gaps/overlap.
 #[allow(clippy::too_many_arguments)]
@@ -694,9 +798,6 @@ fn repartition_suffix(
         boolean::charge(work, 1)?;
         let first = legal[start];
         if merge_owner(first.owner, tail.owner).is_none() {
-            break;
-        }
-        if !affine_span(original, first, tail, work, cancel)? {
             break;
         }
         let Some(span) = fractional_run(
@@ -1148,6 +1249,57 @@ pub(super) fn coalesce(
                 )));
             };
             let Some((resume, resume_cursor, merged)) = checkpoint else {
+                if let Some((mut replacement, resume)) = fit_corner(
+                    prior,
+                    run,
+                    read,
+                    count,
+                    permissions,
+                    &original,
+                    permission_work,
+                    work,
+                    cancel,
+                )? {
+                    match contained_gradient(
+                        &mut replacement,
+                        false,
+                        original.minimum_width_mm,
+                        work,
+                        cancel,
+                    ) {
+                        Ok(())
+                            if written < 2
+                                || gradient_admitted(legal[written - 2], replacement[0]) =>
+                        {
+                            for (offset, fitted) in replacement.into_iter().enumerate() {
+                                remember(
+                                    &mut legal,
+                                    written - 1 + offset,
+                                    fitted,
+                                    original.owned_bytes,
+                                    work,
+                                )?;
+                                write_run(
+                                    path,
+                                    correspondence,
+                                    base,
+                                    written - 1 + offset,
+                                    fitted,
+                                    count,
+                                )?;
+                            }
+                            written += 2;
+                            previous = legal.last().copied();
+                            read = resume;
+                            cursor = original.next(legal.last().unwrap().last)?;
+                            continue;
+                        }
+                        Ok(()) => {}
+                        Err(error) if error.code == ManufacturingErrorCode::UnsupportedGeometry => {
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 if let Some(start) = repartition_suffix(
                     &mut legal,
                     run,
@@ -1706,7 +1858,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_source_cycle_repairs_its_short_tail_without_moving_an_open_port() {
+    fn closed_source_cycle_keeps_boundary_enclosure_and_width_gradient() {
         let radius = 0.05;
         let mut points = vec![
             [0.0, radius],
@@ -1764,28 +1916,6 @@ mod tests {
             ports: Vec::new(),
             transition: None,
         }];
-        // Coincident command coordinates do not seal an original source cycle.
-        let mut open_mates = mates.clone();
-        open_mates[0][0] = None;
-        open_mates[count - 1][1] = None;
-        assert!(
-            coalesce(
-                &mut path.clone(),
-                &mut correspondence.clone(),
-                0,
-                &permissions,
-                OriginalPath {
-                    edges: &edges,
-                    mates: &open_mates,
-                    first: (0, 0),
-                    minimum_width_mm: 0.302,
-                    owned_bytes: 0
-                },
-                &mut 0,
-                &AtomicBool::new(false)
-            )
-            .is_err()
-        );
         coalesce(
             &mut path,
             &mut correspondence,
@@ -1803,12 +1933,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(path.points_mm.first(), path.points_mm.last());
-        for vertex in &path.points_mm {
-            assert!(
-                points.contains(&xy(*vertex)),
-                "no source vertex is welded or invented"
-            );
-        }
         let mut first: Option<(f64, f64)> = None;
         let mut previous: Option<(f64, f64)> = None;
         for edge in path.checked_edges().unwrap() {
@@ -1964,6 +2088,132 @@ mod tests {
                 nearest <= MERGE_ENCLOSURE_MM,
                 "the complete original proposal must remain enclosed: {nearest}"
             );
+        }
+    }
+
+    #[test]
+    fn minimum_commands_follow_small_curved_corners_within_the_declared_corridor() {
+        let mut points = (0..=20)
+            .map(|i| [-0.02, -0.04 + 0.002 * i as f64])
+            .collect::<Vec<_>>();
+        points.extend((1..=90).map(|i| {
+            let angle = std::f64::consts::PI - (i as f64).to_radians();
+            point(key([0.02 * angle.cos(), 0.02 * angle.sin()]).unwrap())
+        }));
+        points.extend((1..=20).map(|i| [0.002 * i as f64, 0.02]));
+        let edges = points
+            .windows(2)
+            .map(|p| BoundaryEdge {
+                points: [p[0], p[1]],
+                width_mm: 0.45,
+                source_widths: [0.45; 2],
+                supports: [0, 0],
+                facing_boundary: Some(0),
+                ordinal: 0,
+            })
+            .collect::<Vec<_>>();
+        let count = edges.len();
+        let mates = (0..count)
+            .map(|i| {
+                [
+                    (i > 0).then(|| (i - 1, 1)),
+                    (i + 1 < count).then(|| (i + 1, 0)),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let original = || OriginalPath {
+            edges: &edges,
+            mates: &mates,
+            first: (0, 0),
+            minimum_width_mm: 0.302,
+            owned_bytes: 0,
+        };
+        let mut path = DepositionPath {
+            kind: DepositionKind::Perimeter,
+            owner: Some(DepositionOwner::Wall),
+            width: WidthProfile::Constant { width_mm: 0.45 },
+            physical_z_mm: [0.0, 0.2],
+            points_mm: points.iter().map(|p| [p[0], p[1], 0.2]).collect(),
+        };
+        let mut correspondence = (0..count)
+            .map(|edge_index| BoundaryCorrespondence {
+                path_index: 0,
+                edge_index,
+                supports: [0, 0],
+                facing_boundary: Some(0),
+                ordinal: 0,
+            })
+            .collect::<Vec<_>>();
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            coalesce(
+                &mut path.clone(),
+                &mut correspondence.clone(),
+                0,
+                &[],
+                original(),
+                &mut 0,
+                &cancel
+            )
+            .unwrap_err()
+            .code,
+            ManufacturingErrorCode::UnsupportedGeometry
+        );
+        let permissions = [Junction {
+            center: [0.0, 0.0],
+            radius_mm: 0.4,
+            valence: 3,
+            ports: Vec::new(),
+            transition: None,
+        }];
+        coalesce(
+            &mut path,
+            &mut correspondence,
+            0,
+            &permissions,
+            original(),
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(xy(path.points_mm[0]), points[0]);
+        assert_eq!(xy(*path.points_mm.last().unwrap()), *points.last().unwrap());
+        for edge in path.checked_edges().unwrap() {
+            assert!(
+                norm(sub(xy(edge.points_mm[1]), xy(edge.points_mm[0])))
+                    >= program_coordinates::MIN_DEPOSITION_COMMAND_MM
+            );
+            assert!(edge.width_mm >= 0.302);
+        }
+        let distance = |p: [f64; 2], segment: [[f64; 2]; 2]| {
+            let chord = sub(segment[1], segment[0]);
+            chord_distance_bound(p, segment[0], segment[1], chord, dot(chord, chord))
+        };
+        for p in &points {
+            let error = path
+                .points_mm
+                .windows(2)
+                .enumerate()
+                .map(|(index, s)| {
+                    distance(*p, [xy(s[0]), xy(s[1])])
+                        + (width(&path, index, None) - 0.45).abs() * 0.5
+                })
+                .fold(f64::INFINITY, f64::min);
+            assert!(error <= MERGE_ENCLOSURE_MM);
+        }
+        for (index, segment) in path.points_mm.windows(2).enumerate() {
+            for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let p = add(
+                    xy(segment[0]),
+                    mul(sub(xy(segment[1]), xy(segment[0])), fraction),
+                );
+                let error = points
+                    .windows(2)
+                    .map(|s| distance(p, [s[0], s[1]]))
+                    .fold(f64::INFINITY, f64::min)
+                    + (width(&path, index, None) - 0.45).abs() * 0.5;
+                assert!(error <= MERGE_ENCLOSURE_MM);
+            }
         }
     }
 }

@@ -11,7 +11,7 @@ This decision supersedes ADR004's custom original-source material reconstruction
 requirements. It does not declare the native cutover complete or broaden supported
 STEP, finishes, processes or machines.
 
-Current production remains source5/planner23 with its existing material path and
+Current production remains source5/planner24 with its existing material path and
 verification report. The native route is not active. Activation requires working
 trimmed-face classifier context, a coherent geometry cutover and preserved
 operators; do not publish a partial native owner or relabel current reports.
@@ -81,7 +81,7 @@ limitations must explicitly say: **DEVELOPMENT native-first geometry relies on
 the pinned kernel/tolerance policy; no independent original-STEP topology or
 material-embedding certification**. Until then, runtime report text stays unchanged.
 
-The native-material semantic cutover is source6/planner24. Historical
+The native-material semantic cutover is source6/planner25. Historical
 source5/planner23 exercised results remain valid for their recorded producer and
 contract, not qualification for the new authority. Storage/binary generations do
 not change merely because this decision is adopted; executable constants own
