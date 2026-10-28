@@ -19,8 +19,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// Binds source, finish, width and source-tube minimum-command fitting admission.
-pub const PLANNER_VERSION: &str = "24";
+/// Binds native BREP material authority, finishes and source-associated walls.
+pub const PLANNER_VERSION: &str = "25";
 pub const EMITTER_VERSION: &str = "7";
 pub const VERIFIER_VERSION: &str = "9";
 

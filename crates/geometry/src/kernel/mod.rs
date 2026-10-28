@@ -344,94 +344,43 @@ impl SourceChartCertificate {
     }
 }
 
-/// Source-relative realization recipe identity, independent of slabs, poses,
-/// adaptive proof cells and available work. This descriptor grants no collar
-/// or endpoint completion authority.
-///
-/// Version 3 uses the selected ORIGINAL spatial-provider range for 1/1024
-/// collar and initial endpoint supports, with the normalized bubble on that
-/// range. Complete original-source comparison costs participate in immutable
-/// endpoint fraction admission before any posed query. Endpoint completion
-/// remains anchored to authored original STEP vertex points.
-/// Native incidence/ranges remain separate; every consumer proves this recipe.
-#[derive(Clone, Copy)]
-pub(crate) struct OriginalMaterialRealization<'a> {
-    definition: &'a Definition,
-}
-
-/// The actual implemented realization variant. A future carrier-law recipe
-/// requires its complete source-only selector and shared vertex plan before it
-/// can acquire a distinct identity; an unimplemented plan is not a variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MaterialRealizationVariant {
-    OriginalSpatialGTransport,
-}
-
-/// Owned recipe descriptor carried alongside a capture's existing immutable
-/// definition ID. Exact bit equality preserves absent allowance and every
-/// source-relative recipe parameter without floating-point tolerance matching.
+/// Captured native-material producer identity. Original STEP uncertainty remains
+/// provenance; there is no reconstructed collar or vertex-completion recipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MaterialRealizationIdentity {
     version: u32,
-    variant: MaterialRealizationVariant,
-    source_allowance_bits: Option<u64>,
-    collar_parameter_fraction_bits: u64,
-    endpoint_support_fraction_bits: u64,
+    source_uncertainty_bits: Option<u64>,
 }
 impl MaterialRealizationIdentity {
     pub(crate) fn new(definition: &Definition) -> Self {
-        Self::with_allowance(definition.provenance.uncertainty_mm)
+        Self::with_source_uncertainty(definition.provenance.uncertainty_mm)
     }
-    pub(crate) fn with_allowance(source_allowance_mm: Option<f64>) -> Self {
+    pub(crate) fn with_source_uncertainty(source_uncertainty_mm: Option<f64>) -> Self {
         Self {
-            version: 5,
-            variant: MaterialRealizationVariant::OriginalSpatialGTransport,
-            source_allowance_bits: source_allowance_mm.map(f64::to_bits),
-            collar_parameter_fraction_bits: (1.0_f64 / 1024.0).to_bits(),
-            endpoint_support_fraction_bits: (1.0_f64 / 1024.0).to_bits(),
+            version: 6,
+            source_uncertainty_bits: source_uncertainty_mm.map(f64::to_bits),
         }
     }
-    /// Fixed canonical hash input, not a persisted wire representation.
-    pub(crate) fn identity_bytes(self) -> [u8; 30] {
-        let mut bytes = [0; 30];
+    /// Canonical cache hash input, not a persisted binary representation.
+    pub(crate) fn identity_bytes(self) -> [u8; 53] {
+        let mut bytes = [0; 53];
         bytes[..4].copy_from_slice(&self.version.to_le_bytes());
-        bytes[4] = match self.variant {
-            MaterialRealizationVariant::OriginalSpatialGTransport => 0,
-        };
-        bytes[5] = u8::from(self.source_allowance_bits.is_some());
-        bytes[6..14].copy_from_slice(&self.source_allowance_bits.unwrap_or(0).to_le_bytes());
-        bytes[14..22].copy_from_slice(&self.collar_parameter_fraction_bits.to_le_bytes());
-        bytes[22..30].copy_from_slice(&self.endpoint_support_fraction_bits.to_le_bytes());
+        bytes[4] = u8::from(self.source_uncertainty_bits.is_some());
+        bytes[5..13].copy_from_slice(&self.source_uncertainty_bits.unwrap_or(0).to_le_bytes());
+        for (chunk, value) in bytes[13..].chunks_exact_mut(8).zip([
+            KERNEL_ZONE_TOLERANCE_MM,
+            KERNEL_INTERSECTION_TOLERANCE_MM,
+            KERNEL_APPROXIMATION_TOLERANCE_MM,
+            KERNEL_ANGULAR_TOLERANCE_DEGREES,
+            KERNEL_MODEL_SIZE_ESTIMATE_MM,
+        ]) {
+            chunk.copy_from_slice(&value.to_bits().to_le_bytes());
+        }
         bytes
     }
 }
 
-impl<'a> OriginalMaterialRealization<'a> {
-    pub(crate) fn new(definition: &'a Definition) -> Self {
-        Self { definition }
-    }
-    pub(crate) fn identity(&self) -> MaterialRealizationIdentity {
-        MaterialRealizationIdentity::new(self.definition)
-    }
-    pub(crate) fn collar_parameter_fraction(&self) -> f64 {
-        f64::from_bits(self.identity().collar_parameter_fraction_bits)
-    }
-    pub(crate) fn endpoint_support_fraction(&self) -> f64 {
-        f64::from_bits(self.identity().endpoint_support_fraction_bits)
-    }
-}
-
 impl Definition {
-    /// Zero transport is a coefficient theorem, not a small residual or a
-    /// source-family assertion. This narrow lane also proves every original
-    /// curve endpoint equals its actual normalized topology vertex.
-    pub(crate) fn material_transport_is_proved_zero(
-        &self,
-        work: &mut crate::GeometryWorkBudget,
-        cancel: &std::sync::atomic::AtomicBool,
-    ) -> Result<bool, crate::GeometryError> {
-        crate::analysis::certify_zero_material_transport(self, work, cancel)
-    }
     /// Prepares the actual retained native edge law. Original STEP operands have
     /// their own provider and must not be silently substituted for this binding.
     pub(crate) fn prepare_boundary_curve<'a>(
@@ -523,12 +472,6 @@ impl Definition {
         &self.brep
     }
 
-    /// Mutable borrow of the underlying solidcore B-Rep.
-    #[inline]
-    pub(crate) fn brep_mut(&mut self) -> &mut solidcore::Brep {
-        &mut self.brep
-    }
-
     /// Primary shell ID of this solid.
     #[inline]
     pub fn shell_id(&self) -> solidcore::topology::ShellId {
@@ -610,14 +553,24 @@ impl Definition {
     }
 }
 
+/// Native query coincidence tolerance; individual BREP entity tolerances remain
+/// separate captured import data, not an independent original-source proof.
+pub const KERNEL_ZONE_TOLERANCE_MM: f64 = 1.0e-6;
+/// Native surface/curve intersection tolerance.
+pub const KERNEL_INTERSECTION_TOLERANCE_MM: f64 = 2.0e-6;
+/// Native approximation tolerance.
+pub const KERNEL_APPROXIMATION_TOLERANCE_MM: f64 = 5.0e-7;
+const KERNEL_ANGULAR_TOLERANCE_DEGREES: f64 = 1.0e-6;
+const KERNEL_MODEL_SIZE_ESTIMATE_MM: f64 = 100.0;
+
 /// Constructs a deterministic thread-isolated `solidcore::Kernel` context with Spiling mm tolerances.
 pub fn make_kernel_context() -> solidcore::Kernel {
     let mut tolerances = solidcore::Tolerances::default();
-    tolerances.zone_tol_3d = 1.0e-6; // 1 um coincidence threshold
-    tolerances.xsect_tol_3d = 2.0e-6; // 2 * zone_tol
-    tolerances.approx_tol_3d = 5.0e-7; // zone_tol / 2
-    tolerances.ang_tol_deg = 1.0e-6; // tight angular tolerance in degrees
-    tolerances.model_size_estimate = 100.0; // 100 mm CAM part scale
+    tolerances.zone_tol_3d = KERNEL_ZONE_TOLERANCE_MM;
+    tolerances.xsect_tol_3d = KERNEL_INTERSECTION_TOLERANCE_MM;
+    tolerances.approx_tol_3d = KERNEL_APPROXIMATION_TOLERANCE_MM;
+    tolerances.ang_tol_deg = KERNEL_ANGULAR_TOLERANCE_DEGREES;
+    tolerances.model_size_estimate = KERNEL_MODEL_SIZE_ESTIMATE_MM;
 
     let options = solidcore::KernelOptions {
         tolerances,
@@ -707,46 +660,6 @@ impl std::fmt::Debug for Definition {
             .field("face_count", &self.faces.len())
             .field("bounds_mm", &self.bounds)
             .finish_non_exhaustive()
-    }
-}
-
-#[cfg(test)]
-mod zero_material_transport_tests {
-    use std::sync::atomic::AtomicBool;
-
-    #[test]
-    fn exact_normalized_box_endpoints_prove_zero_but_missing_receipt_cannot() {
-        let cancel = AtomicBool::new(false);
-        let mut definition = crate::from_step_bytes_with_cancel(
-            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
-            &cancel,
-        )
-        .unwrap();
-        let mut work = crate::GeometryWorkBudget::new(1_000_000);
-        assert!(
-            definition
-                .material_transport_is_proved_zero(&mut work, &cancel)
-                .unwrap()
-        );
-        assert_eq!(
-            definition
-                .material_transport_is_proved_zero(&mut work, &AtomicBool::new(true),)
-                .unwrap_err()
-                .code,
-            spiling_contracts::geometry::GeometryErrorCode::Cancelled,
-        );
-        assert_eq!(
-            definition
-                .material_transport_is_proved_zero(&mut crate::GeometryWorkBudget::new(0), &cancel,)
-                .unwrap_err()
-                .code,
-            spiling_contracts::geometry::GeometryErrorCode::ResourceLimit,
-        );
-        definition.original_source.faces.clear();
-        assert!(!matches!(
-            definition.material_transport_is_proved_zero(&mut work, &cancel),
-            Ok(true)
-        ));
     }
 }
 

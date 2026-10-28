@@ -474,6 +474,7 @@ fn fit_corner(
     }
     Ok(Some((fitted.map(Option::unwrap), consumed + added)))
 }
+
 fn xy(p: [f64; 3]) -> [f64; 2] {
     [p[0], p[1]]
 }

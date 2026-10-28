@@ -19,6 +19,7 @@ struct Demand {
     target: usize,
     failure: strokes::Failure,
 }
+
 pub(super) struct RasterCandidate {
     pub(super) paths: Vec<DepositionPath>,
     pub(super) whole_rows: Vec<DepositionPath>,
@@ -231,7 +232,7 @@ pub(super) fn component_admission<'a>(
     Ok(proof)
 }
 
-fn component_budget(
+pub(super) fn component_budget(
     retained: usize,
     owned_bytes: usize,
     scratch: usize,
@@ -362,6 +363,7 @@ fn merge_shared(
     live_units: usize,
     live_bytes: usize,
     work: &mut usize,
+    foreign_work: usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
@@ -378,7 +380,7 @@ fn merge_shared(
         *into = Arc::clone(&cached.result);
         return Ok(());
     }
-    charge_boolean(into, other, work, cancel)?;
+    charge_boolean(into, other, work, foreign_work, cancel)?;
     let mut result = into.material.union(&other.material);
     region::check_size(&result)?;
     region::canonicalize(&mut result);
@@ -406,10 +408,75 @@ pub(super) struct SupportInput<'a> {
     pub(super) sections: &'a [SectionSpan],
     pub(super) schedule: &'a [super::LayerElevation],
     pub(super) native_points: usize,
-    /// Fixed outside owners, including the frozen cache and layer record array,
-    /// but excluding every layer's mutable path and coverage payloads.
+    /// Outside owners, including the frozen cache and layer record array,
+    /// but excluding every layer's mutable path and coverage payloads. The
+    /// projection callback refreshes the native proof component after compaction.
     pub(super) native_owned_bytes: usize,
     pub(super) recipe: &'a PlanarPrintRecipe,
+}
+
+#[derive(Default)]
+pub(super) struct SupportWork {
+    pub(super) planar: usize,
+    /// Support-owned subset of planar work, excluding object raster/skins.
+    /// This receipt survives every compile-local schedule retry.
+    pub(super) support_owned: usize,
+    pub(super) anchors: usize,
+}
+
+impl SupportWork {
+    fn foreign_work(&self) -> Result<usize, ManufacturingError> {
+        self.planar.checked_sub(self.support_owned).ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "support work-domain accounting mismatch",
+            )
+        })
+    }
+
+    fn finish(
+        &mut self,
+        planar: usize,
+        foreign: usize,
+        anchors: usize,
+    ) -> Result<(), ManufacturingError> {
+        self.planar = planar;
+        self.anchors = anchors;
+        self.support_owned = planar.checked_sub(foreign).ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "support work-domain publication mismatch",
+            )
+        })?;
+        Ok(())
+    }
+}
+
+// Exclude foreign work from the local policy only. The actual global counter
+// is never reset, offset, refunded, or charged a second time.
+fn exclude_object_raster_work(
+    foreign: &mut usize,
+    before: usize,
+    after: usize,
+) -> Result<(), ManufacturingError> {
+    *foreign = after
+        .checked_sub(before)
+        .and_then(|charged| foreign.checked_add(charged))
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "object raster work-domain accounting mismatch",
+            )
+        })?;
+    Ok(())
+}
+
+pub(super) enum SupportAdmission {
+    Complete,
+    RefineUnreachableLayer {
+        index: usize,
+        failure: ManufacturingError,
+    },
 }
 
 // Anchors come only from actual deposited capsules. Corridor exclusion consumes
@@ -421,6 +488,8 @@ pub(super) fn realize(
     segments: &mut usize,
     cancel: &AtomicBool,
     native_work: &mut spiling_geometry::GeometryWorkBudget,
+    tentative: bool,
+    work_bank: &mut SupportWork,
     mut raster: impl FnMut(
         usize,
         region::HatchAxis,
@@ -428,11 +497,16 @@ pub(super) fn realize(
         usize,
         usize,
         usize,
+        &mut usize,
         Option<&mut super::classification::ComponentAnchorCheck<'_>>,
     ) -> Result<RasterCandidate, ManufacturingError>,
     mut project_voids: impl FnMut(
         &[[[f64; 2]; 2]],
         usize,
+        // Complete live bytes, followed by mutable native unit/byte receipts.
+        usize,
+        &mut usize,
+        &mut usize,
         &mut usize,
         &mut spiling_geometry::GeometryWorkBudget,
     ) -> Result<ProtectedVoidSet, ManufacturingError>,
@@ -443,192 +517,244 @@ pub(super) fn realize(
         &mut usize,
         usize,
     ) -> Result<bool, ManufacturingError>,
-) -> Result<(), ManufacturingError> {
-    let SupportInput {
-        sections,
-        schedule,
-        native_points,
-        native_owned_bytes,
-        recipe,
-    } = *input;
-    let width = recipe.bead_width_mm;
-    let mut demands: Vec<Demand> = Vec::new();
-    let mut constructed_points = layers.iter().try_fold(0usize, |total, layer| {
-        total
-            .checked_add(super::bonds::skin_command_fit_points(
-                &layer.skin_command_fits,
-            ))
+) -> Result<SupportAdmission, ManufacturingError> {
+    let mut work = work_bank.planar;
+    let mut anchor_work = work_bank.anchors;
+    let mut foreign_work = work_bank.foreign_work()?;
+    let outcome = (|| {
+        let SupportInput {
+            sections,
+            schedule,
+            mut native_points,
+            mut native_owned_bytes,
+            recipe,
+        } = *input;
+        let width = recipe.bead_width_mm;
+        let mut demands: Vec<Demand> = Vec::new();
+        let mut constructed_points = layers.iter().try_fold(0usize, |total, layer| {
+            total
+                .checked_add(super::bonds::skin_command_fit_points(
+                    &layer.skin_command_fits,
+                ))
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "initial skin command fit accounting overflow",
+                    )
+                })
+        })?;
+        let mut retained = native_points
+            .checked_add(constructed_points)
+            .filter(|n| *n <= super::MAX_RETAINED_GEOMETRY_UNITS)
             .ok_or_else(|| {
                 error(
                     ManufacturingErrorCode::ResourceLimit,
-                    "initial skin command fit accounting overflow",
+                    "initial skin command fit retained budget exceeded",
                 )
-            })
-    })?;
-    let mut retained = native_points
-        .checked_add(constructed_points)
-        .filter(|n| *n <= super::MAX_RETAINED_GEOMETRY_UNITS)
-        .ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "initial skin command fit retained budget exceeded",
-            )
-        })?;
-    let mut work = 0usize;
-    // Deposited-stroke comparisons are not polygon Boolean work.
-    let mut anchor_work = 0usize;
-    let mut anchors = AnchorWorkspace::default();
-    super::remaining_geometry_units(
-        retained,
-        native_owned_bytes
-            .saturating_add(layer_payload_bytes(layers.iter()))
-            .saturating_add(layers.len().saturating_mul(std::mem::size_of::<bool>())),
-    )?;
-    let mut joined_layers = vec![false; layers.len()];
-    let mut original_bridge_roles = Vec::new();
-    let mut owned_bytes = native_owned_bytes
-        .saturating_add(layer_payload_bytes(layers.iter()))
-        .saturating_add(joined_layers.capacity() * std::mem::size_of::<bool>());
-    anchors.set_budget(workspace_budget(retained, owned_bytes)?);
-    if let Some(first) = layers.first_mut() {
-        if !finalize_layer_interface(
-            0,
-            first,
-            segments,
-            &mut work,
-            owned_bytes.saturating_add(anchors.retained_bytes()),
-            &mut finalize_interface,
-        )? {
-            return Err(super::bonds::unresolved(first));
-        }
-    }
-    for index in 1..layers.len() {
-        owned_bytes = native_owned_bytes
-            + layer_payload_bytes(layers.iter())
-            + vec_bytes(&joined_layers)
-            + vec_bytes(&demands)
-            + vec_bytes(&original_bridge_roles);
-        anchors.set_budget(workspace_budget(retained, owned_bytes)?);
-        let (prior, remaining) = layers.split_at_mut(index);
-        let (layer, following) = remaining.split_first_mut().expect("current support layer");
-        check_cancel(cancel)?;
-        let mut interface_bound = finalize_layer_interface(
-            index,
-            layer,
-            segments,
-            &mut work,
-            owned_bytes.saturating_add(anchors.retained_bytes()),
-            &mut finalize_interface,
-        )?;
-        owned_bytes = native_owned_bytes
-            + layer_payload_bytes(
-                prior
-                    .iter()
-                    .chain(std::iter::once(&*layer))
-                    .chain(following.iter()),
-            )
-            + vec_bytes(&joined_layers)
-            + vec_bytes(&demands)
-            + vec_bytes(&original_bridge_roles);
-        anchors.set_budget(workspace_budget(retained, owned_bytes)?);
-        let authored_axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, layer.index);
-        let previous = prior[index - 1].paths.iter();
-        anchors.set_budget(workspace_budget(
+            })?;
+        let mut anchors = AnchorWorkspace::default();
+        super::remaining_geometry_units(
             retained,
-            owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len())),
-        )?);
-        let mut admission = strokes::analyze(
-            &layer.paths,
-            previous.clone(),
-            std::iter::empty(),
-            recipe,
-            &mut anchors,
-            &mut anchor_work,
-            cancel,
+            native_owned_bytes
+                .saturating_add(layer_payload_bytes(layers.iter()))
+                .saturating_add(layers.len().saturating_mul(std::mem::size_of::<bool>())),
         )?;
-        if admission.failure.is_some() || !interface_bound {
-            // Preserve ordinary authored hatch; only a finite demanded role
-            // component may acquire an independently proved Bridge construction.
-            let without_old = *segments - path_segments(&layer.paths);
-            for recover_components in [false, true] {
-                let axis = authored_axis;
-                let mut staged_segments = without_old;
-                anchors.set_budget(0);
-                let extra_owned_bytes = layer_payload_bytes(
+        let mut joined_layers = vec![false; layers.len()];
+        let mut original_bridge_roles = Vec::new();
+        let mut owned_bytes = native_owned_bytes
+            .saturating_add(layer_payload_bytes(layers.iter()))
+            .saturating_add(joined_layers.capacity() * std::mem::size_of::<bool>());
+        anchors.set_budget(workspace_budget(retained, owned_bytes)?);
+        if let Some(first) = layers.first_mut() {
+            if !finalize_layer_interface(
+                0,
+                first,
+                segments,
+                &mut work,
+                owned_bytes.saturating_add(anchors.retained_bytes()),
+                &mut finalize_interface,
+            )? {
+                return Err(super::bonds::unresolved(first));
+            }
+        }
+        for index in 1..layers.len() {
+            owned_bytes = native_owned_bytes
+                + layer_payload_bytes(layers.iter())
+                + vec_bytes(&joined_layers)
+                + vec_bytes(&demands)
+                + vec_bytes(&original_bridge_roles);
+            anchors.set_budget(workspace_budget(retained, owned_bytes)?);
+            let (prior, remaining) = layers.split_at_mut(index);
+            let (layer, following) = remaining.split_first_mut().expect("current support layer");
+            check_cancel(cancel)?;
+            let mut interface_bound = finalize_layer_interface(
+                index,
+                layer,
+                segments,
+                &mut work,
+                owned_bytes.saturating_add(anchors.retained_bytes()),
+                &mut finalize_interface,
+            )?;
+            owned_bytes = native_owned_bytes
+                + layer_payload_bytes(
                     prior
                         .iter()
                         .chain(std::iter::once(&*layer))
                         .chain(following.iter()),
-                ) + vec_bytes(&joined_layers)
-                    + vec_bytes(&demands)
-                    + vec_bytes(&original_bridge_roles)
-                    + vec_bytes(&admission.bridges);
-                owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
-                let staged_anchor_bytes = anchors.retained_bytes();
-                let mut check_component =
-                    |candidate: &mut RasterCandidate,
-                     axis,
-                     scratch: usize,
-                     scratch_owned_bytes: usize| {
-                        let contact_bridge =
-                            axis != authored_component_axis(candidate, index as u32, recipe);
-                        let budget = component_budget(
-                            retained,
-                            owned_bytes,
-                            scratch.saturating_add(candidate_units(candidate)),
-                            scratch_owned_bytes.saturating_add(candidate_owned_bytes(candidate)),
-                        )?;
-                        component_admission(
-                            (candidate, axis, budget, contact_bridge),
-                            previous.clone(),
-                            std::iter::empty(),
-                            recipe,
-                            &mut anchors,
-                            &mut anchor_work,
-                            cancel,
-                        )
-                    };
-                let recovery: Option<&mut super::classification::ComponentAnchorCheck<'_>> =
-                    if recover_components {
-                        Some(&mut check_component)
-                    } else {
-                        None
-                    };
-                let mut candidate = raster(
-                    index,
-                    axis,
-                    &mut staged_segments,
-                    constructed_points,
-                    extra_owned_bytes,
-                    staged_anchor_bytes,
-                    recovery,
-                )?;
-                let joined = coalesce_bridge_rows(
-                    &mut candidate,
-                    BridgeRowContext {
+                )
+                + vec_bytes(&joined_layers)
+                + vec_bytes(&demands)
+                + vec_bytes(&original_bridge_roles);
+            anchors.set_budget(workspace_budget(retained, owned_bytes)?);
+            let authored_axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, layer.index);
+            let previous = prior[index - 1].paths.iter();
+            anchors.set_budget(workspace_budget(
+                retained,
+                owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len())),
+            )?);
+            let mut admission = strokes::analyze(
+                &layer.paths,
+                previous.clone(),
+                std::iter::empty(),
+                recipe,
+                &mut anchors,
+                &mut anchor_work,
+                cancel,
+            )?;
+            if admission.failure.is_some() || !interface_bound {
+                // Preserve ordinary authored hatch; only a finite demanded role
+                // component may acquire an independently proved Bridge construction.
+                let without_old = *segments - path_segments(&layer.paths);
+                for recover_components in [false, true] {
+                    let axis = authored_axis;
+                    let mut staged_segments = without_old;
+                    anchors.set_budget(0);
+                    let extra_owned_bytes = layer_payload_bytes(
+                        prior
+                            .iter()
+                            .chain(std::iter::once(&*layer))
+                            .chain(following.iter()),
+                    ) + vec_bytes(&joined_layers)
+                        + vec_bytes(&demands)
+                        + vec_bytes(&original_bridge_roles)
+                        + vec_bytes(&admission.bridges);
+                    owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
+                    let staged_anchor_bytes = anchors.retained_bytes();
+                    let mut check_component =
+                        |candidate: &mut RasterCandidate,
+                         axis,
+                         scratch: usize,
+                         scratch_owned_bytes: usize| {
+                            let contact_bridge =
+                                axis != authored_component_axis(candidate, index as u32, recipe);
+                            let budget = component_budget(
+                                retained,
+                                owned_bytes,
+                                scratch.saturating_add(candidate_units(candidate)),
+                                scratch_owned_bytes
+                                    .saturating_add(candidate_owned_bytes(candidate)),
+                            )?;
+                            component_admission(
+                                (candidate, axis, budget, contact_bridge),
+                                previous.clone(),
+                                std::iter::empty(),
+                                recipe,
+                                &mut anchors,
+                                &mut anchor_work,
+                                cancel,
+                            )
+                        };
+                    let recovery: Option<&mut super::classification::ComponentAnchorCheck<'_>> =
+                        if recover_components {
+                            Some(&mut check_component)
+                        } else {
+                            None
+                        };
+                    let raster_before = work;
+                    let candidate = raster(
+                        index,
                         axis,
-                        demanded_reorientation: false,
-                        retained_points: retained,
-                        owned_bytes,
+                        &mut staged_segments,
+                        constructed_points,
+                        extra_owned_bytes,
+                        staged_anchor_bytes,
+                        &mut work,
+                        recovery,
+                    );
+                    exclude_object_raster_work(&mut foreign_work, raster_before, work)?;
+                    let mut candidate = candidate?;
+                    let joined = coalesce_bridge_rows(
+                        &mut candidate,
+                        BridgeRowContext {
+                            axis,
+                            demanded_reorientation: false,
+                            retained_points: retained,
+                            owned_bytes,
+                            recipe,
+                        },
+                        previous.clone(),
+                        std::iter::empty(),
+                        &mut anchors,
+                        &mut anchor_work,
+                        cancel,
+                    )?;
+                    let candidate_bound = finalize_interface(
+                        index,
+                        &mut candidate,
+                        &mut staged_segments,
+                        &mut work,
+                        owned_bytes.saturating_add(anchors.retained_bytes()),
+                    )?;
+                    if !candidate_bound {
+                        if recover_components && !interface_bound {
+                            // Diagnostic only: an unresolved layer always refuses
+                            // before it can become the next layer's anchor authority.
+                            layer.paths = candidate.paths;
+                            layer.region_coverage.process_interfaces = candidate.process_interfaces;
+                            {
+                                replace_skin_command_fits(
+                                    &mut layer.skin_command_fits,
+                                    candidate.skin_command_fits,
+                                    &mut retained,
+                                    &mut constructed_points,
+                                )?;
+                                replace_skin_bridge_domains(
+                                    &mut layer.region_coverage,
+                                    candidate.skin_bridge_domains,
+                                    &mut retained,
+                                    &mut constructed_points,
+                                )?;
+                            };
+                        }
+                        continue;
+                    }
+                    anchors.set_budget(candidate_budget(
+                        &candidate.paths,
+                        retained,
+                        owned_bytes
+                            .saturating_add(candidate_aux_bytes(&candidate))
+                            .saturating_add(stroke_proof_reservation(candidate.paths.len())),
+                    )?);
+                    let other = strokes::analyze(
+                        &candidate.paths,
+                        previous.clone(),
+                        std::iter::empty(),
                         recipe,
-                    },
-                    previous.clone(),
-                    std::iter::empty(),
-                    &mut anchors,
-                    &mut anchor_work,
-                    cancel,
-                )?;
-                let candidate_bound = finalize_interface(
-                    index,
-                    &mut candidate,
-                    &mut staged_segments,
-                    &mut work,
-                    owned_bytes.saturating_add(anchors.retained_bytes()),
-                )?;
-                if !candidate_bound {
-                    if recover_components && !interface_bound {
-                        // Diagnostic only: an unresolved layer always refuses
-                        // before it can become the next layer's anchor authority.
+                        &mut anchors,
+                        &mut anchor_work,
+                        cancel,
+                    )?;
+                    let complete = other.failure.is_none();
+                    // Same-axis joins preserve every required piece and have their
+                    // own direct-anchor proof. Keep that monotone improvement even
+                    // when another stroke still needs support; do not demand a
+                    // corridor for fragments that we can already anchor.
+                    let component_bridges = candidate
+                        .paths
+                        .iter()
+                        .any(|path| path.kind == DepositionKind::Bridge);
+                    if complete || joined || component_bridges {
+                        *segments = without_old + path_segments(&candidate.paths);
                         layer.paths = candidate.paths;
                         layer.region_coverage.process_interfaces = candidate.process_interfaces;
                         {
@@ -645,139 +771,111 @@ pub(super) fn realize(
                                 &mut constructed_points,
                             )?;
                         };
+                        interface_bound = true;
+                        joined_layers[index] = joined || component_bridges;
+                        admission = other;
+                        if complete {
+                            break;
+                        }
                     }
-                    continue;
                 }
-                anchors.set_budget(candidate_budget(
-                    &candidate.paths,
-                    retained,
-                    owned_bytes
-                        .saturating_add(candidate_aux_bytes(&candidate))
-                        .saturating_add(stroke_proof_reservation(candidate.paths.len())),
-                )?);
-                let other = strokes::analyze(
-                    &candidate.paths,
-                    previous.clone(),
-                    std::iter::empty(),
-                    recipe,
-                    &mut anchors,
-                    &mut anchor_work,
-                    cancel,
-                )?;
-                let complete = other.failure.is_none();
-                // Same-axis joins preserve every required piece and have their
-                // own direct-anchor proof. Keep that monotone improvement even
-                // when another stroke still needs support; do not demand a
-                // corridor for fragments that we can already anchor.
-                let component_bridges = candidate
-                    .paths
+                owned_bytes = native_owned_bytes
+                    + layer_payload_bytes(
+                        prior
+                            .iter()
+                            .chain(std::iter::once(&*layer))
+                            .chain(following.iter()),
+                    )
+                    + vec_bytes(&joined_layers)
+                    + vec_bytes(&demands)
+                    + vec_bytes(&original_bridge_roles);
+                anchors.set_budget(workspace_budget(retained, owned_bytes)?);
+            }
+            if !interface_bound {
+                return Err(super::bonds::unresolved(layer));
+            }
+            // Permanent construction and its first upper landing may never be
+            // repaired by temporary support, even when unrelated support is enabled.
+            for path in &layer.paths {
+                let Some(DepositionOwner::Regional { region_index }) = path.owner else {
+                    continue;
+                };
+                let plate_owned = layer
+                    .region_coverage
+                    .process_diaphragms
                     .iter()
-                    .any(|path| path.kind == DepositionKind::Bridge);
-                if complete || joined || component_bridges {
-                    *segments = without_old + path_segments(&candidate.paths);
-                    layer.paths = candidate.paths;
-                    layer.region_coverage.process_interfaces = candidate.process_interfaces;
-                    {
-                        replace_skin_command_fits(
-                            &mut layer.skin_command_fits,
-                            candidate.skin_command_fits,
-                            &mut retained,
-                            &mut constructed_points,
-                        )?;
-                        replace_skin_bridge_domains(
-                            &mut layer.region_coverage,
-                            candidate.skin_bridge_domains,
-                            &mut retained,
-                            &mut constructed_points,
-                        )?;
-                    };
-                    interface_bound = true;
-                    joined_layers[index] = joined || component_bridges;
-                    admission = other;
-                    if complete {
-                        break;
+                    .any(|plate| plate.region_index == region_index);
+                let landing_owned = prior[index - 1]
+                    .region_coverage
+                    .process_diaphragms
+                    .iter()
+                    .filter(|plate| plate.physical_z_mm[1] == layer.lower_z_mm)
+                    .any(|plate| {
+                        layer
+                            .region_coverage
+                            .process_regions
+                            .get(usize::from(region_index))
+                            .is_some_and(|region| {
+                                region.contributions.iter().any(|source| {
+                                    source.occurrence_id == plate.occurrence_id
+                                        && source.definition_id == plate.definition_id
+                                })
+                            })
+                    });
+                if plate_owned || landing_owned {
+                    anchors.set_budget(workspace_budget(
+                        retained,
+                        owned_bytes
+                            .saturating_add(vec_bytes(&admission.bridges))
+                            .saturating_add(stroke_proof_reservation(1)),
+                    )?);
+                    let proof = strokes::analyze(
+                        std::slice::from_ref(path),
+                        previous.clone(),
+                        std::iter::empty(),
+                        recipe,
+                        &mut anchors,
+                        &mut anchor_work,
+                        cancel,
+                    )?;
+                    if proof.failure.is_some() {
+                        return Err(error(
+                            ManufacturingErrorCode::UnsupportedGeometry,
+                            format!(
+                                "UnsupportedInterface: permanent diaphragm or upper landing at layer {} Z={} mm lacks actual lower anchors; temporary support is not authorized",
+                                layer.index, layer.z_mm
+                            ),
+                        ));
                     }
                 }
             }
-            owned_bytes = native_owned_bytes
-                + layer_payload_bytes(
-                    prior
-                        .iter()
-                        .chain(std::iter::once(&*layer))
-                        .chain(following.iter()),
-                )
-                + vec_bytes(&joined_layers)
-                + vec_bytes(&demands)
-                + vec_bytes(&original_bridge_roles);
-            anchors.set_budget(workspace_budget(retained, owned_bytes)?);
-        }
-        if !interface_bound {
-            return Err(super::bonds::unresolved(layer));
-        }
-        // Permanent construction and its first upper landing may never be
-        // repaired by temporary support, even when unrelated support is enabled.
-        for path in &layer.paths {
-            let Some(DepositionOwner::Regional { region_index }) = path.owner else {
-                continue;
-            };
-            let plate_owned = layer
-                .region_coverage
-                .process_diaphragms
-                .iter()
-                .any(|plate| plate.region_index == region_index);
-            let landing_owned = prior[index - 1]
-                .region_coverage
-                .process_diaphragms
-                .iter()
-                .filter(|plate| plate.physical_z_mm[1] == layer.lower_z_mm)
-                .any(|plate| {
-                    layer
-                        .region_coverage
-                        .process_regions
-                        .get(usize::from(region_index))
-                        .is_some_and(|region| {
-                            region.contributions.iter().any(|source| {
-                                source.occurrence_id == plate.occurrence_id
-                                    && source.definition_id == plate.definition_id
-                            })
-                        })
-                });
-            if plate_owned || landing_owned {
-                anchors.set_budget(workspace_budget(
-                    retained,
-                    owned_bytes
-                        .saturating_add(vec_bytes(&admission.bridges))
-                        .saturating_add(stroke_proof_reservation(1)),
-                )?);
-                let proof = strokes::analyze(
-                    std::slice::from_ref(path),
-                    previous.clone(),
-                    std::iter::empty(),
-                    recipe,
-                    &mut anchors,
-                    &mut anchor_work,
-                    cancel,
-                )?;
-                if proof.failure.is_some() {
-                    return Err(error(
-                        ManufacturingErrorCode::UnsupportedGeometry,
-                        format!(
-                            "UnsupportedInterface: permanent diaphragm or upper landing at layer {} Z={} mm lacks actual lower anchors; temporary support is not authorized",
-                            layer.index, layer.z_mm
-                        ),
+            if let Some(failure) = admission.failure.take() {
+                if matches!(recipe.supports, SupportPolicy::Disabled) {
+                    return Err(admission_error(
+                        index,
+                        layer.z_mm,
+                        &layer.paths,
+                        &failure,
+                        recipe,
                     ));
                 }
-            }
-        }
-        if let Some(failure) = admission.failure.take() {
-            if matches!(recipe.supports, SupportPolicy::Disabled) {
-                return Err(admission_error(
-                    index,
-                    layer.z_mm,
-                    &layer.paths,
-                    &failure,
-                    recipe,
-                ));
+                let live = native_owned_bytes
+                    + layer_payload_bytes(
+                        prior
+                            .iter()
+                            .chain(std::iter::once(&*layer))
+                            .chain(following.iter()),
+                    )
+                    + vec_bytes(&joined_layers)
+                    + vec_bytes(&demands)
+                    + vec_bytes(&original_bridge_roles)
+                    + anchors.retained_bytes()
+                    + vec_bytes(&admission.bridges);
+                reserve_owned(&mut demands, 1, live)?;
+                demands.push(Demand {
+                    target: index,
+                    failure,
+                });
             }
             let live = native_owned_bytes
                 + layer_payload_bytes(
@@ -791,271 +889,154 @@ pub(super) fn realize(
                 + vec_bytes(&original_bridge_roles)
                 + anchors.retained_bytes()
                 + vec_bytes(&admission.bridges);
-            reserve_owned(&mut demands, 1, live)?;
-            demands.push(Demand {
-                target: index,
-                failure,
-            });
+            reserve_owned(&mut original_bridge_roles, admission.bridges.len(), live)?;
+            for path in admission.bridges {
+                original_bridge_roles.push((index, path, layer.paths[path].kind));
+                layer.paths[path].kind = DepositionKind::Bridge;
+            }
         }
-        let live = native_owned_bytes
-            + layer_payload_bytes(
-                prior
-                    .iter()
-                    .chain(std::iter::once(&*layer))
-                    .chain(following.iter()),
-            )
+        if demands.is_empty() {
+            return Ok(SupportAdmission::Complete);
+        }
+        anchors.set_budget(0);
+        let SupportPolicy::Breakaway {
+            density,
+            xy_clearance_mm,
+            z_gap_mm,
+            interface_thickness_mm,
+        } = recipe.supports
+        else {
+            unreachable!("disabled support demand refused above")
+        };
+        if tentative {
+            for demand in &demands {
+                let path = &layers[demand.target].paths[demand.failure.path];
+                if contact_layer(layers, demand.target, path, z_gap_mm, &mut work, cancel)?
+                    .is_none()
+                {
+                    return Ok(SupportAdmission::RefineUnreachableLayer {
+                        index: demand.target,
+                        failure: unreachable_layer_error(layers, demand, z_gap_mm)?,
+                    });
+                }
+            }
+        }
+        // Native all-Z void branches are projected only after actual strokes prove
+        // demand. Scheduled hole samples cannot certify a protected projection.
+        owned_bytes = native_owned_bytes
+            + layer_payload_bytes(layers.iter())
             + vec_bytes(&joined_layers)
             + vec_bytes(&demands)
             + vec_bytes(&original_bridge_roles)
-            + anchors.retained_bytes()
-            + vec_bytes(&admission.bridges);
-        reserve_owned(&mut original_bridge_roles, admission.bridges.len(), live)?;
-        for path in admission.bridges {
-            original_bridge_roles.push((index, path, layer.paths[path].kind));
-            layer.paths[path].kind = DepositionKind::Bridge;
-        }
-    }
-    if demands.is_empty() {
-        return Ok(());
-    }
-    anchors.set_budget(0);
-    let SupportPolicy::Breakaway {
-        density,
-        xy_clearance_mm,
-        z_gap_mm,
-        interface_thickness_mm,
-    } = recipe.supports
-    else {
-        unreachable!("disabled support demand refused above")
-    };
-    // Native all-Z void branches are projected only after actual strokes prove
-    // demand. Scheduled hole samples cannot certify a protected projection.
-    owned_bytes = native_owned_bytes
-        + layer_payload_bytes(layers.iter())
-        + vec_bytes(&joined_layers)
-        + vec_bytes(&demands)
-        + vec_bytes(&original_bridge_roles)
-        + anchors.retained_bytes();
-    super::remaining_geometry_units(
-        retained,
-        owned_bytes.saturating_add(
-            demands
-                .len()
-                .saturating_mul(std::mem::size_of::<[[f64; 2]; 2]>()),
-        ),
-    )?;
-    let mut demand_bounds = Vec::with_capacity(demands.len());
-    owned_bytes = owned_bytes.saturating_add(vec_bytes(&demand_bounds));
-    // Enclose the half-bead placement search with the existing offset
-    // construction allowance before querying any nearby protected void.
-    let search_bound = (width / 2.0 + super::OFFSET_TOLERANCE_MM * 0.5).next_up();
-    for demand in &demands {
-        check_cancel(cancel)?;
-        let candidate = &sections[span_at(sections, demand.target as u32)].material;
-        let bounds = candidate.bounding_rect().ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                "actual support demand has no material footprint bounds",
-            )
-        })?;
-        demand_bounds.push([
-            [
-                (bounds.min().x - search_bound).next_down(),
-                (bounds.max().x + search_bound).next_up(),
-            ],
-            [
-                (bounds.min().y - search_bound).next_down(),
-                (bounds.max().y + search_bound).next_up(),
-            ],
-        ]);
-    }
-    let projected = project_voids(
-        &demand_bounds,
-        remaining_geometry_budget(retained, owned_bytes, &[], &[], &[])?,
-        &mut work,
-        native_work,
-    )?;
-    let ProtectedVoidSet {
-        regions: protected,
-        scopes,
-    } = projected;
-    let protected = OwnedMaterial::new(protected);
-    if protected.0.len() != scopes.len() {
-        return Err(error(
-            ManufacturingErrorCode::NativeAnalysisIndeterminate,
-            "native protected void scopes do not match their outer masks",
-        ));
-    }
-    region::check_size(&protected)?;
-    let layer_metadata_bytes = layers.len().saturating_mul(
-        2 * std::mem::size_of::<Arc<OwnedMaterial>>()
-            + std::mem::size_of::<usize>()
-            + std::mem::size_of::<Option<usize>>(),
-    );
-    super::remaining_geometry_units(
-        retained,
-        owned_bytes
-            .saturating_add(vec_bytes(&scopes))
-            .saturating_add(protected.bytes)
-            .saturating_add(layer_metadata_bytes)
-            .saturating_add(
-                std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>(),
-            ),
-    )?;
-    let empty = OwnedMaterial::new(MultiPolygon(Vec::new())).into_shared();
-    let mut support_regions = vec![Arc::clone(&empty); layers.len()];
-    let mut interfaces = vec![empty; layers.len()];
-    let mut object_start = vec![0; layers.len()];
-    let mut contact_tops = vec![None; layers.len()];
-    let mut support_metadata_bytes = vec_bytes(&joined_layers)
-        + vec_bytes(&demands)
-        + vec_bytes(&original_bridge_roles)
-        + vec_bytes(&demand_bounds)
-        + vec_bytes(&scopes)
-        + vec_bytes(&support_regions)
-        + vec_bytes(&interfaces)
-        + vec_bytes(&object_start)
-        + vec_bytes(&contact_tops);
-    owned_bytes = native_owned_bytes
-        + layer_payload_bytes(layers.iter())
-        + support_metadata_bytes
-        + anchors.retained_bytes();
-    remaining_geometry_budget(
-        retained,
-        owned_bytes,
-        &support_regions,
-        &interfaces,
-        &[&protected],
-    )?;
-    // Borrow each final-D owner once. Its nominal bead prism remains an outer
-    // exclusion after any later re-hatching; it never supplies an anchor.
-    let available = remaining_geometry_budget(
-        retained,
-        owned_bytes,
-        &support_regions,
-        &interfaces,
-        &[&protected],
-    )?;
-    if sections.len() > available {
-        return Err(error(
-            ManufacturingErrorCode::ResourceLimit,
-            "nominal object scope retention exceeded",
-        ));
-    }
-    super::remaining_geometry_units(
-        retained,
-        owned_bytes
-            .saturating_add(geometry_receipt(&support_regions, &interfaces, &[&protected]).1)
-            .saturating_add(
-                sections
+            + anchors.retained_bytes();
+        super::remaining_geometry_units(
+            retained,
+            owned_bytes.saturating_add(
+                demands
                     .len()
-                    .saturating_mul(std::mem::size_of::<(usize, f64)>()),
+                    .saturating_mul(std::mem::size_of::<[[f64; 2]; 2]>()),
             ),
-    )?;
-    let mut nominal: Vec<(usize, f64)> = Vec::new();
-    nominal.try_reserve_exact(sections.len()).map_err(|_| {
-        error(
-            ManufacturingErrorCode::ResourceLimit,
-            "nominal object scope allocation refused",
-        )
-    })?;
-    owned_bytes = owned_bytes.saturating_add(vec_bytes(&nominal));
-    for (index, section) in sections.iter().enumerate() {
-        check_cancel(cancel)?;
-        if section.material.0.is_empty() {
-            continue;
+        )?;
+        let mut demand_bounds = Vec::with_capacity(demands.len());
+        owned_bytes = owned_bytes.saturating_add(vec_bytes(&demand_bounds));
+        // Enclose the half-bead placement search with the existing offset
+        // construction allowance before querying any nearby protected void.
+        let search_bound = (width / 2.0 + super::OFFSET_TOLERANCE_MM * 0.5).next_up();
+        for demand in &demands {
+            check_cancel(cancel)?;
+            let candidate = &sections[span_at(sections, demand.target as u32)].material;
+            let bounds = candidate.bounding_rect().ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                    "actual support demand has no material footprint bounds",
+                )
+            })?;
+            demand_bounds.push([
+                [
+                    (bounds.min().x - search_bound).next_down(),
+                    (bounds.max().x + search_bound).next_up(),
+                ],
+                [
+                    (bounds.min().y - search_bound).next_down(),
+                    (bounds.max().y + search_bound).next_up(),
+                ],
+            ]);
         }
-        let mut floor: Option<f64> = None;
-        for object in &layers[section.start as usize..section.end as usize] {
-            super::native::charge_support_clearance(&mut work, cancel)?;
-            if object.paths.is_empty() {
-                continue;
-            }
-            for path in &object.paths {
-                let lower = program_coordinates::project_xyz6_bead_height_mm(
-                    path.physical_z_mm[1],
-                    path.physical_z_mm[1] - path.physical_z_mm[0],
-                )?[0];
-                floor = Some(floor.map_or(lower, |value| value.min(lower)));
-            }
-        }
-        if let Some(floor) = floor {
-            nominal.push((index, floor));
-        }
-    }
-    super::boolean::charge(
-        &mut work,
-        nominal.len().checked_mul(nominal.len()).ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "nominal object scope sorting work overflow",
-            )
-        })?,
-    )?;
-    nominal.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
-    check_cancel(cancel)?;
-    let base_retained = retained;
-    let retained = retained
-        .checked_add(nominal.capacity())
-        .filter(|n| *n <= super::MAX_RETAINED_GEOMETRY_UNITS)
-        .ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "nominal object scope retention exceeded",
-            )
-        })?;
-    remaining_geometry_budget(
-        retained,
-        owned_bytes,
-        &support_regions,
-        &interfaces,
-        &[&protected],
-    )?;
-    for demand in &demands {
-        check_cancel(cancel)?;
-        let demanded_path = &layers[demand.target].paths[demand.failure.path];
-        let floor = program_coordinates::project_xyz6_bead_height_mm(
-            demanded_path.physical_z_mm[1],
-            demanded_path.physical_z_mm[1] - demanded_path.physical_z_mm[0],
-        )?[0];
-        let mut contact_top = None;
-        for i in (0..demand.target).rev() {
-            super::native::charge_support_clearance(&mut work, cancel)?;
-            let upper = program_coordinates::project_xyz6_bead_height_mm(
-                layers[i].z_mm,
-                layers[i].z_mm - layers[i].lower_z_mm,
-            )?[1];
-            if program_coordinates::enclosed_vertical_gap_mm(floor, upper)? >= z_gap_mm {
-                contact_top = Some(i);
-                break;
-            }
-        }
-        let Some(top) = contact_top else {
+        let native_points_before = native_points;
+        let native_bytes_before = native_owned_bytes;
+        let projected = project_voids(
+            &demand_bounds,
+            retained,
+            owned_bytes,
+            &mut native_points,
+            &mut native_owned_bytes,
+            &mut work,
+            native_work,
+        )?;
+        retained = retained
+            .checked_sub(native_points_before)
+            .and_then(|n| n.checked_add(native_points))
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "native void proof-unit handoff accounting mismatch",
+                )
+            })?;
+        owned_bytes = owned_bytes
+            .checked_sub(native_bytes_before)
+            .and_then(|n| n.checked_add(native_owned_bytes))
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "native void owner handoff accounting mismatch",
+                )
+            })?;
+        super::remaining_geometry_units(retained, owned_bytes)?;
+        let ProtectedVoidSet {
+            regions: protected,
+            scopes,
+        } = projected;
+        let protected = OwnedMaterial::new(protected);
+        if protected.0.len() != scopes.len() {
             return Err(error(
-                ManufacturingErrorCode::UnsupportedGeometry,
-                format!(
-                    "layer {}: no printable support layer fits below the declared Z gap {z_gap_mm} mm; demanded {:?} stroke {:?} to {:?}, physical interval {:?} mm, width {} mm, uncovered parameters [{:.9}, {:.9}], span {:.9} mm, emitted object floor {:.9} mm, bed {:.9} mm",
-                    demand.target,
-                    demanded_path.kind,
-                    demanded_path.points_mm[demand.failure.first],
-                    demanded_path.points_mm[demand.failure.last],
-                    demanded_path.physical_z_mm,
-                    demand.failure.width_mm,
-                    demand.failure.start,
-                    demand.failure.end,
-                    demand.failure.span,
-                    floor,
-                    layers[0].lower_z_mm,
-                ),
+                ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                "native protected void scopes do not match their outer masks",
             ));
-        };
-        contact_tops[demand.target] = Some(top);
-        let interface_bottom = layers[top].z_mm - interface_thickness_mm;
-        // Realized object D supplies a conservative support candidate only
-        // AFTER actual deposited strokes prove demand; it is never an anchor map.
-        // The half-bead search expansion permits a real support bead under an
-        // outer edge; subsequent C/nominal-D clipping and actual proofs own it.
-        let candidate = &sections[span_at(sections, demand.target as u32)].material;
+        }
+        region::check_size(&protected)?;
+        let layer_metadata_bytes = layers.len().saturating_mul(
+            2 * std::mem::size_of::<Arc<OwnedMaterial>>()
+                + std::mem::size_of::<usize>()
+                + std::mem::size_of::<Option<usize>>(),
+        );
+        super::remaining_geometry_units(
+            retained,
+            owned_bytes
+                .saturating_add(vec_bytes(&scopes))
+                .saturating_add(protected.bytes)
+                .saturating_add(layer_metadata_bytes)
+                .saturating_add(
+                    std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>(),
+                ),
+        )?;
+        let empty = OwnedMaterial::new(MultiPolygon(Vec::new())).into_shared();
+        let mut support_regions = vec![Arc::clone(&empty); layers.len()];
+        let mut interfaces = vec![empty; layers.len()];
+        let mut object_start = vec![0; layers.len()];
+        let mut contact_tops = vec![None; layers.len()];
+        let mut support_metadata_bytes = vec_bytes(&joined_layers)
+            + vec_bytes(&demands)
+            + vec_bytes(&original_bridge_roles)
+            + vec_bytes(&demand_bounds)
+            + vec_bytes(&scopes)
+            + vec_bytes(&support_regions)
+            + vec_bytes(&interfaces)
+            + vec_bytes(&object_start)
+            + vec_bytes(&contact_tops);
+        owned_bytes = native_owned_bytes
+            + layer_payload_bytes(layers.iter())
+            + support_metadata_bytes
+            + anchors.retained_bytes();
         remaining_geometry_budget(
             retained,
             owned_bytes,
@@ -1063,54 +1044,235 @@ pub(super) fn realize(
             &interfaces,
             &[&protected],
         )?;
-        charge_boolean(candidate, candidate, &mut work, cancel)?;
-        // Beveled corners bound this placement search without constructing a
-        // fine round-disk Minkowski sum. Search geometry is never occupied C.
-        let mut column = OwnedMaterial::new(
-            candidate.buffer_with_style(BufferStyle::new(width / 2.0).line_join(LineJoin::Bevel)),
-        );
+        // Borrow each final-D owner once. Its nominal bead prism remains an outer
+        // exclusion after any later re-hatching; it never supplies an anchor.
+        let available = remaining_geometry_budget(
+            retained,
+            owned_bytes,
+            &support_regions,
+            &interfaces,
+            &[&protected],
+        )?;
+        if sections.len() > available {
+            return Err(error(
+                ManufacturingErrorCode::ResourceLimit,
+                "nominal object scope retention exceeded",
+            ));
+        }
+        super::remaining_geometry_units(
+            retained,
+            owned_bytes
+                .saturating_add(geometry_receipt(&support_regions, &interfaces, &[&protected]).1)
+                .saturating_add(
+                    sections
+                        .len()
+                        .saturating_mul(std::mem::size_of::<(usize, f64)>()),
+                ),
+        )?;
+        let mut nominal: Vec<(usize, f64)> = Vec::new();
+        nominal.try_reserve_exact(sections.len()).map_err(|_| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "nominal object scope allocation refused",
+            )
+        })?;
+        owned_bytes = owned_bytes.saturating_add(vec_bytes(&nominal));
+        for (index, section) in sections.iter().enumerate() {
+            check_cancel(cancel)?;
+            if section.material.0.is_empty() {
+                continue;
+            }
+            let mut floor: Option<f64> = None;
+            for object in &layers[section.start as usize..section.end as usize] {
+                super::native::charge_support_clearance(&mut work, cancel)?;
+                if object.paths.is_empty() {
+                    continue;
+                }
+                for path in &object.paths {
+                    let lower = program_coordinates::project_xyz6_bead_height_mm(
+                        path.physical_z_mm[1],
+                        path.physical_z_mm[1] - path.physical_z_mm[0],
+                    )?[0];
+                    floor = Some(floor.map_or(lower, |value| value.min(lower)));
+                }
+            }
+            if let Some(floor) = floor {
+                nominal.push((index, floor));
+            }
+        }
+        super::boolean::charge(
+            &mut work,
+            nominal.len().checked_mul(nominal.len()).ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "nominal object scope sorting work overflow",
+                )
+            })?,
+        )?;
+        nominal.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
         check_cancel(cancel)?;
-        region::check_size(&column)?;
+        let base_retained = retained;
+        let retained = retained
+            .checked_add(nominal.capacity())
+            .filter(|n| *n <= super::MAX_RETAINED_GEOMETRY_UNITS)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "nominal object scope retention exceeded",
+                )
+            })?;
         remaining_geometry_budget(
             retained,
             owned_bytes,
             &support_regions,
             &interfaces,
-            &[&protected, &column],
+            &[&protected],
         )?;
-        // Certify a fixed-XY corridor all the way to the bed before publishing.
-        // Top-down publication before lower clipping leaves floating components.
-        for section in &sections[..=span_at(sections, top as u32)] {
-            if column.0.is_empty() {
-                break;
-            }
-            for (occupied, height) in section.occupied_pieces() {
-                check_cancel(cancel)?;
+        for demand in &demands {
+            check_cancel(cancel)?;
+            let demanded_path = &layers[demand.target].paths[demand.failure.path];
+            let Some(top) = contact_layer(
+                layers,
+                demand.target,
+                demanded_path,
+                z_gap_mm,
+                &mut work,
+                cancel,
+            )?
+            else {
+                return Err(unreachable_layer_error(layers, demand, z_gap_mm)?);
+            };
+            contact_tops[demand.target] = Some(top);
+            let interface_bottom = layers[top].z_mm - interface_thickness_mm;
+            // Realized object D supplies a conservative support candidate only
+            // AFTER actual deposited strokes prove demand; it is never an anchor map.
+            // The half-bead search expansion permits a real support bead under an
+            // outer edge; subsequent C/nominal-D clipping and actual proofs own it.
+            let demanded_section = &sections[span_at(sections, demand.target as u32)];
+            let candidate = &demanded_section.material;
+            remaining_geometry_budget(
+                retained,
+                owned_bytes,
+                &support_regions,
+                &interfaces,
+                &[&protected],
+            )?;
+            charge_boolean(candidate, candidate, &mut work, foreign_work, cancel)?;
+            // Beveled corners bound this placement search without constructing a
+            // fine round-disk Minkowski sum. Search geometry is never occupied C.
+            let mut column = OwnedMaterial::new(
+                candidate
+                    .buffer_with_style(BufferStyle::new(width / 2.0).line_join(LineJoin::Bevel)),
+            );
+            check_cancel(cancel)?;
+            region::check_size(&column)?;
+            remaining_geometry_budget(
+                retained,
+                owned_bytes,
+                &support_regions,
+                &interfaces,
+                &[&protected, &column],
+            )?;
+            // Certify a fixed-XY corridor all the way to the bed before publishing.
+            // Top-down publication before lower clipping leaves floating components.
+            for section in &sections[..=span_at(sections, top as u32)] {
                 if column.0.is_empty() {
                     break;
                 }
+                for (occupied, height) in section.occupied_pieces() {
+                    check_cancel(cancel)?;
+                    if column.0.is_empty() {
+                        break;
+                    }
+                    work = work
+                        .checked_add(1)
+                        .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
+                        .ok_or_else(|| {
+                            error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "cumulative continuous occupied scope work exceeded",
+                            )
+                        })?;
+                    if let Some([lower, upper]) = height {
+                        let bed = layers[0].lower_z_mm;
+                        if lower > layers[top].z_mm || upper < bed {
+                            continue;
+                        }
+                    }
+                    // Independent certified outer operands may overlap. A single
+                    // even-odd normalization would erase their overlap; subtract
+                    // each expanded operand instead, borrowing its original rings.
+                    super::boolean::budget_polygon_accumulated(occupied, &mut work, cancel)?;
+                    let distance =
+                        candidate_clearance_distance(occupied, &column, xy_clearance_mm)?;
+                    let clearance = OwnedMaterial::new(offset_polygon_owned(
+                        occupied,
+                        distance,
+                        retained,
+                        owned_bytes,
+                        &support_regions,
+                        &interfaces,
+                        &[&protected, &column],
+                        cancel,
+                    )?);
+                    remaining_geometry_budget(
+                        retained,
+                        owned_bytes,
+                        &support_regions,
+                        &interfaces,
+                        &[&protected, &column, &clearance],
+                    )?;
+                    charge_boolean(&column, &clearance, &mut work, foreign_work, cancel)?;
+                    let next = OwnedMaterial::new(column.material.difference(&clearance.material));
+                    remaining_geometry_budget(
+                        retained,
+                        owned_bytes,
+                        &support_regions,
+                        &interfaces,
+                        &[&protected, &column, &clearance, &next],
+                    )?;
+                    column = next;
+                    region::check_size(&column)?;
+                    remaining_geometry_budget(
+                        retained,
+                        owned_bytes,
+                        &support_regions,
+                        &interfaces,
+                        &[&protected, &column, &clearance],
+                    )?;
+                }
+            }
+            for (mask, scope) in protected.0.iter().zip(&scopes) {
+                if column.0.is_empty() {
+                    break;
+                }
+                check_cancel(cancel)?;
                 work = work
                     .checked_add(1)
                     .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
                     .ok_or_else(|| {
                         error(
                             ManufacturingErrorCode::ResourceLimit,
-                            "cumulative continuous occupied scope work exceeded",
+                            "cumulative protected-void scope work budget exceeded",
                         )
                     })?;
-                if let Some([lower, upper]) = height {
-                    let bed = layers[0].lower_z_mm;
-                    if lower > layers[top].z_mm || upper < bed {
-                        continue;
+                let corridor_lower = layers[0].lower_z_mm;
+                let corridor_upper = layers[top].z_mm;
+                let relevant = match scope {
+                    spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
+                        *lower_mm <= corridor_upper && *upper_mm >= corridor_lower
                     }
+                    spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm } => {
+                        *upper_mm >= corridor_lower
+                    }
+                };
+                if !relevant {
+                    continue;
                 }
-                // Independent certified outer operands may overlap. A single
-                // even-odd normalization would erase their overlap; subtract
-                // each expanded operand instead, borrowing its original rings.
-                super::boolean::budget_polygon_accumulated(occupied, &mut work, cancel)?;
-                let distance = candidate_clearance_distance(occupied, &column, xy_clearance_mm)?;
+                super::boolean::budget_polygon_accumulated(mask, &mut work, cancel)?;
+                let distance = candidate_clearance_distance(mask, &column, xy_clearance_mm)?;
                 let clearance = OwnedMaterial::new(offset_polygon_owned(
-                    occupied,
+                    mask,
                     distance,
                     retained,
                     owned_bytes,
@@ -1126,7 +1288,7 @@ pub(super) fn realize(
                     &interfaces,
                     &[&protected, &column, &clearance],
                 )?;
-                charge_boolean(&column, &clearance, &mut work, cancel)?;
+                charge_boolean(&column, &clearance, &mut work, foreign_work, cancel)?;
                 let next = OwnedMaterial::new(column.material.difference(&clearance.material));
                 remaining_geometry_budget(
                     retained,
@@ -1145,373 +1307,308 @@ pub(super) fn realize(
                     &[&protected, &column, &clearance],
                 )?;
             }
-        }
-        for (mask, scope) in protected.0.iter().zip(&scopes) {
+            region::check_size(&column)?;
             if column.0.is_empty() {
-                break;
+                let layer = &layers[demand.target];
+                let failure = &demand.failure;
+                let path = &layer.paths[failure.path];
+                let a = path.points_mm[failure.first];
+                let b = path.points_mm[failure.last];
+                let previous = &layers[demand.target - 1];
+                let nearest_a = nearest_stroke(
+                    [a[0], a[1]],
+                    previous.paths.iter(),
+                    &mut work,
+                    foreign_work,
+                    cancel,
+                )?;
+                let nearest_b = nearest_stroke(
+                    [b[0], b[1]],
+                    previous.paths.iter(),
+                    &mut work,
+                    foreign_work,
+                    cancel,
+                )?;
+                return Err(error(
+                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                    format!(
+                        "layer {} Z {:.9}: unresolved continuous outer occupancy/protected geometry cannot certify any bed-anchored support corridor; conservative exclusion is not proof of actual collision; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; previous layer {} Z {:.9}, nearest start {:?}, nearest end {:?}; nominal bead width {:.9} mm, XY clearance {:.9} mm, Z gap {:.9} mm, bridge limit {:.9} mm",
+                        demand.target,
+                        layer.z_mm,
+                        path.kind,
+                        a,
+                        b,
+                        failure.start,
+                        failure.end,
+                        failure.span,
+                        previous.index,
+                        previous.z_mm,
+                        nearest_a,
+                        nearest_b,
+                        width,
+                        xy_clearance_mm,
+                        z_gap_mm,
+                        recipe.process.max_bridge_span_mm
+                    ),
+                ));
             }
-            check_cancel(cancel)?;
-            work = work
-                .checked_add(1)
-                .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
-                .ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "cumulative protected-void scope work budget exceeded",
-                    )
-                })?;
-            let corridor_lower = layers[0].lower_z_mm;
-            let corridor_upper = layers[top].z_mm;
-            let relevant = match scope {
-                spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
-                    *lower_mm <= corridor_upper && *upper_mm >= corridor_lower
-                }
-                spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm } => {
-                    *upper_mm >= corridor_lower
-                }
-            };
-            if !relevant {
-                continue;
-            }
-            super::boolean::budget_polygon_accumulated(mask, &mut work, cancel)?;
-            let distance = candidate_clearance_distance(mask, &column, xy_clearance_mm)?;
-            let clearance = OwnedMaterial::new(offset_polygon_owned(
-                mask,
-                distance,
+            region::canonicalize(&mut column.material);
+            column.bytes = super::native::material_bytes(&mut column.material);
+            column.units = material_units(&column.material);
+            remaining_geometry_budget(
                 retained,
-                owned_bytes,
+                owned_bytes.saturating_add(
+                    std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>(),
+                ),
                 &support_regions,
                 &interfaces,
                 &[&protected, &column],
-                cancel,
-            )?);
-            remaining_geometry_budget(
-                retained,
-                owned_bytes,
-                &support_regions,
-                &interfaces,
-                &[&protected, &column, &clearance],
             )?;
-            charge_boolean(&column, &clearance, &mut work, cancel)?;
-            let next = OwnedMaterial::new(column.material.difference(&clearance.material));
-            remaining_geometry_budget(
-                retained,
-                owned_bytes,
-                &support_regions,
-                &interfaces,
-                &[&protected, &column, &clearance, &next],
-            )?;
-            column = next;
-            region::check_size(&column)?;
-            remaining_geometry_budget(
-                retained,
-                owned_bytes,
-                &support_regions,
-                &interfaces,
-                &[&protected, &column, &clearance],
-            )?;
-        }
-        region::check_size(&column)?;
-        if column.0.is_empty() {
-            let layer = &layers[demand.target];
-            let failure = &demand.failure;
-            let path = &layer.paths[failure.path];
-            let a = path.points_mm[failure.first];
-            let b = path.points_mm[failure.last];
-            let previous = &layers[demand.target - 1];
-            let nearest_a = nearest_stroke([a[0], a[1]], previous.paths.iter(), &mut work, cancel)?;
-            let nearest_b = nearest_stroke([b[0], b[1]], previous.paths.iter(), &mut work, cancel)?;
-            return Err(error(
-                ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                format!(
-                    "layer {} Z {:.9}: unresolved continuous outer occupancy/protected geometry cannot certify any bed-anchored support corridor; conservative exclusion is not proof of actual collision; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; previous layer {} Z {:.9}, nearest start {:?}, nearest end {:?}; nominal bead width {:.9} mm, XY clearance {:.9} mm, Z gap {:.9} mm, bridge limit {:.9} mm",
-                    demand.target,
-                    layer.z_mm,
-                    path.kind,
-                    a,
-                    b,
-                    failure.start,
-                    failure.end,
-                    failure.span,
-                    previous.index,
-                    previous.z_mm,
-                    nearest_a,
-                    nearest_b,
-                    width,
-                    xy_clearance_mm,
-                    z_gap_mm,
-                    recipe.process.max_bridge_span_mm
-                ),
-            ));
-        }
-        region::canonicalize(&mut column.material);
-        column.bytes = super::native::material_bytes(&mut column.material);
-        column.units = material_units(&column.material);
-        remaining_geometry_budget(
-            retained,
-            owned_bytes.saturating_add(
-                std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>(),
-            ),
-            &support_regions,
-            &interfaces,
-            &[&protected, &column],
-        )?;
-        let mut column = column.into_shared();
-        let mut shared_union = None;
-        let mut next_nominal = 0;
-        // A weak source can outlive its last strong geometry owner. Reserve
-        // old/new Arc header records across cache replacement, including offsets
-        // performed while the previous cache entry is still live.
-        let weak_header_reservation =
-            2 * (std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>());
-        owned_bytes = owned_bytes.saturating_add(weak_header_reservation);
-        for i in 0..=top {
-            check_cancel(cancel)?;
-            let upper = program_coordinates::project_xyz6_segment_bead_height_mm(
-                layers[i].z_mm,
-                layers[i].z_mm,
-                layers[i].z_mm - layers[i].lower_z_mm,
-            )?[1];
-            // Higher portions are subsets of the already bed-anchored lower
-            // column. Do not lower/remap its original eligible contact top.
-            while let Some(&(index, floor)) = nominal.get(next_nominal) {
-                super::native::charge_support_clearance(&mut work, cancel)?;
-                if program_coordinates::enclosed_vertical_gap_mm(floor, upper)? >= z_gap_mm {
-                    break;
-                }
-                for polygon in &sections[index].material.0 {
-                    check_cancel(cancel)?;
-                    if column.0.is_empty() {
+            let mut column = column.into_shared();
+            let mut shared_union = None;
+            let mut next_nominal = 0;
+            // A weak source can outlive its last strong geometry owner. Reserve
+            // old/new Arc header records across cache replacement, including offsets
+            // performed while the previous cache entry is still live.
+            let weak_header_reservation =
+                2 * (std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>());
+            owned_bytes = owned_bytes.saturating_add(weak_header_reservation);
+            for i in 0..=top {
+                check_cancel(cancel)?;
+                let upper = program_coordinates::project_xyz6_segment_bead_height_mm(
+                    layers[i].z_mm,
+                    layers[i].z_mm,
+                    layers[i].z_mm - layers[i].lower_z_mm,
+                )?[1];
+                // Higher portions are subsets of the already bed-anchored lower
+                // column. Do not lower/remap its original eligible contact top.
+                while let Some(&(index, floor)) = nominal.get(next_nominal) {
+                    super::native::charge_support_clearance(&mut work, cancel)?;
+                    if program_coordinates::enclosed_vertical_gap_mm(floor, upper)? >= z_gap_mm {
                         break;
                     }
-                    super::boolean::budget_polygon_accumulated(polygon, &mut work, cancel)?;
-                    let distance = candidate_clearance_distance(polygon, &column, xy_clearance_mm)?;
-                    let clearance = OwnedMaterial::new(offset_polygon_owned(
-                        polygon,
-                        distance,
-                        retained,
-                        owned_bytes,
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column],
-                        cancel,
-                    )?);
-                    remaining_geometry_budget(
-                        retained,
-                        owned_bytes,
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column, &clearance],
-                    )?;
-                    charge_boolean(&column, &clearance, &mut work, cancel).map_err(|mut e| {
-                        e.message = format!(
-                            "support layer {i}, nominal object owner {index}: {}",
-                            e.message,
-                        );
-                        e
-                    })?;
-                    let next = OwnedMaterial::new(column.material.difference(&clearance.material));
-                    region::check_size(&next)?;
-                    remaining_geometry_budget(
-                        retained,
-                        owned_bytes.saturating_add(
-                            std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>(),
-                        ),
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column, &clearance, &next],
-                    )?;
-                    column = next.into_shared();
-                    shared_union = None;
+                    for polygon in &sections[index].material.0 {
+                        check_cancel(cancel)?;
+                        if column.0.is_empty() {
+                            break;
+                        }
+                        super::boolean::budget_polygon_accumulated(polygon, &mut work, cancel)?;
+                        let distance =
+                            candidate_clearance_distance(polygon, &column, xy_clearance_mm)?;
+                        let clearance = OwnedMaterial::new(offset_polygon_owned(
+                            polygon,
+                            distance,
+                            retained,
+                            owned_bytes,
+                            &support_regions,
+                            &interfaces,
+                            &[&protected, &column],
+                            cancel,
+                        )?);
+                        remaining_geometry_budget(
+                            retained,
+                            owned_bytes,
+                            &support_regions,
+                            &interfaces,
+                            &[&protected, &column, &clearance],
+                        )?;
+                        charge_boolean(&column, &clearance, &mut work, foreign_work, cancel)
+                            .map_err(|mut e| {
+                                e.message = format!(
+                                    "support layer {i}, nominal object owner {index}: {}",
+                                    e.message,
+                                );
+                                e
+                            })?;
+                        let next =
+                            OwnedMaterial::new(column.material.difference(&clearance.material));
+                        region::check_size(&next)?;
+                        remaining_geometry_budget(
+                            retained,
+                            owned_bytes.saturating_add(
+                                std::mem::size_of::<OwnedMaterial>()
+                                    + 2 * std::mem::size_of::<usize>(),
+                            ),
+                            &support_regions,
+                            &interfaces,
+                            &[&protected, &column, &clearance, &next],
+                        )?;
+                        column = next.into_shared();
+                        shared_union = None;
+                    }
+                    next_nominal += 1;
                 }
-                next_nominal += 1;
-            }
-            if column.0.is_empty() {
-                break;
-            }
-            let (live_units, live_bytes) =
-                geometry_receipt(&support_regions, &interfaces, &[&protected, &column]);
-            merge_shared(
-                &mut support_regions[i],
-                &column,
-                &mut shared_union,
-                retained.saturating_add(live_units),
-                owned_bytes.saturating_add(live_bytes),
-                &mut work,
-                cancel,
-            )?;
-            if layers[i].z_mm > interface_bottom {
+                if column.0.is_empty() {
+                    break;
+                }
                 let (live_units, live_bytes) =
                     geometry_receipt(&support_regions, &interfaces, &[&protected, &column]);
                 merge_shared(
-                    &mut interfaces[i],
+                    &mut support_regions[i],
                     &column,
                     &mut shared_union,
                     retained.saturating_add(live_units),
                     owned_bytes.saturating_add(live_bytes),
                     &mut work,
+                    foreign_work,
                     cancel,
                 )?;
+                if layers[i].z_mm > interface_bottom {
+                    let (live_units, live_bytes) =
+                        geometry_receipt(&support_regions, &interfaces, &[&protected, &column]);
+                    merge_shared(
+                        &mut interfaces[i],
+                        &column,
+                        &mut shared_union,
+                        retained.saturating_add(live_units),
+                        owned_bytes.saturating_add(live_bytes),
+                        &mut work,
+                        foreign_work,
+                        cancel,
+                    )?;
+                }
+                remaining_geometry_budget(
+                    retained,
+                    owned_bytes,
+                    &support_regions,
+                    &interfaces,
+                    &[&protected, &column],
+                )?;
             }
-            remaining_geometry_budget(
-                retained,
-                owned_bytes,
-                &support_regions,
-                &interfaces,
-                &[&protected, &column],
-            )?;
+            owned_bytes = owned_bytes.saturating_sub(weak_header_reservation);
         }
-        owned_bytes = owned_bytes.saturating_sub(weak_header_reservation);
-    }
-    drop(nominal);
-    let mut retained = base_retained;
-    // Support centers stay half a bead inside the clipped support region. This
-    // gives the nominal bead, not only its centerline, the declared XY clearance.
-    for i in 0..layers.len() {
-        owned_bytes =
-            native_owned_bytes + layer_payload_bytes(layers.iter()) + support_metadata_bytes;
-        anchors.set_budget(0);
-        let (prior, remaining) = layers.split_at_mut(i);
-        let (layer, _following) = remaining.split_first_mut().expect("current support layer");
-        let interface = interfaces[i].as_ref();
-        let retained_domains =
-            retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
-        let mut domains = raster::Domains::new(
-            &support_regions[i],
-            interface,
-            Arc::ptr_eq(&support_regions[i], &interfaces[i]),
-            width,
-            retained_domains,
-            owned_bytes
-                .saturating_add(geometry_receipt(&support_regions, &interfaces, &[&protected]).1),
-            anchors.retained_bytes(),
-            &mut work,
-            cancel,
-        )?;
-        let preferred =
-            region::HatchAxis::for_policy(RectilinearAxisPolicy::AlternatingXY, layer.index);
-        let mut paths = Vec::new();
-        for axis in [preferred, preferred.orthogonal()] {
+        drop(nominal);
+        let mut retained = base_retained;
+        // Support centers stay half a bead inside the clipped support region. This
+        // gives the nominal bead, not only its centerline, the declared XY clearance.
+        for i in 0..layers.len() {
+            owned_bytes =
+                native_owned_bytes + layer_payload_bytes(layers.iter()) + support_metadata_bytes;
+            anchors.set_budget(0);
+            let (prior, remaining) = layers.split_at_mut(i);
+            let (layer, _following) = remaining.split_first_mut().expect("current support layer");
+            let interface = interfaces[i].as_ref();
+            let retained_domains =
+                retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
+            let mut domains = raster::Domains::new(
+                &support_regions[i],
+                interface,
+                Arc::ptr_eq(&support_regions[i], &interfaces[i]),
+                width,
+                retained_domains,
+                owned_bytes.saturating_add(
+                    geometry_receipt(&support_regions, &interfaces, &[&protected]).1,
+                ),
+                anchors.retained_bytes(),
+                &mut work,
+                foreign_work,
+                cancel,
+            )?;
+            let preferred =
+                region::HatchAxis::for_policy(RectilinearAxisPolicy::AlternatingXY, layer.index);
+            let mut paths = Vec::new();
+            for axis in [preferred, preferred.orthogonal()] {
+                anchors.set_budget(0);
+                domains.set_anchor_owned_bytes(anchors.retained_bytes());
+                paths = domains.paths(
+                    interface,
+                    density,
+                    &region::HatchLayer {
+                        z: layer.z_mm,
+                        lower_z: layer.lower_z_mm,
+                        height: layer.z_mm - layer.lower_z_mm,
+                        axis,
+                        top_axis: axis,
+                        recipe,
+                    },
+                    *segments,
+                    &mut work,
+                    foreign_work,
+                    cancel,
+                )?;
+                if !support_regions[i].0.is_empty() && paths.is_empty() {
+                    return Err(error(
+                        ManufacturingErrorCode::UnsupportedGeometry,
+                        format!(
+                            "layer {i}: support clearance leaves no printable bead-width support"
+                        ),
+                    ));
+                }
+                if i == 0 {
+                    break;
+                }
+                anchors.set_budget(domains.anchor_budget(&paths)?);
+                let failure = raster::failure(
+                    &paths,
+                    prior[i - 1]
+                        .paths
+                        .iter()
+                        .filter(|path| support_role(path.kind)),
+                    recipe,
+                    &mut anchors,
+                    &mut anchor_work,
+                    cancel,
+                )?;
+                let Some(failure) = failure else {
+                    break;
+                };
+                if axis != preferred {
+                    let path = &paths[failure.path];
+                    return Err(error(
+                        ManufacturingErrorCode::UnsupportedGeometry,
+                        format!(
+                            "layer {i}: neither orthogonal support/interface raster has bounded deposited anchors; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; increase support density or revise support corridor",
+                            path.kind,
+                            path.points_mm[failure.first],
+                            path.points_mm[failure.last],
+                            failure.start,
+                            failure.end,
+                            failure.span,
+                        ),
+                    ));
+                }
+                // Release failed paths and anchor records before staging the other
+                // axis. Neither attempt changes object or support ownership.
+                paths = Vec::new();
+            }
+            *segments += path_segments(&paths);
             anchors.set_budget(0);
             domains.set_anchor_owned_bytes(anchors.retained_bytes());
-            paths = domains.paths(
-                interface,
-                density,
-                &region::HatchLayer {
-                    z: layer.z_mm,
-                    lower_z: layer.lower_z_mm,
-                    height: layer.z_mm - layer.lower_z_mm,
-                    axis,
-                    top_axis: axis,
-                    recipe,
-                },
-                *segments,
-                &mut work,
-                cancel,
-            )?;
-            if !support_regions[i].0.is_empty() && paths.is_empty() {
-                return Err(error(
-                    ManufacturingErrorCode::UnsupportedGeometry,
-                    format!("layer {i}: support clearance leaves no printable bead-width support"),
-                ));
-            }
-            if i == 0 {
-                break;
-            }
-            anchors.set_budget(domains.anchor_budget(&paths)?);
-            let failure = raster::failure(
-                &paths,
-                prior[i - 1]
-                    .paths
-                    .iter()
-                    .filter(|path| support_role(path.kind)),
-                recipe,
-                &mut anchors,
-                &mut anchor_work,
-                cancel,
-            )?;
-            let Some(failure) = failure else {
-                break;
-            };
-            if axis != preferred {
-                let path = &paths[failure.path];
-                return Err(error(
-                    ManufacturingErrorCode::UnsupportedGeometry,
-                    format!(
-                        "layer {i}: neither orthogonal support/interface raster has bounded deposited anchors; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; increase support density or revise support corridor",
-                        path.kind,
-                        path.points_mm[failure.first],
-                        path.points_mm[failure.last],
-                        failure.start,
-                        failure.end,
-                        failure.span,
-                    ),
-                ));
-            }
-            // Release failed paths and anchor records before staging the other
-            // axis. Neither attempt changes object or support ownership.
-            paths = Vec::new();
+            layer.region_coverage.support_area_mm2 = support_regions[i].unsigned_area();
+            layer.region_coverage.support_nominal_deposition_volume_mm3 =
+                paths.iter().try_fold(0.0, |sum, path| {
+                    Ok::<_, ManufacturingError>(
+                        sum + region::nominal_volume(path, layer.index, recipe)?,
+                    )
+                })?;
+            object_start[i] = paths.len();
+            let live_bytes = domains
+                .owned_bytes()
+                .saturating_add(super::bonds::path_bytes(&paths));
+            reserve_owned(&mut paths, layer.paths.len(), live_bytes)?;
+            paths.append(&mut layer.paths);
+            layer.paths = paths;
         }
-        *segments += path_segments(&paths);
-        anchors.set_budget(0);
-        domains.set_anchor_owned_bytes(anchors.retained_bytes());
-        layer.region_coverage.support_area_mm2 = support_regions[i].unsigned_area();
-        layer.region_coverage.support_nominal_deposition_volume_mm3 =
-            paths.iter().try_fold(0.0, |sum, path| {
-                Ok::<_, ManufacturingError>(
-                    sum + region::nominal_volume(path, layer.index, recipe)?,
-                )
-            })?;
-        object_start[i] = paths.len();
-        let live_bytes = domains
-            .owned_bytes()
-            .saturating_add(super::bonds::path_bytes(&paths));
-        reserve_owned(&mut paths, layer.paths.len(), live_bytes)?;
-        paths.append(&mut layer.paths);
-        layer.paths = paths;
-    }
-    // Restore original object roles before reevaluating the actual emitted
-    // support/contact strokes. A supported contour is not a fake Bridge.
-    support_metadata_bytes =
-        support_metadata_bytes.saturating_sub(vec_bytes(&original_bridge_roles));
-    for (index, path, kind) in original_bridge_roles {
-        layers[index].paths[object_start[index] + path].kind = kind;
-    }
-    let mut retained_regions =
-        retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
-    // Raster staging must include these live support/protected domains without
-    // counting the caller's object/cache reservation twice.
-    let retained_support_points = retained_regions.checked_sub(retained).ok_or_else(|| {
-        error(
-            ManufacturingErrorCode::ResourceLimit,
-            "support retained point accounting underflow",
-        )
-    })?;
-    for index in 1..layers.len() {
-        let (prior, remaining) = layers.split_at_mut(index);
-        let (layer, following) = remaining.split_first_mut().expect("current support layer");
-        let extra_owned_bytes = layer_payload_bytes(
-            prior
-                .iter()
-                .chain(std::iter::once(&*layer))
-                .chain(following.iter()),
-        ) + support_metadata_bytes
-            + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
-        owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
-        anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
-        let authored_axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, layer.index);
-        let begin = object_start[index];
-        let previous = prior[index - 1].paths.iter();
-        let contact_paths = contact_tops[index]
-            .map(|top| prior[top].paths.as_slice())
-            .unwrap_or(&[]);
-        let contact = contact_paths.iter().filter(|path| support_role(path.kind));
-        if joined_layers[index] {
-            // Other support demands can change the eventual previous footprints.
-            // Recreate ownership pieces; never retain a stale composite Bridge.
-            let without_old = *segments - path_segments(&layer.paths[begin..]);
-            let mut staged_segments = without_old;
-            anchors.set_budget(0);
+        // Restore original object roles before reevaluating the actual emitted
+        // support/contact strokes. A supported contour is not a fake Bridge.
+        support_metadata_bytes =
+            support_metadata_bytes.saturating_sub(vec_bytes(&original_bridge_roles));
+        for (index, path, kind) in original_bridge_roles {
+            layers[index].paths[object_start[index] + path].kind = kind;
+        }
+        let mut retained_regions =
+            retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
+        // Raster staging must include these live support/protected domains without
+        // counting the caller's object/cache reservation twice.
+        let retained_support_points = retained_regions.checked_sub(retained).ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "support retained point accounting underflow",
+            )
+        })?;
+        for index in 1..layers.len() {
+            let (prior, remaining) = layers.split_at_mut(index);
+            let (layer, following) = remaining.split_first_mut().expect("current support layer");
             let extra_owned_bytes = layer_payload_bytes(
                 prior
                     .iter()
@@ -1519,130 +1616,19 @@ pub(super) fn realize(
                     .chain(following.iter()),
             ) + support_metadata_bytes
                 + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
-            let staged_anchor_bytes = anchors.retained_bytes();
-            let mut check_component =
-                |candidate: &mut RasterCandidate,
-                 axis,
-                 scratch: usize,
-                 scratch_owned_bytes: usize| {
-                    let contact_bridge =
-                        axis != authored_component_axis(candidate, index as u32, recipe);
-                    let budget = component_budget(
-                        retained_regions,
-                        native_owned_bytes + extra_owned_bytes,
-                        scratch.saturating_add(candidate_units(candidate)),
-                        scratch_owned_bytes.saturating_add(candidate_owned_bytes(candidate)),
-                    )?;
-                    component_admission(
-                        (candidate, axis, budget, contact_bridge),
-                        previous.clone(),
-                        contact.clone(),
-                        recipe,
-                        &mut anchors,
-                        &mut anchor_work,
-                        cancel,
-                    )
-                };
-            let mut candidate = raster(
-                index,
-                authored_axis,
-                &mut staged_segments,
-                retained_support_points + constructed_points,
-                extra_owned_bytes,
-                staged_anchor_bytes,
-                Some(&mut check_component),
-            )?;
-            coalesce_bridge_rows(
-                &mut candidate,
-                BridgeRowContext {
-                    axis: authored_axis,
-                    demanded_reorientation: false,
-                    retained_points: retained_regions,
-                    owned_bytes: native_owned_bytes + extra_owned_bytes,
-                    recipe,
-                },
-                previous.clone(),
-                contact.clone(),
-                &mut anchors,
-                &mut anchor_work,
-                cancel,
-            )?;
-            if !finalize_interface(
-                index,
-                &mut candidate,
-                &mut staged_segments,
-                &mut work,
-                owned_bytes.saturating_add(anchors.retained_bytes()),
-            )? {
-                layer.paths = candidate.paths;
-                layer.region_coverage.process_interfaces = candidate.process_interfaces;
-                {
-                    layer.region_coverage.skin_bridge_domains = candidate.skin_bridge_domains;
-                    layer.skin_command_fits = candidate.skin_command_fits;
-                };
-                return Err(super::bonds::unresolved(layer));
-            }
-            *segments = without_old + path_segments(&candidate.paths);
-            layer.paths.truncate(begin);
-            let live_bytes = native_owned_bytes
-                + support_metadata_bytes
-                + layer_payload_bytes(
-                    prior
-                        .iter()
-                        .chain(std::iter::once(&*layer))
-                        .chain(following.iter()),
-                )
-                + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
-                + super::bonds::path_bytes(&candidate.paths)
-                + candidate_aux_bytes(&candidate)
-                + anchors.retained_bytes();
-            reserve_owned(&mut layer.paths, candidate.paths.len(), live_bytes)?;
-            layer.paths.extend(candidate.paths);
-            layer.region_coverage.process_interfaces = candidate.process_interfaces;
-            {
-                replace_skin_command_fits(
-                    &mut layer.skin_command_fits,
-                    candidate.skin_command_fits,
-                    &mut retained,
-                    &mut constructed_points,
-                )?;
-                replace_skin_bridge_domains(
-                    &mut layer.region_coverage,
-                    candidate.skin_bridge_domains,
-                    &mut retained,
-                    &mut constructed_points,
-                )?;
-            };
-            retained_regions =
-                retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
-            owned_bytes = native_owned_bytes
-                + support_metadata_bytes
-                + layer_payload_bytes(
-                    prior
-                        .iter()
-                        .chain(std::iter::once(&*layer))
-                        .chain(following.iter()),
-                )
-                + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
+            owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
             anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
-        }
-        anchors.set_budget(workspace_budget(
-            retained_regions,
-            owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len() - begin)),
-        )?);
-        let mut admission = strokes::analyze(
-            &layer.paths[begin..],
-            previous.clone(),
-            contact.clone(),
-            recipe,
-            &mut anchors,
-            &mut anchor_work,
-            cancel,
-        )?;
-        if admission.failure.is_some() {
-            let without_old = *segments - path_segments(&layer.paths[begin..]);
-            for recover_components in [false, true] {
-                let axis = authored_axis;
+            let authored_axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, layer.index);
+            let begin = object_start[index];
+            let previous = prior[index - 1].paths.iter();
+            let contact_paths = contact_tops[index]
+                .map(|top| prior[top].paths.as_slice())
+                .unwrap_or(&[]);
+            let contact = contact_paths.iter().filter(|path| support_role(path.kind));
+            if joined_layers[index] {
+                // Other support demands can change the eventual previous footprints.
+                // Recreate ownership pieces; never retain a stale composite Bridge.
+                let without_old = *segments - path_segments(&layer.paths[begin..]);
                 let mut staged_segments = without_old;
                 anchors.set_budget(0);
                 let extra_owned_bytes = layer_payload_bytes(
@@ -1651,9 +1637,7 @@ pub(super) fn realize(
                         .chain(std::iter::once(&*layer))
                         .chain(following.iter()),
                 ) + support_metadata_bytes
-                    + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
-                    + vec_bytes(&admission.bridges);
-                owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
+                    + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
                 let staged_anchor_bytes = anchors.retained_bytes();
                 let mut check_component =
                     |candidate: &mut RasterCandidate,
@@ -1664,7 +1648,7 @@ pub(super) fn realize(
                             axis != authored_component_axis(candidate, index as u32, recipe);
                         let budget = component_budget(
                             retained_regions,
-                            owned_bytes,
+                            native_owned_bytes + extra_owned_bytes,
                             scratch.saturating_add(candidate_units(candidate)),
                             scratch_owned_bytes.saturating_add(candidate_owned_bytes(candidate)),
                         )?;
@@ -1678,28 +1662,26 @@ pub(super) fn realize(
                             cancel,
                         )
                     };
-                let recovery: Option<&mut super::classification::ComponentAnchorCheck<'_>> =
-                    if recover_components {
-                        Some(&mut check_component)
-                    } else {
-                        None
-                    };
-                let mut candidate = raster(
+                let raster_before = work;
+                let candidate = raster(
                     index,
-                    axis,
+                    authored_axis,
                     &mut staged_segments,
                     retained_support_points + constructed_points,
                     extra_owned_bytes,
                     staged_anchor_bytes,
-                    recovery,
-                )?;
+                    &mut work,
+                    Some(&mut check_component),
+                );
+                exclude_object_raster_work(&mut foreign_work, raster_before, work)?;
+                let mut candidate = candidate?;
                 coalesce_bridge_rows(
                     &mut candidate,
                     BridgeRowContext {
-                        axis,
+                        axis: authored_axis,
                         demanded_reorientation: false,
                         retained_points: retained_regions,
-                        owned_bytes,
+                        owned_bytes: native_owned_bytes + extra_owned_bytes,
                         recipe,
                     },
                     previous.clone(),
@@ -1715,184 +1697,390 @@ pub(super) fn realize(
                     &mut work,
                     owned_bytes.saturating_add(anchors.retained_bytes()),
                 )? {
-                    continue;
-                }
-                anchors.set_budget(candidate_budget(
-                    &candidate.paths,
-                    retained_regions,
-                    owned_bytes
-                        .saturating_add(candidate_aux_bytes(&candidate))
-                        .saturating_add(stroke_proof_reservation(candidate.paths.len())),
-                )?);
-                let other = strokes::analyze(
-                    &candidate.paths,
-                    previous.clone(),
-                    contact.clone(),
-                    recipe,
-                    &mut anchors,
-                    &mut anchor_work,
-                    cancel,
-                )?;
-                if other.failure.is_none() {
-                    *segments = without_old + path_segments(&candidate.paths);
-                    layer.paths.truncate(begin);
-                    let live_bytes = native_owned_bytes
-                        + support_metadata_bytes
-                        + layer_payload_bytes(
-                            prior
-                                .iter()
-                                .chain(std::iter::once(&*layer))
-                                .chain(following.iter()),
-                        )
-                        + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
-                        + super::bonds::path_bytes(&candidate.paths)
-                        + candidate_aux_bytes(&candidate)
-                        + anchors.retained_bytes();
-                    reserve_owned(&mut layer.paths, candidate.paths.len(), live_bytes)?;
-                    layer.paths.extend(candidate.paths);
+                    layer.paths = candidate.paths;
                     layer.region_coverage.process_interfaces = candidate.process_interfaces;
                     {
-                        replace_skin_command_fits(
-                            &mut layer.skin_command_fits,
-                            candidate.skin_command_fits,
-                            &mut retained,
-                            &mut constructed_points,
-                        )?;
-                        replace_skin_bridge_domains(
-                            &mut layer.region_coverage,
-                            candidate.skin_bridge_domains,
-                            &mut retained,
-                            &mut constructed_points,
-                        )?;
+                        layer.region_coverage.skin_bridge_domains = candidate.skin_bridge_domains;
+                        layer.skin_command_fits = candidate.skin_command_fits;
                     };
-                    retained_regions =
-                        retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
-                    admission = other;
-                    break;
+                    return Err(super::bonds::unresolved(layer));
+                }
+                *segments = without_old + path_segments(&candidate.paths);
+                layer.paths.truncate(begin);
+                let live_bytes = native_owned_bytes
+                    + support_metadata_bytes
+                    + layer_payload_bytes(
+                        prior
+                            .iter()
+                            .chain(std::iter::once(&*layer))
+                            .chain(following.iter()),
+                    )
+                    + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
+                    + super::bonds::path_bytes(&candidate.paths)
+                    + candidate_aux_bytes(&candidate)
+                    + anchors.retained_bytes();
+                reserve_owned(&mut layer.paths, candidate.paths.len(), live_bytes)?;
+                layer.paths.extend(candidate.paths);
+                layer.region_coverage.process_interfaces = candidate.process_interfaces;
+                {
+                    replace_skin_command_fits(
+                        &mut layer.skin_command_fits,
+                        candidate.skin_command_fits,
+                        &mut retained,
+                        &mut constructed_points,
+                    )?;
+                    replace_skin_bridge_domains(
+                        &mut layer.region_coverage,
+                        candidate.skin_bridge_domains,
+                        &mut retained,
+                        &mut constructed_points,
+                    )?;
+                };
+                retained_regions =
+                    retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
+                owned_bytes = native_owned_bytes
+                    + support_metadata_bytes
+                    + layer_payload_bytes(
+                        prior
+                            .iter()
+                            .chain(std::iter::once(&*layer))
+                            .chain(following.iter()),
+                    )
+                    + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
+                anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
+            }
+            anchors.set_budget(workspace_budget(
+                retained_regions,
+                owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len() - begin)),
+            )?);
+            let mut admission = strokes::analyze(
+                &layer.paths[begin..],
+                previous.clone(),
+                contact.clone(),
+                recipe,
+                &mut anchors,
+                &mut anchor_work,
+                cancel,
+            )?;
+            if admission.failure.is_some() {
+                let without_old = *segments - path_segments(&layer.paths[begin..]);
+                for recover_components in [false, true] {
+                    let axis = authored_axis;
+                    let mut staged_segments = without_old;
+                    anchors.set_budget(0);
+                    let extra_owned_bytes = layer_payload_bytes(
+                        prior
+                            .iter()
+                            .chain(std::iter::once(&*layer))
+                            .chain(following.iter()),
+                    ) + support_metadata_bytes
+                        + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
+                        + vec_bytes(&admission.bridges);
+                    owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
+                    let staged_anchor_bytes = anchors.retained_bytes();
+                    let mut check_component =
+                        |candidate: &mut RasterCandidate,
+                         axis,
+                         scratch: usize,
+                         scratch_owned_bytes: usize| {
+                            let contact_bridge =
+                                axis != authored_component_axis(candidate, index as u32, recipe);
+                            let budget = component_budget(
+                                retained_regions,
+                                owned_bytes,
+                                scratch.saturating_add(candidate_units(candidate)),
+                                scratch_owned_bytes
+                                    .saturating_add(candidate_owned_bytes(candidate)),
+                            )?;
+                            component_admission(
+                                (candidate, axis, budget, contact_bridge),
+                                previous.clone(),
+                                contact.clone(),
+                                recipe,
+                                &mut anchors,
+                                &mut anchor_work,
+                                cancel,
+                            )
+                        };
+                    let recovery: Option<&mut super::classification::ComponentAnchorCheck<'_>> =
+                        if recover_components {
+                            Some(&mut check_component)
+                        } else {
+                            None
+                        };
+                    let raster_before = work;
+                    let candidate = raster(
+                        index,
+                        axis,
+                        &mut staged_segments,
+                        retained_support_points + constructed_points,
+                        extra_owned_bytes,
+                        staged_anchor_bytes,
+                        &mut work,
+                        recovery,
+                    );
+                    exclude_object_raster_work(&mut foreign_work, raster_before, work)?;
+                    let mut candidate = candidate?;
+                    coalesce_bridge_rows(
+                        &mut candidate,
+                        BridgeRowContext {
+                            axis,
+                            demanded_reorientation: false,
+                            retained_points: retained_regions,
+                            owned_bytes,
+                            recipe,
+                        },
+                        previous.clone(),
+                        contact.clone(),
+                        &mut anchors,
+                        &mut anchor_work,
+                        cancel,
+                    )?;
+                    if !finalize_interface(
+                        index,
+                        &mut candidate,
+                        &mut staged_segments,
+                        &mut work,
+                        owned_bytes.saturating_add(anchors.retained_bytes()),
+                    )? {
+                        continue;
+                    }
+                    anchors.set_budget(candidate_budget(
+                        &candidate.paths,
+                        retained_regions,
+                        owned_bytes
+                            .saturating_add(candidate_aux_bytes(&candidate))
+                            .saturating_add(stroke_proof_reservation(candidate.paths.len())),
+                    )?);
+                    let other = strokes::analyze(
+                        &candidate.paths,
+                        previous.clone(),
+                        contact.clone(),
+                        recipe,
+                        &mut anchors,
+                        &mut anchor_work,
+                        cancel,
+                    )?;
+                    if other.failure.is_none() {
+                        *segments = without_old + path_segments(&candidate.paths);
+                        layer.paths.truncate(begin);
+                        let live_bytes = native_owned_bytes
+                            + support_metadata_bytes
+                            + layer_payload_bytes(
+                                prior
+                                    .iter()
+                                    .chain(std::iter::once(&*layer))
+                                    .chain(following.iter()),
+                            )
+                            + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
+                            + super::bonds::path_bytes(&candidate.paths)
+                            + candidate_aux_bytes(&candidate)
+                            + anchors.retained_bytes();
+                        reserve_owned(&mut layer.paths, candidate.paths.len(), live_bytes)?;
+                        layer.paths.extend(candidate.paths);
+                        layer.region_coverage.process_interfaces = candidate.process_interfaces;
+                        {
+                            replace_skin_command_fits(
+                                &mut layer.skin_command_fits,
+                                candidate.skin_command_fits,
+                                &mut retained,
+                                &mut constructed_points,
+                            )?;
+                            replace_skin_bridge_domains(
+                                &mut layer.region_coverage,
+                                candidate.skin_bridge_domains,
+                                &mut retained,
+                                &mut constructed_points,
+                            )?;
+                        };
+                        retained_regions = retained
+                            + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
+                        admission = other;
+                        break;
+                    }
+                }
+                owned_bytes = native_owned_bytes
+                    + support_metadata_bytes
+                    + layer_payload_bytes(
+                        prior
+                            .iter()
+                            .chain(std::iter::once(&*layer))
+                            .chain(following.iter()),
+                    )
+                    + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
+                anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
+            }
+            if let Some(failure) = admission.failure {
+                let path = &layer.paths[begin + failure.path];
+                let a = path.points_mm[failure.first];
+                let b = path.points_mm[failure.last];
+                let t = (failure.start + failure.end) * 0.5;
+                let point = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+                let nearest_contact = nearest_stroke(
+                    point,
+                    contact_paths.iter().filter(|path| support_role(path.kind)),
+                    &mut work,
+                    foreign_work,
+                    cancel,
+                )?;
+                let nearest_object = nearest_stroke(
+                    point,
+                    prior[index - 1]
+                        .paths
+                        .iter()
+                        .filter(|path| !support_role(path.kind)),
+                    &mut work,
+                    foreign_work,
+                    cancel,
+                )?;
+                return Err(error(
+                    ManufacturingErrorCode::UnsupportedGeometry,
+                    format!(
+                        "layer {index} Z {:.6}: no raster satisfies both authored normal-fill axis {authored_axis:?} (policy {:?}) and bounded actual deposited/contact anchors; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; contact layer {:?}, nearest contact {:?}, nearest previous object {:?}",
+                        layer.z_mm,
+                        recipe.rectilinear_axis,
+                        path.kind,
+                        a,
+                        b,
+                        failure.start,
+                        failure.end,
+                        failure.span,
+                        contact_tops[index],
+                        nearest_contact,
+                        nearest_object
+                    ),
+                ));
+            }
+            for path in admission.bridges {
+                layer.paths[begin + path].kind = DepositionKind::Bridge;
+            }
+        }
+        // Contact selection is only a proposal until actual final paths exist.
+        // Check the same closed, physical-decimal bead enclosure used by the XY
+        // exclusion gates; no schedule epsilon can authorize a smaller Z gap.
+        for (target, top) in contact_tops.iter().enumerate() {
+            let Some(top) = *top else {
+                continue;
+            };
+            let mut object_bottom = f64::INFINITY;
+            let mut support_top = f64::NEG_INFINITY;
+            for path in &layers[target].paths {
+                if support_role(path.kind) {
+                    continue;
+                }
+                for edge in path.points_mm.windows(2) {
+                    super::native::charge_support_clearance(&mut work, cancel)?;
+                    object_bottom = object_bottom.min(
+                        program_coordinates::project_xyz6_segment_bead_height_mm(
+                            edge[0][2],
+                            edge[1][2],
+                            path.physical_z_mm[1] - path.physical_z_mm[0],
+                        )?[0],
+                    );
                 }
             }
-            owned_bytes = native_owned_bytes
-                + support_metadata_bytes
-                + layer_payload_bytes(
-                    prior
-                        .iter()
-                        .chain(std::iter::once(&*layer))
-                        .chain(following.iter()),
-                )
-                + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
-            anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
+            for path in &layers[top].paths {
+                if !support_role(path.kind) {
+                    continue;
+                }
+                for edge in path.points_mm.windows(2) {
+                    super::native::charge_support_clearance(&mut work, cancel)?;
+                    support_top = support_top.max(
+                        program_coordinates::project_xyz6_segment_bead_height_mm(
+                            edge[0][2],
+                            edge[1][2],
+                            path.physical_z_mm[1] - path.physical_z_mm[0],
+                        )?[1],
+                    );
+                }
+            }
+            if !object_bottom.is_finite()
+                || !support_top.is_finite()
+                || program_coordinates::enclosed_vertical_gap_mm(object_bottom, support_top)?
+                    < z_gap_mm
+            {
+                return Err(error(
+                    ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
+                    format!(
+                        "layer {target}: actual emitted contact does not prove the minimum Z gap {z_gap_mm} mm"
+                    ),
+                ));
+            }
         }
-        if let Some(failure) = admission.failure {
-            let path = &layer.paths[begin + failure.path];
-            let a = path.points_mm[failure.first];
-            let b = path.points_mm[failure.last];
-            let t = (failure.start + failure.end) * 0.5;
-            let point = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-            let nearest_contact = nearest_stroke(
-                point,
-                contact_paths.iter().filter(|path| support_role(path.kind)),
-                &mut work,
-                cancel,
-            )?;
-            let nearest_object = nearest_stroke(
-                point,
-                prior[index - 1]
-                    .paths
-                    .iter()
-                    .filter(|path| !support_role(path.kind)),
-                &mut work,
-                cancel,
-            )?;
-            return Err(error(
-                ManufacturingErrorCode::UnsupportedGeometry,
-                format!(
-                    "layer {index} Z {:.6}: no raster satisfies both authored normal-fill axis {authored_axis:?} (policy {:?}) and bounded actual deposited/contact anchors; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; contact layer {:?}, nearest contact {:?}, nearest previous object {:?}",
-                    layer.z_mm,
-                    recipe.rectilinear_axis,
-                    path.kind,
-                    a,
-                    b,
-                    failure.start,
-                    failure.end,
-                    failure.span,
-                    contact_tops[index],
-                    nearest_contact,
-                    nearest_object
-                ),
-            ));
-        }
-        for path in admission.bridges {
-            layer.paths[begin + path].kind = DepositionKind::Bridge;
+        // Offset/overlay corridor masks only propose candidates. Certify every
+        // final actual emitted support capsule against the unchanged raw all-Z C
+        // and scoped positive void masks, after both raster/anchor alternatives.
+        super::native::certify_support_clearance(
+            layers,
+            &super::native::SupportClearanceGeometry {
+                sections,
+                schedule,
+                protected: &protected,
+                scopes: &scopes,
+            },
+            recipe,
+            native_work,
+            &mut work,
+            cancel,
+        )?;
+        Ok(SupportAdmission::Complete)
+    })();
+    work_bank.finish(work, foreign_work, anchor_work)?;
+    outcome
+}
+
+fn contact_layer(
+    layers: &[PrintLayer],
+    target: usize,
+    path: &DepositionPath,
+    z_gap_mm: f64,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<usize>, ManufacturingError> {
+    let floor = program_coordinates::project_xyz6_bead_height_mm(
+        path.physical_z_mm[1],
+        path.physical_z_mm[1] - path.physical_z_mm[0],
+    )?[0];
+    for i in (0..target).rev() {
+        super::native::charge_support_clearance(work, cancel)?;
+        let upper = program_coordinates::project_xyz6_bead_height_mm(
+            layers[i].z_mm,
+            layers[i].z_mm - layers[i].lower_z_mm,
+        )?[1];
+        if program_coordinates::enclosed_vertical_gap_mm(floor, upper)? >= z_gap_mm {
+            return Ok(Some(i));
         }
     }
-    // Contact selection is only a proposal until actual final paths exist.
-    // Check the same closed, physical-decimal bead enclosure used by the XY
-    // exclusion gates; no schedule epsilon can authorize a smaller Z gap.
-    for (target, top) in contact_tops.iter().enumerate() {
-        let Some(top) = *top else {
-            continue;
-        };
-        let mut object_bottom = f64::INFINITY;
-        let mut support_top = f64::NEG_INFINITY;
-        for path in &layers[target].paths {
-            if support_role(path.kind) {
-                continue;
-            }
-            for edge in path.points_mm.windows(2) {
-                super::native::charge_support_clearance(&mut work, cancel)?;
-                object_bottom = object_bottom.min(
-                    program_coordinates::project_xyz6_segment_bead_height_mm(
-                        edge[0][2],
-                        edge[1][2],
-                        path.physical_z_mm[1] - path.physical_z_mm[0],
-                    )?[0],
-                );
-            }
-        }
-        for path in &layers[top].paths {
-            if !support_role(path.kind) {
-                continue;
-            }
-            for edge in path.points_mm.windows(2) {
-                super::native::charge_support_clearance(&mut work, cancel)?;
-                support_top = support_top.max(
-                    program_coordinates::project_xyz6_segment_bead_height_mm(
-                        edge[0][2],
-                        edge[1][2],
-                        path.physical_z_mm[1] - path.physical_z_mm[0],
-                    )?[1],
-                );
-            }
-        }
-        if !object_bottom.is_finite()
-            || !support_top.is_finite()
-            || program_coordinates::enclosed_vertical_gap_mm(object_bottom, support_top)? < z_gap_mm
-        {
-            return Err(error(
-                ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
-                format!(
-                    "layer {target}: actual emitted contact does not prove the minimum Z gap {z_gap_mm} mm"
-                ),
-            ));
-        }
-    }
-    // Offset/overlay corridor masks only propose candidates. Certify every
-    // final actual emitted support capsule against the unchanged raw all-Z C
-    // and scoped positive void masks, after both raster/anchor alternatives.
-    super::native::certify_support_clearance(
-        layers,
-        &super::native::SupportClearanceGeometry {
-            sections,
-            schedule,
-            protected: &protected,
-            scopes: &scopes,
-        },
-        recipe,
-        native_work,
-        &mut work,
-        cancel,
-    )?;
-    Ok(())
+    Ok(None)
+}
+
+fn unreachable_layer_error(
+    layers: &[PrintLayer],
+    demand: &Demand,
+    z_gap_mm: f64,
+) -> Result<ManufacturingError, ManufacturingError> {
+    let path = &layers[demand.target].paths[demand.failure.path];
+    let floor = program_coordinates::project_xyz6_bead_height_mm(
+        path.physical_z_mm[1],
+        path.physical_z_mm[1] - path.physical_z_mm[0],
+    )?[0];
+    Ok(error(
+        ManufacturingErrorCode::UnsupportedGeometry,
+        format!(
+            "layer {}: no printable support layer fits below the declared Z gap {z_gap_mm} mm; demanded {:?} stroke {:?} to {:?}, physical interval {:?} mm, width {} mm, uncovered parameters [{:.9}, {:.9}], span {:.9} mm, emitted object floor {:.9} mm, bed {:.9} mm",
+            demand.target,
+            path.kind,
+            path.points_mm[demand.failure.first],
+            path.points_mm[demand.failure.last],
+            path.physical_z_mm,
+            demand.failure.width_mm,
+            demand.failure.start,
+            demand.failure.end,
+            demand.failure.span,
+            floor,
+            layers[0].lower_z_mm,
+        ),
+    ))
 }
 
 /// Move existing buffers, never copy geometry. Final construction is complete
@@ -2553,21 +2741,13 @@ fn nearest_stroke<'a>(
     point: [f64; 2],
     paths: impl Iterator<Item = &'a DepositionPath>,
     work: &mut usize,
+    foreign_work: usize,
     cancel: &AtomicBool,
 ) -> Result<Option<NearestStroke>, ManufacturingError> {
     let mut nearest: Option<NearestStroke> = None;
     for path in paths {
         for edge in path.points_mm.windows(2) {
-            check_cancel(cancel)?;
-            *work = work
-                .checked_add(1)
-                .filter(|n| *n <= 20_000_000)
-                .ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "cumulative deposited-stroke diagnostic work budget exceeded",
-                    )
-                })?;
+            charge_owned_work(work, foreign_work, 1, cancel)?;
             let delta = [edge[1][0] - edge[0][0], edge[1][1] - edge[0][1]];
             let length = delta[0].hypot(delta[1]);
             let unit = [delta[0] / length, delta[1] / length];
@@ -2600,6 +2780,7 @@ fn charge_boolean(
     a: &MultiPolygon<f64>,
     b: &MultiPolygon<f64>,
     work: &mut usize,
+    foreign_work: usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     boolean_budget(a, b, cancel)?;
@@ -2611,15 +2792,35 @@ fn charge_boolean(
                 "support Boolean work overflow",
             )
         })?;
-    *work = work
-        .checked_add(pairs)
-        .filter(|n| *n <= 20_000_000)
-        .ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "cumulative support Boolean/projection work budget exceeded",
-            )
-        })?;
+    charge_owned_work(work, foreign_work, pairs, cancel)
+}
+
+const MAX_SUPPORT_OWNED_WORK: usize = 20_000_000;
+
+fn charge_owned_work(
+    work: &mut usize,
+    foreign: usize,
+    amount: usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    check_cancel(cancel)?;
+    let owned = work.checked_sub(foreign).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "support work-domain charge mismatch",
+        )
+    })?;
+    let next = work.checked_add(amount)
+        .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
+        .filter(|n| n.checked_sub(foreign).is_some_and(|n| n <= MAX_SUPPORT_OWNED_WORK))
+        .ok_or_else(|| error(
+            ManufacturingErrorCode::ResourceLimit,
+            format!(
+                "cumulative support Boolean/projection work budget exceeded; global {}, support-owned {owned}, requested {amount}, global limit {}, support-owned limit {MAX_SUPPORT_OWNED_WORK}",
+                *work, super::MAX_BOOLEAN_PAIRS,
+            ),
+        ))?;
+    *work = next;
     Ok(())
 }
 
@@ -2818,6 +3019,77 @@ fn candidate_clearance_distance(
 mod tests {
     use super::*;
     use geo::{line_string, polygon};
+
+    #[test]
+    fn support_owned_work_excludes_failed_object_raster_and_survives_retry() {
+        let material = MultiPolygon(vec![polygon![
+            (x: 0.0, y: 0.0), (x: 3.0, y: 0.0),
+            (x: 3.0, y: 2.0), (x: 0.0, y: 2.0),
+        ]]);
+        let pairs = region::point_count(&material).pow(2);
+        let cancel = AtomicBool::new(false);
+        let mut bank = SupportWork {
+            planar: MAX_SUPPORT_OWNED_WORK * 2,
+            support_owned: MAX_SUPPORT_OWNED_WORK - pairs,
+            ..SupportWork::default()
+        };
+        let mut work = bank.planar;
+        let mut foreign = bank.foreign_work().unwrap();
+        charge_boolean(&material, &material, &mut work, foreign, &cancel).unwrap();
+
+        // A real object-raster kernel consumes global work before cancellation.
+        // Its failed outcome must not turn that charge into support-owned work.
+        let raster_before = work;
+        let raster_result = (|| {
+            super::super::boolean::budget_accumulated(&material, &material, &mut work, &cancel)?;
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            super::super::boolean::budget_accumulated(&material, &material, &mut work, &cancel)
+        })();
+        assert!(raster_result.is_err());
+        assert!(work > raster_before);
+        exclude_object_raster_work(&mut foreign, raster_before, work).unwrap();
+        bank.finish(work, foreign, 0).unwrap();
+        assert_eq!(bank.support_owned, MAX_SUPPORT_OWNED_WORK);
+        assert_eq!(bank.planar, work);
+
+        cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        let foreign = bank.foreign_work().unwrap();
+        let before = bank.planar;
+        let failure =
+            charge_boolean(&material, &material, &mut work, foreign, &cancel).unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
+        bank.finish(work, foreign, 0).unwrap();
+        assert_eq!(bank.planar, before);
+        assert_eq!(bank.support_owned, MAX_SUPPORT_OWNED_WORK);
+    }
+
+    #[test]
+    fn support_owned_work_retains_the_global_planar_cap() {
+        let material = MultiPolygon(vec![polygon![
+            (x: 0.0, y: 0.0), (x: 3.0, y: 0.0),
+            (x: 3.0, y: 2.0), (x: 0.0, y: 2.0),
+        ]]);
+        let pairs = region::point_count(&material).pow(2);
+        let mut bank = SupportWork {
+            planar: super::super::MAX_BOOLEAN_PAIRS - pairs + 1,
+            ..SupportWork::default()
+        };
+        let mut work = bank.planar;
+        let foreign = bank.foreign_work().unwrap();
+        let failure = charge_boolean(
+            &material,
+            &material,
+            &mut work,
+            foreign,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
+        let before = bank.planar;
+        bank.finish(work, foreign, 0).unwrap();
+        assert_eq!(bank.planar, before);
+        assert_eq!(bank.support_owned, 0);
+    }
 
     #[test]
     fn retained_support_capacity_is_byte_bounded_and_shared_once() {
@@ -3632,6 +3904,7 @@ mod tests {
                 region::HatchAxis::X,
                 region::HatchAxis::X,
                 &recipe,
+                region::OrdinaryHatchPhase::Centered,
                 classified_bytes,
                 &[],
                 &mut 0,
@@ -3670,6 +3943,7 @@ mod tests {
                 region::HatchAxis::Y,
                 region::HatchAxis::Y,
                 &recipe,
+                region::OrdinaryHatchPhase::Centered,
                 classified_bytes,
                 &[],
                 &mut 0,

@@ -28,7 +28,6 @@ pub use collar::{
     NativeCriticalCollarTargetSide, certify_native_critical_collar,
 };
 pub use critical::CriticalEventNeighborhood;
-pub(crate) use critical::PreparedSourceVertexPlans;
 pub use joint::{
     CompletedNativeUnionProofSet, EndpointOwnershipRequest, NativeCriticalCollarIncidence,
     NativeInnerMaterialPrism, NativeInterfaceAttachment, NativeOwnedEndpoint,
@@ -40,7 +39,7 @@ pub use joint::{
     certify_native_collar_incidence, certify_native_one_sided_source_leaf,
     certify_native_source_leaf, certify_native_union,
 };
-pub(crate) use material_source::{MaterialSourceView, certify_zero_material_transport};
+pub(crate) use material_source::MaterialSourceView;
 pub use material_source::{PreparedSolid, prepare_solid};
 pub use placed::{
     PlacedMaterialProjectedBounds, analyze_placed_height_domain, placed_bounds,
@@ -158,7 +157,7 @@ impl InvariantHeightDomain {
     ) -> crate::kernel::MaterialRealizationIdentity {
         self.material_realization
     }
-    pub(crate) fn matches_original_material(&self, definition: &Definition) -> bool {
+    pub(crate) fn matches_native_material(&self, definition: &Definition) -> bool {
         self.definition_id() == definition.id()
             && self.material_realization
                 == crate::kernel::MaterialRealizationIdentity::new(definition)
@@ -185,42 +184,28 @@ pub struct HeightAnalysis {
     capture: HeightCapture,
 }
 
-/// Conservative support of possible source-relative transport, not an isolated
-/// critical height, an existence witness, or a physical layer boundary.
-type SourceTransportCover = critical::material_link::SourceTransportSupport;
-
 #[derive(Debug)]
 struct HeightCapture {
     definition_id: DefinitionId,
     material_realization: crate::kernel::MaterialRealizationIdentity,
-    transport_support: Vec<SourceTransportCover>,
-    transport_support_complete: bool,
     frame: PlaneFrameMm,
     height_interval_mm: [f64; 2],
     policy: AnalysisPolicy,
     pose: Option<spiling_contracts::geometry::RigidPoseMm>,
 }
 impl HeightAnalysis {
-    /// Ordinary event brackets describe literal native geometry. Overlapping
-    /// transport support requires a complete realized-material closed capture,
-    /// even when the ordinary native event list is empty.
+    /// A native census is complete only inside its captured height scope.
+    /// Critical brackets remain native topology events, not source transport.
     pub fn requires_closed_material_capture(&self, range: [f64; 2]) -> bool {
-        !self.capture.transport_support_complete
-            || !range.into_iter().all(f64::is_finite)
+        !range.into_iter().all(f64::is_finite)
             || range[0] > range[1]
             || range[0] < self.capture.height_interval_mm[0]
             || range[1] > self.capture.height_interval_mm[1]
-            || self.capture.transport_support.iter().any(|cover| {
-                cover.base_interval[0].min(cover.corrected_interval[0]) <= range[1]
-                    && range[0] <= cover.base_interval[1].max(cover.corrected_interval[1])
-            })
     }
     pub fn retained_bytes(&self) -> usize {
         self.capture.definition_id.allocated_bytes()
             + (self.event_brackets_mm.capacity() + self.proved_event_brackets_mm.capacity())
                 * std::mem::size_of::<[f64; 2]>()
-            + self.capture.transport_support.capacity()
-                * std::mem::size_of::<SourceTransportCover>()
             + self
                 .invariance
                 .as_ref()
@@ -231,16 +216,12 @@ impl HeightAnalysis {
     ) -> crate::kernel::MaterialRealizationIdentity {
         self.capture.material_realization
     }
-    /// Literal native critical candidates, not transport-support boundaries.
-    /// Material callers must also honor `requires_closed_material_capture`.
+    /// Critical candidates from the native material's full boundary census.
     pub fn event_brackets_mm(&self) -> &[[f64; 2]] {
         &self.event_brackets_mm
     }
-    /// Mandatory material-plane candidates are unchanged literal events proved
-    /// outside the complete source-owned correction support. Covered native
-    /// events remain deferred closed-capture obligations, not extra sliver
-    /// planes. An empty iterator never proves an absence of material critical
-    /// strata; global material terminal brackets come from material bounds.
+    /// Mandatory plane candidates are actual native critical strata. Global
+    /// terminal brackets are independently captured by native material bounds.
     pub fn material_plane_event_brackets_mm(&self) -> impl Iterator<Item = [f64; 2]> + '_ {
         self.event_brackets_mm
             .iter()
@@ -314,6 +295,14 @@ impl SlabCapture {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
+        if !section.matches_native_material(definition)
+            || section.certificate.pose != spiling_contracts::geometry::RigidPoseMm::IDENTITY
+        {
+            return Err(GeometryError::new(
+                GeometryErrorCode::InvalidGeometry,
+                "native slab sample does not match its material and definition-space pose",
+            ));
+        }
         let height =
             slab::native_sample_height_band(definition, request.frame, section, work, cancel)?;
         Ok(Self {
@@ -335,8 +324,8 @@ struct PlacedSlabCapture {
     native_shape_error_mm: f64,
 }
 
-/// Original native boundary material present only at a closed slab endpoint.
-/// Its private constructor discharges the full face cover and paired original
+/// Native boundary material present only at a closed slab endpoint.
+/// Its private constructor discharges the full face cover and paired native
 /// coedge incidence; it never claims a finite empty-prism Hausdorff distance.
 #[derive(Debug)]
 pub struct NativeEndpointStratum {
@@ -414,7 +403,7 @@ impl SlabAnalysis {
     ) -> crate::kernel::MaterialRealizationIdentity {
         self.capture.material_realization
     }
-    pub(crate) fn matches_original_material(&self, definition: &Definition) -> bool {
+    pub(crate) fn matches_native_material(&self, definition: &Definition) -> bool {
         self.definition_id() == definition.id()
             && self.capture.material_realization
                 == crate::kernel::MaterialRealizationIdentity::new(definition)
@@ -435,7 +424,7 @@ impl SlabAnalysis {
     /// material. A regular continuation certificate bounds the regular-core
     /// closure. The one-sided critical fallback instead uses C intersected with
     /// sweep(actual native filled sample). Presence of a collar alone does not
-    /// identify these cores. Missing transition material/original endpoint
+    /// identify these cores. Missing transition material or native endpoint
     /// strata require independent material-facing native incidence and coverage.
     pub fn material_core_shape_error_mm(&self) -> f64 {
         self.boundary_motion_bound_mm
@@ -449,10 +438,9 @@ impl SlabAnalysis {
     pub fn has_critical_collar(&self) -> bool {
         self.collar_complex.is_some()
     }
-    /// Global native-source convexity, proved from the complete original
-    /// boundary and exact chart gluing, not from sample-loop counts. An actual
-    /// admitted affine pose preserves it; this immutable capture binds the
-    /// source proof and the posed slab used by downstream joint analysis.
+    /// Global native-material convexity from the complete boundary, not sample
+    /// loop counts. An admitted affine pose preserves it; this capture binds the
+    /// material proof and posed slab used by downstream joint analysis.
     pub fn has_native_convex_section_topology_proof(&self) -> bool {
         self.critical.as_ref().is_some_and(|proof| {
             let a = proof.request();
@@ -476,7 +464,7 @@ impl SlabAnalysis {
     pub fn has_transition_material(&self) -> bool {
         self.collar_complex.is_some() || !self.endpoint_strata.is_empty()
     }
-    /// One-sided candidate prism to the original CLOSED native source material.
+    /// One-sided candidate prism to the CLOSED native material.
     /// This alone never establishes the reverse direction or feature incidence.
     pub fn sample_to_closed_source_shape_error_mm(&self) -> f64 {
         self.boundary_motion_bound_mm

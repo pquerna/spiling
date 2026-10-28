@@ -69,6 +69,7 @@ pub(crate) fn native_surface_nurbs(
 /// This is not the analytic STEP chart and does not certify an analytic/NURBS
 /// correspondence. In particular Cone::evaluate's corrected STEP point must not
 /// be paired with these derivatives; source consumers retain this one law.
+#[track_caller]
 pub fn evaluate_analytic_surface_jet(
     surface: &Surface,
     uv: [[f64; 2]; 2],
@@ -78,6 +79,7 @@ pub fn evaluate_analytic_surface_jet(
     surface_order(surface, uv, 2, work, cancel)
 }
 
+#[track_caller]
 pub(super) fn surface_order(
     surface: &Surface,
     uv: [[f64; 2]; 2],
@@ -96,6 +98,7 @@ pub(super) fn surface_order(
     })
 }
 
+#[track_caller]
 pub(super) fn surface_tensor(
     surface: &Surface,
     uv: [[f64; 2]; 2],
@@ -114,8 +117,36 @@ pub(super) fn surface_tensor(
     let min = domain.min();
     let max = domain.max();
     if uv[0][0] < min.x || uv[0][1] > max.x || uv[1][0] < min.y || uv[1][1] > max.y {
-        return Err(conditioning(
-            "surface query exceeds its immutable native active chart",
+        let nurb_active = native_surface_nurbs(surface).ok().flatten().map(|n| {
+            [
+                [
+                    n.u_knots().get(n.p()).copied(),
+                    n.u_knots().get(n.n() + 1).copied(),
+                ],
+                [
+                    n.v_knots().get(n.q()).copied(),
+                    n.v_knots().get(n.m() + 1).copied(),
+                ],
+            ]
+        });
+        return Err(GeometryError::new(
+            GeometryErrorCode::ConditioningFailure,
+            format!(
+                "surface query exceeds its immutable native active chart: \
+                 uv=[[{:.17e},{:.17e}],[{:.17e},{:.17e}]], \
+                 natural=[[{:.17e},{:.17e}],[{:.17e},{:.17e}]], \
+                 native_nurb_active={nurb_active:?}, kind={}, order={order}, caller={}",
+                uv[0][0],
+                uv[0][1],
+                uv[1][0],
+                uv[1][1],
+                min.x,
+                max.x,
+                min.y,
+                max.y,
+                surface.type_string(),
+                std::panic::Location::caller(),
+            ),
         ));
     }
     if let Some(nurb) = native_surface_nurbs(surface)? {
@@ -300,6 +331,91 @@ fn step_sphere_normal(
     Err(GeometryError::new(
         GeometryErrorCode::ResourceLimit,
         "native STEP normal nesting limit exceeded",
+    ))
+}
+
+/// Whole-carrier exclusion for the literal STEP law P=O+r*A*q, |q|=1.
+/// Project A before taking its row norm; stored placements need not be
+/// orthonormal. This supplies no feasible point on a trimmed face, and must
+/// never be applied to a sphere's independently stored NURBS representation.
+pub(super) fn step_sphere_functional_bounds<const N: usize>(
+    surface: &Surface,
+    functionals: &[super::SurfaceFunctional; N],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<[Interval; N]>, GeometryError> {
+    let mut source = surface;
+    let mut step = false;
+    for _ in 0..32 {
+        work.charge(1, cancel)?;
+        match source.kind() {
+            SurfaceKind::Step(s) => {
+                source = s
+                    .surface()
+                    .ok_or_else(|| conditioning("empty STEP sphere support source"))?;
+                step = true;
+            }
+            SurfaceKind::CurveBounded(s) => source = s.basis(),
+            SurfaceKind::Sphere(s) if step => {
+                let placement = s.base().position();
+                let o = placement.origin();
+                let x = placement.x_axis();
+                let y = placement.y_axis();
+                let z = placement.z_axis();
+                let origin = [o.x, o.y, o.z];
+                let axes = [[x.x, x.y, x.z], [y.x, y.y, y.z], [z.x, z.y, z.z]];
+                let radius = s.radius();
+                for v in origin
+                    .into_iter()
+                    .chain(axes.into_iter().flatten())
+                    .chain([radius])
+                {
+                    Interval::new(v, v)?;
+                }
+                let mut result = [Interval::point(0.0); N];
+                for (bound, f) in result.iter_mut().zip(functionals) {
+                    work.charge(1, cancel)?;
+                    let project = |row: [Interval; 3]| {
+                        (0..3).fold(Interval::point(0.0), |sum, i| {
+                            sum.add(f.direction[i].mul(row[i]))
+                        })
+                    };
+                    let constant = project(std::array::from_fn(|i| {
+                        Interval::point(origin[i]).sub(f.origin[i])
+                    }))
+                    .add(f.offset);
+                    let row = axes.map(|axis| {
+                        project(axis.map(Interval::point)).mul(Interval::point(radius))
+                    });
+                    // A single nonzero coefficient needs neither squaring nor
+                    // sqrt: retain exact axis-aligned support and cancellation.
+                    let nonzero = row.iter().filter(|v| v.lo != 0.0 || v.hi != 0.0).count();
+                    let extent = if nonzero <= 1 {
+                        row.into_iter().map(Interval::abs_upper).fold(0.0, f64::max)
+                    } else {
+                        let scale = row.into_iter().map(Interval::abs_upper).fold(0.0, f64::max);
+                        let mut squared = Interval::point(0.0);
+                        for coefficient in row {
+                            squared =
+                                squared.add(coefficient.div(Interval::point(scale))?.square());
+                        }
+                        squared.sqrt()?.mul(Interval::point(scale)).hi
+                    };
+                    // Evaluate the two endpoints separately so an exactly
+                    // attained pole does not acquire an invented positive gap.
+                    *bound = Interval::new(
+                        Interval::point(constant.lo).sub(Interval::point(extent)).lo,
+                        Interval::point(constant.hi).add(Interval::point(extent)).hi,
+                    )?;
+                }
+                return Ok(Some(result));
+            }
+            _ => return Ok(None),
+        }
+    }
+    Err(GeometryError::new(
+        GeometryErrorCode::ResourceLimit,
+        "native STEP sphere support nesting limit exceeded",
     ))
 }
 
@@ -546,4 +662,80 @@ fn step_surface_tensor(
         scale_u = scale_u.mul(degree);
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod support_tests {
+    use super::*;
+    use solidcore::{
+        geom::{axis2_placement::Axis2Placement, vector3d::Vec3},
+        surface::{sphere::Sphere, surface::p1::StepSurface},
+    };
+
+    #[test]
+    fn step_sphere_scalar_support_keeps_exact_axis_contact_and_rejects_nurbs_alias() {
+        let kernel = crate::make_kernel_context();
+        let placement = Axis2Placement::new(Vec3::new(0.0, 0.0, 2.0), Vec3::X, Vec3::Y);
+        let sphere = Sphere::create_canonical(&kernel, &placement, 2.0).unwrap();
+        let native = Surface::new(SurfaceKind::Sphere(Box::new(sphere)));
+        let f = super::super::SurfaceFunctional {
+            direction: [0.0, 0.0, 1.0].map(Interval::point),
+            origin: [Interval::point(0.0); 3],
+            offset: Interval::point(0.0),
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        assert!(
+            step_sphere_functional_bounds(&native, &[f], &mut work, &cancel)
+                .unwrap()
+                .is_none()
+        );
+        let step = Surface::new(SurfaceKind::Step(StepSurface::new(native, true).unwrap()));
+        let [bound] = step_sphere_functional_bounds(&step, &[f], &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bound, Interval::new(0.0, 4.0).unwrap());
+        let [jet] = super::super::native_surface_functional_enclosures(
+            &step,
+            [[0.0, 360.0], [-90.0, 90.0]],
+            &[f],
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(jet.position, bound);
+    }
+
+    #[test]
+    fn step_sphere_scalar_support_uses_actual_near_unit_placement_coefficients() {
+        let kernel = crate::make_kernel_context();
+        let x = super::super::up(1.0);
+        let placement = Axis2Placement::new(Vec3::ZERO, Vec3::new(x, 0.0, 0.0), Vec3::Y);
+        assert_eq!(placement.x_axis().x, x);
+        let sphere = Sphere::create_canonical(&kernel, &placement, 2.0).unwrap();
+        let native = Surface::new(SurfaceKind::Sphere(Box::new(sphere)));
+        let step = Surface::new(SurfaceKind::Step(StepSurface::new(native, true).unwrap()));
+        let f = super::super::SurfaceFunctional {
+            direction: [1.0, 0.0, 0.0].map(Interval::point),
+            origin: [Interval::point(0.0); 3],
+            offset: Interval::point(0.0),
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        let [bound] = step_sphere_functional_bounds(&step, &[f], &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(bound.lo <= -2.0 * x && bound.hi >= 2.0 * x);
+        assert!(bound.lo < -2.0 && bound.hi > 2.0);
+        let diagonal = super::super::SurfaceFunctional {
+            direction: [1.0, 1.0, 0.0].map(Interval::point),
+            ..f
+        };
+        let [bound] = step_sphere_functional_bounds(&step, &[diagonal], &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        let extent = 2.0 * x.hypot(1.0);
+        assert!(bound.contains(-extent) && bound.contains(extent));
+        assert!(bound.lo > -3.0 && bound.hi < 3.0);
+    }
 }

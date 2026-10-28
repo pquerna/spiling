@@ -55,7 +55,7 @@ Required `rectilinear_axis` and independent `top_skin_axis` each use `"x"`, `"y"
 
 ## Normalized plan
 
-`NormalizedPrintPlan` uses schema11/planner24. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
+`NormalizedPrintPlan` uses schema11/planner25. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
 
 Native sampling and offset construction bounds are each 0.005 mm; finish XY construction has a separate 0.001 mm bound. The explicit recipe `native_shape_error_mm` bounds source-target approximation independently of those construction tolerances. Each mapped image additionally declares its own vertical displacement-error bound.
 
@@ -202,46 +202,29 @@ Preflight admits exact native face metadata and process bounds, expands conserva
 
 `ManufacturingProvenance` contains `project_id`, captured `input_revision`, `input_hash`, `definitions:StoredDefinition[]`, `occurrences:OccurrenceRecord[]`, explicit `intent`, full ordered `surface_overlays` and `process_document`, `surface_images:SurfaceImageContent[]`, `kernel:{name,version,revision}`, and explicit planner/emitter/verifier versions. The bounded unique image content table contains canonical PGM bytes once per referenced image, including disabled layers, making exported provenance self-contained. Immutable capture shares canonical content. Inspection/status provenance contains metadata only. Captured source labels/units/uncertainty remain authoritative; native reimport labels must not replace them.
 
-Current production uses source5/planner24 material admission. Its source-relative
-realization and completed source/union receipts describe that implementation,
-not a permanent requirement to independently reconstruct original STEP material.
-The adopted [native-first DEVELOPMENT decision](../adr/ADR005-native-first-development-geometry.md)
-will replace that path with the imported SolidCore BREP as the single material
-authority. Implementation and operator qualification are pending; the current
-runtime verification report remains unchanged until coherent activation.
+The [native-first DEVELOPMENT route](../adr/ADR005-native-first-development-geometry.md)
+uses source6/planner25 and the imported SolidCore BREP as its single material
+authority M. Original STEP bytes, immutable definition/face/use identity, units,
+uncertainty and original finish operands remain captured inputs and provenance,
+not a second reconstructed solid. Query-private mutation, caches and derived
+trims cannot silently redefine M. Material realization identity binds the native
+producer and admitted query/tolerance policy; geometry-dependent checks rely on
+that kernel rather than an independent original-STEP topology/embedding proof.
 
-In current source5/planner24, Native M retains original-material realization
-contract `1`: immutable source topology/coefficients, identity-bound seam/vertex
-realization inside admitted source uncertainty and the same versioned
-source-relative recipe across slab queries. Completed source/union authority
-remains alive through continuous-occupancy consumers; realized D and deposited
-anchors retain separate dependencies. A small source-map residual is not exact
-seam coincidence or material closure.
-
-Current adjacent regular slabs may obtain registered actual-pair authority only
-for the same occurrence, source recipe and pose at their bitwise-identical shared
-cut. Both per-source actual material/void buffers are checked independently;
-candidate union or invariance cannot substitute. Globally disjoint two-sided
-collars cover the complete Jordan forest with a one-turn transverse graph, not
-a shared visibility-kernel assumption. The ledger consumes bounded fingerprints,
-not retained contours. Critical endpoints, coface incidence and whole closed-cut
-obligations remain independent; refused pairs grant no authority. Pending
-receipts and temporary scratch share the all-live byte bound. These are current
-implementation constraints, not native-first original-source proof requirements.
-
-For the native-first route, original STEP bytes, face/use identity, units,
-uncertainty and original finish inputs remain captured provenance, not a second
-solid. Query-private mutation or derived trims cannot silently redefine that
-BREP. Geometry-dependent checks rely on the pinned kernel and admitted tolerance
-policy; independent command replay supplies no independent original-STEP
-topology/embedding certificate. Use the existing kernel/planner identity and
-report coverage/limitations, without a parallel schema.
+Native source leaves and actual union candidates retain independent per-source,
+pose, interval/reference, policy and candidate bindings. Adjacent regular slabs
+require actual-pair authority at the identical shared cut, including independent
+material/void buffers, complete Jordan coverage and bounded nonzero collars.
+Invariance or one good section cannot supply closed-cut, critical-endpoint or
+attachment authority. Pending receipts and scratch share the live byte bound.
+Realized D, continuous occupancy and deposited anchors remain separate obligations.
 
 Producer/kernel versions are checked independently of the authoring input hash.
-The source6/planner25 native-material activation requires a coherent cutover and
-fresh operator qualification; existing source5/planner23 or planner24 evidence does not
-transfer and older bundles cannot be relabeled into new authority. Realized D,
-continuous occupancy and actual deposited anchors retain separate dependencies.
+Earlier source5/planner23–24 evidence does not qualify this material route, and
+older bundles cannot be relabeled into current authority. Independent emitted
+command/process replay remains mandatory and reports native-kernel reliance; it
+does not certify original STEP topology or physical printability. Fresh operator
+qualification uses exact published dependency pins, never a diagnostic override.
 
 `input_fingerprint(project_id,definitions,occurrences,intent,surface_overlays,process_document)` validates these inputs, sorts definitions/occurrences by identity, then SHA-256 hashes compact UTF-8 Rust serde_json in this field order:
 
@@ -269,7 +252,7 @@ An independent verifier decodes command state from emitted bytes, not emitter he
 
 Current Cartesian XYZ admission binds independently parsed coordinates to the checked XYZ6 projection of each captured expected point. Raw-plan half-step tolerance cannot authorize an alternate neighboring lattice point. The explicit `contracts::manufacturing::program_coordinates` module owns this fixed output precision, coordinate-conditioning range and outward decimal/height enclosures; backend serialization and verifier command parsing remain independent. Projection multiplies the binary64 input by `1_000_000`, rounds ties away from zero, divides by `1_000_000` and normalizes signed zero; it is not exact-real decimal rounding of the original input. Accepted absolute coordinates are at most `2^52 / 1_000_000` mm, preserving distinct adjacent parsed micrometre lattice points. Compensated gap subtraction checks every intermediate and its outward result for finiteness. Unrepresentable arithmetic refuses with `program_coordinate_conditioning_failure`, not a widened clearance tolerance.
 
-Current inspection/reopen requires planner24, which binds complete source-tube minimum-command fitting as well as source-continuation wall-width recovery and selected-master-preserving finish admission. Input fingerprints bind complete ordered authoring documents, source/pose and explicit printer/recipe policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, Wall and mixed skin ownership, permanent plate extent/attachment and actual lower Bridge/rib anchors; it does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3, emitter7/verifier9 and SPLR5 form one consumed cutover without aliases or missing-policy defaults.
+Current inspection/reopen requires planner25, which binds native-first material authority and the current wall/finish/hatch construction. Input fingerprints bind complete ordered authoring documents, source/pose and explicit printer/recipe policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, Wall and mixed skin ownership, permanent plate extent/attachment and actual lower Bridge/rib anchors; it does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3, emitter7/verifier9 and SPLR5 form one consumed cutover without aliases or missing-policy defaults.
 
 Final normalized-plan admission checks ordinary projected axes during its existing coordinate pass. Independent fresh verification separately checks preferred perimeter seam dot/distance/coordinate ordering before matching actual emitted commands. A mutually matching program and plan that ignore either consumed policy do not earn semantic success; stored `verified` metadata remains descriptive.
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Geometry-only exact cycle identity, polygon clearance and actual pair collars.
+//! Geometry-only exact cycle identity, closed nesting, clearance and actual pair collars.
 //! No result supplies native material, pose, or approximation authority.
 
 use super::*;
@@ -344,19 +344,30 @@ pub(super) fn exact_cycle_mapping(
 }
 
 fn jordan_joints(
-    rings: &[Ring], work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    rings: &[Ring],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
     for ring in rings {
         for i in 0..ring.points.len() {
             work.charge(1, cancel)?;
             let vertex = ring.points[i];
-            let incoming = delta(ring.points[(i + ring.points.len() - 1) % ring.points.len()], vertex);
+            let incoming = delta(
+                ring.points[(i + ring.points.len() - 1) % ring.points.len()],
+                vertex,
+            );
             let outgoing = delta(ring.points[(i + 1) % ring.points.len()], vertex);
             if cross(incoming, outgoing).contains_zero()
-                && incoming[0].mul(outgoing[0]).add(incoming[1].mul(outgoing[1])).hi >= 0.0
+                && incoming[0]
+                    .mul(outgoing[0])
+                    .add(incoming[1].mul(outgoing[1]))
+                    .hi
+                    >= 0.0
             {
-                return Err(error(GeometryErrorCode::AnalysisIndeterminate,
-                    "registered native cycle has unresolved adjacent-edge overlap"));
+                return Err(error(
+                    GeometryErrorCode::AnalysisIndeterminate,
+                    "registered native cycle has unresolved adjacent-edge overlap",
+                ));
             }
         }
     }
@@ -367,7 +378,10 @@ fn jordan_joints(
 /// value labels one connected complementary component, hence the entire cycle;
 /// the selected vertex is not itself material/source or containment authority.
 fn jordan_parent(
-    rings: &[Ring], child: usize, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    rings: &[Ring],
+    child: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<Option<usize>, GeometryError> {
     let mut parent: Option<usize> = None;
     for (candidate, ring) in rings.iter().enumerate() {
@@ -379,16 +393,20 @@ fn jordan_parent(
             if point_in_ring(&rings[previous], ring.points[0], work, cancel)? {
                 parent = Some(candidate);
             } else if !point_in_ring(ring, rings[previous].points[0], work, cancel)? {
-                return Err(error(GeometryErrorCode::AnalysisIndeterminate,
-                    "separated native cycles have inconsistent Jordan nesting"));
+                return Err(error(
+                    GeometryErrorCode::AnalysisIndeterminate,
+                    "separated native cycles have inconsistent Jordan nesting",
+                ));
             }
         } else {
             parent = Some(candidate);
         }
     }
     if parent.map_or(rings[child].hole, |p| rings[p].hole == rings[child].hole) {
-        return Err(error(GeometryErrorCode::AnalysisIndeterminate,
-            "registered native cycle roots/parents disagree with material-left outer/hole roles"));
+        return Err(error(
+            GeometryErrorCode::AnalysisIndeterminate,
+            "registered native cycle roots/parents disagree with material-left outer/hole roles",
+        ));
     }
     Ok(parent)
 }
@@ -397,9 +415,13 @@ fn jordan_parent(
 /// narrowphase is the existing interval segment predicate; dyadic endpoint
 /// boxes prune only when their lower gap cannot decrease the current bound.
 fn distinct_loop_clearance(
-    rings: &[Ring], work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    rings: &[Ring],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<Option<f64>, GeometryError> {
-    if rings.len() < 2 { return Ok(None); }
+    if rings.len() < 2 {
+        return Ok(None);
+    }
     let mut minimum = f64::INFINITY;
     for (i, ring) in rings.iter().enumerate() {
         for other in &rings[i + 1..] {
@@ -414,11 +436,15 @@ fn distinct_loop_clearance(
                         gap.max(down(c[axis].min(d[axis]) - a[axis].max(b[axis])))
                             .max(down(a[axis].min(b[axis]) - c[axis].max(d[axis])))
                     });
-                    if lower >= minimum { continue; }
+                    if lower >= minimum {
+                        continue;
+                    }
                     let gap = segment_gap(a, b, c, d);
                     if !gap.is_finite() || gap <= 0.0 {
-                        return Err(error(GeometryErrorCode::AnalysisIndeterminate,
-                            "registered complete native cycle boundaries have no positive clearance lower bound"));
+                        return Err(error(
+                            GeometryErrorCode::AnalysisIndeterminate,
+                            "registered complete native cycle boundaries have no positive clearance lower bound",
+                        ));
                     }
                     minimum = minimum.min(gap);
                 }
@@ -435,12 +461,21 @@ fn distinct_loop_clearance(
 /// its oriented whole-cycle identity, not scalar-zero source displacement.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn capture_loop_registration(
-    source: &[Ring], actual: &[Ring], registration: &mut [NativeLoopRegistration],
-    rounding: f64, exact: bool, scratch: &mut Scratch,
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    source: &[Ring],
+    actual: &[Ring],
+    registration: &mut [NativeLoopRegistration],
+    rounding: f64,
+    exact: bool,
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<Option<f64>, GeometryError> {
-    let unresolved = || error(GeometryErrorCode::AnalysisIndeterminate,
-        "native/candidate complete cycle registration changes oriented parent incidence");
+    let unresolved = || {
+        error(
+            GeometryErrorCode::AnalysisIndeterminate,
+            "native/candidate complete cycle registration changes oriented parent incidence",
+        )
+    };
     if source.len() != actual.len() || registration.len() != actual.len() {
         return Err(unresolved());
     }
@@ -461,7 +496,9 @@ pub(super) fn capture_loop_registration(
         }
         for previous in &registration[..i] {
             work.charge(1, cancel)?;
-            if previous.native_index == original.native_index { return Err(unresolved()); }
+            if previous.native_index == original.native_index {
+                return Err(unresolved());
+            }
         }
     }
     let clearance = distinct_loop_clearance(if exact { source } else { actual }, work, cancel)?;
@@ -472,9 +509,14 @@ pub(super) fn capture_loop_registration(
             if let Some(native_parent) = native_parent {
                 for (j, original) in registration.iter().enumerate() {
                     work.charge(1, cancel)?;
-                    if original.native_index == native_parent { parent = Some(j); break; }
+                    if original.native_index == native_parent {
+                        parent = Some(j);
+                        break;
+                    }
                 }
-                if parent.is_none() { return Err(unresolved()); }
+                if parent.is_none() {
+                    return Err(unresolved());
+                }
             }
             parent
         } else {
@@ -496,52 +538,99 @@ struct ActualCycle<'a> {
     vertices: Vec<usize>,
 }
 impl ActualCycle<'_> {
-    fn len(&self) -> usize { self.vertices.len() }
+    fn len(&self) -> usize {
+        self.vertices.len()
+    }
     fn point(&self, i: usize) -> [f64; 2] {
         let p = self.points[self.vertices[i % self.len()]];
         [p[0], p[1]]
     }
 }
 
-pub(super) const PAIR_COLLAR_STACK_BYTES: usize =
-    8 * std::mem::size_of::<crate::exact_coefficient::ExactCoefficient>()
-    + 8 * std::mem::size_of::<CollarCell>();
+pub(super) const PAIR_COLLAR_STACK_BYTES: usize = 8 * std::mem::size_of::<
+    crate::exact_coefficient::ExactCoefficient,
+>() + 8 * std::mem::size_of::<CollarCell>()
+    + std::mem::size_of::<ActualPairCollarProof>();
 
 fn coefficient_sign(
-    a: [f64; 2], b: [f64; 2], c: [f64; 2], vector: bool,
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    a: [f64; 2],
+    b: [f64; 2],
+    c: [f64; 2],
+    vector: bool,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<Option<i8>, GeometryError> {
     // vector=true: det(b,c-a). Otherwise det(b-a,c-a). Interval zero
     // never establishes incidence: the shared bounded error-free coefficient
     // adapter supplies the exact dyadic endpoint predicate.
-    let x = if vector { b.map(Interval::point) } else { delta(b, a) };
+    let x = if vector {
+        b.map(Interval::point)
+    } else {
+        delta(b, a)
+    };
     let enclosed = cross(x, delta(c, a));
-    if enclosed.lo > 0.0 { return Ok(Some(1)); }
-    if enclosed.hi < 0.0 { return Ok(Some(-1)); }
+    if enclosed.lo > 0.0 {
+        return Ok(Some(1));
+    }
+    if enclosed.hi < 0.0 {
+        return Ok(Some(-1));
+    }
     use crate::exact_coefficient::ExactCoefficient as E;
     let (Some(x0), Some(x1), Some(y0), Some(y1)) = (
-        if vector { Some(E::point(b[0])) } else { E::difference(b[0], a[0]) },
-        if vector { Some(E::point(b[1])) } else { E::difference(b[1], a[1]) },
-        E::difference(c[0], a[0]), E::difference(c[1], a[1]),
-    ) else { return Ok(None); };
-    let (Some(mut p), Some(q)) = (x0.product(&y1, work, cancel)?, x1.product(&y0, work, cancel)?)
-        else { return Ok(None); };
-    if p.subtract(&q).is_none() { return Ok(None); }
+        if vector {
+            Some(E::point(b[0]))
+        } else {
+            E::difference(b[0], a[0])
+        },
+        if vector {
+            Some(E::point(b[1]))
+        } else {
+            E::difference(b[1], a[1])
+        },
+        E::difference(c[0], a[0]),
+        E::difference(c[1], a[1]),
+    ) else {
+        return Ok(None);
+    };
+    let (Some(mut p), Some(q)) = (
+        x0.product(&y1, work, cancel)?,
+        x1.product(&y0, work, cancel)?,
+    ) else {
+        return Ok(None);
+    };
+    if p.subtract(&q).is_none() {
+        return Ok(None);
+    }
     Ok(Some(p.sign()))
 }
 
 fn actual_cycle<'a>(
-    input: &'a SectionLoopMm, scratch: &mut Scratch,
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    input: &'a SectionLoopMm,
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<Option<ActualCycle<'a>>, GeometryError> {
-    let mut result = ActualCycle { points: &input.points_mm, vertices: Vec::new() };
-    scratch.reserve(&mut result.vertices, input.points_mm.len().saturating_sub(1), work, cancel)?;
-    for (i, p) in input.points_mm[..input.points_mm.len() - 1].iter().enumerate() {
+    let mut result = ActualCycle {
+        points: &input.points_mm,
+        vertices: Vec::new(),
+    };
+    scratch.reserve(
+        &mut result.vertices,
+        input.points_mm.len().saturating_sub(1),
+        work,
+        cancel,
+    )?;
+    for (i, p) in input.points_mm[..input.points_mm.len() - 1]
+        .iter()
+        .enumerate()
+    {
         work.charge(1, cancel)?;
         if result.vertices.last().is_none_or(|&last| {
             let previous = input.points_mm[last];
             p[0] != previous[0] || p[1] != previous[1]
-        }) { result.vertices.push(i); }
+        }) {
+            result.vertices.push(i);
+        }
     }
     let mut changed = true;
     while changed && result.len() >= 3 {
@@ -554,7 +643,7 @@ fn actual_cycle<'a>(
             if (0..2).all(|axis| between(b[axis], a[axis], c[axis]))
                 && coefficient_sign(a, b, c, false, work, cancel)? == Some(0)
             {
-                work.charge(result.len() as u64,cancel)?;
+                work.charge(result.len() as u64, cancel)?;
                 result.vertices.remove(i);
                 changed = true;
                 break;
@@ -565,13 +654,296 @@ fn actual_cycle<'a>(
 }
 
 fn actual_cycle_identity(a: &ActualCycle<'_>, b: &ActualCycle<'_>) -> bool {
-    if a.len() != b.len() { return false; }
-    let first = |cycle: &ActualCycle<'_>| (0..cycle.len()).min_by(|&a, &b| {
-        let a = cycle.point(a); let b = cycle.point(b);
-        a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1]))
-    }).unwrap();
+    if a.len() != b.len() {
+        return false;
+    }
+    let first = |cycle: &ActualCycle<'_>| {
+        (0..cycle.len())
+            .min_by(|&a, &b| {
+                let a = cycle.point(a);
+                let b = cycle.point(b);
+                a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1]))
+            })
+            .unwrap()
+    };
     let (i, j) = (first(a), first(b));
     (0..a.len()).all(|k| a.point(i + k) == b.point(j + k))
+}
+
+const NESTED_OUTER_STACK_BYTES: usize = 12
+    * std::mem::size_of::<crate::exact_coefficient::ExactCoefficient>()
+    + 2 * std::mem::size_of::<ActualCycle<'_>>()
+    + std::mem::size_of::<Sha256>();
+
+// Sign of the EXACT dyadic midpoint minus a coordinate. Never round a new
+// reference point off the actual edge to decide closed-set containment.
+fn midpoint_offset_sign(
+    p: f64,
+    q: f64,
+    coordinate: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<i8>, GeometryError> {
+    work.charge(1, cancel)?;
+    let value = Interval::point(p)
+        .sub(Interval::point(coordinate))
+        .add(Interval::point(q).sub(Interval::point(coordinate)));
+    if value.lo > 0.0 {
+        return Ok(Some(1));
+    }
+    if value.hi < 0.0 {
+        return Ok(Some(-1));
+    }
+    use crate::exact_coefficient::ExactCoefficient as E;
+    let Some(mut exact) = E::difference(p, coordinate) else {
+        return Ok(None);
+    };
+    if exact.push(q).is_none() || exact.push(-coordinate).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(exact.sign()))
+}
+
+fn midpoint_orientation(
+    a: [f64; 2],
+    b: [f64; 2],
+    p: [f64; 2],
+    q: [f64; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<i8>, GeometryError> {
+    let relative = std::array::from_fn(|axis| {
+        Interval::point(p[axis])
+            .sub(Interval::point(a[axis]))
+            .add(Interval::point(q[axis]).sub(Interval::point(a[axis])))
+    });
+    let enclosed = cross(delta(b, a), relative);
+    if enclosed.lo > 0.0 {
+        return Ok(Some(1));
+    }
+    if enclosed.hi < 0.0 {
+        return Ok(Some(-1));
+    }
+    use crate::exact_coefficient::ExactCoefficient as E;
+    let (Some(dx), Some(dy), Some(mut rx), Some(mut ry)) = (
+        E::difference(b[0], a[0]),
+        E::difference(b[1], a[1]),
+        E::difference(p[0], a[0]),
+        E::difference(p[1], a[1]),
+    ) else {
+        return Ok(None);
+    };
+    if rx.push(q[0]).is_none()
+        || rx.push(-a[0]).is_none()
+        || ry.push(q[1]).is_none()
+        || ry.push(-a[1]).is_none()
+    {
+        return Ok(None);
+    }
+    let (Some(mut first), Some(second)) = (
+        dx.product(&ry, work, cancel)?,
+        dy.product(&rx, work, cancel)?,
+    ) else {
+        return Ok(None);
+    };
+    if first.subtract(&second).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(first.sign()))
+}
+
+/// Called only after the complete crossing inventory has separated the OPEN
+/// edge piece from the container boundary. Winding labels that connected
+/// complementary component; the midpoint does not manufacture containment.
+fn midpoint_inside_cycle(
+    cycle: &ActualCycle<'_>,
+    p: [f64; 2],
+    q: [f64; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<bool>, GeometryError> {
+    let mut inside = false;
+    for edge in 0..cycle.len() {
+        work.charge(1, cancel)?;
+        let (a, b) = (cycle.point(edge), cycle.point(edge + 1));
+        let (Some(sa), Some(sb)) = (
+            midpoint_offset_sign(p[1], q[1], a[1], work, cancel)?,
+            midpoint_offset_sign(p[1], q[1], b[1], work, cancel)?,
+        ) else {
+            return Ok(None);
+        };
+        if (sa < 0) == (sb < 0) {
+            continue;
+        }
+        let Some(side) = midpoint_orientation(a, b, p, q, work, cancel)? else {
+            return Ok(None);
+        };
+        if side == 0 {
+            return Ok(None);
+        }
+        if (side > 0) == (b[1] > a[1]) {
+            inside = !inside;
+        }
+    }
+    Ok(Some(inside))
+}
+
+fn closed_cycle_contains(
+    outer: &ActualCycle<'_>,
+    inner: &ActualCycle<'_>,
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<bool>, GeometryError> {
+    let mut cuts = Vec::new();
+    let capacity = outer.len().checked_add(2).ok_or_else(|| {
+        error(
+            GeometryErrorCode::ResourceLimit,
+            "actual nesting edge-cut capacity overflow",
+        )
+    })?;
+    scratch.reserve(&mut cuts, capacity, work, cancel)?;
+    for edge in 0..inner.len() {
+        cuts.clear();
+        let (a, b) = (inner.point(edge), inner.point(edge + 1));
+        let axis = usize::from(a[0] == b[0]);
+        cuts.push(a);
+        cuts.push(b);
+        for other in 0..outer.len() {
+            work.charge(1, cancel)?;
+            let (c, d) = (outer.point(other), outer.point(other + 1));
+            if (0..2).any(|i| a[i].max(b[i]) < c[i].min(d[i]) || c[i].max(d[i]) < a[i].min(b[i])) {
+                continue;
+            }
+            let (Some(sc), Some(sd), Some(sa), Some(sb)) = (
+                coefficient_sign(a, b, c, false, work, cancel)?,
+                coefficient_sign(a, b, d, false, work, cancel)?,
+                coefficient_sign(c, d, a, false, work, cancel)?,
+                coefficient_sign(c, d, b, false, work, cancel)?,
+            ) else {
+                return Ok(None);
+            };
+            if sc * sd < 0 && sa * sb < 0 {
+                return Ok(Some(false));
+            }
+            if sc == 0 && sd == 0 {
+                let lo = a[axis].min(b[axis]).max(c[axis].min(d[axis]));
+                let hi = a[axis].max(b[axis]).min(c[axis].max(d[axis]));
+                if lo < hi && (b[axis] > a[axis]) != (d[axis] > c[axis]) {
+                    return Ok(Some(false));
+                }
+            }
+            // Every non-proper intersection is an endpoint contact or exact
+            // collinear overlap. Existing container vertices partition all its
+            // interior contacts; inner endpoints are already in this inventory.
+            if sc == 0 && (0..2).all(|i| between(c[i], a[i], b[i])) {
+                cuts.push(c);
+            }
+        }
+        let sort_work = cuts.len().checked_mul(cuts.len()).ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "actual nesting edge-cut work overflow",
+            )
+        })?;
+        work.charge(sort_work as u64, cancel)?;
+        cuts.sort_unstable_by(|p, q| p[axis].total_cmp(&q[axis]));
+        cuts.dedup();
+        for piece in cuts.windows(2) {
+            let (p, q) = (piece[0], piece[1]);
+            let mut shared = false;
+            for other in 0..outer.len() {
+                work.charge(1, cancel)?;
+                let (c, d) = (outer.point(other), outer.point(other + 1));
+                if !(0..2).all(|i| between(p[i], c[i], d[i]) && between(q[i], c[i], d[i])) {
+                    continue;
+                }
+                let (Some(sp), Some(sq)) = (
+                    coefficient_sign(c, d, p, false, work, cancel)?,
+                    coefficient_sign(c, d, q, false, work, cancel)?,
+                ) else {
+                    return Ok(None);
+                };
+                if sp == 0 && sq == 0 {
+                    if (b[axis] > a[axis]) != (d[axis] > c[axis]) {
+                        return Ok(Some(false));
+                    }
+                    shared = true;
+                    break;
+                }
+            }
+            if !shared {
+                match midpoint_inside_cycle(outer, p, q, work, cancel)? {
+                    Some(true) => {}
+                    Some(false) => return Ok(Some(false)),
+                    None => return Ok(None),
+                }
+            }
+        }
+    }
+    Ok(Some(true))
+}
+
+#[derive(Debug)]
+pub(super) struct ActualOuterNesting {
+    /// Index of the EXISTING complete outer region equal to the intersection.
+    pub(super) inner: usize,
+    pub(super) geometry: [u8; 32],
+}
+
+/// Both inputs must already be registered material-left Jordan OUTER cycles.
+/// Exact whole-edge classification, not a zero-distance clearance exception,
+/// permits same-sided coincident boundary traces. Closed containment makes the
+/// filled intersection one existing Jordan disk. This proves no native source,
+/// error transport, protected-hole or physical attachment fact.
+pub(super) fn actual_outer_nesting(
+    lower: &SectionLoopMm,
+    upper: &SectionLoopMm,
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<ActualOuterNesting>, GeometryError> {
+    scratch.owned(NESTED_OUTER_STACK_BYTES, work, cancel)?;
+    if lower.is_hole || upper.is_hole {
+        return Ok(None);
+    }
+    let Some(a) = actual_cycle(lower, scratch, work, cancel)? else {
+        return Ok(None);
+    };
+    let Some(b) = actual_cycle(upper, scratch, work, cancel)? else {
+        return Ok(None);
+    };
+    let checkpoint = scratch.bytes;
+    let forward = closed_cycle_contains(&a, &b, scratch, work, cancel);
+    // Each edge-cut workspace is gone before trying the other direction.
+    // Failed/cancelled numerical work is never refunded.
+    scratch.bytes = checkpoint;
+    let inner = if forward? == Some(true) {
+        1
+    } else {
+        let reverse = closed_cycle_contains(&b, &a, scratch, work, cancel);
+        scratch.bytes = checkpoint;
+        if reverse? != Some(true) {
+            return Ok(None);
+        }
+        0
+    };
+    let mut digest = Sha256::new();
+    digest.update(b"spiling-actual-nested-outer-pair-1\0");
+    digest.update([inner as u8]);
+    for cycle in [lower, upper] {
+        work.charge(cycle.points_mm.len() as u64, cancel)?;
+        digest.update((cycle.points_mm.len() as u64).to_le_bytes());
+        for point in &cycle.points_mm {
+            for value in &point[..2] {
+                digest.update(value.to_bits().to_le_bytes());
+            }
+        }
+    }
+    Ok(Some(ActualOuterNesting {
+        inner,
+        geometry: digest.finalize().into(),
+    }))
 }
 
 #[derive(Clone, Copy)]
@@ -586,82 +958,168 @@ struct CollarCell {
     // CCW: negative rim, right spoke, positive rim, left spoke.
     quad: [[Interval; 2]; 4],
 }
-fn relative_quad(cell: &CollarCell, origin: [f64;2]) -> [[Interval;2];4] {
-    let offset=|p: [f64;2], q: [f64;2], t: f64| {
-        let p=delta(p,origin);
-        std::array::from_fn(|i|p[i].add(Interval::point(t).mul(Interval::point(q[i]))))
+fn relative_quad(cell: &CollarCell, origin: [f64; 2]) -> [[Interval; 2]; 4] {
+    let offset = |p: [f64; 2], q: [f64; 2], t: f64| {
+        let p = delta(p, origin);
+        std::array::from_fn(|i| p[i].add(Interval::point(t).mul(Interval::point(q[i]))))
     };
-    [offset(cell.p,cell.q,-cell.width),offset(cell.next,cell.next_q,-cell.width),
-        offset(cell.next,cell.next_q,cell.width),offset(cell.p,cell.q,cell.width)]
+    [
+        offset(cell.p, cell.q, -cell.width),
+        offset(cell.next, cell.next_q, -cell.width),
+        offset(cell.next, cell.next_q, cell.width),
+        offset(cell.p, cell.q, cell.width),
+    ]
 }
-fn collar_halfplane(cell: &CollarCell, side: usize, relative: [Interval;2]) -> Interval {
-    let q=cell.q.map(Interval::point);
-    if side == 1 { return cross(cell.next_q.map(Interval::point),relative); }
-    if side == 3 { return cross(q,relative).neg(); }
-    let t=Interval::point(if side == 0 { -cell.width } else { cell.width });
-    let e=delta(cell.next,cell.p);
-    let dq=delta(cell.next_q,cell.q);
-    let edge=std::array::from_fn(|i|e[i].add(t.mul(dq[i])));
-    let point=std::array::from_fn(|i|relative[i].sub(t.mul(q[i])));
-    let side_value=cross(edge,point);
-    if side == 0 { side_value } else { side_value.neg() }
+fn collar_halfplane(cell: &CollarCell, side: usize, relative: [Interval; 2]) -> Interval {
+    let q = cell.q.map(Interval::point);
+    if side == 1 {
+        return cross(cell.next_q.map(Interval::point), relative);
+    }
+    if side == 3 {
+        return cross(q, relative).neg();
+    }
+    let t = Interval::point(if side == 0 { -cell.width } else { cell.width });
+    let e = delta(cell.next, cell.p);
+    let dq = delta(cell.next_q, cell.q);
+    let edge = std::array::from_fn(|i| e[i].add(t.mul(dq[i])));
+    let point = std::array::from_fn(|i| relative[i].sub(t.mul(q[i])));
+    let side_value = cross(edge, point);
+    if side == 0 {
+        side_value
+    } else {
+        side_value.neg()
+    }
 }
-fn collar_cell(cycle: usize, edge: usize, p: [f64; 2], next: [f64; 2],
-    q: [f64; 2], next_q: [f64; 2], width: f64) -> Option<CollarCell> {
+fn collar_cell(
+    cycle: usize,
+    edge: usize,
+    p: [f64; 2],
+    next: [f64; 2],
+    q: [f64; 2],
+    next_q: [f64; 2],
+    width: f64,
+) -> Result<CollarCell, ActualPairCollarRefusal> {
     let e = delta(next, p);
     let dq = delta(next_q, q);
     // This is the WHOLE FIRST determinant, affine in s,t because the exact
     // repeated column has det(dq,dq)=0. It is not a sampled normal test.
     let determinant = cross(e, q.map(Interval::point))
         .add(Interval { lo: 0.0, hi: 1.0 }.mul(cross(e, dq)))
-        .add(Interval { lo: -width, hi: width }.mul(cross(dq, q.map(Interval::point))));
-    if determinant.lo <= 0.0 { return None; }
-    let offset = |p: [f64; 2], q: [f64; 2], t: f64|
-        std::array::from_fn(|i| Interval::point(p[i]).add(Interval::point(t).mul(Interval::point(q[i]))));
-    let quad = [offset(p,q,-width), offset(next,next_q,-width),
-        offset(next,next_q,width), offset(p,q,width)];
+        .add(
+            Interval {
+                lo: -width,
+                hi: width,
+            }
+            .mul(cross(dq, q.map(Interval::point))),
+        );
+    if determinant.lo <= 0.0 {
+        return Err(ActualPairCollarRefusal::ChartJacobian {
+            cycle,
+            edge,
+            width,
+            determinant,
+        });
+    }
+    let offset = |p: [f64; 2], q: [f64; 2], t: f64| {
+        std::array::from_fn(|i| {
+            Interval::point(p[i]).add(Interval::point(t).mul(Interval::point(q[i])))
+        })
+    };
+    let quad = [
+        offset(p, q, -width),
+        offset(next, next_q, -width),
+        offset(next, next_q, width),
+        offset(p, q, width),
+    ];
     // A strictly convex proper boundary and the signed whole first matrix
     // certify a single embedded chart, not arbitrary full-rank injectivity.
-    let lower=std::array::from_fn(|i|e[i].sub(Interval::point(width).mul(dq[i])));
-    let upper=std::array::from_fn(|i|e[i].add(Interval::point(width).mul(dq[i])).neg());
-    let right=next_q.map(|q|Interval::point(2.0).mul(Interval::point(width)).mul(Interval::point(q)));
-    let left=q.map(|q|Interval::point(-2.0).mul(Interval::point(width)).mul(Interval::point(q)));
-    let edges=[lower,right,upper,left];
+    let lower = std::array::from_fn(|i| e[i].sub(Interval::point(width).mul(dq[i])));
+    let upper = std::array::from_fn(|i| e[i].add(Interval::point(width).mul(dq[i])).neg());
+    let right = next_q.map(|q| {
+        Interval::point(2.0)
+            .mul(Interval::point(width))
+            .mul(Interval::point(q))
+    });
+    let left = q.map(|q| {
+        Interval::point(-2.0)
+            .mul(Interval::point(width))
+            .mul(Interval::point(q))
+    });
+    let edges = [lower, right, upper, left];
     for i in 0..4 {
-        if cross(edges[i],edges[(i+1)%4]).lo <= 0.0 { return None; }
+        let turn = cross(edges[i], edges[(i + 1) % 4]);
+        if turn.lo <= 0.0 {
+            return Err(ActualPairCollarRefusal::ChartConvexity {
+                cycle,
+                edge,
+                width,
+                corner: i,
+                turn,
+            });
+        }
     }
-    Some(CollarCell { cycle, edge, p, next, q, next_q, width, quad })
+    Ok(CollarCell {
+        cycle,
+        edge,
+        p,
+        next,
+        q,
+        next_q,
+        width,
+        quad,
+    })
 }
 
 fn opposed_spoke(a: &CollarCell, b: &CollarCell) -> bool {
-    if a.next != b.p || a.next_q != b.q || a.width != b.width { return false; }
+    if a.next != b.p || a.next_q != b.q || a.width != b.width {
+        return false;
+    }
     let origin = a.next;
     let q = a.next_q.map(Interval::point);
     // Literal common affine trace, and WHOLE convex halves on opposite
     // sides. Index adjacency alone never permits a pair to be skipped.
-    let left = relative_quad(a,origin);
-    let right = relative_quad(b,origin);
-    [left[0],left[3]].into_iter().all(|p|cross(q,p).lo > 0.0)
-        && [right[1],right[2]].into_iter().all(|p|cross(q,p).hi < 0.0)
+    let left = relative_quad(a, origin);
+    let right = relative_quad(b, origin);
+    [left[0], left[3]].into_iter().all(|p| cross(q, p).lo > 0.0)
+        && [right[1], right[2]]
+            .into_iter()
+            .all(|p| cross(q, p).hi < 0.0)
 }
-fn collar_cells_separated(a: &CollarCell, b: &CollarCell,
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<bool,GeometryError> {
+fn collar_cells_separated(
+    a: &CollarCell,
+    b: &CollarCell,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
     for axis in 0..2 {
-        work.charge(1,cancel)?;
-        let bounds = |cell: &CollarCell| [
-            cell.quad.iter().map(|p|p[axis].lo).fold(f64::INFINITY,f64::min),
-            cell.quad.iter().map(|p|p[axis].hi).fold(f64::NEG_INFINITY,f64::max),
-        ];
-        let (a,b)=(bounds(a),bounds(b));
-        if a[1] < b[0] || b[1] < a[0] { return Ok(true); }
+        work.charge(1, cancel)?;
+        let bounds = |cell: &CollarCell| {
+            [
+                cell.quad
+                    .iter()
+                    .map(|p| p[axis].lo)
+                    .fold(f64::INFINITY, f64::min),
+                cell.quad
+                    .iter()
+                    .map(|p| p[axis].hi)
+                    .fold(f64::NEG_INFINITY, f64::max),
+            ]
+        };
+        let (a, b) = (bounds(a), bounds(b));
+        if a[1] < b[0] || b[1] < a[0] {
+            return Ok(true);
+        }
     }
-    for (left, right) in [(a,b),(b,a)] {
+    for (left, right) in [(a, b), (b, a)] {
         for i in 0..4 {
-            work.charge(4,cancel)?;
-            let origin=if i == 1 { left.next } else { left.p };
-            if relative_quad(right,origin).into_iter().all(|p|
-                collar_halfplane(left,i,p).hi < 0.0)
-            { return Ok(true); }
+            work.charge(4, cancel)?;
+            let origin = if i == 1 { left.next } else { left.p };
+            if relative_quad(right, origin)
+                .into_iter()
+                .all(|p| collar_halfplane(left, i, p).hi < 0.0)
+            {
+                return Ok(true);
+            }
         }
     }
     Ok(false)
@@ -674,77 +1132,111 @@ struct SpokeCrossing {
     transverse: Interval,
 }
 fn spoke_crossing(
-    cell: &CollarCell, upper: &ActualCycle<'_>, sides: &mut Vec<i8>,
-    scratch: &mut Scratch, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    cell: &CollarCell,
+    upper: &ActualCycle<'_>,
+    sides: &mut Vec<i8>,
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<Option<SpokeCrossing>, GeometryError> {
     sides.clear();
     scratch.reserve(sides, upper.len(), work, cancel)?;
     for i in 0..upper.len() {
         work.charge(1, cancel)?;
         let Some(side) = coefficient_sign(cell.p, cell.q, upper.point(i), true, work, cancel)?
-            else { return Ok(None); };
+        else {
+            return Ok(None);
+        };
         sides.push(side);
     }
     let axis = usize::from(cell.q[1].abs() > cell.q[0].abs());
     let mut crossing = None;
     for i in 0..upper.len() {
         work.charge(1, cancel)?;
-        let (a,b) = (upper.point(i), upper.point(i+1));
-        let (sa,sb) = (sides[i], sides[(i+1)%upper.len()]);
+        let (a, b) = (upper.point(i), upper.point(i + 1));
+        let (sa, sb) = (sides[i], sides[(i + 1) % upper.len()]);
         let (parameter, t, positive) = if sa == 0 {
             // A seam vertex belongs ONLY to its outgoing half-open edge.
-            let previous = sides[(i+upper.len()-1)%upper.len()];
-            let t=Interval::point(a[axis]).sub(Interval::point(cell.p[axis]))
+            let previous = sides[(i + upper.len() - 1) % upper.len()];
+            let t = Interval::point(a[axis])
+                .sub(Interval::point(cell.p[axis]))
                 .div(Interval::point(cell.q[axis]))?;
             (Interval::point(0.0), t, previous > 0 && sb < 0)
         } else if sb != 0 && sa != sb {
-            let denominator = cross(cell.q.map(Interval::point), delta(b,a));
-            if denominator.contains_zero() { return Ok(None); }
-            let parameter = cross(cell.q.map(Interval::point), delta(cell.p,a)).div(denominator)?;
+            let denominator = cross(cell.q.map(Interval::point), delta(b, a));
+            if denominator.contains_zero() {
+                return Ok(None);
+            }
+            let parameter =
+                cross(cell.q.map(Interval::point), delta(cell.p, a)).div(denominator)?;
             // Exact opposite side predicates proved the root is in (0,1).
-            let parameter = Interval { lo: parameter.lo.max(0.0), hi: parameter.hi.min(1.0) };
-            if parameter.lo > parameter.hi { return Ok(None); }
-            let t=cross(delta(a,cell.p),delta(b,a)).div(denominator)?;
+            let parameter = Interval {
+                lo: parameter.lo.max(0.0),
+                hi: parameter.hi.min(1.0),
+            };
+            if parameter.lo > parameter.hi {
+                return Ok(None);
+            }
+            let t = cross(delta(a, cell.p), delta(b, a)).div(denominator)?;
             (parameter, t, sa > 0 && sb < 0)
-        } else { continue; };
-        if t.lo > cell.width || t.hi < -cell.width { continue; }
+        } else {
+            continue;
+        };
+        if t.lo > cell.width || t.hi < -cell.width {
+            continue;
+        }
         if !positive || t.lo <= -cell.width || t.hi >= cell.width || crossing.is_some() {
             return Ok(None);
         }
-        crossing = Some(SpokeCrossing { edge: i, parameter, transverse: t });
+        crossing = Some(SpokeCrossing {
+            edge: i,
+            parameter,
+            transverse: t,
+        });
     }
     Ok(crossing)
 }
 
-fn strict_rims(cell: &CollarCell, point: [f64;2]) -> bool {
-    let relative=delta(point,cell.p);
-    collar_halfplane(cell,0,relative).lo > 0.0
-        && collar_halfplane(cell,2,relative).lo > 0.0
+fn strict_rims(cell: &CollarCell, point: [f64; 2]) -> bool {
+    let relative = delta(point, cell.p);
+    collar_halfplane(cell, 0, relative).lo > 0.0 && collar_halfplane(cell, 2, relative).lo > 0.0
 }
 fn actual_vertex_in_cell(
-    cell: &CollarCell, point: [f64; 2],
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    cell: &CollarCell,
+    point: [f64; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     Ok(strict_rims(cell, point)
-        && coefficient_sign(cell.p,cell.q,point,true,work,cancel)? == Some(-1)
-        && coefficient_sign(cell.next,cell.next_q,point,true,work,cancel)? == Some(1))
+        && coefficient_sign(cell.p, cell.q, point, true, work, cancel)? == Some(-1)
+        && coefficient_sign(cell.next, cell.next_q, point, true, work, cancel)? == Some(1))
 }
 
 fn chart_covers_upper(
-    cell: &CollarCell, upper: &ActualCycle<'_>,
-    start: SpokeCrossing, end: SpokeCrossing, end_edge: usize,
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    cell: &CollarCell,
+    upper: &ActualCycle<'_>,
+    start: SpokeCrossing,
+    end: SpokeCrossing,
+    end_edge: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     // The exact registered trace is p+t*q on each shared spoke. Its certified
     // OPEN t interval and the proper convex chart give strict clearance from
     // BOTH rims without subtracting independently rounded world coordinates.
-    if start.transverse.lo <= -cell.width || start.transverse.hi >= cell.width
-        || end.transverse.lo <= -cell.width || end.transverse.hi >= cell.width
-    { return Ok(false); }
+    if start.transverse.lo <= -cell.width
+        || start.transverse.hi >= cell.width
+        || end.transverse.lo <= -cell.width
+        || end.transverse.hi >= cell.width
+    {
+        return Ok(false);
+    }
     for edge in start.edge..=end_edge {
-        work.charge(1,cancel)?;
-        if edge == end_edge && end.parameter.lo == 0.0 && end.parameter.hi == 0.0 { break; }
-        let tangent = delta(upper.point(edge+1),upper.point(edge));
+        work.charge(1, cancel)?;
+        if edge == end_edge && end.parameter.lo == 0.0 && end.parameter.hi == 0.0 {
+            break;
+        }
+        let tangent = delta(upper.point(edge + 1), upper.point(edge));
         // A straight piece inside this convex embedded chart cannot change
         // the sign of det(tangent,q(s)): a zero would make its supporting
         // line the literal s-spoke, so the entire piece would have constant s.
@@ -753,17 +1245,19 @@ fn chart_covers_upper(
         // transverse corner piece that never reaches that part of the chart.
         // Full interior pieces retain the whole-column sufficient test.
         let transverse = if edge == start.edge {
-            cross(tangent,cell.q.map(Interval::point)).lo > 0.0
+            cross(tangent, cell.q.map(Interval::point)).lo > 0.0
         } else if edge == end_edge {
-            cross(tangent,cell.next_q.map(Interval::point)).lo > 0.0
+            cross(tangent, cell.next_q.map(Interval::point)).lo > 0.0
         } else {
-            cross(tangent,cell.q.map(Interval::point)).lo > 0.0
-                && cross(tangent,cell.next_q.map(Interval::point)).lo > 0.0
+            cross(tangent, cell.q.map(Interval::point)).lo > 0.0
+                && cross(tangent, cell.next_q.map(Interval::point)).lo > 0.0
         };
-        if !transverse { return Ok(false); }
-        if edge > start.edge
-            && !actual_vertex_in_cell(cell,upper.point(edge),work,cancel)?
-        { return Ok(false); }
+        if !transverse {
+            return Ok(false);
+        }
+        if edge > start.edge && !actual_vertex_in_cell(cell, upper.point(edge), work, cancel)? {
+            return Ok(false);
+        }
     }
     // The endpoint traces are the literal registered spokes, in their OPEN
     // rim intervals. Convexity then covers every full clipped straight piece;
@@ -771,25 +1265,117 @@ fn chart_covers_upper(
     Ok(true)
 }
 
-fn proposal_distance(a: &ActualCycle<'_>, b: &ActualCycle<'_>,
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<f64,GeometryError> {
+fn proposal_distance(
+    a: &ActualCycle<'_>,
+    b: &ActualCycle<'_>,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<f64, GeometryError> {
     let mut maximum = 0.0_f64;
     for i in 0..a.len() {
         let p = a.point(i);
         let mut nearest = f64::INFINITY;
         for j in 0..b.len() {
-            work.charge(1,cancel)?;
-            let (a,b)=(b.point(j),b.point(j+1));
-            let e=[b[0]-a[0],b[1]-a[1]];
-            let square=e[0]*e[0]+e[1]*e[1];
-            if square <= 0.0 || !square.is_finite() { continue; }
-            let t=(((p[0]-a[0])*e[0]+(p[1]-a[1])*e[1])/square).clamp(0.0,1.0);
-            nearest=nearest.min((p[0]-(a[0]+t*e[0])).hypot(p[1]-(a[1]+t*e[1])));
+            work.charge(1, cancel)?;
+            let (a, b) = (b.point(j), b.point(j + 1));
+            let e = [b[0] - a[0], b[1] - a[1]];
+            let square = e[0] * e[0] + e[1] * e[1];
+            if square <= 0.0 || !square.is_finite() {
+                continue;
+            }
+            let t = (((p[0] - a[0]) * e[0] + (p[1] - a[1]) * e[1]) / square).clamp(0.0, 1.0);
+            nearest = nearest.min((p[0] - (a[0] + t * e[0])).hypot(p[1] - (a[1] + t * e[1])));
         }
-        maximum=maximum.max(nearest);
+        maximum = maximum.max(nearest);
     }
     Ok(maximum)
 }
+
+/// A refusal is a bounded result of the existing sufficient theorem, not
+/// geometry authority. Query resource/cancellation failures remain outer Err.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ActualPairCollarRefusal {
+    InvalidCycle {
+        side: usize,
+        cycle: usize,
+        points: usize,
+    },
+    ProposalEdge {
+        cycle: usize,
+        vertex: usize,
+        lengths: [f64; 2],
+    },
+    ProposalNormal {
+        cycle: usize,
+        vertex: usize,
+        length: f64,
+    },
+    ProposalDirection {
+        cycle: usize,
+        vertex: usize,
+        side: usize,
+        numerator: Interval,
+        length: Interval,
+    },
+    InvalidWidth {
+        proposal: f64,
+        cosine: f64,
+        shortest: f64,
+        width: f64,
+    },
+    ChartJacobian {
+        cycle: usize,
+        edge: usize,
+        width: f64,
+        determinant: Interval,
+    },
+    ChartConvexity {
+        cycle: usize,
+        edge: usize,
+        width: f64,
+        corner: usize,
+        turn: Interval,
+    },
+    ChartPair {
+        left: [usize; 2],
+        right: [usize; 2],
+        width: f64,
+        adjacent: bool,
+    },
+    SpokeCrossing {
+        cycle: usize,
+        edge: usize,
+        target: usize,
+        width: f64,
+    },
+    SeamOrder {
+        cycle: usize,
+        cut: usize,
+        base: Interval,
+        end: Interval,
+    },
+    CyclicOrder {
+        cycle: usize,
+        cut: usize,
+        previous: usize,
+        end: usize,
+        base: usize,
+        target_edges: usize,
+    },
+    UpperCoverage {
+        cycle: usize,
+        edge: usize,
+        start_edge: usize,
+        end_edge: usize,
+    },
+    IncompleteTurn {
+        cycle: usize,
+        actual: usize,
+        expected: usize,
+    },
+}
+
+pub(super) type ActualPairCollarProof = Result<[u8; 32], ActualPairCollarRefusal>;
 
 /// A finite ACTUAL pair theorem, not a source-cut homotopy inferred from a
 /// Hausdorff scalar. Source/leaf/cut/role/parent matching is sealed by its caller.
@@ -801,61 +1387,101 @@ fn proposal_distance(a: &ActualCycle<'_>, b: &ActualCycle<'_>,
 /// same whole Jordan forest. This proves CONNECTED material AND void overlap,
 /// not just one shared point/cell, and excludes the two-patch extra-tunnel case.
 pub(super) fn actual_pair_collar(
-    lower: &[SectionLoopMm], upper: &[SectionLoopMm], matching: &[usize],
-    scratch: &mut Scratch, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
-) -> Result<Option<[u8;32]>,GeometryError> {
-    scratch.owned(PAIR_COLLAR_STACK_BYTES,work,cancel)?;
-    let mut a=Vec::new(); let mut b=Vec::new();
-    scratch.reserve(&mut a,lower.len(),work,cancel)?;
-    scratch.reserve(&mut b,upper.len(),work,cancel)?;
-    for loop_ in lower {
-        let Some(view)=actual_cycle(loop_,scratch,work,cancel)? else { return Ok(None); };
+    lower: &[SectionLoopMm],
+    upper: &[SectionLoopMm],
+    matching: &[usize],
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<ActualPairCollarProof, GeometryError> {
+    scratch.owned(PAIR_COLLAR_STACK_BYTES, work, cancel)?;
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    scratch.reserve(&mut a, lower.len(), work, cancel)?;
+    scratch.reserve(&mut b, upper.len(), work, cancel)?;
+    for (cycle, loop_) in lower.iter().enumerate() {
+        let Some(view) = actual_cycle(loop_, scratch, work, cancel)? else {
+            return Ok(Err(ActualPairCollarRefusal::InvalidCycle {
+                side: 0,
+                cycle,
+                points: loop_.points_mm.len(),
+            }));
+        };
         a.push(view);
     }
-    for loop_ in upper {
-        let Some(view)=actual_cycle(loop_,scratch,work,cancel)? else { return Ok(None); };
+    for (cycle, loop_) in upper.iter().enumerate() {
+        let Some(view) = actual_cycle(loop_, scratch, work, cancel)? else {
+            return Ok(Err(ActualPairCollarRefusal::InvalidCycle {
+                side: 1,
+                cycle,
+                points: loop_.points_mm.len(),
+            }));
+        };
         b.push(view);
     }
-    let mut digest=Sha256::new();
+    let mut digest = Sha256::new();
     digest.update(b"spiling-actual-registered-pair-collar-1\0");
-    let mut exact=true;
-    for (i,&j) in matching.iter().enumerate() {
-        work.charge((2*a[i].len()+b[j].len()) as u64,cancel)?;
-        exact &= actual_cycle_identity(&a[i],&b[j]);
+    let mut exact = true;
+    for (i, &j) in matching.iter().enumerate() {
+        work.charge((2 * a[i].len() + b[j].len()) as u64, cancel)?;
+        exact &= actual_cycle_identity(&a[i], &b[j]);
     }
     if exact {
         // Whole oriented exact trace identity after exact between-vertex
         // elimination, not small displacement or interval-zero promotion.
         digest.update(b"exact-oriented-traces");
-        return Ok(Some(digest.finalize().into()));
+        return Ok(Ok(digest.finalize().into()));
     }
-    let mut columns=Vec::new();
-    scratch.reserve(&mut columns,a.len(),work,cancel)?;
-    let mut proposal=0.0_f64; let mut cosine=1.0_f64; let mut shortest=f64::INFINITY;
-    for (i,&j) in matching.iter().enumerate() {
-        proposal=proposal.max(proposal_distance(&a[i],&b[j],work,cancel)?)
-            .max(proposal_distance(&b[j],&a[i],work,cancel)?);
-        let mut q=Vec::new();
-        scratch.reserve(&mut q,a[i].len(),work,cancel)?;
+    let mut columns = Vec::new();
+    scratch.reserve(&mut columns, a.len(), work, cancel)?;
+    let mut proposal = 0.0_f64;
+    let mut cosine = 1.0_f64;
+    let mut shortest = f64::INFINITY;
+    for (i, &j) in matching.iter().enumerate() {
+        proposal = proposal
+            .max(proposal_distance(&a[i], &b[j], work, cancel)?)
+            .max(proposal_distance(&b[j], &a[i], work, cancel)?);
+        let mut q = Vec::new();
+        scratch.reserve(&mut q, a[i].len(), work, cancel)?;
         for vertex in 0..a[i].len() {
-            work.charge(1,cancel)?;
-            let p=a[i].point(vertex);
-            let previous=a[i].point((vertex+a[i].len()-1)%a[i].len());
-            let next=a[i].point(vertex+1);
-            let u=[p[0]-previous[0],p[1]-previous[1]];
-            let v=[next[0]-p[0],next[1]-p[1]];
-            let (lu,lv)=(u[0].hypot(u[1]),v[0].hypot(v[1]));
-            if lu <= 0.0 || lv <= 0.0 || !lu.is_finite() || !lv.is_finite() { return Ok(None); }
-            shortest=shortest.min(lu).min(lv);
-            let n=[-u[1]/lu-v[1]/lv,u[0]/lu+v[0]/lv];
-            let length=n[0].hypot(n[1]);
-            if length <= 0.0 || !length.is_finite() { return Ok(None); }
-            let direction=[n[0]/length,n[1]/length];
-            for edge in [delta(p,previous),delta(next,p)] {
-                let numerator=cross(edge,direction.map(Interval::point));
-                let length=edge[0].square().add(edge[1].square()).sqrt()?;
-                if numerator.lo <= 0.0 || length.lo <= 0.0 { return Ok(None); }
-                cosine=cosine.min(numerator.div(length)?.lo);
+            work.charge(1, cancel)?;
+            let p = a[i].point(vertex);
+            let previous = a[i].point((vertex + a[i].len() - 1) % a[i].len());
+            let next = a[i].point(vertex + 1);
+            let u = [p[0] - previous[0], p[1] - previous[1]];
+            let v = [next[0] - p[0], next[1] - p[1]];
+            let (lu, lv) = (u[0].hypot(u[1]), v[0].hypot(v[1]));
+            if lu <= 0.0 || lv <= 0.0 || !lu.is_finite() || !lv.is_finite() {
+                return Ok(Err(ActualPairCollarRefusal::ProposalEdge {
+                    cycle: i,
+                    vertex,
+                    lengths: [lu, lv],
+                }));
+            }
+            shortest = shortest.min(lu).min(lv);
+            let n = [-u[1] / lu - v[1] / lv, u[0] / lu + v[0] / lv];
+            let length = n[0].hypot(n[1]);
+            if length <= 0.0 || !length.is_finite() {
+                return Ok(Err(ActualPairCollarRefusal::ProposalNormal {
+                    cycle: i,
+                    vertex,
+                    length,
+                }));
+            }
+            let direction = [n[0] / length, n[1] / length];
+            for (side, edge) in [delta(p, previous), delta(next, p)].into_iter().enumerate() {
+                let numerator = cross(edge, direction.map(Interval::point));
+                let length = edge[0].square().add(edge[1].square()).sqrt()?;
+                if numerator.lo <= 0.0 || length.lo <= 0.0 {
+                    return Ok(Err(ActualPairCollarRefusal::ProposalDirection {
+                        cycle: i,
+                        vertex,
+                        side,
+                        numerator,
+                        length,
+                    }));
+                }
+                cosine = cosine.min(numerator.div(length)?.lo);
             }
             q.push(direction);
         }
@@ -863,33 +1489,76 @@ pub(super) fn actual_pair_collar(
     }
     // Proposals select a chart width ONLY. Every closed chart, rim, trace,
     // coverage and global embedding predicate below must still pass.
-    let width=if proposal > 0.0 { up(8.0*proposal/cosine) } else { shortest*0.125 };
-    if !width.is_finite() || width <= 0.0 { return Ok(None); }
-    let count=a.iter().try_fold(0usize,|n,cycle|n.checked_add(cycle.len()))
-        .ok_or_else(||error(GeometryErrorCode::ResourceLimit,"actual collar chart count overflow"))?;
-    let mut cells=Vec::new();
-    scratch.reserve(&mut cells,count,work,cancel)?;
-    for (cycle,view) in a.iter().enumerate() {
+    let width = if proposal > 0.0 {
+        up(8.0 * proposal / cosine)
+    } else {
+        shortest * 0.125
+    };
+    if !width.is_finite() || width <= 0.0 {
+        return Ok(Err(ActualPairCollarRefusal::InvalidWidth {
+            proposal,
+            cosine,
+            shortest,
+            width,
+        }));
+    }
+    let count = a
+        .iter()
+        .try_fold(0usize, |n, cycle| n.checked_add(cycle.len()))
+        .ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "actual collar chart count overflow",
+            )
+        })?;
+    let mut cells = Vec::new();
+    scratch.reserve(&mut cells, count, work, cancel)?;
+    for (cycle, view) in a.iter().enumerate() {
         for edge in 0..view.len() {
-            work.charge(16,cancel)?;
-            let Some(cell)=collar_cell(cycle,edge,view.point(edge),view.point(edge+1),
-                columns[cycle][edge],columns[cycle][(edge+1)%view.len()],width)
-                else { return Ok(None); };
+            work.charge(16, cancel)?;
+            let cell = match collar_cell(
+                cycle,
+                edge,
+                view.point(edge),
+                view.point(edge + 1),
+                columns[cycle][edge],
+                columns[cycle][(edge + 1) % view.len()],
+                width,
+            ) {
+                Ok(cell) => cell,
+                Err(reason) => return Ok(Err(reason)),
+            };
             cells.push(cell);
         }
     }
     drop(columns);
-    for (i,left) in cells.iter().enumerate() {
-        for right in &cells[i+1..] {
-            work.charge(1,cancel)?;
-            let accepted=if left.cycle == right.cycle
-                && (left.edge+1)%a[left.cycle].len() == right.edge
-            { work.charge(8,cancel)?; opposed_spoke(left,right) }
-            else if left.cycle == right.cycle
-                && (right.edge+1)%a[left.cycle].len() == left.edge
-            { work.charge(8,cancel)?; opposed_spoke(right,left) }
-            else { collar_cells_separated(left,right,work,cancel)? };
-            if !accepted { return Ok(None); }
+    for (i, left) in cells.iter().enumerate() {
+        for right in &cells[i + 1..] {
+            work.charge(1, cancel)?;
+            let accepted = if left.cycle == right.cycle
+                && (left.edge + 1) % a[left.cycle].len() == right.edge
+            {
+                work.charge(8, cancel)?;
+                opposed_spoke(left, right)
+            } else if left.cycle == right.cycle
+                && (right.edge + 1) % a[left.cycle].len() == left.edge
+            {
+                work.charge(8, cancel)?;
+                opposed_spoke(right, left)
+            } else {
+                collar_cells_separated(left, right, work, cancel)?
+            };
+            if !accepted {
+                let adjacent = left.cycle == right.cycle
+                    && ((left.edge + 1) % a[left.cycle].len() == right.edge
+                        || (right.edge + 1) % a[left.cycle].len() == left.edge);
+                return Ok(Err(ActualPairCollarRefusal::ChartPair {
+                    left: [left.cycle, left.edge],
+                    right: [right.cycle, right.edge],
+                    width,
+                    adjacent,
+                }));
+            }
         }
     }
     // The midlines are the already registered COMPLETE Jordan parent forest.
@@ -898,54 +1567,110 @@ pub(super) fn actual_pair_collar(
     // the material/void-side boundary collars leaves each complementary cell
     // with the SAME connected nonempty core. This global collar isotopy, not a
     // point in one chart, supplies the common-core premise for the graph proof.
-    let mut offset=0;
-    for (cycle,&target) in matching.iter().enumerate() {
-        let charts=&cells[offset..offset+a[cycle].len()];
-        offset+=a[cycle].len();
-        let mut crossings=Vec::new(); let mut sides=Vec::new();
-        scratch.reserve(&mut crossings,charts.len(),work,cancel)?;
+    let mut offset = 0;
+    for (cycle, &target) in matching.iter().enumerate() {
+        let charts = &cells[offset..offset + a[cycle].len()];
+        offset += a[cycle].len();
+        let mut crossings = Vec::new();
+        let mut sides = Vec::new();
+        scratch.reserve(&mut crossings, charts.len(), work, cancel)?;
         for cell in charts {
-            let Some(crossing)=spoke_crossing(cell,&b[target],&mut sides,scratch,work,cancel)?
-                else { return Ok(None); };
+            let Some(crossing) =
+                spoke_crossing(cell, &b[target], &mut sides, scratch, work, cancel)?
+            else {
+                return Ok(Err(ActualPairCollarRefusal::SpokeCrossing {
+                    cycle,
+                    edge: cell.edge,
+                    target,
+                    width,
+                }));
+            };
             crossings.push(crossing);
         }
-        let base=crossings[0];
-        let n=b[target].len();
-        let mut previous=base;
+        let base = crossings[0];
+        let n = b[target].len();
+        let mut previous = base;
         for i in 0..charts.len() {
-            work.charge(1,cancel)?;
-            let mut end=if i+1 == charts.len() { base } else { crossings[i+1] };
-            let end_edge=if i+1 == charts.len() { base.edge+n } else {
-                let mut edge=end.edge;
-                if edge < base.edge { edge+=n; }
-                else if edge == base.edge {
-                    if end.parameter.hi < base.parameter.lo { edge+=n; }
-                    else if end.parameter.lo <= base.parameter.hi { return Ok(None); }
+            work.charge(1, cancel)?;
+            let mut end = if i + 1 == charts.len() {
+                base
+            } else {
+                crossings[i + 1]
+            };
+            let end_edge = if i + 1 == charts.len() {
+                base.edge + n
+            } else {
+                let mut edge = end.edge;
+                if edge < base.edge {
+                    edge += n;
+                } else if edge == base.edge {
+                    if end.parameter.hi < base.parameter.lo {
+                        edge += n;
+                    } else if end.parameter.lo <= base.parameter.hi {
+                        return Ok(Err(ActualPairCollarRefusal::SeamOrder {
+                            cycle,
+                            cut: i,
+                            base: base.parameter,
+                            end: end.parameter,
+                        }));
+                    }
                 }
                 edge
             };
-            if end_edge < previous.edge || (end_edge == previous.edge
-                && end.parameter.lo <= previous.parameter.hi) { return Ok(None); }
-            if end_edge > base.edge+n { return Ok(None); }
-            if !chart_covers_upper(&charts[i],&b[target],previous,end,end_edge,work,cancel)? {
-                return Ok(None);
+            if end_edge < previous.edge
+                || (end_edge == previous.edge && end.parameter.lo <= previous.parameter.hi)
+            {
+                return Ok(Err(ActualPairCollarRefusal::CyclicOrder {
+                    cycle,
+                    cut: i,
+                    previous: previous.edge,
+                    end: end_edge,
+                    base: base.edge,
+                    target_edges: n,
+                }));
             }
-            end.edge=end_edge;
-            previous=end;
+            if end_edge > base.edge + n {
+                return Ok(Err(ActualPairCollarRefusal::CyclicOrder {
+                    cycle,
+                    cut: i,
+                    previous: previous.edge,
+                    end: end_edge,
+                    base: base.edge,
+                    target_edges: n,
+                }));
+            }
+            if !chart_covers_upper(
+                &charts[i], &b[target], previous, end, end_edge, work, cancel,
+            )? {
+                return Ok(Err(ActualPairCollarRefusal::UpperCoverage {
+                    cycle,
+                    edge: charts[i].edge,
+                    start_edge: previous.edge,
+                    end_edge,
+                }));
+            }
+            end.edge = end_edge;
+            previous = end;
         }
         // Complete coherent cyclic lift: exactly one turn, with the original
         // first cut object reused at the closing seam. No segment is omitted.
-        if previous.edge != base.edge+n { return Ok(None); }
+        if previous.edge != base.edge + n {
+            return Ok(Err(ActualPairCollarRefusal::IncompleteTurn {
+                cycle,
+                actual: previous.edge,
+                expected: base.edge + n,
+            }));
+        }
     }
     for cell in &cells {
-        work.charge(1,cancel)?;
+        work.charge(1, cancel)?;
         digest.update((cell.cycle as u64).to_le_bytes());
         digest.update((cell.edge as u64).to_le_bytes());
         for value in cell.p.into_iter().chain(cell.q).chain([cell.width]) {
             digest.update(value.to_bits().to_le_bytes());
         }
     }
-    Ok(Some(digest.finalize().into()))
+    Ok(Ok(digest.finalize().into()))
 }
 
 #[cfg(test)]
@@ -967,57 +1692,336 @@ mod tests {
         Ring { hole, points }
     }
 
-    fn footprint(points: &[[f64;2]], hole: bool) -> SectionLoopMm {
-        let mut points_mm: Vec<_> = points.iter().map(|p|[p[0],p[1],0.0]).collect();
+    fn footprint(points: &[[f64; 2]], hole: bool) -> SectionLoopMm {
+        let mut points_mm: Vec<_> = points.iter().map(|p| [p[0], p[1], 0.0]).collect();
         points_mm.push(points_mm[0]);
-        SectionLoopMm { is_hole: hole, points_mm }
+        SectionLoopMm {
+            is_hole: hole,
+            points_mm,
+        }
+    }
+
+    #[test]
+    fn actual_outer_nesting_accepts_wide_concave_shared_boundary_regions() {
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let floor = footprint(
+            &[
+                [0.0, 0.0],
+                [30.0, 0.0],
+                [30.0, 22.0],
+                [20.0, 22.0],
+                [20.0, 20.0],
+                [15.0, 20.0],
+                [15.0, 22.0],
+                [0.0, 22.0],
+            ],
+            false,
+        );
+        let shell = footprint(
+            &[
+                [0.0, 0.0],
+                [30.0, 0.0],
+                [30.0, 22.0],
+                [20.0, 22.0],
+                [20.0, 20.2],
+                [28.2, 20.2],
+                [28.2, 1.8],
+                [1.8, 1.8],
+                [1.8, 20.2],
+                [15.0, 20.2],
+                [15.0, 22.0],
+                [0.0, 22.0],
+            ],
+            false,
+        );
+        let proof = actual_outer_nesting(
+            &floor,
+            &shell,
+            &mut Scratch { bytes: 0 },
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            proof.inner, 1,
+            "intersection is the existing shell, not a new contour"
+        );
+        let reverse = actual_outer_nesting(
+            &shell,
+            &floor,
+            &mut Scratch { bytes: 0 },
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(reverse.inner, 0);
+        let equal = actual_outer_nesting(
+            &floor,
+            &floor,
+            &mut Scratch { bytes: 0 },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            equal.is_some(),
+            "exact same-sided shared boundaries permit equality"
+        );
+        assert_eq!(
+            actual_outer_nesting(
+                &floor,
+                &shell,
+                &mut Scratch { bytes: MAX_SCRATCH },
+                &mut work,
+                &cancel
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(
+            actual_outer_nesting(
+                &floor,
+                &shell,
+                &mut Scratch { bytes: 0 },
+                &mut work,
+                &AtomicBool::new(true)
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::Cancelled
+        );
+    }
+
+    #[test]
+    fn actual_outer_nesting_classifies_nonproper_contacts_and_near_coincidence() {
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let l = footprint(
+            &[
+                [0.0, 0.0],
+                [4.0, 0.0],
+                [4.0, 1.0],
+                [1.0, 1.0],
+                [1.0, 4.0],
+                [0.0, 4.0],
+            ],
+            false,
+        );
+        let tangent = footprint(&[[0.5, 0.5], [1.5, 0.5], [0.5, 1.5]], false);
+        assert!(
+            actual_outer_nesting(&l, &tangent, &mut Scratch { bytes: 0 }, &mut work, &cancel)
+                .unwrap()
+                .is_some(),
+            "an existing outer vertex in an inner-edge interior is an exact cut"
+        );
+        let notch = footprint(
+            &[
+                [0.0, 0.0],
+                [4.0, 0.0],
+                [4.0, 4.0],
+                [3.0, 4.0],
+                [3.0, 2.0],
+                [2.0, 1.0],
+                [1.0, 2.0],
+                [1.0, 4.0],
+                [0.0, 4.0],
+            ],
+            false,
+        );
+        let across_notch = footprint(&[[0.5, 2.0], [2.0, 0.5], [3.5, 2.0]], false);
+        assert!(
+            actual_outer_nesting(
+                &notch,
+                &across_notch,
+                &mut Scratch { bytes: 0 },
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none(),
+            "all inner vertices can be inside while an edge exits through outer vertices"
+        );
+        let square = footprint(&[[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]], false);
+        let epsilon = 8.0 * f64::EPSILON;
+        let shifted = footprint(
+            &[
+                [epsilon, 0.0],
+                [4.0 + epsilon, 0.0],
+                [4.0 + epsilon, 4.0],
+                [epsilon, 4.0],
+            ],
+            false,
+        );
+        assert!(
+            actual_outer_nesting(
+                &square,
+                &shifted,
+                &mut Scratch { bytes: 0 },
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none(),
+            "near-coincident crossing regions are not promoted to exact containment"
+        );
+        let touching = footprint(&[[4.0, 0.0], [8.0, 0.0], [8.0, 4.0], [4.0, 4.0]], false);
+        assert!(
+            actual_outer_nesting(
+                &square,
+                &touching,
+                &mut Scratch { bytes: 0 },
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none(),
+            "opposed shared traces do not prove filled outer overlap"
+        );
+        let mut hole = tangent;
+        hole.is_hole = true;
+        assert!(
+            actual_outer_nesting(&l, &hole, &mut Scratch { bytes: 0 }, &mut work, &cancel)
+                .unwrap()
+                .is_none(),
+            "outer nesting cannot discharge an arbitrary hole/forest pair"
+        );
     }
 
     #[test]
     fn actual_pair_collar_proves_whole_material_void_core_and_rejects_two_patches() {
-        let cancel=AtomicBool::new(false);
-        let mut work=GeometryWorkBudget::new(1_000_000);
-        let concave=[
-            [0.0,0.0],[8.0,0.0],[8.0,8.0],[6.0,8.0],
-            [6.0,2.0],[2.0,2.0],[2.0,8.0],[0.0,8.0],
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let concave = [
+            [0.0, 0.0],
+            [8.0, 0.0],
+            [8.0, 8.0],
+            [6.0, 8.0],
+            [6.0, 2.0],
+            [2.0, 2.0],
+            [2.0, 8.0],
+            [0.0, 8.0],
         ];
-        let lower=[
-            footprint(&concave,false),
-            footprint(&[[0.5,3.0],[0.5,3.5],[1.0,3.5],[1.0,3.0]],true),
+        let lower = [
+            footprint(&concave, false),
+            footprint(&[[0.5, 3.0], [0.5, 3.5], [1.0, 3.5], [1.0, 3.0]], true),
         ];
         let mut upper = lower.each_ref().map(|cycle| SectionLoopMm {
             is_hole: cycle.is_hole,
             points_mm: cycle.points_mm.clone(),
         });
         for cycle in &mut upper {
-            for point in &mut cycle.points_mm { point[0]+=0.001; }
+            for point in &mut cycle.points_mm {
+                point[0] += 0.001;
+            }
         }
-        assert!(actual_pair_collar(&lower,&upper,&[0,1],
-            &mut Scratch { bytes:0 },&mut work,&cancel).unwrap().is_some(),
-            "whole two-sided collars preserve the connected concave material core AND its void core");
-        let strip=[footprint(&[[0.0,0.0],[8.0,0.0],[8.0,0.01],[0.0,0.01]],false)];
-        let shifted=[footprint(&[[0.0,0.02],[8.0,0.02],[8.0,0.03],[0.0,0.03]],false)];
-        assert!(actual_pair_collar(&strip,&shifted,&[0],
-            &mut Scratch { bytes:0 },&mut work,&cancel).unwrap().is_none(),
-            "a regular translating thin strip does not certify disjoint ACTUAL prisms");
-        let inverted=[footprint(&[
-            [0.0,0.0],[2.0,0.0],[2.0,6.0],[6.0,6.0],
-            [6.0,0.0],[8.0,0.0],[8.0,8.0],[0.0,8.0],
-        ],false)];
-        assert!(actual_pair_collar(&lower[..1],&inverted,&[0],
-            &mut Scratch { bytes:0 },&mut work,&cancel).unwrap().is_none(),
-            "two Jordan disks sharing two disconnected patches must not create a printed tunnel");
-        let triangle=[footprint(&[[0.0,0.0],[4.0,0.0],[0.0,4.0]],false)];
-        let subdivided=[footprint(&[[0.0,0.0],[2.0,0.0],[4.0,0.0],[2.0,2.0],[0.0,4.0]],false)];
-        assert!(actual_pair_collar(&triangle,&subdivided,&[0],
-            &mut Scratch { bytes:0 },&mut work,&cancel).unwrap().is_some(),
-            "exact full trace identity is geometric, including nonaxis between-vertices");
-        assert_eq!(actual_pair_collar(&lower,&upper,&[0,1],
-            &mut Scratch { bytes:MAX_SCRATCH },&mut work,&cancel).unwrap_err().code,
-            GeometryErrorCode::ResourceLimit);
-        assert_eq!(actual_pair_collar(&lower,&upper,&[0,1],
-            &mut Scratch { bytes:0 },&mut work,&AtomicBool::new(true)).unwrap_err().code,
-            GeometryErrorCode::Cancelled);
+        assert!(
+            actual_pair_collar(
+                &lower,
+                &upper,
+                &[0, 1],
+                &mut Scratch { bytes: 0 },
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_ok(),
+            "whole two-sided collars preserve the connected concave material core AND its void core"
+        );
+        let strip = [footprint(
+            &[[0.0, 0.0], [8.0, 0.0], [8.0, 0.01], [0.0, 0.01]],
+            false,
+        )];
+        let shifted = [footprint(
+            &[[0.0, 0.02], [8.0, 0.02], [8.0, 0.03], [0.0, 0.03]],
+            false,
+        )];
+        assert!(
+            actual_pair_collar(
+                &strip,
+                &shifted,
+                &[0],
+                &mut Scratch { bytes: 0 },
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_err(),
+            "a regular translating thin strip does not certify disjoint ACTUAL prisms"
+        );
+        let inverted = [footprint(
+            &[
+                [0.0, 0.0],
+                [2.0, 0.0],
+                [2.0, 6.0],
+                [6.0, 6.0],
+                [6.0, 0.0],
+                [8.0, 0.0],
+                [8.0, 8.0],
+                [0.0, 8.0],
+            ],
+            false,
+        )];
+        assert!(
+            actual_pair_collar(
+                &lower[..1],
+                &inverted,
+                &[0],
+                &mut Scratch { bytes: 0 },
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_err(),
+            "two Jordan disks sharing two disconnected patches must not create a printed tunnel"
+        );
+        let triangle = [footprint(&[[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]], false)];
+        let subdivided = [footprint(
+            &[[0.0, 0.0], [2.0, 0.0], [4.0, 0.0], [2.0, 2.0], [0.0, 4.0]],
+            false,
+        )];
+        assert!(
+            actual_pair_collar(
+                &triangle,
+                &subdivided,
+                &[0],
+                &mut Scratch { bytes: 0 },
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_ok(),
+            "exact full trace identity is geometric, including nonaxis between-vertices"
+        );
+        assert_eq!(
+            actual_pair_collar(
+                &lower,
+                &upper,
+                &[0, 1],
+                &mut Scratch { bytes: MAX_SCRATCH },
+                &mut work,
+                &cancel
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(
+            actual_pair_collar(
+                &lower,
+                &upper,
+                &[0, 1],
+                &mut Scratch { bytes: 0 },
+                &mut work,
+                &AtomicBool::new(true)
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::Cancelled
+        );
     }
 
     #[test]
@@ -1025,10 +2029,19 @@ mod tests {
         // Geometry-only controls: native material/pose/sample authority is
         // supplied separately by the owning source-leaf constructor.
         let source = [
-            polygon(&[
-                [0.0, 0.0], [8.0, 0.0], [8.0, 8.0], [6.0, 8.0],
-                [6.0, 2.0], [2.0, 2.0], [2.0, 8.0], [0.0, 8.0],
-            ], false),
+            polygon(
+                &[
+                    [0.0, 0.0],
+                    [8.0, 0.0],
+                    [8.0, 8.0],
+                    [6.0, 8.0],
+                    [6.0, 2.0],
+                    [2.0, 2.0],
+                    [2.0, 8.0],
+                    [0.0, 8.0],
+                ],
+                false,
+            ),
             square(0.5, 3.0, 0.5, true),
             square(12.0, 0.0, 8.0, false),
         ];
@@ -1037,28 +2050,88 @@ mod tests {
         let mut work = GeometryWorkBudget::new(100_000);
         let mut scratch = Scratch { bytes: 0 };
         let mapping = exact_cycle_mapping(&source, &actual, &mut scratch, &mut work, &cancel)
-            .unwrap().unwrap();
-        let mut registration: Vec<_> = mapping.into_iter().map(|native_index|
-            NativeLoopRegistration { native_index, parent: None }).collect();
-        let lower = capture_loop_registration(&source, &actual, &mut registration,
-            0.0, true, &mut scratch, &mut work, &cancel).unwrap().unwrap();
-        assert_eq!(registration.iter().map(|cycle| cycle.parent).collect::<Vec<_>>(),
-            [Some(2), None, None]);
+            .unwrap()
+            .unwrap();
+        let mut registration: Vec<_> = mapping
+            .into_iter()
+            .map(|native_index| NativeLoopRegistration {
+                native_index,
+                parent: None,
+            })
+            .collect();
+        let lower = capture_loop_registration(
+            &source,
+            &actual,
+            &mut registration,
+            0.0,
+            true,
+            &mut scratch,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            registration
+                .iter()
+                .map(|cycle| cycle.parent)
+                .collect::<Vec<_>>(),
+            [Some(2), None, None]
+        );
         assert!(lower > Interval::point(0.1).mul(Interval::point(2.0)).hi);
-        assert!(lower <= Interval::point(0.25).mul(Interval::point(2.0)).hi,
-            "whole-boundary clearance is a conservative LOWER with a strict two-tube comparison");
-        for point in &mut actual[0].points { point[0] += 12.0; }
-        assert!(capture_loop_registration(&source, &actual, &mut registration,
-            0.0, false, &mut scratch, &mut work, &cancel).is_err(),
-            "the same loop/role bijection cannot silently change the original owning component");
+        assert!(
+            lower <= Interval::point(0.25).mul(Interval::point(2.0)).hi,
+            "whole-boundary clearance is a conservative LOWER with a strict two-tube comparison"
+        );
+        for point in &mut actual[0].points {
+            point[0] += 12.0;
+        }
+        assert!(
+            capture_loop_registration(
+                &source,
+                &actual,
+                &mut registration,
+                0.0,
+                false,
+                &mut scratch,
+                &mut work,
+                &cancel
+            )
+            .is_err(),
+            "the same loop/role bijection cannot silently change the original owning component"
+        );
         let mut cancelled_work = GeometryWorkBudget::new(100_000);
-        assert_eq!(capture_loop_registration(&source, &source, &mut registration,
-            0.0, false, &mut Scratch { bytes: 0 }, &mut cancelled_work, &AtomicBool::new(true))
-            .unwrap_err().code, GeometryErrorCode::Cancelled);
+        assert_eq!(
+            capture_loop_registration(
+                &source,
+                &source,
+                &mut registration,
+                0.0,
+                false,
+                &mut Scratch { bytes: 0 },
+                &mut cancelled_work,
+                &AtomicBool::new(true)
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::Cancelled
+        );
         let mut bounded_work = GeometryWorkBudget::new(1);
-        assert_eq!(capture_loop_registration(&source, &source, &mut registration,
-            0.0, false, &mut Scratch { bytes: 0 }, &mut bounded_work, &cancel)
-            .unwrap_err().code, GeometryErrorCode::ResourceLimit);
+        assert_eq!(
+            capture_loop_registration(
+                &source,
+                &source,
+                &mut registration,
+                0.0,
+                false,
+                &mut Scratch { bytes: 0 },
+                &mut bounded_work,
+                &cancel
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit
+        );
         assert!(bounded_work.consumed() > 0);
     }
 

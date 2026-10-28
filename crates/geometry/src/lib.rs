@@ -46,7 +46,10 @@ pub use analysis::{
 pub use import::{
     from_step_bytes, from_step_bytes_with_cancel, from_step_bytes_with_limits, from_step_file,
 };
-pub use kernel::{BBox3Mm, Definition, SurfaceParameterMap, make_kernel_context};
+pub use kernel::{
+    BBox3Mm, Definition, KERNEL_APPROXIMATION_TOLERANCE_MM, KERNEL_INTERSECTION_TOLERANCE_MM,
+    KERNEL_ZONE_TOLERANCE_MM, SurfaceParameterMap, make_kernel_context,
+};
 pub use parametric::{Interval, IntervalVec2, IntervalVec3};
 pub use section::{
     MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES, NativeSection,

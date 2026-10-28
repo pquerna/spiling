@@ -529,3 +529,87 @@ pub(super) fn read_solid(
     }
     Ok(solid)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::test_source;
+    use sha2::{Digest, Sha256};
+    use spiling_contracts::geometry::{DefinitionId, SourceHash};
+
+    #[test]
+    fn authored_rational_seams_import_without_changing_source_identity_or_units() {
+        for (source, count) in [
+            (test_source::nurbs_cylinder(), 3),
+            (test_source::protected_bore(true), 7),
+        ] {
+            let bytes = test_source::original_step_bytes(source);
+            let cancel = AtomicBool::new(false);
+            let mut exchange = super::super::brep_data_bridge::parse_step_exchange(
+                std::str::from_utf8(&bytes).unwrap(),
+            )
+            .unwrap();
+            let root = *exchange
+                .entities
+                .iter()
+                .find(|(_, entity)| entity.name() == "MANIFOLD_SOLID_BREP")
+                .unwrap()
+                .0;
+            let original = exchange.clone();
+            let solid = read_solid(
+                &mut exchange,
+                root,
+                solidcraft_step::units::Context::default(),
+                super::super::MAX_QUERY_PROOF_BYTES,
+                &cancel,
+            )
+            .unwrap();
+            assert_eq!(exchange.entities, original.entities);
+            assert_eq!(solid.face_origin.len(), count);
+            assert_eq!(solid.brep.faces.len(), count);
+            let declared_seams = exchange
+                .entities
+                .values()
+                .filter(|entity| entity.name() == "SEAM_CURVE")
+                .count();
+            let mut native_seams = 0;
+            for edge in &solid.brep.edges {
+                let [first, second] = edge.uses.as_slice() else {
+                    continue;
+                };
+                if first.face != second.face || first.r#loop != second.r#loop {
+                    continue;
+                }
+                let solidcraft_geom::brep::Loop::Edges { edges } =
+                    &solid.brep.faces[first.face as usize].loops[first.r#loop as usize]
+                else {
+                    panic!("seam uses must belong to an edge loop")
+                };
+                let first = &edges[first.position as usize];
+                let second = &edges[second.position as usize];
+                assert_ne!(first.forward, second.forward);
+                assert_ne!(first.pcurve, second.pcurve);
+                native_seams += 1;
+            }
+            assert_eq!(declared_seams, 1);
+            assert_eq!(native_seams, declared_seams, "no inserted seam edge");
+            solid.brep.validate().unwrap();
+            solid.brep.check_geometry().unwrap();
+
+            let definition = crate::from_step_bytes_with_cancel(&bytes, &cancel).unwrap();
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            assert_eq!(definition.id, DefinitionId::from_source_sha256(&digest));
+            assert_eq!(
+                definition.provenance.source_hash,
+                SourceHash::from_bytes(&bytes)
+            );
+            assert_eq!(definition.source_units_scale_to_mm, 1.0);
+            assert_eq!(definition.faces.len(), count);
+            for (info, &face) in definition.faces.iter().zip(&definition.face_ids) {
+                let captured = definition.original_source.face(face).unwrap();
+                assert_eq!(captured.source_face.0, info.face_id.step_entity());
+                assert_eq!(captured.face_entity.0.to_string(), info.surface_face_entity);
+            }
+        }
+    }
+}

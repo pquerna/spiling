@@ -367,6 +367,7 @@ pub fn to_brep_data(
 
     // 3. Faces, surfaces, loops, and edgeuses.
     let mut eu_cursor = 0usize;
+    let mut face_uv_start = 0;
     for (f, original) in brep.faces.iter().zip(original_carriers) {
         let (surf, uv_domain, is_spline_face) = if let Some(extrusion) =
             crate::kernel::source_operand::original_circular_extrusion(original)
@@ -480,6 +481,19 @@ pub fn to_brep_data(
                 }
             }
         }
+        // Complete the actual native carrier before it becomes authoritative M.
+        // Only a proved affine parameter direction can continue its own law;
+        // arbitrary spline/periodic charts retain their original domain.
+        admit_affine_trim_domain(
+            &mut d.surfaces[surf_idx as usize].object,
+            &d.uv_curves[face_uv_start..],
+            &mut d
+                .faces
+                .last_mut()
+                .ok_or(BridgeError::Invalid("native face"))?
+                .uv_domain,
+        )?;
+        face_uv_start = d.uv_curves.len();
     }
 
     // 4. Edges and 3D curves.
@@ -1084,6 +1098,121 @@ fn build_surface(
             forward,
         } => build_revolution_surface(profile, *origin, *axis, matrix, *forward, domain),
     }
+}
+
+/// A single linear span with denominator independent of this parameter has an
+/// intrinsic affine continuation. Use the native C-max expansion API, not an
+/// adapter evaluator outside its knot domain. Trim coefficients are untouched.
+fn admit_affine_trim_domain(
+    surface: &mut Surface,
+    trims: &[Keyed<Curve>],
+    face_domain: &mut Extent2d,
+) -> R<()> {
+    use crate::parametric::Interval;
+    use solidcore::nurbs::b_spline_surface::SurfParamType;
+    use solidcore::surface::surface::p2::SurfaceKind;
+
+    let SurfaceKind::BSpline(spline) = surface.kind_mut() else {
+        return Ok(());
+    };
+    let Some(n) = spline.gw_nurb() else {
+        return Ok(());
+    };
+    let counts = [n.n() + 1, n.m() + 1];
+    let degrees = [n.p(), n.q()];
+    let knots = [n.u_knots(), n.v_knots()];
+    let mut affine = [false; 2];
+    for axis in 0..2 {
+        let k = knots[axis];
+        if counts[axis] != 2
+            || degrees[axis] != 1
+            || k.len() != 4
+            || k[0] != k[1]
+            || k[2] != k[3]
+            || k[1] >= k[2]
+        {
+            continue;
+        }
+        affine[axis] = true;
+        let mut sign = 0.0_f64;
+        for i in 0..counts[1 - axis] {
+            let at = |j| if axis == 0 { n.cpt(j, i) } else { n.cpt(i, j) };
+            let a = at(0)?;
+            let b = at(1)?;
+            let wa = if n.is_rational() { a.w } else { 1.0 };
+            let wb = if n.is_rational() { b.w } else { 1.0 };
+            if !wa.is_finite() || wa == 0.0 || wa != wb || (sign != 0.0 && sign != wa.signum()) {
+                affine[axis] = false;
+                break;
+            }
+            sign = wa.signum();
+        }
+    }
+    if !affine.into_iter().any(|axis| axis) {
+        return Ok(());
+    }
+
+    // This finite convex hull covers every point of each actual native pcurve,
+    // not merely sampled points or an unbounded interval evaluation. A mixed or
+    // zero denominator supplies no continuation request.
+    let mut cover = [
+        [face_domain.u_min(), face_domain.u_max()],
+        [face_domain.v_min(), face_domain.v_max()],
+    ];
+    for trim in trims {
+        let Some(curve) = crate::parametric::curve_prepared::native_curve_nurbs(&trim.object)
+            .map_err(|_| BridgeError::Invalid("native trim coefficients"))?
+        else {
+            return Ok(());
+        };
+        let mut sign = 0.0_f64;
+        for point in curve.cpts() {
+            let w = if curve.is_rational() { point.w } else { 1.0 };
+            if !w.is_finite() || w == 0.0 || (sign != 0.0 && sign != w.signum()) {
+                return Ok(());
+            }
+            sign = w.signum();
+            for (axis, value) in [point.x, point.y].into_iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(BridgeError::Invalid("native trim coordinate"));
+                }
+                let image = Interval::point(value)
+                    .div(Interval::point(w))
+                    .map_err(|_| BridgeError::Invalid("native trim denominator"))?;
+                cover[axis][0] = cover[axis][0].min(image.lo);
+                cover[axis][1] = cover[axis][1].max(image.hi);
+            }
+        }
+    }
+    let natural = spline.natural_uv_domain();
+    let active = [
+        [natural.u_min(), natural.u_max()],
+        [natural.v_min(), natural.v_max()],
+    ];
+    let mut face = [
+        [face_domain.u_min(), face_domain.u_max()],
+        [face_domain.v_min(), face_domain.v_max()],
+    ];
+    for axis in 0..2 {
+        if !affine[axis] {
+            continue;
+        }
+        let direction = if axis == 0 {
+            SurfParamType::U
+        } else {
+            SurfParamType::V
+        };
+        for side in 0..2 {
+            if (side == 0 && cover[axis][side] < active[axis][side])
+                || (side == 1 && cover[axis][side] > active[axis][side])
+            {
+                spline.expand_boundary_span(cover[axis][side], direction)?;
+                face[axis][side] = cover[axis][side];
+            }
+        }
+    }
+    *face_domain = Extent2d::from_bounds(face[0][0], face[1][0], face[0][1], face[1][1]);
+    Ok(())
 }
 
 fn build_plane(
@@ -2117,6 +2246,98 @@ pub(crate) mod analytic {
 mod tests {
     use super::*;
     use solidcore_mesh::{TessellateOptions, tessellate};
+
+    #[test]
+    fn native_affine_span_continuation_preserves_tiny_trim_excursion_and_rational_carrier() {
+        use crate::parametric::{CurveEvaluator as _, SurfaceEvaluator as _};
+        let points = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 1.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 1.0),
+        ];
+        // V is genuinely affine, but the unequal U weights retain a genuinely
+        // rational carrier. No analytic-plane replacement can pass this gate.
+        let spline = build_bspline_surface(
+            &[0.0, 0.0, 1.0, 1.0],
+            &[0.0, 0.0, 1.0, 1.0],
+            2,
+            2,
+            &points,
+            Some(&[2.0, 2.0, 3.0, 3.0]),
+        )
+        .unwrap();
+        let mut surface = Surface::from(spline);
+        let outside = -2.7046679754378715e-34;
+        let trim = build_trim_curve(
+            &b::Curve2::Spline {
+                knots: vec![0.0, 0.0, 1.0, 1.0],
+                points: vec![[0.0, outside], [1.0, outside]],
+            },
+            true,
+            0.0,
+        )
+        .unwrap();
+        let trims = [Keyed {
+            key: ObjectKey(1),
+            object: trim,
+        }];
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut work = crate::GeometryWorkBudget::new(100_000);
+        let before = trims[0]
+            .object
+            .tensor([0.0, 1.0], 0, &mut work, &cancel)
+            .unwrap();
+        let mut domain = Extent2d::from_bounds(0.0, 0.0, 1.0, 1.0);
+        admit_affine_trim_domain(&mut surface, &trims, &mut domain).unwrap();
+        assert!(domain.v_min() <= outside);
+        assert_eq!(domain.u_min(), 0.0);
+        assert_eq!(domain.u_max(), 1.0);
+        let native = crate::parametric::native_surface_nurbs(&surface)
+            .unwrap()
+            .unwrap();
+        assert!(native.is_rational());
+        let after = trims[0]
+            .object
+            .tensor([0.0, 1.0], 0, &mut work, &cancel)
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "continuation must never clamp or refit the native UV curve"
+        );
+        let position = surface
+            .tensor([[0.0; 2], [outside; 2]], 1, &mut work, &cancel)
+            .unwrap();
+        for axis in [1, 2] {
+            assert!(position[0][0][axis].lo <= outside && outside <= position[0][0][axis].hi);
+            assert!(
+                position[0][0][axis].hi < 0.0,
+                "the true excursion is not a fake zero"
+            );
+        }
+
+        // The rational U denominator is not constant: out-of-domain U must
+        // still refuse, even though the same surface has an affine V law.
+        let invalid = [Keyed {
+            key: ObjectKey(2),
+            object: build_trim_curve(
+                &b::Curve2::Spline {
+                    knots: vec![0.0, 0.0, 1.0, 1.0],
+                    points: vec![[-1.0, 0.0], [-1.0, 1.0]],
+                },
+                true,
+                0.0,
+            )
+            .unwrap(),
+        }];
+        admit_affine_trim_domain(&mut surface, &invalid, &mut domain).unwrap();
+        assert_eq!(domain.u_min(), 0.0);
+        assert!(
+            surface
+                .tensor([[-1.0; 2], [0.0; 2]], 0, &mut work, &cancel)
+                .is_err()
+        );
+    }
 
     const FIXTURES: &[(&str, &str)] = &[
         (

@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Elementary original-source restrictions. A finite native interval is not an
-//! original LINE's active range. Its two captured source vertices instead name
-//! immutable orthogonal-projection parameter expressions. Whole-coedge/face
-//! correspondence and original wire ownership remain separate obligations.
+//! Original STEP coefficient restrictions for raw inspection and finish
+//! authoring only. They preserve the original parameter/endpoint expressions.
+//! Native material queries use PreparedNativeTrimSource::prepare_material and
+//! native spatial restrictions instead; none of these operators is material
+//! authority or a fallback for native admission.
 use crate::exact_coefficient::ExactCoefficient;
 use crate::parametric::{CurveEnclosure, CurveThirdEnclosure, Interval};
 use crate::{GeometryError, GeometryWorkBudget};

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Compact completed authority. Only the complete original F/G atlas and the
-//! identical physical all-face cylinder census may construct this receipt.
+//! Compact native material authority. Only the complete native boundary atlas
+//! and identical physical all-face cylinder census construct this receipt.
 
 use super::*;
 use crate::analysis::material_source::MaterialSourceView;
@@ -26,12 +26,12 @@ pub(in crate::analysis) enum BoundaryVisit {
     RefineActualXy,
 }
 
-/// Raw F retains its original carrier and UV box for correlated scalar bounds.
-/// Swept G/link images deliberately carry no replacement carrier.
+/// Native faces retain their borrowed carrier and UV box for correlated scalar
+/// bounds. Paired native edge images carry no invented replacement carrier.
 #[derive(Clone, Copy)]
 pub(in crate::analysis) struct BoundaryCell<'a> {
     pub position: [Interval; 3],
-    pub original_face: Option<(PreparedTrimSurface<'a, 'a>, [[f64; 2]; 2])>,
+    pub native_face: Option<(PreparedTrimSurface<'a, 'a>, [[f64; 2]; 2])>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -125,8 +125,8 @@ pub(in crate::analysis) fn certify_closed_radial_material_product(
 
 /// The visitor may impose an independent stricter boundary theorem. Its
 /// refinement goal schedules subdivision; success replaces no atlas/census premise.
-/// Boxes conservatively cover original F and all-lambda actual G, not an exact
-/// partition. Only cells meeting the closed scope reach the visitor.
+/// Boxes conservatively cover native trimmed faces and paired coedge images,
+/// not an exact partition. Only cells meeting the closed scope reach the visitor.
 /// The third argument is `can_refine`: false means this exact active cell has
 /// reached the frozen depth cap or has no representable subdivision. A metric
 /// consumer may preserve its own terminal ShapeErrorExceeded without changing

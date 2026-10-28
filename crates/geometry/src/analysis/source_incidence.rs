@@ -473,6 +473,23 @@ impl<'d> SourceEdgeIncidence<'d> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
+        self.visit_vertex_link(definition, vertex, work, cancel, &mut |_, _, _, _| Ok(()))
+    }
+    /// Visit every absolute native endpoint germ in the actual corner/paired
+    /// permutation. The callback cannot replace the complete single-cycle gate.
+    pub(crate) fn visit_vertex_link(
+        &self,
+        definition: &Definition,
+        vertex: VertexId,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+        visit: &mut impl FnMut(
+            CoedgeUse,
+            usize,
+            &mut GeometryWorkBudget,
+            &AtomicBool,
+        ) -> Result<(), GeometryError>,
+    ) -> Result<bool, GeometryError> {
         check_cancel(cancel)?;
         if !self.owns_definition(definition) {
             return Err(failure(
@@ -512,6 +529,7 @@ impl<'d> SourceEdgeIncidence<'d> {
             if edge.vertices[current.1] != vertex {
                 return Ok(false);
             }
+            visit(current.0, current.1, work, cancel)?;
             let at_start = current.1 == usize::from(!same(use_.orientation)?);
             let neighbor_id = (if at_start { use_.cw } else { use_.ccw })
                 .ok_or_else(|| invalid("native vertex link has no face corner"))?;

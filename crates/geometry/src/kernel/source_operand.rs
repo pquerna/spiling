@@ -2952,7 +2952,7 @@ mod tests {
     }
 
     #[test]
-    fn coefficient_sheet_query_does_not_extend_selected_trim_authority() {
+    fn coefficient_carrier_queries_preserve_selected_domain_and_literal_restrictions() {
         let plane = Surface::Plane { position: frame() };
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
@@ -2973,25 +2973,6 @@ mod tests {
         assert!(sheet.du[0].contains(1.0) && sheet.dv[1].contains(1.0));
         assert_eq!(prepared.active_domain(), active);
         assert!(prepared.jet(outside_trim, &mut work, &cancel).is_err());
-        let borrowed =
-            crate::parametric::OriginalCoefficientSheet::new(&prepared, [[1.5, 2.5], [2.5, 3.5]])
-                .unwrap();
-        let jet = crate::parametric::surface_enclosure(&borrowed, outside_trim, &mut work, &cancel)
-            .unwrap();
-        assert!(jet.position[0].contains(2.0) && jet.position[1].contains(3.0));
-        assert!(
-            crate::parametric::SurfaceEvaluator::tensor(
-                &borrowed,
-                [[1.0, 3.0], [2.5, 3.5]],
-                0,
-                &mut work,
-                &cancel,
-            )
-            .is_err(),
-            "the borrowed view cannot exceed even its coefficient-only scope"
-        );
-        assert_eq!(prepared.active_domain(), active);
-        assert!(prepared.jet(outside_trim, &mut work, &cancel).is_err());
 
         let literal = Surface::RectangularTrimmed {
             basis: std::sync::Arc::new(Surface::Plane { position: frame() }),
@@ -3004,21 +2985,16 @@ mod tests {
         };
         let literal =
             PreparedOriginalSurface::new(&literal, active, usize::MAX, &mut work, &cancel).unwrap();
-        let borrowed =
-            crate::parametric::OriginalCoefficientSheet::new(&literal, outside_trim).unwrap();
         assert!(
-            crate::parametric::surface_enclosure(&borrowed, outside_trim, &mut work, &cancel)
-                .is_err(),
-            "coefficient scope never widens the literal source restriction"
+            literal
+                .carrier_jet(outside_trim, &mut work, &cancel)
+                .is_err()
         );
         assert!(
-            crate::parametric::SurfaceEvaluator::parameter_axes(
-                &borrowed,
-                outside_trim,
-                &mut work,
-                &cancel,
-            )
-            .is_err()
+            literal
+                .carrier_position_bounds(outside_trim, &mut work, &cancel)
+                .is_err(),
+            "coefficient queries cannot widen the literal source restriction"
         );
     }
 }

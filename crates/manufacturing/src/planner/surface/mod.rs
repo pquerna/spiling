@@ -247,6 +247,7 @@ impl PreparedFinish {
         Arc::make_mut(occupied).push(
             envelope,
             [lower_z.max(native_height[0]), upper_z.min(native_height[1])],
+            None,
         )?;
         Ok(())
     }

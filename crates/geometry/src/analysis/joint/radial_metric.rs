@@ -88,7 +88,7 @@ pub(in crate::analysis) fn seal_closed_radial_slab_from_complete_metric(
     cancel: &AtomicBool,
 ) -> Result<Option<ClosedRadialSlab>, GeometryError> {
     work.charge(1, cancel)?;
-    if !analysis.matches_original_material(definition)
+    if !analysis.matches_native_material(definition)
         || analysis.section.definition_id() != definition.id()
         || !analysis.section.is_native_intersection()
     {
@@ -290,7 +290,7 @@ impl RadialCandidate<'_> {
 /// XY box. Its original source first jet preserves coefficient correlations.
 /// A centered mean-value enclosure is valid across admitted continuous C0
 /// spans; it grants neither smoothness nor a substitute topology certificate.
-fn original_face_support(
+fn native_face_support(
     surface: &(impl SurfaceEvaluator + ?Sized),
     uv: [[f64; 2]; 2],
     coordinates: &ActualMaterialCoordinates<'_>,
@@ -477,17 +477,17 @@ pub(in crate::analysis) fn certify_closed_radial_slab(
         source, request, coordinates, available, work, cancel,
         &mut |cell: BoundaryCell<'_>, inward, can_refine, work, cancel| {
             let point = coordinates.position_relative_to_center_family(cell.position)?;
-            let distance = if let Some((surface, uv)) = cell.original_face {
+            let distance = if let Some((surface, uv)) = cell.native_face {
                 candidate.distance_with_support(
                     [point[0], point[1]], inward, target, work, cancel,
                     &mut |direction, coarse, work, cancel| {
-                        original_face_support(
+                        native_face_support(
                             &surface, uv, coordinates, direction, coarse, work, cancel,
                         )
                     },
                 )?
             } else {
-                // An actual G/link image is not an original raw carrier cell.
+                // Native edge and vertex images use their direct interval bounds.
                 candidate.distance([point[0], point[1]], inward, work, cancel)?
             };
             let Some(distance) = distance
@@ -603,7 +603,7 @@ mod tests {
                 .unwrap();
             let direction = [center[1].neg(), center[0]];
             let coarse = cross([point[0], point[1]], direction);
-            let support = original_face_support(
+            let support = native_face_support(
                 surface,
                 uv,
                 &coordinates,

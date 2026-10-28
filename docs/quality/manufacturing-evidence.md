@@ -13,22 +13,21 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
 [native-first decision](../adr/ADR005-native-first-development-geometry.md) separate
 adopted authority from implementation and qualification.
 
-**Current production remains source5/planner24.** Its software operator scope is
-tapered fitting, ordinary rounded housing, source-zoned centered plate, genuine H1
-fine/combined and narrow planar/full-cylinder finish workflows. Box/protected-bore
-geometry retains the source5 boundary; manufacturing outputs require the current
-planner and fresh replay. These results do not qualify the adopted
-source6/planner25 native-first route, original bracket, affected workbench or
-general mechanical-part support. Historical evidence retains its exact producer.
+**This implementation uses source6/planner25 native-first DEVELOPMENT material
+authority.** The imported SolidCore BREP is the single M, with original STEP
+identity/provenance and original finish inputs preserved. Independent actual
+program/process decoding remains mandatory and explicitly reports native-kernel
+reliance, not independent certification of original STEP topology/embedding.
+There is no custom original-source material reconstruction or fallback.
 
-The native-first DEVELOPMENT cutover is adopted but not active or operator
-qualified. Its single material authority will be the imported SolidCore BREP,
-with original STEP identity/provenance and original finish inputs preserved.
-Independent actual-program/process decoding remains mandatory, but does not
-independently certify original STEP topology/embedding. Runtime reports stay
-unchanged until coherent activation; proposed claims live in ADR005. The
-implementation descriptions below refer to current source5/planner24, not
-requirements to revive custom original-source material reconstruction.
+Qualification is specific to the actual producer and inputs. Historical
+source5/planner23–24 and Monstertruck evidence does not transfer to this route.
+Fitting, ordinary housing, source-zoned centered plate, genuine H1 and narrow
+finish workflows require their complete current-producer operators and fresh
+replay/recovery. Native source/void/closed-height/resource controls remain
+independent of successful manufacture. Original bracket/W1, deferred noncolumn
+torus critical-band slab capability and general mechanical support are not
+qualified by the cutover.
 
 ## Entry points and immutable capture
 
@@ -64,7 +63,7 @@ requirements to revive custom original-source material reconstruction.
   drawing-buffer sizing; layout changes do not request geometry or replay again.
 
 Native geometry work has one fixed, whole-job cumulative 512-million-unit CPU
-envelope, including complete original three-dimensional reference-cycle proofs.
+envelope, including native coefficient, correspondence and closed-capture work.
 Deposited-stroke anchor comparisons retain their cumulative 128-million-unit
 ceiling; planar construction/overlay work uses 16,384,000,000 cumulative units.
 These bound computation, not geometric
@@ -103,18 +102,19 @@ Multi-layer proposals shorten before a typed singleton shape-error path may spli
 a layer. Unsupported, indeterminate, conditioning, resource and cancellation
 failures propagate rather than masquerading as successful refinement.
 
-Literal source-height event bands also delimit native capture proposals without
-creating physical slice planes. A source-F event is not automatically a selected-G
-material event. Contacting physical layers use singleton captures; refinements
-recompute proposals from the same schedule. Retained proposal storage coexists
-with source promotion and later query scratch; all allowance calculations charge it.
+Native height event bands also delimit capture proposals without creating
+physical slice planes. Contacting physical layers use singleton captures;
+refinements recompute proposals from the same schedule. Retained proposal storage
+coexists with source promotion and later query scratch; all allowance calculations
+charge it.
 
 ## Source material and reuse
 
 [`PreparedGeometrySource` → `PreparedMaterialSource`](../../crates/geometry/src/analysis/material_source.rs)
-moves original domains/plans rather than reconstructing selection. Geometry owns
-trim/face/use correspondence, placed source uncertainty and opaque constructors;
-raw native queries do not require complete manufacturing admission.
+promotes the same borrowed native BREP trim domains rather than constructing
+another material realization. Geometry owns native trim/face/use correspondence,
+placed source uncertainty and opaque constructors; raw native queries do not
+require complete manufacturing admission.
 
 [`native::collect_span`](../../crates/manufacturing/src/planner/native.rs) binds source
 leaves and actual union polygons through geometry's
@@ -280,6 +280,17 @@ resolves X/Y or alternating XY/YX from the actual scheduled index. TopSkin uses
 its explicit role policy; regional sparse/Separator construction keeps its
 source-bound ordinary axis and phase. Template reuse keys the resolved axis
 within final-D/classification/physical-height dependencies.
+
+Ordinary unpinned regional fill selects at most one default-first quarter-pitch
+phase per scheduled layer, conjoined across every free regional piece. It retains
+each polygon's nonempty row count/cadence, source owner and holes; it never phases
+fragments independently. A geometrically unusable speculative hatch rejects that
+phase, not later proposals or ordinary recovery; resource/cancellation failures
+remain terminal and charged work is not refunded. Authored definition-origin
+grids, mandatory skins and coarse H1 retain their own construction. The selected
+phase stays fixed through support reconstruction and participates in template
+identity. A lower-layer guide proposes phase only; final actual-stroke anchors,
+Bridge and replay obligations remain fresh.
 Actual-stroke recovery selects only complete all-genuine Bridge row runs from
 the same borrowed role owner/density, rooted in actual original XY demand.
 Core ownership is exactly that original polygon intersected with the selected
@@ -375,14 +386,14 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project10/manufacturing11/process3/surface3, planner24,
-emitter7/verifier9 and SPLR5; executable constants and exact native pin remain authoritative.
+Current identities are project10/manufacturing11/process3/surface3, source6/planner25,
+emitter7/verifier9 and SPLR5; executable constants and exact native pins remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
 Raw inspection, an older producer's successful job or historical hardware
 evidence does not qualify the current producer. Current software admission is
-not general manufacturing or native-first cutover qualification; executable
-refusal boundaries and freshly verified outputs remain authoritative.
+not general manufacturing or physical qualification; executable refusal boundaries
+and freshly verified outputs remain authoritative.
 
 The SolidCore software controls include native box/protected bore with
 `solid-fill.intent.json` and unchanged rounded housing with
@@ -428,10 +439,10 @@ requires separate eligibility and does not inherit full-cylinder authority.
 The [planar-image recovery journey](../../apps/cli/tests/project.rs)
 `planar_image_relief_survives_source_deletion_and_fresh_readonly_retrieval`
 currently refuses at its first thin image-event layer: local wall dose exceeds
-the source-local junction/count allowance. The current source5/planner24 baseline
-has the same defect; it is not a native-first regression or a qualified image
-workflow. Keep the executable journey and its dose gate unchanged. Fixing that
-wall construction is separate from the native-first landing.
+the source-local junction/count allowance. The source5/planner24 baseline has the
+same defect; it is not a native-first regression or a qualified image workflow.
+Keep the executable journey and its dose gate unchanged. Fixing that wall
+construction is separate from this landing.
 
 The default native box also exercises the actual local AMD/CEF production panel:
 physical native-face picking, consumed maximum-width Apply/Undo/Redo/recompile,

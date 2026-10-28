@@ -1302,6 +1302,43 @@ async fn native_bed_contact_is_nonpenetrating_read_only_and_revision_bound() {
 }
 
 #[tokio::test]
+async fn native_bed_contact_resolves_support_before_large_world_translation() {
+    let mut client = EngineClient::spawn(ENGINE).await.unwrap();
+    let pose = RigidPoseMm {
+        translation_mm: [0.0, 0.0, 2.0_f64.powi(33)],
+        rotation_xyzw: [0.6, 0.0, 0.0, 0.8],
+    };
+    let captured = import(&mut client, "box-mm.step", pose).await;
+    let occurrence = occurrences(&mut client, &captured).await.remove(0);
+    let revision = project_revision(&client).await;
+    let prepared = client
+        .prepare_bed_pose(
+            &captured,
+            revision,
+            &occurrence,
+            AabbMm::new([0.0; 3], [200.0; 3]).unwrap(),
+            true,
+        )
+        .await
+        .unwrap();
+    // This rotation gives Z = 0.96*Y + 0.28*Z for the [0,20]x[0,10]x[0,8]
+    // source box, so the minimum is its origin, independently of the old pose.
+    assert_eq!(prepared.pose.rotation_xyzw, pose.rotation_xyzw);
+    assert!(prepared.pose.translation_mm[2] >= 0.0);
+    assert!(prepared.pose.translation_mm[2] <= prepared.maximum_contact_gap_mm);
+    assert!(prepared.minimum_lower_mm[2] <= pose.translation_mm[2]);
+    assert!(prepared.minimum_upper_mm[2] >= pose.translation_mm[2]);
+    assert!(prepared.maximum_contact_gap_mm <= SECTION_PLANE_TOLERANCE_MM);
+    assert_eq!(
+        scene(&mut client).await,
+        captured,
+        "preparation must not Apply"
+    );
+    assert_eq!(project_revision(&client).await, revision);
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn equivalent_world_planes_preserve_sections_for_accepted_near_unit_poses() {
     let mut client = EngineClient::spawn(ENGINE).await.unwrap();
     let pose = RigidPoseMm {

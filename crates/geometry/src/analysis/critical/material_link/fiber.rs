@@ -24,7 +24,7 @@ pub(super) struct FiberCore {
 /// `cross(rows[0], rows[1])`; it need not be that tangent under an affine map.
 /// Outer-meridian fibers additionally require `px > 0` AND `rho > radius`.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct OriginalFiber {
+pub(super) struct NativeFiber {
     pub(super) center: [f64; 3],
     pub(super) rows: [[Interval; 3]; 2],
     pub(super) offsets: [Interval; 2],
@@ -34,15 +34,13 @@ pub(super) struct OriginalFiber {
     pub(super) core: Option<FiberCore>,
 }
 
-/// Exactly one outward-positive root on the complete original trimmed source.
-/// This does NOT certify that correction collars, vertex supports or cut caps
-/// miss the fiber. The material-degree consumer must separately prove those
-/// gates for this identical fiber and closed request before using the receipt.
+/// Exactly one outward-positive root on the complete native trimmed boundary.
+/// This does not certify native vertex coincidence zones or cut-cap exclusion;
+/// the material-degree consumer proves those gates for this identical fiber.
 pub(super) struct FiberDegreeOne;
 
-/// A complete ORIGINAL-source cylinder-fiber calibration, not an atlas or
-/// actual-material receipt. Consumers must independently exclude BOTH removed
-/// source and added realization supports from this identical fiber.
+/// Complete native cylinder-fiber calibration. An actual boundary atlas and
+/// the SAME request scope remain independent prerequisites.
 pub(super) struct CylinderFiberCensus {
     #[cfg(test)]
     outer_forward: Interval,
@@ -104,7 +102,7 @@ enum FiberSearchJet {
 }
 
 impl FiberSearchJet {
-    fn excluded(&self, fiber: &OriginalFiber, restriction: CensusRestriction<'_>) -> bool {
+    fn excluded(&self, fiber: &NativeFiber, restriction: CensusRestriction<'_>) -> bool {
         match self {
             Self::Affine(jets) => {
                 jets[..2].iter().any(|jet| !jet.position.contains_zero())
@@ -117,7 +115,7 @@ impl FiberSearchJet {
         }
     }
 
-    fn jacobian(&self, fiber: &OriginalFiber) -> [[Interval; 2]; 2] {
+    fn jacobian(&self, fiber: &NativeFiber) -> [[Interval; 2]; 2] {
         match self {
             Self::Affine(jets) => std::array::from_fn(|i| [jets[i].du, jets[i].dv]),
             Self::Spatial(jet) => fiber.rows.map(|row| [dot(row, jet.du), dot(row, jet.dv)]),
@@ -125,7 +123,7 @@ impl FiberSearchJet {
     }
 }
 
-fn fiber_equations(fiber: &OriginalFiber) -> [SurfaceFunctional; 2] {
+fn fiber_equations(fiber: &NativeFiber) -> [SurfaceFunctional; 2] {
     std::array::from_fn(|i| SurfaceFunctional {
         direction: fiber.rows[i],
         origin: fiber.center.map(Interval::point),
@@ -137,7 +135,7 @@ fn fiber_search_jet(
     surface: &(impl SurfaceEvaluator + ?Sized),
     uv: [[f64; 2]; 2],
     smooth: bool,
-    fiber: &OriginalFiber,
+    fiber: &NativeFiber,
     height: HeightFunctional,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
@@ -189,9 +187,9 @@ const FIBER_STACK_BYTES: usize = std::mem::size_of::<[Option<FiberCell>; FIBER_S
 /// exclusions and strictly owned interval roots form a complete cover. No root
 /// is selected by a sampled point or merged by physical nearness. A root on a
 /// chart, trim, split, knot, half-ray or slab boundary remains unresolved.
-pub(super) fn original_fiber_degree_one(
+pub(super) fn native_fiber_degree_one(
     source: MaterialSourceView<'_, '_>,
-    fiber: &OriginalFiber,
+    fiber: &NativeFiber,
     request: &SlabRequest,
     height: HeightFunctional,
     remaining_bytes: usize,
@@ -207,7 +205,7 @@ pub(super) fn original_fiber_degree_one(
         inward: Some(false),
     };
     Ok(
-        census_original_fiber(source, fiber, restriction, remaining_bytes, work, cancel)?
+        census_native_fiber(source, fiber, restriction, remaining_bytes, work, cancel)?
             .map(|_| FiberDegreeOne),
     )
 }
@@ -216,10 +214,10 @@ pub(super) fn original_fiber_degree_one(
 /// pointing into its bounded void. The caller must separately prove complete
 /// correction-support exclusion for this identical physical fiber.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn original_wall_fiber_degree_one(
+pub(super) fn native_wall_fiber_degree_one(
     source: MaterialSourceView<'_, '_>,
     faces: &[usize],
-    fiber: &OriginalFiber,
+    fiber: &NativeFiber,
     request: &SlabRequest,
     height: HeightFunctional,
     remaining_bytes: usize,
@@ -249,7 +247,7 @@ pub(super) fn original_wall_fiber_degree_one(
         inward: Some(true),
     };
     Ok(
-        census_original_fiber(source, fiber, restriction, remaining_bytes, work, cancel)?
+        census_native_fiber(source, fiber, restriction, remaining_bytes, work, cancel)?
             .map(|_| FiberDegreeOne),
     )
 }
@@ -259,9 +257,9 @@ pub(super) fn original_wall_fiber_degree_one(
 /// ordering, a tangent root or any unresolved owner refuses this calibration.
 /// In particular a single carrier may supply both the inner and outer root.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn original_cylinder_fiber_census(
+pub(super) fn native_cylinder_fiber_census(
     source: MaterialSourceView<'_, '_>,
-    fiber: &OriginalFiber,
+    fiber: &NativeFiber,
     request: &SlabRequest,
     height: HeightFunctional,
     remaining_bytes: usize,
@@ -283,7 +281,7 @@ pub(super) fn original_cylinder_fiber_census(
         inward: None,
     };
     Ok(
-        census_original_fiber(source, fiber, restriction, remaining_bytes, work, cancel)?.and_then(
+        census_native_fiber(source, fiber, restriction, remaining_bytes, work, cancel)?.and_then(
             |roots| {
                 roots.outward.map(|_outer_forward| CylinderFiberCensus {
                     #[cfg(test)]
@@ -295,9 +293,9 @@ pub(super) fn original_cylinder_fiber_census(
     )
 }
 
-fn census_original_fiber(
+fn census_native_fiber(
     source: MaterialSourceView<'_, '_>,
-    fiber: &OriginalFiber,
+    fiber: &NativeFiber,
     restriction: CensusRestriction<'_>,
     remaining_bytes: usize,
     work: &mut GeometryWorkBudget,
@@ -323,6 +321,12 @@ fn census_original_fiber(
             continue;
         }
         let domain = source.face_domain(face_index, domain_bytes, work, cancel)?;
+        if !domain.is_native_material() {
+            return Err(GeometryError::new(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "physical fiber census requires the borrowed native material owner",
+            ));
+        }
         let surface = &domain.surface_operand();
         let orientation = domain.orientation();
         let before = work.consumed();
@@ -336,9 +340,11 @@ fn census_original_fiber(
                 active_depth = 0;
                 phase = "whole original span regularity";
                 work.charge(1, cancel)?;
-                // Only whole-position exclusions are valid on an unqualified
-                // original C0 span. Subdivision cannot manufacture C1 authority.
-                let smooth = surface_parameter_span_smooth(surface, span, work, cancel)?;
+                // Reuse the prepared whole-carrier C1 premise. Without it,
+                // qualify the complete original span before any root refinement;
+                // subdivision cannot manufacture continuity authority.
+                let smooth = prepared_carrier_c1_covers(domain, span)
+                    || surface_parameter_span_smooth(surface, span, work, cancel)?;
                 let mut pending = 1_usize;
                 stack[0] = Some(FiberCell {
                     uv: span,
@@ -400,22 +406,22 @@ fn census_original_fiber(
                     if jet.excluded(fiber, restriction) {
                         continue;
                     }
-                    // A complete carrier image also encloses its entire
-                    // trimmed subset. Exclude it before asking winding about
-                    // curved trims which cannot contribute a physical root.
-                    // An Inside proof is inherited only by subset children.
-                    let mut trim_inside = cell.trim_inside;
-                    if !trim_inside {
-                        phase = "original root trim classification";
-                        let classification =
-                            domain.classify_with_byte_limit(cell.uv, domain_bytes, work, cancel);
-                        match classification? {
-                            TrimClassification::Outside => continue,
-                            TrimClassification::Inside => trim_inside = true,
-                            TrimClassification::Boundary => {}
-                        }
-                    }
                     if !smooth {
+                        // A nonsmooth carrier can still be wholly outside the
+                        // trim. Preserve that exclusion before declining its
+                        // root theorem; subdivision supplies no C1 authority.
+                        if !cell.trim_inside {
+                            phase = "nonsmooth original carrier trim exclusion";
+                            if domain.classify_with_byte_limit(
+                                cell.uv,
+                                domain_bytes,
+                                work,
+                                cancel,
+                            )? == TrimClassification::Outside
+                            {
+                                continue;
+                            }
+                        }
                         return Ok(false);
                     }
                     phase = "uniform affine-family Krawczyk root";
@@ -427,7 +433,37 @@ fn census_original_fiber(
                         work,
                         cancel,
                     );
-                    match root? {
+                    let root = match root {
+                        Ok(root) => root,
+                        Err(error)
+                            if matches!(
+                                error.code,
+                                GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled,
+                            ) =>
+                        {
+                            return Err(error);
+                        }
+                        Err(error) => {
+                            // Former trim-first admission could discard this
+                            // entire cell without needing its root matrix.
+                            // Keep that scope on geometric theorem failures,
+                            // never on exhausted/cancelled work.
+                            if !cell.trim_inside {
+                                phase = "failed original root trim exclusion";
+                                if domain.classify_with_byte_limit(
+                                    cell.uv,
+                                    domain_bytes,
+                                    work,
+                                    cancel,
+                                )? == TrimClassification::Outside
+                                {
+                                    continue;
+                                }
+                            }
+                            return Err(error);
+                        }
+                    };
+                    match root {
                         FiberNewton::Excluded => continue,
                         FiberNewton::Enclosure { uv, unique: true } => {
                             phase = "strict original root ownership/crossing";
@@ -436,6 +472,7 @@ fn census_original_fiber(
                                 surface,
                                 domain,
                                 uv,
+                                cell.trim_inside,
                                 fiber,
                                 restriction,
                                 orientation,
@@ -443,6 +480,37 @@ fn census_original_fiber(
                                 work,
                                 cancel,
                             );
+                            let root = match root {
+                                Err(error)
+                                    if matches!(
+                                        error.code,
+                                        GeometryErrorCode::ResourceLimit
+                                            | GeometryErrorCode::Cancelled,
+                                    ) =>
+                                {
+                                    return Err(error);
+                                }
+                                result => result,
+                            };
+                            if !cell.trim_inside
+                                && matches!(&root, Err(_) | Ok(QualifiedRoot::Unresolved),)
+                            {
+                                // Contracted membership/conditioning may be
+                                // unresolved even when the former whole-cell
+                                // trim query could discard this entire owner.
+                                // Only complete Outside suppresses that result.
+                                phase = "unqualified original root trim exclusion";
+                                active_uv = cell.uv;
+                                if domain.classify_with_byte_limit(
+                                    cell.uv,
+                                    domain_bytes,
+                                    work,
+                                    cancel,
+                                )? == TrimClassification::Outside
+                                {
+                                    continue;
+                                }
+                            }
                             match root? {
                                 QualifiedRoot::Excluded => continue,
                                 QualifiedRoot::Unresolved => return Ok(false),
@@ -457,6 +525,25 @@ fn census_original_fiber(
                             }
                         }
                         FiberNewton::Enclosure { unique: false, .. } | FiberNewton::Unresolved => {}
+                    }
+                    // Only unresolved roots need whole-cell trim admission
+                    // before subdivision. Excluded carriers need no winding;
+                    // unique roots above own membership on their contracted
+                    // enclosure in qualify_fiber_root. Inside is inherited
+                    // only by these actual subset children.
+                    let mut trim_inside = cell.trim_inside;
+                    if !trim_inside {
+                        phase = "original root trim classification";
+                        match domain.classify_with_byte_limit(
+                            cell.uv,
+                            domain_bytes,
+                            work,
+                            cancel,
+                        )? {
+                            TrimClassification::Outside => continue,
+                            TrimClassification::Inside => trim_inside = true,
+                            TrimClassification::Boundary => {}
+                        }
                     }
                     if cell.depth >= MAX_DEPTH {
                         return Ok(false);
@@ -497,7 +584,7 @@ fn census_original_fiber(
     Ok((roots.outward.is_some() || roots.inward.is_some()).then_some(roots))
 }
 
-fn validate_fiber(fiber: &OriginalFiber) -> Result<(), GeometryError> {
+fn validate_fiber(fiber: &NativeFiber) -> Result<(), GeometryError> {
     let exact_forward = cross(fiber.rows[0], fiber.rows[1]);
     if fiber.center.into_iter().any(|v| !v.is_finite())
         || fiber
@@ -542,12 +629,12 @@ fn validate_fiber(fiber: &OriginalFiber) -> Result<(), GeometryError> {
     Ok(())
 }
 
-fn fiber_value(fiber: &OriginalFiber, position: [Interval; 3]) -> [Interval; 2] {
+fn fiber_value(fiber: &NativeFiber, position: [Interval; 3]) -> [Interval; 2] {
     let relative = std::array::from_fn(|i| position[i].sub(Interval::point(fiber.center[i])));
     std::array::from_fn(|i| dot(fiber.rows[i], relative).add(fiber.offsets[i]))
 }
 
-pub(super) fn fiber_forward(fiber: &OriginalFiber, position: [Interval; 3]) -> Interval {
+pub(super) fn fiber_forward(fiber: &NativeFiber, position: [Interval; 3]) -> Interval {
     dot(
         fiber.forward,
         std::array::from_fn(|i| position[i].sub(Interval::point(fiber.center[i]))),
@@ -561,7 +648,7 @@ fn fiber_core_radius(core: FiberCore, position: [Interval; 3]) -> Interval {
 }
 
 fn fiber_image_excluded(
-    fiber: &OriginalFiber,
+    fiber: &NativeFiber,
     position: [Interval; 3],
     height: HeightFunctional,
     request: &SlabRequest,
@@ -573,7 +660,7 @@ fn fiber_image_excluded(
 }
 
 fn fiber_restriction_excluded(
-    fiber: &OriginalFiber,
+    fiber: &NativeFiber,
     position: [Interval; 3],
     height: HeightFunctional,
     request: &SlabRequest,
@@ -592,7 +679,7 @@ fn fiber_restriction_excluded(
 }
 
 fn census_root_owned(
-    fiber: &OriginalFiber,
+    fiber: &NativeFiber,
     position: [Interval; 3],
     normal: [Interval; 3],
     restriction: CensusRestriction<'_>,
@@ -646,7 +733,7 @@ pub(super) fn fiber_krawczyk(
     surface: &(impl SurfaceEvaluator + ?Sized),
     uv: [[f64; 2]; 2],
     jet: &SurfaceEnclosure,
-    fiber: &OriginalFiber,
+    fiber: &NativeFiber,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<FiberNewton, GeometryError> {
@@ -664,7 +751,7 @@ fn fiber_krawczyk_jacobian(
     surface: &(impl SurfaceEvaluator + ?Sized),
     uv: [[f64; 2]; 2],
     jacobian: [[Interval; 2]; 2],
-    fiber: &OriginalFiber,
+    fiber: &NativeFiber,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<FiberNewton, GeometryError> {
@@ -760,7 +847,8 @@ fn qualify_fiber_root(
     surface: &(impl SurfaceEvaluator + ?Sized),
     domain: &PreparedFaceTrimDomain<'_>,
     mut uv: [[f64; 2]; 2],
-    fiber: &OriginalFiber,
+    mut trim_inside: bool,
+    fiber: &NativeFiber,
     restriction: CensusRestriction<'_>,
     orientation: bool,
     remaining_bytes: usize,
@@ -769,9 +857,12 @@ fn qualify_fiber_root(
 ) -> Result<QualifiedRoot, GeometryError> {
     for _ in 0..=MAX_DEPTH {
         work.charge(1, cancel)?;
-        let membership = domain.classify_with_byte_limit(uv, remaining_bytes, work, cancel)?;
-        if membership == TrimClassification::Outside {
-            return Ok(QualifiedRoot::Excluded);
+        if !trim_inside {
+            match domain.classify_with_byte_limit(uv, remaining_bytes, work, cancel)? {
+                TrimClassification::Outside => return Ok(QualifiedRoot::Excluded),
+                TrimClassification::Inside => trim_inside = true,
+                TrimClassification::Boundary => {}
+            }
         }
         let jet = surface_enclosure(surface, uv, work, cancel)?;
         // Uniqueness on the original owner was already proved. Its contracted
@@ -790,7 +881,7 @@ fn qualify_fiber_root(
         {
             return Ok(QualifiedRoot::Excluded);
         }
-        if membership == TrimClassification::Inside {
+        if trim_inside {
             if let Some(inward) =
                 census_root_owned(fiber, jet.position, normal(&jet, orientation), restriction)
             {
@@ -807,6 +898,9 @@ fn qualify_fiber_root(
                     "original fiber unique-root enclosure became inconsistent",
                 ));
             }
+            // Every returned enclosure is the literal intersection with this
+            // uv box in fiber_krawczyk_jacobian. A whole-box Inside proof from
+            // the same immutable domain therefore covers every later subset.
             FiberNewton::Enclosure { uv: next, .. } if next != uv => uv = next,
             FiberNewton::Enclosure { .. } | FiberNewton::Unresolved => {
                 return Ok(QualifiedRoot::Unresolved);
@@ -863,11 +957,11 @@ mod tests {
         let jet = surface_enclosure(&operand, uv, &mut work, &cancel).unwrap();
         let cell = super::super::BoundaryCell {
             position: jet.position,
-            original_face: Some((operand, uv)),
+            native_face: Some((operand, uv)),
         };
-        let (captured, captured_uv) = cell.original_face.unwrap();
+        let (captured, captured_uv) = cell.native_face.unwrap();
         let rows = [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0]].map(|row| row.map(Interval::point));
-        let ray = OriginalFiber {
+        let ray = NativeFiber {
             center: [0.0, 0.0, 0.25],
             rows,
             offsets: [Interval::point(0.0); 2],
@@ -885,8 +979,8 @@ mod tests {
         ));
     }
 
-    fn fiber(center: [f64; 3]) -> OriginalFiber {
-        OriginalFiber {
+    fn fiber(center: [f64; 3]) -> NativeFiber {
+        NativeFiber {
             center,
             rows: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]].map(|v| v.map(Interval::point)),
             offsets: [Interval::point(0.0); 2],
@@ -1082,7 +1176,7 @@ mod tests {
         let one = Interval::point(1.0);
         let uncertainty = Interval::new(-1.0 / 128.0, 1.0 / 128.0).unwrap();
         let rows = [[one, zero, uncertainty], [uncertainty, one, zero]];
-        let family = OriginalFiber {
+        let family = NativeFiber {
             center: [0.0, 0.0, 2.0],
             rows,
             offsets: [
@@ -1165,7 +1259,7 @@ mod tests {
         let source = owner.source_view().unwrap();
         let fiber = fiber([1.23456789, 2.34567891, 2.0]);
         assert!(
-            original_fiber_degree_one(
+            native_fiber_degree_one(
                 source,
                 &fiber,
                 &request(),
@@ -1187,7 +1281,7 @@ mod tests {
         );
         let cancel = AtomicBool::new(false);
         let definition = crate::from_step_bytes_with_cancel(bytes, &cancel).unwrap();
-        let fiber = OriginalFiber {
+        let fiber = NativeFiber {
             center: [-10.0, 10.0, 4.0],
             rows: [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|v| v.map(Interval::point)),
             offsets: [Interval::point(0.0); 2],
@@ -1211,7 +1305,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            original_fiber_degree_one(
+            native_fiber_degree_one(
                 owner.source_view().unwrap(),
                 &fiber,
                 &request,
@@ -1242,7 +1336,7 @@ mod tests {
         let source = owner.source_view().unwrap();
         let fiber = fiber([1.25, 2.25, 2.0]);
         let mut work = GeometryWorkBudget::new(100);
-        let error = original_fiber_degree_one(
+        let error = native_fiber_degree_one(
             source,
             &fiber,
             &request(),
@@ -1256,7 +1350,7 @@ mod tests {
         assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
         assert_eq!(work.consumed(), 1);
         let mut work = GeometryWorkBudget::new(0);
-        let error = original_fiber_degree_one(
+        let error = native_fiber_degree_one(
             source,
             &fiber,
             &request(),
@@ -1269,7 +1363,7 @@ mod tests {
         .unwrap();
         assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
         let mut work = GeometryWorkBudget::new(100);
-        let error = original_fiber_degree_one(
+        let error = native_fiber_degree_one(
             source,
             &fiber,
             &request(),
@@ -1286,7 +1380,7 @@ mod tests {
 
     #[test]
     fn affine_cylinder_crossing_uses_ray_tangent_not_radial_covector() {
-        let mut ray = OriginalFiber {
+        let mut ray = NativeFiber {
             center: [0.0; 3],
             rows: [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|r| r.map(Interval::point)),
             offsets: [Interval::point(0.0); 2],
@@ -1323,7 +1417,7 @@ mod tests {
 
     #[test]
     fn cylinder_calibration_refuses_folded_normals_and_closed_cut_touches() {
-        let ray = OriginalFiber {
+        let ray = NativeFiber {
             center: [0.0; 3],
             rows: [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|r| r.map(Interval::point)),
             offsets: [Interval::point(0.0); 2],

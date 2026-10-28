@@ -217,84 +217,6 @@ impl SurfaceEvaluator for PreparedOriginalSurface<'_> {
     }
 }
 
-/// A finite, borrowed coefficient-only query scope. This neither enlarges the
-/// prepared selected domain nor certifies trim/material membership. All source
-/// restrictions and continuity checks use the owner's one immutable inventory.
-pub(crate) struct OriginalCoefficientSheet<'p, 'd> {
-    surface: &'p PreparedOriginalSurface<'d>,
-    scope: [[f64; 2]; 2],
-}
-
-impl<'p, 'd> OriginalCoefficientSheet<'p, 'd> {
-    pub(crate) fn new(
-        surface: &'p PreparedOriginalSurface<'d>,
-        scope: [[f64; 2]; 2],
-    ) -> Result<Self, GeometryError> {
-        for range in scope {
-            Interval::new(range[0], range[1])?;
-        }
-        Ok(Self { surface, scope })
-    }
-
-    fn validate_query(&self, uv: [[f64; 2]; 2]) -> Result<(), GeometryError> {
-        for i in 0..2 {
-            Interval::new(uv[i][0], uv[i][1])?;
-            if uv[i][0] < self.scope[i][0] || uv[i][1] > self.scope[i][1] {
-                return Err(nurbs_eval::conditioning(
-                    "original coefficient query exceeds its finite scope",
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-
-impl SurfaceEvaluator for OriginalCoefficientSheet<'_, '_> {
-    fn active_domain(&self) -> [[f64; 2]; 2] {
-        self.scope
-    }
-    fn tensor(
-        &self,
-        uv: [[f64; 2]; 2],
-        order: usize,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<SurfaceTensor, GeometryError> {
-        self.validate_query(uv)?;
-        self.surface.carrier_evaluate_order(uv, order, work, cancel)
-    }
-    fn continuous(
-        &self,
-        uv: [[f64; 2]; 2],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<bool, GeometryError> {
-        self.validate_query(uv)?;
-        self.surface.carrier_continuity(uv, 0, work, cancel)
-    }
-    fn smooth(
-        &self,
-        uv: [[f64; 2]; 2],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<bool, GeometryError> {
-        self.validate_query(uv)?;
-        self.surface.carrier_continuity(uv, 1, work, cancel)
-    }
-    fn parameter_axes(
-        &self,
-        uv: [[f64; 2]; 2],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<[(&[f64], usize); 2], GeometryError> {
-        self.validate_query(uv)?;
-        self.surface.carrier_evaluate_order(uv, 0, work, cancel)?;
-        self.surface.parameter_axes(work, cancel)
-    }
-    fn original_surface(&self) -> Option<&solidcraft_step::geom::Surface> {
-        Some(self.surface.source())
-    }
-}
 impl CurveEvaluator for Curve {
     fn active_range(&self) -> [f64; 2] {
         if let Ok(Some(n)) = curve_prepared::native_curve_nurbs(self) {
@@ -304,6 +226,49 @@ impl CurveEvaluator for Curve {
         }
         let d = self.natural_interval();
         [d.min(), d.max()]
+    }
+    fn exact_affine_coefficients(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<ExactAffineCurve>, GeometryError> {
+        use crate::exact_coefficient::ExactCoefficient as E;
+        work.charge(1, cancel)?;
+        let solidcore::curve::curve::CurveKind::Line(line) = self.kind() else {
+            return Ok(None);
+        };
+        // Bounded native lines have a separate NURB-to-analytic map, including
+        // a native short-domain branch. No affine receipt is claimed for it.
+        if line.is_bounded() {
+            return Ok(None);
+        }
+        let c = line.canonical_unit();
+        let point = [c.point.x, c.point.y, c.point.z];
+        let vector = [c.vector.x, c.vector.y, c.vector.z];
+        for value in point.into_iter().chain(vector).chain([c.scale]) {
+            Interval::new(value, value)?;
+        }
+        // The actual unbounded native gauge is +/-q. Preserve the separately
+        // stored vector and scale: their rounded product is not a coefficient.
+        let mut derivative = std::array::from_fn(|_| E::point(0.0));
+        for axis in 0..3 {
+            let Some(mut velocity) =
+                E::point(vector[axis]).product(&E::point(c.scale), work, cancel)?
+            else {
+                return Ok(None);
+            };
+            if c.inside_out {
+                for term in &mut velocity.terms[..velocity.len] {
+                    *term = -*term;
+                }
+            }
+            derivative[axis] = velocity;
+        }
+        Ok(Some(ExactAffineCurve {
+            position: point.map(E::point),
+            derivative,
+            denominator: E::point(1.0),
+        }))
     }
     fn tensor(
         &self,

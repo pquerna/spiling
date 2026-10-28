@@ -2,13 +2,11 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! One borrowed native BREP, with independently scoped inspection and material
-//! preparation. Unavailable source correspondence cannot disable raw inspection,
-//! and an inspection result cannot silently acquire manufacturing authority.
+//! One borrowed native BREP material owner. Original STEP inspection and finish
+//! authoring are separate roles and confer no material correspondence claim.
 use super::{
     AnalysisPolicy, BoundsPolicy, GeometryWorkBudget, HeightAnalysis,
-    PlacedMaterialProjectedBounds, PlacedSlabRequest, PreparedSourceVertexPlans, SlabAnalysis,
-    SlabRequest,
+    PlacedMaterialProjectedBounds, PlacedSlabRequest, SlabAnalysis, SlabRequest,
 };
 use crate::kernel::{PreparedFaceTrimDomain, PreparedNativeTrimSource};
 use crate::parametric::Interval;
@@ -20,19 +18,17 @@ use std::{mem::size_of, sync::atomic::AtomicBool};
 pub struct PreparedSolid<'d> {
     definition: &'d Definition,
     charts: Result<PreparedNativeTrimSource<'d>, GeometryError>,
-    plans: Option<PreparedSourceVertexPlans<'d>>,
     material_position_bounds: Option<[Interval; 3]>,
     material_unavailable: Option<GeometryError>,
     sections: crate::section::PreparedSectionSource<'d>,
+    native_position_maps_ready: std::cell::Cell<bool>,
 }
 
-/// Internal borrowed query operands. This is not another prepared-source owner:
-/// domains and source-only plans always belong to the same `PreparedSolid`.
+/// Internal borrowed operands of the one native material owner.
 #[derive(Clone, Copy)]
 pub(crate) struct MaterialSourceView<'s, 'd> {
     definition: &'d Definition,
     trims: &'s PreparedNativeTrimSource<'d>,
-    plans: Option<&'s PreparedSourceVertexPlans<'d>>,
     material_position_bounds: Option<&'s [Interval; 3]>,
     retained_owner_bytes: usize,
 }
@@ -61,31 +57,11 @@ impl<'s, 'd> MaterialSourceView<'s, 'd> {
             )
         })
     }
-    pub(crate) fn vertex_plans(self) -> Option<&'s PreparedSourceVertexPlans<'d>> {
-        self.plans
-    }
     pub(crate) fn trim_source(self) -> &'s PreparedNativeTrimSource<'d> {
         self.trims
     }
-    pub(crate) fn material_transport_is_proved_zero(
-        self,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<bool, GeometryError> {
-        self.trims.certify_zero_material_transport(work, cancel)
-    }
-    /// Deliberately permit foreign/unretained plans only in owner-validation
-    /// tests. Production views are constructed solely by their prepared owner.
-    #[cfg(test)]
-    pub(crate) fn with_vertex_plans(
-        self,
-        plans: Option<&'s PreparedSourceVertexPlans<'d>>,
-    ) -> Self {
-        Self {
-            plans,
-            material_position_bounds: None,
-            ..self
-        }
+    pub(crate) fn effective_tolerance_mm(self) -> f64 {
+        self.trims.effective_tolerance_mm()
     }
 }
 
@@ -102,9 +78,9 @@ fn propagate_preparation_failure(error: &GeometryError) -> bool {
     )
 }
 
-/// Prepare immutable source facts once. Geometry unavailability is retained as a
-/// typed manufacturing refusal; cancellation or exhausted ownership/work is an
-/// error, never an apparently successful partial preparation.
+/// Prepare the immutable native material and section operands once. Geometric
+/// unavailability is a typed refusal; cancellation and ownership exhaustion are
+/// errors, never successful partial preparation.
 pub fn prepare_solid<'d>(
     definition: &'d Definition,
     byte_limit: usize,
@@ -136,7 +112,7 @@ pub fn prepare_solid<'d>(
         })
         .and_then(|bytes| bytes.checked_add(size_of::<PreparedNativeTrimSource<'d>>()))
         .ok_or_else(capacity_error)?;
-    let charts = PreparedNativeTrimSource::prepare_originals(definition, allowance, work, cancel);
+    let charts = PreparedNativeTrimSource::prepare_material(definition, allowance, work, cancel);
     if let Err(error) = &charts {
         if propagate_preparation_failure(error) {
             return Err(error.clone());
@@ -145,49 +121,22 @@ pub fn prepare_solid<'d>(
     let mut solid = PreparedSolid {
         definition,
         charts,
-        plans: None,
         material_position_bounds: None,
         material_unavailable: None,
         sections,
+        native_position_maps_ready: std::cell::Cell::new(false),
     };
-    if let Ok(trims) = &solid.charts {
-        // This validates selected ORIGINAL coedges, domains, joints and their
-        // source-forward maps, not generated native trims relabeled by proximity.
-        // Closed realization/topology/metric authority remains query-scoped.
-        let preparation = (|| {
-            trims.require_source_correspondence(work, cancel)?;
-            let remaining = limit
-                .checked_sub(solid.retained_bytes())
-                .ok_or_else(capacity_error)?;
-            PreparedSourceVertexPlans::prepare(
-                MaterialSourceView {
-                    definition,
-                    trims,
-                    plans: None,
-                    material_position_bounds: None,
-                    retained_owner_bytes: solid.retained_bytes(),
-                },
-                remaining
-                    .checked_add(size_of::<PreparedSourceVertexPlans<'d>>())
-                    .ok_or_else(capacity_error)?,
-                work,
-                cancel,
-            )
-        })();
-        match preparation {
-            Ok(plans) => solid.plans = Some(plans),
-            Err(error) if propagate_preparation_failure(&error) => return Err(error),
-            Err(error) => solid.material_unavailable = Some(error),
-        }
-    }
-    if solid.plans.is_some() && solid.material_unavailable.is_none() {
-        // Bound the actual selected F/C/V realization and retained cone G once.
-        // Neither the native AABB nor a declared tolerance bounds that material.
+    if solid.charts.is_ok() {
+        // Cache the same native material's coefficient enclosure for posed
+        // interval arithmetic. This does not assert original STEP coincidence.
         let remaining = limit
             .checked_sub(solid.retained_bytes())
             .ok_or_else(capacity_error)?;
+        let before = work.consumed();
         match super::placed::material_position_bounds(solid.source_view()?, remaining, work, cancel)
-        {
+            .map_err(|error| {
+                work.annotate_error(error, before, "native material position enclosure")
+            }) {
             Ok(bounds) => solid.material_position_bounds = Some(bounds),
             Err(error) if propagate_preparation_failure(&error) => return Err(error),
             Err(error) => solid.material_unavailable = Some(error),
@@ -199,25 +148,12 @@ pub fn prepare_solid<'d>(
     Ok(solid)
 }
 
-/// Standalone coefficient/source proof, without preparing source-vertex plans.
-/// The prepared-source path calls the borrowed view method instead, so source
-/// construction never recurses through a Definition zero-transport query.
-pub(crate) fn certify_zero_material_transport(
-    definition: &Definition,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<bool, GeometryError> {
-    work.charge(1, cancel)?;
-    let allowance = crate::MAX_PREPARED_SECTION_SOURCE_BYTES
-        .checked_sub(definition.retained_query_proof_bytes())
-        .ok_or_else(capacity_error)?;
-    let source = PreparedNativeTrimSource::prepare_originals(definition, allowance, work, cancel)?;
-    source.certify_zero_material_transport(work, cancel)
-}
-
 impl<'d> PreparedSolid<'d> {
     pub fn definition(&self) -> &'d Definition {
         self.definition
+    }
+    pub fn effective_tolerance_mm(&self) -> Result<f64, GeometryError> {
+        Ok(self.source_view()?.effective_tolerance_mm())
     }
     /// Inline fields, each owned capacity and pinned source proof exactly once.
     /// The immutable borrowed BREP is not another job-local allocation.
@@ -236,17 +172,47 @@ impl<'d> PreparedSolid<'d> {
                     .retained_bytes()
                     .saturating_sub(size_of::<crate::section::PreparedSectionSource<'_>>()),
             )
-            .saturating_add(self.plans.as_ref().map_or(0, |plans| {
-                plans
-                    .retained_bytes()
-                    .saturating_sub(size_of::<PreparedSourceVertexPlans<'d>>())
-            }))
             .saturating_add(
                 self.material_unavailable
                     .as_ref()
                     .map_or(0, |error| error.message.capacity()),
             )
     }
+    /// Warm immutable native positional query aids BEFORE taking shared-owner
+    /// byte snapshots. `query_byte_limit` excludes every already live owner and
+    /// output; the returned allowance subtracts only newly retained capacities.
+    /// Actual capacities become part of `retained_bytes()` under the unchanged
+    /// source cap. No allocation occurs on reuse or during nested map queries.
+    /// This changes no material geometry, source/native parameter law or tangent
+    /// authority. Placement/bounds do not pay this manufacturing preparation.
+    pub fn prepare_native_position_maps(
+        &self,
+        query_byte_limit: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<usize, GeometryError> {
+        work.charge(1, cancel)?;
+        if self.native_position_maps_ready.get() {
+            return Ok(query_byte_limit);
+        }
+        let trims = self.charts.as_ref().map_err(Clone::clone)?;
+        if let Some(error) = &self.material_unavailable {
+            return Err(error.clone());
+        }
+        let available = crate::MAX_PREPARED_SECTION_SOURCE_BYTES
+            .checked_sub(self.retained_bytes())
+            .ok_or_else(capacity_error)?
+            .min(query_byte_limit);
+        let growth = trims.prepare_native_position_maps(available, work, cancel)?;
+        let remaining = query_byte_limit
+            .checked_sub(growth)
+            .ok_or_else(capacity_error)?;
+        self.sections
+            .seed_native_position_maps(trims, work, cancel)?;
+        self.native_position_maps_ready.set(true);
+        Ok(remaining)
+    }
+
     pub(crate) fn source_view(&self) -> Result<MaterialSourceView<'_, 'd>, GeometryError> {
         let trims = self.charts.as_ref().map_err(Clone::clone)?;
         if let Some(error) = &self.material_unavailable {
@@ -255,12 +221,11 @@ impl<'d> PreparedSolid<'d> {
         Ok(MaterialSourceView {
             definition: self.definition,
             trims,
-            plans: self.plans.as_ref(),
             material_position_bounds: self.material_position_bounds.as_ref(),
             retained_owner_bytes: self.retained_bytes(),
         })
     }
-    /// Unposed support of the same selected source, without preparing it again.
+    /// Unposed support of the same native material, without preparing it again.
     /// Retained owner and query scratch share the frozen directional byte cap.
     pub fn material_bounds(
         &self,
@@ -333,8 +298,18 @@ impl<'d> PreparedSolid<'d> {
         byte_limit: u32,
         work: &mut GeometryWorkBudget,
     ) -> Result<NativeSection, GeometryError> {
-        self.sections
-            .section_for_query(query, cancel, byte_limit, work)
+        let section = self
+            .sections
+            .section_for_query(query, cancel, byte_limit, work)?;
+        if !section.matches_native_material(self.definition)
+            || section.certificate.pose != RigidPoseMm::IDENTITY
+        {
+            return Err(GeometryError::new(
+                GeometryErrorCode::InvalidGeometry,
+                "native section changed its prepared material or pose identity",
+            ));
+        }
+        Ok(section)
     }
     /// Raw posed inspection uses the same geometry-owned affine pullback and
     /// world-space metric checks without borrowing manufacturing admission.

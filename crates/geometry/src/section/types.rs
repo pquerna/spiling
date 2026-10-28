@@ -104,6 +104,8 @@ pub struct NativeSection {
 #[derive(Debug, Clone)]
 pub(crate) struct NativeSectionCertificate {
     pub(crate) definition_id: DefinitionId,
+    pub(crate) material_realization: crate::kernel::MaterialRealizationIdentity,
+    pub(crate) pose: spiling_contracts::geometry::RigidPoseMm,
     pub(crate) authority: SectionAuthority,
     pub(crate) maximum_chord_error_mm: f64,
     pub(crate) maximum_plane_error_mm: f64,
@@ -137,6 +139,11 @@ impl NativeSection {
     }
     pub fn definition_id(&self) -> &DefinitionId {
         &self.certificate.definition_id
+    }
+    pub(crate) fn matches_native_material(&self, definition: &crate::Definition) -> bool {
+        self.definition_id() == definition.id()
+            && self.certificate.material_realization
+                == crate::kernel::MaterialRealizationIdentity::new(definition)
     }
     pub fn is_native_intersection(&self) -> bool {
         self.certificate.authority == SectionAuthority::NativeIntersection

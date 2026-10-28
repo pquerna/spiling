@@ -32,10 +32,11 @@ impl Domains {
         owned_bytes: usize,
         anchor_owned_bytes: usize,
         work: &mut usize,
+        foreign_work: usize,
         cancel: &AtomicBool,
     ) -> Result<Self, ManufacturingError> {
         let owned_bytes = owned_bytes.saturating_add(anchor_owned_bytes);
-        charge_boolean(support, support, work, cancel)?;
+        charge_boolean(support, support, work, foreign_work, cancel)?;
         let mut centers = region::offset_admitted(
             support,
             -width * 0.5,
@@ -63,7 +64,7 @@ impl Domains {
         };
         result.admit()?;
         if !interface.0.is_empty() && !all_interface {
-            charge_boolean(&result.centers, interface, work, cancel)?;
+            charge_boolean(&result.centers, interface, work, foreign_work, cancel)?;
             result.interface = Some(result.centers.intersection(interface));
             region::check_size(result.interface.as_ref().unwrap())?;
             result.owned_bytes =
@@ -73,7 +74,7 @@ impl Domains {
                         result.interface.as_mut().unwrap(),
                     ));
             result.admit()?;
-            charge_boolean(&result.centers, interface, work, cancel)?;
+            charge_boolean(&result.centers, interface, work, foreign_work, cancel)?;
             result.ordinary = Some(result.centers.difference(interface));
             region::check_size(result.ordinary.as_ref().unwrap())?;
             result.owned_bytes =
@@ -123,6 +124,7 @@ impl Domains {
         layer: &region::HatchLayer<'_>,
         existing_segments: usize,
         work: &mut usize,
+        foreign_work: usize,
         cancel: &AtomicBool,
     ) -> Result<Vec<DepositionPath>, ManufacturingError> {
         check_cancel(cancel)?;
@@ -194,6 +196,7 @@ impl Domains {
                 retained,
                 self.owned_bytes,
                 work,
+                foreign_work,
                 cancel,
             )?;
         }
@@ -201,7 +204,7 @@ impl Domains {
             (ordinary, DepositionKind::Support, density),
             (interface_centers, DepositionKind::SupportInterface, 1.0),
         ] {
-            charge_hatch(domain, fraction, layer, work, cancel)?;
+            charge_hatch(domain, fraction, layer, work, foreign_work, cancel)?;
             region::hatch(
                 domain,
                 kind,
@@ -234,13 +237,13 @@ fn resource(message: &str) -> ManufacturingError {
     error(ManufacturingErrorCode::ResourceLimit, message)
 }
 
-fn charge(work: &mut usize, amount: usize, cancel: &AtomicBool) -> Result<(), ManufacturingError> {
-    check_cancel(cancel)?;
-    *work = work
-        .checked_add(amount)
-        .filter(|n| *n <= 20_000_000)
-        .ok_or_else(|| resource("cumulative support raster ownership work budget exceeded"))?;
-    Ok(())
+fn charge(
+    work: &mut usize,
+    amount: usize,
+    foreign_work: usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    super::charge_owned_work(work, foreign_work, amount, cancel)
 }
 
 fn charge_hatch(
@@ -248,6 +251,7 @@ fn charge_hatch(
     fraction: f64,
     layer: &region::HatchLayer<'_>,
     work: &mut usize,
+    foreign_work: usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let width = layer.recipe.bead_width_mm;
@@ -281,6 +285,7 @@ fn charge_hatch(
             (rows as usize)
                 .checked_mul(edges)
                 .ok_or_else(|| resource("support hatch work overflow"))?,
+            foreign_work,
             cancel,
         )?;
     }
@@ -307,6 +312,7 @@ fn walls(
     retained: usize,
     owned_bytes: usize,
     work: &mut usize,
+    foreign_work: usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let WallContours { centers, interface } = contours;
@@ -358,7 +364,7 @@ fn walls(
                 for owner in &interface.0 {
                     for boundary in std::iter::once(owner.exterior()).chain(owner.interiors()) {
                         for side in boundary.0.windows(2) {
-                            charge(work, 1, cancel)?;
+                            charge(work, 1, foreign_work, cancel)?;
                             match line_intersection(Line::new(a, b), Line::new(side[0], side[1])) {
                                 Some(LineIntersection::SinglePoint { intersection, .. }) => {
                                     add_cut(intersection)?
@@ -378,7 +384,7 @@ fn walls(
                 let mut owned_start = a;
                 let mut owned_kind = None;
                 for end in cuts.iter().map(|cut| cut.1).chain(std::iter::once(b)) {
-                    charge(work, region::point_count(interface), cancel)?;
+                    charge(work, region::point_count(interface), foreign_work, cancel)?;
                     let midpoint = Point::new(
                         start.x + (end.x - start.x) * 0.5,
                         start.y + (end.y - start.y) * 0.5,
@@ -556,6 +562,7 @@ mod tests {
                 0,
                 0,
                 &mut 0,
+                0,
                 &cancel
             )
             .is_ok()
@@ -570,6 +577,7 @@ mod tests {
                 MAX_MANUFACTURING_RETAINED_BYTES as usize,
                 0,
                 &mut 0,
+                0,
                 &cancel
             )
             .is_err()
@@ -613,6 +621,7 @@ mod tests {
             0,
             0,
             &mut work,
+            0,
             &cancel,
         )
         .unwrap();
@@ -625,6 +634,7 @@ mod tests {
             0,
             0,
             &mut work,
+            0,
             &cancel,
         )
         .unwrap();
@@ -642,6 +652,7 @@ mod tests {
                 },
                 0,
                 &mut work,
+                0,
                 &cancel,
             )
             .unwrap();
@@ -659,6 +670,7 @@ mod tests {
                 },
                 super::super::path_segments(&previous),
                 &mut work,
+                0,
                 &cancel,
             )
             .unwrap();
@@ -730,6 +742,7 @@ mod tests {
             0,
             0,
             &mut 0,
+            0,
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -764,8 +777,10 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let support = rectangle(0.0, 0.0, 20.0, 5.0);
         let interface = MultiPolygon(Vec::new());
-        let domains =
-            Domains::new(&support, &interface, false, 0.6, 0, 0, 0, &mut 0, &cancel).unwrap();
+        let domains = Domains::new(
+            &support, &interface, false, 0.6, 0, 0, 0, &mut 0, 0, &cancel,
+        )
+        .unwrap();
         let recipe = crate::planner::tests::recipe(1.0);
         let layer = region::HatchLayer {
             z: 0.4,
@@ -783,6 +798,7 @@ mod tests {
                     &layer,
                     MAX_DEPOSITION_SEGMENTS as usize,
                     &mut 0,
+                    0,
                     &cancel
                 )
                 .unwrap_err()
@@ -792,7 +808,7 @@ mod tests {
         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(
             domains
-                .paths(&interface, 1.0, &layer, 0, &mut 0, &cancel)
+                .paths(&interface, 1.0, &layer, 0, &mut 0, 0, &cancel)
                 .is_err()
         );
     }

@@ -1071,6 +1071,12 @@ pub(crate) fn verify_actual(
     Ok(VerificationReport {
         verified: true,
         coverage: vec![
+            format!(
+                "Native BREP plan authority: pinned kernel, source identity and imported entity tolerances; query zone={} mm, intersection={} mm, approximation={} mm. Program/process bytes independently decoded.",
+                spiling_geometry::KERNEL_ZONE_TOLERANCE_MM,
+                spiling_geometry::KERNEL_INTERSECTION_TOLERANCE_MM,
+                spiling_geometry::KERNEL_APPROXIMATION_TOLERANCE_MM,
+            ),
             "Independent decoding of actual bytes; required ordered workflow, strict millimetre/absolute XYZ/E modes and lifecycle/object command field masks".into(),
             "Ordered travel/deposition completeness; XYZ6 <=0.0000005 mm/axis, E8 <=0.000000005 mm absolute / 0.00000001 mm delta, F6 <=0.0000005 mm/min; scale-aware floating roundoff only".into(),
             "Command-space build envelope, explicit feeds, printer speed and nominal volumetric flow limits".into(),
@@ -1088,6 +1094,7 @@ pub(crate) fn verify_actual(
         ],
         limitations: vec![
             "SOFTWARE VALIDATION ONLY, NOT MACHINE READY; no physical printer support or printability certification".into(),
+            "DEVELOPMENT native-first geometry: no independent original-STEP topology or material-embedding certification; native-kernel material reliance is not physical printability evidence".into(),
             "No physics, structural/mechanical or material deposition validation".into(),
             "No collisions or component/fixture clearance validation; component shapes are metadata only".into(),
             "No firmware behavior, execution, calibration or hardware accuracy validation".into(),

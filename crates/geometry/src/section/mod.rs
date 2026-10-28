@@ -74,6 +74,46 @@ impl<'a> PreparedSectionSource<'a> {
         )
     }
 
+    /// Reuse only complete positional evidence on the identical immutable BREP.
+    /// The existing per-use receipt remains a native-mm error bound; roots,
+    /// chart containment, crossings and physical endpoint gaps are not cached.
+    pub(crate) fn seed_native_position_maps(
+        &self,
+        source: &crate::kernel::trim::PreparedNativeTrimSource<'_>,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), GeometryError> {
+        work.charge(1, cancel)?;
+        if !std::ptr::eq(self.definition, source.definition()) {
+            return Err(indeterminate(
+                "native positional maps belong to another immutable section definition",
+            ));
+        }
+        for ordinal in 0..self.definition.face_ids().len() {
+            let domain = source
+                .face_domain(ordinal)
+                .ok_or_else(|| indeterminate("native positional maps lost their face inventory"))?;
+            for (index, coedge) in domain.coedges().iter().enumerate() {
+                let Some(achieved) = domain.complete_native_position_bound_mm(
+                    index,
+                    domain.effective_tolerance_mm(),
+                    work,
+                    cancel,
+                )?
+                else {
+                    continue;
+                };
+                work.charge(
+                    u64::from(self.native_correspondence.len().max(1).ilog2()) + 1,
+                    cancel,
+                )?;
+                let receipt = self.native_correspondence_allowance(coedge.edgeuse)?;
+                receipt.set(receipt.get().min(achieved));
+            }
+        }
+        Ok(())
+    }
+
     fn native_correspondence_allowance(
         &self,
         edgeuse: solidcore::topology::EdgeuseId,

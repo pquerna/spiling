@@ -6,17 +6,16 @@ Licensed under the Open Software License version 3.0
 
 # ADR005: native-first DEVELOPMENT geometry
 
-Status: **adopted decision; implementation and operator qualification pending**.
+Status: **adopted; native-first material implementation, producer-specific qualification**.
 This decision supersedes ADR004's custom original-source material reconstruction
-requirements. It does not declare the native cutover complete or broaden supported
-STEP, finishes, processes or machines.
+requirements. It does not broaden supported STEP, finishes, processes or machines,
+or establish complete operator qualification merely from implementation.
 
-Current production remains source5/planner24 with its existing material path and
-verification report. The native route is not active. Activation requires a
-coherent geometry cutover, matching published dependency/producer identities
-and preserved qualified operators and source-safety controls; do not publish a
-partial native owner or relabel current reports. A stronger standalone native
-API is a prerequisite only when the actual consumer needs its contract.
+The implemented material route is source6/planner25 native-first DEVELOPMENT.
+Landing requires one coherent native owner, matching published dependency/producer
+identities and preserved qualified operators and source-safety controls. Do not
+relabel older source5/planner24 reports as current evidence. A stronger standalone
+native API is a prerequisite only when the actual consumer needs its contract.
 
 ## Decision
 
@@ -77,11 +76,11 @@ supported nominal ownership/contact obligations. Geometry-dependent checks rely
 on the captured native material and plan. Fresh Verify does not independently
 reconstruct or certify original STEP topology or embedding.
 
-At activation, report coverage must state reliance on captured native-kernel BREP
-material and independent decoding of actual program/process semantics. Report
-limitations must explicitly say: **DEVELOPMENT native-first geometry relies on
-the pinned kernel/tolerance policy; no independent original-STEP topology or
-material-embedding certification**. Until then, runtime report text stays unchanged.
+Report coverage states reliance on captured native-kernel BREP material and
+independent decoding of actual program/process semantics. Report limitations
+explicitly say: **DEVELOPMENT native-first geometry relies on the pinned
+kernel/tolerance policy; no independent original-STEP topology or material-embedding
+certification**.
 
 The native-material semantic cutover is source6/planner25. Historical
 source5/planner23–24 exercised results remain valid for their recorded producer and
@@ -97,6 +96,11 @@ units, protected material/voids, closed-height scope, resource limits and
 cancellation remain required. No easier fixture, intent or all-fine substitute
 replaces these preserved positives.
 
+The user explicitly separated the existing planar-image wall-dose defect after
+the same operator reproduced it on a producer-verified source5/planner24 main
+baseline. Keep that failing journey and its unchanged source-local dose gate;
+the native-first landing does not claim planar-image qualification. Its wall
+construction repair remains separate.
 The original ribbed bracket remains explicitly unqualified for manufacturing.
 Its default-wall Compile → fresh Verify → export, useful variable width/count
 regions and junctions, width/history and source-deleted recovery remain the full

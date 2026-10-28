@@ -749,6 +749,33 @@ pub(super) struct HatchLayer<'a> {
     pub recipe: &'a PlanarPrintRecipe,
 }
 
+/// Quarter-pitch residues relative to each ordinary polygon's centered lattice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OrdinaryHatchPhase {
+    Centered,
+    Quarter,
+    Half,
+    ThreeQuarters,
+}
+
+impl OrdinaryHatchPhase {
+    pub(super) const CANDIDATES: [Self; 4] = [
+        Self::Centered,
+        Self::Quarter,
+        Self::Half,
+        Self::ThreeQuarters,
+    ];
+
+    pub(super) fn ordinal(self) -> u8 {
+        match self {
+            Self::Centered => 0,
+            Self::Quarter => 1,
+            Self::Half => 2,
+            Self::ThreeQuarters => 3,
+        }
+    }
+}
+
 // Fill endpoints belong to the eroded interior boundary, half a bead from
 // the final wall center. No wall-extension strokes or duplicate outlines.
 pub(super) fn hatch(
@@ -760,7 +787,17 @@ pub(super) fn hatch(
     segments: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    hatch_with_phase(fill, kind, fraction, layer, None, paths, segments, cancel)
+    hatch_with_phase(
+        fill,
+        kind,
+        fraction,
+        layer,
+        None,
+        OrdinaryHatchPhase::Centered,
+        paths,
+        segments,
+        cancel,
+    )
 }
 
 pub(super) fn hatch_with_phase(
@@ -769,6 +806,7 @@ pub(super) fn hatch_with_phase(
     fraction: f64,
     layer: &HatchLayer<'_>,
     common_phase: Option<[f64; 2]>,
+    phase: OrdinaryHatchPhase,
     paths: &mut Vec<DepositionPath>,
     segments: &mut usize,
     cancel: &AtomicBool,
@@ -777,7 +815,9 @@ pub(super) fn hatch_with_phase(
         let rows = if let Some(origin) = common_phase {
             HatchRows::common(polygon, fraction, layer, origin)?
         } else {
-            HatchRows::new(polygon, fraction, layer)?
+            HatchRows::centered_phase(polygon, fraction, layer, phase)?.ok_or_else(|| {
+                unsupported("selected ordinary hatch phase no longer preserves polygon row count")
+            })?
         };
         hatch_polygon(polygon, kind, &rows, layer, paths, segments, cancel)?;
     }
@@ -798,6 +838,14 @@ impl HatchRows {
         fraction: f64,
         layer: &HatchLayer<'_>,
     ) -> Result<Self, ManufacturingError> {
+        Self::prepare_centered(polygon, fraction, layer).map(|(rows, _, _)| rows)
+    }
+
+    fn prepare_centered(
+        polygon: &Polygon<f64>,
+        fraction: f64,
+        layer: &HatchLayer<'_>,
+    ) -> Result<(Self, [f64; 2], f64), ManufacturingError> {
         let width = layer.recipe.bead_width_mm;
         let h = layer.height;
         let solid_spacing = ((width - h) * h + std::f64::consts::PI * (h * 0.5).powi(2)) / h;
@@ -824,12 +872,43 @@ impl HatchRows {
                 total.checked_add(ring.0.len().saturating_sub(1))
             })
             .ok_or_else(|| resource("component hatch boundary count overflow"))?;
-        Ok(Self {
-            count: count as usize,
-            start: min + ((max - min) - (count - 1.0) * spacing) * 0.5,
-            spacing,
-            edges,
-        })
+        Ok((
+            Self {
+                count: count as usize,
+                start: min + ((max - min) - (count - 1.0) * spacing) * 0.5,
+                spacing,
+                edges,
+            },
+            [min, max],
+            solid_spacing,
+        ))
+    }
+
+    /// Alternative residues retain the original polygon's exact lattice count.
+    /// A single centered row still uses the nominal pitch for quarter shifts.
+    pub(super) fn centered_phase(
+        polygon: &Polygon<f64>,
+        fraction: f64,
+        layer: &HatchLayer<'_>,
+        phase: OrdinaryHatchPhase,
+    ) -> Result<Option<Self>, ManufacturingError> {
+        let (mut rows, bounds, solid_spacing) = Self::prepare_centered(polygon, fraction, layer)?;
+        if phase == OrdinaryHatchPhase::Centered {
+            return Ok(Some(rows));
+        }
+        let spacing = if rows.count == 1 {
+            solid_spacing / fraction
+        } else {
+            rows.spacing
+        };
+        let origin = rows.start + f64::from(phase.ordinal()) * 0.25 * spacing;
+        let (first, count) = Self::lattice_extent(bounds, spacing, origin);
+        if count != rows.count as f64 {
+            return Ok(None);
+        }
+        rows.start = origin + first * spacing;
+        rows.spacing = spacing;
+        Ok(Some(rows))
     }
 
     /// Adjoining zones share the transported physical definition origin,
@@ -840,22 +919,14 @@ impl HatchRows {
         layer: &HatchLayer<'_>,
         origin: [f64; 2],
     ) -> Result<Self, ManufacturingError> {
-        let mut rows = Self::new(polygon, fraction, layer)?;
-        let width = layer.recipe.bead_width_mm;
-        let h = layer.height;
-        let spacing = ((width - h) * h + std::f64::consts::PI * (h * 0.5).powi(2)) / h / fraction;
-        let rect = polygon
-            .bounding_rect()
-            .ok_or_else(|| unsupported("fill has no finite bounds"))?;
-        let (min, max) = if layer.axis == HatchAxis::Y {
-            (rect.min().x, rect.max().x)
+        let (mut rows, bounds, solid_spacing) = Self::prepare_centered(polygon, fraction, layer)?;
+        let spacing = if rows.count == 1 {
+            solid_spacing / fraction
         } else {
-            (rect.min().y, rect.max().y)
+            rows.spacing
         };
         let origin = origin[usize::from(layer.axis == HatchAxis::X)];
-        let first = ((min - origin) / spacing).ceil();
-        let stop = ((max - origin) / spacing).ceil();
-        let count = (stop - first).max(0.);
+        let (first, count) = Self::lattice_extent(bounds, spacing, origin);
         if !count.is_finite() || count > MAX_DEPOSITION_SEGMENTS as f64 {
             return Err(resource("common phase hatch row limit exceeded"));
         }
@@ -863,6 +934,12 @@ impl HatchRows {
         rows.count = count as usize;
         rows.spacing = spacing;
         Ok(rows)
+    }
+
+    fn lattice_extent(bounds: [f64; 2], spacing: f64, origin: f64) -> (f64, f64) {
+        let first = ((bounds[0] - origin) / spacing).ceil();
+        let stop = ((bounds[1] - origin) / spacing).ceil();
+        (first, (stop - first).max(0.))
     }
 
     pub(super) fn point_bound(&self) -> Result<usize, ManufacturingError> {
@@ -1269,4 +1346,160 @@ fn resource(message: &str) -> ManufacturingError {
 }
 fn zero(x: f64) -> f64 {
     if x == 0.0 { 0.0 } else { x }
+}
+
+#[cfg(test)]
+#[test]
+fn ordinary_quarter_hatch_preserves_each_polygon_cadence_and_authored_origins() {
+    let recipe = super::tests::recipe(0.5);
+    let cancel = AtomicBool::new(false);
+    let layer = HatchLayer {
+        z: recipe.layer_height_mm,
+        lower_z: 0.0,
+        height: recipe.layer_height_mm,
+        axis: HatchAxis::X,
+        top_axis: HatchAxis::Y,
+        recipe: &recipe,
+    };
+    let h = layer.height;
+    let pitch = ((recipe.bead_width_mm - h) * h + std::f64::consts::PI * (h * 0.5).powi(2))
+        / h
+        / recipe.infill_fraction;
+    let ring = |x, y, width, height| {
+        LineString::from(vec![
+            (x, y),
+            (x + width, y),
+            (x + width, y + height),
+            (x, y + height),
+            (x, y),
+        ])
+    };
+    let second_y = 19.125 * pitch;
+    let fill = MultiPolygon(vec![
+        Polygon::new(
+            ring(0.0, 0.0, 10.0, 12.75 * pitch),
+            vec![ring(3.0, 4.0 * pitch, 4.0, 4.0 * pitch)],
+        ),
+        Polygon::new(ring(20.0, second_y, 10.0, 8.75 * pitch), vec![]),
+    ]);
+    let emit = |kind, fraction, origin, phase| {
+        let mut paths = Vec::new();
+        let mut segments = 0;
+        hatch_with_phase(
+            &fill,
+            kind,
+            fraction,
+            &layer,
+            origin,
+            phase,
+            &mut paths,
+            &mut segments,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(segments, paths.len());
+        paths
+    };
+    let centered = emit(
+        DepositionKind::SparseFill,
+        recipe.infill_fraction,
+        None,
+        OrdinaryHatchPhase::Centered,
+    );
+    let quarter = emit(
+        DepositionKind::SparseFill,
+        recipe.infill_fraction,
+        None,
+        OrdinaryHatchPhase::Quarter,
+    );
+    let rows = |paths: &[DepositionPath], second: bool| {
+        let mut coordinates: Vec<_> = paths
+            .iter()
+            .filter(|path| (path.points_mm[0][0] > 15.0) == second)
+            .map(|path| path.points_mm[0][1])
+            .collect();
+        coordinates.dedup();
+        coordinates
+    };
+    for (second, expected_count) in [(false, 13), (true, 9)] {
+        let original_rows = rows(&centered, second);
+        let shifted_rows = rows(&quarter, second);
+        assert_eq!(original_rows.len(), expected_count);
+        assert_eq!(shifted_rows.len(), expected_count);
+        for (index, (&original, &shifted)) in original_rows.iter().zip(&shifted_rows).enumerate() {
+            assert!((shifted - original - 0.25 * pitch).abs() < 1e-10);
+            if index > 0 {
+                assert!((shifted - shifted_rows[index - 1] - pitch).abs() < 1e-10);
+            }
+            let mut nonempty = 0;
+            for path in quarter.iter().filter(|path| {
+                (path.points_mm[0][0] > 15.0) == second && path.points_mm[0][1] == shifted
+            }) {
+                assert_eq!(path.points_mm.len(), 2);
+                let [a, b] = path.points_mm.as_slice() else {
+                    unreachable!()
+                };
+                assert_eq!(a[1], b[1]);
+                assert_eq!(a[2], layer.z);
+                assert_eq!(b[2], layer.z);
+                assert!((b[0] - a[0]).abs() > 0.000002);
+                nonempty += 1;
+            }
+            assert!(nonempty > 0);
+        }
+    }
+    let hole_paths: Vec<_> = quarter
+        .iter()
+        .filter(|path| {
+            path.points_mm[0][0] < 15.0
+                && path.points_mm[0][1] > 4.0 * pitch
+                && path.points_mm[0][1] < 8.0 * pitch
+        })
+        .collect();
+    assert_eq!(hole_paths.len(), 8);
+    for path in hole_paths {
+        let a = path.points_mm[0][0];
+        let b = path.points_mm[1][0];
+        assert!(a.max(b) <= 3.0 || a.min(b) >= 7.0);
+    }
+
+    let origin = Some([0.0, 0.123 * pitch]);
+    assert_eq!(
+        emit(
+            DepositionKind::SparseFill,
+            recipe.infill_fraction,
+            origin,
+            OrdinaryHatchPhase::Centered,
+        ),
+        emit(
+            DepositionKind::SparseFill,
+            recipe.infill_fraction,
+            origin,
+            OrdinaryHatchPhase::Quarter,
+        ),
+    );
+
+    let mut rejected = Vec::new();
+    let mut rejected_segments = 0;
+    let failure = hatch_with_phase(
+        &fill,
+        DepositionKind::SparseFill,
+        recipe.infill_fraction,
+        &layer,
+        None,
+        OrdinaryHatchPhase::Half,
+        &mut rejected,
+        &mut rejected_segments,
+        &cancel,
+    )
+    .unwrap_err();
+    assert_eq!(failure.code, ManufacturingErrorCode::UnsupportedGeometry);
+    let half_origin = rows(&centered, false)[0] + 0.5 * pitch;
+    let unrestricted_half = emit(
+        DepositionKind::SparseFill,
+        recipe.infill_fraction,
+        Some([0.0, half_origin]),
+        OrdinaryHatchPhase::Half,
+    );
+    assert_eq!(rows(&unrestricted_half, false).len(), 12);
 }

@@ -98,7 +98,7 @@ impl NativeInnerMaterialPrism {
         cancel: &AtomicBool,
     ) -> Result<Option<f64>, GeometryError> {
         work.charge(1, cancel)?;
-        if !self.source.same_material_recipe(source)
+        if !self.source.same_native_material(source)
             || self.source.occurrence_id() != source.occurrence_id()
             || self.source.pose() != source.pose()
             || self.source.native_shape_error_policy_mm().to_bits()

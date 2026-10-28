@@ -76,6 +76,102 @@ fn assert_provenance(definition: &Definition, result: &NativeSection) {
         }
     }
 }
+
+#[test]
+fn prepared_position_receipts_reject_foreign_native_owner_and_stricter_reuse() {
+    let definition = fixture("box-mm.step");
+    let foreign_definition = fixture("box-mm.step");
+    assert_eq!(definition.id(), foreign_definition.id());
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(20_000_000);
+    let source = crate::kernel::trim::PreparedNativeTrimSource::prepare_material(
+        &definition,
+        MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    source
+        .prepare_native_position_maps(
+            MAX_PREPARED_SECTION_SOURCE_BYTES - source.retained_bytes(),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+    let prepared = prepare_section_source(
+        &definition,
+        MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &cancel,
+        &mut work,
+    )
+    .unwrap();
+    prepared
+        .seed_native_position_maps(&source, &mut work, &cancel)
+        .unwrap();
+    let foreign = prepare_section_source(
+        &foreign_definition,
+        MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &cancel,
+        &mut work,
+    )
+    .unwrap();
+    assert_eq!(
+        foreign
+            .seed_native_position_maps(&source, &mut work, &cancel)
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::AnalysisIndeterminate,
+    );
+    assert!(
+        foreign
+            .native_correspondence
+            .iter()
+            .all(|receipt| receipt.allowance_mm.get().is_infinite()),
+        "equal source IDs do not authorize another native coefficient owner"
+    );
+
+    // Conservatively weakening genuine complete bounds remains valid evidence
+    // for a coarse query, but cannot authorize the narrower actual section.
+    let coarse_bound = SECTION_SAMPLING_TOLERANCE_MM / 64.0;
+    let mut weakened = false;
+    for receipt in &prepared.native_correspondence {
+        let achieved = receipt.allowance_mm.get();
+        if achieved.is_finite() {
+            assert!(achieved <= coarse_bound);
+            receipt.allowance_mm.set(coarse_bound);
+            weakened = true;
+        }
+    }
+    assert!(
+        weakened,
+        "the actual native boundary supplied complete positional evidence"
+    );
+    let query = SectionQuery {
+        plane: PlaneMm {
+            origin_mm: [0.0, 0.0, 4.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        maximum_chord_error_mm: SECTION_SAMPLING_TOLERANCE_MM * 0.5,
+        maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
+    };
+    let section = prepared
+        .section_for_query(&query, &cancel, MAX_SECTION_BYTES, &mut work)
+        .unwrap();
+    assert_provenance(&definition, &section);
+    assert_eq!(section.loops().len(), 1);
+    assert!(
+        prepared
+            .native_correspondence
+            .iter()
+            .any(|receipt| { receipt.allowance_mm.get() <= query.maximum_chord_error_mm / 64.0 }),
+        "a stricter query must obtain fresh achieved correspondence, not borrow the coarse bound"
+    );
+    let foreign_section = foreign
+        .section_for_query(&query, &cancel, MAX_SECTION_BYTES, &mut work)
+        .unwrap();
+    assert_provenance(&foreign_definition, &foreign_section);
+    assert_eq!(foreign_section.loops().len(), 1);
+}
 #[test]
 fn box_cylinder_and_void_sections_preserve_native_area_orientation_and_lineage() {
     for (name, expected_area, loop_count, perimeter) in [

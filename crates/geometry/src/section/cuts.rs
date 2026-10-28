@@ -167,7 +167,15 @@ impl<'a> CutInventory<'a> {
                 admission,
                 work,
                 cancel,
-            )?;
+            ).map_err(|mut failure| {
+                if failure.code == spiling_contracts::geometry::GeometryErrorCode::AnalysisIndeterminate {
+                    failure.message = format!(
+                        "native atlas-cut plane roots: axis={axis} coordinate={coordinate:?} other={other} line={line:?} kind={}; {}; plane={:?}",
+                        self.surface.type_string(), failure.message, self.plane,
+                    );
+                }
+                failure
+            })?;
             let mut qualified = Vec::new();
             let mut maximum_error: f64 = 0.0;
             let mut maximum_width: f64 = 0.0;

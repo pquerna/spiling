@@ -515,12 +515,6 @@ fn native_rational_and_polynomial_caps_share_the_critical_complex() {
             .unwrap();
         assert_eq!(result.section.loops.len(), 1);
         assert!(
-            result
-                .critical
-                .as_ref()
-                .is_some_and(CriticalSlabCertificate::has_native_convex_section_topology_proof)
-        );
-        assert!(
             !result.event_neighborhoods().is_empty(),
             "physical corner strata remain in the critical cover"
         );
@@ -569,14 +563,6 @@ fn imported_rational_torus_has_generic_terminal_metric_and_cycle_incidence() {
     assert_eq!(result.critical_material_component_count(), Some(1));
     assert_eq!(result.critical_bounded_void_count(), Some(0));
     assert_eq!(result.critical_tunnel_cycle_count(), Some(1));
-    assert!(
-        !result
-            .critical
-            .as_ref()
-            .unwrap()
-            .has_native_convex_section_topology_proof(),
-        "fiberwise convex toroidal meridians are not a globally convex original source"
-    );
     assert!(!result.event_neighborhoods().is_empty());
     assert!(result.boundary_motion_bound_mm <= request.native_shape_error_mm);
     assert_eq!(result.request().sample_height_mm, request.sample_height_mm);
@@ -589,9 +575,8 @@ fn imported_rational_torus_has_generic_terminal_metric_and_cycle_incidence() {
 }
 
 #[test]
-fn original_circle_callbacks_keep_radian_gauge_separate_from_native_interval() {
+fn native_edge_callbacks_keep_actual_restrictions_and_provenance_separate() {
     use crate::parametric::CurveEvaluator;
-    use solidcraft_step::geom::{Curve as OriginalCurve, PreferredRep};
     let cancel = AtomicBool::new(false);
     let definition = crate::from_step_bytes_with_cancel(
         include_bytes!(concat!(
@@ -606,71 +591,45 @@ fn original_circle_callbacks_keep_radian_gauge_separate_from_native_interval() {
         crate::prepare_solid(&definition, MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
     let source = prepared.source_view().unwrap();
     let remaining = MAX_SCRATCH_BYTES - prepared.retained_bytes();
-    let mut circles = 0;
+    let mut uses = 0;
     for face in 0..definition.face_ids().len() {
         let domain = source
             .face_domain(face, remaining, &mut work, &cancel)
             .unwrap();
-        for index in 0..domain.coedges().len() {
-            let proof = domain.original_coedge_correspondence(index).unwrap();
-            let binding = *proof
-                .binding()
-                .expect("sealed selected original occurrence");
-            let native = definition.brep().edge(binding.edge).unwrap();
-            assert_eq!(
-                binding.native_interval,
-                [native.interval.min(), native.interval.max()]
-            );
-            let spatial = proof.spatial_range();
-            domain.with_original_spatial_curve(index, remaining, &mut work, &cancel, |curve, work, cancel| {
-                let mut original = curve.original_curve().expect("original callback operand, not a native carrier");
-                for _ in 0..16 {
-                    match original {
-                        OriginalCurve::Trimmed { basis, .. } => original = basis,
-                        OriginalCurve::SurfaceCurve { curve_3d, master: PreferredRep::Curve3d, .. } =>
-                            original = curve_3d,
-                        _ => break,
-                    }
-                }
-                let OriginalCurve::Circle { position, radius } = original else { return Ok(()); };
-                circles += 1;
-                assert_ne!(spatial, binding.native_interval,
-                    "this actual circular occurrence must exercise independent source/native gauges");
-                let mut t = spatial[0] * 0.5 + spatial[1] * 0.5;
-                if let Some(native_t) = binding.native_interval.into_iter()
-                    .find(|&value| value < spatial[0] || value > spatial[1])
-                {
-                    let refusal = crate::parametric::curve_enclosure(curve, (native_t, native_t), work, cancel)
-                        .unwrap_err();
-                    assert_eq!(refusal.code, GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                        "a native parameter cannot enlarge the selected original radian restriction");
-                } else {
-                    t = spatial.into_iter().find(|&value|
-                        value < binding.native_interval[0] || value > binding.native_interval[1]).unwrap();
-                }
-                let jet = crate::parametric::curve_enclosure(curve, (t, t), work, cancel)?;
-                let (sine, cosine) = t.sin_cos();
-                let y = position.y();
-                let point: [f64; 3] = std::array::from_fn(|axis|
-                    position.origin[axis] + radius * (position.ref_direction[axis] * cosine + y[axis] * sine));
-                let tangent: [f64; 3] = std::array::from_fn(|axis|
-                    radius * (-position.ref_direction[axis] * sine + y[axis] * cosine));
-                for axis in 0..3 {
-                    assert!(jet.position[axis].contains(point[axis]));
-                    assert!(jet.derivative[axis].contains(tangent[axis]));
-                }
-                let direction = [1.0, -0.5, 0.25];
-                let height = HeightFunctional { direction: direction.map(Interval::point), offset: Interval::point(0.0) };
-                assert!(height.height(jet.position).contains((0..3).map(|axis| direction[axis] * point[axis]).sum()));
-                assert!(height.dot(jet.derivative).contains((0..3).map(|axis| direction[axis] * tangent[axis]).sum()));
-                Ok(())
-            }).unwrap();
+        assert!(domain.is_native_material());
+        assert!(domain.surface_operand().original_surface().is_none());
+        for (index, coedge) in domain.coedges().iter().enumerate() {
+            let native = definition.edge_curve(coedge.edge).unwrap();
+            domain
+                .with_native_spatial_curve(
+                    index,
+                    remaining,
+                    &mut work,
+                    &cancel,
+                    |curve, work, cancel| {
+                        assert_eq!(curve.active_range(), coedge.native_range);
+                        assert!(curve.original_curve().is_none());
+                        let t = coedge.native_range[0] * 0.5 + coedge.native_range[1] * 0.5;
+                        let actual = curve.tensor([t; 2], 1, work, cancel)?;
+                        let direct = native.tensor([t; 2], 1, work, cancel)?;
+                        for order in 0..2 {
+                            for axis in 0..3 {
+                                assert!(
+                                    actual[order][axis].lo <= direct[order][axis].hi
+                                        && direct[order][axis].lo <= actual[order][axis].hi
+                                );
+                            }
+                        }
+                        let outside = down(coedge.native_range[0]);
+                        assert!(curve.tensor([outside; 2], 0, work, cancel).is_err());
+                        uses += 1;
+                        Ok(())
+                    },
+                )
+                .unwrap();
         }
     }
-    assert!(
-        circles > 0,
-        "all actual selected circular uses are exercised"
-    );
+    assert!(uses > 0);
 }
 #[test]
 fn source_normal_matching_uses_independent_uv_and_native_edge_parameters() {
@@ -685,31 +644,21 @@ fn source_normal_matching_uses_independent_uv_and_native_edge_parameters() {
         .face_domain(0, remaining, &mut work, &cancel)
         .unwrap();
     for index in 0..domain.coedges().len() {
-        let correspondence = domain.original_coedge_correspondence(index).unwrap();
-        // Source pcurves retain [0,2]/[2,4]; spatial source leaders
-        // retain [10,14]/[14,18]. No numeric parameter is shared.
-        assert!(correspondence.spatial_range()[0] >= 10.0);
-        assert!(
-            correspondence
-                .uv_range()
-                .into_iter()
-                .all(|value| value <= 4.0)
-        );
+        let coedge = &domain.coedges()[index];
+        let spatial = coedge.native_range;
+        assert!(spatial.into_iter().all(f64::is_finite));
+        assert!(coedge.uv_range.into_iter().all(f64::is_finite));
         domain
-            .with_original_spatial_curve(
+            .with_native_spatial_curve(
                 index,
                 remaining,
                 &mut work,
                 &cancel,
                 |prepared, work, cancel| {
-                    let [lo, hi] = crate::parametric::curve_parameter_spans(
-                        prepared,
-                        correspondence.spatial_range(),
-                        work,
-                        cancel,
-                    )?
-                    .next()
-                    .unwrap();
+                    let [lo, hi] =
+                        crate::parametric::curve_parameter_spans(prepared, spatial, work, cancel)?
+                            .next()
+                            .unwrap();
                     let t = lo + (hi - lo) * 0.37;
                     let child = crate::parametric::curve_enclosure(
                         prepared,
@@ -780,18 +729,12 @@ fn imported_exact_tensor_proves_internal_and_periodic_projective_g1_identities()
         )
         .unwrap();
     let surface = domain.surface_evaluator();
-    let mut original = surface
-        .original_surface()
-        .expect("selected original tensor coefficients");
-    while let solidcraft_step::geom::Surface::RectangularTrimmed { basis, .. } = original {
-        original = basis;
-    }
-    let solidcraft_step::geom::Surface::BSpline(tensor) = original else {
-        panic!("the original rational torus retains its actual B-spline coefficient net");
-    };
+    assert!(surface.native_surface().is_some());
+    assert!(surface.original_surface().is_none());
     assert!(
-        tensor.weights.is_some(),
-        "the selected original tensor retains its rational weights"
+        tensor_g1::direct_tensor_axes(surface, domain.uv_domain(), &mut work, &cancel)
+            .unwrap()
+            .is_some()
     );
     let source_domain = domain.uv_domain();
     for axis in 0..2 {
@@ -862,14 +805,6 @@ fn original_one_degree_tilted_cylinder_retains_its_terminal_slab() {
         .unwrap();
     assert_eq!(result.critical_material_component_count(), Some(1));
     assert_eq!(result.critical_tunnel_cycle_count(), Some(0));
-    assert!(
-        !result
-            .critical
-            .as_ref()
-            .unwrap()
-            .has_native_convex_section_topology_proof(),
-        "bounded material transport is not an exact whole-source convexity theorem"
-    );
     assert!(result.boundary_motion_bound_mm <= 0.02);
     assert!(!result.event_neighborhoods().is_empty());
     assert_eq!(result.request().sample_height_mm, request.sample_height_mm);
@@ -1475,7 +1410,7 @@ fn horizontal_critical(
 }
 
 #[test]
-fn closed_capture_excludes_original_pocket_only_when_its_whole_height_is_disjoint() {
+fn closed_capture_excludes_native_pocket_only_when_its_whole_height_is_disjoint() {
     let cancel = AtomicBool::new(false);
     for name in [
         "native-parity-blind-pocket.step",
@@ -1490,8 +1425,8 @@ fn closed_capture_excludes_original_pocket_only_when_its_whole_height_is_disjoin
             &cancel,
         )
         .unwrap();
-        // The SAME immutable source has real void-facing walls above Z=4.
-        // Below that floor its actual closed material intersection is a disk.
+        // The SAME immutable native material has real void-facing walls above
+        // Z=4. Below that floor its actual closed intersection is a disk.
         let request = horizontal_request([1.99, 2.01], 2.0);
         let proof = horizontal_critical(&prepared, request, &mut work, &cancel).unwrap();
         assert_eq!(proof.definition_id(), definition.id());
@@ -1501,17 +1436,7 @@ fn closed_capture_excludes_original_pocket_only_when_its_whole_height_is_disjoin
         );
         assert_eq!(proof.material_component_count(), 1);
         assert_eq!(proof.bounded_void_count(), 0);
-        assert!(
-            !proof.has_native_convex_section_topology_proof(),
-            "the actual upper pocket forbids a whole-source convex claim"
-        );
-        let Some(SourceBoundaryScope::ClosedCapture(boundary)) = &proof.boundary_scope else {
-            panic!("the original upper pocket needs explicit height-exclusion authority");
-        };
-        assert!(boundary.excluded_face_cells > 0);
-        assert!(boundary.excluded_coedge_cells > 0);
         assert!(proof.boundary_motion_bound_mm <= request.native_shape_error_mm);
-        assert!(proof.covered_cells().0 > boundary.excluded_face_cells);
         // Intersecting the pocket, or merely touching its floor at the
         // CLOSED endpoint, must not reuse those previous exclusions.
         for range in [[3.99, 4.01], [3.99, 4.0]] {
@@ -1523,34 +1448,8 @@ fn closed_capture_excludes_original_pocket_only_when_its_whole_height_is_disjoin
             )
             .unwrap_err();
             assert_eq!(failure.code, GeometryErrorCode::AnalysisIndeterminate);
-            assert!(failure.message.contains("radial degree"), "{failure:?}");
         }
     }
-}
-
-#[test]
-fn actual_whole_source_convexity_is_not_replaced_by_capture_exclusions() {
-    let cancel = AtomicBool::new(false);
-    let definition = source("native-parity-nurbs-box.step");
-    let mut work = GeometryWorkBudget::new(100_000_000);
-    let prepared = crate::prepare_solid(
-        &definition,
-        crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-        &mut work,
-        &cancel,
-    )
-    .unwrap();
-    let proof = horizontal_critical(
-        &prepared,
-        horizontal_request([1.99, 2.01], 2.0),
-        &mut work,
-        &cancel,
-    )
-    .unwrap();
-    assert!(
-        proof.has_native_convex_section_topology_proof(),
-        "all original box faces and links, not only this section, were proved"
-    );
 }
 
 #[test]
@@ -1678,7 +1577,6 @@ fn complete_radial_material_link_preserves_a_genuine_nonconvex_star() {
     assert_eq!(proof.material_component_count(), 1);
     assert_eq!(proof.bounded_void_count(), 0);
     assert_eq!(proof.tunnel_cycle_count(), 0);
-    assert!(!proof.has_native_convex_section_topology_proof());
     assert!(proof.boundary_motion_bound_mm <= 0.1);
     let section = horizontal_section(&prepared, 2.0, &mut work, &cancel);
     assert_eq!(section.loops.len(), 1);
@@ -1727,10 +1625,6 @@ fn original_housing_layer_one_has_a_complete_paired_material_link() {
     assert_eq!(proof.material_component_count(), 1);
     assert_eq!(proof.bounded_void_count(), 0);
     assert_eq!(proof.tunnel_cycle_count(), 0);
-    assert!(
-        !proof.has_native_convex_section_topology_proof(),
-        "the unchanged upper blind pocket is not a globally convex source"
-    );
     assert!(proof.boundary_motion_bound_mm <= 0.1);
     assert!(proof.occupied.is_some());
     assert_eq!(

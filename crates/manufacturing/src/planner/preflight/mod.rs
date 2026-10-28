@@ -202,7 +202,7 @@ pub(super) fn admit<'a>(
                 {
                     return Err(super::native_error(
                         e,
-                        "original material geometry preparation",
+                        "native material geometry preparation",
                     ));
                 }
                 Err(e) => {
@@ -220,7 +220,7 @@ pub(super) fn admit<'a>(
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
-                        "aggregate original material geometry capacity exceeded",
+                        "aggregate native material geometry capacity exceeded",
                     )
                 })?;
             geometry_sources.insert(occurrence.definition_id.clone(), source);
@@ -250,7 +250,7 @@ pub(super) fn admit<'a>(
                     {
                         return Err(error(
                             ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                            "material support lost its original source/recipe/pose/query binding",
+                            "material support lost its native producer/source/pose/query binding",
                         ));
                     }
                     extent.bounds()

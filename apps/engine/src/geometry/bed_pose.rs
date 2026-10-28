@@ -49,8 +49,8 @@ pub(super) fn prepare(
         &mut work,
         cancel,
     )?;
-    // Immutable domains and vertex plans are shared; each query's scratch must
-    // fit alongside their retained capacities within the same geometry pool.
+    // Share immutable native trim domains; admit each query's scratch beside
+    // their retained capacities in the same geometry pool.
     let query_bytes = spiling_geometry::MAX_PREPARED_SECTION_BYTES
         .checked_sub(source.retained_bytes())
         .ok_or_else(|| {
@@ -63,15 +63,32 @@ pub(super) fn prepare(
     let mut minimum_upper_mm = [0.0; 3];
     let mut maximum_lower_mm = [0.0; 3];
     let mut maximum_upper_mm = [0.0; 3];
+    // Conservative placement uses the minimum's lower enclosure. Resolve Z at
+    // least as tightly as the captured kernel's approximation policy, not just
+    // the operator's contact allowance. A coarser enclosure can lift the part
+    // above its native terminal band and invent a mandatory micro-layer.
+    // This tightens support analysis; it neither moves nor discards an event.
+    // The old Z translation is removed by placement. Query without it so its
+    // binary64 spacing cannot make native-scale support unrepresentable, then
+    // transport closed brackets back for the original-pose contact evidence.
     for axis in 0..3 {
         check_cancel(cancel)?;
         let mut direction = [0.0; 3];
         direction[axis] = 1.0;
+        let mut query_pose = request.pose;
+        if axis == 2 {
+            query_pose.translation_mm[2] = 0.0;
+        }
         let support = source.placed_material_bounds(
-            request.pose,
+            query_pose,
             direction,
             BoundsPolicy {
-                maximum_endpoint_uncertainty_mm: request.contact_tolerance_mm * 0.25,
+                maximum_endpoint_uncertainty_mm: if axis == 2 {
+                    (request.contact_tolerance_mm * 0.25)
+                        .min(spiling_geometry::KERNEL_APPROXIMATION_TOLERANCE_MM)
+                } else {
+                    request.contact_tolerance_mm * 0.25
+                },
             },
             query_bytes,
             &mut work,
@@ -79,19 +96,32 @@ pub(super) fn prepare(
         )?;
         if support.definition_id() != &request.definition_id
             || !support.is_compatible_with_definition(definition)
-            || support.placed_pose() != request.pose
+            || support.placed_pose() != query_pose
             || support.world_direction() != direction
         {
             return Err(error(
                 GeometryErrorCode::AnalysisIndeterminate,
-                "material support lost its original source/recipe/pose/query binding",
+                "material support lost its native producer/source/pose/query binding",
             ));
         }
         let bounds = support.bounds();
-        minimum_lower_mm[axis] = bounds.minimum[0];
-        minimum_upper_mm[axis] = bounds.minimum[1];
-        maximum_lower_mm[axis] = bounds.maximum[0];
-        maximum_upper_mm[axis] = bounds.maximum[1];
+        let mut minimum = bounds.minimum;
+        let mut maximum = bounds.maximum;
+        if axis == 2 {
+            let shift = request.pose.translation_mm[2];
+            minimum = [
+                rounded_sum_interval(minimum[0], shift)[0],
+                rounded_sum_interval(minimum[1], shift)[1],
+            ];
+            maximum = [
+                rounded_sum_interval(maximum[0], shift)[0],
+                rounded_sum_interval(maximum[1], shift)[1],
+            ];
+        }
+        minimum_lower_mm[axis] = minimum[0];
+        minimum_upper_mm[axis] = minimum[1];
+        maximum_lower_mm[axis] = maximum[0];
+        maximum_upper_mm[axis] = maximum[1];
     }
     // Use the same directed arithmetic as the checked proposal contract.
     // A blanket reserve based on unrelated XY/envelope magnitudes invents a

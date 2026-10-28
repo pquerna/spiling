@@ -114,7 +114,7 @@ fn inner_capture_bytes(captures: &Vec<spiling_geometry::NativeInnerMaterialPrism
             .sum::<usize>()
 }
 
-fn void_capture_bytes(captures: &Vec<CapturedProtectedVoid>) -> usize {
+pub(super) fn void_capture_bytes(captures: &Vec<CapturedProtectedVoid>) -> usize {
     captures
         .capacity()
         .saturating_mul(std::mem::size_of::<CapturedProtectedVoid>())
@@ -321,28 +321,93 @@ struct StageMetric {
 
 /// A scheduling hint only: every proposed prefix still needs fresh proof.
 #[derive(Default)]
-struct NativeSpanSizing {
-    partition_end_z_bits: Option<u64>,
-    max_layers: Option<u32>,
+pub(super) struct NativeSpanSizing {
+    limits: Vec<(u64, Option<u32>)>,
+    active: Option<usize>,
 }
 
 impl NativeSpanSizing {
-    fn begin_partition(&mut self, upper_z_bits: u64) {
-        if self.partition_end_z_bits != Some(upper_z_bits) {
-            self.partition_end_z_bits = Some(upper_z_bits);
-            self.max_layers = None;
+    pub(super) fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.limits.capacity() * std::mem::size_of::<(u64, Option<u32>)>()
+    }
+
+    // Bounds learned from actual geometry are only proposal limits. Retaining
+    // them across an anchor-driven schedule change avoids repeating known
+    // over-wide source queries; every new interval still needs fresh proof.
+    fn begin_partition(
+        &mut self,
+        upper_z_bits: u64,
+        live_bytes: usize,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<usize, ManufacturingError> {
+        if self
+            .active
+            .is_some_and(|index| self.limits[index].0 == upper_z_bits)
+        {
+            return Ok(0);
         }
+        preflight::charge_capture_proposal_work(
+            work,
+            (usize::BITS - self.limits.len().leading_zeros()) as usize + 1,
+            cancel,
+        )?;
+        let old_bytes = self.retained_bytes();
+        let index = match self
+            .limits
+            .binary_search_by_key(&upper_z_bits, |limit| limit.0)
+        {
+            Ok(index) => index,
+            Err(index) => {
+                if self.limits.len() >= MAX_PRINT_LAYERS as usize {
+                    return Err(error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "native partition proposal hints exceed the layer budget",
+                    ));
+                }
+                let growth = if self.limits.len() == self.limits.capacity() {
+                    std::mem::size_of::<(u64, Option<u32>)>()
+                } else {
+                    0
+                };
+                admit_bytes(live_bytes, growth, 0)?;
+                preflight::charge_capture_proposal_work(
+                    work,
+                    self.limits.len() - index + 1,
+                    cancel,
+                )?;
+                self.limits.try_reserve_exact(1).map_err(|_| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "native partition proposal hint allocation refused",
+                    )
+                })?;
+                self.limits.insert(index, (upper_z_bits, None));
+                index
+            }
+        };
+        self.active = Some(index);
+        let growth = self.retained_bytes() - old_bytes;
+        admit_bytes(live_bytes, growth, 0)?;
+        Ok(growth)
     }
 
     fn limit_end(&self, index: u32, partition_end: u32) -> u32 {
-        self.max_layers.map_or(partition_end, |layers| {
-            index.saturating_add(layers.max(1)).min(partition_end)
-        })
+        self.active
+            .and_then(|active| self.limits[active].1)
+            .map_or(partition_end, |layers| {
+                index.saturating_add(layers.max(1)).min(partition_end)
+            })
     }
 
     fn tighten(&mut self, upper_z_bits: u64, layers: u32) {
-        if layers > 0 && self.partition_end_z_bits == Some(upper_z_bits) {
-            self.max_layers = Some(self.max_layers.map_or(layers, |limit| limit.min(layers)));
+        if let Some(index) = self.active
+            && layers > 0
+            && self.limits[index].0 == upper_z_bits
+        {
+            let limit = &mut self.limits[index].1;
+            *limit = Some(limit.map_or(layers, |previous| previous.min(layers)));
         }
     }
 }
@@ -356,10 +421,14 @@ pub(super) struct NativeStageState {
     ready_points: usize,
     ready_bytes: usize,
     ledger: spiling_geometry::NativeUnionBindingLedger,
+    terminal_z: f64,
     metrics: Vec<StageMetric>,
     protected_voids: Vec<CapturedProtectedVoid>,
     void_bytes: usize,
     sizing: NativeSpanSizing,
+    defer_voids: bool,
+    pending_voids: Vec<CapturedEvidence>,
+    pending_void_payload_bytes: usize,
 }
 
 impl NativeStageState {
@@ -376,10 +445,14 @@ impl NativeStageState {
             ready_points: 0,
             ready_bytes: 0,
             ledger,
+            terminal_z: interval[1],
             metrics: Vec::new(),
             protected_voids: Vec::new(),
             void_bytes: 0,
             sizing: NativeSpanSizing::default(),
+            defer_voids: false,
+            pending_voids: Vec::new(),
+            pending_void_payload_bytes: 0,
         })
     }
 
@@ -387,10 +460,177 @@ impl NativeStageState {
         self.ready_points
     }
 
-    fn retained_proof_bytes(&self) -> usize {
+    pub(super) fn set_capture_terminal(&mut self, upper: f64) {
+        self.terminal_z = upper;
+    }
+
+    pub(super) fn defer_void_capture(&mut self, defer: bool) {
+        self.defer_voids = defer;
+    }
+
+    pub(super) fn take_recyclable_slabs(&mut self) -> RecyclableSlabs {
+        self.pending_void_payload_bytes = 0;
+        RecyclableSlabs(std::mem::take(&mut self.pending_voids))
+    }
+
+    /// Resolve every intact native void obligation before projection or
+    /// accepted-prefix handoff. `live_bytes` includes this stage and all caller
+    /// and pool owners; conversion scratch must fit beside the raw input.
+    pub(super) fn materialize_pending_voids(
+        &mut self,
+        input: &CompilerInput<'_>,
+        mut live_bytes: usize,
+        work: &mut spiling_geometry::GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        check_cancel(cancel)?;
+        if self.pending_voids.is_empty() {
+            return Ok(());
+        }
+        let required = self
+            .protected_voids
+            .len()
+            .checked_add(self.pending_voids.len())
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "native void obligation count overflow",
+                )
+            })?;
+        let old_capacity = self.protected_voids.capacity();
+        let growth = required
+            .saturating_sub(old_capacity)
+            .saturating_mul(std::mem::size_of::<CapturedProtectedVoid>());
+        admit_bytes(live_bytes, growth, 0)?;
+        self.protected_voids
+            .try_reserve_exact(self.pending_voids.len())
+            .map_err(|_| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "pending native void allocation refused",
+                )
+            })?;
+        let actual_growth = (self.protected_voids.capacity() - old_capacity)
+            .saturating_mul(std::mem::size_of::<CapturedProtectedVoid>());
+        live_bytes = admit_bytes(live_bytes, actual_growth, 0)?;
+        self.void_bytes = void_capture_bytes(&self.protected_voids);
+        for evidence in self.pending_voids.drain(..) {
+            check_cancel(cancel)?;
+            let payload = evidence.retained_bytes();
+            self.pending_void_payload_bytes = self
+                .pending_void_payload_bytes
+                .checked_sub(payload)
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "pending native void payload accounting mismatch",
+                    )
+                })?;
+            work.charge(input.occurrences.len() as u64, cancel)
+                .map_err(|failure| {
+                    super::native_error(failure, "pending native void source binding")
+                })?;
+            let occurrence = input
+                .occurrences
+                .iter()
+                .find(|occurrence| occurrence.occurrence_id == evidence.occurrence_id)
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                        "pending native void lost its source occurrence",
+                    )
+                })?;
+            let available = spiling_geometry::MAX_PREPARED_SECTION_BYTES
+                .checked_sub(live_bytes)
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "pending native void has no conversion scratch beside retained raw M",
+                    )
+                })?;
+            let capture = if let Some(collar) = evidence.collar {
+                collar.capture_projected_voids(evidence.analysis, available as u32, work, cancel)
+            } else {
+                spiling_geometry::capture_projected_voids(
+                    evidence.analysis,
+                    available as u32,
+                    work,
+                    cancel,
+                )
+            }
+            .map_err(|failure| super::native_error(failure, "pending native void capture"))?;
+            let bytes = if let Some(capture) = capture {
+                if capture.definition_id() != &occurrence.definition_id
+                    || capture.placed_pose() != Some(occurrence.pose)
+                {
+                    return Err(error(
+                        ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                        "pending native void changed its source/pose binding",
+                    ));
+                }
+                let bytes = capture.retained_bytes();
+                self.protected_voids.push(CapturedProtectedVoid {
+                    occurrence_id: occurrence.occurrence_id,
+                    capture,
+                });
+                bytes
+            } else {
+                0
+            };
+            live_bytes = live_bytes
+                .checked_sub(payload)
+                .and_then(|n| n.checked_add(bytes))
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "pending native void live-owner accounting mismatch",
+                    )
+                })?;
+            self.void_bytes = void_capture_bytes(&self.protected_voids);
+            admit_bytes(live_bytes, 0, 0)?;
+        }
+        drop(std::mem::take(&mut self.pending_voids));
+        Ok(())
+    }
+
+    pub(super) fn replace_span_sizing(&mut self, sizing: NativeSpanSizing) {
+        self.sizing = sizing;
+    }
+
+    pub(super) fn take_span_sizing(&mut self) -> NativeSpanSizing {
+        std::mem::take(&mut self.sizing)
+    }
+
+    pub(super) fn source_captures(&self) -> &[spiling_geometry::NativeUnionSourceCapture] {
+        self.ledger.source_captures()
+    }
+
+    pub(super) fn protected_voids_mut(
+        &mut self,
+    ) -> Result<&mut Vec<CapturedProtectedVoid>, ManufacturingError> {
+        if !self.pending_voids.is_empty() {
+            return Err(error(
+                ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                "native void projection requires all pending raw obligations to materialize",
+            ));
+        }
+        Ok(&mut self.protected_voids)
+    }
+
+    pub(super) fn refresh_void_bytes(&mut self) {
+        self.void_bytes = void_capture_bytes(&self.protected_voids);
+    }
+
+    pub(super) fn retained_proof_bytes(&self) -> usize {
         self.previous_bytes
             .saturating_add(self.void_bytes)
-            .saturating_add(std::mem::size_of::<NativeSpanSizing>())
+            .saturating_add(self.pending_void_payload_bytes)
+            .saturating_add(
+                self.pending_voids
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<CapturedEvidence>()),
+            )
+            .saturating_add(self.sizing.retained_bytes())
             .saturating_add(self.ledger.retained_bytes())
             .saturating_add(
                 self.metrics
@@ -409,6 +649,12 @@ impl NativeStageState {
         work: &mut spiling_geometry::GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<CompletedCoverage, ManufacturingError> {
+        if !self.pending_voids.is_empty() {
+            return Err(error(
+                ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                "completed native coverage still owns unresolved raw void obligations",
+            ));
+        }
         if !self.ready.is_empty() {
             return Err(error(
                 ManufacturingErrorCode::NativeAnalysisIndeterminate,
@@ -480,8 +726,159 @@ fn add_count(a: u32, b: u32) -> Result<u32, ManufacturingError> {
 }
 
 struct CapturedEvidence {
+    occurrence_id: OccurrenceId,
     analysis: spiling_geometry::SlabAnalysis,
     collar: Option<spiling_geometry::NativeCriticalCollarIncidence>,
+}
+
+impl CapturedEvidence {
+    fn retained_bytes(&self) -> usize {
+        self.analysis.retained_bytes().saturating_add(
+            self.collar
+                .as_ref()
+                .map_or(0, |collar| collar.retained_bytes()),
+        )
+    }
+}
+
+fn evidence_bytes(evidence: &Vec<CapturedEvidence>) -> usize {
+    evidence
+        .capacity()
+        .saturating_mul(std::mem::size_of::<CapturedEvidence>())
+        .saturating_add(
+            evidence
+                .iter()
+                .map(CapturedEvidence::retained_bytes)
+                .sum::<usize>(),
+        )
+}
+
+/// Intact M proofs leaving a failed attempt; no D or ledger authority survives.
+#[derive(Default)]
+pub(super) struct RecyclableSlabs(Vec<CapturedEvidence>);
+
+/// One compile and one immutable PreparedSources owner. Slots own raw M only;
+/// actual source leaves, collars, D and composition are always rebuilt.
+#[derive(Default)]
+pub(super) struct NativeSlabPool {
+    entries: Vec<CapturedEvidence>,
+    payload_bytes: usize,
+}
+
+impl NativeSlabPool {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.payload_bytes.saturating_add(
+            self.entries
+                .capacity()
+                .saturating_mul(std::mem::size_of::<CapturedEvidence>()),
+        )
+    }
+
+    pub(super) fn clear(&mut self) {
+        drop(std::mem::take(&mut self.entries));
+        self.payload_bytes = 0;
+    }
+
+    fn take(
+        &mut self,
+        occurrence: &OccurrenceRecord,
+        interval: [f64; 2],
+        sample: f64,
+        policy: f64,
+        work: &mut spiling_geometry::GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<CapturedEvidence>, ManufacturingError> {
+        check_cancel(cancel)?;
+        for index in 0..self.entries.len() {
+            work.charge(1, cancel).map_err(|failure| {
+                super::native_error(failure, "native placed-slab reuse lookup")
+            })?;
+            let entry = &self.entries[index];
+            let analysis = &entry.analysis;
+            if entry.occurrence_id == occurrence.occurrence_id
+                && analysis.definition_id() == &occurrence.definition_id
+                && analysis.placed_pose().is_some_and(|pose| {
+                    pose.translation_mm.map(f64::to_bits)
+                        == occurrence.pose.translation_mm.map(f64::to_bits)
+                        && pose.rotation_xyzw.map(f64::to_bits)
+                            == occurrence.pose.rotation_xyzw.map(f64::to_bits)
+                })
+                && analysis
+                    .world_height_interval_mm()
+                    .map(|v| v.map(f64::to_bits))
+                    == Some(interval.map(f64::to_bits))
+                && analysis.sample_world_z_mm().map(f64::to_bits) == Some(sample.to_bits())
+                && analysis.world_shape_error_policy_mm().map(f64::to_bits)
+                    == Some(policy.to_bits())
+            {
+                let entry = self.entries.swap_remove(index);
+                self.payload_bytes -= entry.retained_bytes();
+                return Ok(Some(entry));
+            }
+        }
+        Ok(None)
+    }
+
+    pub(super) fn recycle(
+        &mut self,
+        slabs: RecyclableSlabs,
+        outside_bytes: usize,
+        work: &mut spiling_geometry::GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        let mut entries = slabs.0;
+        work.charge(entries.len() as u64, cancel)
+            .map_err(|failure| {
+                super::native_error(failure, "native placed-slab proof recycling")
+            })?;
+        for entry in &mut entries {
+            // This receipt binds the discarded attempt's actual M neighbours.
+            drop(entry.collar.take());
+        }
+        let live = outside_bytes
+            .saturating_add(self.retained_bytes())
+            .saturating_add(evidence_bytes(&entries));
+        admit_bytes(live, 0, 0)?;
+        let payload = entries
+            .iter()
+            .map(CapturedEvidence::retained_bytes)
+            .sum::<usize>();
+        let count = entries.len();
+        if self.entries.is_empty() {
+            drop(std::mem::replace(&mut self.entries, entries));
+        } else {
+            let required = self.entries.len().checked_add(count).ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "native proof recycle count overflow",
+                )
+            })?;
+            let growth = required
+                .saturating_sub(self.entries.capacity())
+                .saturating_mul(std::mem::size_of::<CapturedEvidence>());
+            admit_bytes(live, growth, 0)?;
+            let old_capacity = self.entries.capacity();
+            self.entries.try_reserve_exact(count).map_err(|_| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "native proof recycle allocation refused",
+                )
+            })?;
+            admit_bytes(
+                live,
+                (self.entries.capacity() - old_capacity)
+                    .saturating_mul(std::mem::size_of::<CapturedEvidence>()),
+                0,
+            )?;
+            self.entries.append(&mut entries);
+        }
+        self.payload_bytes = if self.entries.len() == count {
+            payload
+        } else {
+            self.payload_bytes.saturating_add(payload)
+        };
+        Ok(())
+    }
 }
 
 struct DraftStage {
@@ -555,6 +952,7 @@ struct ReadyStage {
     candidate: Vec<spiling_geometry::SectionLoopMm>,
     positive: Vec<SourceMaterial>,
     protected_voids: Vec<CapturedProtectedVoid>,
+    pending_voids: Vec<CapturedEvidence>,
 }
 
 impl ReadyStage {
@@ -575,6 +973,7 @@ impl ReadyStage {
                     .sum::<usize>(),
             )
             .saturating_add(void_capture_bytes(&self.protected_voids))
+            .saturating_add(evidence_bytes(&self.pending_voids))
             .saturating_add(
                 self.positive
                     .capacity()
@@ -618,6 +1017,7 @@ pub(super) fn collect_span(
     request: &NativeSpanRequest,
     state: &mut NativeStageState,
     surface_work: &mut usize,
+    pool: &mut NativeSlabPool,
     cancel: &AtomicBool,
 ) -> Result<NativeSpan, ManufacturingError> {
     let NativeSourceInputs {
@@ -630,12 +1030,28 @@ pub(super) fn collect_span(
         retained_points,
         retained_output_bytes,
     } = *request;
-    // The map owns one preparation per distinct definition, regardless of how
-    // many occurrences borrow it. Its retained bytes already include proofs.
-    let resident_bytes = sources.values().fold(
+    // Each map value is an actual prepared owner. Warm it BEFORE freezing the
+    // resident byte baseline reused through frontier retries, not per occurrence
+    // or by assuming equal definition IDs imply shared allocations.
+    let mut resident_bytes = sources.values().fold(
         retained_output_bytes.saturating_add(admission.native_capture_proposal_bytes()),
         |bytes, source| bytes.saturating_add(source.retained_bytes()),
     );
+    let mut map_allowance = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES.saturating_sub(
+        resident_bytes
+            .saturating_add(state.retained_proof_bytes())
+            .saturating_add(state.ready_bytes)
+            .saturating_add(pool.retained_bytes()),
+    );
+    for prepared in sources.values() {
+        let remaining = prepared
+            .prepare_native_position_maps(map_allowance, &mut admission.geometry_work, cancel)
+            .map_err(|failure| {
+                super::native_error(failure, "native positional query-map preparation")
+            })?;
+        resident_bytes = resident_bytes.saturating_add(map_allowance - remaining);
+        map_allowance = remaining;
+    }
     if state.ready.is_empty() {
         let partition_end = span_end(
             schedule,
@@ -644,9 +1060,18 @@ pub(super) fn collect_span(
             index,
             surface_work,
             cancel,
-        )?;
+        )?
+        .min(schedule.partition_point(|layer| layer.z <= state.terminal_z) as u32);
         let partition_end_z_bits = schedule[(partition_end - 1) as usize].z.to_bits();
-        state.sizing.begin_partition(partition_end_z_bits);
+        state.sizing.begin_partition(
+            partition_end_z_bits,
+            resident_bytes
+                .saturating_add(state.retained_proof_bytes())
+                .saturating_add(state.ready_bytes)
+                .saturating_add(pool.retained_bytes()),
+            surface_work,
+            cancel,
+        )?;
         let end = state.sizing.limit_end(index, partition_end);
         let first = capture_base(
             source,
@@ -660,6 +1085,7 @@ pub(super) fn collect_span(
                 retained_bytes: resident_bytes.saturating_add(state.retained_proof_bytes()),
             },
             &mut state.sizing,
+            pool,
             surface_work,
             cancel,
         )?;
@@ -673,9 +1099,12 @@ pub(super) fn collect_span(
             let successor_matches = settled
                 .front()
                 .is_some_and(|next| next.index == current.end);
-            if current.needs_successor(current.end < schedule.len() as u32) && !successor_matches {
+            if current.needs_successor(current.interval[1] < state.terminal_z) && !successor_matches
+            {
                 let next_index = current.end;
-                if next_index >= schedule.len() as u32 {
+                if next_index >= schedule.len() as u32
+                    || schedule[next_index as usize].lower_z >= state.terminal_z
+                {
                     return Err(error(
                         ManufacturingErrorCode::NativeAnalysisIndeterminate,
                         "native upper endpoint has no actual positive successor stratum",
@@ -717,7 +1146,11 @@ pub(super) fn collect_span(
                                 .saturating_mul(std::mem::size_of::<ReadyStage>()),
                         )
                     })
-                    .filter(|n| *n <= spiling_geometry::MAX_PREPARED_SECTION_BYTES)
+                    .filter(|n| {
+                        n.checked_add(pool.retained_bytes()).is_some_and(|total| {
+                            total <= spiling_geometry::MAX_PREPARED_SECTION_BYTES
+                        })
+                    })
                     .ok_or_else(|| {
                         error(
                             ManufacturingErrorCode::ResourceLimit,
@@ -737,9 +1170,16 @@ pub(super) fn collect_span(
                     next_index,
                     surface_work,
                     cancel,
-                )?;
+                )?
+                .min(schedule.partition_point(|layer| layer.z <= state.terminal_z) as u32);
                 let partition_end_z_bits = schedule[(partition_end - 1) as usize].z.to_bits();
-                state.sizing.begin_partition(partition_end_z_bits);
+                let growth = state.sizing.begin_partition(
+                    partition_end_z_bits,
+                    bytes.saturating_add(pool.retained_bytes()),
+                    surface_work,
+                    cancel,
+                )?;
+                let bytes = bytes.saturating_add(growth);
                 let next_end = state.sizing.limit_end(next_index, partition_end);
                 let next = capture_base(
                     source,
@@ -753,6 +1193,7 @@ pub(super) fn collect_span(
                         retained_bytes: bytes,
                     },
                     &mut state.sizing,
+                    pool,
                     surface_work,
                     cancel,
                 )?;
@@ -771,6 +1212,7 @@ pub(super) fn collect_span(
                 .filter(|stage| stage.index == current.end)
                 .map_or(&[][..], |stage| stage.positive.as_slice());
             let coexisting = resident_bytes
+                .saturating_add(pool.retained_bytes())
                 .saturating_add(state.retained_proof_bytes())
                 .saturating_add(
                     frontier
@@ -826,7 +1268,14 @@ pub(super) fn collect_span(
                     let retry_index = current.index;
                     let mut end = current.end;
                     let partition_end_z_bits = current.partition_end_z_bits;
-                    state.sizing.begin_partition(partition_end_z_bits);
+                    state.sizing.begin_partition(
+                        partition_end_z_bits,
+                        coexisting
+                            .saturating_add(current.retained_bytes())
+                            .saturating_add(loop_bytes(&candidate)),
+                        surface_work,
+                        cancel,
+                    )?;
                     refine_candidate(
                         schedule,
                         retry_index,
@@ -870,6 +1319,7 @@ pub(super) fn collect_span(
                             retained_bytes: bytes,
                         },
                         &mut state.sizing,
+                        pool,
                         surface_work,
                         cancel,
                     )?;
@@ -878,103 +1328,159 @@ pub(super) fn collect_span(
                 }
                 Err(failure) => return Err(failure),
             };
+            consume_closed_source_projection(
+                source,
+                &mut current,
+                &pending,
+                &candidate,
+                coexisting,
+                surface_work,
+                cancel,
+            )?;
             let mut protected_voids = Vec::new();
-            let capture_base_bytes = if matches!(
-                input.intent.recipe.supports,
-                SupportPolicy::Breakaway { .. }
-            ) {
-                state
-                    .retained_proof_bytes()
-                    .saturating_add(
-                        frontier
-                            .iter()
-                            .map(|stage| stage.native_bytes)
-                            .sum::<usize>(),
+            let mut allocation_live = coexisting
+                .checked_add(current.retained_bytes())
+                .and_then(|n| n.checked_add(pending.retained_bytes()))
+                .and_then(|n| n.checked_add(loop_bytes(&candidate)))
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "native stage conversion owner overflow",
                     )
-                    .saturating_add(
-                        settled
-                            .iter()
-                            .map(ReadyStage::retained_bytes)
-                            .sum::<usize>(),
+                })?;
+            let analysis_wrappers = current
+                .analyses
+                .capacity()
+                .checked_mul(std::mem::size_of::<CapturedEvidence>())
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "native stage analysis wrapper overflow",
                     )
-            } else {
-                0
-            };
+                })?;
             let invariant = current
                 .analyses
                 .iter()
                 .all(|evidence| evidence.analysis.invariance().is_some());
-            for (occurrence, evidence) in occurrences.iter().zip(current.analyses) {
-                if matches!(
-                    input.intent.recipe.supports,
-                    SupportPolicy::Breakaway { .. }
-                ) {
-                    let coexisting =
-                        capture_base_bytes.saturating_add(void_capture_bytes(&protected_voids));
-                    let available = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES
-                        .checked_sub(coexisting)
-                        .filter(|n| *n > 0)
+            let pending_voids = if state.defer_voids {
+                let mut analyses = current.analyses;
+                for evidence in &mut analyses {
+                    // Preserve exactly the receipt selected by today's void
+                    // path, not a collar from a previous schedule attempt.
+                    evidence.collar = pending
+                        .critical_collars()
+                        .iter()
+                        .find(|collar| {
+                            collar.current_leaf().occurrence_id() == evidence.occurrence_id
+                        })
+                        .cloned();
+                }
+                analyses
+            } else {
+                for (occurrence, evidence) in occurrences.iter().zip(current.analyses) {
+                    let raw_bytes = evidence.retained_bytes();
+                    if matches!(
+                        input.intent.recipe.supports,
+                        SupportPolicy::Breakaway { .. }
+                    ) {
+                        let available = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES
+                            .checked_sub(allocation_live)
+                            .ok_or_else(|| {
+                                error(
+                                    ManufacturingErrorCode::ResourceLimit,
+                                    "deferred native void has no retained-byte allowance",
+                                )
+                            })?;
+                        let capture = if let Some(collar) =
+                            pending.critical_collars().iter().find(|collar| {
+                                collar.current_leaf().occurrence_id() == occurrence.occurrence_id
+                            }) {
+                            collar.capture_projected_voids(
+                                evidence.analysis,
+                                available as u32,
+                                &mut admission.geometry_work,
+                                cancel,
+                            )
+                        } else {
+                            spiling_geometry::capture_projected_voids(
+                                evidence.analysis,
+                                available as u32,
+                                &mut admission.geometry_work,
+                                cancel,
+                            )
+                        }
+                        .map_err(|failure| {
+                            super::native_error(failure, "deferred native void capture")
+                        })?;
+                        let capture_bytes = capture
+                            .as_ref()
+                            .map_or(0, |capture| capture.retained_bytes());
+                        allocation_live = allocation_live
+                            .checked_sub(raw_bytes)
+                            .and_then(|n| n.checked_add(capture_bytes))
+                            .ok_or_else(|| {
+                                error(
+                                    ManufacturingErrorCode::ResourceLimit,
+                                    "native stage void owner replacement mismatch",
+                                )
+                            })?;
+                        if let Some(capture) = capture {
+                            if capture.definition_id() != &occurrence.definition_id
+                                || capture.placed_pose() != Some(occurrence.pose)
+                            {
+                                return Err(error(
+                                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                                    "deferred native void capture disagrees with original source/pose",
+                                ));
+                            }
+                            if protected_voids.capacity() == 0 {
+                                let wrappers = occurrences
+                                    .len()
+                                    .saturating_mul(std::mem::size_of::<CapturedProtectedVoid>());
+                                admit_bytes(allocation_live, wrappers, 0)?;
+                                protected_voids
+                                    .try_reserve_exact(occurrences.len())
+                                    .map_err(|_| {
+                                        error(
+                                            ManufacturingErrorCode::ResourceLimit,
+                                            "deferred native void wrapper allocation refused",
+                                        )
+                                    })?;
+                                allocation_live =
+                                    admit_bytes(
+                                        allocation_live,
+                                        protected_voids.capacity().saturating_mul(
+                                            std::mem::size_of::<CapturedProtectedVoid>(),
+                                        ),
+                                        0,
+                                    )?;
+                            }
+                            protected_voids.push(CapturedProtectedVoid {
+                                occurrence_id: occurrence.occurrence_id,
+                                capture,
+                            });
+                        }
+                    } else {
+                        allocation_live =
+                            allocation_live.checked_sub(raw_bytes).ok_or_else(|| {
+                                error(
+                                    ManufacturingErrorCode::ResourceLimit,
+                                    "native stage discarded-analysis accounting mismatch",
+                                )
+                            })?;
+                    }
+                }
+                allocation_live =
+                    allocation_live
+                        .checked_sub(analysis_wrappers)
                         .ok_or_else(|| {
                             error(
                                 ManufacturingErrorCode::ResourceLimit,
-                                "deferred native void has no retained-byte allowance",
+                                "native stage analysis wrapper release mismatch",
                             )
                         })?;
-                    let capture = if let Some(collar) =
-                        pending.critical_collars().iter().find(|collar| {
-                            collar.current_leaf().occurrence_id() == occurrence.occurrence_id
-                        }) {
-                        collar.capture_projected_voids(
-                            evidence.analysis,
-                            available as u32,
-                            &mut admission.geometry_work,
-                            cancel,
-                        )
-                    } else {
-                        spiling_geometry::capture_projected_voids(
-                            evidence.analysis,
-                            available as u32,
-                            &mut admission.geometry_work,
-                            cancel,
-                        )
-                    }
-                    .map_err(|failure| {
-                        super::native_error(failure, "deferred native void capture")
-                    })?;
-                    if let Some(capture) = capture {
-                        if capture.definition_id() != &occurrence.definition_id
-                            || capture.placed_pose() != Some(occurrence.pose)
-                        {
-                            return Err(error(
-                                ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                                "deferred native void capture disagrees with original source/pose",
-                            ));
-                        }
-                        if protected_voids.capacity() == 0 {
-                            let wrappers = occurrences
-                                .len()
-                                .saturating_mul(std::mem::size_of::<CapturedProtectedVoid>());
-                            admit_bytes(
-                                state.retained_proof_bytes(),
-                                capture.retained_bytes(),
-                                wrappers,
-                            )?;
-                            protected_voids
-                                .try_reserve_exact(occurrences.len())
-                                .map_err(|_| {
-                                    error(
-                                        ManufacturingErrorCode::ResourceLimit,
-                                        "deferred native void wrapper allocation refused",
-                                    )
-                                })?;
-                        }
-                        protected_voids.push(CapturedProtectedVoid {
-                            occurrence_id: occurrence.occurrence_id,
-                            capture,
-                        });
-                    }
-                }
-            }
+                Vec::new()
+            };
             let mut inner_material = Vec::new();
             for material in &current.leaves {
                 if !current
@@ -985,22 +1491,21 @@ pub(super) fn collect_span(
                     continue;
                 }
                 if let Some(capture) = material.leaf.capture_constant_inner_prism() {
+                    let capture_bytes = capture.retained_bytes();
                     if inner_material.capacity() == 0 {
-                        admit_bytes(
-                            resident_bytes,
-                            current
-                                .leaves
-                                .len()
-                                .saturating_mul(std::mem::size_of::<
-                                    spiling_geometry::NativeInnerMaterialPrism,
-                                >())
-                                .saturating_add(
-                                    capture
-                                        .retained_bytes()
-                                        .saturating_mul(current.leaves.len()),
-                                ),
-                            0,
-                        )?;
+                        let wrappers = current
+                            .leaves
+                            .len()
+                            .checked_mul(std::mem::size_of::<
+                                spiling_geometry::NativeInnerMaterialPrism,
+                            >())
+                            .ok_or_else(|| {
+                                error(
+                                    ManufacturingErrorCode::ResourceLimit,
+                                    "native inner-material wrapper overflow",
+                                )
+                            })?;
+                        admit_bytes(allocation_live, capture_bytes, wrappers)?;
                         inner_material
                             .try_reserve_exact(current.leaves.len())
                             .map_err(|_| {
@@ -1009,7 +1514,17 @@ pub(super) fn collect_span(
                                     "native inner-material capture allocation refused",
                                 )
                             })?;
+                        allocation_live = admit_bytes(
+                            allocation_live,
+                            inner_material
+                                .capacity()
+                                .saturating_mul(std::mem::size_of::<
+                                    spiling_geometry::NativeInnerMaterialPrism,
+                                >()),
+                            0,
+                        )?;
                     }
+                    allocation_live = admit_bytes(allocation_live, capture_bytes, 0)?;
                     inner_material.push(capture);
                 }
             }
@@ -1026,6 +1541,7 @@ pub(super) fn collect_span(
                 candidate,
                 positive,
                 protected_voids,
+                pending_voids,
                 span: NativeSpan {
                     end: current.end,
                     invariant,
@@ -1060,6 +1576,7 @@ pub(super) fn collect_span(
                     bytes.saturating_add(stage.retained_bytes())
                 }))
                 .saturating_add(ready.retained_bytes())
+                .saturating_add(pool.retained_bytes())
                 .saturating_add(state.retained_proof_bytes());
             if points > MAX_DEPOSITION_SEGMENTS as usize
                 || bytes > spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES
@@ -1078,7 +1595,7 @@ pub(super) fn collect_span(
             }
         }
     }
-    let ready = state.ready.pop_front().ok_or_else(|| {
+    let mut ready = state.ready.pop_front().ok_or_else(|| {
         error(
             ManufacturingErrorCode::NativeAnalysisIndeterminate,
             "native source stage produced no actual candidate",
@@ -1094,6 +1611,8 @@ pub(super) fn collect_span(
             .ready_bytes
             .checked_add(ready.retained_bytes())
             .and_then(|n| n.checked_add(state.retained_proof_bytes()))
+            .and_then(|n| n.checked_add(resident_bytes))
+            .and_then(|n| n.checked_add(pool.retained_bytes()))
             .is_none_or(|n| n > spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES)
     {
         return Err(error(
@@ -1111,6 +1630,43 @@ pub(super) fn collect_span(
             "settled native lookahead no longer matches the actual shared schedule",
         ));
     }
+    if !ready.pending_voids.is_empty() {
+        let live = resident_bytes
+            .saturating_add(pool.retained_bytes())
+            .saturating_add(state.ready_bytes)
+            .saturating_add(state.retained_proof_bytes())
+            .saturating_add(ready.retained_bytes());
+        let required = state
+            .pending_voids
+            .len()
+            .checked_add(ready.pending_voids.len())
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "pending native slab count overflow",
+                )
+            })?;
+        let old_capacity = state.pending_voids.capacity();
+        let growth = required
+            .saturating_sub(old_capacity)
+            .saturating_mul(std::mem::size_of::<CapturedEvidence>());
+        admit_bytes(live, growth, 0)?;
+        state
+            .pending_voids
+            .try_reserve_exact(ready.pending_voids.len())
+            .map_err(|_| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "pending native slab allocation refused",
+                )
+            })?;
+        admit_bytes(
+            live,
+            (state.pending_voids.capacity() - old_capacity)
+                .saturating_mul(std::mem::size_of::<CapturedEvidence>()),
+            0,
+        )?;
+    }
 
     let metric = StageMetric {
         layers: ready.span.end - index,
@@ -1118,6 +1674,17 @@ pub(super) fn collect_span(
         coverage: ready.pending.coverage(),
         owned_critical_slabs: ready.pending.owned_critical_slab_count() as u32,
     };
+    admit_bytes(
+        resident_bytes
+            .saturating_add(pool.retained_bytes())
+            .saturating_add(state.ready_bytes)
+            .saturating_add(state.retained_proof_bytes())
+            .saturating_add(ready.retained_bytes()),
+        ready.positive.len().saturating_mul(std::mem::size_of::<
+            &spiling_geometry::NativeSourceLeafReceipt,
+        >()),
+        0,
+    )?;
     let positive = ready
         .positive
         .iter()
@@ -1135,6 +1702,14 @@ pub(super) fn collect_span(
         .map_err(|failure| {
             super::native_error(failure, "actual native contributor/final-M binding")
         })?;
+    state.pending_void_payload_bytes = state.pending_void_payload_bytes.saturating_add(
+        ready
+            .pending_voids
+            .iter()
+            .map(CapturedEvidence::retained_bytes)
+            .sum::<usize>(),
+    );
+    state.pending_voids.append(&mut ready.pending_voids);
     if metric.owned_critical_slabs == 0 {
         state
             .sizing
@@ -1183,6 +1758,15 @@ pub(super) fn collect_span(
                 .ready_bytes
                 .saturating_add(state.ledger.retained_bytes())
                 .saturating_add(state.previous_bytes)
+                .saturating_add(resident_bytes)
+                .saturating_add(pool.retained_bytes())
+                .saturating_add(state.pending_void_payload_bytes)
+                .saturating_add(
+                    state
+                        .pending_voids
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<CapturedEvidence>()),
+                )
                 .saturating_add(
                     ready
                         .protected_voids
@@ -1214,6 +1798,7 @@ fn capture_base(
     schedule: &mut Vec<LayerElevation>,
     request: &SpanCaptureRequest,
     sizing: &mut NativeSpanSizing,
+    pool: &mut NativeSlabPool,
     surface_work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<DraftStage, ManufacturingError> {
@@ -1253,51 +1838,74 @@ fn capture_base(
                     "native source stage identity capacity overflow",
                 )
             })?;
-        let mut native_bytes = admit_bytes(0, initial_bytes, retained_bytes)?;
+        let mut native_bytes = admit_bytes(
+            0,
+            initial_bytes,
+            retained_bytes.saturating_add(pool.retained_bytes()),
+        )?;
         let mut analyses = Vec::with_capacity(occurrences.len());
         if !refine {
             for occurrence in occurrences {
                 check_cancel(cancel)?;
-                let query_byte_limit = spiling_geometry::MAX_PREPARED_SECTION_BYTES
-                    .checked_sub(retained_bytes)
-                    .and_then(|n| n.checked_sub(native_bytes))
-                    .filter(|n| *n > 0)
-                    .ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "native slab has no remaining shared source/query byte allowance",
-                        )
-                    })?;
-                let analysis = sources[&occurrence.definition_id].analyze_placed_slab(
-                    &spiling_geometry::PlacedSlabRequest {
-                        pose: occurrence.pose,
-                        world_height_interval_mm: interval,
-                        sample_world_z_mm: sample,
-                        native_shape_error_mm: input.intent.recipe.native_shape_error_mm,
-                    },
-                    query_byte_limit,
+                let cached = pool.take(
+                    occurrence,
+                    interval,
+                    sample,
+                    input.intent.recipe.native_shape_error_mm,
                     &mut admission.geometry_work,
                     cancel,
-                );
-                let analysis = match analysis {
-                    Ok(analysis) => analysis,
-                    Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => {
-                        refine = true;
-                        break;
-                    }
-                    Err(failure) => {
-                        return Err(super::native_error(
-                            failure,
-                            &format!(
-                                "native slab at layer {index}, world interval [{:.17e}, {:.17e}] mm, sample {:.17e} mm, occurrence {}",
-                                interval[0],
-                                interval[1],
-                                sample,
-                                occurrence.occurrence_id.get()
-                            ),
-                        ));
+                )?;
+                let evidence = if let Some(evidence) = cached {
+                    evidence
+                } else {
+                    let query_byte_limit = spiling_geometry::MAX_PREPARED_SECTION_BYTES
+                        .checked_sub(retained_bytes)
+                        .and_then(|n| n.checked_sub(native_bytes))
+                        .and_then(|n| n.checked_sub(pool.retained_bytes()))
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| {
+                            error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "native slab has no remaining shared source/query byte allowance",
+                            )
+                        })?;
+                    let analysis = sources[&occurrence.definition_id].analyze_placed_slab(
+                        &spiling_geometry::PlacedSlabRequest {
+                            pose: occurrence.pose,
+                            world_height_interval_mm: interval,
+                            sample_world_z_mm: sample,
+                            native_shape_error_mm: input.intent.recipe.native_shape_error_mm,
+                        },
+                        query_byte_limit,
+                        &mut admission.geometry_work,
+                        cancel,
+                    );
+                    let analysis = match analysis {
+                        Ok(analysis) => analysis,
+                        Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => {
+                            refine = true;
+                            break;
+                        }
+                        Err(failure) => {
+                            return Err(super::native_error(
+                                failure,
+                                &format!(
+                                    "native slab at layer {index}, world interval [{:.17e}, {:.17e}] mm, sample {:.17e} mm, occurrence {}",
+                                    interval[0],
+                                    interval[1],
+                                    sample,
+                                    occurrence.occurrence_id.get()
+                                ),
+                            ));
+                        }
+                    };
+                    CapturedEvidence {
+                        occurrence_id: occurrence.occurrence_id,
+                        analysis,
+                        collar: None,
                     }
                 };
+                let analysis = &evidence.analysis;
                 if analysis.definition_id() != &occurrence.definition_id
                     || analysis.placed_pose() != Some(occurrence.pose)
                     || analysis.world_height_interval_mm() != Some(interval)
@@ -1313,9 +1921,12 @@ fn capture_base(
                 native_bytes = native_bytes
                     .checked_add(analysis.retained_bytes())
                     .filter(|n| {
-                        retained_bytes.checked_add(*n).is_some_and(|total| {
-                            total <= spiling_geometry::MAX_PREPARED_SECTION_BYTES
-                        })
+                        retained_bytes
+                            .checked_add(pool.retained_bytes())
+                            .and_then(|bytes| bytes.checked_add(*n))
+                            .is_some_and(|total| {
+                                total <= spiling_geometry::MAX_PREPARED_SECTION_BYTES
+                            })
                     })
                     .ok_or_else(|| {
                         error(
@@ -1329,10 +1940,7 @@ fn capture_base(
                         "native endpoint strata lack a genuine closed-source collar complex",
                     ));
                 }
-                analyses.push(CapturedEvidence {
-                    analysis,
-                    collar: None,
-                });
+                analyses.push(evidence);
             }
         }
         if refine {
@@ -1356,6 +1964,9 @@ fn capture_base(
             sizing.tighten(partition_end_z_bits, end - index);
             continue;
         }
+        // Pool checkouts changed idle ownership. All later realization and
+        // source-leaf scratch uses its current payload plus unused capacity.
+        let retained_bytes = retained_bytes.saturating_add(pool.retained_bytes());
         let mut material = Arc::new(MultiPolygon(Vec::new()));
         let mut composed_bytes = 0usize;
         let mut finished: Vec<(OccurrenceId, Arc<MultiPolygon<f64>>)> = Vec::new();
@@ -1407,7 +2018,7 @@ fn capture_base(
                     region::point_count(&placed),
                 )?;
                 for polygon in outer.0 {
-                    occupied.push(polygon, height)?;
+                    occupied.push(polygon, height, Some(occurrence.occurrence_id))?;
                 }
             }
             let actual_source_loops = union_loops(&placed, &[], sample, cancel)?;
@@ -2333,7 +2944,7 @@ fn span_end(
     Ok(end)
 }
 
-fn split_layer(
+pub(super) fn split_layer(
     schedule: &mut Vec<LayerElevation>,
     index: u32,
     context: &str,
@@ -2403,6 +3014,7 @@ pub(super) fn project_protected_voids(
     sources: &BTreeMap<DefinitionId, spiling_geometry::PreparedSolid<'_>>,
     captures: &mut Vec<CapturedProtectedVoid>,
     demand: &ProtectedVoidDemand<'_>,
+    preserve_captures: bool,
     support_work: &mut usize,
     work: &mut spiling_geometry::GeometryWorkBudget,
     cancel: &AtomicBool,
@@ -2440,9 +3052,10 @@ pub(super) fn project_protected_voids(
             ));
         }
     };
-    for captured in captures.drain(..) {
+    let mut project_one = |captured: &CapturedProtectedVoid,
+                           retained_native: usize|
+     -> Result<(), ManufacturingError> {
         check_cancel(cancel)?;
-        let payload_bytes = captured.capture.retained_bytes();
         let bounds = native_bounds.get(&captured.occurrence_id).ok_or_else(|| {
             error(
                 ManufacturingErrorCode::NativeAnalysisIndeterminate,
@@ -2613,13 +3226,260 @@ pub(super) fn project_protected_voids(
                 converted_bytes = converted_bytes.saturating_add(additional);
             }
         }
-        drop(captured);
-        retained_native -= payload_bytes;
+        Ok(())
+    };
+    if preserve_captures {
+        for captured in captures.iter() {
+            project_one(captured, retained_native)?;
+        }
+    } else {
+        for captured in captures.drain(..) {
+            let payload_bytes = captured.capture.retained_bytes();
+            project_one(&captured, retained_native)?;
+            drop(captured);
+            retained_native -= payload_bytes;
+        }
     }
+    drop(project_one);
     Ok(super::support::ProtectedVoidSet {
         regions: MultiPolygon(regions),
         scopes,
     })
+}
+
+// Native placed occupancy is an outward WORLD rectangle. Recognize that exact
+// storage invariant before intersecting independent closed-M enclosures; the
+// bounding box of an arbitrary polygon cannot replace its occupied set.
+fn occupied_rectangle_bounds(polygon: &geo::Polygon<f64>) -> Option<[[f64; 2]; 2]> {
+    let ring = &polygon.exterior().0;
+    if !polygon.interiors().is_empty() || ring.len() != 5 || ring[0] != ring[4] {
+        return None;
+    }
+    let mut bounds = [[f64::INFINITY, f64::NEG_INFINITY]; 2];
+    for point in &ring[..4] {
+        for (axis, value) in [point.x, point.y].into_iter().enumerate() {
+            if !value.is_finite() {
+                return None;
+            }
+            bounds[axis][0] = bounds[axis][0].min(value);
+            bounds[axis][1] = bounds[axis][1].max(value);
+        }
+    }
+    if bounds.iter().any(|axis| axis[0] >= axis[1]) {
+        return None;
+    }
+    let mut corners = 0u8;
+    for edge in ring.windows(2) {
+        if edge[0].x != edge[1].x && edge[0].y != edge[1].y {
+            return None;
+        }
+        let x = if edge[0].x == bounds[0][0] {
+            0
+        } else if edge[0].x == bounds[0][1] {
+            1
+        } else {
+            return None;
+        };
+        let y = if edge[0].y == bounds[1][0] {
+            0
+        } else if edge[0].y == bounds[1][1] {
+            1
+        } else {
+            return None;
+        };
+        let corner = 1u8 << (x + 2 * y);
+        if corners & corner != 0 {
+            return None;
+        }
+        corners |= corner;
+    }
+    (corners == 15).then_some(bounds)
+}
+
+fn consume_closed_source_projection(
+    source: &NativeSourceInputs<'_, '_>,
+    current: &mut DraftStage,
+    pending: &spiling_geometry::PendingNativeUnionProof,
+    candidate: &Vec<spiling_geometry::SectionLoopMm>,
+    outside_bytes: usize,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    if pending.critical_collars().is_empty() {
+        return Ok(()); // Regular spans keep their existing path unchanged.
+    }
+    // Called only after full union certification. Neither these exclusions nor
+    // their refinement participate in constructing their own native witness.
+    let live = outside_bytes
+        .checked_add(current.retained_bytes())
+        .and_then(|n| n.checked_add(pending.retained_bytes()))
+        .and_then(|n| n.checked_add(loop_bytes(candidate)))
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "qualified native projection live-byte overflow",
+            )
+        })?;
+    admit_bytes(live, 0, 0)?;
+    let old_points = current.occupied.point_count;
+    for ((occurrence, evidence), material) in source
+        .occurrences
+        .iter()
+        .zip(&current.analyses)
+        .zip(&current.leaves)
+    {
+        check_cancel(cancel)?;
+        let Some(fresh) = &evidence.collar else {
+            continue;
+        };
+        super::boolean::charge(work, pending.critical_collars().len())?;
+        let Some(incidence) = pending.critical_collars().iter().find(|bound| {
+            bound.current_leaf().occurrence_id() == occurrence.occurrence_id
+                && bound.incidence_sha256() == fresh.incidence_sha256()
+        }) else {
+            continue;
+        };
+        let leaf = incidence.current_leaf();
+        let collar = incidence.native_collar();
+        let pose_matches = |pose: RigidPoseMm| {
+            pose.translation_mm.map(f64::to_bits)
+                == occurrence.pose.translation_mm.map(f64::to_bits)
+                && pose.rotation_xyzw.map(f64::to_bits)
+                    == occurrence.pose.rotation_xyzw.map(f64::to_bits)
+        };
+        let interval_bits = current.interval.map(f64::to_bits);
+        if evidence.occurrence_id != occurrence.occurrence_id
+            || leaf.definition_id() != &occurrence.definition_id
+            || material.leaf.occurrence_id() != occurrence.occurrence_id
+            || material.leaf.definition_id() != leaf.definition_id()
+            || !pose_matches(leaf.pose())
+            || !pose_matches(material.leaf.pose())
+            || collar.definition_id() != leaf.definition_id()
+            || !pose_matches(collar.placed_pose())
+            || leaf.world_height_interval_mm().map(f64::to_bits) != interval_bits
+            || material.leaf.world_height_interval_mm().map(f64::to_bits) != interval_bits
+            || collar.world_height_interval_mm().map(f64::to_bits) != interval_bits
+            || leaf.sample_world_z_mm().to_bits() != current.native_sample.to_bits()
+            || material.leaf.sample_world_z_mm().to_bits() != current.native_sample.to_bits()
+            || collar.sample_world_z_mm().to_bits() != current.native_sample.to_bits()
+            || leaf.native_sample_sha256() != material.leaf.native_sample_sha256()
+            || collar.native_sample_sha256() != leaf.native_sample_sha256()
+            || leaf.candidate_geometry_sha256() != material.leaf.candidate_geometry_sha256()
+            || collar.world_shape_error_policy_mm().to_bits()
+                != source.input.intent.recipe.native_shape_error_mm.to_bits()
+            || evidence.analysis.definition_id() != leaf.definition_id()
+            || !evidence.analysis.placed_pose().is_some_and(pose_matches)
+            || evidence
+                .analysis
+                .world_height_interval_mm()
+                .map(|v| v.map(f64::to_bits))
+                != Some(interval_bits)
+            || evidence.analysis.sample_world_z_mm().map(f64::to_bits)
+                != Some(current.native_sample.to_bits())
+            || evidence
+                .analysis
+                .world_shape_error_policy_mm()
+                .map(f64::to_bits)
+                != Some(collar.world_shape_error_policy_mm().to_bits())
+        {
+            return Err(error(
+                ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                "qualified native projection changed its source/pose/closed-cut/sample/policy binding",
+            ));
+        }
+        let projection = collar.source_occupied_xy_bounds_mm();
+        if projection
+            .iter()
+            .any(|axis| !axis[0].is_finite() || !axis[1].is_finite() || axis[0] >= axis[1])
+        {
+            continue; // No positive rectangle authority: retain the old outer C.
+        }
+        super::boolean::charge(work, current.occupied.pieces.len())?;
+        for piece in &mut current.occupied.pieces {
+            if piece.raw_native_occurrence != Some(occurrence.occurrence_id) {
+                continue;
+            }
+            if piece.height_mm[0] < current.interval[0] || piece.height_mm[1] > current.interval[1]
+            {
+                return Err(error(
+                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                    "native occupied operand escaped its qualified closed-height scope",
+                ));
+            }
+            super::boolean::charge(work, 15)?;
+            let Some(outer) = occupied_rectangle_bounds(&piece.polygon) else {
+                continue;
+            };
+            let bounds = std::array::from_fn::<_, 2, _>(|axis| {
+                [
+                    outer[axis][0].max(projection[axis][0]),
+                    outer[axis][1].min(projection[axis][1]),
+                ]
+            });
+            if bounds.iter().any(|axis| axis[0] >= axis[1]) || bounds == outer {
+                continue; // Never infer empty material from an empty intersection.
+            }
+            let prior_points = piece.polygon.exterior().0.len();
+            let prior_bytes = polygon_bytes(&mut piece.polygon);
+            // Five closed rectangle coordinates already exist. Rewrite them
+            // without allocating another envelope beside the old live owners.
+            piece.polygon.exterior_mut(|ring| {
+                ring.0[0] = geo::Coord {
+                    x: bounds[0][0],
+                    y: bounds[1][0],
+                };
+                ring.0[1] = geo::Coord {
+                    x: bounds[0][1],
+                    y: bounds[1][0],
+                };
+                ring.0[2] = geo::Coord {
+                    x: bounds[0][1],
+                    y: bounds[1][1],
+                };
+                ring.0[3] = geo::Coord {
+                    x: bounds[0][0],
+                    y: bounds[1][1],
+                };
+                ring.0[4] = ring.0[0];
+            });
+            let points = piece.polygon.exterior().0.len();
+            let bytes = polygon_bytes(&mut piece.polygon);
+            current.occupied.point_count = current
+                .occupied
+                .point_count
+                .checked_sub(prior_points)
+                .and_then(|n| n.checked_add(points))
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "native occupied projection point accounting mismatch",
+                    )
+                })?;
+            current.occupied.payload_bytes = current
+                .occupied
+                .payload_bytes
+                .checked_sub(prior_bytes)
+                .and_then(|n| n.checked_add(bytes))
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "native occupied projection byte accounting mismatch",
+                    )
+                })?;
+            // Retain the original closed-height intersection, including caps.
+        }
+    }
+    current.point_count = current
+        .point_count
+        .checked_sub(old_points)
+        .and_then(|n| n.checked_add(current.occupied.point_count))
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "native stage occupied projection point accounting mismatch",
+            )
+        })?;
+    Ok(())
 }
 
 fn certify_stage<'a>(
@@ -2642,7 +3502,9 @@ fn certify_stage<'a>(
         .zip(&mut current.analyses)
         .zip(&current.leaves)
     {
-        let CapturedEvidence { analysis, collar } = evidence;
+        let CapturedEvidence {
+            analysis, collar, ..
+        } = evidence;
         if !analysis.has_critical_collar() {
             continue;
         }
@@ -2739,7 +3601,9 @@ fn certify_stage<'a>(
         .zip(&current.analyses)
         .zip(&current.leaves)
     {
-        let CapturedEvidence { analysis, collar } = evidence;
+        let CapturedEvidence {
+            analysis, collar, ..
+        } = evidence;
         let leaf = &material.leaf;
         let evidence = if let Some(collar) = collar {
             spiling_geometry::NativeUnionOccurrenceEvidence::SlabWithCollar {

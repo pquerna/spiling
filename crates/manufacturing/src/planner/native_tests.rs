@@ -3493,6 +3493,360 @@ fn previous_planner_identity_cannot_acquire_current_fresh_inspection_authority()
 }
 
 #[test]
+fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
+    let intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/manufacturing/housing-ordinary.intent.json",
+    ))
+    .unwrap();
+    let scene = NativeScene::new(
+        include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ),
+        &[RigidPoseMm {
+            translation_mm: [98.0, 100.99999999999977, 1.225587472778531e-9],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        }],
+    );
+    let input = scene.input(&intent);
+    let cancel = AtomicBool::new(false);
+    let (mut admission, sources) = preflight::admit(&input, &cancel).unwrap();
+    let mut planar_work = 0;
+    preflight::resolve_native_events(&input, &mut admission, &sources, &mut planar_work, &cancel)
+        .unwrap();
+    let mut captures = input
+        .occurrences
+        .iter()
+        .map(|occurrence| {
+            zones::capture(
+                &input,
+                &admission,
+                occurrence.occurrence_id,
+                &mut planar_work,
+                &cancel,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    admit_source_captures(
+        &sources,
+        admission.native_capture_proposal_bytes(),
+        &mut admission.geometry_work,
+        &cancel,
+    )
+    .unwrap();
+    let mut schedule = scheduled_layers(&input, &admission, &captures, &cancel).unwrap();
+    let endpoints = schedule
+        .iter()
+        .map(|layer| layer.z.to_bits())
+        .collect::<Vec<_>>();
+    let mut support_work = support::SupportWork::default();
+    let mut span_sizing = native::NativeSpanSizing::default();
+    let mut slab_pool = native::NativeSlabPool::default();
+    loop {
+        let upper = deposition_prefix_upper(
+            &input,
+            &admission,
+            &captures,
+            &schedule,
+            &mut planar_work,
+            &cancel,
+        )
+        .unwrap()
+        .expect("the declared support gap has an actual unreachable prefix");
+        match admit_schedule(
+            &input,
+            &cancel,
+            &mut admission,
+            &sources,
+            &mut captures,
+            &mut schedule,
+            &mut planar_work,
+            &mut support_work,
+            Some(upper),
+            None,
+            &mut span_sizing,
+            &mut slab_pool,
+        )
+        .unwrap()
+        {
+            ScheduleAdmission::RefineUnreachableLayer {
+                index,
+                failure,
+                recycled,
+            } => {
+                let outside = native_retry_outside_bytes(
+                    &sources,
+                    &admission,
+                    &schedule,
+                    &captures,
+                    &span_sizing,
+                )
+                .unwrap();
+                slab_pool
+                    .recycle(recycled, outside, &mut admission.geometry_work, &cancel)
+                    .unwrap();
+                refine_deposition_pair(&mut schedule, index, &input, failure).unwrap();
+            }
+            ScheduleAdmission::PrefixAdmitted(mut capture) => {
+                slab_pool.clear();
+                let live = geometry_bytes(&[
+                    native_retry_outside_bytes(
+                        &sources,
+                        &admission,
+                        &schedule,
+                        &captures,
+                        &span_sizing,
+                    )
+                    .unwrap(),
+                    native::output_bytes(
+                        &capture.sections,
+                        &capture.native_surfaces,
+                        capture.retained_section_bytes,
+                    ),
+                    capture.stage.retained_proof_bytes(),
+                ])
+                .unwrap();
+                capture
+                    .stage
+                    .materialize_pending_voids(&input, live, &mut admission.geometry_work, &cancel)
+                    .unwrap();
+                capture.stage.protected_voids_mut().unwrap();
+                assert!(!capture.sections.is_empty());
+                assert!(!capture.stage.source_captures().is_empty());
+                break;
+            }
+            ScheduleAdmission::Complete(_) => {
+                panic!("tentative actual paths cannot publish a plan")
+            }
+        }
+    }
+    for endpoint in endpoints {
+        assert!(schedule.iter().any(|layer| layer.z.to_bits() == endpoint));
+    }
+    assert!(schedule.iter().all(|layer| {
+        intent
+            .printer
+            .deposition_limits
+            .admits(intent.recipe.bead_width_mm, layer.z - layer.lower_z)
+    }));
+    assert!(admission.geometry_work.consumed() <= MAX_NATIVE_WORK_UNITS);
+}
+
+#[test]
+fn housing_c0_occupied_projection_preserves_other_poses_and_semantic_finish_additions() {
+    use geo::{Area, BoundingRect};
+
+    let intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/manufacturing/housing-ordinary.intent.json",
+    ))
+    .unwrap();
+    let cancel = AtomicBool::new(false);
+    // The independent rectangular source supplies a genuinely certified finish;
+    // both housing instances still use the unchanged real rounded BREP.
+    // Align source-height events; sub-minimum vertical staggering is not this check.
+    let mut scene = NativeScene::new(BOX, &[translated(40.0, 40.0, 1.225587472778531e-9)]);
+    scene.surface_overlays.layers.push(rib_layer(&scene, 1));
+    let quarter = std::f64::consts::FRAC_1_SQRT_2;
+    scene.add(
+        include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ),
+        &[
+            RigidPoseMm {
+                translation_mm: [98.0, 100.99999999999977, 1.225587472778531e-9],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            },
+            RigidPoseMm {
+                translation_mm: [170.0, 140.0, 1.225587472778531e-9],
+                rotation_xyzw: [0.0, 0.0, quarter, quarter],
+            },
+        ],
+    );
+    let input = scene.input(&intent);
+    let (mut admission, sources) = preflight::admit(&input, &cancel).unwrap();
+    assert_eq!(admission.report.disposition, PreflightDisposition::Admitted);
+    let mut planar_work = 0;
+    preflight::resolve_native_events(&input, &mut admission, &sources, &mut planar_work, &cancel)
+        .unwrap();
+    let captures = input
+        .occurrences
+        .iter()
+        .map(|occurrence| {
+            zones::capture(
+                &input,
+                &admission,
+                occurrence.occurrence_id,
+                &mut planar_work,
+                &cancel,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    admit_source_captures(
+        &sources,
+        admission.native_capture_proposal_bytes(),
+        &mut admission.geometry_work,
+        &cancel,
+    )
+    .unwrap();
+    // Keep the genuine full schedule available for C0's required upper-source
+    // dependencies, but collect only its first span, not the whole operator.
+    let mut schedule = scheduled_layers(&input, &admission, &captures, &cancel).unwrap();
+    let occurrences = input.occurrences.iter().collect::<Vec<_>>();
+    let retained = schedule.capacity() * std::mem::size_of::<LayerElevation>()
+        + occurrences.capacity() * std::mem::size_of::<&OccurrenceRecord>();
+    let mut state = native::NativeStageState::new([
+        input.intent.printer.build_envelope.min[2],
+        schedule.last().unwrap().z,
+    ])
+    .unwrap();
+    let mut slab_pool = native::NativeSlabPool::default();
+    let span = native::collect_span(
+        &native::NativeSourceInputs {
+            input: &input,
+            occurrences: &occurrences,
+            sources: &sources,
+        },
+        &mut admission,
+        &mut schedule,
+        &native::NativeSpanRequest {
+            index: 0,
+            retained_points: 0,
+            retained_output_bytes: retained,
+        },
+        &mut state,
+        &mut planar_work,
+        &mut slab_pool,
+        &cancel,
+    )
+    .unwrap();
+    let interval = [schedule[0].lower_z, schedule[span.end as usize - 1].z];
+    let sample = interval[0] + (interval[1] - interval[0]) * 0.5;
+    let quarter_height = interval[0] + (interval[1] - interval[0]) * 0.25;
+    // This ledger intentionally remains partial: a first-span containment
+    // regression must not claim to finalize all remaining positive geometry.
+
+    let occupied_at = |outer: &ContinuousOccupied, owner: Option<OccurrenceId>, z: f64| {
+        MultiPolygon(
+            outer
+                .pieces
+                .iter()
+                .filter(|piece| {
+                    piece.raw_native_occurrence == owner
+                        && piece.height_mm[0] <= z
+                        && z <= piece.height_mm[1]
+                })
+                .map(|piece| piece.polygon.clone())
+                .collect::<Vec<_>>(),
+        )
+    };
+    let actual_section = |occurrence: &OccurrenceRecord, z: f64| {
+        let native = &scene.definitions[&occurrence.definition_id];
+        let section = spiling_geometry::section_with_byte_limit(
+            native,
+            PlaneMm {
+                origin_mm: [0.0, 0.0, z - occurrence.pose.translation_mm[2]],
+                normal: [0.0, 0.0, 1.0],
+            },
+            &cancel,
+            4 * 1024 * 1024,
+        )
+        .unwrap();
+        assert!(section.is_native_intersection());
+        region::from_native(&section, &occurrence.pose, z, &cancel).unwrap()
+    };
+
+    // These native sections are independent material witnesses, not authority
+    // for the continuous bound: collect_span above must qualify the real C0.
+    // Check multiple heights, including the closed upper cap, in both poses.
+    for (index, occurrence) in scene.occurrences.iter().enumerate() {
+        for z in [quarter_height, sample, interval[1]] {
+            let actual = actual_section(occurrence, z);
+            assert!(actual.unsigned_area() > 0.0);
+            let raw = occupied_at(&span.occupied, Some(occurrence.occurrence_id), z);
+            assert!(
+                actual.difference(&raw).0.is_empty(),
+                "native occupied refinement lost real material for occurrence {index} at {z}"
+            );
+            for other in scene
+                .occurrences
+                .iter()
+                .filter(|other| other.occurrence_id != occurrence.occurrence_id)
+            {
+                let other_raw = occupied_at(&span.occupied, Some(other.occurrence_id), z);
+                assert!(
+                    actual.intersection(&other_raw).0.is_empty(),
+                    "a source-only projection was applied to another occurrence/pose"
+                );
+            }
+        }
+        if index > 0 {
+            let raw = occupied_at(&span.occupied, Some(occurrence.occurrence_id), sample);
+            let tight = raw.bounding_rect().unwrap();
+            let whole = admission.native_bounds[&occurrence.occurrence_id];
+            assert!(
+                tight.width() * tight.height()
+                    < (whole.max[0] - whole.min[0]) * (whole.max[1] - whole.min[1]),
+                "the real C0 must replace its whole-definition coarse occupied bound"
+            );
+        }
+    }
+
+    let finished_occurrence = &scene.occurrences[0];
+    let source = actual_section(finished_occurrence, sample);
+    let fields = &admission.surface_fields[&finished_occurrence.occurrence_id];
+    let derived = surface::realize(
+        source.clone(),
+        fields,
+        sample,
+        span.point_count,
+        &mut planar_work,
+        &cancel,
+    )
+    .unwrap();
+    let addition = derived.difference(&source);
+    assert!(addition.unsigned_area() > 0.0);
+    let raw = occupied_at(
+        &span.occupied,
+        Some(finished_occurrence.occurrence_id),
+        sample,
+    );
+    assert!(
+        addition.difference(&raw).unsigned_area() > 0.0,
+        "the semantic finish must have real material beyond raw native occupancy"
+    );
+    let mut occupied = span.occupied;
+    let native_bounds = admission.native_bounds[&finished_occurrence.occurrence_id];
+    for field in fields {
+        field
+            .include_occupied_envelope(
+                &mut occupied,
+                &surface::OccupiedHeightScope {
+                    requested: interval,
+                    native: [native_bounds.min[2], native_bounds.max[2]],
+                },
+                &schedule,
+                span.point_count + region::point_count(&derived),
+                &mut planar_work,
+                &cancel,
+            )
+            .unwrap();
+    }
+    let finish_outer = occupied_at(&occupied, None, sample);
+    assert!(
+        addition.difference(&finish_outer).0.is_empty(),
+        "independent semantic additive occupancy must contain the realized ribs"
+    );
+    // Appending semantic C must leave every raw M operand valid, including
+    // the two distinct world-XY projections of the same native definition.
+    for occurrence in &scene.occurrences {
+        let actual = actual_section(occurrence, sample);
+        let raw = occupied_at(&occupied, Some(occurrence.occurrence_id), sample);
+        assert!(actual.difference(&raw).0.is_empty());
+    }
+}
+
+#[test]
 fn housing_terminal_native_source_refinement_preserves_closed_material_authority() {
     let intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
         "../../../../fixtures/manufacturing/housing-ordinary.intent.json",
@@ -3575,6 +3929,7 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
     let occurrences = input.occurrences.iter().collect::<Vec<_>>();
     let full_interval = [intent.printer.build_envelope.min[2], interval[1]];
     let mut state = native::NativeStageState::new(full_interval).unwrap();
+    let mut slab_pool = native::NativeSlabPool::default();
     let mut index = 0;
     let mut covered_upper = full_interval[0];
     let mut terminal_appended = false;
@@ -3609,6 +3964,7 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
             },
             &mut state,
             &mut proposal_work,
+            &mut slab_pool,
             &cancel,
         )
         .unwrap();

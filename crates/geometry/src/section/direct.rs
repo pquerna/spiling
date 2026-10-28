@@ -203,17 +203,24 @@ pub(super) fn intersect(
                 let accepted = prepared
                     .map(|source| source.native_correspondence_allowance(eu_id))
                     .transpose()?;
-                if accepted.is_none_or(|bound| correspondence_allowance < bound.get()) {
-                    binding
-                        .prove_correspondence(
-                            correspondence_allowance,
-                            admission.limit.checked_sub(admission.used).ok_or_else(|| {
-                                resource_error("native trim correspondence exceeds live query allowance")
-                            })?,
-                            work,
-                            cancel,
-                        )
-                        .map_err(|mut error| {
+                let cached = accepted.map(|bound| bound.get());
+                let cache_hit = cached.is_some_and(|bound| bound <= correspondence_allowance);
+                let proof = if cache_hit {
+                    Ok(cached.unwrap())
+                } else {
+                    binding.prove_correspondence(
+                        correspondence_allowance,
+                        admission.limit.checked_sub(admission.used).ok_or_else(|| {
+                            resource_error(
+                                "native trim correspondence exceeds live query allowance",
+                            )
+                        })?,
+                        work,
+                        cancel,
+                    )
+                };
+                if !cache_hit {
+                    let achieved = proof.map_err(|mut error| {
                             error.message = format!(
                                 "native section face={face_id:?} edge={edge_id:?} edgeuse={eu_id:?}: {}",
                                 error.message
@@ -225,7 +232,7 @@ pub(super) fn intersect(
                     // at least as strict as the current caller's allowance;
                     // roots, crossings, endpoint gaps and sections stay fresh.
                     if let Some(bound) = accepted {
-                        bound.set(bound.get().min(correspondence_allowance));
+                        bound.set(bound.get().min(achieved));
                     }
                 }
                 let mut boundary_side = 0;
@@ -248,7 +255,17 @@ pub(super) fn intersect(
                     &mut admission,
                     work,
                     cancel,
-                )?;
+                ).map_err(|mut failure| {
+                    if failure.code == GeometryErrorCode::AnalysisIndeterminate {
+                        failure.message = format!(
+                            "native chart-boundary plane roots: face={ordinal}/{face_id:?} edge={edge_id:?} edgeuse={eu_id:?} spatial_kind={} chart_kind={:?} parameter=[0,1]; {}; source={} plane={plane:?}",
+                            binding.curve.type_string(),
+                            binding.uv_curve.map(Curve::type_string), failure.message,
+                            definition.id().as_str(),
+                        );
+                    }
+                    failure
+                })?;
                 boundary_root_free_side = Some(match boundary_root_free_side {
                     None => boundary_side,
                     Some(previous) if previous == boundary_side => previous,
@@ -497,6 +514,8 @@ pub(super) fn intersect(
         boolean_tolerance_mm: SECTION_BOOLEAN_TOLERANCE_MM,
         certificate: NativeSectionCertificate {
             definition_id: definition.id().clone(),
+            material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
+            pose: spiling_contracts::geometry::RigidPoseMm::IDENTITY,
             authority: SectionAuthority::NativeIntersection,
             maximum_chord_error_mm: 0.0,
             maximum_plane_error_mm: 0.0,
@@ -788,7 +807,15 @@ fn ensure_edge_roots(
         admission,
         work,
         cancel,
-    )?;
+    ).map_err(|mut failure| {
+        if failure.code == GeometryErrorCode::AnalysisIndeterminate {
+            failure.message = format!(
+                "native spatial edge-plane roots: edge={edge_id:?} kind={} owned_parameter={range:?} accuracy={parameter_accuracy:.17e}; {}; source={} plane={plane:?}",
+                curve.type_string(), failure.message, definition.id().as_str(),
+            );
+        }
+        failure
+    })?;
     for (ordinal, root) in found.into_iter().enumerate() {
         if root.parameter.contains(range[0]) || root.parameter.contains(range[1]) {
             return Err(indeterminate(
@@ -867,8 +894,20 @@ impl<'a> Boundary<'a> {
                 work,
                 cancel,
             )? {
-                return Err(indeterminate(
-                    "native UV trim has no coefficient proof of active-chart containment",
+                let parameters = [d.min(), d.min() * 0.5 + d.max() * 0.5, d.max()];
+                let mut images = [[Interval::point(0.0); 3]; 3];
+                for (parameter, image) in parameters.into_iter().zip(&mut images) {
+                    *image =
+                        p::CurveEvaluator::tensor(uv_curve, [parameter; 2], 0, work, cancel)?[0];
+                }
+                return Err(GeometryError::new(
+                    GeometryErrorCode::AnalysisIndeterminate,
+                    format!(
+                        "native UV trim has no coefficient proof of active-chart containment; \
+                         edge={edge:?}; edgeuse={eu:?}; carrier=[[{},{}],[{},{}]]; \
+                         native_point_parameters={parameters:?}; native_point_uv={images:?}",
+                        min.x, max.x, min.y, max.y,
+                    ),
                 ));
             }
         }
@@ -1005,7 +1044,7 @@ impl<'a> Boundary<'a> {
         byte_limit: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<(), GeometryError> {
+    ) -> Result<f64, GeometryError> {
         if let Some(chart) = self.uv_curve {
             let reference = p::curve_prepared::NativeChartCurve {
                 surface: self.surface,
@@ -1020,7 +1059,7 @@ impl<'a> Boundary<'a> {
             let physical_allowance = Interval::point(allowance)
                 .div(Interval::point(self.scale))?
                 .lo;
-            return crate::kernel::trim::prove_native_curve_position_correspondence(
+            return crate::kernel::trim::calibrate_native_curve_position(
                 &reference,
                 self.curve,
                 self.edge_range,
@@ -1030,6 +1069,15 @@ impl<'a> Boundary<'a> {
                 work,
                 cancel,
             )
+            .map(|calibration| {
+                // Retain the achieved whole-branch bound, not the looser
+                // request that stopped refinement. A later stricter query
+                // may reuse this same immutable positional evidence.
+                Interval::point(calibration.maximum_position_error_mm())
+                    .mul(Interval::point(self.scale))
+                    .hi
+                    .min(allowance)
+            })
             .map_err(|mut error| {
                 if error.code == GeometryErrorCode::ParameterCorrespondenceUnavailable {
                     error.code = GeometryErrorCode::AnalysisIndeterminate;
@@ -1052,7 +1100,7 @@ impl<'a> Boundary<'a> {
         r: [f64; 2],
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<(), GeometryError> {
+    ) -> Result<f64, GeometryError> {
         work.charge(1, cancel)?;
         let (position, derivative, _, _) = self.evaluate(r, work, cancel)?;
         let edge = self.edge_jet(r, work, cancel)?;
@@ -1065,8 +1113,9 @@ impl<'a> Boundary<'a> {
                 .sub(edge_at.position[i])
                 .add(derivative[i].sub(edge.derivative[i]).mul(displacement))
         });
-        if norm(error) <= allowance {
-            return Ok(());
+        let achieved = norm(error);
+        if achieved <= allowance {
+            return Ok(achieved);
         }
         if depth >= 24 || mid == r[0] || mid == r[1] {
             return Err(indeterminate(format!(
@@ -1074,8 +1123,11 @@ impl<'a> Boundary<'a> {
                 position
             )));
         }
-        self.prove_affine_correspondence(allowance, depth + 1, [r[0], mid], work, cancel)?;
-        self.prove_affine_correspondence(allowance, depth + 1, [mid, r[1]], work, cancel)
+        let left =
+            self.prove_affine_correspondence(allowance, depth + 1, [r[0], mid], work, cancel)?;
+        let right =
+            self.prove_affine_correspondence(allowance, depth + 1, [mid, r[1]], work, cancel)?;
+        Ok(left.max(right))
     }
 }
 

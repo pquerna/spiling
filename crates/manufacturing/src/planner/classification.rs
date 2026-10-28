@@ -801,6 +801,214 @@ impl ClassifiedRegions {
         super::zones::partition(self, domains, recipe, admit, work, cancel)
     }
 
+    /// Propose one shared ordinary phase without granting final stroke support
+    /// or changing any source-framed or mandatory-skin construction.
+    pub(super) fn choose_initial_ordinary_phase<'a>(
+        &self,
+        layer: &region::HatchLayer<'_>,
+        previous: impl Iterator<Item = &'a DepositionPath> + Clone,
+        anchors: &mut super::support::AnchorWorkspace,
+        anchor_work: &mut usize,
+        classified_owned_bytes: usize,
+        outside_retained_points: usize,
+        outside_owned_bytes: usize,
+        mut admit: impl FnMut(usize, usize, usize) -> Result<(), ManufacturingError>,
+        cancel: &AtomicBool,
+    ) -> Result<region::OrdinaryHatchPhase, ManufacturingError> {
+        check_cancel(cancel)?;
+        let class_points = self.retained_points();
+        admit(
+            point_sum(class_points, anchors.retained_records())?,
+            byte_sum(classified_owned_bytes, anchors.retained_bytes())?,
+            0,
+        )?;
+        if !self
+            .interiors
+            .iter()
+            .any(|interior| interior.frame_origin_mm.is_none() && !interior.domain.0.is_empty())
+        {
+            return Ok(region::OrdinaryHatchPhase::Centered);
+        }
+        let mut eligible_previous = false;
+        for path in previous.clone() {
+            check_cancel(cancel)?;
+            if path.physical_z_mm[1] == layer.lower_z && path.checked_edges()?.len() != 0 {
+                eligible_previous = true;
+                break;
+            }
+        }
+        if !eligible_previous {
+            return Ok(region::OrdinaryHatchPhase::Centered);
+        }
+        'proposal: for phase in region::OrdinaryHatchPhase::CANDIDATES {
+            check_cancel(cancel)?;
+            let mut candidate = super::support::RasterCandidate {
+                paths: Vec::new(),
+                whole_rows: Vec::new(),
+                process_interfaces: Vec::new(),
+                skin_bridge_domains: Vec::new(),
+                skin_command_fits: Vec::new(),
+            };
+            let mut segments = 0;
+            let mut candidate_points = 0;
+            for (index, interior) in self.interiors.iter().enumerate() {
+                if interior.frame_origin_mm.is_some() {
+                    continue;
+                }
+                let fraction = interior.coverage.fraction;
+                let kind = if fraction == 1.0 {
+                    DepositionKind::SolidFill
+                } else {
+                    DepositionKind::SparseFill
+                };
+                for polygon in &interior.domain.0 {
+                    check_cancel(cancel)?;
+                    let Some(rows) =
+                        region::HatchRows::centered_phase(polygon, fraction, layer, phase)?
+                    else {
+                        continue 'proposal;
+                    };
+                    let bound = rows.point_bound()?;
+                    let live = point_sum(class_points, candidate_points)?;
+                    let live_bytes = byte_sum(classified_owned_bytes, candidate_bytes(&candidate))?;
+                    // Work is a delta consumed by the caller's cumulative
+                    // ledger, including rows from subsequently refused trials.
+                    admit(
+                        point_sum(point_sum(live, anchors.retained_records())?, bound)?,
+                        byte_sum(
+                            byte_sum(live_bytes, anchors.retained_bytes())?,
+                            hatch_storage_bound(bound)?,
+                        )?,
+                        bound,
+                    )?;
+                    let mut paths = Vec::new();
+                    match region::hatch_polygon(
+                        polygon,
+                        kind,
+                        &rows,
+                        layer,
+                        &mut paths,
+                        &mut segments,
+                        cancel,
+                    ) {
+                        Ok(()) => {}
+                        // A speculative phase may clip a degenerate row even
+                        // when a later phase or ordinary recovery is usable.
+                        Err(failure)
+                            if failure.code == ManufacturingErrorCode::UnsupportedGeometry =>
+                        {
+                            continue 'proposal;
+                        }
+                        Err(failure) => return Err(failure),
+                    }
+                    if paths.is_empty() {
+                        continue 'proposal;
+                    }
+                    for path in &mut paths {
+                        path.owner = Some(DepositionOwner::Regional {
+                            region_index: index as u16,
+                        });
+                    }
+                    let points = path_points(&paths);
+                    let target = record_target(&candidate.paths, paths.len());
+                    let replacement_bytes = if target > candidate.paths.capacity() {
+                        target.checked_mul(std::mem::size_of::<DepositionPath>())
+                    } else {
+                        Some(0)
+                    }
+                    .ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "ordinary phase path reservation overflow",
+                        )
+                    })?;
+                    admit(
+                        point_sum(point_sum(live, points)?, anchors.retained_records())?,
+                        byte_sum(
+                            byte_sum(
+                                byte_sum(live_bytes, super::bonds::path_bytes(&paths))?,
+                                anchors.retained_bytes(),
+                            )?,
+                            replacement_bytes,
+                        )?,
+                        0,
+                    )?;
+                    candidate
+                        .paths
+                        .try_reserve_exact(target - candidate.paths.len())
+                        .map_err(|_| {
+                            error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "ordinary phase candidate allocation refused",
+                            )
+                        })?;
+                    candidate.paths.append(&mut paths);
+                    candidate_points = point_sum(candidate_points, points)?;
+                    // The emptied polygon record buffer remains live here.
+                    admit(
+                        point_sum(
+                            point_sum(class_points, candidate_points)?,
+                            anchors.retained_records(),
+                        )?,
+                        byte_sum(
+                            byte_sum(
+                                byte_sum(classified_owned_bytes, candidate_bytes(&candidate))?,
+                                super::bonds::path_bytes(&paths),
+                            )?,
+                            anchors.retained_bytes(),
+                        )?,
+                        0,
+                    )?;
+                }
+            }
+            let live = point_sum(class_points, candidate_points)?;
+            let live_bytes = byte_sum(classified_owned_bytes, candidate_bytes(&candidate))?;
+            // The outside baseline excludes this classifier and workspace.
+            // The existing component allowance owns query/proof growth; only
+            // actual capacities, not that unallocated allowance, enter admit.
+            admit(
+                point_sum(live, anchors.retained_records())?,
+                byte_sum(live_bytes, anchors.retained_bytes())?,
+                0,
+            )?;
+            let budget = super::support::component_budget(
+                outside_retained_points,
+                outside_owned_bytes,
+                live,
+                live_bytes,
+            )?;
+            let proof = super::support::component_admission(
+                (&mut candidate, layer.axis, budget, false),
+                previous.clone(),
+                std::iter::empty(),
+                layer.recipe,
+                anchors,
+                anchor_work,
+                cancel,
+            )?;
+            admit(
+                point_sum(
+                    point_sum(live, anchors.retained_records())?,
+                    proof.retained_points(),
+                )?,
+                byte_sum(
+                    byte_sum(live_bytes, anchors.retained_bytes())?,
+                    proof.retained_bytes(),
+                )?,
+                0,
+            )?;
+            let supported = proof.supported;
+            drop(proof);
+            drop(candidate);
+            if supported {
+                return Ok(phase);
+            }
+        }
+        // A guide refusal never substitutes for the actual ordinary/support
+        // pipeline's honest result, including an empty centered polygon.
+        Ok(region::OrdinaryHatchPhase::Centered)
+    }
+
     pub(super) fn paths(
         &self,
         z: f64,
@@ -808,6 +1016,7 @@ impl ClassifiedRegions {
         axis: region::HatchAxis,
         top_axis: region::HatchAxis,
         recipe: &PlanarPrintRecipe,
+        phase: region::OrdinaryHatchPhase,
         classified_owned_bytes: usize,
         source_domains: &[super::ProcessDomain],
         segments: &mut usize,
@@ -866,6 +1075,7 @@ impl ClassifiedRegions {
                 fraction,
                 &layer,
                 interior.frame_origin_mm,
+                phase,
                 &mut paths,
                 segments,
                 cancel,
@@ -898,6 +1108,7 @@ impl ClassifiedRegions {
     pub(super) fn paths_with_bridge_recovery(
         &self,
         layer: &region::HatchLayer<'_>,
+        phase: region::OrdinaryHatchPhase,
         source_domains: &[super::ProcessDomain],
         classified_owned_bytes: usize,
         initial_workspace_bytes: usize,
@@ -918,6 +1129,7 @@ impl ClassifiedRegions {
                 };
             self.paths_with_bridge_recovery_unfitted(
                 layer,
+                phase,
                 source_domains,
                 classified_owned_bytes,
                 initial_workspace_bytes,
@@ -977,6 +1189,7 @@ impl ClassifiedRegions {
     fn paths_with_bridge_recovery_unfitted(
         &self,
         layer: &region::HatchLayer<'_>,
+        phase: region::OrdinaryHatchPhase,
         source_domains: &[super::ProcessDomain],
         classified_owned_bytes: usize,
         initial_workspace_bytes: usize,
@@ -1129,6 +1342,15 @@ impl ClassifiedRegions {
                 drop(workspace_receipt);
                 let rows = if let Some(origin) = frame {
                     region::HatchRows::common(polygon, fraction, layer, origin)?
+                } else if owner.is_some() {
+                    region::HatchRows::centered_phase(polygon, fraction, layer, phase)?.ok_or_else(
+                        || {
+                            error(
+                                ManufacturingErrorCode::UnsupportedGeometry,
+                                "frozen ordinary hatch phase changed the polygon lattice count",
+                            )
+                        },
+                    )?
                 } else {
                     region::HatchRows::new(polygon, fraction, layer)?
                 };
@@ -1154,6 +1376,12 @@ impl ClassifiedRegions {
                     segments,
                     cancel,
                 )?;
+                if owner.is_some() && frame.is_none() && component.paths.is_empty() {
+                    return Err(error(
+                        ManufacturingErrorCode::UnsupportedGeometry,
+                        "frozen ordinary hatch phase emitted no polygon paths",
+                    ));
+                }
                 if let Some((index, _)) = owner {
                     for path in &mut component.paths {
                         path.owner = Some(DepositionOwner::Regional {
@@ -3583,6 +3811,7 @@ fn bridge_bands(
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+    use geo::polygon;
 
     #[test]
     fn classification_records_match_empty_and_positive_interior_ownership() {
@@ -3627,6 +3856,126 @@ mod ownership_tests {
                 (classified.retained_points(), classified.retained_bytes())
             );
         }
+    }
+
+    #[test]
+    fn degenerate_phase_does_not_hide_later_anchored_ordinary_rows() {
+        let cancel = AtomicBool::new(false);
+        let mut recipe = crate::planner::tests::recipe(0.20);
+        let h = recipe.layer_height_mm;
+        let solid_spacing =
+            ((recipe.bead_width_mm - h) * h + std::f64::consts::PI * (h * 0.5).powi(2)) / h;
+        recipe.infill_fraction = solid_spacing / 4.0;
+        let fill = MultiPolygon(vec![polygon![
+            (x: 0., y: 0.), (x: 16., y: 8.), (x: 0., y: 8.), (x: 0., y: 0.)
+        ]]);
+        let layout = Arc::new(WallPlan {
+            paths: Vec::new(),
+            correspondence: Vec::new(),
+            fill: fill.clone(),
+            section_area_mm2: fill.unsigned_area(),
+            wall_area_mm2: 0.,
+            protected_hole_area_mm2: 0.,
+            retained_points: 0,
+            retained_bytes: 0,
+        });
+        let mut classified =
+            ClassifiedRegions::new(layout, &fill, &fill, |_, _| Ok(()), &recipe, &cancel).unwrap();
+        let owned_bytes = classified.retained_bytes();
+        let layer = region::HatchLayer {
+            z: 2.0 * h,
+            lower_z: h,
+            height: h,
+            axis: region::HatchAxis::X,
+            top_axis: region::HatchAxis::Y,
+            recipe: &recipe,
+        };
+        // Only rows y=1 and y=5 have actual lower strokes. The earlier Half
+        // proposal touches the minimum vertex and cannot construct its row.
+        let previous = [1.0, 5.0].map(|y| DepositionPath {
+            kind: DepositionKind::SparseFill,
+            owner: Some(DepositionOwner::Regional { region_index: 0 }),
+            width: WidthProfile::Constant {
+                width_mm: recipe.bead_width_mm,
+            },
+            physical_z_mm: [0., h],
+            points_mm: vec![[0., y, h], [2.0 * y, y, h]],
+        });
+        let mut workspace = super::super::support::AnchorWorkspace::default();
+        let mut work = 0;
+        let phase = classified
+            .choose_initial_ordinary_phase(
+                &layer,
+                previous.iter(),
+                &mut workspace,
+                &mut work,
+                owned_bytes,
+                0,
+                0,
+                |_, _, _| Ok(()),
+                &cancel,
+            )
+            .unwrap();
+        let mut paths = Vec::new();
+        let mut segments = 0;
+        region::hatch_with_phase(
+            &fill,
+            DepositionKind::SparseFill,
+            recipe.infill_fraction,
+            &layer,
+            None,
+            phase,
+            &mut paths,
+            &mut segments,
+            &cancel,
+        )
+        .unwrap();
+        let mut rows: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let [a, b] = path.points_mm.as_slice() else {
+                    panic!("ordinary row must be a segment")
+                };
+                (a[1], a[0].min(b[0]), a[0].max(b[0]))
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(rows, [(1.0, 0.0, 2.0), (5.0, 0.0, 10.0)]);
+
+        let failure = classified
+            .choose_initial_ordinary_phase(
+                &layer,
+                previous.iter(),
+                &mut workspace,
+                &mut work,
+                owned_bytes,
+                0,
+                0,
+                |_, _, _| {
+                    Err(error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "test capacity",
+                    ))
+                },
+                &cancel,
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let failure = classified
+            .choose_initial_ordinary_phase(
+                &layer,
+                previous.iter(),
+                &mut workspace,
+                &mut work,
+                owned_bytes,
+                0,
+                0,
+                |_, _, _| Ok(()),
+                &cancel,
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::Cancelled);
     }
 
     #[test]

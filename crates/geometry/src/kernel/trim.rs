@@ -2,24 +2,11 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Literal native charts, not a reconstruction of the imported material.
-//!
-//! Chart admission proves coefficient-level C0 joins and embedded, disjoint UV
-//! circuits. C1 is an independent property of each original coedge restriction;
-//! corners never acquire tangent authority by subdivision. Winding queries use
-//! enclosures of the original coefficients, not a sampled trim polygon.
-//!
-//! Material admission has additional obligations: original-source parameter
-//! correspondence, equality of opposed spatial traces and shared endpoints,
-//! filled-face embedding, complete vertex links and nonincident spatial
-//! separation. Native topology, tolerance/gap fields and interval overlap do not
-//! prove those identities. Original operands are retained separately from native
-//! generated charts; source admission must qualify their complete selected
-//! restrictions and every correction joint before exposing material queries.
-//! Incident source restrictions may meet inside their existing masked correction
-//! cell. Whole exact-affine intersection ownership or a nonsingular smooth-pair
-//! contraction proves only separation outside that cell, never a welded anchor
-//! or the later spatial/material vertex link.
+//! Native material operands borrow the kernel BREP, its oriented topology and
+//! coefficient evaluators. Material preparation declares an effective spatial
+//! tolerance; chart endpoint bridges are uncertainty covers, not added material.
+//! Raw chart inspection and captured-original preparation retain their stricter
+//! independent claims. Native admission never supplies original correspondence.
 
 use super::Definition;
 use super::source_operand::PreparedOriginalSurface;
@@ -29,10 +16,12 @@ use crate::parametric::{self, CurveEvaluator as _, Interval, SurfaceEvaluator as
 use crate::{GeometryError, GeometryWorkBudget, check_cancel};
 use solidcore::curve::{curve::Curve, curve::p2::CurveKind};
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
+use solidcore::surface::surface::Surface;
 use solidcore::topology::edgeuse::p1 as edgeuse;
 use solidcore::topology::{EdgeId, EdgeuseId, EdgeuseOwner, FaceId, LoopuseStart, VertexId};
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::{
+    cell::{Cell, OnceCell},
     mem::{size_of, size_of_val},
     sync::{Arc, atomic::AtomicBool},
 };
@@ -45,6 +34,13 @@ const SCRATCH_BYTES: usize = 128 * 1024
     + parametric::nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES;
 const CLASSIFICATION_SCRATCH_BYTES: usize =
     SCRATCH_BYTES + 2 * size_of::<parametric::ChartCurveEnclosure>();
+pub(crate) const NATIVE_SPATIAL_QUERY_SCRATCH_BYTES: usize = size_of::<NativeSpatialCurve<'_>>()
+    + parametric::curve_prepared::CURVE_EVALUATION_SCRATCH_BYTES;
+
+pub(crate) const NATIVE_TRACE_QUERY_SCRATCH_BYTES: usize = SCRATCH_BYTES
+    + size_of::<[([f64; 2], u8); MAX_DEPTH as usize + 2]>()
+    + 4 * size_of::<[[Interval; 3]; 4]>()
+    + 20 * size_of::<Interval>();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrimClassification {
@@ -161,6 +157,81 @@ pub(crate) struct NativeCoedgeIdentity {
     pub(crate) edgeuse: EdgeuseId,
 }
 
+/// Plane-independent containment of this immutable native curve, over the
+/// complete admitted parameter range. A changed carrier or curve cannot reuse it.
+struct NativeCurveCarrierContainment<'d> {
+    curve: &'d Curve,
+    range: [f64; 2],
+    domain: [[f64; 2]; 2],
+}
+
+/// Immutable native trace binding plus one completely qualified restriction.
+/// Only its nonborrowed (range, uniform error allowance) approval changes:
+/// references stay outside Cell so material/domain lifetimes remain covariant.
+struct NativeTraceCorrespondence<'d> {
+    spatial: &'d Curve,
+    surface: &'d Surface,
+    chart: &'d Curve,
+    edge: EdgeId,
+    edgeuse: EdgeuseId,
+    uv_owner: EdgeuseId,
+    native_range: [f64; 2],
+    uv_range: [f64; 2],
+    carrier_domain: [[f64; 2]; 2],
+    material_tolerance_mm: f64,
+    accepted_range_allowance: Cell<Option<([f64; 2], f64)>>,
+    // None inside a completed cell means no whole-branch query map was proved;
+    // it supplies no authority. Only successful maps retain heap capacity.
+    derived_position: OnceCell<Option<NativePositionCalibration>>,
+    derived_image: Cell<Option<([f64; 2], [Interval; 2])>>,
+}
+impl NativeTraceCorrespondence<'_> {
+    fn matches(
+        &self,
+        coedge: &NativeTrimCoedge<'_>,
+        spatial: &Curve,
+        surface: &Surface,
+        tolerance: f64,
+    ) -> bool {
+        std::ptr::eq(self.spatial, spatial)
+            && std::ptr::eq(self.surface, surface)
+            && std::ptr::eq(self.chart, coedge.curve)
+            && self.edge == coedge.edge
+            && self.edgeuse == coedge.edgeuse
+            && self.uv_owner == coedge.uv_owner
+            && self.native_range == coedge.native_range
+            && self.uv_range == coedge.uv_range
+            && coedge.native_carrier_domain == Some(self.carrier_domain)
+            && self.material_tolerance_mm == tolerance
+    }
+}
+
+fn merge_native_trace_approval(
+    previous: Option<([f64; 2], f64)>,
+    current: ([f64; 2], f64),
+) -> ([f64; 2], f64) {
+    let Some((old, old_bound)) = previous else {
+        return current;
+    };
+    let (range, bound) = current;
+    if old[0] <= range[0] && range[1] <= old[1] && old_bound <= bound {
+        return (old, old_bound);
+    }
+    if range[0] <= old[0] && old[1] <= range[1] && bound <= old_bound {
+        return current;
+    }
+    if old[0] <= range[1] && range[0] <= old[1] {
+        // Closed overlapping/adjacent restrictions cover their exact union,
+        // with the WEAKER of their two uniform positional bounds.
+        return (
+            [old[0].min(range[0]), old[1].max(range[1])],
+            old_bound.max(bound),
+        );
+    }
+    // One bounded cache window: replacing is safe; filling an unproved gap is not.
+    current
+}
+
 /// Immutable bindings to actual native edgeuses; no nearest-point parameter map.
 pub(crate) struct NativeTrimCoedge<'d> {
     pub(crate) edgeuse: EdgeuseId,
@@ -172,6 +243,9 @@ pub(crate) struct NativeTrimCoedge<'d> {
     pub(crate) forward: bool,
     pub(crate) c1: bool,
     curve: &'d Curve,
+    native_carrier_domain: Option<[[f64; 2]; 2]>,
+    native_carrier_containment: Option<NativeCurveCarrierContainment<'d>>,
+    native_trace_correspondence: Option<NativeTraceCorrespondence<'d>>,
     loop_index: usize,
     face: FaceId,
     index: usize,
@@ -192,10 +266,21 @@ impl<'d> NativeTrimCoedge<'d> {
         }
     }
     pub(crate) fn oriented_range(&self) -> [f64; 2] {
+        self.oriented_uv_range()
+    }
+    pub(crate) fn oriented_uv_range(&self) -> [f64; 2] {
         if self.forward {
             self.uv_range
         } else {
             [self.uv_range[1], self.uv_range[0]]
+        }
+    }
+
+    pub(crate) fn oriented_native_range(&self) -> [f64; 2] {
+        if self.forward {
+            self.native_range
+        } else {
+            [self.native_range[1], self.native_range[0]]
         }
     }
 
@@ -210,10 +295,123 @@ impl<'d> NativeTrimCoedge<'d> {
         Interval::new(range[0], range[1])?;
         if range[0] < self.uv_range[0] || range[1] > self.uv_range[1] {
             return Err(unavailable(
-                "native trim query exceeds its complete original UV restriction",
+                "native trim query exceeds its complete native UV restriction",
             ));
         }
-        parametric::curve2d_piecewise_jet(self.curve, range, work, cancel)
+        let mut jet = parametric::curve2d_piecewise_jet(self.curve, range, work, cancel)?;
+        if let Some(domain) = self.native_carrier_domain {
+            if (0..2).any(|axis| {
+                jet.position[axis].lo < domain[axis][0] || jet.position[axis].hi > domain[axis][1]
+            }) {
+                // Only complete homogeneous coefficient containment removes
+                // outward UV arithmetic excess. Actual excursions and unproved
+                // periodic aliases cannot acquire carrier-domain authority.
+                let captured = self
+                    .native_carrier_containment
+                    .as_ref()
+                    .is_some_and(|proof| {
+                        std::ptr::eq(proof.curve, self.curve)
+                            && proof.domain == domain
+                            && proof.range[0] <= range[0]
+                            && range[1] <= proof.range[1]
+                    });
+                if !captured
+                    && !parametric::curve2d_image_within_box(
+                        self.curve, range, domain, work, cancel,
+                    )?
+                {
+                    // Failure-only native evaluations distinguish a loose
+                    // whole-cell hull from an actual fitted-chart excursion.
+                    // These points supply diagnostics, never containment.
+                    let parameters = [range[0], range[0] * 0.5 + range[1] * 0.5, range[1]];
+                    let mut point_images = [[Interval::point(0.0); 2]; 3];
+                    for (parameter, image) in parameters.into_iter().zip(&mut point_images) {
+                        let point = parametric::CurveEvaluator::tensor(
+                            self.curve,
+                            [parameter; 2],
+                            0,
+                            work,
+                            cancel,
+                        )?[0];
+                        *image = [point[0], point[1]];
+                    }
+                    return Err(GeometryError::new(
+                        GeometryErrorCode::ConditioningFailure,
+                        format!(
+                            "native face {:?} coedge {}/{} UV image lacks immutable carrier containment: \
+                             owned_native_range={:?}, uv_range=[{:.17e},{:.17e}], \
+                             uv_image=[[{:.17e},{:.17e}],[{:.17e},{:.17e}]], \
+                             carrier_domain=[[{:.17e},{:.17e}],[{:.17e},{:.17e}]]; \
+                             native_point_parameters={parameters:?}, native_point_uv={point_images:?}; \
+                             no tolerance or periodic alias authority",
+                            self.face,
+                            self.loop_index,
+                            self.index,
+                            self.native_range,
+                            range[0],
+                            range[1],
+                            jet.position[0].lo,
+                            jet.position[0].hi,
+                            jet.position[1].lo,
+                            jet.position[1].hi,
+                            domain[0][0],
+                            domain[0][1],
+                            domain[1][0],
+                            domain[1][1],
+                        ),
+                    ));
+                }
+                for axis in 0..2 {
+                    jet.position[axis] = jet.position[axis]
+                        .intersect(Interval::new(domain[axis][0], domain[axis][1])?)?;
+                }
+            }
+        }
+        Ok(jet)
+    }
+
+    fn native_parameter_image(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(Interval, Interval), GeometryError> {
+        work.charge(1, cancel)?;
+        Interval::new(range[0], range[1])?;
+        if range[0] < self.native_range[0] || range[1] > self.native_range[1] {
+            return Err(unavailable(
+                "native chart query leaves its owned spatial edge range",
+            ));
+        }
+        let native_width =
+            Interval::point(self.native_range[1]).sub(Interval::point(self.native_range[0]));
+        let uv_width = Interval::point(self.uv_range[1]).sub(Interval::point(self.uv_range[0]));
+        let scale = uv_width.div(native_width)?;
+        let mapped = Interval::point(self.uv_range[0]).add(
+            Interval::new(range[0], range[1])?
+                .sub(Interval::point(self.native_range[0]))
+                .mul(scale),
+        );
+        // Exact normalized endpoint coverage removes only arithmetic excess.
+        let mapped = mapped.intersect(Interval::new(self.uv_range[0], self.uv_range[1])?)?;
+        Ok((mapped, scale))
+    }
+
+    /// Affine pairing used by the kernel's TWO separate normalized evaluations.
+    /// UV and spatial curves have independent gauges: matching normalization
+    /// and direction is not a same-point theorem. Physical consumers must
+    /// separately qualify the positional residual of this proposed pairing.
+    pub(crate) fn native_chart_jet(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<parametric::ChartCurveEnclosure, GeometryError> {
+        let (mapped, scale) = self.native_parameter_image(range, work, cancel)?;
+        let mut jet = self.chart_jet([mapped.lo, mapped.hi], work, cancel)?;
+        jet.derivative = jet.derivative.map(|v| v.mul(scale));
+        jet.second_derivative = jet.second_derivative.map(|v| v.mul(scale.square()));
+        Ok(jet)
     }
 
     /// Independent strict tangent qualification on the requested native chart
@@ -227,6 +425,150 @@ impl<'d> NativeTrimCoedge<'d> {
         self.chart_jet(range, work, cancel)?;
         parametric::curve2d_c1_jet(self.curve, range, work, cancel)
     }
+}
+
+fn native_trace_tensor(
+    chart: &parametric::curve_prepared::NativeChartCurve<'_>,
+    parameter: Interval,
+    scale: Interval,
+    order: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[[Interval; 3]; 4], GeometryError> {
+    let mut tensor = chart.tensor([parameter.lo, parameter.hi], order, work, cancel)?;
+    let mut factor = Interval::point(1.0);
+    for derivative in 1..=order {
+        factor = factor.mul(scale);
+        tensor[derivative] = tensor[derivative].map(|value| value.mul(factor));
+    }
+    Ok(tensor)
+}
+
+/// Same-parameter native trace qualification. The positional Taylor bounds
+/// are the native correspondence helper's existing third/second/first-order
+/// arithmetic, but NO fitted or reselected parameter map is allowed here:
+/// contained native restrictions must retain the kernel's normalization law.
+fn prove_fixed_native_trace_position(
+    coedge: &NativeTrimCoedge<'_>,
+    surface: &Surface,
+    spatial: &Curve,
+    range: [f64; 2],
+    maximum_error_mm: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    work.charge(1, cancel)?;
+    let chart = parametric::curve_prepared::NativeChartCurve {
+        surface,
+        chart: coedge.curve,
+    };
+    let (complete_uv, _) = coedge.native_parameter_image(range, work, cancel)?;
+    if !spatial.continuous(range, work, cancel)?
+        || !chart.continuous([complete_uv.lo, complete_uv.hi], work, cancel)?
+    {
+        return Err(unavailable(
+            "native coedge trace restriction lacks C0 coefficient continuity",
+        ));
+    }
+    let mut stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 2];
+    stack[0] = (range, 0);
+    let mut live = 1;
+    while live != 0 {
+        live -= 1;
+        let (range, depth) = stack[live];
+        work.charge(1, cancel)?;
+        let (uv, scale) = coedge.native_parameter_image(range, work, cancel)?;
+        let uv_range = [uv.lo, uv.hi];
+        let third = chart.single_open_span(uv_range, work, cancel)?
+            && parametric::curve_prepared::native_curve_single_open_span(
+                spatial, range, work, cancel,
+            )?;
+        let smooth = third
+            || (chart.smooth(uv_range, work, cancel)? && spatial.smooth(range, work, cancel)?);
+        let order = if third {
+            3
+        } else if smooth {
+            2
+        } else {
+            1
+        };
+        let middle_order = order - 1;
+        let native = spatial.tensor(range, order, work, cancel)?;
+        let carrier = native_trace_tensor(&chart, uv, scale, order, work, cancel)?;
+        let middle = range[0] * 0.5 + range[1] * 0.5;
+        let (middle_uv, middle_scale) = coedge.native_parameter_image([middle; 2], work, cancel)?;
+        let native_middle = spatial.tensor([middle; 2], middle_order, work, cancel)?;
+        let carrier_middle =
+            native_trace_tensor(&chart, middle_uv, middle_scale, middle_order, work, cancel)?;
+        let position_error: [Interval; 3] =
+            std::array::from_fn(|axis| native_middle[0][axis].sub(carrier_middle[0][axis]));
+        let point_error = norm(position_error)?;
+        if point_error.lo > maximum_error_mm {
+            return Err(unavailable(format!(
+                "native normalized trace has a positional counterexample: edgeuse={:?}, parameter={middle}, trace_cell={range:?}, native_range={:?}, uv_range={:?}, uv_parameter={middle_uv:?}, native_point={:?}, carrier_point={:?}, position_error_mm=[{:.17e},{:.17e}], allowance={maximum_error_mm} mm",
+                coedge.edgeuse,
+                coedge.native_range,
+                coedge.uv_range,
+                native_middle[0],
+                carrier_middle[0],
+                point_error.lo,
+                point_error.hi,
+            )));
+        }
+        let delta = Interval::new(range[0], range[1])?.sub(Interval::point(middle));
+        let half_square = delta.square().mul(Interval::point(0.5));
+        let third_factor = if third {
+            delta.square().mul(delta).div(Interval::point(6.0))?
+        } else {
+            Interval::point(0.0)
+        };
+        let residual = std::array::from_fn(|axis| {
+            let position = position_error[axis];
+            if third {
+                position
+                    .add(
+                        native_middle[1][axis]
+                            .sub(carrier_middle[1][axis])
+                            .mul(delta),
+                    )
+                    .add(
+                        native_middle[2][axis]
+                            .sub(carrier_middle[2][axis])
+                            .mul(half_square),
+                    )
+                    .add(native[3][axis].sub(carrier[3][axis]).mul(third_factor))
+            } else if smooth {
+                position
+                    .add(
+                        native_middle[1][axis]
+                            .sub(carrier_middle[1][axis])
+                            .mul(delta),
+                    )
+                    .add(native[2][axis].sub(carrier[2][axis]).mul(half_square))
+            } else {
+                position.add(native[1][axis].sub(carrier[1][axis]).mul(delta))
+            }
+        });
+        let error = norm(residual)?.hi;
+        if error <= maximum_error_mm {
+            continue;
+        }
+        if depth >= MAX_DEPTH || middle <= range[0] || middle >= range[1] {
+            return Err(unavailable(format!(
+                "complete native normalized trace exceeds positional allowance: edgeuse={:?}, range={range:?}, bound={error} mm, allowance={maximum_error_mm} mm",
+                coedge.edgeuse,
+            )));
+        }
+        if live + 2 > stack.len() {
+            return Err(resource(
+                "native coedge trace subdivision exceeds fixed scratch",
+            ));
+        }
+        stack[live] = ([middle, range[1]], depth + 1);
+        stack[live + 1] = ([range[0], middle], depth + 1);
+        live += 2;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +595,15 @@ struct TrimSpan {
     ends: [bool; 2],
 }
 
+/// A chart-only endpoint completion. Its complete carrier image is enclosed in
+/// the declared native vertex tolerance ball. It is not a spatial material edge
+/// and deliberately cannot be returned by an original-source accessor.
+struct NativeChartBridge {
+    loop_index: usize,
+    endpoints: [[Interval; 2]; 2],
+    enclosure: [Interval; 2],
+}
+
 /// One proved literal chart. This does not establish a spatial material face.
 pub(crate) struct PreparedFaceTrimDomain<'d> {
     definition: &'d Definition,
@@ -271,6 +622,8 @@ pub(crate) struct PreparedFaceTrimDomain<'d> {
     joint_after: Vec<Option<usize>>,
     original_margin_uv: Option<[f64; 2]>,
     original_chart_error_mm: Option<f64>,
+    native_tolerance_mm: Option<f64>,
+    native_bridges: Vec<NativeChartBridge>,
 }
 
 /// One borrowed definition, with no duplicate BREP and no synthetic source law.
@@ -281,6 +634,7 @@ pub(crate) struct PreparedNativeTrimSource<'d> {
     spatial_operators: Vec<SourceSpatialCacheEntry<'d>>,
     source_vertices: Vec<SourceVertexRecord>,
     source_inventory: Option<OriginalCorrespondenceInventory>,
+    native_tolerance_mm: Option<f64>,
 }
 
 impl<'d> PreparedNativeTrimSource<'d> {
@@ -330,9 +684,133 @@ impl<'d> PreparedNativeTrimSource<'d> {
             spatial_operators: Vec::new(),
             source_vertices: Vec::new(),
             source_inventory: None,
+            native_tolerance_mm: None,
         })
     }
 
+    /// Native BREP material authority, with no original-STEP correspondence.
+    /// The effective tolerance is the maximum of the kernel intersection policy
+    /// and native entity zones. Original source uncertainty remains provenance.
+    /// Tolerance bounds ambiguous chart joins; it never licenses an unresolved
+    /// interior, continuous shape query or source identity claim.
+    pub(crate) fn prepare_material(
+        definition: &'d Definition,
+        allowance: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        let mut tolerance = super::KERNEL_INTERSECTION_TOLERANCE_MM;
+        let mut include = |value: f64| -> Result<(), GeometryError> {
+            if !value.is_finite() || value < 0.0 {
+                return Err(unavailable(
+                    "native material tolerance is not finite/nonnegative",
+                ));
+            }
+            tolerance = tolerance.max(value);
+            Ok(())
+        };
+        for &face in definition.face_ids() {
+            work.charge(1, cancel)?;
+            let record = definition.brep().face(face).map_err(native_error)?;
+            include(record.tolerance)?;
+            for &wire in &record.loops {
+                let wire = definition.brep().loop_(wire).map_err(native_error)?;
+                for entry in &wire.edges {
+                    work.charge(1, cancel)?;
+                    let edge = definition.brep().edge(entry.edge).map_err(native_error)?;
+                    include(edge.tolerance)?;
+                    for vertex in edge.vertices {
+                        include(
+                            definition
+                                .brep()
+                                .vertex(vertex)
+                                .map_err(native_error)?
+                                .tolerance,
+                        )?;
+                    }
+                }
+            }
+        }
+        let count = definition.face_ids().len();
+        if count == 0 {
+            return Err(unavailable("native material source has no faces"));
+        }
+        memory(
+            size_of::<Self>() + checked_bytes::<PreparedFaceTrimDomain<'_>>(count)?,
+            allowance,
+        )?;
+        let mut result = Self {
+            definition,
+            faces: Vec::new(),
+            allowance,
+            spatial_operators: Vec::new(),
+            source_vertices: Vec::new(),
+            source_inventory: None,
+            native_tolerance_mm: Some(tolerance),
+        };
+        result
+            .faces
+            .try_reserve_exact(count)
+            .map_err(|_| resource("native material face inventory allocation failed"))?;
+        let mut retained = result.retained_bytes();
+        memory(retained, allowance)?;
+        for &face in definition.face_ids() {
+            let remaining = allowance
+                .checked_sub(retained)
+                .ok_or_else(|| resource("native material face inventory exceeds allowance"))?;
+            let before = work.consumed();
+            let domain = PreparedFaceTrimDomain::prepare_impl(
+                definition,
+                face,
+                remaining,
+                Some(tolerance),
+                work,
+                cancel,
+            )
+            .map_err(|error| {
+                work.annotate_error(
+                    error,
+                    before,
+                    format_args!("native material chart face={face:?}"),
+                )
+            })?;
+            retained = retained
+                .checked_add(domain.owned_bytes())
+                .ok_or_else(|| resource("native material face inventory byte count overflow"))?;
+            memory(retained, allowance)?;
+            result.faces.push(domain);
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn effective_tolerance_mm(&self) -> f64 {
+        self.native_tolerance_mm.unwrap_or(0.0)
+    }
+
+    pub(crate) fn native_vertex_point(
+        &self,
+        vertex: VertexId,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[f64; 3], GeometryError> {
+        work.charge(1, cancel)?;
+        if self.native_tolerance_mm.is_none() {
+            return Err(unavailable(
+                "native material vertex requires native material preparation",
+            ));
+        }
+        let p = self
+            .definition
+            .brep()
+            .vertex(vertex)
+            .map_err(native_error)?
+            .point;
+        let point = [p.x, p.y, p.z];
+        if point.iter().any(|v| !v.is_finite()) {
+            return Err(unavailable("native material vertex is not finite"));
+        }
+        Ok(point)
+    }
     pub(crate) fn definition(&self) -> &'d Definition {
         self.definition
     }
@@ -351,6 +829,79 @@ impl<'d> PreparedNativeTrimSource<'d> {
                 .iter()
                 .map(|entry| entry.operator.retained_bytes() + 2 * size_of::<usize>())
                 .sum::<usize>()
+    }
+
+    /// Prepare optional immutable positional query maps BEFORE callers snapshot
+    /// source bytes. Never allocate these retained maps inside a slab query.
+    /// A missing whole-branch map does not reject an otherwise provable local
+    /// restriction; it grants no substitute authority either.
+    pub(crate) fn prepare_native_position_maps(
+        &self,
+        allowance: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<usize, GeometryError> {
+        work.charge(1, cancel)?;
+        if self.native_tolerance_mm.is_none() {
+            return Err(unavailable(
+                "native query maps require native material preparation",
+            ));
+        }
+        let mut available = allowance;
+        for domain in &self.faces {
+            for coedge in &domain.coedges {
+                work.charge(1, cancel)?;
+                let Some(binding) = coedge.native_trace_correspondence.as_ref() else {
+                    continue;
+                };
+                if binding.derived_position.get().is_some() {
+                    continue;
+                }
+                let reference = parametric::curve_prepared::NativeChartCurve {
+                    surface: binding.surface,
+                    chart: binding.chart,
+                };
+                let target = NativeSpatialCurve {
+                    curve: binding.spatial,
+                    range: binding.native_range,
+                };
+                let proof = calibrate_native_curve_position(
+                    &reference,
+                    &target,
+                    binding.native_range,
+                    binding.material_tolerance_mm,
+                    24,
+                    available,
+                    work,
+                    cancel,
+                );
+                let qualified = match proof {
+                    Ok(map) => Some(map),
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            GeometryErrorCode::ParameterCorrespondenceUnavailable
+                                | GeometryErrorCode::ConditioningFailure
+                                | GeometryErrorCode::AnalysisIndeterminate
+                        ) =>
+                    {
+                        None
+                    }
+                    Err(error) => return Err(error),
+                };
+                let owned = qualified
+                    .as_ref()
+                    .map_or(0, NativePositionCalibration::owned_bytes);
+                available = available.checked_sub(owned).ok_or_else(|| {
+                    resource("native positional query maps exceed live source admission")
+                })?;
+                work.charge(1, cancel)?;
+                binding.derived_position.set(qualified).map_err(|_| {
+                    unavailable("native positional query map changed during preparation")
+                })?;
+            }
+        }
+        Ok(allowance - available)
     }
     pub(crate) fn face_domain(&self, ordinal: usize) -> Option<&PreparedFaceTrimDomain<'d>> {
         self.faces.get(ordinal)
@@ -397,33 +948,6 @@ impl<'d> PreparedNativeTrimSource<'d> {
         }
         Ok(())
     }
-    pub(crate) fn certify_zero_material_transport(
-        &self,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<bool, GeometryError> {
-        self.require_source_correspondence(work, cancel)?;
-        for face in &self.faces {
-            for coedge in &face.original_coedges {
-                work.charge(1, cancel)?;
-                let receipt = &coedge.correspondence;
-                if receipt.provenance() != OriginalCorrespondenceProvenance::ExactCoefficients
-                    || receipt.position_error_mm() != 0.0
-                    || receipt.relative_derivative_error_bound() != 0.0
-                    || !coedge.curve.spatial.operator.exact_source_endpoints()
-                {
-                    return Ok(false);
-                }
-            }
-            for joint in &face.original_joints {
-                work.charge(1, cancel)?;
-                if !joint.zero_displacement {
-                    return Ok(false);
-                }
-            }
-        }
-        Ok(true)
-    }
 }
 
 impl<'d> PreparedFaceTrimDomain<'d> {
@@ -433,6 +957,17 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         definition: &'d Definition,
         face_id: FaceId,
         allowance: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        Self::prepare_impl(definition, face_id, allowance, None, work, cancel)
+    }
+
+    fn prepare_impl(
+        definition: &'d Definition,
+        face_id: FaceId,
+        allowance: usize,
+        native_tolerance_mm: Option<f64>,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
@@ -538,6 +1073,8 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             original_margin_uv: None,
             original_chart_error_mm: None,
             joint_after: Vec::new(),
+            native_tolerance_mm,
+            native_bridges: Vec::new(),
         };
         result
             .coedges
@@ -618,7 +1155,9 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                         "native edgeuse {current:?} has no exact C0 coefficient qualification across its original knots"
                     )));
                 }
-                if !parametric::curve2d_image_within_box(curve, uv_range, domain, work, cancel)? {
+                let carrier_contained =
+                    parametric::curve2d_image_within_box(curve, uv_range, domain, work, cancel)?;
+                if native_tolerance_mm.is_none() && !carrier_contained {
                     return Err(unavailable(format!(
                         "native edgeuse {current:?} leaves its literal carrier chart; periodic/pole chart identification is unproved"
                     )));
@@ -633,6 +1172,35 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                     forward,
                     c1,
                     curve,
+                    native_carrier_domain: native_tolerance_mm.map(|_| domain),
+                    native_carrier_containment: (native_tolerance_mm.is_some()
+                        && carrier_contained)
+                        .then_some(NativeCurveCarrierContainment {
+                            curve,
+                            range: uv_range,
+                            domain,
+                        }),
+                    native_trace_correspondence: if let Some(tolerance) = native_tolerance_mm {
+                        Some(NativeTraceCorrespondence {
+                            spatial: definition.edge_curve(expected.edge).ok_or_else(|| {
+                                unavailable("native trace binding lost its spatial curve")
+                            })?,
+                            surface,
+                            chart: curve,
+                            edge: expected.edge,
+                            edgeuse: current,
+                            uv_owner,
+                            native_range,
+                            uv_range,
+                            carrier_domain: domain,
+                            material_tolerance_mm: tolerance,
+                            accepted_range_allowance: Cell::new(None),
+                            derived_position: OnceCell::new(),
+                            derived_image: Cell::new(None),
+                        })
+                    } else {
+                        None
+                    },
                     loop_index,
                     face: face_id,
                     index,
@@ -662,9 +1230,14 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                         "native chart circuit has inconsistent shared endpoint IDs",
                     ));
                 }
-                let p = exact_endpoint(a.curve, a_end, work, cancel)?;
-                let q = exact_endpoint(b.curve, b_start, work, cancel)?;
-                if !same_endpoint(&p, &q, work, cancel)? {
+                if native_tolerance_mm.is_some() {
+                    result.prepare_native_bridge(index, next, allowance, work, cancel)?;
+                } else {
+                    let p = exact_endpoint(a.curve, a_end, work, cancel)?;
+                    let q = exact_endpoint(b.curve, b_start, work, cancel)?;
+                    if same_endpoint(&p, &q, work, cancel)? {
+                        continue;
+                    }
                     return Err(unavailable(format!(
                         "native chart C0 identity unproved at edgeuses {:?}/{:?}: original endpoint coefficients differ or exact arithmetic is unavailable; a nominal edge gap is not closure",
                         a.edgeuse, b.edgeuse
@@ -672,6 +1245,27 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                 }
             }
             result.loops.push([start, end]);
+        }
+        if native_tolerance_mm.is_some() {
+            // The kernel owns native incidence. Do not recast coefficient-level
+            // embedding proofs as original-source material correspondence.
+            for coedge in 0..result.coedges.len() {
+                let curve = result.coedges[coedge].curve;
+                let range = result.coedges[coedge].uv_range;
+                for part in parametric::curve2d_parameter_spans(curve, range, work, cancel)? {
+                    reserve_span(&mut result, allowance)?;
+                    result.spans.push(TrimSpan {
+                        boundary: BoundaryCurve::Coedge(coedge),
+                        range: part,
+                        ends: [part[0] == range[0], part[1] == range[1]],
+                    });
+                }
+            }
+            // A filled bounded native trim lies in its complete boundary hull.
+            // Keep the carrier's natural domain on each coedge for evaluation,
+            // but do not make slab/height consumers search the untrimmed sheet.
+            result.domain = result.bounded_uv_cover(work, cancel)?;
+            return Ok(result);
         }
         // Each retained piece is injective by a strict monotone coordinate.
         // Every pair is then separated, except its genuine common endpoint.
@@ -715,13 +1309,157 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         Ok(result)
     }
 
+    fn prepare_native_bridge(
+        &mut self,
+        incoming: usize,
+        outgoing: usize,
+        allowance: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), GeometryError> {
+        let a = &self.coedges[incoming];
+        let b = &self.coedges[outgoing];
+        let endpoint_a = usize::from(a.forward);
+        let endpoint_b = usize::from(!b.forward);
+        let p = self.native_endpoint_position(a, endpoint_a, work, cancel)?;
+        let q = self.native_endpoint_position(b, endpoint_b, work, cancel)?;
+        let vertex = self
+            .definition
+            .brep()
+            .vertex(a.vertices[endpoint_a])
+            .map_err(native_error)?;
+        let point = [vertex.point.x, vertex.point.y, vertex.point.z];
+        for (coedge, endpoint) in [(a, endpoint_a), (b, endpoint_b)] {
+            let curve = self
+                .definition
+                .edge_curve(coedge.edge)
+                .ok_or_else(|| unavailable("native endpoint has no spatial coefficient curve"))?;
+            let t = coedge.native_range[endpoint];
+            let image = curve.tensor([t; 2], 0, work, cancel)?[0];
+            let gap = norm(std::array::from_fn(|axis| {
+                image[axis].sub(Interval::point(point[axis]))
+            }))?;
+            if gap.hi > self.effective_tolerance_mm() {
+                return Err(unavailable(
+                    "native spatial edge endpoint exceeds its declared material vertex tolerance",
+                ));
+            }
+        }
+        let enclosure: [Interval; 2] = std::array::from_fn(|axis| p[axis].hull(q[axis]));
+        let chart = enclosure.map(|v| [v.lo, v.hi]);
+        // A continuous carrier enclosure includes pole joins. A seam jump
+        // whose full bridge is not local is not silently welded.
+        let image = self.surface_evaluator().tensor(chart, 0, work, cancel)?[0][0];
+        let residual = norm(std::array::from_fn(|axis| {
+            image[axis].sub(Interval::point(point[axis]))
+        }))?;
+        if residual.hi > self.effective_tolerance_mm() {
+            return Err(unavailable(format!(
+                "native face {:?} endpoint chart bridge exceeds effective material tolerance ({} mm > {} mm)",
+                self.face,
+                residual.hi,
+                self.effective_tolerance_mm(),
+            )));
+        }
+        if (0..2).all(|axis| p[axis].is_point() && p[axis] == q[axis]) {
+            return Ok(());
+        }
+        let loop_index = a.loop_index;
+        memory(
+            self.retained_bytes() + size_of::<NativeChartBridge>(),
+            allowance,
+        )?;
+        self.native_bridges
+            .try_reserve_exact(1)
+            .map_err(|_| resource("native chart bridge allocation failed"))?;
+        self.native_bridges.push(NativeChartBridge {
+            loop_index,
+            endpoints: [p, q],
+            enclosure,
+        });
+        memory(self.retained_bytes(), allowance)?;
+        Ok(())
+    }
+
+    fn native_endpoint_position(
+        &self,
+        coedge: &NativeTrimCoedge<'_>,
+        endpoint: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[Interval; 2], GeometryError> {
+        let t = coedge.uv_range[endpoint];
+        let mut position = coedge.chart_jet([t; 2], work, cancel)?.position;
+        if (0..2).all(|axis| {
+            position[axis].lo >= self.domain[axis][0] && position[axis].hi <= self.domain[axis][1]
+        }) {
+            return Ok(position);
+        }
+        // At a native polar/periodic chart boundary the coefficient endpoint
+        // may be exactly on the boundary while interval evaluation rounds past
+        // it. Tighten only by exact homogeneous equality, never by an epsilon.
+        let exact = exact_endpoint(coedge.curve, endpoint, work, cancel)?;
+        for axis in 0..2 {
+            for bound in self.domain[axis] {
+                if position[axis].lo >= self.domain[axis][0]
+                    && position[axis].hi <= self.domain[axis][1]
+                {
+                    break;
+                }
+                let mut residual = exact.xy[axis].clone();
+                let coordinate = exact_product(
+                    &ExactCoefficient::point(bound),
+                    &ExactCoefficient::point(exact.weight),
+                    work,
+                    cancel,
+                )?;
+                residual
+                    .subtract(&coordinate)
+                    .ok_or_else(|| unavailable("native boundary equality exceeds exact scratch"))?;
+                if residual.sign() == 0 {
+                    position[axis] = Interval::point(bound);
+                }
+            }
+            if position[axis].lo < self.domain[axis][0] || position[axis].hi > self.domain[axis][1]
+            {
+                return Err(unavailable(
+                    "native trim endpoint leaves its carrier domain without exact boundary ownership",
+                ));
+            }
+        }
+        Ok(position)
+    }
+
+    fn connector_winding(
+        &self,
+        endpoints: &[[Interval; 2]; 2],
+        uv_box: [[f64; 2]; 2],
+        point: [f64; 2],
+        shear: f64,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<BoundaryWinding, GeometryError> {
+        work.charge(1, cancel)?;
+        let [a, b] = *endpoints;
+        if (0..2).all(|axis| {
+            let image = a[axis].hull(b[axis]);
+            uv_box[axis][0] <= image.hi && uv_box[axis][1] >= image.lo
+        }) {
+            return Ok(BoundaryWinding::Contact);
+        }
+        Ok(match chord_winding(a, b, point, shear) {
+            Some(value) => BoundaryWinding::Count(value),
+            None => BoundaryWinding::Unresolved,
+        })
+    }
+
     pub(crate) fn uv_domain(&self) -> [[f64; 2]; 2] {
         self.domain
     }
 
     /// Exclusion-only cover of the filled chart, never an Inside witness.
-    /// The admitted native circuits are finite, exactly C0-closed and simple:
-    /// their bounded winding regions lie within the whole-boundary coordinate
+    /// Native topology (or strict raw admission) owns the finite circuits;
+    /// endpoint uncertainty covers remain in their whole-boundary coordinate
     /// hull. Natural plane domains can be arbitrarily larger than that hull.
     pub(crate) fn bounded_uv_cover(
         &self,
@@ -734,11 +1472,37 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             work.charge(1, cancel)?;
             return Ok(self.domain);
         }
+        if self.native_tolerance_mm.is_some()
+            && self
+                .coedges
+                .iter()
+                .any(|coedge| coedge.native_carrier_containment.is_none())
+        {
+            // This is an exclusion-only surface cover, not a request to
+            // evaluate every trim or certify every C3D/UV correspondence.
+            // Keep the whole admitted native sheet when a narrower boundary
+            // hull is unavailable. Actual boundary queries still enter
+            // chart_jet and retain its strict carrier-containment obligation.
+            work.charge(self.coedges.len() as u64 + 1, cancel)?;
+            return Ok(self.domain);
+        }
         let mut boundary: Option<[Interval; 2]> = None;
         for span in &self.spans {
-            let curve = self.boundary_operand(span.boundary)?;
-            let image =
-                parametric::curve2d_piecewise_jet(&curve, span.range, work, cancel)?.position;
+            // Native coedges already own the immutable complete-carrier
+            // containment receipt. Reuse it before intersecting any outward
+            // image with the carrier; a raw interval hull alone cannot prove
+            // that an actual trim excursion stays in the active chart.
+            let image = match span.boundary {
+                BoundaryCurve::Coedge(index) if self.native_tolerance_mm.is_some() => {
+                    self.coedges[index]
+                        .chart_jet(span.range, work, cancel)?
+                        .position
+                }
+                boundary => {
+                    let curve = self.boundary_operand(boundary)?;
+                    parametric::curve2d_piecewise_jet(&curve, span.range, work, cancel)?.position
+                }
+            };
             boundary = Some(match boundary {
                 None => image,
                 Some(old) => std::array::from_fn(|axis| old[axis].hull(image[axis])),
@@ -777,6 +1541,20 @@ impl<'d> PreparedFaceTrimDomain<'d> {
     }
     pub(crate) fn coedges(&self) -> &[NativeTrimCoedge<'d>] {
         &self.coedges
+    }
+    pub(crate) fn coedge(&self, index: usize) -> Result<&NativeTrimCoedge<'d>, GeometryError> {
+        self.coedges
+            .get(index)
+            .ok_or_else(|| unavailable("native coedge ordinal is absent"))
+    }
+    pub(crate) fn loops(&self) -> &[[usize; 2]] {
+        &self.loops
+    }
+    pub(crate) fn is_native_material(&self) -> bool {
+        self.native_tolerance_mm.is_some()
+    }
+    pub(crate) fn effective_tolerance_mm(&self) -> f64 {
+        self.native_tolerance_mm.unwrap_or(0.0)
     }
     /// Source correction joints only. An empty result is a proved zero ordinary
     /// completion, never a native-only stand-in for missing source operands.
@@ -881,6 +1659,13 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<parametric::ChartCurveEnclosure, GeometryError> {
+        if self.is_native_material() {
+            return self
+                .coedges
+                .get(coedge)
+                .ok_or_else(|| unavailable("native trim coedge ordinal is absent"))?
+                .chart_jet(range, work, cancel);
+        }
         let curve = self.coedge_operand(coedge)?;
         let active = self.boundary_restriction(BoundaryCurve::Coedge(coedge)).0;
         Interval::new(range[0], range[1])?;
@@ -929,6 +1714,14 @@ impl<'d> PreparedFaceTrimDomain<'d> {
     }
     fn owned_bytes(&self) -> usize {
         self.coedges.capacity() * size_of::<NativeTrimCoedge<'_>>()
+            + self
+                .coedges
+                .iter()
+                .filter_map(|coedge| coedge.native_trace_correspondence.as_ref())
+                .filter_map(|binding| binding.derived_position.get())
+                .filter_map(Option::as_ref)
+                .map(NativePositionCalibration::owned_bytes)
+                .sum::<usize>()
             + self.loops.capacity() * size_of::<[usize; 2]>()
             + self.spans.capacity() * size_of::<TrimSpan>()
             + self.original_coedges.capacity() * size_of::<PreparedOriginalCoedge<'_>>()
@@ -939,6 +1732,7 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                 .sum::<usize>()
             + self.original_joints.capacity() * size_of::<PreparedTrimJoint>()
             + self.joint_after.capacity() * size_of::<Option<usize>>()
+            + self.native_bridges.capacity() * size_of::<NativeChartBridge>()
             + self.original_surface.as_ref().map_or(0, |surface| {
                 surface
                     .retained_bytes()
@@ -981,6 +1775,15 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         }
         if (0..2).any(|a| uv_box[a][0] < self.domain[a][0] || uv_box[a][1] > self.domain[a][1]) {
             return Ok(TrimClassification::Boundary);
+        }
+        for bridge in &self.native_bridges {
+            work.charge(1, cancel)?;
+            if (0..2).all(|axis| {
+                uv_box[axis][0] <= bridge.enclosure[axis].hi
+                    && uv_box[axis][1] >= bridge.enclosure[axis].lo
+            }) {
+                return Ok(TrimClassification::Boundary);
+            }
         }
         for joint in &self.original_joints {
             work.charge(1, cancel)?;
@@ -1039,6 +1842,32 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                                 winding = winding.checked_add(value).ok_or_else(|| {
                                     resource("source joint winding count overflow")
                                 })?
+                            }
+                            BoundaryWinding::Contact => return Ok(TrimClassification::Boundary),
+                            BoundaryWinding::Unresolved => {
+                                resolved = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if resolved {
+                    for bridge in &self.native_bridges {
+                        if bridge.loop_index != loop_index {
+                            continue;
+                        }
+                        match self.connector_winding(
+                            &bridge.endpoints,
+                            uv_box,
+                            point,
+                            shear,
+                            work,
+                            cancel,
+                        )? {
+                            BoundaryWinding::Count(value) => {
+                                winding = winding.checked_add(value).ok_or_else(|| {
+                                    resource("native bridge winding count overflow")
+                                })?;
                             }
                             BoundaryWinding::Contact => return Ok(TrimClassification::Boundary),
                             BoundaryWinding::Unresolved => {
@@ -2195,13 +3024,15 @@ fn checked_bytes<T>(count: usize) -> Result<usize, GeometryError> {
         .ok_or_else(|| resource("native trim byte count overflow"))
 }
 fn memory(retained: usize, allowance: usize) -> Result<(), GeometryError> {
-    if retained
-        .checked_add(SCRATCH_BYTES)
-        .is_none_or(|n| n > allowance)
-    {
-        return Err(resource(
-            "native trim retained and fixed scratch bytes exceed the live allocation allowance",
-        ));
+    let Some(required) = retained.checked_add(SCRATCH_BYTES) else {
+        return Err(resource(format!(
+            "native trim retained and fixed scratch byte count overflows: retained_bytes={retained}, fixed_scratch_bytes={SCRATCH_BYTES}, available_bytes={allowance}",
+        )));
+    };
+    if required > allowance {
+        return Err(resource(format!(
+            "native trim retained and fixed scratch bytes exceed the live allocation allowance: required_bytes={required}, available_bytes={allowance}, retained_bytes={retained}, fixed_scratch_bytes={SCRATCH_BYTES}",
+        )));
     }
     Ok(())
 }
@@ -3857,6 +4688,9 @@ struct ParameterSegment {
 }
 impl ParameterSegment {
     fn jet(&self, range: [f64; 2]) -> Result<[Interval; 4], GeometryError> {
+        self.jet_order(range, 3)
+    }
+    fn jet_order(&self, range: [f64; 2], order: usize) -> Result<[Interval; 4], GeometryError> {
         let [a, b] = self.endpoints;
         let length = Interval::point(b.source).sub(Interval::point(a.source));
         let v = Interval::new(range[0], range[1])?
@@ -3866,12 +4700,6 @@ impl ParameterSegment {
         let one = Interval::point(1.0).sub(v);
         let d0 = Interval::point(a.slope);
         let d2 = Interval::point(b.slope);
-        let d1 = Interval::point(b.target)
-            .sub(Interval::point(a.target))
-            .div(length)?
-            .mul(Interval::point(3.0))
-            .sub(d0)
-            .sub(d2);
         let controls = [
             Interval::point(a.target),
             Interval::point(a.target).add(length.mul(d0).div(Interval::point(3.0))?),
@@ -3887,11 +4715,28 @@ impl ParameterSegment {
                 a.target.min(b.target),
                 a.target.max(b.target),
             )?)?;
+        if order == 0 {
+            return Ok([
+                value,
+                Interval::point(0.0),
+                Interval::point(0.0),
+                Interval::point(0.0),
+            ]);
+        }
+        let d1 = Interval::point(b.target)
+            .sub(Interval::point(a.target))
+            .div(length)?
+            .mul(Interval::point(3.0))
+            .sub(d0)
+            .sub(d2);
         let first = d0
             .mul(one.square())
             .add(d1.mul(Interval::point(2.0).mul(v).mul(one)))
             .add(d2.mul(v.square()))
             .intersect(d0.hull(d1).hull(d2))?;
+        if order == 1 {
+            return Ok([value, first, Interval::point(0.0), Interval::point(0.0)]);
+        }
         let second0 = d1.sub(d0).mul(Interval::point(2.0)).div(length)?;
         let second1 = d2.sub(d1).mul(Interval::point(2.0)).div(length)?;
         let second = second0
@@ -3949,8 +4794,163 @@ impl ParameterSegment {
     }
 }
 
+/// A derived query map between two fixed native coefficient branches. The
+/// complete directed positional tube and endpoint coverage are proved, not an
+/// original/native parameter law, topology, embedding or relative-tangent claim.
+/// Only bounded parameter PREIMAGES escape; map derivatives stay private.
+pub(crate) struct NativePositionCalibration(CurveCalibrationMap);
+impl NativePositionCalibration {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.0.retained_bytes()
+    }
+    fn owned_bytes(&self) -> usize {
+        self.retained_bytes() - size_of::<Self>()
+    }
+    pub(crate) fn maximum_position_error_mm(&self) -> f64 {
+        self.0.maximum_position_error_mm
+    }
+    pub(crate) fn reference_range(&self) -> [f64; 2] {
+        self.0.source_range
+    }
+    pub(crate) fn target_range(&self) -> [f64; 2] {
+        self.0.target_range
+    }
+
+    /// The unique monotone-map preimage of a complete target restriction. For
+    /// native traces, target is C3D and reference is the carrier's C2D branch.
+    /// A conservative unresolved polynomial bracket remains an overcover.
+    pub(crate) fn reference_parameter_preimage(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Interval, GeometryError> {
+        work.charge(1, cancel)?;
+        let target = Interval::new(range[0], range[1])?;
+        let domain = self.0.target_range;
+        if range[0] < domain[0].min(domain[1]) || range[1] > domain[0].max(domain[1]) {
+            return Err(unavailable(
+                "native positional preimage leaves its proved complete target range",
+            ));
+        }
+        let reference = self.0.source_range;
+        if self.0.affine {
+            let slope = Interval::point(reference[1])
+                .sub(Interval::point(reference[0]))
+                .div(Interval::point(domain[1]).sub(Interval::point(domain[0])))?;
+            let mut image = Interval::point(reference[0])
+                .add(target.sub(Interval::point(domain[0])).mul(slope))
+                .intersect(Interval::new(reference[0], reference[1])?)?;
+            if range[0] == range[1] {
+                if range[0] == domain[0] {
+                    image = Interval::point(reference[0]);
+                }
+                if range[0] == domain[1] {
+                    image = Interval::point(reference[1]);
+                }
+            }
+            return Ok(image);
+        }
+        let forward = domain[1] > domain[0];
+        let sign = if forward { 1.0 } else { -1.0 };
+        let target = if forward {
+            range
+        } else {
+            [-range[1], -range[0]]
+        };
+        work.charge(
+            (usize::BITS - self.0.segments.len().leading_zeros() + 1) as u64,
+            cancel,
+        )?;
+        let first = self
+            .0
+            .segments
+            .partition_point(|segment| sign * segment.endpoints[1].target < target[0]);
+        let mut image: Option<Interval> = None;
+        for segment in &self.0.segments[first..] {
+            work.charge(1, cancel)?;
+            let [a, b] = segment.endpoints;
+            let lower = sign * a.target;
+            let upper = sign * b.target;
+            if lower > target[1] {
+                break;
+            }
+            let lo =
+                monotone_parameter_preimage(segment, target[0].max(lower), forward, work, cancel)?;
+            let hi =
+                monotone_parameter_preimage(segment, target[1].min(upper), forward, work, cancel)?;
+            let covered = Interval::new(lo.lo, hi.hi)?;
+            image = Some(image.map_or(covered, |old| old.hull(covered)));
+        }
+        image.ok_or_else(|| {
+            unavailable("native positional preimage has no covering proved map segment")
+        })
+    }
+}
+
+fn monotone_parameter_preimage(
+    segment: &ParameterSegment,
+    target: f64,
+    forward: bool,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Interval, GeometryError> {
+    let sign = if forward { 1.0 } else { -1.0 };
+    let signed = |value: Interval| if forward { value } else { value.neg() };
+    let [a, b] = segment.endpoints;
+    if target == sign * a.target {
+        return Ok(Interval::point(a.source));
+    }
+    if target == sign * b.target {
+        return Ok(Interval::point(b.source));
+    }
+    let mut bracket = Interval::new(a.source, b.source)?;
+    for _ in 0..MAX_DEPTH {
+        work.charge(2, cancel)?;
+        let middle = bracket.mid();
+        if middle <= bracket.lo || middle >= bracket.hi {
+            break;
+        }
+        let value = signed(segment.jet_order([middle; 2], 0)?[0]);
+        let derivative = signed(segment.jet_order([bracket.lo, bracket.hi], 1)?[1]);
+        if derivative.lo > 0.0 {
+            let contracted = Interval::point(middle)
+                .sub(value.sub(Interval::point(target)).div(derivative)?)
+                .intersect(bracket)?;
+            if contracted.lo > bracket.lo || contracted.hi < bracket.hi {
+                bracket = contracted;
+                continue;
+            }
+        }
+        if value.hi < target {
+            bracket.lo = middle;
+        } else if value.lo > target {
+            bracket.hi = middle;
+        } else {
+            let old = bracket;
+            // At an exact midpoint root, a stationary OUTER endpoint can make
+            // the whole bracket derivative nonstrict. Quarter probes safely
+            // remove that endpoint without treating a rounded value as a root.
+            for parameter in [old.lo * 0.5 + middle * 0.5, middle * 0.5 + old.hi * 0.5] {
+                work.charge(1, cancel)?;
+                let value = signed(segment.jet_order([parameter; 2], 0)?[0]);
+                if value.hi < target {
+                    bracket.lo = bracket.lo.max(parameter);
+                }
+                if value.lo > target {
+                    bracket.hi = bracket.hi.min(parameter);
+                }
+            }
+            if bracket.lo == old.lo && bracket.hi == old.hi {
+                break;
+            }
+        }
+    }
+    Ok(bracket)
+}
+
 /// Strong original-source receipt: only the relative-tangent constructor can
-/// expose this wrapper. Native positional proofs discard their private map.
+/// expose this wrapper. Native positional maps have no such tangent theorem.
 pub(crate) struct SourceCurveCalibration(CurveCalibrationMap);
 impl SourceCurveCalibration {
     pub(crate) fn retained_bytes(&self) -> usize {
@@ -4234,11 +5234,11 @@ pub(crate) fn calibrate_source_curves(
     Ok(SourceCurveCalibration(map))
 }
 
-/// Prove a complete directed native branch's positional tube, allowing actual
-/// stationary OUTER parameter endpoints. The map is strictly monotone on its
-/// interior and covers both literal target endpoints exactly. No source
-/// relative-tangent receipt or parameter-map authority escapes this consumer.
-pub(crate) fn prove_native_curve_position_correspondence(
+/// Qualify a complete directed native branch's positional tube and retain its
+/// derived monotone query map, allowing actual stationary OUTER endpoints.
+/// Literal target endpoints are covered exactly. No original-source parameter,
+/// topology or relative-tangent authority is produced.
+pub(crate) fn calibrate_native_curve_position(
     reference: &dyn parametric::CurveEvaluator,
     target: &dyn parametric::CurveEvaluator,
     target_range: [f64; 2],
@@ -4247,7 +5247,7 @@ pub(crate) fn prove_native_curve_position_correspondence(
     allowance: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
+) -> Result<NativePositionCalibration, GeometryError> {
     calibrate_curves(
         reference,
         target,
@@ -4258,8 +5258,8 @@ pub(crate) fn prove_native_curve_position_correspondence(
         CurveCalibrationTheorem::NativeDirectedPosition,
         work,
         cancel,
-    )?;
-    Ok(())
+    )
+    .map(NativePositionCalibration)
 }
 
 fn calibrate_curves(
@@ -4960,8 +5960,331 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             cancel,
         )
     }
-    pub(crate) fn material_realization(&self) -> super::OriginalMaterialRealization<'d> {
-        super::OriginalMaterialRealization::new(self.definition)
+
+    /// The callback uses the actual spatial edge gauge, not UV trim parameters.
+    pub(crate) fn with_native_spatial_curve<R>(
+        &self,
+        index: usize,
+        allowance: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+        callback: impl FnOnce(
+            &dyn parametric::CurveEvaluator,
+            &mut GeometryWorkBudget,
+            &AtomicBool,
+        ) -> Result<R, GeometryError>,
+    ) -> Result<R, GeometryError> {
+        work.charge(1, cancel)?;
+        if !self.is_native_material() {
+            return Err(unavailable(
+                "native spatial material query requires native preparation",
+            ));
+        }
+        if allowance < NATIVE_SPATIAL_QUERY_SCRATCH_BYTES {
+            return Err(resource(
+                "native spatial curve evaluator exceeds its scratch allowance",
+            ));
+        }
+        let coedge = self
+            .coedges
+            .get(index)
+            .ok_or_else(|| unavailable("native spatial coedge ordinal is absent"))?;
+        let curve = self
+            .definition
+            .edge_curve(coedge.edge)
+            .ok_or_else(|| unavailable("native spatial coedge has no coefficient curve"))?;
+        callback(
+            &NativeSpatialCurve {
+                curve,
+                range: coedge.native_range,
+            },
+            work,
+            cancel,
+        )
+    }
+
+    /// Qualify the COMPLETE requested native C3D/UV-carrier restriction, not an
+    /// irrelevant full coedge. Positive overlapping/adjacent restrictions may
+    /// share one bounded cache window; no slab, sample, radial or void authority.
+    pub(crate) fn qualify_native_coedge_trace(
+        &self,
+        index: usize,
+        range: [f64; 2],
+        maximum_error_mm: f64,
+        allowance: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), GeometryError> {
+        work.charge(1, cancel)?;
+        if !self.is_native_material() {
+            return Err(unavailable(
+                "native trace qualification requires native material preparation",
+            ));
+        }
+        let material_tolerance_mm = self.effective_tolerance_mm();
+        if !maximum_error_mm.is_finite()
+            || maximum_error_mm < 0.0
+            || maximum_error_mm > material_tolerance_mm
+        {
+            return Err(unavailable(
+                "native trace allowance leaves its captured material policy",
+            ));
+        }
+        let coedge = self.coedge(index)?;
+        Interval::new(range[0], range[1])?;
+        if range[0] < coedge.native_range[0] || range[1] > coedge.native_range[1] {
+            return Err(unavailable(
+                "native trace query leaves its captured physical edge restriction",
+            ));
+        }
+        let spatial = self
+            .definition
+            .edge_curve(coedge.edge)
+            .ok_or_else(|| unavailable("native trace lost its spatial coefficient curve"))?;
+        let surface = self
+            .definition
+            .face_surface(self.face)
+            .ok_or_else(|| unavailable("native trace lost its face coefficient carrier"))?;
+        coedge
+            .native_carrier_domain
+            .ok_or_else(|| unavailable("native trace has no admitted carrier domain"))?;
+        let binding = coedge.native_trace_correspondence.as_ref();
+        let same_owner = binding
+            .is_some_and(|proof| proof.matches(coedge, spatial, surface, material_tolerance_mm));
+        if same_owner
+            && binding
+                .and_then(|proof| proof.accepted_range_allowance.get())
+                .is_some_and(|(approved, bound)| {
+                    approved[0] <= range[0] && range[1] <= approved[1] && bound <= maximum_error_mm
+                })
+        {
+            return Ok(());
+        }
+        // This is TOTAL query scratch, including SCRATCH_BYTES already. The
+        // borrowed domain/approval storage belongs to the enclosing material
+        // owner; memory(retained, ...) would charge the common scratch twice.
+        if NATIVE_TRACE_QUERY_SCRATCH_BYTES > allowance {
+            return Err(resource(format!(
+                "native coedge trace scratch exceeds the live allocation allowance: required_scratch_bytes={NATIVE_TRACE_QUERY_SCRATCH_BYTES}, available_bytes={allowance}, face_index={}, coedge_index={index}",
+                self.face_index,
+            )));
+        }
+        prove_fixed_native_trace_position(
+            coedge,
+            surface,
+            spatial,
+            range,
+            maximum_error_mm,
+            work,
+            cancel,
+        )?;
+        // A failed, exhausted or cancelled qualification publishes no receipt.
+        work.charge(1, cancel)?;
+        if let Some(proof) = binding
+            && same_owner
+        {
+            let approved = merge_native_trace_approval(
+                proof.accepted_range_allowance.get(),
+                (range, maximum_error_mm),
+            );
+            proof.accepted_range_allowance.set(Some(approved));
+        }
+        Ok(())
+    }
+
+    /// Achieved positional bound for this complete, unchanged native boundary.
+    /// The section consumer uses native millimetres, not the original unit
+    /// label. This exports no parameter derivative or relative-tangent receipt.
+    pub(crate) fn complete_native_position_bound_mm(
+        &self,
+        index: usize,
+        maximum_error_mm: f64,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<f64>, GeometryError> {
+        work.charge(7, cancel)?;
+        if !self.is_native_material() || !maximum_error_mm.is_finite() || maximum_error_mm < 0.0 {
+            return Ok(None);
+        }
+        let coedge = self.coedge(index)?;
+        let Some(binding) = coedge.native_trace_correspondence.as_ref() else {
+            return Ok(None);
+        };
+        let Some(Some(map)) = binding.derived_position.get() else {
+            return Ok(None);
+        };
+        let spatial = self
+            .definition
+            .edge_curve(coedge.edge)
+            .ok_or_else(|| unavailable("native positional receipt lost its spatial curve"))?;
+        let surface = self
+            .definition
+            .face_surface(self.face)
+            .ok_or_else(|| unavailable("native positional receipt lost its face carrier"))?;
+        let native_use = self
+            .definition
+            .brep()
+            .edgeuse(coedge.edgeuse)
+            .map_err(native_error)?;
+        let (chart, owner) =
+            edgeuse::uv_trim_curve(self.definition.brep(), coedge.edgeuse).map_err(native_error)?;
+        let Some(chart) = chart else {
+            return Ok(None);
+        };
+        let edge = self
+            .definition
+            .brep()
+            .edge(coedge.edge)
+            .map_err(native_error)?;
+        let uv = chart.natural_interval();
+        let tolerance = self.effective_tolerance_mm();
+        let achieved = map.maximum_position_error_mm();
+        if !binding.matches(coedge, spatial, surface, tolerance)
+            || native_use.edge != Some(coedge.edge)
+            || owner != Some(coedge.uv_owner)
+            || !std::ptr::eq(chart, coedge.curve)
+            || edgeuse::face(self.definition.brep(), coedge.edgeuse).map_err(native_error)?
+                != Some(self.face)
+            || coedge.native_range != [edge.interval.min(), edge.interval.max()]
+            || coedge.uv_range != [uv.min(), uv.max()]
+            || map.reference_range() != coedge.uv_range
+            || map.target_range() != coedge.native_range
+            || !achieved.is_finite()
+            || achieved < 0.0
+            || achieved > tolerance
+            || achieved > maximum_error_mm
+        {
+            return Ok(None);
+        }
+        Ok(Some(achieved))
+    }
+
+    /// Carrier UV POSITION image for a canonical C3D restriction, through a
+    /// preprepared native positional map. No UV derivative or original gauge is
+    /// exposed, and no retained allocation may occur during this query.
+    pub(crate) fn derived_native_coedge_uv_image(
+        &self,
+        index: usize,
+        range: [f64; 2],
+        maximum_error_mm: f64,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<[Interval; 2]>, GeometryError> {
+        work.charge(1, cancel)?;
+        let tolerance = self.effective_tolerance_mm();
+        if !self.is_native_material()
+            || !maximum_error_mm.is_finite()
+            || maximum_error_mm < 0.0
+            || maximum_error_mm > tolerance
+        {
+            return Err(unavailable(
+                "native positional query leaves its captured material policy",
+            ));
+        }
+        let coedge = self.coedge(index)?;
+        let Some(binding) = coedge.native_trace_correspondence.as_ref() else {
+            return Ok(None);
+        };
+        let Some(Some(map)) = binding.derived_position.get() else {
+            return Ok(None);
+        };
+        let spatial = self
+            .definition
+            .edge_curve(coedge.edge)
+            .ok_or_else(|| unavailable("native positional query lost its spatial curve"))?;
+        let surface = self
+            .definition
+            .face_surface(self.face)
+            .ok_or_else(|| unavailable("native positional query lost its carrier"))?;
+        if !binding.matches(coedge, spatial, surface, tolerance)
+            || map.maximum_position_error_mm() > maximum_error_mm
+            || map.reference_range() != coedge.uv_range
+            || map.target_range() != coedge.native_range
+        {
+            return Ok(None);
+        }
+        if let Some((queried, image)) = binding.derived_image.get()
+            && queried == range
+        {
+            return Ok(Some(image));
+        }
+        let parameter = map.reference_parameter_preimage(range, work, cancel)?;
+        let image = coedge
+            .chart_jet([parameter.lo, parameter.hi], work, cancel)?
+            .position;
+        work.charge(1, cancel)?;
+        binding.derived_image.set(Some((range, image)));
+        Ok(Some(image))
+    }
+}
+
+/// Stack-only native edge restriction; no duplicate coefficient owner or
+/// original-parameter calibration.
+struct NativeSpatialCurve<'d> {
+    curve: &'d Curve,
+    range: [f64; 2],
+}
+impl NativeSpatialCurve<'_> {
+    fn require_range(&self, range: [f64; 2]) -> Result<(), GeometryError> {
+        Interval::new(range[0], range[1])?;
+        if range[0] < self.range[0] || range[1] > self.range[1] {
+            return Err(unavailable(
+                "native spatial query leaves its owned edge restriction",
+            ));
+        }
+        Ok(())
+    }
+}
+impl parametric::CurveEvaluator for NativeSpatialCurve<'_> {
+    fn active_range(&self) -> [f64; 2] {
+        self.range
+    }
+    fn tensor(
+        &self,
+        range: [f64; 2],
+        order: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[[Interval; 3]; 4], GeometryError> {
+        self.require_range(range)?;
+        self.curve.tensor(range, order, work, cancel)
+    }
+    fn continuous(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        self.require_range(range)?;
+        self.curve.continuous(range, work, cancel)
+    }
+    fn smooth(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        self.require_range(range)?;
+        self.curve.smooth(range, work, cancel)
+    }
+    fn parameter_spans(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<parametric::AxisSpans<'_>, GeometryError> {
+        self.require_range(range)?;
+        self.curve.parameter_spans(range, work, cancel)
+    }
+    fn native_curve(&self) -> Option<&Curve> {
+        Some(self.curve)
+    }
+    fn exact_affine_coefficients(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<parametric::ExactAffineCurve>, GeometryError> {
+        self.curve.exact_affine_coefficients(work, cancel)
     }
 }
 
@@ -5628,6 +6951,9 @@ impl<'d> NativeFaceSkeleton<'d> {
                     forward: entry.forward,
                     c1: false,
                     curve,
+                    native_carrier_domain: None,
+                    native_carrier_containment: None,
+                    native_trace_correspondence: None,
                     loop_index: wire_index,
                     face,
                     index,
@@ -6264,6 +7590,7 @@ impl<'d> PreparedNativeTrimSource<'d> {
             spatial_operators: Vec::new(),
             source_vertices: Vec::new(),
             source_inventory: None,
+            native_tolerance_mm: None,
         };
         prepared
             .faces
@@ -7110,6 +8437,8 @@ fn finish_original_face<'d>(
                 actual_error = actual_error.max(joint.physical_error_mm);
             }
             let mut domain = PreparedFaceTrimDomain {
+                native_tolerance_mm: None,
+                native_bridges: Vec::new(),
                 definition: skeleton.definition,
                 face: skeleton.face,
                 face_index: skeleton.face_index,
@@ -7388,6 +8717,804 @@ mod tests {
         "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
     );
 
+    fn quadratic_position_map(reverse: bool, split: bool) -> NativePositionCalibration {
+        let sample = |source: f64| ParameterSample {
+            source,
+            target: if reverse {
+                1.0 - source * source
+            } else {
+                source * source
+            },
+            slope: if reverse { -2.0 * source } else { 2.0 * source },
+        };
+        let segments = if split {
+            vec![
+                ParameterSegment {
+                    endpoints: [sample(0.0), sample(0.5)],
+                },
+                ParameterSegment {
+                    endpoints: [sample(0.5), sample(1.0)],
+                },
+            ]
+        } else {
+            vec![ParameterSegment {
+                endpoints: [sample(0.0), sample(1.0)],
+            }]
+        };
+        for segment in &segments {
+            assert!(
+                segment
+                    .directed_position_monotone([0.0, 1.0], !reverse)
+                    .unwrap()
+            );
+        }
+        NativePositionCalibration(CurveCalibrationMap {
+            segments,
+            cuts: if split {
+                vec![0.0, 0.5, 1.0]
+            } else {
+                vec![0.0, 1.0]
+            },
+            source_range: [0.0, 1.0],
+            target_range: if reverse { [1.0, 0.0] } else { [0.0, 1.0] },
+            affine: false,
+            maximum_position_error_mm: 0.0,
+            relative_derivative_error_bound: None,
+        })
+    }
+
+    #[test]
+    fn native_position_preimage_covers_monotone_polynomials_and_stationary_outer_endpoints() {
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        for reverse in [false, true] {
+            for split in [false, true] {
+                let map = quadratic_position_map(reverse, split);
+                let target = if reverse { [0.19, 0.75] } else { [0.25, 0.81] };
+                let image = map
+                    .reference_parameter_preimage(target, &mut work, &cancel)
+                    .unwrap();
+                assert!(image.lo <= 0.5 && image.hi >= 0.9);
+                assert!(
+                    image.width() < 0.40000001,
+                    "the proved inverse must actually contract"
+                );
+                for endpoint in [0.0, 1.0] {
+                    let target = if reverse { 1.0 - endpoint } else { endpoint };
+                    assert_eq!(
+                        map.reference_parameter_preimage([target; 2], &mut work, &cancel)
+                            .unwrap(),
+                        Interval::point(endpoint),
+                    );
+                }
+            }
+        }
+        let map = quadratic_position_map(false, true);
+        assert_eq!(
+            map.reference_parameter_preimage([0.25; 2], &mut work, &cancel)
+                .unwrap(),
+            Interval::point(0.5),
+            "adjacent proved segments share their literal endpoint exactly",
+        );
+        let image = map
+            .reference_parameter_preimage(
+                [0.25_f64.next_down(), 0.25_f64.next_up()],
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        assert!(image.lo <= 0.5 && image.hi >= 0.5 && image.width() < 1e-8);
+        assert!(
+            map.reference_parameter_preimage([-f64::EPSILON, 0.1], &mut work, &cancel)
+                .is_err()
+        );
+        assert_eq!(
+            map.reference_parameter_preimage([0.2, 0.3], &mut GeometryWorkBudget::new(0), &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        assert_eq!(
+            map.reference_parameter_preimage([0.2, 0.3], &mut work, &AtomicBool::new(true))
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::Cancelled,
+        );
+    }
+
+    #[test]
+    fn native_position_maps_retain_real_gauge_preimages_without_query_heap_growth() {
+        let definition = crate::from_step_bytes(HOUSING).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let mut source = PreparedNativeTrimSource::prepare_material(
+            &definition,
+            32 * 1024 * 1024,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let initial = source.retained_bytes();
+        assert_eq!(
+            source
+                .prepare_native_position_maps(0, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        assert_eq!(
+            source.retained_bytes(),
+            initial,
+            "exhausted map preparation retains no failed allocation"
+        );
+        assert_eq!(
+            source
+                .prepare_native_position_maps(32 * 1024 * 1024, &mut work, &AtomicBool::new(true))
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::Cancelled,
+        );
+        let growth = source
+            .prepare_native_position_maps(32 * 1024 * 1024, &mut work, &cancel)
+            .unwrap();
+        let retained = source.retained_bytes();
+        assert_eq!(retained, initial + growth);
+        let (face, index) = source
+            .faces
+            .iter()
+            .enumerate()
+            .find_map(|(face, domain)| {
+                domain
+                    .coedges()
+                    .iter()
+                    .position(|coedge| coedge.edgeuse == EdgeuseId::from_index(196))
+                    .map(|index| (face, index))
+            })
+            .expect("observed housing native coedge must retain its source identity");
+        let domain = &source.faces[face];
+        let range = [0.00011238767719667916, 0.00011238767719667919];
+        let tolerance = domain.effective_tolerance_mm();
+        assert_eq!(
+            domain
+                .qualify_native_coedge_trace(
+                    index,
+                    range,
+                    tolerance,
+                    NATIVE_TRACE_QUERY_SCRATCH_BYTES,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+            "the fixed normalized gauge is not promoted merely because a derived map exists",
+        );
+        let binding = domain.coedges[index]
+            .native_trace_correspondence
+            .as_ref()
+            .unwrap();
+        let map = binding
+            .derived_position
+            .get()
+            .and_then(Option::as_ref)
+            .expect("the actual mismatched native trace needs a complete derived positional map");
+        assert!(map.maximum_position_error_mm() <= tolerance);
+        assert_eq!(map.reference_range(), domain.coedges[index].uv_range);
+        assert_eq!(map.target_range(), domain.coedges[index].native_range);
+        let achieved = domain
+            .complete_native_position_bound_mm(index, tolerance, &mut work, &cancel)
+            .unwrap()
+            .expect("the complete unchanged native boundary owns its achieved bound");
+        assert_eq!(achieved, map.maximum_position_error_mm());
+        assert!(achieved > 0.0);
+        assert!(
+            domain
+                .complete_native_position_bound_mm(index, achieved * 0.5, &mut work, &cancel)
+                .unwrap()
+                .is_none(),
+            "a positional map grants no stricter error than it proved"
+        );
+        let uv = domain
+            .derived_native_coedge_uv_image(index, range, tolerance, &mut work, &cancel)
+            .unwrap()
+            .expect("native C3D restrictions have a bounded UV-image preimage");
+        assert_eq!(
+            domain
+                .derived_native_coedge_uv_image(
+                    index,
+                    range,
+                    tolerance,
+                    &mut GeometryWorkBudget::new(1),
+                    &cancel
+                )
+                .unwrap(),
+            Some(uv),
+            "the identical swept/normal query reuses only its nonborrowed image",
+        );
+        assert_eq!(
+            source.retained_bytes(),
+            retained,
+            "nested map queries may not grow source-owned heap"
+        );
+        let old_owner = source.faces[face].coedges[index].uv_owner;
+        source.faces[face].coedges[index].uv_owner = EdgeuseId::from_index(0);
+        assert!(
+            source.faces[face]
+                .derived_native_coedge_uv_image(index, range, tolerance, &mut work, &cancel)
+                .unwrap()
+                .is_none(),
+            "a stale native owner cannot reuse either the map or its image cache"
+        );
+        assert!(
+            source.faces[face]
+                .complete_native_position_bound_mm(index, tolerance, &mut work, &cancel)
+                .unwrap()
+                .is_none(),
+            "the section consumer cannot borrow a foreign UV owner"
+        );
+        source.faces[face].coedges[index].uv_owner = old_owner;
+        let old_range = source.faces[face].coedges[index].native_range;
+        source.faces[face].coedges[index].native_range[1] = old_range[0] * 0.5 + old_range[1] * 0.5;
+        assert!(
+            source.faces[face]
+                .complete_native_position_bound_mm(index, tolerance, &mut work, &cancel)
+                .unwrap()
+                .is_none(),
+            "a full-edge receipt cannot be relabelled with another physical range"
+        );
+        source.faces[face].coedges[index].native_range = old_range;
+        let old_uv_range = source.faces[face].coedges[index].uv_range;
+        source.faces[face].coedges[index].uv_range[1] =
+            old_uv_range[0] * 0.5 + old_uv_range[1] * 0.5;
+        assert!(
+            source.faces[face]
+                .complete_native_position_bound_mm(index, tolerance, &mut work, &cancel)
+                .unwrap()
+                .is_none(),
+            "a partial UV branch is not the complete actual native curve"
+        );
+        source.faces[face].coedges[index].uv_range = old_uv_range;
+        assert_eq!(
+            source
+                .prepare_native_position_maps(0, &mut work, &cancel)
+                .unwrap(),
+            0
+        );
+        assert_eq!(source.retained_bytes(), retained);
+    }
+
+    #[test]
+    fn native_position_map_warming_precedes_shared_owner_byte_snapshots() {
+        let definition = crate::from_step_bytes(HOUSING).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let prepared = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let before = prepared.retained_bytes();
+        let available = crate::MAX_PREPARED_SECTION_BYTES - before;
+        let remaining = prepared
+            .prepare_native_position_maps(available, &mut work, &cancel)
+            .unwrap();
+        let after = prepared.retained_bytes();
+        assert_eq!(
+            available - remaining,
+            after - before,
+            "charge new map capacity exactly once"
+        );
+        assert_eq!(
+            prepared.source_view().unwrap().retained_owner_bytes(),
+            after
+        );
+        assert_eq!(
+            prepared
+                .prepare_native_position_maps(remaining, &mut GeometryWorkBudget::new(1), &cancel)
+                .unwrap(),
+            remaining,
+        );
+        assert_eq!(prepared.retained_bytes(), after);
+        assert_eq!(
+            prepared
+                .prepare_native_position_maps(remaining, &mut work, &AtomicBool::new(true))
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::Cancelled,
+        );
+    }
+
+    #[test]
+    fn native_trace_approval_union_never_bridges_unproved_gaps() {
+        assert_eq!(
+            merge_native_trace_approval(Some(([0.0, 2.0], 1e-6)), ([1.0, 3.0], 2e-6)),
+            ([0.0, 3.0], 2e-6),
+        );
+        assert_eq!(
+            merge_native_trace_approval(Some(([0.0, 2.0], 2e-6)), ([2.0, 3.0], 1e-6)),
+            ([0.0, 3.0], 2e-6),
+        );
+        assert_eq!(
+            merge_native_trace_approval(Some(([0.0, 3.0], 2e-6)), ([1.0, 2.0], 1e-6)),
+            ([0.0, 3.0], 2e-6),
+            "a tighter interior bound cannot tighten the unvisited remainder",
+        );
+        assert_eq!(
+            merge_native_trace_approval(Some(([1.0, 2.0], 2e-6)), ([0.0, 3.0], 1e-6)),
+            ([0.0, 3.0], 1e-6),
+        );
+        let after_gap = ([1.0_f64.next_up(), 2.0], 1e-6);
+        assert_eq!(
+            merge_native_trace_approval(Some(([0.0, 1.0], 2e-6)), after_gap),
+            after_gap,
+            "even an arithmetic-sized unproved gap cannot be merged",
+        );
+    }
+
+    #[test]
+    fn native_trace_failure_outside_an_accepted_range_does_not_invalidate_it() {
+        let definition = crate::from_step_bytes(HOUSING).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let source = PreparedNativeTrimSource::prepare_material(
+            &definition,
+            32 * 1024 * 1024,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        // Actual housing pair 9/16 reaches an unqualified endpoint outside its
+        // layer-one closed cut. Census bounded native restrictions to retain a
+        // real admitted interval without presuming a different parameter map.
+        let domain = &source.faces[9];
+        let index = 1;
+        let full = domain.coedges[index].native_range;
+        let width = full[1] - full[0];
+        let tolerance = domain.effective_tolerance_mm();
+        let mut accepted = None;
+        for part in 1..16 {
+            let range = [
+                full[0] + width * f64::from(part) / 16.0,
+                full[0] + width * f64::from(part + 1) / 16.0,
+            ];
+            match domain.qualify_native_coedge_trace(
+                index,
+                range,
+                tolerance,
+                NATIVE_TRACE_QUERY_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+            ) {
+                Ok(()) => {
+                    accepted = Some(range);
+                    break;
+                }
+                Err(error)
+                    if matches!(
+                        error.code,
+                        GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled
+                    ) =>
+                {
+                    panic!("bounded native trace census failed: {error:?}");
+                }
+                Err(_) => {}
+            }
+        }
+        let accepted =
+            accepted.expect("the actual coedge retains an admitted interior restriction");
+        let approval = &domain.coedges[index]
+            .native_trace_correspondence
+            .as_ref()
+            .unwrap()
+            .accepted_range_allowance;
+        assert_eq!(approval.get(), Some((accepted, tolerance)));
+        let failure = domain
+            .qualify_native_coedge_trace(
+                index,
+                full,
+                tolerance,
+                NATIVE_TRACE_QUERY_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .expect_err("an admitted interior cannot certify the observed unqualified endpoint");
+        assert!(!matches!(
+            failure.code,
+            GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled
+        ));
+        assert_eq!(
+            approval.get(),
+            Some((accepted, tolerance)),
+            "failed broader qualification neither erases nor extends the valid restriction"
+        );
+        domain
+            .qualify_native_coedge_trace(
+                index,
+                accepted,
+                tolerance,
+                0,
+                &mut GeometryWorkBudget::new(1),
+                &cancel,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn native_coedge_trace_reuses_only_completed_tolerance_bound_correspondence() {
+        // This generic coercion fails to compile if cache mutation makes the
+        // prepared source lifetime invariant again.
+        fn shorter<'a, 'd: 'a>(
+            domain: &'a PreparedFaceTrimDomain<'d>,
+        ) -> &'a PreparedFaceTrimDomain<'a> {
+            domain
+        }
+
+        let definition = crate::from_step_bytes(HOUSING).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let source = PreparedNativeTrimSource::prepare_material(
+            &definition,
+            32 * 1024 * 1024,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let domain = shorter(&source.faces[4]);
+        let index = 2;
+        let range = domain.coedges[index].native_range;
+        let tolerance = domain.effective_tolerance_mm();
+        let approval = &domain.coedges[index]
+            .native_trace_correspondence
+            .as_ref()
+            .unwrap()
+            .accepted_range_allowance;
+        assert_eq!(
+            approval.get(),
+            None,
+            "native preparation does no eager trace qualification"
+        );
+        assert_eq!(
+            domain
+                .qualify_native_coedge_trace(
+                    index,
+                    range,
+                    tolerance,
+                    NATIVE_TRACE_QUERY_SCRATCH_BYTES - 1,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit,
+            "a cold trace must reserve its complete advertised evaluator scratch",
+        );
+        assert_eq!(approval.get(), None);
+        domain
+            .qualify_native_coedge_trace(
+                index,
+                range,
+                tolerance,
+                NATIVE_TRACE_QUERY_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(approval.get(), Some((range, tolerance)));
+        let contained = [range[0], range[0] * 0.5 + range[1] * 0.5];
+        domain
+            .qualify_native_coedge_trace(
+                index,
+                contained,
+                tolerance,
+                0,
+                &mut GeometryWorkBudget::new(1),
+                &cancel,
+            )
+            .expect(
+                "a completed trace restriction needs no evaluator scratch for a contained query",
+            );
+        assert_eq!(
+            domain
+                .qualify_native_coedge_trace(
+                    index,
+                    contained,
+                    tolerance * 0.5,
+                    32 * 1024 * 1024,
+                    &mut GeometryWorkBudget::new(1),
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit,
+            "a tighter allowance requires fresh complete qualification",
+        );
+        assert_eq!(
+            approval.get(),
+            Some((range, tolerance)),
+            "failed tightening keeps only the old positive bound"
+        );
+        assert!(
+            domain
+                .qualify_native_coedge_trace(
+                    index,
+                    [range[0].next_down(), range[1]],
+                    tolerance,
+                    0,
+                    &mut work,
+                    &cancel,
+                )
+                .is_err(),
+            "a complete trace cannot authorize an extended native restriction"
+        );
+        approval.set(None);
+        assert_eq!(
+            domain
+                .qualify_native_coedge_trace(
+                    index,
+                    range,
+                    tolerance,
+                    32 * 1024 * 1024,
+                    &mut GeometryWorkBudget::new(1),
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        assert_eq!(
+            approval.get(),
+            None,
+            "exhausted qualification is not cached"
+        );
+        assert_eq!(
+            domain
+                .qualify_native_coedge_trace(
+                    index,
+                    range,
+                    tolerance,
+                    32 * 1024 * 1024,
+                    &mut work,
+                    &AtomicBool::new(true),
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::Cancelled,
+        );
+        assert_eq!(
+            approval.get(),
+            None,
+            "cancelled qualification is not cached"
+        );
+    }
+
+    #[test]
+    fn native_coedge_trace_binding_rejects_stale_geometry_ranges_and_policy() {
+        let definition = crate::from_step_bytes(HOUSING).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let mut source = PreparedNativeTrimSource::prepare_material(
+            &definition,
+            32 * 1024 * 1024,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let face = 4;
+        let index = 2;
+        let range = source.faces[face].coedges[index].native_range;
+        let uv_range = source.faces[face].coedges[index].uv_range;
+        let carrier = source.faces[face].coedges[index].native_carrier_domain;
+        let curve = source.faces[face].coedges[index].curve;
+        let edge = source.faces[face].coedges[index].edge;
+        let face_id = source.faces[face].face;
+        let tolerance = source.faces[face].effective_tolerance_mm();
+        source.faces[face]
+            .qualify_native_coedge_trace(
+                index,
+                range,
+                tolerance,
+                32 * 1024 * 1024,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        let other_chart = source
+            .faces
+            .iter()
+            .flat_map(|domain| domain.coedges.iter())
+            .find(|entry| !std::ptr::eq(entry.curve, curve))
+            .unwrap()
+            .curve;
+        let spatial = definition.edge_curve(edge).unwrap();
+        let other_edge = source
+            .faces
+            .iter()
+            .flat_map(|domain| domain.coedges.iter())
+            .find(|entry| {
+                definition
+                    .edge_curve(entry.edge)
+                    .is_some_and(|candidate| !std::ptr::eq(candidate, spatial))
+            })
+            .unwrap()
+            .edge;
+        let surface = definition.face_surface(face_id).unwrap();
+        let other_face = *definition
+            .face_ids()
+            .iter()
+            .find(|&&id| {
+                definition
+                    .face_surface(id)
+                    .is_some_and(|candidate| !std::ptr::eq(candidate, surface))
+            })
+            .unwrap();
+        let contained = [range[0], range[0] * 0.5 + range[1] * 0.5];
+        let miss = |domain: &PreparedFaceTrimDomain<'_>| {
+            assert_eq!(
+                domain
+                    .qualify_native_coedge_trace(
+                        index,
+                        contained,
+                        tolerance,
+                        32 * 1024 * 1024,
+                        &mut GeometryWorkBudget::new(1),
+                        &cancel,
+                    )
+                    .unwrap_err()
+                    .code,
+                GeometryErrorCode::ResourceLimit,
+                "changed native binding cannot reuse the old approval",
+            );
+        };
+        source.faces[face].coedges[index].curve = other_chart;
+        miss(&source.faces[face]);
+        source.faces[face].coedges[index].curve = curve;
+        source.faces[face].coedges[index].edge = other_edge;
+        miss(&source.faces[face]);
+        source.faces[face].coedges[index].edge = edge;
+        source.faces[face].face = other_face;
+        miss(&source.faces[face]);
+        source.faces[face].face = face_id;
+        source.faces[face].coedges[index].native_range[1] = range[1].next_down();
+        miss(&source.faces[face]);
+        source.faces[face].coedges[index].native_range = range;
+        source.faces[face].coedges[index].uv_range[1] = uv_range[1].next_down();
+        miss(&source.faces[face]);
+        source.faces[face].coedges[index].uv_range = uv_range;
+        source.faces[face].coedges[index]
+            .native_carrier_domain
+            .as_mut()
+            .unwrap()[0][0] = carrier.unwrap()[0][0].next_up();
+        miss(&source.faces[face]);
+        source.faces[face].coedges[index].native_carrier_domain = carrier;
+        source.faces[face].native_tolerance_mm = Some(tolerance.next_up());
+        miss(&source.faces[face]);
+        source.faces[face].native_tolerance_mm = Some(tolerance);
+        source.faces[face]
+            .qualify_native_coedge_trace(
+                index,
+                contained,
+                tolerance,
+                0,
+                &mut GeometryWorkBudget::new(1),
+                &cancel,
+            )
+            .unwrap();
+        // A real failed qualification under a changed native UV curve must not
+        // publish approval, even when an old successful binding once existed.
+        source.faces[face].coedges[index]
+            .native_trace_correspondence
+            .as_ref()
+            .unwrap()
+            .accepted_range_allowance
+            .set(None);
+        source.faces[face].coedges[index].curve = other_chart;
+        assert!(
+            source.faces[face]
+                .qualify_native_coedge_trace(
+                    index,
+                    range,
+                    tolerance,
+                    32 * 1024 * 1024,
+                    &mut work,
+                    &cancel,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            source.faces[face].coedges[index]
+                .native_trace_correspondence
+                .as_ref()
+                .unwrap()
+                .accepted_range_allowance
+                .get(),
+            None,
+        );
+    }
+
+    #[test]
+    fn native_boundary_carrier_limits_remove_only_proved_arithmetic_excess() {
+        let definition = crate::from_step_bytes(HOUSING).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let mut source = PreparedNativeTrimSource::prepare_material(
+            &definition,
+            32 * 1024 * 1024,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let mut selected = None;
+        'faces: for (face_index, face) in source.faces.iter().enumerate() {
+            for (coedge_index, coedge) in face.coedges.iter().enumerate() {
+                let carrier = coedge.native_carrier_domain.unwrap();
+                let raw = parametric::curve2d_piecewise_jet(
+                    coedge.curve,
+                    coedge.uv_range,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+                if !(0..2).any(|axis| {
+                    raw.position[axis].lo < carrier[axis][0]
+                        || raw.position[axis].hi > carrier[axis][1]
+                }) {
+                    continue;
+                }
+                let uv = face
+                    .boundary_position_enclosure(coedge_index, coedge.uv_range, &mut work, &cancel)
+                    .unwrap();
+                for axis in 0..2 {
+                    assert!(uv[axis][0] >= carrier[axis][0]);
+                    assert!(uv[axis][1] <= carrier[axis][1]);
+                }
+                // Exercise the actual critical-coedge consumer's knot
+                // partition, not only the native-to-UV parameter adapter.
+                for patch in parametric::surface_parameter_boxes(
+                    face.surface_evaluator(),
+                    uv,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                {
+                    parametric::surface_piecewise_first_enclosure(
+                        face.surface_evaluator(),
+                        patch,
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap();
+                }
+                selected = Some((face_index, coedge_index));
+                break 'faces;
+            }
+        }
+        let (face, coedge) = selected.expect("native housing reaches a carrier boundary");
+        let entry = &mut source.faces[face].coedges[coedge];
+        let range = entry.uv_range;
+        let mut excluded = entry.native_carrier_domain.unwrap();
+        excluded[0] = [excluded[0][1] + 1.0, excluded[0][1] + 2.0];
+        entry.native_carrier_domain = Some(excluded);
+        entry.native_carrier_containment = None;
+        // Exclusion does not consume a whole-boundary evaluation. Keeping the
+        // admitted sheet available must not grant an unsupported trim query.
+        assert_eq!(
+            source.faces[face]
+                .bounded_uv_cover(&mut work, &cancel)
+                .unwrap(),
+            source.faces[face].uv_domain(),
+        );
+        assert_eq!(
+            source.faces[face]
+                .boundary_position_enclosure(coedge, range, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ConditioningFailure,
+        );
+    }
+
     fn assert_original_face_regions(
         fixture: &[u8],
         source_face: spiling_contracts::geometry::StepEntityId,
@@ -7415,6 +9542,7 @@ mod tests {
             spatial_operators: Vec::new(),
             source_vertices: Vec::new(),
             source_inventory: None,
+            native_tolerance_mm: None,
         };
         let face = definition
             .original_source()
@@ -7714,6 +9842,7 @@ mod tests {
             spatial_operators: Vec::new(),
             source_vertices: Vec::new(),
             source_inventory: None,
+            native_tolerance_mm: None,
         };
         let mut lookup = SourceSpatialLookup::new();
         let mut failures = Vec::new();
@@ -7850,6 +9979,7 @@ mod tests {
             spatial_operators: Vec::new(),
             source_vertices: Vec::new(),
             source_inventory: None,
+            native_tolerance_mm: None,
         };
         let skeleton = NativeFaceSkeleton::new(
             &definition,

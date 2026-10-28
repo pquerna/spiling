@@ -343,6 +343,7 @@ pub(super) fn combine(
                 interior.coverage.fraction,
                 &hatch,
                 interior.frame_origin_mm,
+                region::OrdinaryHatchPhase::Centered,
                 &mut coarse,
                 &mut segments,
                 cancel,

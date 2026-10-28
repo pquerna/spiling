@@ -6,18 +6,17 @@ Licensed under the Open Software License version 3.0
 
 # Geometry authority and code map
 
-Geometry has separate admission, inspection, display and material-proof boundaries.
+Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
-[ADR005](../adr/ADR005-native-first-development-geometry.md) adopts native-first
-DEVELOPMENT geometry, but implementation and operator qualification are pending.
-Current production remains source5/planner24. The source-realization details below
-describe its operating constraints and evidence, not required independent
-original-STEP reconstruction for the adopted replacement. The
-[parity RFC](../adr/004-native-geometry-parity.md) is superseded on that authority.
-Current evidence does not transfer to source6/planner25. See
-[manufacturing](manufacturing-evidence.md) for the compiler/replay boundary and
-[development](development.md) for build prerequisites. No geometry result
-establishes physical printability or machine readiness.
+[ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
+source6/planner25 DEVELOPMENT candidate: the imported SolidCore BREP is its sole
+material geometry. Published Main remains source5/planner24; coherent public-pin
+and operator qualification of the candidate remain release gates. Earlier
+producer receipts do not transfer by relabeling. The
+[parity RFC](../adr/004-native-geometry-parity.md) is superseded on independent
+original-STEP material reconstruction. See [manufacturing](manufacturing-evidence.md)
+for compiler/replay obligations and [development](development.md) for build
+prerequisites. No geometry result establishes physical printability or machine readiness.
 
 ## Entry points and immutable source identity
 
@@ -35,17 +34,16 @@ establishes physical printability or machine readiness.
   [`kernel/source.rs`](../../crates/geometry/src/kernel/source.rs). These facts
   are not reconstructed from native arena ordinals, generated UV curves,
   display triangles or section-loop order. Occurrences add poses, not definitions.
-- [`kernel/trim.rs`](../../crates/geometry/src/kernel/trim.rs) prepares original
-  domains and complete correspondence receipts with
-  [`analysis/source_restriction.rs`](../../crates/geometry/src/analysis/source_restriction.rs).
-  Literal PCurve associations and the selected original master remain distinct
-  from generated native chart proposals. Missing correspondence refuses the
-  material query; a native mesh or fitted inverse cannot fill that gap.
-  Without a declared PCurve, an original cylinder admits only the implemented
-  axial-line/same-frame coaxial-circle inverse: exact source-frame/coaxial
-  receipts, selected-provider parameter images, owned-rim angular lifts and
-  complete forward correspondence remain mandatory. Exact circle lifts do not
-  erase original vertex residuals; unproved families or declared branches refuse.
+- [`kernel/trim.rs`](../../crates/geometry/src/kernel/trim.rs) prepares native
+  face/use domains for material queries. `prepare_solid` never selects original
+  STEP operands as a material fallback or requires a separately reconstructed
+  original solid. Missing native query authority still refuses.
+  Retained original operands and
+  [`analysis/source_restriction.rs`](../../crates/geometry/src/analysis/source_restriction.rs)
+  serve the separate bounded inspection/finish path. Literal PCurve associations,
+  selected masters and source frames remain distinct from generated native
+  charts; absence or ambiguity can refuse that operand/finish query without
+  conferring original declaration or embedding authority on a native query aid.
 
 The importer materializes the decoder's optional `Loop.edges` cache once from
 bounded, reciprocal, owner-checked Loopuse/Edgeuse cycles and charges its retained
@@ -58,18 +56,18 @@ and weight identity, multiplicity equal to degree and one inactive exterior
 knot per end. A shared whole-active-domain basis identity permits temporary
 decoder normalization; exchange/source coefficients are restored before capture.
 Native construction retains exact operand copies, not analytic recognition, and
-restores only checked inactive slots before topology publication. Original
-PCurve/seam genealogy and literal native/source association remain mandatory.
-The independent spline housing supports source import, save and source-deleted
-reopen; its display and section still refuse active-chart obligations. This is
-not general spline display, native-query or manufacturing qualification.
+restores only checked inactive slots before topology publication. Declared
+PCurve/seam genealogy remains immutable; generated charts are not original
+declarations. Import, save and source-deleted reopen do not qualify display,
+sections or manufacturing; their active-chart and coverage gates remain separate.
 
 Before native conversion and chart-map construction, exact adjacent null uses
 may cancel only for the same edge, opposite directions, identical PCurves and
 exactly two uses in one face/wire. Owned normalization preserves surviving
 coefficients, radial order and face provenance; only unreferenced derived data
 disappears, and affected chart domains only narrow. Genuine periodic seam
-branches remain. Original-use census and material qualification still apply.
+branches remain. Complete native-use and operation-specific material admission
+still apply; retained original-use operands remain available to finish checks.
 
 Import bounds are complete, conservative native enclosures for scene fitting
 and coarse exclusion. The importer evaluates retained face-carrier domains,
@@ -81,13 +79,13 @@ uncertainty claims or material receipts. Physical-extent controls use certified
 `projected_bounds` on literal native trims at their declared endpoint uncertainty;
 placement and manufacturing retain their independent source-material queries.
 
-[`parametric.rs`](../../crates/geometry/src/parametric.rs) and its coefficient
-providers own bounded original-surface/curve evaluation. Unclamped splines use
-their regular domains, not exterior knot support. Knot crossings retain both
-incident continuous pieces; outward transported parameter bands are not feasible
-point witnesses or C1 authority. Whole-range position correspondence does not
-prove relative tangent correspondence, trim topology, inverse coverage or
-native incidence. Samples and native tolerance fields do not discharge them.
+[`parametric.rs`](../../crates/geometry/src/parametric.rs) and its providers own
+bounded native surface/curve evaluation and separate original-operand queries.
+Unclamped splines use their regular domains, not exterior knot support. Closed
+knot queries retain both incident pieces; outward parameter bands are not
+feasible point witnesses or C1 authority. Whole-range positional correspondence
+does not prove relative tangents, trim topology, inverse coverage or native
+incidence. Samples and native tolerance fields do not discharge those obligations.
 
 Generic `FaceInfo.geometry` may carry optional exact analytic metadata. That
 metadata describes a face; it does not authorize a finish, slab reuse or a
@@ -99,16 +97,16 @@ specified by the [RFC](../adr/004-native-geometry-parity.md) and
 
 | Owner / operation | Invariant and navigation |
 | --- | --- |
-| `PreparedSolid` / `prepare_solid` | [`analysis/material_source.rs`](../../crates/geometry/src/analysis/material_source.rs): one definition-borrowed owner for original domains, source-vertex plans and query preparation. No promotion to a second material owner or native Boolean seed phase. |
-| `PreparedSectionSource` | Definition-borrowed raw inspection owner in [`section/mod.rs`](../../crates/geometry/src/section/mod.rs), retained by `PreparedSolid`; direct native surface/plane graphs do not require original-material admission. |
-| Native face sections | [`section/atlas.rs`](../../crates/geometry/src/section/atlas.rs) exhausts local graph coverage; [`cuts.rs`](../../crates/geometry/src/section/cuts.rs) owns whole-line cut roots; [`continuation.rs`](../../crates/geometry/src/section/continuation.rs) assembles original trim/material and checked spans. The single-graph case remains in `direct.rs`. |
+| `PreparedSolid` / `prepare_solid` | [`analysis/material_source.rs`](../../crates/geometry/src/analysis/material_source.rs): one definition-borrowed owner for immutable native material domains, bounds, section operands and positional query maps. No duplicate BREP or original-material reconstruction. |
+| `PreparedSectionSource` | Definition-borrowed native intersection owner in [`section/mod.rs`](../../crates/geometry/src/section/mod.rs), retained by `PreparedSolid`; raw inspection does not require original STEP correspondence. |
+| Native face sections | [`section/atlas.rs`](../../crates/geometry/src/section/atlas.rs) exhausts local graph coverage; [`cuts.rs`](../../crates/geometry/src/section/cuts.rs) owns whole-line roots; [`continuation.rs`](../../crates/geometry/src/section/continuation.rs) assembles native trim/material incidence and checked spans. The single-graph case remains in `direct.rs`. |
 | Placed queries | [`analysis/placed.rs`](../../crates/geometry/src/analysis/placed.rs): actual accepted quaternion-polynomial transforms, not an assumed exactly orthogonal transpose. |
 
 `NativeSection` carries plane/frame, face lineage, exact single/piecewise native
 surface-plane expressions and achieved chord/plane errors. Internal chart limits
 retain exact cut-root expressions, not invented BREP edges. Owned chart capacities
-are charged and moved through assembly. A raw intersection is not source-material
-closure; conservative slab envelopes cannot be promoted to manufactured layers.
+are charged and moved through assembly. A raw intersection alone is not closed-slab
+occupancy; conservative envelopes cannot be promoted to manufactured layers.
 
 Sections intersect the retained native carriers directly. Complete root/span
 inventories, original face lineage, ordered closure, Jordan and achieved
@@ -140,24 +138,28 @@ become constant Cartesian coordinates. Perturbed controls and both incident
 closed-knot sides remain enclosed. This tightens arithmetic bounds without a
 geometry-family flag, C1 promotion, tolerance change or persistent cache.
 
-The prepared section owner retains successful whole-coedge native position
-correspondence proofs by immutable definition/edge-use and admitted error bound.
-Only an equal or looser allowance reuses them; errors and partial proofs do not.
-Actual vector capacity is admitted and reported in retained bytes. Native chart
-validation, plane-specific roots, ordered crossings, endpoint gaps, section
-sampling and cancellation remain fresh. Standalone inspection uses the same
-algorithm without retained proofs; no process-global or persistent cache is added.
+The prepared section owner retains achieved whole-coedge positional bounds by
+immutable native definition/edge-use. `PreparedSolid` warms complete native maps
+before shared-owner byte snapshots and seeds those existing receipts only after
+exact surface/UV owner/curve, C3D and full-range validation. Equal source IDs on
+different definition owners are insufficient. Only an equal or looser error
+request reuses the achieved bound; absent, mismatched or insufficient evidence
+retains fresh calibration. No map derivatives or original-relative tangent
+authority are exported. Actual retained capacities remain charged; chart
+containment, plane roots, crossings, endpoint gaps, sampling and cancellation
+stay fresh. Standalone inspection uses the same algorithm without material map
+warming; there is no process-global or persistent cache.
 
 Graph isolation contracts each transverse search leaf to a necessary zero-set
 enclosure while retaining conservative endpoint slack. The midpoint is not an
 existence witness. Closed knot coverage, final whole-hull derivative direction
 and whole-independent-interval root existence remain mandatory.
 
-Raw section success does not establish source-material occupancy. Material slabs
-bind their actual reference to original-domain analysis, placed-world proof and
-planner conversion. Source chord, placement arithmetic, plane drift and complete
-realized/native-shape bounds retain their separate budgets; a differently sampled
-hole or topology-conditioned precision retry cannot silently change the contract.
+Raw section success does not establish whole-material occupancy. Slabs bind the
+actual reference to native face/coedge/vertex analysis, placed-world proof and
+planner conversion. Chord error, placement arithmetic, plane drift and complete
+native-shape bounds retain separate budgets; resampling a hole or retrying at a
+different precision cannot silently change the contract.
 
 Native definitions contain non-`Sync` kernel caches. The engine confines them to
 owning workers rather than adding a reentrant carrier lock or cloning the BREP
@@ -169,7 +171,7 @@ second-order jets. Continuous one-sided first bounds are not C1 or Hessian
 authority; strict smoothness and second-order consumers retain their own queries.
 Taylor qualification treats a spline's terminal coefficient extension as one
 piece, not an interior C0 join. Genuine internal and reflected uncertain knot
-bands still need original C1 proof.
+bands retain their own closed-span continuity/smoothness obligations.
 Height-event curve census likewise distinguishes strictly internal parameter
 knots from the selected coedge's closed endpoints. The complete knot visitor
 retains endpoints, but only internal joins have two nonempty neighborhoods;
@@ -184,42 +186,40 @@ Native work is debited on refusal and cancellation as well as success.
 Optional surface-to-curve reductions must decline outside the reduced curve's
 regular domain, preserving the full tensor evaluator's extension semantics.
 
+Actual active-net axis/component identities may annihilate homogeneous
+derivatives separately on each original knot rectangle. This is coefficient
+equality, not a cylinder label or near-zero test. Recentered components retain
+the weight-derivative term when weights vary; rational division, mixed jets,
+closed-knot sides and denominator/weight checks remain independent.
+
 Closed-height contraction in `analysis/slab.rs` computes a necessary parameter
 cover, not occupancy or containment. Only proved whole-box height containment
 and trim `Inside` survive subset refinement. The radial atlas refines actual XY
 metrics in XY, while unresolved radius/determinant obligations retain spatial
 refinement. Native scalar facet support preserves coefficient correlation;
 [`material_link/fiber.rs`](../../crates/geometry/src/analysis/critical/material_link/fiber.rs)
-uses uniform affine-family root proofs after original-span C1 qualification,
+uses uniform affine-family root proofs after native closed-span C1 qualification,
 not sampled roots or smoothness manufactured by subdivision.
 
-Source-vertex scalar bounds in `material_link/vertex_transport.rs` use the exact
-closed-cone law `G(s,t)=V+s(B(t)-V)`: extrema come from the apex and complete
-boundary, so only `t` needs adaptive search. Feasible boundary/apex witnesses
-tighten achieved endpoints without clipping the complete original comparison
-inventory or changing the selected G. They assert no global Original-F/G distance.
-
-Central-ribbon endpoint witnesses bind the same definition/coedge, both frozen
-endpoint-germ cuts and an admitted owned UV embedding. Only the strictly retained
-central interval at zero transverse coordinate supplies actual C3D material
-points. Whole-original-edge overcovers, unused endpoint portions and position-only
-correspondence cannot establish feasible contact. Missing optional ownership
-supplies no witness; work exhaustion and cancellation remain terminal. Witnesses
-tighten only feasible endpoints, never the outward RANGE/BASE, displacement,
-physical source error or query allowance.
+Feasible support witnesses belong to actual native vertices and qualified
+spatial restrictions on the captured face/use inventory. A carrier rectangle,
+UV overcover or positional error tube supplies no feasible material point.
+Inherited trim `Inside` applies only to verified subset cells of the same
+immutable face. Complete coefficient/trim coverage, outward bounds, cumulative
+work and cancellation remain mandatory.
 
 [`tessellation/mod.rs`](../../crates/geometry/src/tessellation/mod.rs) obtains
 bounded SolidCore mesh candidates. Its `audit` and `trim` modules independently
 check whole-triangle carriers, normals, native trim/triangle coverage and packed
-output. Candidate deviation estimates or generated UV curves are not original-F
-correspondence or material authority. Unqualified collapsed/singular coverage
-refuses display rather than dropping triangles or publishing an empty mesh.
+output. Candidate deviation estimates and generated UV curves are not original
+STEP declarations or manufacturing authority. Unqualified collapsed/singular
+coverage refuses display rather than dropping triangles or publishing an empty mesh.
 
 Singular-chart publication binds actual native vertex/edge-use ownership to the
 exact coefficient collapse law and one-sided coefficient normals. Missing curved
 fans must prove complete transport to the same retained mesh spoke; shared IDs
 or zero chord area alone do not establish coverage. Fan and ordinary triangle
-carrier bounds combine over disjoint coverage, while source-to-chord transport
+carrier bounds combine over disjoint coverage, while native-to-chord error
 remains independently additive. No vertex snapping or raw-mesh fallback supplies
 these proofs.
 
@@ -249,258 +249,150 @@ means no mesh artifact or GPU face picking, not an empty successful mesh.
 Native source records and supported queries remain available; cancellation
 must never be converted into display unavailability.
 
-One `PreparedSolid` owns the selected source for a captured definition.
+One `PreparedSolid` owns native query preparation for a captured definition.
 `material_bounds`, placed bounds/height analysis and slab queries borrow that
-same preparation; repeated XYZ queries do not rebuild it or reselect implicit
+same BREP; repeated XYZ queries do not rebuild it or reselect implicit
 branches. Unposed directional bounds retain the frozen combined 32 MiB
 owner/query cap. The standalone material-bounds function composes the same
 prepared path for one-off consumers.
 
-## Source material and proof boundaries
+## Native material and operation proof boundaries
 
-For the pending native-first route, imported SolidCore BREP will be the sole
-material authority, bound to source identity, exact producer, units, tolerance
-policy, pose and query scope. Original STEP and finish operands remain provenance;
-no independent original-STEP topology/embedding certificate is claimed. Private
-query mutation, caches and derived trims must not silently change the BREP.
-Unsupported/indeterminate operations refuse, with bounded work/bytes/cancellation.
-The source-only G and correspondence obligations below remain scoped to current
-source5 implementation and existing finish inputs, not a second material path
-for the adopted route.
+The implemented candidate uses the imported SolidCore BREP as the single
+DEVELOPMENT material authority. Results bind source identity, exact kernel
+producer, canonical millimetres, tolerance policy, occurrence pose, closed query
+scope and achieved approximation bounds. `MaterialRealizationIdentity` in
+[`kernel/mod.rs`](../../crates/geometry/src/kernel/mod.rs) identifies this native
+material contract, not a selectable original-source transport recipe.
 
-- **Source-only G:** `OriginalMaterialRealization` / `MaterialRealizationIdentity`
-  in `kernel/mod.rs` bind the implemented source-relative transport recipe and
-  exact source-allowance bits. Complete original-source comparison costs enter
-  deterministic endpoint-fraction admission before the versioned plan freezes.
-  Query radial witnesses cannot change that recipe or select a finer fraction.
-  [`critical/material_link.rs`](../../crates/geometry/src/analysis/critical/material_link.rs)
-  and its transport/vertex owners prove original-use material embedding; a
-  retained chart or enclosure-only recipe cannot supply embedding authority.
-  Closed-unit recipe coordinates are validated before convex endpoint hulls
-  tighten their affine enclosures. Exact zero/sign identities preserve attained
-  boundaries, including signed underflow, rather than inventing outward material
-  or widening source domains. Unproved coordinates are never clipped; coefficient
-  domain checks and original-material embedding remain independent obligations.
-  Finite F/G homotopies and auxiliary support rectangles use explicit original
-  coefficient-sheet queries, not trim-box membership as an evaluation shortcut.
-  These borrow the captured inventory and retain literal rectangular/spline
-  restrictions, denominators and charged work. Position-only images infer no
-  continuity; piecewise first queries require closed C0 and retain derivative
-  jumps, while smooth second queries require closed C1. Auxiliary inverse boxes
-  retain strict original-root inclusion, scaled contraction and branch checks;
-  independent selected-domain calibration supplies material membership.
-  Source 2D images may intersect their natural enclosure with an enclosed
-  midpoint plus the complete derivative only after checked C0. Prepared coedges
-  retain whole-restriction jets separately from selected image metadata; reuse
-  requires the identical captured operator and exact validated full range.
-  Refined requests retain ordinary evaluation and every visit remains charged
-  and cancellation-aware. Source scalar support projects the same original
-  coefficients in their actual gauge, never a native degree chart. None of
-  these queries mutates selected domains or grants native correspondence,
-  branch ownership or realized-material embedding.
-  Complete-path winding and literal geometric laws may use the same selected
-  PCurve before its sealed C0, strictly monotone, endpoint-preserving calibration.
-  This preserves the complete oriented image and original root/turn expressions,
-  not interior parameter identity. Physical G, frozen cuts and native/source
-  correspondence must retain their spatial-gauge evaluator.
-- **Uncertainty:** [`analysis/bounds.rs`](../../crates/geometry/src/analysis/bounds.rs)
-  and `analysis/placed.rs` distinguish geometric from realized-material bounds.
-  Source realization error must survive actual affine conversion, placement
-  arithmetic and plane drift. A complete bound is not made cheaper by omitting
-  uncertainty or charging it in a different coordinate system.
-  Original C0 bounds prioritize refinement by actual projected cross-section
-  variation, not unrelated UV lengths. This changes search order only: complete
-  cell enclosures, feasible witnesses and the work limit remain authoritative.
-  Native source support carries independently feasible extrema across faces.
-  A complete coefficient-sheet enclosure already covered by those extrema may
-  skip trim contact search under the same outward stopping rule; it supplies no
-  witness and never promotes a carrier bound to a material-contact receipt.
+Original STEP bytes, canonical face/use provenance and finish-authoring operands
+remain immutable. They do not constitute an independently reconstructed material
+or original-STEP topology/embedding certificate. Query caches, derived charts
+and positional maps cannot change the BREP or silently heal a failed query.
+Native trace/connectors are uncertainty covers, not added material. Effective
+native tolerance includes the pinned kernel policy and actual entity zones;
+a tolerance label does not replace a complete measured query bound.
+
+- **Support and uncertainty:** [`analysis/bounds.rs`](../../crates/geometry/src/analysis/bounds.rs)
+  and [`analysis/placed.rs`](../../crates/geometry/src/analysis/placed.rs) separate
+  inspection enclosures from native-material contact receipts. Native vertices
+  and spatial restrictions provide feasible witnesses; complete carrier/trim
+  bounds exclude competing extrema. Independently feasible extrema may prune
+  another complete enclosure without creating a witness on that face.
+  Actual affine coefficients, pose arithmetic, closed height limits and plane
+  drift retain directed error accounting; process-scale padding is not a
+  substitute for the placed query's arithmetic bound.
 - **Regular slabs:** [`analysis/slab.rs`](../../crates/geometry/src/analysis/slab.rs)
-  binds the actual source, interval, reference and policy. Height invariance is
-  local to regular partitions; it does not cross critical-event brackets.
-  [`placed/material_coordinates.rs`](../../crates/geometry/src/analysis/placed/material_coordinates.rs)
-  owns actual-coordinate capture, not a nominal orthogonal-cylinder surrogate.
-- **Radial products:** [`critical/material_link/radial_product.rs`](../../crates/geometry/src/analysis/critical/material_link/radial_product.rs)
+  binds the actual material, closed interval, sample and shape policy. Complete
+  native face, physical coedge and vertex coverage is required. Whole-control
+  scalar support may exclude an inactive coedge only with the actual complete
+  native law; endpoint samples and near-zero derivatives are insufficient.
+  Height invariance and regular continuation do not cross unqualified critical
+  brackets. [`placed/material_coordinates.rs`](../../crates/geometry/src/analysis/placed/material_coordinates.rs)
+  captures actual physical coordinates, not a nominal orthogonal surrogate.
+- **Critical incidence and collars:** [`analysis/critical.rs`](../../crates/geometry/src/analysis/critical.rs),
+  [`source_incidence.rs`](../../crates/geometry/src/analysis/source_incidence.rs)
+  and [`analysis/collar.rs`](../../crates/geometry/src/analysis/collar.rs) consume
+  actual native face/coedge/vertex ownership. They retain complete closed-cut,
+  orientation, shape and neighboring-material obligations. A scalar event cover
+  or loop count does not discharge births/deaths, a pocket floor, disappearing
+  voids or attachment. Missing/ambiguous incidence refuses; this is not an
+  independent original-STEP material-embedding claim.
+- **Filled-material metrics:** [`critical/material_link/radial_product.rs`](../../crates/geometry/src/analysis/critical/material_link/radial_product.rs)
   and [`joint/radial_metric.rs`](../../crates/geometry/src/analysis/joint/radial_metric.rs)
-  pair closed topology with a complete filled-material metric and calibrate the
-  actual used polygon in matching physical coordinates. The complete glued atlas
-  permits radius to vary with angle and actual height; it is not an XY-invariance
-  certificate. Boundary nearness, directed/core-only metrics and separately
-  isotopic annuli are insufficient.
-- **Original corner cuts:** [`vertex_transport/uv_ownership/source_cut.rs`](../../crates/geometry/src/analysis/critical/material_link/vertex_transport/uv_ownership/source_cut.rs)
-  proves fixed-exit relative surgery against the actual original germs,
-  retained central continuations and foreign sources. Original classification
-  masks complete owned joint cells as Boundary, never Inside. A sealed affine
-  endpoint family need not have a provably nonzero derivative; incident germs
-  may overlap only inside the same incidence-owned cell. Bounded interval
-  mean-value contraction can establish that containment without welding their
-  uncertain endpoints. Foreign boundaries must stay outside the whole cell.
-  These chart receipts do not replace material corner surgery: an uncertainty
-  connector need not be Jordan, and a completed reference disk cannot simply
-  be subtracted from native UV. The closed atlas covers original F and actual G,
-  including literal NativeV apices. Genuine poles need independent quotient authority.
-- **Critical sets and collars:** [`analysis/critical.rs`](../../crates/geometry/src/analysis/critical.rs)
-  covers original face/coedge complexes; [`source_incidence.rs`](../../crates/geometry/src/analysis/source_incidence.rs)
-  owns actual edge/vertex use incidence. [`analysis/collar.rs`](../../crates/geometry/src/analysis/collar.rs)
-  binds nonzero collars and closed endpoints to actual neighboring material.
-  A regular radial product does not discharge births/deaths, pocket floors,
-  disappearing voids or cross-occurrence attachment; loop counts do not prove incidence.
-  Rectangle and port covers use closed UV contraction and honest first bounds;
-  only a smooth affine fallback requests Hessians. One actual segment may cover
-  a complete affine patch only when it covers every corner plus the full
-  remainder; corner-wise different edges cannot certify holes or nonconvex gaps.
-  Isolated definite vertices additionally require whole-cell Hessian/orientation
-  bounds, an all-roots cover and a physical NativeV connection on the proved
-  original relative-cut side. The native joint is not padded. Strict outward
-  world normals can bound one material-facing crossing shadow, not regular
-  boundary speed; target selection and retained cells use that same shadow.
-  At a spherical parameter pole, an independently qualified original sphere
-  chart can supply the oriented nonsingular carrier normal. Literal coefficients,
-  actual source joints and their complete strips qualify the chart; a sphere
-  label or radial fit cannot. This normal grants no trim, constructed-material,
-  vertex-link or height-continuation authority. An already sealed ribbon
-  embedding may exclude its own zero-margin original boundary only within that
-  same map and parameter scope; foreign boundaries retain independent exclusion.
+  qualify the actual used polygon over its complete native scope. Directed,
+  boundary-only or core metrics cannot stand in for a two-sided filled-material
+  result. A regular product does not upgrade the critical endpoints or supply
+  unsupported void/floor authority.
+- **Protected voids:** [`analysis/voids.rs`](../../crates/geometry/src/analysis/voids.rs)
+  keeps capture, projected extent and physical height/attachment scope distinct.
+  Complete C0 piecewise first bounds suffice for the implemented column normal
+  and crease-tangent consumers; rank, cap orientation, exact joins or vertical
+  creases, native paired ownership and floor checks remain independent.
+  Deferred projection is not permission to consume an unproved void scope.
+  Native noncolumn torus critical-material operations remain unqualified.
 - **Final composition:** [`analysis/joint.rs`](../../crates/geometry/src/analysis/joint.rs)
-  owns source leaves, union captures and `NativeUnionBindingLedger`. Receipts
-  bind source/realization, occurrence, pose, interval/reference, policy and actual
-  candidate geometry. Changed polygons or stale captures cannot inherit proof.
-  `certify_regular_interface_pair` registers complete actual material/void loops
-  and consumes the whole non-star collar theorem in
-  [`joint/planar.rs`](../../crates/geometry/src/analysis/joint/planar.rs).
-  Receipt-bound topology does not replace native boundary confinement or
-  closed-cut incidence; critical pairs retain the original proof route.
-  Endpoint-local radial products can prove regular-side confinement beside a
-  critical cap. Their own source/world domains and actual polygon calibration
-  do not upgrade the whole leaf or fabricate a boundary-motion tube.
-  Critical support-exclusion capture combines a complete raw-F slab overcover of
-  retained F with direct world-height/XY C0 covers of all closed G cones and
-  complete central ribbons. Its rectangle conservatively excludes support from
-  the complement; it is not a no-void receipt, Original-F correspondence,
-  source-material anchor or precise Hole origin.
-  Native material reuse does not establish realized finish or deposited support;
-  those remain independent [manufacturing obligations](../protocol/manufacturing.md).
+  owns native leaves, union captures and `NativeUnionBindingLedger`. Receipts
+  bind source/material, occurrence, pose, interval/sample, policy and actual
+  candidate geometry. Changed polygons and stale captures inherit no authority.
+  Registered actual material/void loops and the complete collar predicates in
+  [`joint/planar.rs`](../../crates/geometry/src/analysis/joint/planar.rs) remain
+  necessary; a registered regular pair is not whole closed-cut incidence.
+  Endpoint-local products or conservative support-exclusion rectangles are not
+  whole-leaf, no-void, anchor or deposited-support certificates.
 
-## Original source correspondence
+Native material reuse does not establish realized finish, process coverage or
+deposited support. Those retain independent
+[manufacturing obligations](../protocol/manufacturing.md). Unsupported,
+indeterminate, ill-conditioned and invalid operations refuse explicitly under
+the same work, byte and cancellation gates.
 
-Original source operands retain literal coefficients, trim restrictions,
-preferred-master selection and PCurve association order. Source restriction
-preparation must prove a complete correspondence to the actual retained native
-use; endpoint proximity and native labels cannot replace whole-range evidence.
+## Original STEP operands and bounded finish correspondence
 
-`analysis/source_restriction/carrier/` admits coefficient-checked original
-line, circle and B-spline extrusion gauges. Profile knots, controls, rational
-weights and finite profile domains remain independent of the unbounded source-v
-axis; extrusion magnitude is a parameter scale, not another physical-size scale.
-Position-error queries enforce every finite axis even for literal-zero residuals.
-The importer shares its original-carrier reader with source capture and maps
-decoded carriers into canonical face order. An exact positive coaxial circular
-extrusion uses native angular degrees/axial millimetres with regenerated native
-UV, while the original source remains an extrusion in radians/scaled v. Trimmed,
-opposed-axis and unproved carrier matches acquire no such correspondence.
+Retained original operands preserve literal coefficients, face/use/vertex
+identity, finite restrictions, selected masters and PCurve association order.
+They support bounded source inspection and the existing planar/full-cylinder
+finish lanes, not a second manufacturing material. Native query maps, generated
+UV and proximity cannot fabricate original declarations or stronger original
+relative-tangent correspondence.
 
-Original circular-extrusion import, display, section and source-deleted project
-reopen are exercised independently of manufacturing. Generic extrusion material
-queries still need complete declared-PCurve or original inverse/branch authority.
-The curved-profile control without a PCurve retains that refusal; a separately
-authored PCurve does not by itself discharge material endpoint bounds or native
-active-chart containment. These gauges do not qualify generic-extrusion Compile.
+[`analysis/source_restriction/`](../../crates/geometry/src/analysis/source_restriction/)
+and [`kernel/source_operand.rs`](../../crates/geometry/src/kernel/source_operand.rs)
+retain the original providers. Actual finite domains, knot bands, denominators,
+units and selector gauges apply even for literal-zero residuals. Profile
+extrusion magnitude remains a parameter scale, not another physical-size scale.
+The importer shares the original-carrier reader with source capture and retains
+canonical face order. A proved circular-extrusion/native gauge does not turn
+generated native angular/axial UV into the original radians/scaled-v declaration.
+Generic extrusion import/display/section availability is not generic-extrusion
+Compile qualification.
 
-Literal native-boundary correspondence proves a directed positional trace, not
-parameter-speed equality or original-source relative-tangent authority. Evaluate
-only the requested jet order; cubic positional residuals require one genuine
-open original knot cell, while joins retain the qualified piecewise bound.
-An exact native boundary-row shortcut requires complete homogeneous coefficients,
-matching knots/affine gauge and chart/domain identity, not endpoint samples.
+For an original-operand query, missing declared PCurves require the implemented
+bounded inverse, not a nearest branch. A plane inverse uses the selected spatial
+expression and the coefficient-proved nondegenerate Gram map; the narrow
+cylinder inverse requires actual same-frame axial-line/coaxial-circle evidence,
+owned-rim angular lifts and complete forward correspondence. Derived evidence
+never overrides a failed declared branch. These restrictions do not make
+original correspondence a prerequisite for querying native material.
 
-Untrimmed nonperiodic selected PCurve LINEs reuse the finite source-coefficient
-window provider with the edge's captured original vertices. A search cover stays
-in that declared master's gauge; it does not borrow the independently gauged 3D
-reference or generated native UV. Endpoint uniqueness, whole correspondence,
-relative derivatives and chart/joint qualification remain separate obligations.
-Finite authored trims and periodic selectors retain their own branch inventory.
+Endpoint-root pairs and tangent samples only propose PCurve branches. Each
+qualifying branch retains its own selected-domain, complete world-position and
+relative-derivative proof; distinct qualified branches refuse, never select the
+first match. Native positional calibration cannot construct the stronger
+`SourceCurveCalibration` receipt. Original source and native spatial parameters
+remain independent gauges, including periodic selectors and finite trims.
 
-Independent PCurve endpoint-root pairs and midpoint tangent checks propose
-branches; they do not establish ambiguity or authorize the first match. Each
-candidate must pass complete world-position and relative-derivative calibration
-in its own gauge before it counts as qualified. Distinct qualified branches
-refuse; cumulative work and peak root/proof/workspace bytes stay bounded.
+Coefficient fences and exact stationary parameters are not exact vertex
+coincidence. Full physical residuals remain charged; interval overlap or a small
+box cannot collapse a joint. Recheck representable candidates after contraction,
+and retain actual branch/endpoint coverage. A common whole-turn UV
+Circle/Ellipse translation requires independently proved endpoint roots and
+strict closed-hull uniqueness; world periodicity does not make a UV LINE periodic.
+Numerical carrier-derived windows acquire no selector-proved domain token.
 
-Independently gauged PCurves retain their own selector-proved natural/authored
-closed-domain token. Before stationary isolation, the complete lifted domain may
-prove strictly increasing distance derivative and a strict outward fence sign
-(interval or coefficient-exact affine), with the full admitted physical residual.
-This unique constrained minimum is a typed closed fence, not a stationary root
-or exact vertex coincidence. Its literal parameter remains available to affine
-and knot consumers; full world/relative-derivative calibration is unchanged.
-Numerical carrier-derived LINE windows never acquire that token.
+Original chart errors are achieved upper bounds, not new admission tolerances.
+Whole-image/domain, joint, orientation and actual native-association checks
+remain independent. An original boundary point in a query box proves only
+conservative `Boundary`, not winding, an interior or source-hole nesting.
+Numerical cuts are not new source vertices; complete C0/monotone germs and
+whole-span separation cannot be replaced by welding uncertain endpoints.
+`FACE_OUTER_BOUND` is an explicit marker; generic `FACE_BOUND` is not a declared
+hole. Source-use census retains actual incidence rather than coordinate matches.
+Only an exact coefficient compose-back identity can claim zero residual;
+positional native maps and small measured error do not.
 
-Actual UV Circle/Ellipse periods can identify one common whole-turn translation
-of two independently established endpoint roots. Closed-hull C1 and strict
-stationary-root uniqueness remain required at both ends; different winding is
-not the same branch. A carrier's world periodicity does not make a UV LINE
-periodic. Preserve selector search separately from a wider evaluable turn cover.
+Native material realization identity 6 and candidate planner25 distinguish the
+new authority from published source5/planner24. The source hash, pinned kernel,
+query policy and captured original uncertainty remain identity/provenance
+inputs. A preferred-master or declared-association change still invalidates
+affected finish/source-operand receipts; it never selects an alternate material
+for native queries. Older artifacts gain no current inspection/export authority
+by relabeling.
 
-Realization identity 5 binds this selectable source recipe. Admitting an earlier
-PCurve can change the chosen chart and joint costs even when a later candidate
-previously succeeded. Current planner24 additionally binds selected-master finish
-support, continuing source-stroke width recovery and source-tube corner fitting;
-earlier programs cannot retain current inspection/export authority.
-
-Endpoint proposals include finite coefficient fences, midpoints and reference
-zero. Recheck representable candidates after Newton contraction: an initial
-search midpoint need not hit the contracted root. A stationary singleton still
-requires exact outward stationarity and its full physical residual bound;
-proximity or a small interval is not parameter identity.
-
-An exactly isolated stationary parameter is not exact vertex coincidence.
-Its nonzero physical source residual remains charged to the source allowance.
-A joint collapses only with coefficient identity or equal singleton outward UV
-enclosures; overlapping or merely small uncertainty boxes are not identity and
-do not erase displacement or correspondence obligations.
-
-Selected-original chart errors are measured upper bounds, not admission ceilings.
-Independent original-joint image checks use the immutable admitted source
-uncertainty while retaining exact source cuts, closed cutovers, whole-image
-containment and projection qualification. A looser outward recomputation cannot
-turn a tighter earlier enclosure into a new tolerance policy. Metric sealing
-remains independent of this topology qualification.
-
-An original boundary image or coefficient-enclosed boundary point contained in a
-query box proves only conservative `Boundary`. It supplies no winding, interior,
-exterior or source-hole nesting authority. Distinguish this ray-independent contact
-from an unresolved ray so known contact cannot repeatedly exhaust winding work.
-
-Numerical knot/cut leaves are not new source endpoints. A leaf can use its
-complete boundary's exact shared C0 anchor only after opposite monotone germs
-are certified over both entire leaf-to-anchor parameter hulls. This preserves
-separation across uncertain internal cuts without endpoint welding or distance
-tolerances.
-Complete C0 coefficient pieces with a strict derivative coordinate qualify as
-injective spans before pairwise separation. Unproved pieces subdivide within the
-same depth/work policy, preferring an actual cover fence near the midpoint so
-narrow original spans do not depend on dyadic resolution. Numerical calibration
-cuts and original knots remain in the evaluator; they are not mandatory
-pairwise topology.
-
-Source edge/vertex census checks complete original-use ownership against native
-incidence, including opposed uses, rather than matching stars by coordinates.
-`FACE_OUTER_BOUND` is an explicit outer marker; generic `FACE_BOUND` is not a
-declaration of a hole. Whole-domain winding and nesting retain the actual
-outer/hole qualification.
-
-When no declared PCurve exists on an original plane, preparation may derive UV
-from that plane's coefficient-proved nondegenerate global Gram inverse applied
-to the same selected original spatial expression. Derived evidence stays distinct
-from declaration and never overrides a failed declared branch. Whole lift,
-relative-derivative, native association, domain, joint and incidence checks remain;
-only exact whole-affine compose-back identity grants a zero transport receipt.
-
-`PreparedSolid` readiness means its actual selected realization operands are
-prepared. It is not a global Original-F embedding, filled-material, attachment
-or manufacturing certificate. Slab, critical-collar, pair and final binding-ledger
-queries retain those independent obligations. Unsupported original associations
-remain explicit refusals without disabling unrelated raw native inspection.
+`PreparedSolid` readiness means native operands are prepared, not that a slab,
+whole material/void result, attachment, finish or manufacturing operation has
+passed. Missing original associations can refuse the separate operand/finish
+path without disabling unrelated native import, inspection or admitted queries.
 
 ## Refusals and support boundary
 
@@ -513,11 +405,11 @@ Resource exhaustion, cancellation, unavailable parameter correspondence,
 conditioning, unsupported operations and invalid geometry remain distinct failures.
 No partial proof, stale job or failed display grants successful material authority.
 
-This is a development cutover, not transferred kernel qualification. Historical
-Monstertruck fitting/housing CLI and hardware-workbench journeys do not establish
-SolidCore parity. The unchanged original fixtures and operator workflows remain
-the reproduction inputs; report the SolidCore paths actually exercised and their
-explicit refusals before expanding support claims.
+This is a development candidate, not transferred kernel qualification.
+Historical Monstertruck or earlier SolidCore receipts do not establish the
+source6/planner25 operator gate. The unchanged original fixtures and workflows
+remain reproduction inputs; match the actual workspace binaries and producer
+identities before interpreting results.
 
 Prepared native housing sections preserve material before/after the corner event
 and the pocket through the rounded cap under plane reversal. A necessary carrier
@@ -527,24 +419,29 @@ face even when its inflated carrier box crosses the plane. Otherwise, a face
 without trim incidences still requires complete carrier-root exclusion; missing
 crossings alone grant nothing. Packed section points are relative to the captured
 plane origin: compare physical cuts only after restoring that world origin.
-The unchanged ordinary housing, source-zoned centered physical plate, paired
-fine/genuine combined H1 and tapered fitting exercise SolidCore placement,
-Preflight, Compile, independent saved-byte Verify/export/save and byte-identical
-source-deleted fresh-engine recovery. Fitting recovery may retain a geometry-only
-scene with its immutable program; this does not create a source display mesh.
-General STEP, bracket and affected workbench remain unqualified. Source metrics,
-material/void topology and the union guard remain independent.
 
-Standalone engine/CLI sections exercise the unchanged fitting at Z=6 and housing
-at Z=8.05 under their frozen query limits. Primitive/void and original bracket
-cut controls retain independent area, orientation and lineage obligations.
-Literal native-chart bounds search the complete coefficient-backed boundary
-hull rather than an arbitrary large natural plane domain; that exclusion cover
-never supplies an Inside witness. Nonclosed native coefficient circuits can
-still refuse even when source uncertainty permits a separately qualified
-selected material realization. Original-source bounds consume that realization,
-not an implicitly healed raw chart. Prepared positives do not waive unrelated
-raw-query, source-material or resource obligations.
+Preserved operation requirements include the ordinary housing, source-zoned
+centered physical plate, fine/genuine combined H1 and tapered fitting through
+placement, Preflight, Compile, independent saved-byte Verify, export/save and
+byte-identical source-deleted fresh-engine recovery. Fitting recovery may retain
+a geometry-only scene with its immutable program; that does not create a source
+display mesh. These are qualification gates, not a claim that final public-pin
+and affected-workbench acceptance has completed.
+
+Housing corner/cap, primitive/void and native section controls retain complete
+root existence, area, orientation and lineage obligations. Missing trim
+crossings alone do not prove a face empty. General STEP and unqualified critical
+material interfaces remain outside support. The original bracket remains
+manufacturing-unqualified; its separate W1 completion is not claimed here.
+
+Standalone fitting/housing section queries and original bracket cut controls
+retain their frozen work/source/output limits. Literal native-chart bounds use
+the complete coefficient-backed trim hull rather than an arbitrary large natural
+plane domain; that exclusion cover never supplies an `Inside` witness.
+Nonclosed or ambiguous native coefficient circuits can still refuse. There is
+no original-material reassembly, implicitly healed raw chart or mesh-success
+fallback. A prepared positive waives no unrelated native-query, material-scope
+or resource obligation.
 
 The workspace has no Monstertruck runtime, development, test or tooling dependency.
 Retained historical STEP provenance may name that producer; the data is not a
@@ -579,12 +476,12 @@ Inspect `DefinitionDisplay` as well as the command status: an explicit unavailab
 display is not proof of a working mesh. The CLI validates transferred mesh and
 section payloads; raw inspection does not qualify manufacturing.
 
-The fitting/housing scene exercises shared-definition instances, actual rendered
+Use the fitting/housing scene to exercise shared definitions, actual rendered
 native-face picking, world section overlays, cancellation/resume and engine/window
 lifecycle on the local AMD/CEF surface. Raw section jobs prepare the existing
-`PreparedSectionSource` once per definition, not unused manufacturing-material
-charts and source-vertex plans. Native correspondence, fresh roots/loops and the
-unchanged shared work/source/output caps remain independent of material admission:
+`PreparedSectionSource` once per definition, not unused material-map owners.
+Native correspondence, fresh roots/loops and unchanged work/source/output caps
+remain independent gates; this command is a reproduction, not a performed result:
 
 ```sh
 node tools/smoke-desktop.mjs --executable "$PWD/target/debug/spiling-desktop" \

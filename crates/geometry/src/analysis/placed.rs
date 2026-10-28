@@ -252,93 +252,48 @@ pub(super) fn material_position_bounds(
     if remaining_bytes < fixed {
         return Err(error(
             GeometryErrorCode::ResourceLimit,
-            "material coefficient position bound exhausts evaluator scratch",
+            "native material position bound exhausts evaluator scratch",
         ));
     }
-    let definition = source.definition();
-    // Retain the native candidate's real bound too; it is not a proxy for F.
-    let native = definition.bounds_mm();
-    let mut bounds = std::array::from_fn(|axis| Interval {
-        lo: native.min[axis],
-        hi: native.max[axis],
-    });
-    for coordinate in bounds {
-        finite(coordinate)?;
-    }
-    let mut original_bounds = [Interval {
+    let mut bounds = [Interval {
         lo: f64::INFINITY,
         hi: f64::NEG_INFINITY,
     }; 3];
-    let mut ribbon_displacement = 0.0_f64;
-    for ordinal in 0..definition.face_ids().len() {
+    for ordinal in 0..source.definition().face_ids().len() {
         let domain = source.face_domain(ordinal, remaining_bytes, work, cancel)?;
         let surface = domain.surface_operand();
-        let active = surface.active_domain();
-        for range in active {
-            Interval::new(range[0], range[1])?;
-        }
-        // Enclose F on its complete selected source parameter domain, never a
-        // native UV box evaluated as original radians. Cone G positions are
-        // enclosed independently from their retained literal realization below.
-        let position =
-            crate::parametric::surface_position_enclosure(&surface, active, work, cancel)?;
-        include_position_bounds(&mut original_bounds, position)?;
-        for flat in 0..domain.coedges().len() {
+        let uv = domain.bounded_uv_cover(work, cancel)?;
+        include_position_bounds(
+            &mut bounds,
+            crate::parametric::surface_position_enclosure(&surface, uv, work, cancel)?,
+        )?;
+        for (flat, coedge) in domain.coedges().iter().enumerate() {
             work.charge(1, cancel)?;
-            let proof = domain.original_coedge_correspondence(flat)?;
-            let displacement = proof.position_error_mm();
-            if !displacement.is_finite() || displacement < 0.0 {
-                return Err(error(
-                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                    "selected source trace has no finite physical deviation bound",
-                ));
-            }
-            ribbon_displacement = ribbon_displacement.max(displacement);
-            let binding = proof.binding().ok_or_else(|| {
-                error(
-                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                    "material position bound has no bound original vertices",
-                )
-            })?;
-            for point in binding.source_vertex_points_mm {
-                include_position_bounds(&mut bounds, point.map(Interval::point))?;
-            }
-            domain.with_original_spatial_curve(
+            domain.with_native_spatial_curve(
                 flat,
                 remaining_bytes,
                 work,
                 cancel,
                 |curve, work, cancel| {
+                    let range = coedge.oriented_native_range();
                     include_position_bounds(
                         &mut bounds,
-                        curve.tensor(proof.spatial_range(), 0, work, cancel)?[0],
+                        curve.tensor(
+                            [range[0].min(range[1]), range[0].max(range[1])],
+                            0,
+                            work,
+                            cancel,
+                        )?[0],
                     )
                 },
             )?;
+            for vertex in coedge.vertices {
+                let point = source
+                    .trim_source()
+                    .native_vertex_point(vertex, work, cancel)?;
+                include_position_bounds(&mut bounds, point.map(Interval::point))?;
+            }
         }
-    }
-    for axis in 0..3 {
-        // The actual ribbon law is F + lambda*(C-F(trace)), 0 <= lambda <= 1.
-        // Its displacement is the sealed whole-trace coefficient bound above,
-        // not the declared tolerance or an assumed F/native correspondence.
-        let ribbon = finite(add(
-            original_bounds[axis],
-            Interval {
-                lo: -ribbon_displacement,
-                hi: ribbon_displacement,
-            },
-        ))?;
-        bounds[axis] = bounds[axis].hull(ribbon);
-    }
-    if let Some(plans) = source.vertex_plans() {
-        plans.visit_position_supports(definition, work, cancel, &mut |position| {
-            include_position_bounds(&mut bounds, position)
-        })?;
-    } else if !source.material_transport_is_proved_zero(work, cancel)? {
-        return Err(error(
-            GeometryErrorCode::ParameterCorrespondenceUnavailable,
-            "material position bound lacks the complete selected G vertex positions",
-        ));
     }
     Ok(bounds)
 }
@@ -384,21 +339,9 @@ pub fn placed_bounds(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<ProjectedBounds, GeometryError> {
-    let prepared = super::material_source::prepare_solid(
-        definition,
-        crate::MAX_PREPARED_SECTION_BYTES,
-        work,
-        cancel,
-    )?;
-    placed_bounds_inner(
-        prepared.source_view()?,
-        pose,
-        world_direction,
-        policy,
-        Some(super::slab::remaining_scratch(prepared.retained_bytes())?),
-        work,
-        cancel,
-    )
+    let frame = PlacedBoundsFrame::new(pose, world_direction, policy, work, cancel)?;
+    let source = projected_bounds(definition, frame.nominal, frame.source_policy, work, cancel)?;
+    frame.finish(source, source_extent(definition))
 }
 
 /// Scratch allowance excludes the pinned source proof and every caller-owned
@@ -417,7 +360,7 @@ pub(super) fn placed_bounds_with_scratch_limit(
         pose,
         world_direction,
         policy,
-        Some(remaining_bytes),
+        remaining_bytes,
         work,
         cancel,
     )
@@ -521,29 +464,27 @@ fn placed_bounds_inner(
     pose: RigidPoseMm,
     world_direction: [f64; 3],
     policy: BoundsPolicy,
-    remaining_bytes: Option<usize>,
+    remaining_bytes: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<ProjectedBounds, GeometryError> {
-    let definition = source_context.definition();
     let frame = PlacedBoundsFrame::new(pose, world_direction, policy, work, cancel)?;
-    let source = match remaining_bytes {
-        Some(bytes) => super::bounds::projected_bounds_with_scratch_limit(
-            source_context.trim_source(),
-            frame.nominal,
-            frame.source_policy,
-            bytes,
-            work,
-            cancel,
-        ),
-        None => projected_bounds(definition, frame.nominal, frame.source_policy, work, cancel),
-    }?;
-    frame.finish(source, source_extent(definition))
+    let source = super::bounds::projected_bounds_with_scratch_limit(
+        source_context.trim_source(),
+        frame.nominal,
+        frame.source_policy,
+        remaining_bytes,
+        work,
+        cancel,
+    )?;
+    frame.finish(
+        source,
+        material_extent(source_context, remaining_bytes, work, cancel)?,
+    )
 }
 
-/// Opaque complete material support bound for one exact source, recipe, pose
-/// and directional query. Its terminal brackets are global material extrema,
-/// not isolated critical events or permission to merge nearby source heights.
+/// Complete native material support for one exact definition, material policy,
+/// pose and directional query. Terminal brackets are global native extrema.
 #[derive(Debug)]
 pub struct PlacedMaterialProjectedBounds {
     source: super::bounds::MaterialProjectedBounds,
@@ -551,8 +492,7 @@ pub struct PlacedMaterialProjectedBounds {
     world_direction: [f64; 3],
     policy: BoundsPolicy,
     bounds: ProjectedBounds,
-    source_realization_error_mm: f64,
-    scalar_transport_is_identically_zero: bool,
+    effective_tolerance_mm: f64,
 }
 impl PlacedMaterialProjectedBounds {
     pub fn bounds(&self) -> ProjectedBounds {
@@ -570,16 +510,11 @@ impl PlacedMaterialProjectedBounds {
     pub fn policy(&self) -> BoundsPolicy {
         self.policy
     }
-    pub fn source_realization_error_mm(&self) -> f64 {
-        self.source_realization_error_mm
+    pub fn effective_tolerance_mm(&self) -> f64 {
+        self.effective_tolerance_mm
     }
-    /// True only for a whole-source scalar identity at the actual posed
-    /// covector. An uncertain coefficient box cannot inherit nominal equality.
-    pub fn scalar_transport_is_identically_zero(&self) -> bool {
-        self.scalar_transport_is_identically_zero
-    }
-    /// Match the immutable original definition and its exact material recipe.
-    /// Pose, direction and policy remain independently bound query fields.
+    /// Match the immutable definition and exact native material identity.
+    /// Pose, direction and output policy are independently bound query fields.
     pub fn is_compatible_with_definition(&self, definition: &Definition) -> bool {
         self.source.definition_id() == definition.id()
             && self.source.material_realization_identity()
@@ -652,18 +587,17 @@ pub(super) fn placed_material_bounds_with_scratch_limit(
     {
         return Err(error(
             GeometryErrorCode::InvalidGeometry,
-            "placed material support changed its source recipe",
+            "placed material support changed its native material identity",
         ));
     }
-    let source_error = source.source_realization_error_mm();
-    if !source_error.is_finite() || source_error < 0.0 {
+    let effective_tolerance = source.effective_tolerance_mm();
+    if !effective_tolerance.is_finite() || effective_tolerance < 0.0 {
         return Err(error(
             GeometryErrorCode::ConditioningFailure,
-            "invalid source material realization error",
+            "invalid native material effective tolerance",
         ));
     }
-    // Quaternion residuals act on actual selected F/C/V/G positions. A source
-    // deviation from F is not a proof of distance to the native candidate.
+    // Quaternion residuals act on actual native positions, not source transport.
     let extent_remaining = query_byte_limit
         .checked_sub(source.retained_bytes())
         .ok_or_else(|| {
@@ -674,24 +608,18 @@ pub(super) fn placed_material_bounds_with_scratch_limit(
         })?;
     let extent = material_extent(source_context, extent_remaining, work, cancel)?;
     let bounds = frame.finish(source.bounds(), extent)?;
-    let source_realization_error_mm = finite(mul(
-        Interval::point(source_error),
+    let effective_tolerance_mm = finite(mul(
+        Interval::point(effective_tolerance),
         Interval::point(spectral_bound(frame.matrix)?),
     ))?
     .hi;
-    let scalar_transport_is_identically_zero = source.scalar_transport_is_identically_zero()
-        && (0..3).all(|axis| {
-            frame.coefficients[axis].lo == frame.nominal[axis]
-                && frame.coefficients[axis].hi == frame.nominal[axis]
-        });
     Ok(PlacedMaterialProjectedBounds {
         source,
         pose,
         world_direction,
         policy,
         bounds,
-        source_realization_error_mm,
-        scalar_transport_is_identically_zero,
+        effective_tolerance_mm,
     })
 }
 
@@ -957,19 +885,6 @@ pub(super) fn analyze_placed_height_domain_with_scratch_limit(
                 ));
             }
         }
-        for support in &mut source.capture.transport_support {
-            work.charge(1, cancel)?;
-            support.base_interval = map.world_value(support.base_interval)?;
-            support.corrected_interval = map.world_value(support.corrected_interval)?;
-            let displacement = finite(mul(
-                Interval::point(map.scale),
-                Interval::new(
-                    support.displacement_interval[0],
-                    support.displacement_interval[1],
-                )?,
-            ))?;
-            support.displacement_interval = [displacement.lo, displacement.hi];
-        }
         source.invariance = placed_invariance(
             source.invariance,
             &map,
@@ -1004,14 +919,12 @@ pub(super) fn analyze_placed_height_domain_with_scratch_limit(
     {
         return Err(error(
             GeometryErrorCode::InvalidGeometry,
-            "placed height capture changed its original material realization",
+            "placed height capture changed its native material identity",
         ));
     }
     result.capture = HeightCapture {
         definition_id: definition.id().clone(),
         material_realization,
-        transport_support: std::mem::take(&mut result.capture.transport_support),
-        transport_support_complete: result.capture.transport_support_complete,
         frame: world_frame(),
         height_interval_mm: world_height_interval_mm,
         policy,
@@ -1123,6 +1036,7 @@ fn transform_points(
             span.section_pose = pose;
         }
     }
+    section.certificate.pose = pose;
     Ok((arithmetic, plane_error))
 }
 
@@ -1539,102 +1453,108 @@ pub(crate) fn analyze_placed_slab(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SlabAnalysis, GeometryError> {
-    work.charge(1, cancel)?;
-    let query_byte_limit = query_byte_limit.min(
-        crate::MAX_PREPARED_SECTION_BYTES
-            .checked_sub(source.retained_bytes())
+    (|| -> Result<_, crate::GeometryError> {
+        work.charge(1, cancel)?;
+        let query_byte_limit =
+            source.prepare_native_position_maps(query_byte_limit, work, cancel)?;
+        let query_byte_limit = query_byte_limit.min(
+            crate::MAX_PREPARED_SECTION_BYTES
+                .checked_sub(source.retained_bytes())
+                .ok_or_else(|| {
+                    error(
+                        GeometryErrorCode::ResourceLimit,
+                        "placed slab source exceeds shared capacity",
+                    )
+                })?,
+        );
+        let coexisting_bytes = crate::MAX_PREPARED_SECTION_BYTES - query_byte_limit;
+        validate_range(request.world_height_interval_mm)?;
+        if !request.sample_world_z_mm.is_finite()
+            || request.sample_world_z_mm <= request.world_height_interval_mm[0]
+            || request.sample_world_z_mm >= request.world_height_interval_mm[1]
+            || !request.native_shape_error_mm.is_finite()
+            || request.native_shape_error_mm <= 0.0
+        {
+            return Err(error(
+                GeometryErrorCode::InvalidGeometry,
+                "placed slab requires an interior finite sample and positive finite shape error",
+            ));
+        }
+        let extent = material_extent(source.source_view()?, query_byte_limit, work, cancel)?;
+        let map = HeightMap::new(request.pose, extent)?;
+        let range = map.source_range(request.world_height_interval_mm)?;
+        let sample = div(
+            sub(
+                Interval::point(request.sample_world_z_mm),
+                Interval::point(request.pose.translation_mm[2]),
+            ),
+            Interval::point(map.scale),
+        )?
+        .mid();
+        let sigma = spectral_bound(map.matrix)?;
+        let source_policy = div(
+            Interval::point(request.native_shape_error_mm),
+            Interval::point(sigma),
+        )?
+        .lo;
+        if !source_policy.is_finite()
+            || source_policy <= 0.0
+            || !sample.is_finite()
+            || sample <= range[0]
+            || sample >= range[1]
+        {
+            return Err(error(
+                GeometryErrorCode::ConditioningFailure,
+                "placed slab policy or sample cannot be resolved in the source frame",
+            ));
+        }
+        let source_request = SlabRequest {
+            frame: map.frame,
+            height_interval_mm: range,
+            sample_height_mm: sample,
+            native_shape_error_mm: source_policy,
+        };
+        let mut prepared = super::slab::prepare_slab_sample(
+            source,
+            source_request,
+            query_byte_limit,
+            work,
+            cancel,
+        )?;
+        let placement = SamplePlacement {
+            map: &map,
+            pose: request.pose,
+            sample: request.sample_world_z_mm,
+            sigma,
+            extent: source_extent(source.definition()),
+        };
+        let fixed = coexisting_bytes
+            .saturating_add(prepared.section.retained_bytes())
+            .saturating_add(source.definition().id().allocated_bytes())
+            .saturating_add(ActualMaterialCoordinates::SCRATCH_BYTES)
+            .saturating_add(std::mem::size_of_val(&prepared));
+        let world_candidate = (|| -> Result<_, crate::GeometryError> {
+            WorldSampleCandidate::prepare(
+                &prepared.section,
+                &placement,
+                super::slab::remaining_scratch(fixed)?,
+                work,
+                cancel,
+            )
+        })()?;
+        let candidate_bytes = world_candidate.retained_bytes();
+        prepared.source_retained_bytes = prepared
+            .source_retained_bytes
+            .checked_add(candidate_bytes)
             .ok_or_else(|| {
                 error(
                     GeometryErrorCode::ResourceLimit,
-                    "placed slab source exceeds shared capacity",
+                    "coexisting world candidate capacity overflow",
                 )
-            })?,
-    );
-    let coexisting_bytes = crate::MAX_PREPARED_SECTION_BYTES - query_byte_limit;
-    validate_range(request.world_height_interval_mm)?;
-    if !request.sample_world_z_mm.is_finite()
-        || request.sample_world_z_mm <= request.world_height_interval_mm[0]
-        || request.sample_world_z_mm >= request.world_height_interval_mm[1]
-        || !request.native_shape_error_mm.is_finite()
-        || request.native_shape_error_mm <= 0.0
-    {
-        return Err(error(
-            GeometryErrorCode::InvalidGeometry,
-            "placed slab requires an interior finite sample and positive finite shape error",
-        ));
-    }
-    let extent = material_extent(source.source_view()?, query_byte_limit, work, cancel)?;
-    let map = HeightMap::new(request.pose, extent)?;
-    let range = map.source_range(request.world_height_interval_mm)?;
-    let sample = div(
-        sub(
-            Interval::point(request.sample_world_z_mm),
-            Interval::point(request.pose.translation_mm[2]),
-        ),
-        Interval::point(map.scale),
-    )?
-    .mid();
-    let sigma = spectral_bound(map.matrix)?;
-    let source_policy = div(
-        Interval::point(request.native_shape_error_mm),
-        Interval::point(sigma),
-    )?
-    .lo;
-    if !source_policy.is_finite()
-        || source_policy <= 0.0
-        || !sample.is_finite()
-        || sample <= range[0]
-        || sample >= range[1]
-    {
-        return Err(error(
-            GeometryErrorCode::ConditioningFailure,
-            "placed slab policy or sample cannot be resolved in the source frame",
-        ));
-    }
-    let source_request = SlabRequest {
-        frame: map.frame,
-        height_interval_mm: range,
-        sample_height_mm: sample,
-        native_shape_error_mm: source_policy,
-    };
-    let mut prepared =
-        super::slab::prepare_slab_sample(source, source_request, query_byte_limit, work, cancel)?;
-    let placement = SamplePlacement {
-        map: &map,
-        pose: request.pose,
-        sample: request.sample_world_z_mm,
-        sigma,
-        extent: source_extent(source.definition()),
-    };
-    let fixed = coexisting_bytes
-        .saturating_add(prepared.section.retained_bytes())
-        .saturating_add(source.definition().id().allocated_bytes())
-        .saturating_add(ActualMaterialCoordinates::SCRATCH_BYTES)
-        .saturating_add(std::mem::size_of_val(&prepared));
-    let world_candidate = WorldSampleCandidate::prepare(
-        &prepared.section,
-        &placement,
-        super::slab::remaining_scratch(fixed)?,
-        work,
-        cancel,
-    )?;
-    let candidate_bytes = world_candidate.retained_bytes();
-    prepared.source_retained_bytes = prepared
-        .source_retained_bytes
-        .checked_add(candidate_bytes)
-        .ok_or_else(|| {
-            error(
-                GeometryErrorCode::ResourceLimit,
-                "coexisting world candidate capacity overflow",
-            )
-        })?;
-    // Preserve the cheap exact-source continuation lane. A source with
-    // nonzero correspondence uncertainty cannot acquire exact invariance;
-    // try its complete actual-coordinate radial proof before the expensive
-    // sufficient face cover. Annuli also avoid a meridian-convexity premise.
-    // This only orders proof attempts, never authorizes a geometry family.
-    let radial_first = !prepared.material_transport_zero
-        || prepared.section.loops.len() == 2
+            })?;
+        // Annuli try actual-coordinate radial coverage before the sufficient
+        // face-continuation cover. This orders attempts, not geometry authority.
+        let radial_first = prepared.section.loops.len() == 2
             && prepared
                 .section
                 .loops
@@ -1642,342 +1562,362 @@ pub(crate) fn analyze_placed_slab(
                 .filter(|ring| ring.is_hole)
                 .count()
                 == 1;
-    let source_proof = if radial_first {
-        None
-    } else {
-        Some(
-            match super::slab::analyze_slab_sample(source, &prepared, work, cancel) {
-                Ok(proof) => Ok(proof),
+        let source_proof = if radial_first {
+            None
+        } else {
+            Some(
+                match (|| -> Result<_, crate::GeometryError> {
+                    super::slab::analyze_slab_sample(source, &prepared, work, cancel)
+                })() {
+                    Ok(proof) => Ok(proof),
+                    Err(failure)
+                        if matches!(
+                            failure.code,
+                            GeometryErrorCode::AnalysisIndeterminate
+                                | GeometryErrorCode::ShapeErrorExceeded
+                                | GeometryErrorCode::ParameterCorrespondenceUnavailable
+                        ) =>
+                    {
+                        Err(failure)
+                    }
+                    Err(failure) => return Err(failure),
+                },
+            )
+        };
+        let needs_radial_metric = source_proof.as_ref().is_none_or(|proof| match proof {
+            Ok(proof) => proof.has_transition_material(),
+            Err(_) => true,
+        });
+        let proof_inline_bytes = std::mem::size_of_val(&source_proof);
+        let radial_fixed = fixed.saturating_add(proof_inline_bytes).saturating_add(
+            source_proof
+                .as_ref()
+                .and_then(|proof| proof.as_ref().ok())
+                .map_or(0, |proof| proof.retained_bytes()),
+        );
+        let radial_shape_failure = if needs_radial_metric {
+            let coordinates = ActualMaterialCoordinates::placed(
+                source.definition(),
+                &map,
+                request.world_height_interval_mm,
+                request.sample_world_z_mm,
+                work,
+                cancel,
+            )?;
+            let radial = if prepared.section.loops.is_empty() {
+                Ok(None)
+            } else {
+                (|| -> Result<_, crate::GeometryError> {
+                    super::joint::certify_closed_radial_slab(
+                        source.source_view()?,
+                        &source_request,
+                        &coordinates,
+                        &world_candidate.loops,
+                        request.native_shape_error_mm,
+                        super::slab::remaining_scratch(
+                            radial_fixed.saturating_add(world_candidate.retained_bytes()),
+                        )?,
+                        work,
+                        cancel,
+                    )
+                })()
+            };
+            match radial {
+                Ok(Some(radial)) => {
+                    // Only a COMPLETE topology+filled-metric proof wins. Keep the
+                    // unchanged raw sample available for the other sufficient lane.
+                    drop(source_proof);
+                    let mut capture = super::SlabCapture::new(
+                        source.definition(),
+                        source_request,
+                        &prepared.section,
+                        work,
+                        cancel,
+                    )?;
+                    let band = capture.source_sample_height_band_mm;
+                    if band[0] < range[0] || band[1] > range[1] {
+                        return Err(error(
+                            GeometryErrorCode::AnalysisIndeterminate,
+                            "actual native sample plane is not inside the captured slab",
+                        ));
+                    }
+                    let endpoint_radial_bytes = std::mem::size_of::<
+                        [Option<super::critical::ClosedRadialMaterialProduct>; 2],
+                    >();
+                    let transform_limit = query_byte_limit
+                        .checked_sub(
+                            capture.definition_id.allocated_bytes()
+                                + ActualMaterialCoordinates::SCRATCH_BYTES
+                                + std::mem::size_of_val(&radial)
+                                + std::mem::size_of_val(&prepared)
+                                + proof_inline_bytes
+                                + endpoint_radial_bytes
+                                + std::mem::size_of::<WorldSampleCandidate>(),
+                        )
+                        .ok_or_else(|| {
+                            error(
+                                GeometryErrorCode::ResourceLimit,
+                                "closed radial sample commit exceeds coexisting capacity",
+                            )
+                        })?;
+                    (|| -> Result<_, crate::GeometryError> {
+                        world_candidate.commit(
+                            &mut prepared.section,
+                            &placement,
+                            transform_limit,
+                            work,
+                            cancel,
+                        )
+                    })()?;
+                    let bound = radial.bound_mm();
+                    let occupied_bytes = coexisting_bytes
+                        .saturating_add(prepared.section.retained_bytes())
+                        .saturating_add(capture.definition_id.allocated_bytes())
+                        .saturating_add(ActualMaterialCoordinates::SCRATCH_BYTES)
+                        .saturating_add(std::mem::size_of_val(&radial))
+                        .saturating_add(std::mem::size_of_val(&prepared))
+                        .saturating_add(endpoint_radial_bytes)
+                        .saturating_add(proof_inline_bytes);
+                    let occupied = super::slab::occupied_envelope(
+                        &prepared.section,
+                        bound,
+                        super::slab::remaining_scratch(occupied_bytes)?,
+                        work,
+                        cancel,
+                    )?;
+                    capture.placed = Some(PlacedSlabCapture {
+                        pose: request.pose,
+                        world_height_interval_mm: request.world_height_interval_mm,
+                        sample_world_z_mm: request.sample_world_z_mm,
+                        native_shape_error_mm: request.native_shape_error_mm,
+                    });
+                    return Ok(SlabAnalysis {
+                        section: prepared.section,
+                        occupied: Some(occupied),
+                        boundary_motion_bound_mm: bound,
+                        invariance: None,
+                        critical: None,
+                        endpoint_strata: Vec::new(),
+                        collar_complex: None,
+                        radial_slab: Some(radial),
+                        endpoint_radial_products: [None; 2],
+                        capture,
+                    });
+                }
+                Ok(None) => None,
+                Err(failure)
+                    if radial_first && failure.code == GeometryErrorCode::ShapeErrorExceeded =>
+                {
+                    // This lane has no retained competing source proof. Its
+                    // actual-coordinate metric requests a smaller fresh capture;
+                    // do not exhaust work on a sufficient legacy cover first.
+                    return Err(failure);
+                }
+                Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => {
+                    Some(failure)
+                }
                 Err(failure)
                     if matches!(
                         failure.code,
                         GeometryErrorCode::AnalysisIndeterminate
-                            | GeometryErrorCode::ShapeErrorExceeded
                             | GeometryErrorCode::ParameterCorrespondenceUnavailable
                     ) =>
                 {
-                    Err(failure)
+                    None
                 }
                 Err(failure) => return Err(failure),
-            },
-        )
-    };
-    let needs_radial_metric = source_proof.as_ref().is_none_or(|proof| match proof {
-        Ok(proof) => proof.has_transition_material(),
-        Err(_) => true,
-    });
-    let proof_inline_bytes = std::mem::size_of_val(&source_proof);
-    let radial_fixed = fixed.saturating_add(proof_inline_bytes).saturating_add(
-        source_proof
-            .as_ref()
-            .and_then(|proof| proof.as_ref().ok())
-            .map_or(0, |proof| proof.retained_bytes()),
-    );
-    let radial_shape_failure = if needs_radial_metric {
-        let coordinates = ActualMaterialCoordinates::placed(
-            source.definition(),
-            &map,
-            request.world_height_interval_mm,
-            request.sample_world_z_mm,
-            work,
-            cancel,
-        )?;
-        let radial = if prepared.section.loops.is_empty() {
-            Ok(None)
+            }
         } else {
-            super::joint::certify_closed_radial_slab(
-                source.source_view()?,
-                &source_request,
-                &coordinates,
-                &world_candidate.loops,
-                request.native_shape_error_mm,
-                super::slab::remaining_scratch(
-                    radial_fixed.saturating_add(world_candidate.retained_bytes()),
-                )?,
-                work,
-                cancel,
-            )
+            None
         };
-        match radial {
-            Ok(Some(radial)) => {
-                // Only a COMPLETE topology+filled-metric proof wins. Keep the
-                // unchanged raw sample available for the other sufficient lane.
-                drop(source_proof);
-                let mut capture = super::SlabCapture::new(
-                    source.definition(),
-                    source_request,
-                    &prepared.section,
-                    work,
-                    cancel,
-                )?;
-                let band = capture.source_sample_height_band_mm;
-                if band[0] < range[0] || band[1] > range[1] {
-                    return Err(error(
-                        GeometryErrorCode::AnalysisIndeterminate,
-                        "actual native sample plane is not inside the captured slab",
-                    ));
-                }
-                let endpoint_radial_bytes = std::mem::size_of::<
-                    [Option<super::critical::ClosedRadialMaterialProduct>; 2],
-                >();
-                let transform_limit = query_byte_limit
-                    .checked_sub(
-                        capture.definition_id.allocated_bytes()
-                            + ActualMaterialCoordinates::SCRATCH_BYTES
-                            + std::mem::size_of_val(&radial)
-                            + std::mem::size_of_val(&prepared)
-                            + proof_inline_bytes
-                            + endpoint_radial_bytes
-                            + std::mem::size_of::<WorldSampleCandidate>(),
-                    )
-                    .ok_or_else(|| {
-                        error(
-                            GeometryErrorCode::ResourceLimit,
-                            "closed radial sample commit exceeds coexisting capacity",
-                        )
-                    })?;
-                world_candidate.commit(
-                    &mut prepared.section,
-                    &placement,
-                    transform_limit,
-                    work,
-                    cancel,
-                )?;
-                let bound = radial.bound_mm();
-                let occupied_bytes = coexisting_bytes
-                    .saturating_add(prepared.section.retained_bytes())
-                    .saturating_add(capture.definition_id.allocated_bytes())
-                    .saturating_add(ActualMaterialCoordinates::SCRATCH_BYTES)
-                    .saturating_add(std::mem::size_of_val(&radial))
-                    .saturating_add(std::mem::size_of_val(&prepared))
-                    .saturating_add(endpoint_radial_bytes)
-                    .saturating_add(proof_inline_bytes);
-                let occupied = super::slab::occupied_envelope(
-                    &prepared.section,
-                    bound,
-                    super::slab::remaining_scratch(occupied_bytes)?,
-                    work,
-                    cancel,
-                )?;
-                capture.placed = Some(PlacedSlabCapture {
-                    pose: request.pose,
-                    world_height_interval_mm: request.world_height_interval_mm,
-                    sample_world_z_mm: request.sample_world_z_mm,
-                    native_shape_error_mm: request.native_shape_error_mm,
-                });
-                return Ok(SlabAnalysis {
-                    section: prepared.section,
-                    occupied: Some(occupied),
-                    boundary_motion_bound_mm: bound,
-                    invariance: None,
-                    critical: None,
-                    endpoint_strata: Vec::new(),
-                    collar_complex: None,
-                    radial_slab: Some(radial),
-                    endpoint_radial_products: [None; 2],
-                    capture,
-                });
-            }
-            Ok(None) => None,
-            Err(failure)
-                if radial_first && failure.code == GeometryErrorCode::ShapeErrorExceeded =>
-            {
-                // This lane has no retained competing source proof. Its
-                // actual-coordinate metric requests a smaller fresh capture;
-                // do not exhaust work on a sufficient legacy cover first.
-                return Err(failure);
-            }
-            Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => Some(failure),
+        let coexisting_bytes = coexisting_bytes.saturating_add(candidate_bytes);
+        let source_proof = match source_proof {
+            Some(proof) => proof,
+            None => (|| -> Result<_, crate::GeometryError> {
+                super::slab::analyze_slab_sample(source, &prepared, work, cancel)
+            })(),
+        };
+        let mut result = match source_proof {
+            Ok(proof) => proof.into_analysis(prepared.section),
             Err(failure)
                 if matches!(
                     failure.code,
                     GeometryErrorCode::AnalysisIndeterminate
+                        | GeometryErrorCode::ShapeErrorExceeded
                         | GeometryErrorCode::ParameterCorrespondenceUnavailable
                 ) =>
             {
-                None
+                return Err(radial_shape_failure.unwrap_or(failure));
             }
             Err(failure) => return Err(failure),
-        }
-    } else {
-        None
-    };
-    let coexisting_bytes = coexisting_bytes.saturating_add(candidate_bytes);
-    let source_proof = match source_proof {
-        Some(proof) => proof,
-        None => super::slab::analyze_slab_sample(source, &prepared, work, cancel),
-    };
-    let mut result = match source_proof {
-        Ok(proof) => proof.into_analysis(prepared.section),
-        Err(failure)
-            if matches!(
-                failure.code,
-                GeometryErrorCode::AnalysisIndeterminate
-                    | GeometryErrorCode::ShapeErrorExceeded
-                    | GeometryErrorCode::ParameterCorrespondenceUnavailable
-            ) =>
+        };
+        if !result.matches_native_material(source.definition())
+            || result.endpoint_strata.iter().any(|stratum| {
+                stratum.material_realization_identity() != result.material_realization_identity()
+            })
         {
-            return Err(radial_shape_failure.unwrap_or(failure));
+            return Err(error(
+                GeometryErrorCode::InvalidGeometry,
+                "placed slab cannot change its native material identity",
+            ));
         }
-        Err(failure) => return Err(failure),
-    };
-    if !result.matches_original_material(source.definition())
-        || result.endpoint_strata.iter().any(|stratum| {
-            stratum.material_realization_identity() != result.material_realization_identity()
-        })
-    {
-        return Err(error(
-            GeometryErrorCode::InvalidGeometry,
-            "placed slab cannot change its original material realization",
-        ));
-    }
-    let placed = PlacedSlabCapture {
-        pose: request.pose,
-        world_height_interval_mm: request.world_height_interval_mm,
-        sample_world_z_mm: request.sample_world_z_mm,
-        native_shape_error_mm: request.native_shape_error_mm,
-    };
-    place_endpoint_strata(
-        &mut result.endpoint_strata,
-        source.definition(),
-        &map,
-        &placed,
-        work,
-        cancel,
-    )?;
-    if let Some(seed) = result.collar_complex.as_ref() {
-        // A nominal source foliation does not certify actual world critical
-        // incidence. Retain the complete native event-face lineage, but prove
-        // its posed world band and regular complement before exposing it.
-        let remaining = super::slab::remaining_scratch(
-            coexisting_bytes.saturating_add(result.retained_bytes()),
-        )?;
-        let actual = super::collar::place_native_collar_complex(
-            source.source_view()?,
-            super::collar::PlacedCollarComplexQuery {
-                seed,
-                pose: request.pose,
-                interval: request.world_height_interval_mm,
-                sample: request.sample_world_z_mm,
-            },
-            remaining,
-            work,
-            cancel,
-        )?;
-        result.collar_complex = Some(actual);
-    }
-    let drift = axial_drift(&map, &result.section, range, extent)?;
-    let section_byte_limit = query_byte_limit
-        .checked_sub(
-            result
-                .retained_bytes()
-                .saturating_sub(result.section.retained_bytes())
-                .saturating_add(std::mem::size_of::<WorldSampleCandidate>()),
-        )
-        .ok_or_else(|| {
-            error(
-                GeometryErrorCode::ResourceLimit,
-                "placed slab leaves no native section transform capacity",
-            )
-        })?;
-    let arithmetic = world_candidate.commit(
-        &mut result.section,
-        &placement,
-        section_byte_limit,
-        work,
-        cancel,
-    )?;
-    let bound = finite(add(
-        add(
-            mul(
-                Interval::point(sigma),
-                Interval::point(result.boundary_motion_bound_mm),
-            ),
-            Interval::point(drift),
-        ),
-        Interval::point(arithmetic),
-    ))?
-    .hi;
-    if bound > request.native_shape_error_mm {
-        return Err(error(
-            GeometryErrorCode::ShapeErrorExceeded,
-            "placed slab shape bound exceeds the requested world policy",
-        ));
-    }
-    if let Some(occupied) = &mut result.occupied {
-        transform_occupied(
-            occupied,
-            &map,
-            request.pose,
-            request.sample_world_z_mm,
-            drift,
-            work,
-            cancel,
-        )?;
-    } else {
-        return Err(error(
-            GeometryErrorCode::AnalysisIndeterminate,
-            "placed slab lacks a conservative occupied projection",
-        ));
-    }
-    result.invariance = placed_invariance(
-        result.invariance,
-        &map,
-        request.pose,
-        range,
-        request.world_height_interval_mm,
-    );
-    result.boundary_motion_bound_mm = bound;
-    result.capture.placed = Some(placed);
-    if result.closed_shape_error_mm().is_some()
-        && !result.section.loops.is_empty()
-        && result.invariance.is_none()
-        && !result.has_native_convex_section_topology_proof()
-    {
-        let coordinates = ActualMaterialCoordinates::placed(
-            source.definition(),
-            &map,
-            request.world_height_interval_mm,
-            request.sample_world_z_mm,
-            work,
-            cancel,
-        )?;
-        let remaining = super::slab::remaining_scratch(
-            coexisting_bytes
-                .saturating_sub(candidate_bytes)
-                .saturating_add(result.retained_bytes())
-                .saturating_add(ActualMaterialCoordinates::SCRATCH_BYTES),
-        )?;
-        if let Some(product) =
-            super::critical::material_link::certify_closed_radial_material_product(
-                source.source_view()?,
-                &source_request,
-                &coordinates,
-                remaining,
+        let placed = PlacedSlabCapture {
+            pose: request.pose,
+            world_height_interval_mm: request.world_height_interval_mm,
+            sample_world_z_mm: request.sample_world_z_mm,
+            native_shape_error_mm: request.native_shape_error_mm,
+        };
+        (|| -> Result<_, crate::GeometryError> {
+            place_endpoint_strata(
+                &mut result.endpoint_strata,
+                source.definition(),
+                &map,
+                &placed,
                 work,
                 cancel,
-            )?
-        {
-            result.radial_slab = super::joint::seal_closed_radial_slab_from_complete_metric(
-                source.definition(),
-                &result,
-                product,
-                remaining,
+            )
+        })()?;
+        if let Some(seed) = result.collar_complex.as_ref() {
+            // A nominal source foliation does not certify actual world critical
+            // incidence. Retain the complete native event-face lineage, but prove
+            // its posed world band and regular complement before exposing it.
+            let remaining = super::slab::remaining_scratch(
+                coexisting_bytes.saturating_add(result.retained_bytes()),
+            )?;
+            let actual = (|| -> Result<_, crate::GeometryError> {
+                super::collar::place_native_collar_complex(
+                    source.source_view()?,
+                    super::collar::PlacedCollarComplexQuery {
+                        seed,
+                        pose: request.pose,
+                        interval: request.world_height_interval_mm,
+                        sample: request.sample_world_z_mm,
+                        world_native_shape_error_mm: request.native_shape_error_mm,
+                    },
+                    remaining,
+                    work,
+                    cancel,
+                )
+            })()?;
+            result.collar_complex = Some(actual);
+        }
+        let drift = axial_drift(&map, &result.section, range, extent)?;
+        let section_byte_limit = query_byte_limit
+            .checked_sub(
+                result
+                    .retained_bytes()
+                    .saturating_sub(result.section.retained_bytes())
+                    .saturating_add(std::mem::size_of::<WorldSampleCandidate>()),
+            )
+            .ok_or_else(|| {
+                error(
+                    GeometryErrorCode::ResourceLimit,
+                    "placed slab leaves no native section transform capacity",
+                )
+            })?;
+        let arithmetic = (|| -> Result<_, crate::GeometryError> {
+            world_candidate.commit(
+                &mut result.section,
+                &placement,
+                section_byte_limit,
+                work,
+                cancel,
+            )
+        })()?;
+        let bound = finite(add(
+            add(
+                mul(
+                    Interval::point(sigma),
+                    Interval::point(result.boundary_motion_bound_mm),
+                ),
+                Interval::point(drift),
+            ),
+            Interval::point(arithmetic),
+        ))?
+        .hi;
+        if bound > request.native_shape_error_mm {
+            return Err(error(
+                GeometryErrorCode::ShapeErrorExceeded,
+                "placed slab shape bound exceeds the requested world policy",
+            ));
+        }
+        if let Some(occupied) = &mut result.occupied {
+            transform_occupied(
+                occupied,
+                &map,
+                request.pose,
+                request.sample_world_z_mm,
+                drift,
                 work,
                 cancel,
             )?;
+        } else {
+            return Err(error(
+                GeometryErrorCode::AnalysisIndeterminate,
+                "placed slab lacks a conservative occupied projection",
+            ));
         }
-    }
-    certify_endpoint_radial_products(
-        source,
-        &map,
-        request,
-        &mut result,
-        coexisting_bytes.saturating_sub(candidate_bytes),
-        work,
-        cancel,
-    )?;
-    Ok(result)
+        result.invariance = placed_invariance(
+            result.invariance,
+            &map,
+            request.pose,
+            range,
+            request.world_height_interval_mm,
+        );
+        result.boundary_motion_bound_mm = bound;
+        result.capture.placed = Some(placed);
+        if result.closed_shape_error_mm().is_some()
+            && !result.section.loops.is_empty()
+            && result.invariance.is_none()
+            && !result.has_native_convex_section_topology_proof()
+        {
+            let coordinates = ActualMaterialCoordinates::placed(
+                source.definition(),
+                &map,
+                request.world_height_interval_mm,
+                request.sample_world_z_mm,
+                work,
+                cancel,
+            )?;
+            let remaining = super::slab::remaining_scratch(
+                coexisting_bytes
+                    .saturating_sub(candidate_bytes)
+                    .saturating_add(result.retained_bytes())
+                    .saturating_add(ActualMaterialCoordinates::SCRATCH_BYTES),
+            )?;
+            if let Some(product) = (|| -> Result<_, crate::GeometryError> {
+                super::critical::material_link::certify_closed_radial_material_product(
+                    source.source_view()?,
+                    &source_request,
+                    &coordinates,
+                    remaining,
+                    work,
+                    cancel,
+                )
+            })()? {
+                result.radial_slab = super::joint::seal_closed_radial_slab_from_complete_metric(
+                    source.definition(),
+                    &result,
+                    product,
+                    remaining,
+                    work,
+                    cancel,
+                )?;
+            }
+        }
+        (|| -> Result<_, crate::GeometryError> {
+            certify_endpoint_radial_products(
+                source,
+                &map,
+                request,
+                &mut result,
+                coexisting_bytes.saturating_sub(candidate_bytes),
+                work,
+                cancel,
+            )
+        })()?;
+        Ok(result)
+    })()
 }
 
 fn plane_functional(
@@ -2210,10 +2150,21 @@ mod tests {
                 .iter()
                 .all(|value| value.lo.is_finite() && value.hi.is_finite())
         );
-        for coedge in &definition.original_source().coedges {
-            for point in coedge.vertex_points_mm {
-                for axis in 0..3 {
-                    assert!(positions[axis].lo <= point[axis] && point[axis] <= positions[axis].hi);
+        for ordinal in 0..definition.face_ids().len() {
+            let domain = source
+                .face_domain(ordinal, remaining, &mut work, &cancel)
+                .unwrap();
+            for coedge in domain.coedges() {
+                for vertex in coedge.vertices {
+                    let point = source
+                        .trim_source()
+                        .native_vertex_point(vertex, &mut work, &cancel)
+                        .unwrap();
+                    for axis in 0..3 {
+                        assert!(
+                            positions[axis].lo <= point[axis] && point[axis] <= positions[axis].hi
+                        );
+                    }
                 }
             }
         }
@@ -2237,7 +2188,7 @@ mod tests {
     }
 
     #[test]
-    fn placed_material_bounds_retain_source_recipe_pose_and_terminal_brackets() {
+    fn placed_material_bounds_retain_native_identity_pose_and_terminal_brackets() {
         let cancel = AtomicBool::new(false);
         let mut definition = crate::from_step_bytes_with_cancel(
             include_bytes!("../../../../fixtures/geometry/box-mm.step"),
@@ -2256,8 +2207,6 @@ mod tests {
         let material =
             placed_material_bounds(&definition, pose, direction, policy, &mut work, &cancel)
                 .unwrap();
-        let literal =
-            placed_bounds(&definition, pose, direction, policy, &mut work, &cancel).unwrap();
         assert_eq!(material.definition_id(), definition.id());
         assert_eq!(material.placed_pose(), pose);
         assert_eq!(material.world_direction(), direction);
@@ -2266,11 +2215,12 @@ mod tests {
             policy.maximum_endpoint_uncertainty_mm
         );
         assert!(material.is_compatible_with_definition(&definition));
-        assert!(material.scalar_transport_is_identically_zero());
-        assert_eq!(material.source_realization_error_mm(), 0.0);
+        assert!(material.effective_tolerance_mm().is_finite());
+        assert!(material.effective_tolerance_mm() > 0.0);
         let bounds = material.bounds();
-        assert!(bounds.minimum[0] <= literal.minimum[1] && literal.minimum[0] <= bounds.minimum[1]);
-        assert!(bounds.maximum[0] <= literal.maximum[1] && literal.maximum[0] <= bounds.maximum[1]);
+        // Direction is normalized: its magnitude does not scale millimetres.
+        assert!(bounds.minimum[0] <= 4.0 && bounds.minimum[1] >= 4.0);
+        assert!(bounds.maximum[0] <= 12.0 && bounds.maximum[1] >= 12.0);
         assert!(bounds.achieved_uncertainty_mm <= policy.maximum_endpoint_uncertainty_mm);
         assert!(material.retained_bytes() >= std::mem::size_of::<PlacedMaterialProjectedBounds>());
         assert_eq!(
@@ -2565,6 +2515,9 @@ mod tests {
                 definition_id: spiling_contracts::geometry::DefinitionId::from_source_sha256(
                     &[0; 32],
                 ),
+                material_realization:
+                    crate::kernel::MaterialRealizationIdentity::with_source_uncertainty(None),
+                pose: RigidPoseMm::IDENTITY,
                 authority: crate::SectionAuthority::NativeIntersection,
                 maximum_chord_error_mm: 1e-5,
                 maximum_plane_error_mm: 0.0,
@@ -2697,7 +2650,8 @@ mod tests {
         };
         let certificate = InvariantHeightDomain {
             definition_id: spiling_contracts::geometry::DefinitionId::from_source_sha256(&[0; 32]),
-            material_realization: crate::kernel::MaterialRealizationIdentity::with_allowance(None),
+            material_realization:
+                crate::kernel::MaterialRealizationIdentity::with_source_uncertainty(None),
             frame: world_frame(),
             height_interval_mm: [0.0, 2.0],
             pose: None,

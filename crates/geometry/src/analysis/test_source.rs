@@ -47,6 +47,12 @@ impl From<b::Brep> for SourceBrep {
 }
 
 pub(crate) fn original_definition(source: impl Into<SourceBrep>) -> Definition {
+    crate::from_step_bytes_with_cancel(&original_step_bytes(source), &AtomicBool::new(false))
+        .expect("actual closed native source imports")
+}
+
+/// The identical authored STEP operands for direct import-boundary regressions.
+pub(crate) fn original_step_bytes(source: impl Into<SourceBrep>) -> Vec<u8> {
     use solidcraft_step::p21::Param as P;
     use solidcraft_step::write::{GeomWriter, Writer, topology};
     let mut source = source.into();
@@ -137,13 +143,9 @@ pub(crate) fn original_definition(source: impl Into<SourceBrep>) -> Definition {
             P::Ref(context),
         ],
     );
-    crate::from_step_bytes_with_cancel(
-        writer
-            .file("analysis-source.step", "AUTOMOTIVE_DESIGN")
-            .as_bytes(),
-        &AtomicBool::new(false),
-    )
-    .expect("actual closed native source imports")
+    writer
+        .file("analysis-source.step", "AUTOMOTIVE_DESIGN")
+        .into_bytes()
 }
 
 /// The normal portable writer is used unless the source deliberately retains

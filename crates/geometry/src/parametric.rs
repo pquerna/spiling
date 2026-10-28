@@ -191,7 +191,8 @@ fn native_surface_functional_enclosures<const N: usize>(
         }
     }
     let jet = surface_piecewise_first_enclosure(surface, uv, work, cancel)?;
-    let result = functionals.map(|f| {
+    let carrier = analytic_eval::step_sphere_functional_bounds(surface, functionals, work, cancel)?;
+    let mut result = functionals.map(|f| {
         let project = |row: [Interval; 3]| {
             (0..3).fold(Interval::point(0.0), |s, i| {
                 s.add(f.direction[i].mul(row[i]))
@@ -204,12 +205,65 @@ fn native_surface_functional_enclosures<const N: usize>(
             dv: project(jet.dv),
         }
     });
+    if let Some(carrier) = carrier {
+        for (result, carrier) in result.iter_mut().zip(carrier) {
+            result.position = result.position.intersect(carrier)?;
+        }
+    }
     for r in result {
         for v in [r.position, r.du, r.dv] {
             Interval::new(v.lo, v.hi)?;
         }
     }
     Ok(result)
+}
+
+/// Whole-carrier scalar enclosure from native rational control coefficients.
+/// Uniform-sign weights give a convex combination of Euclidean controls. This
+/// is an outer bound only; a control value is never a feasible curve witness.
+pub(crate) fn native_curve_functional_control_bounds(
+    curve: &dyn CurveEvaluator,
+    range: [f64; 2],
+    direction: [Interval; 3],
+    offset: Interval,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<Interval>, GeometryError> {
+    let Some(native) = curve.native_curve() else {
+        return Ok(None);
+    };
+    let Some(nurbs) = native_curve_nurbs(curve)? else {
+        return Ok(None);
+    };
+    if !curve_parameter_span_continuous(curve, range, work, cancel)? {
+        return Ok(None);
+    }
+    let mut weight_sign = None;
+    let mut support: Option<Interval> = None;
+    for point in nurbs.cpts() {
+        work.charge(1, cancel)?;
+        let weight = if nurbs.is_rational() { point.w } else { 1.0 };
+        let coefficient = [
+            point.x,
+            point.y,
+            if native.dim() == 2 { 0.0 } else { point.z },
+        ];
+        for value in coefficient.into_iter().chain([weight]) {
+            Interval::new(value, value)?;
+        }
+        if weight == 0.0 || weight_sign.is_some_and(|sign| sign != (weight > 0.0)) {
+            return Ok(None);
+        }
+        weight_sign = Some(weight > 0.0);
+        let bound = (0..3)
+            .fold(Interval::point(0.0), |sum, axis| {
+                sum.add(direction[axis].mul(Interval::point(coefficient[axis])))
+            })
+            .div(Interval::point(weight))?
+            .add(offset);
+        support = Some(support.map_or(bound, |previous| previous.hull(bound)));
+    }
+    Ok(support)
 }
 fn native_surface_geometric_normal_enclosure(
     surface: &Surface,
@@ -605,6 +659,111 @@ fn native_curve2d_image_within_box(
     if (0..2).all(|i| image[i].lo >= domain[i][0] && image[i].hi <= domain[i][1]) {
         return Ok(true);
     }
+    if native_curve2d_control_hull_within_box(curve, range, domain, work, cancel)? {
+        return Ok(true);
+    }
+    // An outlying control is not an outlying curve point. Exhaust the actual
+    // knot spans with bounded whole-cell images before declining containment.
+    // This is a positive-only proof: unresolved leaves grant no chart authority.
+    const MAX_CONTAINMENT_DEPTH: u8 = 64;
+    let mut pending = [([0.0; 2], 0u8); MAX_CONTAINMENT_DEPTH as usize + 1];
+    let mut covered = false;
+    for span in native_curve2d_parameter_spans(curve, range, work, cancel)? {
+        covered = true;
+        let mut live = 1;
+        pending[0] = (span, 0);
+        while live != 0 {
+            live -= 1;
+            let (cell, depth) = pending[live];
+            let jet = curve_prepared::curve_jet_order(curve, cell, 1, 0, work, cancel)?;
+            if (0..2)
+                .any(|axis| jet[0][axis].hi < domain[axis][0] || jet[0][axis].lo > domain[axis][1])
+            {
+                return Ok(false);
+            }
+            let mut contained = true;
+            let mut endpoints = [None; 2];
+            for axis in 0..2 {
+                for side in 0..2 {
+                    let bound = domain[axis][side];
+                    if (side == 0 && jet[0][axis].lo >= bound)
+                        || (side == 1 && jet[0][axis].hi <= bound)
+                    {
+                        continue;
+                    }
+                    // A complete one-sided derivative and its literal endpoint
+                    // can close a boundary-touching cell without interval
+                    // padding turning exact equality into a false excursion.
+                    let derivative = jet[1][axis];
+                    let endpoint = if derivative.lo >= 0.0 {
+                        Some(side)
+                    } else if derivative.hi <= 0.0 {
+                        Some(1 - side)
+                    } else {
+                        None
+                    };
+                    let Some(endpoint) = endpoint else {
+                        contained = false;
+                        break;
+                    };
+                    let point = match endpoints[endpoint] {
+                        Some(point) => point,
+                        None => {
+                            let point = curve_prepared::curve_jet_order(
+                                curve,
+                                [cell[endpoint]; 2],
+                                0,
+                                0,
+                                work,
+                                cancel,
+                            )?[0];
+                            endpoints[endpoint] = Some(point);
+                            point
+                        }
+                    };
+                    if (side == 0 && point[axis].lo >= bound)
+                        || (side == 1 && point[axis].hi <= bound)
+                        || curve_prepared::curve_endpoint_coordinate_equal(
+                            curve,
+                            cell[endpoint],
+                            axis,
+                            bound,
+                            work,
+                            cancel,
+                        )?
+                    {
+                        continue;
+                    }
+                    contained = false;
+                    break;
+                }
+                if !contained {
+                    break;
+                }
+            }
+            if contained {
+                continue;
+            }
+            let middle = cell[0] * 0.5 + cell[1] * 0.5;
+            if depth >= MAX_CONTAINMENT_DEPTH || middle <= cell[0] || middle >= cell[1] {
+                return Ok(false);
+            }
+            work.charge(2, cancel)?;
+            pending[live] = ([middle, cell[1]], depth + 1);
+            pending[live + 1] = ([cell[0], middle], depth + 1);
+            live += 2;
+        }
+    }
+    Ok(covered)
+}
+
+fn native_curve2d_control_hull_within_box(
+    curve: &Curve,
+    range: [f64; 2],
+    domain: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
     let Some(n) = curve_prepared::native_curve_nurbs(curve)? else {
         return Ok(false);
     };
