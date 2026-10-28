@@ -444,10 +444,28 @@ same defect; it is not a native-first regression or a qualified image workflow.
 Keep the executable journey and its dose gate unchanged. Fixing that wall
 construction is separate from this landing.
 
-The default native box also exercises the actual local AMD/CEF production panel:
-physical native-face picking, consumed maximum-width Apply/Undo/Redo/recompile,
-fresh actual-program report/preview, export/save and source-deleted fresh read-only
-reopen. Historical artifacts do not regain fresh authority through Undo.
+The additional8×8/depth0.35 cylindrical-image workbench Compile also remains
+unqualified. Its captured image/intent/pose refuses on source5/planner24 at
+finished-material/bed bounds and on the native-first route during surface
+construction; neither proves a shared cause. Actual native carrier selection,
+canonical PNG preview and source-independent image authoring/history are
+exercised, not successful manufactured output for that parameter set. The
+separate cylindrical-image CLI journey retains its own narrower input evidence.
+
+The ordinary housing's additional fixed-Y workbench Compile remains unqualified:
+source5/planner24 refuses an earlier protected wall/floor obligation, while the
+native-first route still refuses actual top-skin support. Those are not a shared
+root-cause claim. The accepted ordinary/physical-plate reference retains
+alternating XY; authoring another axis does not establish manufacturing support.
+Keep fixed-Y diagnostics visible without expanding this native landing.
+
+The default native box exercises the actual local AMD/CEF production panel:
+physical native-face picking, Compile, fresh actual-program report/preview,
+export/save and source-deleted fresh read-only reopen. The accepted alternating-XY
+housing/physical-plate operator also exercises consumed maximum-width
+Apply/Undo/Redo/invalidation/recompile, density history, source-hidden physical
+slab/pocket inspection and source-deleted fresh replay/export. Historical
+artifacts do not regain fresh authority through Undo.
 The fitting/housing scene's native picking, world section and lifecycle have their
 own [geometry qualification](geometry-evidence.md#minimal-user-flows). Neither
 bounded workbench result qualifies arbitrary GPUs/platforms, packaging or physical

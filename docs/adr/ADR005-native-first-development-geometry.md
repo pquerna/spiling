@@ -96,11 +96,15 @@ units, protected material/voids, closed-height scope, resource limits and
 cancellation remain required. No easier fixture, intent or all-fine substitute
 replaces these preserved positives.
 
-The user explicitly separated the existing planar-image wall-dose defect after
-the same operator reproduced it on a producer-verified source5/planner24 main
-baseline. Keep that failing journey and its unchanged source-local dose gate;
-the native-first landing does not claim planar-image qualification. Its wall
-construction repair remains separate.
+Additional refused journeys remain outside this activation by explicit decision:
+the pre-existing planar-image wall-dose case, fixed-Y housing Compile, and the
+8×8/depth0.35 cylindrical-image workbench Compile. Published source5/planner24
+also refuses those inputs; only the planar dose rejection establishes the same
+failure, not the earlier baseline refusals of the other journeys. Preserve the
+failing paths, diagnostics and unchanged geometry/support/dose gates. The accepted
+alternating-XY housing/plate operator, passing cylindrical-image CLI journey and
+actual PNG authoring/preview/history remain separate evidence.
+
 The original ribbed bracket remains explicitly unqualified for manufacturing.
 Its default-wall Compile → fresh Verify → export, useful variable width/count
 regions and junctions, width/history and source-deleted recovery remain the full
