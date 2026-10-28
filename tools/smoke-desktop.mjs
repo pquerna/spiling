@@ -1078,12 +1078,12 @@ async function inspectSurfaceFinishAuthoring() {
       "native source face inspection",
     );
     const carrier = await evaluate(
-      "JSON.parse(document.querySelector('[data-testid=\"face-inspection\"] pre').textContent)",
+      "JSON.parse(document.querySelector('[data-testid=\"face-inspection\"] pre').textContent).analytic",
     );
     if (
       cylindricalFinishScenario
-        ? carrier.kind === "cylinder"
-        : carrier.kind === "plane" && Math.abs(carrier.normal[2]) < 1e-12
+        ? carrier?.kind === "cylinder"
+        : carrier?.kind === "plane" && Math.abs(carrier.normal[2]) < 1e-12
     ) {
       selectedCarrier = carrier;
       reference = (await surfaceState()).selectedFaceRef;

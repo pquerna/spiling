@@ -247,8 +247,10 @@ the same policies and bytes survive independently of that path.
 Source-face finishes are ordinary revision-bound project edits. Use current native
 occurrence/face IDs, choose scope and explicitly Apply; Undo/Redo/Save remain Core
 operations. Whole-face ribs and image relief retain narrow certified carrier/pose
-eligibility despite generic base geometry. Image preview shows captured Gray8 data,
-not displacement. Compile and fresh replay show manufactured paths. Parameter/wire
+eligibility despite generic base geometry. Native face descriptions nest optional
+analytic carrier data inside `geometry.analytic`; a display or generic descriptor
+cannot substitute for the engine's finish certificate. Image preview shows captured
+Gray8 data, not displacement. Compile and fresh replay show manufactured paths. Parameter/wire
 contracts live in [manufacturing protocol](../protocol/manufacturing.md),
 [rib ADR](../adr/002-cylindrical-grip-ribs.md) and [image ADR](../adr/003-spatial-image-relief.md).
 
