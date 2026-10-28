@@ -269,6 +269,8 @@ SPILING_ENGINE_PATH="$ENGINE" node tools/smoke-desktop.mjs \
 
 The manufacturing runner exercises intent/placement/history, Compile, actual-byte
 report/motion, cancellation, export, source-independent reopen and child cleanup.
+Terminal Compile refusal fails the runner immediately with the native diagnostic;
+the observation deadline bounds pending work, not a wait after a known failure.
 Geometry clicks target visible viewport interiors from the captured rendered
 surface, then require a real native face inspection from physical pointer events.
 A missed sparse coordinate grid is not evidence that production picking failed.

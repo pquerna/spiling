@@ -2134,6 +2134,9 @@ async function inspectManufacturing() {
   state = await until(
     async () => {
       const current = await manufacturingState();
+      if (!current.working &&
+          await evaluate("!!document.querySelector('#manufacturing-operation-failure')"))
+        throw new Error(`Compile refused: ${await text("manufacturing-message")}`);
       return current.selected_artifact && !current.working ? current : false;
     },
     "native immutable compile",
