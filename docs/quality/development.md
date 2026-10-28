@@ -109,10 +109,18 @@ kernel's published-branch policy while keeping review URLs stable and old exact
 pins reachable. Do not merge Spiling overlays into the fork's upstream mirror.
 
 Run the owning resource/backend controls and actual native consumer on the
-combined integration tree. Keep producer-specific Cargo targets when comparing
-different checked-out baselines: do not credit a run that reused the other
-worktree's path-package artifact. Record exact producer, commands and outcomes in
-ignored evidence or commit/PR notes, not append-only Markdown logs.
+combined integration tree. Prefer producer-specific Cargo targets when comparing
+checked-out baselines. Cargo success and the working directory do not prove
+producer identity: a shared target can retain another worktree's workspace Rust
+artifacts. If retaining a warm native cache across trees, invalidate all workspace
+Rust packages before building the next tree; preserve external/native dependency
+artifacts. Before interpreting a comparison or starting a long operator, run
+`spiling-cli diagnose` with the exact engine and check its actual Hello build and
+native revision against the checked-out contracts and pins. A mismatch invalidates
+the comparison, not the source under investigation. Freeze the matching binary
+pair for the run and retain its identity with ignored evidence. Record exact
+producer, commands and outcomes in evidence or commit/PR notes, not append-only
+Markdown logs.
 
 Push updated lanes and integration with normal pushes. Integration is the only
 source for new Spiling pins, but its moving tip is not itself a reproducible

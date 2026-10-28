@@ -425,6 +425,14 @@ qualify arbitrary planar finishes, image carriers or a new micro-texture family.
 The unchanged split-cylinder baseline compiles; split-face finishing still
 requires separate eligibility and does not inherit full-cylinder authority.
 
+The [planar-image recovery journey](../../apps/cli/tests/project.rs)
+`planar_image_relief_survives_source_deletion_and_fresh_readonly_retrieval`
+currently refuses at its first thin image-event layer: local wall dose exceeds
+the source-local junction/count allowance. The current source5/planner24 baseline
+has the same defect; it is not a native-first regression or a qualified image
+workflow. Keep the executable journey and its dose gate unchanged. Fixing that
+wall construction is separate from the native-first landing.
+
 The default native box also exercises the actual local AMD/CEF production panel:
 physical native-face picking, consumed maximum-width Apply/Undo/Redo/recompile,
 fresh actual-program report/preview, export/save and source-deleted fresh read-only
