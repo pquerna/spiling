@@ -227,8 +227,8 @@ Actual outer XYZ6 Z scope and strict bead/projection/error margin are mandatory.
 Final-D/field invariance, skins/events, process ownership and actual deposited
 support remain separate gates. The
 [band contract](../protocol/manufacturing.md#same-nozzle-combined-sparse-bands)
-owns the current construction details; ADR005 does not independently qualify
-this operation under the pending native-first authority.
+owns the current construction details; ADR005 alone does not independently qualify
+this operation. Require its actual current-producer operator and replay evidence.
 
 Nominal width and physical `[lower,upper]` are path data throughout hatch pitch,
 stadium area/volume, capsules, clearance, backend E/flow and independent replay.

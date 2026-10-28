@@ -1,0 +1,19 @@
+[package]
+name = "solidcraft-geom"
+description = "SolidCraft geometry foundation: vectors, planes, frames, meshes and their measures"
+version = "0.18.1"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+authors = ["SolidCraft contributors"]
+repository = "https://github.com/tangency-labs/solidcraft"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }

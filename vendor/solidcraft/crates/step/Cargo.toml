@@ -1,0 +1,15 @@
+[package]
+name = "solidcraft-step"
+description = "SolidCraft STEP (ISO 10303) exchange: the Part 21 exchange structure and Part 42 geometry as plain data, with no modelling backend"
+version = "0.18.1"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+authors = ["SolidCraft contributors"]
+repository = "https://github.com/tangency-labs/solidcraft"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+solidcraft-geom = { version = "=0.18.1", path = "../geom" }

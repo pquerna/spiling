@@ -22,6 +22,8 @@ Third-party dependencies, vendored code, fonts, fixtures, and other imported ass
 
 Manufacturing's exact-pinned `boostvoronoi` segment constructor uses BSL-1.0; the Spiling adapter is independently authored OSL-3.0 code. Preserve the constructor's Andrii Sydorchuk/Eadf notices and Boost license text, and collect every locked transitive dependency's own notices through the existing release provenance tool. The constructor supplies planar proposals only, not an alternate native kernel. Dependency versions/checksums belong to Cargo manifests/lockfiles, and distribution still requires reviewing the complete collected notices rather than assuming one top-level license covers its dependency graph.
 
+The two SolidCraft companion libraries under `vendor/solidcraft/` are third-party MIT OR Apache-2.0 material, excluded from the Spiling workspace. Preserve their upstream headers, license texts, NOTICE and conformance-input attribution; do not apply Spiling headers to imported source. `vendor/solidcraft/UPSTREAM.toml` owns the exact upstream snapshot and local modifications. Cargo path dependencies are reproducible from the checkout; release provenance must include non-workspace local packages, not just registry and Git sources.
+
 ## Standard file header
 
 Use this three-line notice in the file's native comment syntax:

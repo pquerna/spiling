@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Native geometry parity: trimmed BREP through manufacturing
 
-Status: **native-first DEVELOPMENT replacement adopted in [ADR005](ADR005-native-first-development-geometry.md); implementation and qualification pending**. Current production remains source5/planner23. The source-reconstruction and G0–G3 designs below document its existing implementation constraints and the superseded parity approach, not required material law for ADR005's native route. Keep current operating limits until a coherent cutover preserves the existing operators; no partial native owner or transferred evidence is authorized. [Current evidence](../quality/geometry-evidence.md) owns exercised flows and explicit limits. No mesh fallback or physical qualification is introduced.
+Status: **superseded by the implemented source6/planner25 native-first DEVELOPMENT route in [ADR005](ADR005-native-first-development-geometry.md)**. The source-reconstruction and G0–G3 designs below retain the rationale and constraints of the superseded parity approach, not current material law or a second runtime geometry authority. [Current evidence](../quality/geometry-evidence.md) owns exercised operators and explicit limits; older producer results do not qualify the replacement. No mesh fallback or physical qualification is introduced.
 
 ## 1. Decision and user outcome
 

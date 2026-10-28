@@ -12,8 +12,8 @@ requirements. It does not broaden supported STEP, finishes, processes or machine
 or establish complete operator qualification merely from implementation.
 
 The implemented material route is source6/planner25 native-first DEVELOPMENT.
-Landing requires one coherent native owner, matching published dependency/producer
-identities and preserved qualified operators and source-safety controls. Do not
+Qualification requires one coherent native owner, matching published SolidCore
+pins, recorded vendored companion sources and preserved operators/source-safety controls. Do not
 relabel older source5/planner24 reports as current evidence. A stronger standalone
 native API is a prerequisite only when the actual consumer needs its contract.
 

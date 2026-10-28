@@ -169,7 +169,10 @@ async function provenance() {
   const metadata = JSON.parse(
     await run("cargo", ["metadata", "--locked", "--format-version", "1"], { capture: true }),
   );
-  const rustPackages = metadata.packages.filter((item) => item.source !== null);
+  const workspacePackages = new Set(metadata.workspace_members);
+  const rustPackages = metadata.packages.filter(
+    (item) => item.source !== null || !workspacePackages.has(item.id),
+  );
   const nodeLicenses = JSON.parse(
     await run("pnpm", ["licenses", "list", "--json"], { capture: true }),
   );
@@ -327,6 +330,9 @@ async function main() {
       break;
     case "contracts":
       await contracts(process.argv.includes("--check"));
+      break;
+    case "provenance":
+      await provenance();
       break;
     case "dev": {
       const engine = await prepare();

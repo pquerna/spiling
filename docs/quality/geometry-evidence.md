@@ -9,10 +9,10 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source6/planner25 DEVELOPMENT candidate: the imported SolidCore BREP is its sole
-material geometry. Published Main remains source5/planner24; coherent public-pin
-and operator qualification of the candidate remain release gates. Earlier
-producer receipts do not transfer by relabeling. The
+source6/planner25 DEVELOPMENT route: the imported SolidCore BREP is its sole
+material geometry. Qualification requires the actual coherent producer,
+recorded dependency sources and preserved operators. Earlier producer receipts
+do not transfer by relabeling. The
 [parity RFC](../adr/004-native-geometry-parity.md) is superseded on independent
 original-STEP material reconstruction. See [manufacturing](manufacturing-evidence.md)
 for compiler/replay obligations and [development](development.md) for build
@@ -29,6 +29,10 @@ prerequisites. No geometry result establishes physical printability or machine r
   admission and physical unit conversion. SolidCraft decodes the admitted
   single-solid subset; [`brep_data_bridge.rs`](../../crates/geometry/src/import/brep_data_bridge.rs)
   constructs native carriers. Unsupported conversion is not malformed source.
+  Both SolidCraft libraries are checked-in third-party source under
+  `vendor/solidcraft/`; its `UPSTREAM.toml` identifies the exact snapshot,
+  homogeneous-boundary closure correction and retained licensing. They are
+  exchange/evaluation libraries, not another material kernel.
 - [`import/source.rs`](../../crates/geometry/src/import/source.rs) captures
   literal original face, loop, coedge, vertex and selected-curve identities in
   [`kernel/source.rs`](../../crates/geometry/src/kernel/source.rs). These facts
@@ -405,7 +409,7 @@ Resource exhaustion, cancellation, unavailable parameter correspondence,
 conditioning, unsupported operations and invalid geometry remain distinct failures.
 No partial proof, stale job or failed display grants successful material authority.
 
-This is a development candidate, not transferred kernel qualification.
+This is DEVELOPMENT geometry, not transferred kernel qualification.
 Historical Monstertruck or earlier SolidCore receipts do not establish the
 source6/planner25 operator gate. The unchanged original fixtures and workflows
 remain reproduction inputs; match the actual workspace binaries and producer
@@ -425,8 +429,8 @@ centered physical plate, fine/genuine combined H1 and tapered fitting through
 placement, Preflight, Compile, independent saved-byte Verify, export/save and
 byte-identical source-deleted fresh-engine recovery. Fitting recovery may retain
 a geometry-only scene with its immutable program; that does not create a source
-display mesh. These are qualification gates, not a claim that final public-pin
-and affected-workbench acceptance has completed.
+display mesh. These operator gates remain separate from physical qualification
+and the explicitly unqualified journeys below.
 
 Housing corner/cap, primitive/void and native section controls retain complete
 root existence, area, orientation and lineage obligations. Missing trim
@@ -460,6 +464,12 @@ emitted-program, history and source-deleted recovery evidence within the
 General STEP documents/assemblies, unproved charts, arbitrary freeform finishes,
 singular/nonmanifold material and unqualified critical interfaces remain outside
 support. Native descriptors and successful raw inspection do not broaden it.
+
+The vendored STEP reader retains an upstream placed-revolution PCurve failure:
+`topology::tests::surfaces_of_revolution_read_as_placed_revolutions` fails in the
+standalone default test profile on both the patched snapshot and unpatched base.
+Do not suppress this regression or infer general revolution admission from the
+passing conformance corpus and narrower native workflows.
 
 ## Minimal user flows
 

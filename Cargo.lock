@@ -4486,7 +4486,6 @@ dependencies = [
 [[package]]
 name = "solidcraft-geom"
 version = "0.18.1"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=1b7b9d8d88233c18071fe8d6f4da418a315935a6#1b7b9d8d88233c18071fe8d6f4da418a315935a6"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -4495,7 +4494,6 @@ dependencies = [
 [[package]]
 name = "solidcraft-step"
 version = "0.18.1"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=1b7b9d8d88233c18071fe8d6f4da418a315935a6#1b7b9d8d88233c18071fe8d6f4da418a315935a6"
 dependencies = [
  "solidcraft-geom",
 ]

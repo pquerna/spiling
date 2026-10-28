@@ -6,6 +6,7 @@
 resolver = "3"
 members = ["crates/contracts", "crates/core", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/desktop/src-tauri", "tests"]
 default-members = ["crates/contracts", "crates/core", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli"]
+exclude = ["vendor/solidcraft/crates/geom", "vendor/solidcraft/crates/step"]
 
 [workspace.package]
 version = "0.1.0"
@@ -38,8 +39,9 @@ boostvoronoi = { version = "=0.12.1", default-features = false }
 # Integration source: pquerna/integration-spiling-tracking; keep an exact tested revision.
 solidcore = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "5d85d5818b144a3a115abb1cff21c23bf08de17e" }
 solidcore-mesh = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "5d85d5818b144a3a115abb1cff21c23bf08de17e", features = ["nurbs-grid-mesh"] }
-solidcraft-geom = { version = "=0.18.1", git = "https://github.com/tangency-labs/solidcraft", rev = "1b7b9d8d88233c18071fe8d6f4da418a315935a6" }
-solidcraft-step = { version = "=0.18.1", git = "https://github.com/tangency-labs/solidcraft", rev = "1b7b9d8d88233c18071fe8d6f4da418a315935a6" }
+# Checked-in upstream snapshot and closure patch: vendor/solidcraft/UPSTREAM.toml.
+solidcraft-geom = { version = "=0.18.1", path = "vendor/solidcraft/crates/geom" }
+solidcraft-step = { version = "=0.18.1", path = "vendor/solidcraft/crates/step" }
 step-p21 = "=0.1.1"
 spiling-geometry = { path = "crates/geometry" }
 spiling-core = { path = "crates/core" }

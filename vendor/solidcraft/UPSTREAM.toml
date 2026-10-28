@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# Licensed under the Open Software License version 3.0
+
+repository = "https://github.com/tangency-labs/solidcraft"
+base_revision = "1b7b9d8d88233c18071fe8d6f4da418a315935a6"
+snapshot_revision = "db09423bd4efac448d1a5fc79592da1d596be2d8"
+version = "0.18.1"
+license = "MIT OR Apache-2.0"
+crates = ["solidcraft-geom", "solidcraft-step"]
+regression_inputs = "tests/step-conformance"
+
+[[changes]]
+path = "crates/geom/src/tess/uv.rs"
+revision = "db09423bd4efac448d1a5fc79592da1d596be2d8"
+reason = "Recognize complete closed spline boundary rows related by one exact positive homogeneous scale; retain rejection of unequal row laws, unsafe products and changed geometry."
+
+[[changes]]
+paths = ["crates/geom/Cargo.toml", "crates/step/Cargo.toml"]
+reason = "Make upstream package metadata, dependencies and lints standalone without inheriting Spiling's license or requiring the SolidCraft application workspace."
+
+[[changes]]
+paths = ["crates/geom/LICENSE-MIT", "crates/geom/LICENSE-APACHE", "crates/geom/NOTICE", "crates/step/LICENSE-MIT", "crates/step/LICENSE-APACHE", "crates/step/NOTICE"]
+reason = "Retain unmodified upstream notices alongside each crate for release collection."

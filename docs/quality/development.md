@@ -38,6 +38,7 @@ launch correctly; a bare Rust executable is not equivalent.
 | `pnpm smoke:cli`   | Actual child startup, operations, transfer and reap                  |
 | `pnpm bench:smoke` | Diagnostic process/transfer benchmark, not geometry performance      |
 | `pnpm package`     | Current-platform package with sidecar, CEF and notices               |
+| `node tools/run.mjs provenance` | Collect dependency provenance/notices without rebuilding the application |
 
 **Build before running real surfaces.** Direct desktop Cargo builds can overwrite
 a fresh engine with a stale staged sidecar. Do not build while a desktop smoke
@@ -47,20 +48,34 @@ crates are optimized independently of the desktop stack.
 
 ## Material authority and qualification
 
-[ADR005](../adr/ADR005-native-first-development-geometry.md) adopts native-first
-DEVELOPMENT geometry: one imported SolidCore BREP, exact kernel/tolerance binding,
-original STEP identity/provenance and original finish inputs. Implementation and
-operator qualification are pending; source5/planner24 remains production. Keep
-current operating limits and operators until a coherent cutover; do not publish a
-partial native owner or relabel current runtime reports/evidence.
+[ADR005](../adr/ADR005-native-first-development-geometry.md) adopts the implemented
+source6/planner25 DEVELOPMENT route: one imported SolidCore BREP, exact
+kernel/tolerance binding, original STEP identity/provenance and original finish
+inputs. Qualify preserved operators with the actual coherent producer; do not
+relabel source5/planner24 reports or transfer older runtime evidence.
 
-The eventual native route retains independent actual-program/process replay,
+The native route retains independent actual-program/process replay,
 not independent original-STEP topology/embedding certification or physical
 readiness. Query-private mutation and derived trims cannot silently redefine the
 authoritative BREP. Unsupported/indeterminate operations refuse; display meshes
 and custom original-source reconstruction are not alternative material paths.
 Work, live-byte admission and cancellation remain bounded. Exact pins and builds
 are provenance/prerequisites, not complete operator acceptance.
+
+SolidCore and solidcore-mesh retain exact published fork pins. Only the
+SolidCraft geometry/STEP companion libraries are vendored: relative Cargo paths
+under `vendor/solidcraft/` include the exact homogeneous-boundary closure patch,
+upstream licenses and bounded conformance inputs. `UPSTREAM.toml` records their
+source and modifications. No SolidCraft application fork or machine-local Cargo
+override is needed. Update this snapshot as a coherent two-crate unit and rerun
+its semantic regressions plus affected import/manufacturing operators.
+
+Run the excluded libraries' tests with
+`cargo test --offline --manifest-path vendor/solidcraft/crates/geom/Cargo.toml`
+and the corresponding `step/Cargo.toml` path, not workspace `-p` selection.
+The retained placed-revolution failure is documented in
+[geometry limits](geometry-evidence.md#refusals-and-support-boundary); do not
+hide it by skipping the test or weaken its PCurve assertion.
 
 ## SolidCore fork freshness
 
