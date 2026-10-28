@@ -227,8 +227,8 @@ writer. [Manufacturing](manufacturing-evidence.md) maps the implementation and c
 refusals; [authoring](authoring-evidence.md) maps transactions and recovery.
 
 `apps/engine/src/geometry/bed_pose.rs` prepares one immutable native source for
-the three directional material-support queries. Its retained domain/vertex-plan
-capacity is charged once; each query borrows it and uses only the remaining
+the three directional material-support queries. Retained native domains and
+correspondence-map capacity are charged once; each query uses only the remaining
 shared geometry bytes. Preparation and all directions share the unchanged
 20M cumulative contact-work allowance. Exercise this path with `--center-on-bed 1`
 before Compile on the ordinary housing above; the revision/nonpenetration gate is
