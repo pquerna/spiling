@@ -4,6 +4,8 @@
 
 //! Bounds on the stored homogeneous coefficients, without rounded knot insertion.
 //! Closed queries retain both incident one-sided jets at every original knot.
+//! Axis-constant homogeneous components retain exact zero derivatives on each
+//! piece; recentering still carries weight derivatives through rational division.
 
 use super::interval::Interval;
 use crate::{GeometryError, GeometryWorkBudget};
@@ -17,7 +19,8 @@ pub const BASIS_SCRATCH_BYTES: usize =
 pub const SURFACE_EVALUATION_SCRATCH_BYTES: usize = 3 * BASIS_SCRATCH_BYTES
     + std::mem::size_of::<[[[Interval; 4]; 4]; 4]>()
     + 3 * std::mem::size_of::<SurfaceTensor>()
-    + std::mem::size_of::<([f64; 3], [f64; 4], Option<Interval>, [usize; 8])>();
+    + std::mem::size_of::<([f64; 3], [f64; 4], Option<Interval>, [usize; 8])>()
+    + std::mem::size_of::<([[f64; 4]; 3], [u8; 2])>();
 const ZERO: Interval = Interval::point(0.0);
 
 #[derive(Debug, Clone, Copy)]
@@ -197,6 +200,7 @@ pub(super) fn evaluate_nurbs_surface_tensor(
     let indices = surface.indices();
     let nu = indices.n + 1;
     let nv = indices.m + 1;
+    let rational = surface.is_rational();
     validate_knots(uk, p, nu, uv[0], work, cancel)?;
     validate_knots(vk, q, nv, uv[1], work, cancel)?;
     let mut result: Option<SurfaceTensor> = None;
@@ -218,7 +222,7 @@ pub(super) fn evaluate_nurbs_surface_tensor(
             let anchor = surface
                 .cpt(us - p, vs - q)
                 .map_err(|_| conditioning("missing native anchor coefficient"))?;
-            let anchor_w = if surface.is_rational() { anchor.w } else { 1.0 };
+            let anchor_w = if rational { anchor.w } else { 1.0 };
             // Any finite binary64 constant is a valid recentering origin.
             // A zero anchor weight does not imply a zero curve denominator.
             let origin = if anchor_w != 0.0 {
@@ -234,23 +238,60 @@ pub(super) fn evaluate_nurbs_surface_tensor(
                 Interval::new(v, v)?;
             }
             let mut weight_hull: Option<Interval> = None;
+            // On this original knot rectangle, a homogeneous component that
+            // repeats along an active axis has zero derivatives in that axis.
+            // Compare RAW coefficients, before recentering widens them.
+            let mut invariant = [if order == 0 { 0_u8 } else { 15_u8 }; 2];
             for i in 0..=p {
+                let mut row_first = [0.0; 4];
                 for j in 0..=q {
                     work.charge(1, cancel)?;
-                    let c = surface
-                        .cpt(us - p + i, vs - q + j)
-                        .map_err(|_| conditioning("missing native control point"))?;
-                    if (c.w != solidcore::nurbs::math::NOW) != surface.is_rational()
+                    let c = if i == 0 && j == 0 {
+                        anchor
+                    } else {
+                        surface
+                            .cpt(us - p + i, vs - q + j)
+                            .map_err(|_| conditioning("missing native control point"))?
+                    };
+                    if (c.w != solidcore::nurbs::math::NOW) != rational
                         || c.z == solidcore::nurbs::math::NOZ
                     {
                         return Err(conditioning(
                             "inconsistent native homogeneous surface coefficients",
                         ));
                     }
-                    let w = if surface.is_rational() { c.w } else { 1.0 };
+                    let w = if rational { c.w } else { 1.0 };
                     let coeff = [c.x, c.y, c.z, w];
                     for a in coeff {
                         Interval::new(a, a)?;
+                    }
+                    if i > 0 && invariant[0] != 0 {
+                        work.charge(1, cancel)?;
+                        let first = surface.cpt(us - p, vs - q + j).map_err(|_| {
+                            conditioning("missing native invariant-axis coefficient")
+                        })?;
+                        let first = [
+                            first.x,
+                            first.y,
+                            first.z,
+                            if rational { first.w } else { 1.0 },
+                        ];
+                        for k in 0..4 {
+                            if coeff[k] != first[k] {
+                                invariant[0] &= !(1 << k);
+                            }
+                        }
+                    }
+                    if invariant[1] != 0 {
+                        if j == 0 {
+                            row_first = coeff;
+                        } else {
+                            for k in 0..4 {
+                                if coeff[k] != row_first[k] {
+                                    invariant[1] &= !(1 << k);
+                                }
+                            }
+                        }
                     }
                     let wi = Interval::point(w);
                     weight_hull = Some(weight_hull.map_or(wi, |old| old.hull(wi)));
@@ -270,13 +311,31 @@ pub(super) fn evaluate_nurbs_surface_tensor(
                     }
                 }
             }
-            if !surface.is_rational() {
+            if !rational {
                 for a in 0..=order {
                     for b in 0..=order - a {
                         h[a][b][3] = ZERO;
                     }
                 }
                 h[0][0][3] = Interval::point(1.0);
+            }
+            for total in 1..=order {
+                for a in 0..=total {
+                    let b = total - a;
+                    let zero = (if a > 0 { invariant[0] } else { 0 })
+                        | (if b > 0 { invariant[1] } else { 0 });
+                    if zero & 8 != 0 {
+                        h[a][b][3] = ZERO;
+                    }
+                    for k in 0..3 {
+                        if zero & (1 << k) != 0 {
+                            // D(H_k - origin_k W) = -origin_k D(W).
+                            // A constant raw coordinate with varying weights
+                            // is NOT a constant Cartesian coordinate.
+                            h[a][b][k] = Interval::point(origin[k]).mul(h[a][b][3]).neg();
+                        }
+                    }
+                }
             }
             h[0][0][3] = h[0][0][3]
                 .intersect(weight_hull.ok_or_else(|| conditioning("empty control net"))?)?;

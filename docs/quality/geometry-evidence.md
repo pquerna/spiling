@@ -132,6 +132,14 @@ roots still require independent complete inventories, ordered bijection and
 actual endpoint-gap checks. Original-source calibration retains its stronger
 relative-tangent contract and cannot consume the weaker native position proof.
 
+Native rational first/higher jets retain axis-constant homogeneous components
+from the actual active control net, independently on each original knot piece.
+Differentiating a constant component annihilates it; recentering still retains
+the weight derivative, so constant raw coordinates with varying weights do not
+become constant Cartesian coordinates. Perturbed controls and both incident
+closed-knot sides remain enclosed. This tightens arithmetic bounds without a
+geometry-family flag, C1 promotion, tolerance change or persistent cache.
+
 The prepared section owner retains successful whole-coedge native position
 correspondence proofs by immutable definition/edge-use and admitted error bound.
 Only an equal or looser allowance reuses them; errors and partial proofs do not.

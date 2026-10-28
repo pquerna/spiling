@@ -189,6 +189,220 @@ fn native_surface_derivatives_enclose_rational_tensor_and_refuse_partial_domain(
         GeometryErrorCode::ConditioningFailure
     );
 }
+fn axis_invariant_surface_net() -> Vec<Vec<CPoint>> {
+    vec![
+        vec![
+            CPoint::new(2.0, 3.0, 0.0, 1.0),
+            CPoint::new(2.0, 3.0, 1.0, 1.0),
+        ],
+        vec![
+            CPoint::new(8.0, 10.0, 0.0, 2.0),
+            CPoint::new(8.0, 10.0, 2.0, 2.0),
+        ],
+    ]
+}
+
+fn bilinear_axis_surface(net: Vec<Vec<CPoint>>) -> srf_basic::Surface {
+    srf_basic::Surface::new(
+        net,
+        1,
+        1,
+        vec![0.0, 0.0, 1.0, 1.0],
+        vec![0.0, 0.0, 1.0, 1.0],
+    )
+    .unwrap()
+}
+
+#[test]
+fn native_surface_axis_invariance_preserves_mixed_derivatives() {
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(100_000);
+    for transpose in [false, true] {
+        let mut net = axis_invariant_surface_net();
+        if transpose {
+            let off_diagonal = net[0][1];
+            net[0][1] = net[1][0];
+            net[1][0] = off_diagonal;
+        }
+        let raw = bilinear_axis_surface(net);
+        for uv in [[[0.0, 1.0]; 2], [[0.5; 2]; 2]] {
+            let jet =
+                super::nurbs_eval::evaluate_nurbs_surface_tensor(&raw, uv, 3, &mut work, &cancel)
+                    .unwrap();
+            for a in 0..=3 {
+                for b in 0..=3 - a {
+                    if if transpose { a > 0 } else { b > 0 } {
+                        assert_eq!(jet[a][b][0], Interval::point(0.0));
+                        assert_eq!(jet[a][b][1], Interval::point(0.0));
+                    }
+                }
+            }
+            if uv[0][0] == uv[0][1] {
+                let varying = if transpose {
+                    jet[0][1][0]
+                } else {
+                    jet[1][0][0]
+                };
+                assert!(
+                    varying.lo > 0.0,
+                    "the other parameter must retain its real derivative"
+                );
+                assert!(varying.contains(16.0 / 9.0));
+            }
+        }
+    }
+}
+
+#[test]
+fn native_surface_axis_invariance_rejects_perturbed_controls() {
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(100_000);
+    let mut net = axis_invariant_surface_net();
+    net[1][1].x += 0.25;
+    let jet = super::nurbs_eval::evaluate_nurbs_surface_tensor(
+        &bilinear_axis_surface(net),
+        [[0.5; 2]; 2],
+        2,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    assert!(jet[0][1][0].lo > 0.0 && jet[0][1][0].contains(1.0 / 12.0));
+    assert!(jet[1][1][0].lo > 0.0 && jet[1][1][0].contains(1.0 / 9.0));
+    assert_eq!(jet[0][1][1], Interval::point(0.0));
+}
+
+#[test]
+fn native_surface_axis_invariance_keeps_varying_weight_terms() {
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(100_000);
+    // Hx is literally constant, but W=(1+u)(1+v). Recentered Hx' therefore
+    // retains -origin*W'; Cartesian x=2/W has nonzero pure/mixed derivatives.
+    let net = vec![
+        vec![
+            CPoint::new(2.0, 0.0, 0.0, 1.0),
+            CPoint::new(2.0, 0.0, 2.0, 2.0),
+        ],
+        vec![
+            CPoint::new(2.0, 2.0, 0.0, 2.0),
+            CPoint::new(2.0, 4.0, 4.0, 4.0),
+        ],
+    ];
+    let jet = super::nurbs_eval::evaluate_nurbs_surface_tensor(
+        &bilinear_axis_surface(net),
+        [[0.5; 2]; 2],
+        3,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    assert!(jet[0][1][0].hi < 0.0 && jet[0][1][0].contains(-16.0 / 27.0));
+    assert!(jet[1][1][0].lo > 0.0 && jet[1][1][0].contains(32.0 / 81.0));
+    assert!(jet[0][2][0].lo > 0.0 && jet[0][2][0].contains(64.0 / 81.0));
+    assert!(jet[1][2][0].hi < 0.0 && jet[1][2][0].contains(-128.0 / 243.0));
+}
+
+#[test]
+fn native_surface_axis_invariance_hulls_both_closed_knot_sides() {
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(100_000);
+    let raw = srf_basic::Surface::new(
+        vec![
+            vec![
+                CPoint::new(2.0, 0.0, 0.0, NOW),
+                CPoint::new(2.0, 0.0, 1.0, NOW),
+                CPoint::new(2.0, 0.0, 2.0, NOW),
+            ],
+            vec![
+                CPoint::new(4.0, 1.0, 0.0, NOW),
+                CPoint::new(4.0, 1.0, 1.0, NOW),
+                CPoint::new(5.0, 1.0, 2.0, NOW),
+            ],
+        ],
+        1,
+        1,
+        vec![0.0, 0.0, 1.0, 1.0],
+        vec![0.0, 0.0, 1.0, 2.0, 2.0],
+    )
+    .unwrap();
+    let left = super::nurbs_eval::evaluate_nurbs_surface_tensor(
+        &raw,
+        [[0.5; 2], [0.25, 0.75]],
+        2,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(left[0][1][0], Interval::point(0.0));
+    let knot = super::nurbs_eval::evaluate_nurbs_surface_tensor(
+        &raw,
+        [[0.5; 2], [1.0; 2]],
+        2,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    assert!(knot[0][1][0].contains(0.0) && knot[0][1][0].contains(0.5));
+    assert!(knot[1][1][0].contains(0.0) && knot[1][1][0].contains(1.0));
+    assert!(
+        !super::continuity::surface_is_c1(&raw, [[0.25, 0.75], [0.75, 1.25]], &mut work, &cancel,)
+            .unwrap(),
+        "coefficient annihilation must not grant C1 across a real derivative jump"
+    );
+}
+
+#[test]
+fn native_surface_axis_invariance_preserves_weight_and_work_refusals() {
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(100_000);
+    for weights in [[[0.0; 2]; 2], [[1.0, -1.0]; 2]] {
+        let net = weights
+            .into_iter()
+            .enumerate()
+            .map(|(u, row)| {
+                row.into_iter()
+                    .enumerate()
+                    .map(|(v, w)| CPoint::new(2.0, u as f64, v as f64, w))
+                    .collect()
+            })
+            .collect();
+        let failure = super::nurbs_eval::evaluate_nurbs_surface_tensor(
+            &bilinear_axis_surface(net),
+            [[0.0, 1.0]; 2],
+            2,
+            &mut work,
+            &cancel,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, GeometryErrorCode::ConditioningFailure);
+    }
+    let raw = bilinear_axis_surface(axis_invariant_surface_net());
+    assert_eq!(
+        super::nurbs_eval::evaluate_nurbs_surface_tensor(
+            &raw,
+            [[0.0, 1.0]; 2],
+            2,
+            &mut GeometryWorkBudget::new(0),
+            &cancel,
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::ResourceLimit
+    );
+    assert_eq!(
+        super::nurbs_eval::evaluate_nurbs_surface_tensor(
+            &raw,
+            [[0.0, 1.0]; 2],
+            2,
+            &mut work,
+            &AtomicBool::new(true),
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::Cancelled
+    );
+}
+
 #[test]
 fn cancellation_and_cumulative_failed_queries_do_not_reset_work() {
     let c = rational_line();
@@ -287,6 +501,31 @@ fn uv_domain_containment_uses_exact_homogeneous_inequalities() {
         3,
     );
     assert!(!curve_parameter_span_continuous(&jump, [0.0, 1.0], &mut work, &cancel).unwrap());
+}
+
+#[test]
+fn uv_containment_refines_the_whole_curve_not_its_untrimmed_control_hull() {
+    let cancel = AtomicBool::new(false);
+    for (control, contained) in [(1.2, true), (3.0, false)] {
+        let c = curve(
+            vec![
+                CPoint::new(0.0, 0.5, NOZ, 1.0),
+                CPoint::new(control, 0.5, NOZ, 1.0),
+                CPoint::new(0.8, 0.5, NOZ, 1.0),
+            ],
+            2,
+            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            2,
+        );
+        let mut work = GeometryWorkBudget::new(100_000);
+        // The first curve touches the exact lower chart boundary, but its
+        // complete quadratic image stays in the unit chart despite an outlying control.
+        // The second has a real interior excursion with the SAME endpoints.
+        assert_eq!(
+            curve2d_image_within_box(&c, [0.0, 1.0], [[0.0, 1.0]; 2], &mut work, &cancel).unwrap(),
+            contained,
+        );
+    }
 }
 
 #[test]

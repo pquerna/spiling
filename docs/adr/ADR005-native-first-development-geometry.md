@@ -109,6 +109,13 @@ Record exact producer/input identity, resource observations, exercised stages
 and remaining refusals in commit/PR notes or ignored evidence. These gates are
 requirements, **not performed results of this ADR**.
 
+Noncolumn torus critical-band slab analysis is explicitly outside this activation
+bar. Its current native height-event refusal remains unqualified, not a passed
+positive or a weaker successful certificate. Separate torus import/display/section
+controls do not qualify that material query. Preserve demand deferral for already
+qualified slabs, protected noncolumn refusal and closed-height pocket/floor
+obligations without requiring this additional torus capability.
+
 Programs remain **SOFTWARE VALIDATION ONLY, NOT MACHINE READY**. This decision
 provides no physical printability, adhesion/support, collision, calibration,
 firmware or machine-readiness certification. See [geometry boundaries](../quality/geometry-evidence.md),
