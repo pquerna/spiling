@@ -182,7 +182,7 @@
         "assignments": [
           {
             "occurrence_id": 1,
-            "material_id": "software-pla-a",
+            "material": { "kind": "uniform", "material_id": "software-pla-a" },
             "work_envelope_mm": {
               "min": [
                 19,
@@ -198,7 +198,7 @@
           },
           {
             "occurrence_id": 2,
-            "material_id": "software-pla-b",
+            "material": { "kind": "uniform", "material_id": "software-pla-b" },
             "work_envelope_mm": {
               "min": [
                 119,

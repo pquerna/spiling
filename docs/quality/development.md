@@ -49,7 +49,7 @@ crates are optimized independently of the desktop stack.
 ## Material authority and qualification
 
 [ADR005](../adr/ADR005-native-first-development-geometry.md) adopts the implemented
-source6/planner26 DEVELOPMENT route: one imported SolidCore BREP, exact
+source6/planner27 DEVELOPMENT route: one imported SolidCore BREP, exact
 kernel/tolerance binding, original STEP identity/provenance and original finish
 inputs. Qualify preserved operators with the actual coherent producer; do not
 relabel source5/planner24 reports or transfer older runtime evidence.
@@ -284,6 +284,18 @@ source/material route history; the restored input must restore its original
 manufacturing identity. `--replay-out` belongs to create/inspect, not edit. The
 existing CEF full-intent/replay consumer uses the same saved job and decoded bytes;
 it does not recolor source meshes or simulate physical filament appearance.
+
+For executable whole-occurrence physical cycles, substitute
+`fixtures/manufacturing/fixed-dual-cycle.intent.json` in the same two-box workflow.
+It reuses the static route and existing optical `LayerCycle`, with explicit A/B
+bindings, equal0.2-mm slots, origin0 and opposite occurrence phases. Inspect actual
+tool/XYZ/E plus complete physical intervals: two occurrences at common Z must keep
+their independent material, while native finer intervals within one slot keep
+the same phase. Counts alone cannot distinguish a real cycle from static coloring.
+Swap both phase values in a disposable intent to obtain a different actual program;
+undo/redo/undo must restore the original manufacturing input and output. A changed
+height/origin must re-resolve or refuse, never silently advance by layer number.
+
 
 
 `apps/engine/src/geometry/bed_pose.rs` prepares one immutable native source for

@@ -233,6 +233,7 @@ pub(crate) fn stream(
                     ));
                 }
                 if previous_tool != Some(tool) {
+                    let [start, end] = crate::routing::waste_points(job, tool, layer.z_mm)?;
                     if group_started {
                         let old = &job.tools[usize::from(active_tool)];
                         emit(Event::Barrier)?;
@@ -244,6 +245,18 @@ pub(crate) fn stream(
                         let from = position.unwrap();
                         let lifted = [from[0], from[1], safe_z.unwrap()];
                         emit(Event::Travel(lifted, recipe.travel_speed_mm_s))?;
+                        let incoming = job.tools[usize::from(tool)].offset_xy_mm;
+                        // Stage the same carriage at the incoming waste lane
+                        // while coordinates still name the outgoing hotend.
+                        emit(Event::Travel(
+                            [
+                                start[0] + old.offset_xy_mm[0] - incoming[0],
+                                start[1] + old.offset_xy_mm[1] - incoming[1],
+                                safe_z.unwrap(),
+                            ],
+                            recipe.travel_speed_mm_s,
+                        ))?;
+                        emit(Event::Barrier)?;
                         emit(Event::HotendTarget(active_tool, old.standby_temperature_c))?;
                         emit(Event::SelectTool(tool))?;
                         emit(Event::ResetExtrusion)?;
@@ -270,11 +283,12 @@ pub(crate) fn stream(
                         emit(Event::Extrusion(extrusion, loaded.retract_speed_mm_s))?;
                         debt[usize::from(tool)] = 0.0;
                     }
-                    let [start, end] = crate::routing::waste_points(job, tool, layer.z_mm)?;
-                    emit(Event::Travel(
-                        [start[0], start[1], safe_z.unwrap()],
-                        recipe.travel_speed_mm_s,
-                    ))?;
+                    if !group_started {
+                        emit(Event::Travel(
+                            [start[0], start[1], safe_z.unwrap()],
+                            recipe.travel_speed_mm_s,
+                        ))?;
+                    }
                     emit(Event::Travel(start, recipe.travel_speed_mm_s))?;
                     let height = layer.z_mm - layer.lower_z_mm;
                     let flow = recipe.flow_multiplier

@@ -323,6 +323,7 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
             "bounded_vertical_rib_construction_v1".into(),
             "bounded_cylindrical_rib_construction_v1".into(),
             "fixed_dual_material_routing_v1".into(),
+            "whole_occurrence_layer_cycles_v1".into(),
         ],
         max_control_bytes: MAX_CONTROL_BYTES,
         max_binary_bytes: MAX_ARTIFACT_BYTES,

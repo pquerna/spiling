@@ -8,6 +8,7 @@ package spiling.engine;
 import "google/longrunning/operations.proto";
 import "spiling/native_common.proto";
 import "spiling/native_project.proto";
+import "spiling/native_appearance.proto";
 
 service Manufacturing {
   rpc Execute(ManufacturingRequest) returns (ManufacturingReply);
@@ -291,10 +292,23 @@ message FixedDualTool {
   // Exactly four coordinates: start X/Y, then end X/Y.
   repeated double waste_line_xy_mm = 17;
 }
+message UniformOccurrenceMaterial {
+  string material_id = 1;
+}
+message LayerCycleOccurrenceMaterial {
+  OpticalLayerCycle recipe = 1;
+  // Exactly two ordered, distinct immutable loaded material identities.
+  repeated string material_ids = 2;
+}
 message OccurrenceMaterialAssignment {
   uint32 occurrence_id = 1;
-  string material_id = 2;
+  reserved 2;
   AabbMm work_envelope_mm = 3;
+  // Required: omission and unknown alternatives are rejected by adapters.
+  oneof material {
+    UniformOccurrenceMaterial uniform = 4;
+    LayerCycleOccurrenceMaterial layer_cycle = 5;
+  }
 }
 message FixedDualJob {
   string machine_id = 1;

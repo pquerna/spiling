@@ -13,7 +13,7 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
 [native-first decision](../adr/ADR005-native-first-development-geometry.md) separate
 adopted authority from implementation and qualification.
 
-**This implementation uses source6/planner26 native-first DEVELOPMENT material
+**This implementation uses source6/planner27 native-first DEVELOPMENT material
 authority.** The imported SolidCore BREP is the single M, with original STEP
 identity/provenance and original finish inputs preserved. Independent actual
 program/process decoding remains mandatory and explicitly reports native-kernel
@@ -31,8 +31,9 @@ qualified by the cutover.
 
 The bounded [fixed-dual software route](../protocol/manufacturing.md#fixed-dual-software-route)
 adds a recoverable two-material headless job: two explicitly assigned upright native
-occurrences, independently loaded fixed hotends, supported per-layer waste and fresh
-decoded tool/offset/E/debt/thermal state. Full bead reservations and conservative
+occurrences, static bindings or independent uniform physical cycles, supported waste,
+preselection staging and fresh decoded tool/frame/E/debt/thermal state. Native fine
+refinement does not advance physical phase. Full bead reservations and conservative
 inactive-tip/carriage-prefix sweeps remain separate from native source qualification.
 The source-reviewed Marlin configuration and pressure/material records are declarations,
 not deployable firmware, physical nozzle measurements, clean color or printability.

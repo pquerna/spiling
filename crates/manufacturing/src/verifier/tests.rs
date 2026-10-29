@@ -3082,3 +3082,115 @@ fn fixed_dual_waste_bead_must_fit_bed_not_only_centerline() {
         "independent replay must reject the actual out-of-bed waste footprint"
     );
 }
+
+fn fixed_dual_cycle_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
+    let (mut intent, mut plan) = fixed_dual_fixture();
+    let height = plan.layers[0].z_mm - plan.layers[0].lower_z_mm;
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    let material_ids = std::array::from_fn(|index| job.tools[index].material.id.clone());
+    for (index, assignment) in job.assignments.iter_mut().enumerate() {
+        assignment.material = OccurrenceMaterial::LayerCycle {
+            recipe: spiling_contracts::optical::LayerCycle {
+                slots: vec![
+                    spiling_contracts::optical::OpticalSlot {
+                        material: 0,
+                        height_mm: height,
+                    },
+                    spiling_contracts::optical::OpticalSlot {
+                        material: 1,
+                        height_mm: height,
+                    },
+                ],
+                phase_slot: index as u16,
+                origin_z_mm: 0.0,
+            },
+            material_ids: material_ids.clone(),
+        };
+    }
+    for layer in &mut plan.layers {
+        layer
+            .paths
+            .sort_unstable_by_key(|path| job.tool_for_path(path).unwrap());
+    }
+    crate::realization::canonicalize(&mut plan, &intent, &AtomicBool::new(false)).unwrap();
+    (intent, plan)
+}
+
+#[test]
+fn physical_cycles_route_same_z_occurrences_independently_in_actual_commands() {
+    let (intent, plan) = fixed_dual_cycle_fixture();
+    let cancel = AtomicBool::new(false);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
+    let (bytes, _) = sink.finish().unwrap();
+    let mut seen = [[0u32; 2]; 2];
+    for record in bytes[REPLAY_HEADER_BYTES..]
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+    {
+        if !matches!(record[46], 1..=5 | 8 | 13) {
+            continue;
+        }
+        let x = f64::from_le_bytes(record[0..8].try_into().unwrap());
+        let z = f64::from_le_bytes(record[16..24].try_into().unwrap());
+        let interval = match z {
+            1.0 => 0,
+            2.0 => 1,
+            _ => panic!("unexpected actual deposition Z {z}"),
+        };
+        let occurrence = usize::from(x >= 100.0);
+        let actual_tool = u32::from_le_bytes(record[76..80].try_into().unwrap());
+        assert_eq!(
+            actual_tool,
+            [[0, 1], [1, 0]][interval][occurrence],
+            "physical phase belongs to each occurrence, never a global layer color"
+        );
+        seen[interval][occurrence] += 1;
+    }
+    assert_eq!(seen, [[5, 5], [1, 1]]);
+
+    let mut swapped = intent.clone();
+    let mut swapped_plan = plan.clone();
+    if let JobWorkflow::FixedDualMarlin { job } = &mut swapped.printer.workflow {
+        for assignment in &mut job.assignments {
+            if let OccurrenceMaterial::LayerCycle { recipe, .. } = &mut assignment.material {
+                recipe.phase_slot ^= 1;
+            }
+        }
+        for layer in &mut swapped_plan.layers {
+            layer
+                .paths
+                .sort_unstable_by_key(|path| job.tool_for_path(path).unwrap());
+        }
+    }
+    crate::realization::canonicalize(&mut swapped_plan, &swapped, &cancel).unwrap();
+    assert!(
+        verify(&program, &swapped_plan, &swapped, &cancel).is_err(),
+        "a valid changed source-phase plan cannot reuse the old material program"
+    );
+    let changed = crate::backend::emit(&swapped_plan, &swapped, &cancel)
+        .expect("both phase-swapped occurrence groups must remain executable");
+    assert_ne!(
+        changed, program,
+        "both phase-swapped occurrences must realize a different executable job"
+    );
+    verify(&changed, &swapped_plan, &swapped, &cancel).unwrap();
+
+    let mut crossing = intent.clone();
+    if let JobWorkflow::FixedDualMarlin { job } = &mut crossing.printer.workflow {
+        for assignment in &mut job.assignments {
+            if let OccurrenceMaterial::LayerCycle { recipe, .. } = &mut assignment.material {
+                for slot in &mut recipe.slots {
+                    slot.height_mm = 1.5;
+                }
+            }
+        }
+    }
+    assert!(
+        crate::backend::emit(&plan, &crossing, &cancel).is_err(),
+        "an already captured physical interval may not straddle a recipe slot"
+    );
+}

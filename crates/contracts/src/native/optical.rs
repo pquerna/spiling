@@ -7,6 +7,66 @@ use crate::{ArtifactView, appearance::*, geometry::SourceHash, optical::*, rpc};
 use prost::Message;
 use std::sync::Arc;
 
+impl TryFrom<rpc::OpticalLayerCycle> for LayerCycle {
+    type Error = String;
+
+    fn try_from(value: rpc::OpticalLayerCycle) -> Result<Self, String> {
+        if value.slots.is_empty() || value.slots.len() > 64 {
+            return Err("optical cycle requires 1..64 slots".into());
+        }
+        if value.phase_slot as usize >= value.slots.len() || !value.origin_z_mm.is_finite() {
+            return Err("invalid optical cycle phase or origin".into());
+        }
+        Ok(Self {
+            slots: value
+                .slots
+                .into_iter()
+                .map(|slot| {
+                    if slot.material > 1 || !slot.height_mm.is_finite() || slot.height_mm <= 0.0 {
+                        return Err("invalid optical cycle material or height".into());
+                    }
+                    Ok(OpticalSlot {
+                        material: slot.material as u8,
+                        height_mm: slot.height_mm,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+            phase_slot: value.phase_slot as u16,
+            origin_z_mm: value.origin_z_mm,
+        })
+    }
+}
+
+impl TryFrom<&LayerCycle> for rpc::OpticalLayerCycle {
+    type Error = String;
+
+    fn try_from(value: &LayerCycle) -> Result<Self, String> {
+        if value.slots.is_empty()
+            || value.slots.len() > 64
+            || usize::from(value.phase_slot) >= value.slots.len()
+            || !value.origin_z_mm.is_finite()
+            || value.slots.iter().any(|slot| {
+                slot.material > 1 || !slot.height_mm.is_finite() || slot.height_mm <= 0.0
+            })
+        {
+            return Err("invalid optical cycle".into());
+        }
+        let wire = Self {
+            slots: value
+                .slots
+                .iter()
+                .map(|slot| rpc::OpticalSlot {
+                    material: u32::from(slot.material),
+                    height_mm: slot.height_mm,
+                })
+                .collect(),
+            phase_slot: u32::from(value.phase_slot),
+            origin_z_mm: value.origin_z_mm,
+        };
+        Ok(wire)
+    }
+}
+
 fn observation(value: rpc::OpticalObservation) -> Result<OpticalObservation, String> {
     let illuminant = match rpc::AppearanceIlluminant::try_from(value.illuminant)
         .map_err(|_| "unknown optical illuminant")?

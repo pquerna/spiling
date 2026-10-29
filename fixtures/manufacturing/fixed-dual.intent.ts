@@ -58,8 +58,8 @@ const intent = {
         maximum_bed_temperature_c: 100,
         tools: [tool(0), tool(1)],
         assignments: [
-          { occurrence_id: 1, material_id: "software-pla-a", work_envelope_mm: { min: [19, 19, -1], max: [41, 31, 9] } },
-          { occurrence_id: 2, material_id: "software-pla-b", work_envelope_mm: { min: [119, 19, -1], max: [141, 31, 9] } },
+          { occurrence_id: 1, material: { kind: "uniform", material_id: "software-pla-a" }, work_envelope_mm: { min: [19, 19, -1], max: [41, 31, 9] } },
+          { occurrence_id: 2, material: { kind: "uniform", material_id: "software-pla-b" }, work_envelope_mm: { min: [119, 19, -1], max: [141, 31, 9] } },
         ],
         transition_lift_mm: 0.5,
         carriage_travel_bounds_mm: { min: [-30, -5, 0], max: [220, 220, 220] },

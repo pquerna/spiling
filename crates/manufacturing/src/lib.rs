@@ -20,10 +20,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// Binds native BREP material authority, finishes and source-associated walls.
-pub const PLANNER_VERSION: &str = "26";
-pub const EMITTER_VERSION: &str = "8";
-pub const VERIFIER_VERSION: &str = "10";
+/// Binds native material authority and physical per-occurrence material events.
+pub const PLANNER_VERSION: &str = "27";
+pub const EMITTER_VERSION: &str = "9";
+pub const VERIFIER_VERSION: &str = "11";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,

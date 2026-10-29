@@ -1,0 +1,5 @@
+SPDX-FileCopyrightText: 2026 Spiling contributors
+SPDX-License-Identifier: OSL-3.0
+Licensed under the Open Software License version 3.0
+
+Original software evaluation intent derived from fixed-dual-cycle.intent.ts and the existing shared recipe/profile. Opposite physical material phases, configuration, materials, pressure and geometry are declared reference inputs, not measured printer, color or bonding qualification.

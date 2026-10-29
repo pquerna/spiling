@@ -327,6 +327,10 @@ fn validate_engine_cutover(hello: &Hello) -> Result<(), ClientError> {
         ),
         (
             &hello.manufacturing_capabilities,
+            "whole_occurrence_layer_cycles_v1",
+        ),
+        (
+            &hello.manufacturing_capabilities,
             "varying_z_material_domains_v1",
         ),
         (

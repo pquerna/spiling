@@ -2137,10 +2137,30 @@ impl TryFrom<FixedDualTool> for rpc::FixedDualTool {
 impl TryFrom<rpc::OccurrenceMaterialAssignment> for OccurrenceMaterialAssignment {
     type Error = String;
     fn try_from(value: rpc::OccurrenceMaterialAssignment) -> Result<Self, String> {
-        routing_label(&value.material_id)?;
         let result = Self {
             occurrence_id: OccurrenceId::new(value.occurrence_id).map_err(|e| e.to_string())?,
-            material_id: value.material_id,
+            material: match required(value.material, "occurrence material")? {
+                rpc::occurrence_material_assignment::Material::Uniform(uniform) => {
+                    routing_label(&uniform.material_id)?;
+                    OccurrenceMaterial::Uniform {
+                        material_id: uniform.material_id,
+                    }
+                }
+                rpc::occurrence_material_assignment::Material::LayerCycle(cycle) => {
+                    let material_ids: [String; 2] = cycle
+                        .material_ids
+                        .try_into()
+                        .map_err(|_| "layer cycle requires exactly two material IDs")?;
+                    for id in &material_ids {
+                        routing_label(id)?;
+                    }
+                    OccurrenceMaterial::LayerCycle {
+                        recipe: required(cycle.recipe, "occurrence layer cycle recipe")?
+                            .try_into()?,
+                        material_ids,
+                    }
+                }
+            },
             work_envelope_mm: required(value.work_envelope_mm, "assignment work envelope")?
                 .try_into()?,
         };
@@ -2151,11 +2171,25 @@ impl TryFrom<rpc::OccurrenceMaterialAssignment> for OccurrenceMaterialAssignment
 impl TryFrom<OccurrenceMaterialAssignment> for rpc::OccurrenceMaterialAssignment {
     type Error = String;
     fn try_from(value: OccurrenceMaterialAssignment) -> Result<Self, String> {
-        routing_label(&value.material_id)?;
         validate_assignment_bounds(&value)?;
         Ok(Self {
             occurrence_id: value.occurrence_id.get(),
-            material_id: value.material_id,
+            material: Some(match value.material {
+                OccurrenceMaterial::Uniform { material_id } => {
+                    rpc::occurrence_material_assignment::Material::Uniform(
+                        rpc::UniformOccurrenceMaterial { material_id },
+                    )
+                }
+                OccurrenceMaterial::LayerCycle {
+                    recipe,
+                    material_ids,
+                } => rpc::occurrence_material_assignment::Material::LayerCycle(
+                    rpc::LayerCycleOccurrenceMaterial {
+                        recipe: Some((&recipe).try_into()?),
+                        material_ids: material_ids.into(),
+                    },
+                ),
+            }),
             work_envelope_mm: Some(value.work_envelope_mm.try_into()?),
         })
     }
@@ -2354,6 +2388,10 @@ fn validate_assignment_bounds(value: &OccurrenceMaterialAssignment) -> Result<()
     }) {
         return Err("routing requires finite positive box dimensions".into());
     }
+    value
+        .material
+        .validate_for_z_bounds([value.work_envelope_mm.min[2], value.work_envelope_mm.max[2]])
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -2407,7 +2445,9 @@ mod fixed_dual_wire_tests {
             tools: [tool(0), tool(1)],
             assignments: std::array::from_fn(|index| OccurrenceMaterialAssignment {
                 occurrence_id: OccurrenceId::new(index as u32 + 1).unwrap(),
-                material_id: format!("material-{index}"),
+                material: OccurrenceMaterial::Uniform {
+                    material_id: format!("material-{index}"),
+                },
                 work_envelope_mm: AabbMm::new(
                     [index as f64 * 40.0, 10.0, 0.0],
                     [index as f64 * 40.0 + 20.0, 30.0, 20.0],
@@ -2468,6 +2508,92 @@ mod fixed_dual_wire_tests {
         let mut invalid = wire.clone();
         invalid.assignments[0].work_envelope_mm = None;
         assert!(FixedDualJob::try_from(invalid).is_err());
+        let mut invalid = wire.clone();
+        invalid.assignments[0].material = None;
+        assert!(FixedDualJob::try_from(invalid).is_err());
+        let cycle = rpc::LayerCycleOccurrenceMaterial {
+            recipe: Some(rpc::OpticalLayerCycle {
+                slots: vec![
+                    rpc::OpticalSlot {
+                        material: 0,
+                        height_mm: 0.2,
+                    },
+                    rpc::OpticalSlot {
+                        material: 1,
+                        height_mm: 0.2,
+                    },
+                ],
+                phase_slot: 0,
+                origin_z_mm: 0.0,
+            }),
+            material_ids: vec!["material-0".into(), "material-1".into()],
+        };
+        for mutation in 0..12 {
+            let mut cycle = cycle.clone();
+            match mutation {
+                0 => cycle.recipe = None,
+                1 => cycle.material_ids.clear(),
+                2 => cycle.material_ids.push("third".into()),
+                3 => cycle.material_ids[1] = cycle.material_ids[0].clone(),
+                4 => cycle.material_ids[1] = "foreign".into(),
+                5 => cycle.recipe.as_mut().unwrap().slots.clear(),
+                6 => {
+                    cycle.recipe.as_mut().unwrap().slots = vec![
+                        rpc::OpticalSlot {
+                            material: 0,
+                            height_mm: 0.2
+                        };
+                        65
+                    ]
+                }
+                7 => cycle.recipe.as_mut().unwrap().phase_slot = 2,
+                8 => cycle.recipe.as_mut().unwrap().origin_z_mm = f64::INFINITY,
+                9 => cycle.recipe.as_mut().unwrap().slots[0].material = 2,
+                10 => cycle.recipe.as_mut().unwrap().slots[0].height_mm = f64::NAN,
+                11 => cycle.recipe.as_mut().unwrap().slots[0].height_mm = 0.1,
+                _ => unreachable!(),
+            }
+            let mut invalid = wire.clone();
+            invalid.assignments[0].material = Some(
+                rpc::occurrence_material_assignment::Material::LayerCycle(cycle),
+            );
+            assert!(
+                FixedDualJob::try_from(invalid).is_err(),
+                "mutation {mutation}"
+            );
+        }
+        for mutation in 0..4 {
+            let mut invalid = job.clone();
+            let mut recipe = crate::optical::LayerCycle {
+                slots: vec![
+                    crate::optical::OpticalSlot {
+                        material: 0,
+                        height_mm: 0.2,
+                    },
+                    crate::optical::OpticalSlot {
+                        material: 1,
+                        height_mm: 0.2,
+                    },
+                ],
+                phase_slot: 0,
+                origin_z_mm: 0.0,
+            };
+            match mutation {
+                0 => recipe.slots.resize(65, recipe.slots[0].clone()),
+                1 => recipe.phase_slot = 2,
+                2 => recipe.origin_z_mm = f64::NAN,
+                3 => recipe.slots[0].height_mm = 0.1,
+                _ => unreachable!(),
+            }
+            invalid.assignments[0].material = OccurrenceMaterial::LayerCycle {
+                recipe,
+                material_ids: ["material-0".into(), "material-1".into()],
+            };
+            assert!(
+                rpc::FixedDualJob::try_from(invalid).is_err(),
+                "outbound mutation {mutation}"
+            );
+        }
         let mut invalid = wire;
         invalid.firmware_revision = "unreviewed".into();
         assert!(FixedDualJob::try_from(invalid).is_err());

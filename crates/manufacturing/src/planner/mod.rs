@@ -2692,6 +2692,43 @@ fn scheduled_layers(
             }
         }
     }
+    if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
+        for assignment in &job.assignments {
+            let mut previous = bed;
+            let mut visited = 0usize;
+            while let Some(boundary) = assignment.material.next_boundary_after(previous)? {
+                check_cancel(cancel)?;
+                let identical_to_top = (boundary - top).abs()
+                    <= 4.0 * f64::EPSILON * boundary.abs().max(top.abs()).max(1.0);
+                if boundary >= top || identical_to_top {
+                    break;
+                }
+                if boundary <= previous {
+                    return Err(error(
+                        ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
+                        "physical material-cycle boundary cannot advance the native schedule",
+                    ));
+                }
+                visited += 1;
+                if visited > 3 * MAX_PRINT_LAYERS as usize {
+                    return Err(error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "material-cycle event work exceeds the existing layer budget",
+                    ));
+                }
+                if let Err(position) = events.binary_search_by(|old| old.total_cmp(&boundary)) {
+                    if events.len() >= 3 * MAX_PRINT_LAYERS as usize {
+                        return Err(error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "combined native/field/material event budget exceeded",
+                        ));
+                    }
+                    events.insert(position, boundary);
+                }
+                previous = boundary;
+            }
+        }
+    }
     if let SupportPolicy::Breakaway {
         z_gap_mm,
         interface_thickness_mm,

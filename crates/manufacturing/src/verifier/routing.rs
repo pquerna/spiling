@@ -123,7 +123,7 @@ impl<'a> RouteState<'a> {
         state
     }
     fn push(&mut self, op: Op) {
-        // Each finite phase has at most fifteen operations, not a motion buffer.
+        // Fixed-size lifecycle cursor, never a motion buffer.
         self.ops[self.count] = Some(op);
         self.count += 1;
     }
@@ -163,10 +163,24 @@ impl<'a> RouteState<'a> {
         let last = motion
             .position
             .ok_or_else(|| failed("routed transition has no actual position"))?;
+        let waste = self.job.tools[tool as usize].waste_line_xy_mm[0];
+        let start =
+            project_xyz6_point_mm([waste[0], waste[1], self.plan.layers[layer as usize].z_mm])?;
         if self.group != 0 {
             self.push(Op::Bare(Command::Barrier));
             self.push(Op::Retract);
             self.push(Op::Move([last[0], last[1], self.safe_z], false));
+            let outgoing = self.job.tools[self.active as usize].offset_xy_mm;
+            let incoming = self.job.tools[tool as usize].offset_xy_mm;
+            self.push(Op::Move(
+                [
+                    start[0] + outgoing[0] - incoming[0],
+                    start[1] + outgoing[1] - incoming[1],
+                    self.safe_z,
+                ],
+                false,
+            ));
+            self.push(Op::Bare(Command::Barrier));
             self.push(Op::Scalar(
                 Command::NozzleOff,
                 5,
@@ -189,13 +203,9 @@ impl<'a> RouteState<'a> {
         }
         if self.group == 0 {
             self.push(Op::Move([last[0], last[1], self.safe_z], false));
+            self.push(Op::Move([start[0], start[1], self.safe_z], false));
         }
-        let start = self.job.tools[tool as usize].waste_line_xy_mm[0];
-        self.push(Op::Move([start[0], start[1], self.safe_z], false));
-        self.push(Op::Move(
-            [start[0], start[1], self.plan.layers[layer as usize].z_mm],
-            false,
-        ));
+        self.push(Op::Move(start, false));
         self.push(Op::Waste);
         self.group += 1;
         Ok(())

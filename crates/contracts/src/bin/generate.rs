@@ -174,6 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         FixedDualJob::decl(&config),
         FixedDualTool::decl(&config),
         LoadedMaterial::decl(&config),
+        OccurrenceMaterial::decl(&config),
         OccurrenceMaterialAssignment::decl(&config),
         FixedDualConfiguration::decl(&config),
         RoutedToolAccounting::decl(&config),
