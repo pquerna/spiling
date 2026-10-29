@@ -9,6 +9,7 @@ mod error;
 pub mod geometry;
 pub mod manufacturing;
 mod operation;
+mod optical;
 mod process;
 pub mod project;
 mod replay;

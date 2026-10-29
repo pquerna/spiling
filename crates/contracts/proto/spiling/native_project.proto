@@ -30,6 +30,12 @@ service Projects {
  rpc GetAppearanceReport(GetAppearanceReportRequest) returns (google.longrunning.Operation) {
   option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
  }
+ rpc CompareOptical(CompareOpticalRequest) returns (google.longrunning.Operation) {
+  option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
+ }
+ rpc GetOpticalReport(GetOpticalReportRequest) returns (google.longrunning.Operation) {
+  option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
+ }
 }
 message ProjectRequest {
  string parent = 1;
@@ -44,6 +50,8 @@ message ProjectRequest {
   EditProcessRequest edit_process = 9;
   SetAppearanceTargetRequest set_appearance_target = 10;
   AcceptAppearanceReportRequest accept_appearance_report = 11;
+  SetOpticalStudyRequest set_optical_study = 12;
+  AcceptOpticalReportRequest accept_optical_report = 13;
  }
 }
 message GetProjectRequest {}
@@ -131,3 +139,8 @@ message SetAppearanceTargetRequest { uint32 base_revision = 1; AppearanceTarget 
 message AcceptAppearanceReportRequest { uint32 base_revision = 1; string report_hash = 2; optional string selection = 3; }
 message AppearancePaletteImportedResult { ProjectInfo info = 1; AppearancePaletteRecord palette = 2; }
 message AppearanceComparedResult { string project_id = 1; uint32 captured_revision = 2; AppearanceReportRecord record = 3; Artifact resource = 4; }
+message SetOpticalStudyRequest { uint32 base_revision = 1; OpticalRequest request = 2; }
+message AcceptOpticalReportRequest { uint32 base_revision = 1; string report_hash = 2; OpticalSelection selection = 3; }
+message CompareOpticalRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }
+message GetOpticalReportRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }
+message OpticalComparedResult { string project_id = 1; uint32 captured_revision = 2; OpticalReportRecord record = 3; Artifact resource = 4; }

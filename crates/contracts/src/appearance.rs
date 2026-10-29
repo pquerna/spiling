@@ -42,7 +42,7 @@ fn optional_text(value: &Option<String>) -> Result<(), ProjectError> {
     }
     Ok(())
 }
-fn required_option<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+pub(crate) fn required_option<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     d: D,
 ) -> Result<Option<T>, D::Error> {
     Option::<T>::deserialize(d)
@@ -65,7 +65,7 @@ fn bounded_text<'de, D: serde::Deserializer<'de>, const N: usize>(
     }
     d.deserialize_str(Visitor::<N>)
 }
-fn text64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+pub(crate) fn text64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     bounded_text::<D, 64>(d)
 }
 fn text128<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
@@ -796,7 +796,7 @@ pub fn decode_palette(bytes: &[u8]) -> Result<PaletteDocument, ProjectError> {
     document.validate()?;
     Ok(document)
 }
-fn encode_bounded<T: Serialize>(value: &T, max: usize) -> Result<Vec<u8>, ProjectError> {
+pub(crate) fn encode_bounded<T: Serialize>(value: &T, max: usize) -> Result<Vec<u8>, ProjectError> {
     struct Writer {
         bytes: Vec<u8>,
         max: usize,
@@ -1158,6 +1158,8 @@ pub struct AppearanceStudy {
     pub report_record: Option<AppearanceReportRecord>,
     #[serde(deserialize_with = "required_option")]
     pub selection: Option<String>,
+    #[serde(deserialize_with = "required_option")]
+    pub optical: Option<crate::optical::OpticalStudy>,
 }
 impl Default for AppearanceStudy {
     fn default() -> Self {
@@ -1168,6 +1170,7 @@ impl Default for AppearanceStudy {
             report: None,
             report_record: None,
             selection: None,
+            optical: None,
         }
     }
 }
@@ -1179,6 +1182,9 @@ impl AppearanceStudy {
         }
         if let Some(target) = &self.target {
             target.validate()?;
+        }
+        if let Some(optical) = &self.optical {
+            optical.validate(self.palette.as_ref().ok_or_else(|| invalid("optical study has no palette"))?)?;
         }
         if let Some(report) = &self.report {
             self.matches_report(report)?;
@@ -1229,6 +1235,7 @@ impl AppearanceStudy {
             limits: self.limits,
             report: self.report_record.clone(),
             selection: self.selection.clone(),
+            optical: self.optical.as_ref().map(crate::optical::OpticalStudy::info),
         }
     }
     /// Does not include shared Arc report storage; callers deduplicate report pointers.
@@ -1244,6 +1251,7 @@ impl AppearanceStudy {
             + self.report_record.as_ref().map_or(0, |r| {
                 r.hash.allocated_bytes() + r.input_hash.allocated_bytes() + r.producer.capacity()
             })
+            + self.optical.as_ref().map_or(0, crate::optical::OpticalStudy::allocated_bytes)
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
@@ -1258,6 +1266,8 @@ pub struct AppearanceStudyInfo {
     pub report: Option<AppearanceReportRecord>,
     #[serde(deserialize_with = "required_option")]
     pub selection: Option<String>,
+    #[serde(deserialize_with = "required_option")]
+    pub optical: Option<crate::optical::OpticalStudyInfo>,
 }
 impl AppearanceStudyInfo {
     pub fn validate(&self) -> Result<(), ProjectError> {
@@ -1267,6 +1277,9 @@ impl AppearanceStudyInfo {
         }
         if let Some(target) = &self.target {
             target.validate()?;
+        }
+        if let Some(optical) = &self.optical {
+            optical.validate(self.palette.as_ref().ok_or_else(|| invalid("optical study info has no palette"))?)?;
         }
         if let Some(report) = &self.report {
             report.validate()?;
@@ -1313,7 +1326,7 @@ fn optional_text128<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Str
     }
     d.deserialize_option(Optional)
 }
-fn bounded_sequence<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>, const N: usize>(
+pub(crate) fn bounded_sequence<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>, const N: usize>(
     d: D,
 ) -> Result<Vec<T>, D::Error> {
     struct Sequence<T, const N: usize>(std::marker::PhantomData<T>);
@@ -1381,7 +1394,7 @@ fn validate_encoded_report(report: &AppearanceReport, bytes: &[u8]) -> Result<()
     }
     Ok(())
 }
-fn hash_json<T: Serialize>(value: &T, max: usize) -> Result<(SourceHash, usize), ProjectError> {
+pub(crate) fn hash_json<T: Serialize>(value: &T, max: usize) -> Result<(SourceHash, usize), ProjectError> {
     struct HashWriter {
         hash: Sha256,
         count: usize,

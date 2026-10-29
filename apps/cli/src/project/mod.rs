@@ -17,6 +17,9 @@ use spiling_contracts::surface::{
 };
 use spiling_contracts::{ArtifactView, geometry::*, manufacturing::*, project::*};
 use spiling_contracts::appearance::{AppearanceTarget, AppearanceReport, AppearanceReportRecord, SearchLimits};
+use spiling_contracts::optical::{
+    MAX_OPTICAL_REQUEST_BYTES, OpticalReport, OpticalReportRecord, OpticalRequest, OpticalSelection,
+};
 use spiling_engine_client::EngineClient;
 use std::{env, ffi::OsString, fs::File, io::Read, path::PathBuf, sync::Arc};
 
@@ -61,6 +64,11 @@ pub struct Workflow {
     operations: Vec<Operation>,
     inspections: Vec<(OccurrenceId, FaceId)>,
 }
+enum OpticalChoice {
+    Requested,
+    Best,
+    Candidate(u32),
+}
 enum Operation {
     AppearancePalette(NativePath),
     AppearanceTarget(AppearanceTarget),
@@ -68,6 +76,10 @@ enum Operation {
     AppearanceCompare,
     AppearanceAccept(Option<String>),
     AppearanceReport,
+    OpticalStudy(OpticalRequest),
+    OpticalCompare,
+    OpticalAccept(Option<OpticalChoice>),
+    OpticalReport,
     Import(NativePath),
     Add(DefinitionId, RigidPoseMm),
     Pose(OccurrenceId, RigidPoseMm),
@@ -143,6 +155,15 @@ fn appearance_json<T: serde::de::DeserializeOwned>(
     }
     Ok(serde_json::from_slice(&bytes)?)
 }
+fn optical_json(args: &mut impl Iterator<Item = OsString>) -> Result<OpticalRequest, Error> {
+    let source = args.next().ok_or("--optical-study requires a native JSON path")?;
+    NativePath::from_os_str(&source)?;
+    let mut bytes = Vec::new();
+    File::open(PathBuf::from(source))?
+        .take(MAX_OPTICAL_REQUEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(OpticalRequest::decode(&bytes)?)
+}
 fn process_scope_kind(
     args: &mut impl Iterator<Item = OsString>,
     name: &str,
@@ -174,9 +195,27 @@ pub fn parse(
     let mut replay_output = None;
     let mut surface_image_output = None;
     let mut appearance_report_output = None;
+    let mut optical_report_output = None;
     let mut inspections = Vec::new();
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--optical-study") => operations.push(Operation::OpticalStudy(optical_json(&mut args)?)),
+            Some("--optical-compare") => operations.push(Operation::OpticalCompare),
+            Some("--optical-accept") => {
+                let choice = match text(&mut args, "--optical-accept")?.as_str() {
+                    "requested" => OpticalChoice::Requested,
+                    "best" => OpticalChoice::Best,
+                    index => OpticalChoice::Candidate(index.parse()?),
+                };
+                operations.push(Operation::OpticalAccept(Some(choice)));
+            }
+            Some("--optical-accept-report") => operations.push(Operation::OpticalAccept(None)),
+            Some("--optical-report") => {
+                let destination = args.next().ok_or("--optical-report requires a native destination")?;
+                NativePath::from_os_str(&destination)?;
+                set_once(&mut optical_report_output, PathBuf::from(destination), "--optical-report")?;
+                operations.push(Operation::OpticalReport);
+            }
             Some("--appearance-palette") => operations.push(Operation::AppearancePalette(path(&mut args, "--appearance-palette")?)),
             Some("--appearance-target") => {
                 let target: AppearanceTarget = appearance_json(&mut args, "--appearance-target")?;
@@ -443,6 +482,8 @@ pub fn parse(
                         | Operation::ProcessResolve(_)
                         | Operation::AppearanceCompare
                         | Operation::AppearanceReport
+                        | Operation::OpticalCompare
+                        | Operation::OpticalReport
                 )
             }))
     {
@@ -489,6 +530,7 @@ pub fn parse(
             replay_output,
             surface_image_output,
             appearance_report_output,
+            optical_report_output,
         },
         engine: engine.unwrap_or(
             env::current_exe()?
@@ -671,6 +713,7 @@ pub async fn run(
     replay_output: Option<&mut OutputFile>,
     surface_image_output: Option<&mut OutputFile>,
     appearance_report_output: Option<&mut OutputFile>,
+    optical_report_output: Option<&mut OutputFile>,
 ) -> Result<serde_json::Value, Error> {
     match execute(
         client,
@@ -681,6 +724,7 @@ pub async fn run(
         replay_output,
         surface_image_output,
         appearance_report_output,
+        optical_report_output,
     )
     .await
     {
@@ -711,6 +755,7 @@ async fn execute(
     mut replay_output: Option<&mut OutputFile>,
     mut surface_image_output: Option<&mut OutputFile>,
     mut appearance_report_output: Option<&mut OutputFile>,
+    mut optical_report_output: Option<&mut OutputFile>,
 ) -> Result<serde_json::Value, Error> {
     let session = client.hello().session_id.clone();
     let summary = geometry::scene(client, &session).await?;
@@ -748,11 +793,84 @@ async fn execute(
     let mut preflight_report = None;
     let mut appearance_comparison: Option<(ProjectRevision, AppearanceReportRecord, AppearanceReport)> = None;
     let mut appearance_evidence = Vec::new();
+    let mut optical_comparison: Option<(ProjectRevision, OpticalReportRecord, OpticalReport)> = None;
+    let mut optical_evidence = Vec::new();
     for operation in workflow.operations {
         let base_revision = geometry::scene(client, &session).await?.revision;
         let label;
         let mut process_resolution = None;
         match operation {
+            Operation::OpticalStudy(request) => {
+                label = "optical_study";
+                let captured = info(client).await?;
+                let response = client.project(ProjectCommand::SetOpticalStudy {
+                    session_id: session.clone(), base_revision: captured.revision, request,
+                }).await?;
+                complete(client, response).await?;
+            }
+            Operation::OpticalAccept(choice) => {
+                label = "optical_accept";
+                let captured = info(client).await?;
+                let (revision, record, report) = optical_comparison.as_ref()
+                    .ok_or("optical accept requires an earlier complete comparison")?;
+                let selection = choice.map(|choice| match choice {
+                    OpticalChoice::Requested => Ok(OpticalSelection::Requested),
+                    OpticalChoice::Best => report.alternatives.first().copied()
+                        .map(|index| OpticalSelection::Candidate { index })
+                        .ok_or("optical search retained no assessed alternative"),
+                    OpticalChoice::Candidate(index) => Ok(OpticalSelection::Candidate { index }),
+                }).transpose()?;
+                if *revision != captured.revision || !report.is_complete()
+                    || selection.as_ref().is_some_and(|selection| !report.has_selection(selection))
+                {
+                    return Err("optical acceptance does not match the latest complete current-revision comparison".into());
+                }
+                let response = client.project(ProjectCommand::AcceptOpticalReport {
+                    session_id: session.clone(), base_revision: captured.revision,
+                    report_hash: record.hash.clone(), selection,
+                }).await?;
+                complete(client, response).await?;
+            }
+            Operation::OpticalCompare | Operation::OpticalReport => {
+                let export = matches!(operation, Operation::OpticalReport);
+                label = if export { "optical_report" } else { "optical_compare" };
+                let captured = info(client).await?;
+                let study = captured.appearance_study.optical.as_ref()
+                    .ok_or("optical comparison requires a study request")?;
+                let palette = captured.appearance_study.palette.as_ref()
+                    .ok_or("optical comparison requires a palette")?;
+                let command = if export {
+                    ProjectCommand::GetOpticalReport { session_id: session.clone(), base_revision: captured.revision }
+                } else {
+                    ProjectCommand::CompareOptical { session_id: session.clone(), base_revision: captured.revision }
+                };
+                let ProjectResponse::OperationAccepted { operation } = client.project(command).await? else {
+                    return Err("optical comparison did not return an operation".into());
+                };
+                match geometry::wait_operation(client, &session, operation).await? {
+                    JobResult::OpticalCompared { project_id, captured_revision, record, resource } => {
+                        if project_id != captured.project_id || captured_revision != captured.revision
+                            || export && study.report.as_ref() != Some(&record)
+                        {
+                            return Err("optical report disagrees with captured project/study".into());
+                        }
+                        let report = client.fetch_optical_report(&record, &resource).await?;
+                        report.matches_inputs(palette, study.request.as_ref())?;
+                        if export {
+                            optical_report_output.as_deref_mut()
+                                .ok_or("optical report output was not admitted")?.write(&report.encode()?)?;
+                        }
+                        optical_evidence.push(serde_json::json!({
+                            "operation": label, "project_id": project_id, "captured_revision": captured_revision,
+                            "record": record, "resource": resource, "report": report,
+                        }));
+                        if !export {
+                            optical_comparison = Some((captured_revision, record, report));
+                        }
+                    }
+                    _ => return Err("unexpected optical comparison result".into()),
+                }
+            }
             Operation::AppearancePalette(source) => {
                 label = "appearance_palette";
                 let project_revision = info(client).await?.revision;
@@ -1439,6 +1557,7 @@ async fn execute(
         report["surface_image"] = evidence;
     }
     report["appearance"] = serde_json::json!(appearance_evidence);
+    report["optical"] = serde_json::json!(optical_evidence);
     Ok(report)
 }
 

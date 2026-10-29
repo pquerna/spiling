@@ -84,6 +84,11 @@ pub(crate) enum JobResult {
         captured_revision: ProjectRevision,
         record: spiling_contracts::appearance::AppearanceReportRecord,
     },
+    OpticalCompared {
+        project_id: ProjectId,
+        captured_revision: ProjectRevision,
+        record: spiling_contracts::optical::OpticalReportRecord,
+    },
     ManufacturingCompiled {
         info: ProjectInfo,
         record: ManufacturingArtifactRecord,

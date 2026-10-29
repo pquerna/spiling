@@ -7,7 +7,7 @@ use spiling_contracts::{
     TRIANGLE_HEADER_BYTES, TRIANGLE_INDEX_COUNT, TRIANGLE_SCHEMA_VERSION, TRIANGLE_VERTEX_COUNT,
 };
 use spiling_contracts::{
-    appearance::*, display::*, geometry::*, manufacturing::*, process::*, project::*, surface::*,
+    appearance::*, display::*, geometry::*, manufacturing::*, optical::*, process::*, project::*, surface::*,
 };
 use std::{env, fs, path::Path};
 use ts_rs::TS;
@@ -47,6 +47,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         AppearanceReportRecord::decl(&config),
         AppearanceStudy::decl(&config),
         AppearanceStudyInfo::decl(&config),
+        OpticalModel::decl(&config),
+        OpticalView::decl(&config),
+        OpticalEvidence::decl(&config),
+        OpticalExecution::decl(&config),
+        OpticalObservation::decl(&config),
+        OpticalPatch::decl(&config),
+        OpticalTarget::decl(&config),
+        OpticalSlot::decl(&config),
+        LayerCycle::decl(&config),
+        OpticalPattern::decl(&config),
+        OpticalSearchSpace::decl(&config),
+        OpticalRequest::decl(&config),
+        CycleExposure::decl(&config),
+        OpticalUnknownReason::decl(&config),
+        OpticalAssessment::decl(&config),
+        OpticalVisit::decl(&config),
+        OpticalSelection::decl(&config),
+        OpticalReport::decl(&config),
+        OpticalReportRecord::decl(&config),
+        OpticalStudy::decl(&config),
+        OpticalStudyInfo::decl(&config),
         GeometryErrorCode::decl(&config),
         GeometryError::decl(&config),
         SessionId::decl(&config),

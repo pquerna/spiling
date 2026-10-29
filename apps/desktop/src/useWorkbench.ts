@@ -708,6 +708,7 @@ export function useWorkbench(
             case "project_saved":
             case "surface_image_prepared":
             case "appearance_compared":
+            case "optical_compared":
               return result;
             case "surface_image_imported":
             case "appearance_palette_imported":
@@ -892,6 +893,7 @@ export function useWorkbench(
           throw new Error("image operations require the image-specific workbench workflow");
         case "appearance_palette_imported":
         case "appearance_compared":
+        case "optical_compared":
           throw new Error("appearance studies are inspected through engine-client or CLI");
         case "manufacturing_compiled":
         case "manufacturing_verified":

@@ -75,7 +75,8 @@ impl NativeHost {
                         let result = command.as_ref().map_or(Ok(()), |command| {
                             runtime.validate_image_admission(command)
                                 .and_then(|()| match command {
-                                    Control::Project(command) => runtime.validate_appearance_admission(command),
+                                    Control::Project(command) => runtime.validate_appearance_admission(command)
+                                        .and_then(|()| runtime.validate_optical_admission(command)),
                                     _ => Ok(()),
                                 })
                                 .map_err(|error| domain_tonic(error.into()))
@@ -98,6 +99,13 @@ impl NativeHost {
                                 Control::Project(spiling_contracts::project::ProjectCommand::CompareAppearance {
                                     session_id, base_revision,
                                 }) if initially_cancelled => runtime.compare_appearance_with_initial_cancel(
+                                    &session_id, base_revision, true,
+                                ).unwrap_or_else(|error| Reply::Project(
+                                    spiling_contracts::project::ProjectResponse::Error { error }
+                                )),
+                                Control::Project(spiling_contracts::project::ProjectCommand::CompareOptical {
+                                    session_id, base_revision,
+                                }) if initially_cancelled => runtime.compare_optical_with_initial_cancel(
                                     &session_id, base_revision, true,
                                 ).unwrap_or_else(|error| Reply::Project(
                                     spiling_contracts::project::ProjectResponse::Error { error }
@@ -163,7 +171,9 @@ impl NativeHost {
                 | spiling_contracts::project::ProjectCommand::GetSurfaceImage { .. }
                 | spiling_contracts::project::ProjectCommand::ImportAppearancePalette { .. }
                 | spiling_contracts::project::ProjectCommand::CompareAppearance { .. }
-                | spiling_contracts::project::ProjectCommand::GetAppearanceReport { .. }),
+                | spiling_contracts::project::ProjectCommand::GetAppearanceReport { .. }
+                | spiling_contracts::project::ProjectCommand::CompareOptical { .. }
+                | spiling_contracts::project::ProjectCommand::GetOpticalReport { .. }),
             ) => Some(Control::Project(command.clone())),
             _ => None,
         };
@@ -304,6 +314,24 @@ fn publish_terminal(
     let private = job
         .result
         .ok_or_else(|| Status::internal("native terminal result missing"))?;
+    if let geometry::JobResult::OpticalCompared { project_id, captured_revision, record } = &private {
+        let report = runtime.optical_publication(id)
+            .ok_or_else(|| Status::internal("ACK optical report missing"))?;
+        if &report.record != record {
+            return Err(Status::data_loss("ACK optical report metadata mismatch"));
+        }
+        let artifact = jobs.describe_native_artifact(
+            &report.bytes, spiling_contracts::optical::OPTICAL_REPORT_MIME,
+            spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
+        )?;
+        let result = spiling_contracts::geometry::JobResult::OpticalCompared {
+            project_id: project_id.clone(), captured_revision: *captured_revision,
+            record: record.clone(), resource: view(&artifact)?,
+        };
+        jobs.native_finish(name, Ok(result), vec![(artifact, report.bytes.as_slice())])?;
+        runtime.release_optical_publication(id);
+        return Ok(true);
+    }
     if let geometry::JobResult::AppearanceCompared { project_id, captured_revision, record } = &private {
         let report = runtime.appearance_publication(id)
             .ok_or_else(|| Status::internal("ACK appearance report missing"))?;
@@ -562,6 +590,8 @@ fn public_result(
             Public::BedPosePrepared { preparation }
         }
         geometry::JobResult::ProjectSaved { info } => Public::ProjectSaved { info },
+        geometry::JobResult::OpticalCompared { .. } =>
+            return Err(Status::internal("optical report requires ACK-bound blob publication")),
         geometry::JobResult::AppearancePaletteImported { info, palette } =>
             Public::AppearancePaletteImported { info, palette },
         geometry::JobResult::AppearanceCompared { .. } =>

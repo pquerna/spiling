@@ -6,6 +6,7 @@ mod appearance;
 mod bed_pose;
 mod execution;
 mod manufacturing;
+mod optical;
 mod placement;
 mod source;
 mod surface_image;
@@ -130,6 +131,8 @@ enum Purpose {
     ImportAppearancePalette,
     CompareAppearance,
     GetAppearanceReport,
+    CompareOptical,
+    GetOpticalReport,
 }
 struct Publication {
     kind: PublicationKind,
@@ -163,6 +166,7 @@ enum PublicationKind {
         palette: spiling_contracts::appearance::PaletteRecord,
     },
     AppearanceCompared(Arc<appearance::ReportPublication>),
+    OpticalCompared(Arc<optical::OpticalReportPublication>),
     Section,
     Manufacturing {
         edit: PreparedEdit,
@@ -203,6 +207,8 @@ pub struct Runtime {
     image_publication: Option<(JobId, Arc<spiling_core::SurfaceImageAsset>)>,
     appearance_publication: Option<(JobId, Arc<appearance::ReportPublication>)>,
     appearance_comparison: Option<(ProjectId, ProjectRevision, Arc<appearance::ReportPublication>)>,
+    optical_publication: Option<(JobId, Arc<optical::OpticalReportPublication>)>,
+    optical_comparison: Option<(ProjectId, ProjectRevision, Arc<optical::OpticalReportPublication>)>,
     released: VecDeque<ArtifactId>,
     jobs: BTreeMap<JobId, EngineJob>,
     terminal: VecDeque<JobId>,
@@ -227,6 +233,8 @@ impl Runtime {
             image_publication: None,
             appearance_publication: None,
             appearance_comparison: None,
+            optical_publication: None,
+            optical_comparison: None,
             jobs: BTreeMap::new(),
             terminal: VecDeque::new(),
             next_job: 0,
@@ -353,7 +361,7 @@ impl Runtime {
                 }
                 // Comparing produces evidence only, never a Core transaction. A
                 // cancelled traversal must still deliver its incomplete report.
-                let report_only = matches!(active.purpose, Purpose::CompareAppearance);
+                let report_only = matches!(active.purpose, Purpose::CompareAppearance | Purpose::CompareOptical);
                 // A durable save receipt has already crossed its disk commit point.
                 // It must reach core even if cancellation arrived after replacement.
                 let durable = matches!(&result, Ok(Product::Saved(_)));
@@ -371,6 +379,8 @@ impl Runtime {
                             | Purpose::ImportAppearancePalette
                             | Purpose::CompareAppearance
                             | Purpose::GetAppearanceReport
+                            | Purpose::CompareOptical
+                            | Purpose::GetOpticalReport
                     ) && active.project_base != self.project.info().revision)
                 {
                     Err(
@@ -534,6 +544,7 @@ impl Runtime {
                             self.project.commit(edit)
                                 .map_err(|error| format!("core palette ACK invariant: {error}"))?;
                             self.appearance_comparison = None;
+                            self.optical_comparison = None;
                             Some(JobResult::AppearancePaletteImported {
                                 info: self.project.info(),
                                 palette,
@@ -554,6 +565,26 @@ impl Runtime {
                             let record = report.record.clone();
                             self.appearance_publication = Some((job, report));
                             Some(JobResult::AppearanceCompared {
+                                project_id: self.project.info().project_id,
+                                captured_revision: active.project_base,
+                                record,
+                            })
+                        }
+                        PublicationKind::OpticalCompared(report) => {
+                            if self.optical_publication.is_some() {
+                                return Err("unreleased optical report publication".into());
+                            }
+                            if matches!(active.purpose, Purpose::CompareOptical) {
+                                self.optical_comparison = if !active.cancel.load(Ordering::Acquire)
+                                    && report.record.complete {
+                                    Some((self.project.info().project_id, active.project_base, report.clone()))
+                                } else {
+                                    None
+                                };
+                            }
+                            let record = report.record.clone();
+                            self.optical_publication = Some((job, report));
+                            Some(JobResult::OpticalCompared {
                                 project_id: self.project.info().project_id,
                                 captured_revision: active.project_base,
                                 record,
@@ -648,6 +679,12 @@ impl Runtime {
             (Purpose::CompareAppearance | Purpose::GetAppearanceReport, Product::AppearanceReport(report)) => {
                 Ok(Publication {
                     kind: PublicationKind::AppearanceCompared(report),
+                    artifact: None,
+                })
+            }
+            (Purpose::CompareOptical | Purpose::GetOpticalReport, Product::OpticalReport(report)) => {
+                Ok(Publication {
+                    kind: PublicationKind::OpticalCompared(report),
                     artifact: None,
                 })
             }
@@ -1418,6 +1455,20 @@ impl Runtime {
             ProjectCommand::AcceptAppearanceReport { session_id, base_revision, report_hash, selection } => {
                 self.accept_appearance_report(&session_id, base_revision, &report_hash, selection)
             }
+            ProjectCommand::SetOpticalStudy { session_id, base_revision, request } => {
+                self.metadata_base(&session_id, base_revision)?;
+                self.optical_comparison = None;
+                self.commit_metadata_edit(Edit::SetOpticalStudy { request })
+            }
+            ProjectCommand::CompareOptical { session_id, base_revision } => {
+                self.compare_optical(&session_id, base_revision)
+            }
+            ProjectCommand::GetOpticalReport { session_id, base_revision } => {
+                self.get_optical_report(&session_id, base_revision)
+            }
+            ProjectCommand::AcceptOpticalReport { session_id, base_revision, report_hash, selection } => {
+                self.accept_optical_report(&session_id, base_revision, &report_hash, selection)
+            }
             ProjectCommand::Get { session_id } => {
                 if session_id != self.session_id {
                     return Err(project_error(
@@ -1688,6 +1739,8 @@ impl Runtime {
             Purpose::ImportAppearancePalette => "importing_appearance_palette",
             Purpose::CompareAppearance => "comparing_appearance",
             Purpose::GetAppearanceReport => "preparing_appearance_report",
+            Purpose::CompareOptical => "comparing_optical",
+            Purpose::GetOpticalReport => "preparing_optical_report",
         };
         self.watchdog.start(job, cancel.clone());
         let work = work(job, artifact, &self.watchdog);
@@ -1793,6 +1846,8 @@ fn cancelled(purpose: &Purpose) -> JobError {
         | Purpose::ImportAppearancePalette
         | Purpose::CompareAppearance
         | Purpose::GetAppearanceReport
+        | Purpose::CompareOptical
+        | Purpose::GetOpticalReport
         | Purpose::GetSurfaceImage => project_error(
             ProjectErrorCode::Cancelled,
             "project job cancelled before publication",

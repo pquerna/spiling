@@ -61,9 +61,51 @@ export type AppearanceReport = { producer: string, input_hash: SourceHash, palet
 
 export type AppearanceReportRecord = { hash: SourceHash, byte_count: bigint, input_hash: SourceHash, producer: string, complete: boolean, };
 
-export type AppearanceStudy = { palette: PaletteRecord | null, target: AppearanceTarget | null, limits: SearchLimits, report: AppearanceReport | null, report_record: AppearanceReportRecord | null, selection: string | null, };
+export type AppearanceStudy = { palette: PaletteRecord | null, target: AppearanceTarget | null, limits: SearchLimits, report: AppearanceReport | null, report_record: AppearanceReportRecord | null, selection: string | null, optical: OpticalStudy | null, };
 
-export type AppearanceStudyInfo = { palette: PaletteRecord | null, target: AppearanceTarget | null, limits: SearchLimits, report: AppearanceReportRecord | null, selection: string | null, };
+export type AppearanceStudyInfo = { palette: PaletteRecord | null, target: AppearanceTarget | null, limits: SearchLimits, report: AppearanceReportRecord | null, selection: string | null, optical: OpticalStudyInfo | null, };
+
+export type OpticalModel = "prusa_v7_007bb922";
+
+export type OpticalView = "normal_to_patch";
+
+export type OpticalEvidence = "reference_estimate";
+
+export type OpticalExecution = "study_only_not_routed";
+
+export type OpticalObservation = { illuminant: AppearanceIlluminant, observer: AppearanceObserver, view: OpticalView, };
+
+export type OpticalPatch = { origin_mm: [number, number, number], normal_xy: [number, number], width_mm: number, height_mm: number, };
+
+export type OpticalTarget = { color: AppearanceColor, delta_e00_tolerance: number, lightness_tolerance: number | null, };
+
+export type OpticalSlot = { material: number, height_mm: number, };
+
+export type LayerCycle = { slots: Array<OpticalSlot>, phase_slot: number, origin_z_mm: number, };
+
+export type OpticalPattern = { materials: Array<number>, };
+
+export type OpticalSearchSpace = { patterns: Array<OpticalPattern>, slot_heights_mm: Array<number>, phase_slots: Array<number>, origin_z_mm: number, };
+
+export type OpticalRequest = { model: OpticalModel, materials: Array<string>, target: OpticalTarget, observation: OpticalObservation, patch: OpticalPatch, recipe: LayerCycle, search: OpticalSearchSpace, limits: SearchLimits, };
+
+export type CycleExposure = { period_mm: number, phase_at_patch_mm: number, complete_periods: bigint, exposed_height_mm: [number, number, number], fractions: [number, number, number], };
+
+export type OpticalUnknownReason = "missing_evidence" | "unsupported_conditions" | "unsupported_color_domain";
+
+export type OpticalAssessment = { "kind": "filtered_phase" } | { "kind": "unassessed", reason: OpticalUnknownReason, exposure: CycleExposure, } | { "kind": "estimate", exposure: CycleExposure, predicted_lab: [number, number, number], display_srgb8: [number, number, number], delta_e00: number, delta_lightness: number, within_tolerance: boolean, };
+
+export type OpticalVisit = { index: number, assessment: OpticalAssessment, };
+
+export type OpticalSelection = { "kind": "requested" } | { "kind": "candidate", index: number, };
+
+export type OpticalReport = { producer: string, input_hash: SourceHash, palette_hash: SourceHash, request: OpticalRequest, material_evidence_hashes: Array<SourceHash>, evidence: OpticalEvidence, execution: OpticalExecution, requested: OpticalAssessment, total_candidates: number, visits: Array<OpticalVisit>, alternatives: Array<number>, alternatives_truncated: boolean, status: AppearanceStatus, };
+
+export type OpticalReportRecord = { hash: SourceHash, byte_count: bigint, input_hash: SourceHash, producer: string, complete: boolean, };
+
+export type OpticalStudy = { request: OpticalRequest, report: OpticalReport | null, report_record: OpticalReportRecord | null, selection: OpticalSelection | null, };
+
+export type OpticalStudyInfo = { request: OpticalRequest, report: OpticalReportRecord | null, selection: OpticalSelection | null, };
 
 export type GeometryErrorCode = "invalid_geometry" | "unsupported_geometry" | "unsupported_units" | "source_io" | "source_changed" | "invalid_pose" | "stale_revision" | "unknown_handle" | "busy" | "resource_limit" | "cancelled" | "degenerate_section" | "kernel_failure" | "conditioning_failure" | "analysis_indeterminate" | "singular_geometry" | "unsupported_conversion" | "unsupported_operation" | "native_intersection_failure" | "parameter_correspondence_unavailable" | "shape_error_exceeded";
 
@@ -168,7 +210,7 @@ export type ArtifactPageKind = "chunks" | "loops";
 
 export type JobStatus = "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted";
 
-export type JobResult = { "kind": "scene", summary: SceneSummary, } | { "kind": "section", artifact_id: ArtifactId, } | { "kind": "bed_pose_prepared", preparation: BedPosePreparation, } | { "kind": "project_saved", info: ProjectInfo, } | { "kind": "surface_image_imported", info: ProjectInfo, image: SurfaceImageRecord, layer_id: SurfaceLayerId, } | { "kind": "surface_image_prepared", project_id: ProjectId, captured_revision: ProjectRevision, record: SurfaceImageRecord, resource: ArtifactView, } | { "kind": "appearance_palette_imported", info: ProjectInfo, palette: PaletteRecord, } | { "kind": "appearance_compared", project_id: ProjectId, captured_revision: ProjectRevision, record: AppearanceReportRecord, resource: ArtifactView, } | { "kind": "manufacturing_preflight", report: PreflightReport, } | { "kind": "manufacturing_compiled", info: ProjectInfo, record: ManufacturingArtifactRecord, resource: ArtifactView, } | { "kind": "manufacturing_verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, };
+export type JobResult = { "kind": "scene", summary: SceneSummary, } | { "kind": "section", artifact_id: ArtifactId, } | { "kind": "bed_pose_prepared", preparation: BedPosePreparation, } | { "kind": "project_saved", info: ProjectInfo, } | { "kind": "surface_image_imported", info: ProjectInfo, image: SurfaceImageRecord, layer_id: SurfaceLayerId, } | { "kind": "surface_image_prepared", project_id: ProjectId, captured_revision: ProjectRevision, record: SurfaceImageRecord, resource: ArtifactView, } | { "kind": "appearance_palette_imported", info: ProjectInfo, palette: PaletteRecord, } | { "kind": "appearance_compared", project_id: ProjectId, captured_revision: ProjectRevision, record: AppearanceReportRecord, resource: ArtifactView, } | { "kind": "optical_compared", project_id: ProjectId, captured_revision: ProjectRevision, record: OpticalReportRecord, resource: ArtifactView, } | { "kind": "manufacturing_preflight", report: PreflightReport, } | { "kind": "manufacturing_compiled", info: ProjectInfo, record: ManufacturingArtifactRecord, resource: ArtifactView, } | { "kind": "manufacturing_verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, };
 
 export type JobError = { "domain": "geometry", error: GeometryError, } | { "domain": "project", error: ProjectError, } | { "domain": "manufacturing", error: ManufacturingError, };
 
@@ -268,7 +310,7 @@ export type ProjectManifest = { format_version: number, project_id: ProjectId, r
 
 export type ProjectInfo = { project_id: ProjectId, revision: ProjectRevision, saved_revision: ProjectRevision | null, path_label: string | null, dirty: boolean, save_uncertain: boolean, read_only: boolean, recovered_previous: boolean, can_undo: boolean, can_redo: boolean, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, appearance_study: AppearanceStudyInfo, resolved_process: Array<ResolvedOccurrenceProcess>, };
 
-export type ProjectCommand = { "op": "import_appearance_palette", session_id: SessionId, base_revision: ProjectRevision, source: NativePath, } | { "op": "set_appearance_target", session_id: SessionId, base_revision: ProjectRevision, target: AppearanceTarget, limits: SearchLimits, } | { "op": "compare_appearance", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "accept_appearance_report", session_id: SessionId, base_revision: ProjectRevision, report_hash: SourceHash, selection: string | null, } | { "op": "get_appearance_report", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "edit_process", session_id: SessionId, base_revision: ProjectRevision, edit: ProcessEdit, } | { "op": "get", session_id: SessionId, } | { "op": "new", session_id: SessionId, base_revision: SceneRevision, discard_changes: boolean, } | { "op": "open", session_id: SessionId, base_revision: SceneRevision, path: NativePath, read_only: boolean, recover_previous: boolean, discard_changes: boolean, } | { "op": "save", session_id: SessionId, base_revision: SceneRevision, target: NativePath | null, } | { "op": "undo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "redo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "import_surface_image_finish", session_id: SessionId, base_revision: ProjectRevision, reference: FaceRef, scope: SurfaceScopeKind, source: NativePath, parameters: ImageReliefParameters, } | { "op": "get_surface_image", session_id: SessionId, base_revision: ProjectRevision, image_hash: SourceHash, } | { "op": "add_surface_finish", session_id: SessionId, base_revision: ProjectRevision, face_ref: FaceRef, scope: SurfaceScopeKind, finish: SurfaceFinish, } | { "op": "remove_surface_finish", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, } | { "op": "set_surface_finish_enabled", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, enabled: boolean, };
+export type ProjectCommand = { "op": "import_appearance_palette", session_id: SessionId, base_revision: ProjectRevision, source: NativePath, } | { "op": "set_appearance_target", session_id: SessionId, base_revision: ProjectRevision, target: AppearanceTarget, limits: SearchLimits, } | { "op": "compare_appearance", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "accept_appearance_report", session_id: SessionId, base_revision: ProjectRevision, report_hash: SourceHash, selection: string | null, } | { "op": "get_appearance_report", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "set_optical_study", session_id: SessionId, base_revision: ProjectRevision, request: OpticalRequest, } | { "op": "compare_optical", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "get_optical_report", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "accept_optical_report", session_id: SessionId, base_revision: ProjectRevision, report_hash: SourceHash, selection: OpticalSelection | null, } | { "op": "edit_process", session_id: SessionId, base_revision: ProjectRevision, edit: ProcessEdit, } | { "op": "get", session_id: SessionId, } | { "op": "new", session_id: SessionId, base_revision: SceneRevision, discard_changes: boolean, } | { "op": "open", session_id: SessionId, base_revision: SceneRevision, path: NativePath, read_only: boolean, recover_previous: boolean, discard_changes: boolean, } | { "op": "save", session_id: SessionId, base_revision: SceneRevision, target: NativePath | null, } | { "op": "undo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "redo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "import_surface_image_finish", session_id: SessionId, base_revision: ProjectRevision, reference: FaceRef, scope: SurfaceScopeKind, source: NativePath, parameters: ImageReliefParameters, } | { "op": "get_surface_image", session_id: SessionId, base_revision: ProjectRevision, image_hash: SourceHash, } | { "op": "add_surface_finish", session_id: SessionId, base_revision: ProjectRevision, face_ref: FaceRef, scope: SurfaceScopeKind, finish: SurfaceFinish, } | { "op": "remove_surface_finish", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, } | { "op": "set_surface_finish_enabled", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, enabled: boolean, };
 
 export type ProjectResponse = { "type": "status", info: ProjectInfo, } | { "type": "scene_changed", info: ProjectInfo, summary: SceneSummary, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "error", error: ProjectError, };
 

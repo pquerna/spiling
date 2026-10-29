@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 syntax = "proto3";
 package spiling.engine;
+import "spiling/native_common.proto";
 
 message AppearanceChannels { double first = 1; double second = 2; double third = 3; }
 message AppearanceColor {
@@ -63,4 +64,76 @@ message AppearanceStudyInfo {
  AppearanceSearchLimits limits = 3;
  AppearanceReportRecord report = 4;
  optional string selection = 5;
+ OpticalStudyInfo optical = 6;
+}
+
+// Named reference estimate, pinned to prusa-fdm-mixer 007bb922994cdf985c324cb734f6504e805f6790.
+// This is not a material calibration or a physical light-transport model.
+enum OpticalModel {
+ OPTICAL_MODEL_UNSPECIFIED = 0;
+ OPTICAL_MODEL_PRUSA_V7_REFERENCE = 1;
+}
+enum OpticalView {
+ OPTICAL_VIEW_UNSPECIFIED = 0;
+ OPTICAL_VIEW_NORMAL_TO_PATCH = 1;
+}
+message OpticalObservation {
+ AppearanceIlluminant illuminant = 1;
+ AppearanceObserver observer = 2;
+ OpticalView view = 3;
+}
+// Upright build-frame millimetres; outward normal lies in build XY.
+message OpticalPatch {
+ Vec3 origin_mm = 1;
+ double normal_x = 2;
+ double normal_y = 3;
+ double width_mm = 4;
+ double height_mm = 5;
+}
+message OpticalTarget {
+ AppearanceColor color = 1;
+ double delta_e00_tolerance = 2;
+ optional double lightness_tolerance = 3;
+}
+message OpticalSlot { uint32 material = 1; double height_mm = 2; }
+message OpticalLayerCycle {
+ repeated OpticalSlot slots = 1;
+ uint32 phase_slot = 2;
+ double origin_z_mm = 3;
+}
+message OpticalPattern { repeated uint32 materials = 1; }
+message OpticalSearchSpace {
+ repeated OpticalPattern patterns = 1;
+ repeated double slot_heights_mm = 2;
+ repeated uint32 phase_slots = 3;
+ double origin_z_mm = 4;
+}
+message OpticalRequest {
+ OpticalModel model = 1;
+ repeated string materials = 2;
+ OpticalTarget target = 3;
+ OpticalObservation observation = 4;
+ OpticalPatch patch = 5;
+ OpticalLayerCycle recipe = 6;
+ OpticalSearchSpace search = 7;
+ AppearanceSearchLimits limits = 8;
+}
+message OpticalRequestedSelection {}
+message OpticalSelection {
+ oneof kind {
+  OpticalRequestedSelection requested = 1;
+  uint32 candidate_index = 2;
+ }
+}
+message OpticalReportRecord {
+ string hash = 1;
+ uint64 byte_count = 2;
+ string input_hash = 3;
+ string producer = 4;
+ bool complete = 5;
+}
+message OpticalStudyInfo {
+ OpticalRequest request = 1;
+ OpticalReportRecord report = 2;
+ OpticalSelection selection = 3;
 }

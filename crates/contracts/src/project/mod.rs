@@ -6,6 +6,7 @@
 use crate::geometry::*;
 use crate::appearance::{AppearanceStudy, AppearanceStudyInfo, AppearanceTarget, SearchLimits};
 use crate::manufacturing::{ManufacturingArtifactRecord, ManufacturingIntent, input_fingerprint};
+use crate::optical::{OpticalRequest, OpticalSelection};
 use crate::process::*;
 use crate::surface::*;
 use serde::{Deserialize, Serialize};
@@ -324,6 +325,25 @@ pub enum ProjectCommand {
     GetAppearanceReport {
         session_id: SessionId,
         base_revision: ProjectRevision,
+    },
+    SetOpticalStudy {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        request: OpticalRequest,
+    },
+    CompareOptical {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+    },
+    GetOpticalReport {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+    },
+    AcceptOpticalReport {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        report_hash: SourceHash,
+        selection: Option<OpticalSelection>,
     },
     EditProcess {
         session_id: SessionId,

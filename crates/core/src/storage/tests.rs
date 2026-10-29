@@ -2682,3 +2682,64 @@ fn appearance_save_never_collects_palette_assets_needed_by_previous_or_history()
     project.undo().unwrap();
     assert_eq!(project.appearance_study().palette.as_ref().unwrap(), first.record());
 }
+
+#[test]
+fn optical_reports_reconstruct_source_independently_readonly_with_exact_bytes_and_shared_request() {
+    let sandbox = Sandbox::new();
+    let (mut project, asset, report) = crate::optical_tests::optical_project();
+    let palette_path = sandbox.0.join("optical-palette.json");
+    let request_path = sandbox.0.join("optical-request.json");
+    fs::write(&palette_path, asset.original().as_slice()).unwrap();
+    fs::write(&request_path, report.request.encode().unwrap()).unwrap();
+    let report_bytes = report.encode().unwrap();
+    let record = report.canonical_record().unwrap();
+    let manufactured = project.snapshot().manufacturing_artifact.as_ref().unwrap().clone();
+    save_project(&mut project, Some(sandbox.target()));
+    fs::remove_file(palette_path).unwrap();
+    fs::remove_file(request_path).unwrap();
+    let mut readonly = Project::from_loaded(open(&sandbox.target(), true, false, &flag()).unwrap()).unwrap();
+    let optical = readonly.appearance_study().optical.as_ref().unwrap();
+    let reconstructed = optical.report.as_ref().unwrap();
+    assert_eq!(reconstructed.encode().unwrap(), report_bytes);
+    assert_eq!(optical.report_record.as_ref(), Some(&record));
+    assert_eq!(record.validate_bytes(&report_bytes).unwrap(), **reconstructed);
+    assert!(Arc::ptr_eq(&optical.request, &reconstructed.request));
+    assert_eq!(optical.request.encode().unwrap(), report.request.encode().unwrap());
+    assert_eq!(readonly.snapshot().manufacturing_artifact.as_ref().unwrap().bytes.as_slice(), manufactured.bytes.as_slice());
+    assert_eq!(readonly.snapshot().manufacturing_artifact.as_ref().unwrap().record.input_hash, manufactured.record.input_hash);
+    assert_eq!(readonly.prepare(Edit::SetOpticalStudy { request: crate::optical_tests::optical_request() }).unwrap_err().code, ProjectErrorCode::ReadOnly);
+    assert_eq!(readonly.prepare(Edit::AcceptOpticalReport { report: reconstructed.clone(), selection: Some(spiling_contracts::optical::OpticalSelection::Requested) }).unwrap_err().code, ProjectErrorCode::ReadOnly);
+    assert_eq!(readonly.undo().unwrap_err().code, ProjectErrorCode::ReadOnly);
+    assert_eq!(save(readonly.capture(), readonly.storage(), None, &flag(), |_| {}).unwrap_err().code, ProjectErrorCode::ReadOnly);
+}
+
+#[test]
+fn optical_recovery_preserves_accepted_report_and_rejects_forged_palette_evidence_closure() {
+    let sandbox = Sandbox::new();
+    let (mut project, _, report) = crate::optical_tests::optical_project();
+    save_project(&mut project, Some(sandbox.target()));
+    let first = project.capture().manifest;
+    let mut request = crate::optical_tests::optical_request();
+    request.patch.width_mm = 3.0;
+    crate::tests::commit_appearance(&mut project, Edit::SetOpticalStudy { request });
+    save_project(&mut project, None);
+    let recovered = Project::from_loaded(open(&sandbox.target(), true, true, &flag()).unwrap()).unwrap();
+    assert_eq!(recovered.appearance_study(), &first.appearance_study);
+    assert_eq!(recovered.appearance_study().optical.as_ref().unwrap().report.as_ref().unwrap().encode().unwrap(), report.encode().unwrap());
+    assert!(recovered.info().recovered_previous && recovered.info().dirty);
+
+    // A fresh descriptor hash is not authority to change the retained evidence.
+    let path = sandbox.target().join(CURRENT);
+    let mut forged = first;
+    let optical = forged.appearance_study.optical.as_mut().unwrap();
+    let changed = Arc::make_mut(optical.report.as_mut().unwrap());
+    changed.material_evidence_hashes[0] = SourceHash::from_bytes(b"foreign material evidence");
+    optical.report_record = Some(changed.canonical_record().unwrap());
+    forged.validate().unwrap();
+    fs::write(&path, serde_json::to_vec(&forged).unwrap()).unwrap();
+    assert_eq!(open(&sandbox.target(), true, false, &flag()).unwrap_err().code, ProjectErrorCode::CorruptAsset);
+    let changed = Arc::make_mut(forged.appearance_study.optical.as_mut().unwrap().report.as_mut().unwrap());
+    changed.producer = "unrecognized-optical-model".into();
+    fs::write(path, serde_json::to_vec(&forged).unwrap()).unwrap();
+    assert_eq!(open(&sandbox.target(), true, false, &flag()).unwrap_err().code, ProjectErrorCode::InvalidProject);
+}

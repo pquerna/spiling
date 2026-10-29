@@ -313,6 +313,7 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
             "surface_image_assets_v1".into(),
             "source_bound_process_v3".into(),
             "appearance_palette_study_c1a".into(),
+            "optical_construction_reference_study_v1".into(),
         ],
         manufacturing_capabilities: vec![
             spiling_contracts::MANUFACTURING_SCHEMA_CAPABILITY.into(),

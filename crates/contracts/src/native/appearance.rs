@@ -253,6 +253,7 @@ impl TryFrom<rpc::AppearanceStudyInfo> for AppearanceStudyInfo {
             limits: required(value.limits, "appearance limits")?.try_into()?,
             report: value.report.map(TryInto::try_into).transpose()?,
             selection: value.selection,
+            optical: value.optical.map(TryInto::try_into).transpose()?,
         };
         info.validate().map_err(|error| error.to_string())?;
         Ok(info)
@@ -268,6 +269,7 @@ impl TryFrom<AppearanceStudyInfo> for rpc::AppearanceStudyInfo {
             limits: Some(value.limits.try_into()?),
             report: value.report.map(TryInto::try_into).transpose()?,
             selection: value.selection,
+            optical: value.optical.map(TryInto::try_into).transpose()?,
         })
     }
 }

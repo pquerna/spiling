@@ -241,16 +241,18 @@ fn validate_format(bytes: &[u8], recovery: bool) -> Result<(), ProjectError> {
 }
 fn parse_manifest(bytes: &[u8]) -> Result<ProjectManifest, ProjectError> {
     validate_format(bytes, false)?;
-    let manifest: ProjectManifest =
+    let mut manifest: ProjectManifest =
         serde_json::from_slice(bytes).map_err(|e| invalid(format!("invalid manifest: {e}")))?;
     manifest.validate()?;
+    share_optical_request(&mut manifest);
     Ok(manifest)
 }
 fn parse_recovery(bytes: &[u8]) -> Result<RecoveryRecord, ProjectError> {
     validate_format(bytes, true)?;
-    let record: RecoveryRecord = serde_json::from_slice(bytes)
+    let mut record: RecoveryRecord = serde_json::from_slice(bytes)
         .map_err(|e| invalid(format!("invalid recovery checkpoint: {e}")))?;
     record.manifest.validate()?;
+    share_optical_request(&mut record.manifest);
     if record.next_occurrence_high_water < record.manifest.next_occurrence
         || record.revision_high_water < record.manifest.revision
         || record.next_surface_layer_high_water < record.manifest.next_surface_layer
@@ -262,6 +264,19 @@ fn parse_recovery(bytes: &[u8]) -> Result<RecoveryRecord, ProjectError> {
         ));
     }
     Ok(record)
+}
+
+// Equality and the complete report/input binding were checked before sharing.
+// The persisted request appears twice in JSON, but is one immutable allocation
+// in live project/history state after reconstruction.
+fn share_optical_request(manifest: &mut ProjectManifest) {
+    if let Some(optical) = &mut manifest.appearance_study.optical {
+        if let Some(report) = &mut optical.report {
+            if let Some(report) = Arc::get_mut(report) {
+                report.request = optical.request.clone();
+            }
+        }
+    }
 }
 fn durability_failure(e: std::io::Error) -> ProjectError {
     error(
@@ -1258,7 +1273,11 @@ fn load_palettes(
     let mut assets = BTreeMap::new();
     let budget = budget.min(MAX_APPEARANCE_RETAINED_BYTES);
     let metadata = manifest.appearance_study.allocated_bytes()
-        + manifest.appearance_study.report.as_ref().map_or(0, |report| report.allocated_bytes());
+        + manifest.appearance_study.report.as_ref().map_or(0, |report| report.allocated_bytes())
+        + manifest.appearance_study.optical.as_ref().map_or(0, |optical| {
+            optical.request.allocated_bytes()
+                + optical.report.as_ref().map_or(0, |report| report.allocated_bytes())
+        });
     if metadata > budget {
         return Err(error(ProjectErrorCode::ResourceLimit, "incoming appearance metadata budget exceeded"));
     }

@@ -13,6 +13,7 @@ pub mod display;
 pub mod geometry;
 pub mod manufacturing;
 pub mod native;
+pub mod optical;
 pub mod process;
 pub mod project;
 pub mod surface;
@@ -46,7 +47,7 @@ pub use spiling::engine as rpc;
 
 pub const ENGINE_BUILD_ID: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    ";project10;manufacturing11;surface3;planner25;emitter7;verifier9"
+    ";project10;manufacturing11;surface3;planner25;emitter7;verifier9;optical-prusa-v7-007bb922-cycle1"
 );
 pub const PROJECT_FORMAT_CAPABILITY: &str = "recoverable_projects_v10";
 pub const MANUFACTURING_SCHEMA_CAPABILITY: &str = "manufacturing_schema11";

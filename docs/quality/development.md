@@ -218,6 +218,16 @@ paths. Read-only inspection forbids mutation but permits native queries and fres
 bundle verification. Recovery explicitly selects a previous committed checkpoint;
 never blindly retry `save_uncertain`.
 
+Geometry-free palette and optical studies use the same engine/CLI. [Project appearance contracts](../protocol/project.md#optical-reference-construction-studies) own the strict JSON example and source-absent reopen procedure. Build engine/CLI, then run the selected real-child gates without starting CEF or compiling geometry:
+
+```sh
+SPILING_TEST_ENGINE="$ENGINE" cargo test --locked -p spiling-cli --test project optical_study_source_deleted_reopen_and_revision_owned_acceptance -- --ignored --exact --test-threads=1
+cargo test --locked -p spiling-engine --test project optical_cancelled_report_is_transient_and_stale_comparisons_cannot_publish -- --exact --test-threads=1
+cargo test --locked -p spiling-appearance --test optical
+```
+
+The named Prusa v7 model is a numerical reference estimate, not measured Spiling color or mixed-printing support. The example exercises finite physical exposure and bounded search; no GUI, backing-transport model, printer route or physical qualification follows.
+
 For manufacturing, author trusted TypeScript only outside the engine, or use the
 checked-in inert JSON. Desktop/engine load bounded JSON; they do not execute profiles:
 

@@ -2043,3 +2043,125 @@ async fn appearance_cancelled_report_is_transient_and_stale_comparisons_cannot_p
     assert_eq!(scene(&mut client).await, original_scene);
     client.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn optical_cancelled_report_is_transient_and_stale_comparisons_cannot_publish() {
+    use spiling_contracts::appearance::{AppearanceStatus, MAX_APPEARANCE_REPORT_BYTES};
+    use spiling_contracts::optical::{OpticalAssessment, OpticalRequest, OpticalSelection};
+    use spiling_contracts::{metadata, rpc};
+    let mut client = spawn().await;
+    let session = client.hello().session_id.clone();
+    let original_scene = scene(&mut client).await;
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/appearance");
+    let initial = info(&mut client).await;
+    let ProjectResponse::OperationAccepted { operation } = client.project(
+        ProjectCommand::ImportAppearancePalette {
+            session_id: session.clone(), base_revision: initial.revision,
+            source: native(&fixtures.join("palette.json")),
+        },
+    ).await.unwrap() else { panic!("palette import operation"); };
+    let imported = wait_job(&mut client, operation.name).await;
+    assert!(matches!(imported.result, Some(JobResult::AppearancePaletteImported { .. })));
+    let request = OpticalRequest::decode(
+        &std::fs::read(fixtures.join("optical-layer-cycle.json")).unwrap(),
+    ).unwrap();
+    let revision = info(&mut client).await.revision;
+    client.project(ProjectCommand::SetOpticalStudy {
+        session_id: session.clone(), base_revision: revision, request: request.clone(),
+    }).await.unwrap();
+    let revision = info(&mut client).await.revision;
+    let ProjectResponse::OperationAccepted { operation } = client.project(
+        ProjectCommand::CompareOptical { session_id: session.clone(), base_revision: revision },
+    ).await.unwrap() else { panic!("optical comparison operation"); };
+    let compared = wait_job(&mut client, operation.name).await;
+    assert_eq!(compared.status, JobStatus::Completed, "{compared:?}");
+    let Some(JobResult::OpticalCompared { project_id, captured_revision, record, resource }) = compared.result
+        else { panic!("checked optical comparison result"); };
+    assert_eq!(project_id, initial.project_id);
+    assert_eq!(captured_revision, revision);
+    assert!(record.complete && record.byte_count <= MAX_APPEARANCE_REPORT_BYTES as u64);
+    let rpc = client.rpc();
+    let report = rpc.fetch_optical_report(&record, &resource).await.unwrap();
+    assert!(matches!(report.requested, OpticalAssessment::Estimate { .. }));
+    assert_eq!(report.request.as_ref(), &request);
+    client.project(ProjectCommand::AcceptOpticalReport {
+        session_id: session.clone(), base_revision: revision,
+        report_hash: record.hash, selection: Some(OpticalSelection::Requested),
+    }).await.unwrap();
+    let baseline = info(&mut client).await;
+    assert_eq!(baseline.appearance_study.optical.as_ref().unwrap().selection, Some(OpticalSelection::Requested));
+
+    // Initial cancellation must still traverse the worker/ACK report path,
+    // even when the operation was queued behind the shared execution lease.
+    let blocker = rpc.run_diagnostic(rpc::RunDiagnosticRequest {
+        parent: "diagnostics/optical-cancel-control".into(), request_id: String::new(),
+        chunk_count: 4, delay_ms: 500, chunk_bytes: 64, input_revision: "lease-control".into(),
+    }).await.unwrap();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let operation = rpc.get_operation(&blocker.name).await.unwrap();
+            if metadata(&operation).unwrap().state == rpc::DiagnosticState::Running as i32 { break; }
+            assert!(!operation.done, "diagnostic did not hold the execution lease");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.unwrap();
+    let ProjectResponse::OperationAccepted { operation } = client.project(
+        ProjectCommand::CompareOptical { session_id: session.clone(), base_revision: baseline.revision },
+    ).await.unwrap() else { panic!("queued optical comparison"); };
+    rpc.cancel_operation(&operation.name).await.unwrap();
+    rpc.cancel_operation(&blocker.name).await.unwrap();
+    let cancelled = wait_job(&mut client, operation.name).await;
+    assert_eq!(cancelled.status, JobStatus::Completed, "{cancelled:?}");
+    let Some(JobResult::OpticalCompared { project_id, captured_revision, record, resource }) = cancelled.result
+        else { panic!("cancelled optical traversal must deliver its bounded report"); };
+    assert_eq!(project_id, baseline.project_id);
+    assert_eq!(captured_revision, baseline.revision);
+    assert!(!record.complete && record.byte_count <= MAX_APPEARANCE_REPORT_BYTES as u64);
+    assert_eq!(cancelled.outputs.len(), 1);
+    let report = rpc.fetch_optical_report(&record, &resource).await.unwrap();
+    assert_eq!(report.status, AppearanceStatus::Cancelled);
+    assert!(report.visits.is_empty() && report.alternatives.is_empty());
+    assert_eq!(report.request.as_ref(), &request);
+    assert_eq!(info(&mut client).await, baseline);
+    project_rejection(&mut client, ProjectCommand::AcceptOpticalReport {
+        session_id: session.clone(), base_revision: baseline.revision,
+        report_hash: record.hash, selection: Some(OpticalSelection::Requested),
+    }, ProjectErrorCode::StaleRevision).await;
+
+    // Changing the independent optical query while queued cannot rebind the
+    // captured comparison to the new request or replace its committed state.
+    let blocker = rpc.run_diagnostic(rpc::RunDiagnosticRequest {
+        parent: "diagnostics/optical-stale-control".into(), request_id: String::new(),
+        chunk_count: 4, delay_ms: 500, chunk_bytes: 64, input_revision: "lease-control".into(),
+    }).await.unwrap();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let operation = rpc.get_operation(&blocker.name).await.unwrap();
+            if metadata(&operation).unwrap().state == rpc::DiagnosticState::Running as i32 { break; }
+            assert!(!operation.done, "diagnostic did not hold the execution lease");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.unwrap();
+    let ProjectResponse::OperationAccepted { operation } = client.project(
+        ProjectCommand::CompareOptical { session_id: session.clone(), base_revision: baseline.revision },
+    ).await.unwrap() else { panic!("queued optical comparison"); };
+    let mut changed_request = request;
+    changed_request.patch.width_mm += 1.0;
+    client.project(ProjectCommand::SetOpticalStudy {
+        session_id: session.clone(), base_revision: baseline.revision, request: changed_request.clone(),
+    }).await.unwrap();
+    let changed = info(&mut client).await;
+    assert_eq!(changed.appearance_study.optical.as_ref().unwrap().request.as_ref(), &changed_request);
+    assert!(changed.appearance_study.optical.as_ref().unwrap().report.is_none());
+    rpc.cancel_operation(&blocker.name).await.unwrap();
+    let stale = wait_job(&mut client, operation.name).await;
+    project_job_error(&stale, ProjectErrorCode::StaleRevision);
+    assert!(stale.outputs.is_empty());
+    assert_eq!(info(&mut client).await, changed);
+    assert_eq!(scene(&mut client).await, original_scene);
+    client.project(ProjectCommand::Undo { session_id: session, base_revision: original_scene.revision })
+        .await.unwrap();
+    assert_eq!(info(&mut client).await.appearance_study, baseline.appearance_study);
+    assert_eq!(scene(&mut client).await, original_scene);
+    client.shutdown().await.unwrap();
+}

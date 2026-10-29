@@ -13,11 +13,36 @@ pub enum ProjectCall {
     ImportAppearancePalette(rpc::ImportAppearancePaletteRequest),
     CompareAppearance(rpc::CompareAppearanceRequest),
     GetAppearanceReport(rpc::GetAppearanceReportRequest),
+    CompareOptical(rpc::CompareOpticalRequest),
+    GetOpticalReport(rpc::GetOpticalReportRequest),
 }
 pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, String> {
     request_id(id)?;
     use rpc::project_request::Command as C;
     let (session_id, command) = match command {
+        ProjectCommand::CompareOptical { session_id, base_revision } => {
+            return Ok(ProjectCall::CompareOptical(rpc::CompareOpticalRequest {
+                parent: format!("sessions/{}", session_id.as_str()), request_id: id.into(),
+                base_revision: base_revision.0,
+            }));
+        }
+        ProjectCommand::GetOpticalReport { session_id, base_revision } => {
+            return Ok(ProjectCall::GetOpticalReport(rpc::GetOpticalReportRequest {
+                parent: format!("sessions/{}", session_id.as_str()), request_id: id.into(),
+                base_revision: base_revision.0,
+            }));
+        }
+        ProjectCommand::SetOpticalStudy { session_id, base_revision, request } => (
+            session_id, C::SetOpticalStudy(rpc::SetOpticalStudyRequest {
+                base_revision: base_revision.0, request: Some(request.try_into()?),
+            }),
+        ),
+        ProjectCommand::AcceptOpticalReport { session_id, base_revision, report_hash, selection } => (
+            session_id, C::AcceptOpticalReport(rpc::AcceptOpticalReportRequest {
+                base_revision: base_revision.0, report_hash: report_hash.into(),
+                selection: selection.map(TryInto::try_into).transpose()?,
+            }),
+        ),
         ProjectCommand::ImportAppearancePalette { session_id, base_revision, source } => {
             return Ok(ProjectCall::ImportAppearancePalette(rpc::ImportAppearancePaletteRequest {
                 parent: format!("sessions/{}", session_id.as_str()), request_id: id.into(),
@@ -211,6 +236,15 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
         let session_id = session_parent(&v.parent)?;
         use rpc::project_request::Command as C;
         Ok(match required(v.command, "project command")? {
+            C::SetOpticalStudy(value) => Self::SetOpticalStudy {
+                session_id, base_revision: ProjectRevision(value.base_revision),
+                request: required(value.request, "optical request")?.try_into()?,
+            },
+            C::AcceptOpticalReport(value) => Self::AcceptOpticalReport {
+                session_id, base_revision: ProjectRevision(value.base_revision),
+                report_hash: SourceHash::parse(value.report_hash).map_err(|error| error.to_string())?,
+                selection: value.selection.map(TryInto::try_into).transpose()?,
+            },
             C::SetAppearanceTarget(v) => Self::SetAppearanceTarget {
                 session_id, base_revision: ProjectRevision(v.base_revision),
                 target: required(v.target, "appearance target")?.try_into()?,
@@ -357,6 +391,26 @@ impl TryFrom<rpc::GetAppearanceReportRequest> for ProjectCommand {
     fn try_from(value: rpc::GetAppearanceReportRequest) -> Result<Self, String> {
         request_id(&value.request_id)?;
         Ok(Self::GetAppearanceReport { session_id: session_parent(&value.parent)?, base_revision: ProjectRevision(value.base_revision) })
+    }
+}
+impl TryFrom<rpc::CompareOpticalRequest> for ProjectCommand {
+    type Error = String;
+    fn try_from(value: rpc::CompareOpticalRequest) -> Result<Self, String> {
+        request_id(&value.request_id)?;
+        Ok(Self::CompareOptical {
+            session_id: session_parent(&value.parent)?,
+            base_revision: ProjectRevision(value.base_revision),
+        })
+    }
+}
+impl TryFrom<rpc::GetOpticalReportRequest> for ProjectCommand {
+    type Error = String;
+    fn try_from(value: rpc::GetOpticalReportRequest) -> Result<Self, String> {
+        request_id(&value.request_id)?;
+        Ok(Self::GetOpticalReport {
+            session_id: session_parent(&value.parent)?,
+            base_revision: ProjectRevision(value.base_revision),
+        })
     }
 }
 pub fn validate_project_info(v: &ProjectInfo) -> Result<(), String> {

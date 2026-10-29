@@ -161,6 +161,12 @@ pub enum JobResult {
         record: crate::appearance::AppearanceReportRecord,
         resource: crate::ArtifactView,
     },
+    OpticalCompared {
+        project_id: crate::project::ProjectId,
+        captured_revision: crate::project::ProjectRevision,
+        record: crate::optical::OpticalReportRecord,
+        resource: crate::ArtifactView,
+    },
     ManufacturingPreflight {
         report: crate::manufacturing::PreflightReport,
     },

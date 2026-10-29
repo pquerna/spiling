@@ -231,6 +231,7 @@ impl Jobs {
         // including cancellation before it acquires the existing worker lease.
         let report_only = matches!(&command, Control::Project(
             spiling_contracts::project::ProjectCommand::CompareAppearance { .. }
+                | spiling_contracts::project::ProjectCommand::CompareOptical { .. }
         ));
         let permit = loop {
             if native_cancelled(&updates.borrow()) && !report_only {

@@ -460,6 +460,7 @@ fn palette_and_report_records_bind_all_bytes_and_metadata() {
         report: Some(Arc::new(report.clone())),
         report_record: Some(descriptor.clone()),
         selection: Some(report.alternatives[0].key.clone()),
+        optical: None,
     };
     study.validate().unwrap();
     assert_eq!(study.info().report, Some(descriptor));

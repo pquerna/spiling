@@ -93,6 +93,7 @@ fn native_artifact_limit(media: &str) -> Result<u64, String> {
         "application/x-spiling-replay-motion" => Ok(u64::from(MAX_REPLAY_DISPLAY_BYTES)),
         SURFACE_IMAGE_MEDIA_TYPE => Ok(MAX_SURFACE_IMAGE_BYTES as u64),
         crate::appearance::APPEARANCE_REPORT_MIME => Ok(crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64),
+        crate::optical::OPTICAL_REPORT_MIME => Ok(crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64),
         _ => Err("unexpected native artifact media type".into()),
     }
 }
@@ -235,6 +236,14 @@ pub fn native_operation_view(
                         && output.sha256 == resource.sha256 && output.size_bytes == record.byte_count
                         && output.media_type == resource.media_type)
                 { return Err("appearance report captured revision or outputs mismatch".into()); }
+            }
+            JobResult::OpticalCompared { captured_revision, record, resource, .. } => {
+                super::optical::validate_report_resource(record, resource)?;
+                if captured_revision.0 != meta.captured_project_revision || meta.outputs.len() != 1
+                    || !meta.outputs.iter().any(|output| output.name == resource.name
+                        && output.sha256 == resource.sha256 && output.size_bytes == record.byte_count
+                        && output.media_type == resource.media_type)
+                { return Err("optical report captured revision or outputs mismatch".into()); }
             }
             JobResult::SurfaceImageImported {
                 info,
@@ -397,6 +406,16 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
                     captured_revision: ProjectRevision(value.captured_revision), record, resource,
                 }
             }
+            R::OpticalCompared(value) => {
+                let record = required(value.record, "optical report record")?.try_into()?;
+                let resource = artifact_to_view(required(value.resource, "optical report resource")?,
+                    crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)?;
+                super::optical::validate_report_resource(&record, &resource)?;
+                Self::OpticalCompared {
+                    project_id: ProjectId::parse(value.project_id).map_err(|error| error.to_string())?,
+                    captured_revision: ProjectRevision(value.captured_revision), record, resource,
+                }
+            }
             R::Scene(summary) => Self::Scene {
                 summary: summary.try_into()?,
             },
@@ -500,6 +519,14 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
             JobResult::AppearanceCompared { project_id, captured_revision, record, resource } => {
                 super::appearance::validate_report_resource(&record, &resource)?;
                 R::AppearanceCompared(rpc::AppearanceComparedResult {
+                    project_id: project_id.as_str().into(), captured_revision: captured_revision.0,
+                    record: Some(record.try_into()?), resource: Some(artifact_from_view(resource,
+                        crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)?),
+                })
+            }
+            JobResult::OpticalCompared { project_id, captured_revision, record, resource } => {
+                super::optical::validate_report_resource(&record, &resource)?;
+                R::OpticalCompared(rpc::OpticalComparedResult {
                     project_id: project_id.as_str().into(), captured_revision: captured_revision.0,
                     record: Some(record.try_into()?), resource: Some(artifact_from_view(resource,
                         crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)?),

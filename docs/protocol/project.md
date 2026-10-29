@@ -115,7 +115,37 @@ target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project ins
   --appearance-report "$work/reopened-report.json" --appearance-compare
 ```
 
-`--appearance-accept-report` explicitly accepts a complete report without selecting a candidate; it is not a reserved candidate-key sentinel. `--appearance-limits FILE` supplies strict `max_visited`/`max_alternatives` JSON after a target. Exports use the shared exclusive output transaction and commit only after observed child reap. Inspect opens fresh read-only and uses captured assets after source deletion. Project10/manufacturing11/process3/surface3/SPLR5 remain unchanged; current producer freshness uses planner24/emitter7/verifier9.
+`--appearance-accept-report` explicitly accepts a complete report without selecting a candidate; it is not a reserved candidate-key sentinel. `--appearance-limits FILE` supplies strict `max_visited`/`max_alternatives` JSON after a target. Exports use the shared exclusive output transaction and commit only after observed child reap. Inspect opens fresh read-only and uses captured assets after source deletion. Project10/manufacturing11/process3/surface3/SPLR5 remain unchanged; current manufacturing producer freshness uses planner25/emitter7/verifier9.
+
+## Optical reference construction studies
+
+`spiling-contracts::optical` owns strict typed requests, physical cycles and reports; `spiling-appearance::optical` evaluates them without Core, geometry, threads, filesystem or printer dependencies. The named model `prusa_v7_007bb922` is a source-attributed reference estimate, ported from the MIT TypeScript v7 functions at `007bb922994cdf985c324cb734f6504e805f6790`. Its own matrix, byte rounding, fitted corrections, display clipping and pure-component guard are reference semantics, not a change to C1a's unclipped CSS-D65 conversion or target ranking. The original notice is retained in the port and release notices.
+
+An `OpticalRequest` identifies two/three distinct palette material keys, a target/tolerances, observation, an upright finite build-frame-mm patch, an ordered requested cycle and a finite search grid. Patch Z runs along build Z and its unit outward normal lies in build XY; only normal-to-patch viewing is represented. Cycles retain each material index and positive physical slot height, phase slot and physical origin Z. At that origin the selected phase slot begins. Resolution analytically clips the periodic construction to the patch's actual height; it does not iterate all layers or equate slot counts with exposed height. A finite partial cycle can expose unequal fractions from an equal-slot recipe. Requests outside the stated f64 representability envelope refuse rather than clamp coordinates or phase.
+
+Search explicitly enumerates pattern × uniform slot height × phase, in that order, with at most1024 declared combinations and at most256 retained alternatives. Requested recipes may use unequal slot heights. A phase outside a particular pattern is a visited filtered candidate, not modulo-normalized into another recipe. Reports retain the requested assessment, every visited grid index, exposed heights/fractions, predicted Lab/display bytes, target errors, ranked assessed alternatives and traversal/completion state. Alternative truncation does not stop enumeration. Incomplete work/cancelled reports cannot be accepted, even after finding an estimate within tolerance.
+
+The predictor uses only positive-exposure components. Catalog base RGB is explicitly quantized to the reference's byte input; supported declared measured base colors are converted through existing unclipped colorimetry and remain unassessed outside the model's RGB domain. Unknown evidence/conditions are not assigned zero error. D50, ten-degree or unknown observation is unassessed, not silently adapted to D65/2°. Reference-model corrections are not Spiling calibration: no finite backing transport, viewing-distance/stripe-visibility model, arbitrary orientation, physical uncertainty bound, material/process admission or routed printing is supplied. `reference_estimate` and `study_only_not_routed` remain explicit.
+
+`AppearanceStudy.optical` is a required nullable field. Its request and accepted report are immutable Arcs, deduplicated across current/history/prepared/saved pins under the existing64MiB appearance allowance. The typed authoring request is stored with the project; its external CLI JSON path is not a persistent input. Base data remains the original/canonical palette asset. C1a target/limits and optical requests are independent. Palette replacement revokes optical report/selection authority and cannot retain an incompatible query. Complete-report acceptance binds the exact current project/revision/hash, palette/evidence and request; it may select the requested estimate or a retained assessed grid candidate. Study edits preserve manufacturing bytes/input identity and SceneRevision.
+
+`Projects.Execute` carries typed `SetOpticalStudy`/`AcceptOpticalReport`; `CompareOptical`/`GetOpticalReport` use the existing worker/ACK/native Operations and checked ByteStream path. `OpticalCompared` binds captured project/revision, a producer/input-bound record and `application/x-spiling-optical-report+json` bytes (<=1MiB). ProjectInfo contains request/selection/report metadata, never the full report. Compare/Get permit read-only; stale queued work and historical operations cannot authorize current acceptance. Existing development projects missing the strict field must be recreated; no format-counter change or compatibility default is introduced.
+
+The CLI consumes real engine computation, not a local predictor:
+
+```sh
+work="$(mktemp -d)"
+cp fixtures/appearance/palette.json "$work/palette.json"
+cp fixtures/appearance/optical-layer-cycle.json "$work/request.json"
+target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project create "$work/study" \
+  --appearance-palette "$work/palette.json" --optical-study "$work/request.json" \
+  --optical-compare --optical-accept requested --save --undo --redo
+rm "$work/palette.json" "$work/request.json"  # Only these newly owned external inputs.
+target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project inspect "$work/study" \
+  --optical-report "$work/reopened-report.json" --optical-compare
+```
+
+The example's target is the pinned model's synthetic reference result, not a measured mixed coupon or a manufacturing-quality promise. Its finite0.15mm window over two0.10mm slots exercises unequal exposed fractions. `--optical-accept best` chooses a retained ranked candidate; an integer denotes the original grid index, not its rank. `--optical-accept-report` accepts a complete report without selecting an estimate. Export destinations must be new and use the shared owned-handle/reap/rollback transaction. This headless cut does not implement a workbench form, backed-patch optics, mixed-material G-code or physical color accuracy.
 
 ## Writer ownership and reader snapshots
 

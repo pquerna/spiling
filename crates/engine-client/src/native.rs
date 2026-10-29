@@ -85,6 +85,28 @@ impl EngineRpc {
         ).await?;
         Ok(record.validate_bytes(&bytes)?)
     }
+    /// Retrieve the engine's named reference estimate; no optical evaluation in clients.
+    pub async fn fetch_optical_report(
+        &self,
+        record: &spiling_contracts::optical::OpticalReportRecord,
+        descriptor: &ArtifactView,
+    ) -> Result<spiling_contracts::optical::OpticalReport, ClientError> {
+        record.validate()?;
+        let limit = spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64;
+        let size = native::validate_artifact_view(descriptor, limit)
+            .map_err(ClientError::Protocol)?;
+        if size != record.byte_count
+            || descriptor.sha256 != record.hash.as_str()
+            || descriptor.name.strip_prefix("artifacts/") != Some(record.hash.as_str())
+            || descriptor.media_type != spiling_contracts::optical::OPTICAL_REPORT_MIME
+        {
+            return Err(ClientError::Protocol("optical descriptor disagrees with record".into()));
+        }
+        let bytes = self.read_bounded_artifact(
+            &descriptor.name, size, &descriptor.sha256, limit,
+        ).await?;
+        Ok(record.validate_bytes(&bytes)?)
+    }
     pub async fn geometry(
         &self,
         command: GeometryCommand,
@@ -196,6 +218,9 @@ impl EngineRpc {
             target.validate()?;
             limits.validate()?;
         }
+        if let ProjectCommand::SetOpticalStudy { request, .. } = &command {
+            request.validate()?;
+        }
         match &command {
             ProjectCommand::Open { path, .. } => path.validate(),
             ProjectCommand::ImportSurfaceImageFinish { source, .. }
@@ -215,6 +240,10 @@ impl EngineRpc {
             | ProjectCommand::CompareAppearance { .. }
             | ProjectCommand::AcceptAppearanceReport { .. }
             | ProjectCommand::GetAppearanceReport { .. }
+            | ProjectCommand::SetOpticalStudy { .. }
+            | ProjectCommand::CompareOptical { .. }
+            | ProjectCommand::GetOpticalReport { .. }
+            | ProjectCommand::AcceptOpticalReport { .. }
             | ProjectCommand::RemoveSurfaceFinish { .. }
             | ProjectCommand::SetSurfaceFinishEnabled { .. } => Ok(()),
         }
@@ -296,6 +325,20 @@ impl EngineRpc {
             }
             ProjectCall::GetAppearanceReport(request) => {
                 let operation = client.get_appearance_report(self.request(bounded(request)?))
+                    .await.map_err(rpc_error)?.into_inner();
+                Ok(ProjectResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation).map_err(ClientError::Protocol)?,
+                })
+            }
+            ProjectCall::CompareOptical(request) => {
+                let operation = client.compare_optical(self.request(bounded(request)?))
+                    .await.map_err(rpc_error)?.into_inner();
+                Ok(ProjectResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation).map_err(ClientError::Protocol)?,
+                })
+            }
+            ProjectCall::GetOpticalReport(request) => {
+                let operation = client.get_optical_report(self.request(bounded(request)?))
                     .await.map_err(rpc_error)?.into_inner();
                 Ok(ProjectResponse::OperationAccepted {
                     operation: native::native_operation_view(&operation).map_err(ClientError::Protocol)?,
@@ -691,6 +734,13 @@ impl EngineClient {
         descriptor: &ArtifactView,
     ) -> Result<spiling_contracts::appearance::AppearanceReport, ClientError> {
         self.rpc.fetch_appearance_report(record, descriptor).await
+    }
+    pub async fn fetch_optical_report(
+        &self,
+        record: &spiling_contracts::optical::OpticalReportRecord,
+        descriptor: &ArtifactView,
+    ) -> Result<spiling_contracts::optical::OpticalReport, ClientError> {
+        self.rpc.fetch_optical_report(record, descriptor).await
     }
     pub async fn geometry(
         &self,

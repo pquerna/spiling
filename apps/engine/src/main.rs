@@ -518,6 +518,44 @@ impl projects_server::Projects for Service {
                 .await?,
         ))
     }
+    async fn compare_optical(
+        &self,
+        req: Request<CompareOpticalRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Projects.CompareOptical", &req);
+        let command = req.try_into().map_err(|error: String| {
+            request_error(spiling_contracts::native::project_request_status(&error))
+        })?;
+        Ok(Response::new(self.jobs.start_native(
+            self.native.clone(),
+            jobs::NativeAdmission {
+                parent, request_id: id, digest, command: Control::Project(command),
+                reservation: spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
+            },
+        ).await?))
+    }
+    async fn get_optical_report(
+        &self,
+        req: Request<GetOpticalReportRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Projects.GetOpticalReport", &req);
+        let command = req.try_into().map_err(|error: String| {
+            request_error(spiling_contracts::native::project_request_status(&error))
+        })?;
+        Ok(Response::new(self.jobs.start_native(
+            self.native.clone(),
+            jobs::NativeAdmission {
+                parent, request_id: id, digest, command: Control::Project(command),
+                reservation: spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
+            },
+        ).await?))
+    }
 }
 #[tonic::async_trait]
 impl manufacturing_server::Manufacturing for Service {
@@ -733,6 +771,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "surface_image_assets_v1",
             "source_bound_process_v3",
             "appearance_palette_study_c1a",
+            "optical_construction_reference_study_v1",
         ]
         .into_iter()
         .map(str::to_owned)

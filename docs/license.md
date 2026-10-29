@@ -24,6 +24,8 @@ Manufacturing's exact-pinned `boostvoronoi` segment constructor uses BSL-1.0; th
 
 The two SolidCraft companion libraries under `vendor/solidcraft/` are third-party MIT OR Apache-2.0 material, excluded from the Spiling workspace. Preserve their upstream headers, license texts, NOTICE and conformance-input attribution; do not apply Spiling headers to imported source. `vendor/solidcraft/UPSTREAM.toml` owns the exact upstream snapshot and local modifications. Cargo path dependencies are reproducible from the checkout; release provenance must include non-workspace local packages, not just registry and Git sources.
 
+The in-tree Prusa v7 reference port in `crates/appearance/src/prusa_v7.rs` retains its original MIT copyright and full notice, separately from original OSL-3.0 study code. Keep `crates/appearance/LICENSE-prusa-fdm-mixer.txt` and the modification/source disclosure in [NOTICE.md](../NOTICE.md). Release provenance must collect this source component even though ordinary workspace packages are excluded from dependency notice collection. Model-code licensing does not grant rights to unrelated catalogs or measurement datasets.
+
 ## Standard file header
 
 Use this three-line notice in the file's native comment syntax:

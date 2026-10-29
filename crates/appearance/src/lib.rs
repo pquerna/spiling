@@ -2,13 +2,17 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Pure scalar C1a lookup. No optical mixing, spool inventory or physical accuracy claim.
+//! Pure scalar C1a lookup and finite headless optical reference studies.
+//! No spool inventory, routed printing or physical accuracy claim.
 //! Conversion uses CSS Color 4's xy D65 (0.3127, 0.3290), the matching rational
 //! sRGB matrix and explicit XYZ Y=1/Y=100 scales. D65 Lab is NOT CSS D50 Lab.
 //! CIEDE2000 uses the standard hue branches and kL=kC=kH=1, without gamut clamps.
 use spiling_contracts::appearance::*;
 use spiling_contracts::project::{ProjectError, ProjectErrorCode};
 use std::f64::consts::PI;
+
+pub mod optical;
+mod prusa_v7;
 
 fn numerical(message: &str) -> ProjectError {
     ProjectError::new(ProjectErrorCode::InvalidProject, message)

@@ -112,6 +112,13 @@ pub enum Work {
     GetAppearanceReport {
         report: Arc<spiling_contracts::appearance::AppearanceReport>,
     },
+    CompareOptical {
+        asset: Arc<spiling_core::PaletteAsset>,
+        request: Arc<spiling_contracts::optical::OpticalRequest>,
+    },
+    GetOpticalReport {
+        report: Arc<spiling_contracts::optical::OpticalReport>,
+    },
     GetSurfaceImage {
         asset: Arc<SurfaceImageAsset>,
     },
@@ -196,6 +203,7 @@ pub enum Product {
     SurfaceImage(Arc<SurfaceImageAsset>),
     AppearancePalette(Arc<spiling_core::PaletteAsset>),
     AppearanceReport(Arc<super::appearance::ReportPublication>),
+    OpticalReport(Arc<super::optical::OpticalReportPublication>),
     Section(EncodedSection),
     Compiled(Arc<ManufacturingAsset>),
     Preflight(PreflightReport),
@@ -317,6 +325,15 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
                 .and_then(|()| super::appearance::ReportPublication::new(report))
                 .map(Arc::new)
                 .map(Product::AppearanceReport)
+                .map_err(JobError::from),
+            Work::CompareOptical { asset, request } => super::optical::compare_palette(asset, request, &cancel)
+                .map(Product::OpticalReport)
+                .map_err(JobError::from),
+            Work::GetOpticalReport { report } => check_cancel(&cancel)
+                .map_err(super::project_geometry_error)
+                .and_then(|()| super::optical::OpticalReportPublication::new(report))
+                .map(Arc::new)
+                .map(Product::OpticalReport)
                 .map_err(JobError::from),
             Work::ImportSurfaceImage {
                 source,

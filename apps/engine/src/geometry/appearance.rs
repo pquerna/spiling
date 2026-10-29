@@ -95,7 +95,7 @@ pub(super) fn compare_palette(
 }
 
 impl Runtime {
-    fn appearance_base(
+    pub(super) fn appearance_base(
         &self,
         session: &SessionId,
         base: ProjectRevision,

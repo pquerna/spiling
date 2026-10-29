@@ -1,0 +1,26 @@
+{
+  "model": "prusa_v7_007bb922",
+  "materials": [
+    "0e26ccbd-f4a3-5da1-95c9-3855970d0066/catalog-rgb",
+    "261ae7e7-20d9-5969-9ed5-dd82eea29bcf/catalog-rgb"
+  ],
+  "target": {
+    "color": {"encoding": "d65_lab", "channels": [57.8557803945072, 7.111905584953413, 1.9501896677348116]},
+    "delta_e00_tolerance": 2.0,
+    "lightness_tolerance": null
+  },
+  "observation": {"illuminant": "d65", "observer": "cie1931_two_degree", "view": "normal_to_patch"},
+  "patch": {"origin_mm": [0, 0, 0], "normal_xy": [0, -1], "width_mm": 12.0, "height_mm": 0.15},
+  "recipe": {
+    "slots": [{"material": 0, "height_mm": 0.1}, {"material": 1, "height_mm": 0.1}],
+    "phase_slot": 0,
+    "origin_z_mm": 0
+  },
+  "search": {
+    "patterns": [{"materials": [0, 1]}, {"materials": [0, 0, 1]}, {"materials": [1, 0]}, {"materials": [0, 1, 1]}],
+    "slot_heights_mm": [0.05, 0.1],
+    "phase_slots": [0, 1, 2],
+    "origin_z_mm": 0
+  },
+  "limits": {"max_visited": 1024, "max_alternatives": 8}
+}

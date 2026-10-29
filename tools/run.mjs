@@ -205,6 +205,18 @@ async function provenance() {
       join(directory, "third-party", "npm", `${pkg.name.replaceAll("/", "_")}-${pkg.version}`),
     );
   }
+  const sourceComponents = [{
+    name: "prusa-fdm-mixer",
+    source: "https://github.com/prusa3d/prusa-fdm-mixer",
+    revision: "007bb922994cdf985c324cb734f6504e805f6790",
+    license: "MIT",
+    path: "crates/appearance/src/prusa_v7.rs",
+    modifications: "Allocation-free Rust port of the pinned TypeScript v7 reference functions; no measurement dataset imported.",
+  }];
+  await copyNotices(
+    join(root, "crates", "appearance"),
+    join(directory, "third-party", "source", "prusa-fdm-mixer-007bb922"),
+  );
   const commit = await run("git", ["rev-parse", "HEAD"], { capture: true });
   const dirty = (await run("git", ["status", "--porcelain"], { capture: true })).length > 0;
   const lockHashes = {};
@@ -240,6 +252,7 @@ async function provenance() {
       repository,
     })),
     cefDistributions: await cefArchiveRecords(),
+    sourceComponents,
   };
   await writeFile(join(directory, "provenance.json"), JSON.stringify(record, null, 2) + "\n");
   await copyFile(join(root, "LICENSE.md"), join(directory, "LICENSE.md"));
