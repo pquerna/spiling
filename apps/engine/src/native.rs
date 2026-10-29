@@ -169,9 +169,13 @@ impl NativeHost {
                     ..
                 }
                 | spiling_contracts::project::ProjectCommand::GetSurfaceImage { .. }
-                | spiling_contracts::project::ProjectCommand::ImportAppearancePalette { .. }
+                | spiling_contracts::project::ProjectCommand::ImportAppearancePalette {
+                    ..
+                }
                 | spiling_contracts::project::ProjectCommand::CompareAppearance { .. }
-                | spiling_contracts::project::ProjectCommand::GetAppearanceReport { .. }
+                | spiling_contracts::project::ProjectCommand::GetAppearanceReport {
+                    ..
+                }
                 | spiling_contracts::project::ProjectCommand::CompareOptical { .. }
                 | spiling_contracts::project::ProjectCommand::GetOpticalReport { .. }),
             ) => Some(Control::Project(command.clone())),
@@ -314,37 +318,55 @@ fn publish_terminal(
     let private = job
         .result
         .ok_or_else(|| Status::internal("native terminal result missing"))?;
-    if let geometry::JobResult::OpticalCompared { project_id, captured_revision, record } = &private {
-        let report = runtime.optical_publication(id)
+    if let geometry::JobResult::OpticalCompared {
+        project_id,
+        captured_revision,
+        record,
+    } = &private
+    {
+        let report = runtime
+            .optical_publication(id)
             .ok_or_else(|| Status::internal("ACK optical report missing"))?;
         if &report.record != record {
             return Err(Status::data_loss("ACK optical report metadata mismatch"));
         }
         let artifact = jobs.describe_native_artifact(
-            &report.bytes, spiling_contracts::optical::OPTICAL_REPORT_MIME,
+            &report.bytes,
+            spiling_contracts::optical::OPTICAL_REPORT_MIME,
             spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
         )?;
         let result = spiling_contracts::geometry::JobResult::OpticalCompared {
-            project_id: project_id.clone(), captured_revision: *captured_revision,
-            record: record.clone(), resource: view(&artifact)?,
+            project_id: project_id.clone(),
+            captured_revision: *captured_revision,
+            record: record.clone(),
+            resource: view(&artifact)?,
         };
         jobs.native_finish(name, Ok(result), vec![(artifact, report.bytes.as_slice())])?;
         runtime.release_optical_publication(id);
         return Ok(true);
     }
-    if let geometry::JobResult::AppearanceCompared { project_id, captured_revision, record } = &private {
-        let report = runtime.appearance_publication(id)
+    if let geometry::JobResult::AppearanceCompared {
+        project_id,
+        captured_revision,
+        record,
+    } = &private
+    {
+        let report = runtime
+            .appearance_publication(id)
             .ok_or_else(|| Status::internal("ACK appearance report missing"))?;
         if &report.record != record {
             return Err(Status::data_loss("ACK appearance report metadata mismatch"));
         }
         let artifact = jobs.describe_native_artifact(
-            &report.bytes, "application/x-spiling-appearance-report+json",
+            &report.bytes,
+            "application/x-spiling-appearance-report+json",
             spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
         )?;
         let result = spiling_contracts::geometry::JobResult::AppearanceCompared {
-            project_id: project_id.clone(), captured_revision: *captured_revision,
-            record: record.clone(), resource: view(&artifact)?,
+            project_id: project_id.clone(),
+            captured_revision: *captured_revision,
+            record: record.clone(),
+            resource: view(&artifact)?,
         };
         jobs.native_finish(name, Ok(result), vec![(artifact, report.bytes.as_slice())])?;
         runtime.release_appearance_publication(id);
@@ -385,8 +407,11 @@ fn publish_terminal(
         runtime.release_image_publication(id);
         return Ok(true);
     }
-    if matches!(&private, geometry::JobResult::SurfaceImageImported { .. }
-        | geometry::JobResult::AppearancePaletteImported { .. }) {
+    if matches!(
+        &private,
+        geometry::JobResult::SurfaceImageImported { .. }
+            | geometry::JobResult::AppearancePaletteImported { .. }
+    ) {
         let result = public_result(private, resources, None)?;
         jobs.native_finish(name, Ok(result), vec![])?;
         return Ok(true);
@@ -590,12 +615,19 @@ fn public_result(
             Public::BedPosePrepared { preparation }
         }
         geometry::JobResult::ProjectSaved { info } => Public::ProjectSaved { info },
-        geometry::JobResult::OpticalCompared { .. } =>
-            return Err(Status::internal("optical report requires ACK-bound blob publication")),
-        geometry::JobResult::AppearancePaletteImported { info, palette } =>
-            Public::AppearancePaletteImported { info, palette },
-        geometry::JobResult::AppearanceCompared { .. } =>
-            return Err(Status::internal("appearance report requires ACK-bound blob publication")),
+        geometry::JobResult::OpticalCompared { .. } => {
+            return Err(Status::internal(
+                "optical report requires ACK-bound blob publication",
+            ));
+        }
+        geometry::JobResult::AppearancePaletteImported { info, palette } => {
+            Public::AppearancePaletteImported { info, palette }
+        }
+        geometry::JobResult::AppearanceCompared { .. } => {
+            return Err(Status::internal(
+                "appearance report requires ACK-bound blob publication",
+            ));
+        }
         geometry::JobResult::SurfaceImageImported {
             info,
             image,

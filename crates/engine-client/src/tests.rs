@@ -44,6 +44,7 @@ fn manufacturing_record(bytes: &[u8]) -> ManufacturingArtifactRecord {
             support_filament_length_mm: 0.0,
             surface_resolution: spiling_contracts::manufacturing::SurfaceResolutionTotals::empty(),
             software_only: true,
+            routing: None,
         },
     }
 }
@@ -321,6 +322,7 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
             "varying_z_material_domains_v1".into(),
             "bounded_vertical_rib_construction_v1".into(),
             "bounded_cylindrical_rib_construction_v1".into(),
+            "fixed_dual_material_routing_v1".into(),
         ],
         max_control_bytes: MAX_CONTROL_BYTES,
         max_binary_bytes: MAX_ARTIFACT_BYTES,

@@ -519,16 +519,19 @@ export function useManufacturing(host: ManufacturingHost): ManufacturingControll
         if (result.replay_display) {
           setAdmittingReplay(true);
           const descriptor = result.replay_display;
+          const wasteCount = result.report.routing?.tools.reduce((sum, tool) => sum + tool.waste_deposition_segments, 0) ?? 0;
           if (
             descriptor.info.bundle_hash !== result.record.hash ||
             descriptor.info.input_hash !== result.record.input_hash ||
             descriptor.info.input_hash !== result.provenance.input_hash ||
             descriptor.info.verifier_version !== result.provenance.verifier_version ||
             descriptor.info.layer_count !== result.record.summary.layers ||
-            descriptor.info.deposition_count !== result.report.deposition_segments + result.report.support_deposition_segments ||
+            descriptor.info.deposition_count !== result.report.deposition_segments + result.report.support_deposition_segments + wasteCount ||
             descriptor.info.travel_count !== result.report.travel_segments ||
             descriptor.info.lifecycle_count !== result.report.lifecycle_motion_count ||
-            descriptor.info.process_count !== result.report.retraction_count * 2
+            descriptor.info.process_count !== result.report.retraction_count * 2 - (result.report.routing ? 2 : 0) ||
+            descriptor.info.tool_epoch_count !== (result.report.routing?.selection_count ?? 0) ||
+            descriptor.info.waste_count !== wasteCount
           )
             throw new Error(
               "Replay descriptor is not bound to the freshly verified active bundle.",

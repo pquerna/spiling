@@ -7,7 +7,8 @@ use spiling_contracts::{
     TRIANGLE_HEADER_BYTES, TRIANGLE_INDEX_COUNT, TRIANGLE_SCHEMA_VERSION, TRIANGLE_VERTEX_COUNT,
 };
 use spiling_contracts::{
-    appearance::*, display::*, geometry::*, manufacturing::*, optical::*, process::*, project::*, surface::*,
+    appearance::*, display::*, geometry::*, manufacturing::*, optical::*, process::*, project::*,
+    surface::*,
 };
 use std::{env, fs, path::Path};
 use ts_rs::TS;
@@ -170,6 +171,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         OutputDialect::decl(&config),
         JobWorkflow::decl(&config),
         SingleExtruderJob::decl(&config),
+        FixedDualJob::decl(&config),
+        FixedDualTool::decl(&config),
+        LoadedMaterial::decl(&config),
+        OccurrenceMaterialAssignment::decl(&config),
+        FixedDualConfiguration::decl(&config),
+        RoutedToolAccounting::decl(&config),
+        FixedDualVerification::decl(&config),
         HomingCoordinateContract::decl(&config),
         PrinterCapabilities::decl(&config),
         MachineComponentRole::decl(&config),

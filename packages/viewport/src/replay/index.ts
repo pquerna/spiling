@@ -44,7 +44,7 @@ const reject = (message: string): never => {
 
 /** Computes all retained raw/CPU/GPU buffer costs before any projection allocation. */
 export function replayBudget(replay: DecodedReplayDisplay) {
-  const segments = replay.eventCount - 1;
+  const segments = replay.eventCount - 1 - Math.max(0, replay.toolEpochCount - 1);
   const vertexBytes = segments * 24 - replay.processCount * 12 + 12;
   return { rawBytes: replay.bytes.byteLength + vertexBytes + segments * 4, gpuBytes: vertexBytes };
 }
@@ -61,6 +61,8 @@ export function createReplayDisplay(
     replay.travelCount !== descriptor.info.travel_count ||
     replay.lifecycleCount !== descriptor.info.lifecycle_count ||
     replay.processCount !== descriptor.info.process_count ||
+    replay.toolEpochCount !== descriptor.info.tool_epoch_count ||
+    replay.wasteCount !== descriptor.info.waste_count ||
     replay.layerCount !== descriptor.info.layer_count ||
     replay.bytes.byteLength !== Number(descriptor.resource.size_bytes)
   )
@@ -85,10 +87,11 @@ export function createReplayDisplay(
     if (kind !== 5) return kind;
     const height = data.getFloat64(start + 64, true) - data.getFloat64(start + 56, true);
     const width = data.getFloat64(start + 48, true);
-    return 14 + Math.min(15, Math.floor(height / width * 16));
+    return 16 + Math.min(15, Math.floor(height / width * 16));
   };
-  const counts = new Uint32Array(30);
+  const counts = new Uint32Array(32);
   for (let event = 1; event < replay.eventCount; event++) {
+    if (replay.kind(event) === 14) continue;
     const batch = batchAt(event);
     counts[batch] = counts[batch]! + 1;
   }
@@ -125,11 +128,13 @@ export function createReplayDisplay(
       "#e26086",
       "#f6b8ce",
       "#f5ef44",
+      "#ff77b7",
+      "#d7a7ff",
     ];
     for (let batch = 0; batch < counts.length; batch++) {
       if (!counts[batch]) continue;
-      const kind = batch >= 14 ? 5 : batch;
-      const color = batch >= 14 ? `hsl(${150 - (batch - 14) * 8}, 80%, 62%)` : colors[kind];
+      const kind = batch >= 16 ? 5 : batch;
+      const color = batch >= 16 ? `hsl(${150 - (batch - 16) * 8}, 80%, 62%)` : colors[kind];
       const stationary = kind === 11 || kind === 12;
       const vertices = stationary ? 1 : 2;
       const positions = new Float32Array(counts[batch]! * vertices * 3);
@@ -216,7 +221,7 @@ export function createReplayDisplay(
           ((batch.kind !== 0 && batch.kind !== 6) || view.showTravel);
       }
       marker.visible =
-        view.showTravel &&
+        replay.toolEpochCount === 0 && view.showTravel &&
         view.eventCount > 0 &&
         (view.layer === null || view.layer === layerAt(0));
     };

@@ -1015,6 +1015,8 @@ fn complete_job_accounts_priming_separately_and_streams_lifecycle() {
             travel_count: 3,
             lifecycle_count: 4,
             process_count: 0,
+            tool_epoch_count: 0,
+            waste_count: 0,
             layer_count: 2,
             bounds_mm: bounds,
         },
@@ -1309,6 +1311,8 @@ fn packed_process_descriptor(
             travel_count: report.travel_segments,
             lifecycle_count: report.lifecycle_motion_count,
             process_count: report.retraction_count * 2,
+            tool_epoch_count: 0,
+            waste_count: 0,
             layer_count: plan.layers.len() as u32,
             bounds_mm: bounds,
         },
@@ -2906,5 +2910,175 @@ fn mixed_skin_replay_keeps_complete_regional_rows_mandatory_masks_and_direct_low
     assert!(
         replay_skin_fit(&wrong_axis, plan).is_err(),
         "a mixed regional row must retain its declared authored hatch axis"
+    );
+}
+
+fn fixed_dual_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
+    let (numeric, mut plan) = fixture();
+    let mut intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/manufacturing/fixed-dual.intent.json"
+    ))
+    .unwrap();
+    intent.recipe = numeric.recipe;
+    intent.printer.nozzle_diameter_mm = numeric.printer.nozzle_diameter_mm;
+    intent.printer.deposition_limits = numeric.printer.deposition_limits;
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    for tool in &mut job.tools {
+        tool.nozzle_diameter_mm = intent.printer.nozzle_diameter_mm;
+        tool.deposition_limits = intent.printer.deposition_limits;
+        tool.filament_diameter_mm = intent.recipe.filament_diameter_mm;
+    }
+    for layer in &mut plan.layers {
+        for path in &mut layer.paths {
+            for point in &mut path.points_mm {
+                point[0] += 20.0;
+                point[1] += 20.0;
+            }
+        }
+        let mut second = layer.paths.clone();
+        for path in &mut second {
+            for point in &mut path.points_mm {
+                point[0] += 100.0;
+            }
+        }
+        layer.paths.extend(second);
+        layer.region_coverage.section_area_mm2 *= 2.0;
+        layer.region_coverage.source_section_area_mm2 *= 2.0;
+        layer.region_coverage.wall_area_mm2 *= 2.0;
+    }
+    refresh_volumes(&intent, &mut plan);
+    plan.native_geometry.height_analysis_count = 2;
+    plan.native_geometry.slab_count = 4;
+    crate::realization::canonicalize(&mut plan, &intent, &AtomicBool::new(false)).unwrap();
+    (intent, plan)
+}
+
+#[test]
+fn fixed_dual_actual_epochs_repay_feeders_and_separate_waste_from_model() {
+    let (intent, plan) = fixed_dual_fixture();
+    let cancel = AtomicBool::new(false);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
+    report.validate().unwrap();
+    let routing = report.routing.as_ref().unwrap();
+    assert_eq!(routing.selection_count, 4);
+    assert_eq!(report.deposition_segments, 12);
+    assert_eq!(report.retraction_count, 4);
+    for tool in &routing.tools {
+        assert_eq!(tool.model_deposition_segments, 6);
+        assert_eq!(tool.waste_deposition_segments, 2);
+        assert!((tool.model_filament_length_mm - 6.0).abs() < 1e-8);
+        assert!((tool.waste_filament_length_mm - 10.0).abs() < 1e-8);
+        assert_eq!(tool.outstanding_retraction_mm, 0.6);
+    }
+    let (bytes, bounds) = sink.finish().unwrap();
+    let mut descriptor =
+        packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report);
+    descriptor.info.tool_epoch_count = 4;
+    descriptor.info.waste_count = 4;
+    descriptor.info.deposition_count += 4;
+    descriptor.info.process_count -= 2; // Both physical feeders remain retracted at shutdown.
+    descriptor.info.event_count += 6;
+    validate_replay_display(&bytes, &descriptor).unwrap();
+    let records = bytes[REPLAY_HEADER_BYTES..]
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0;
+    assert_eq!(records.iter().filter(|record| record[46] == 14).count(), 4);
+    for record in records.iter().filter(|record| record[46] == 14) {
+        assert_eq!(
+            record[47], 0,
+            "a tool-frame jump is never a printed connecting line"
+        );
+        assert_eq!(f64::from_le_bytes(record[32..40].try_into().unwrap()), 0.0);
+    }
+    let hex = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let positions: Vec<[f64; 3]> = records
+        .iter()
+        .map(|record| {
+            std::array::from_fn(|axis| {
+                f64::from_le_bytes(record[axis * 8..axis * 8 + 8].try_into().unwrap())
+            })
+        })
+        .collect();
+    let golden = serde_json::json!({"encoding":"hex", "descriptor":descriptor,
+        "data":hex, "actual_positions":positions, "program":program});
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/protocol/replay-fixed-dual.json"
+    );
+    if std::env::var_os("SPILING_UPDATE_REPLAY_FIXTURE").is_some() {
+        std::fs::write(path, serde_json::to_vec_pretty(&golden).unwrap()).unwrap();
+    } else {
+        let committed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            golden, committed,
+            "fixed-dual Rust/TypeScript actual-byte golden drift"
+        );
+    }
+}
+
+#[test]
+fn fixed_dual_independent_replay_rejects_tool_offset_epoch_wait_debt_and_waste_mutations() {
+    let (intent, plan) = fixed_dual_fixture();
+    let cancel = AtomicBool::new(false);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    for (from, to) in [
+        ("T1 S1", "T0 S1"),
+        ("T1 S1", "T1"),
+        (
+            "M218 T1 X25.000000 Y0.000000 Z0.000000",
+            "M218 T1 X24.000000 Y0.000000 Z0.000000",
+        ),
+        ("M218 T0 X0.000000 Y0.000000 Z0.000000\n", ""),
+        ("G92 E0\n", ""),
+        ("M109 T1 R200.000000", "M104 T1 S200.000000"),
+        ("M109 T1 R200.000000", "M109 T0 R200.000000"),
+        ("G1 E0.60000000 F1500.000000", "G1 E0.50000000 F1500.000000"),
+        ("G1 X80.000000 Y160.000000", "G1 X80.000000 Y159.000000"),
+        ("M104 T1 S0\n", ""),
+    ] {
+        let changed = program.replacen(from, to, 1);
+        assert_ne!(
+            changed, program,
+            "mutation did not address an emitted command: {from}"
+        );
+        assert!(
+            verify(&changed, &plan, &intent, &cancel).is_err(),
+            "accepted {from} -> {to}"
+        );
+    }
+    let mut collision = intent.clone();
+    if let JobWorkflow::FixedDualMarlin { job } = &mut collision.printer.workflow {
+        job.tools[1].offset_xy_mm = [2.0, 0.0];
+    }
+    assert!(
+        crate::backend::emit(&plan, &collision, &cancel).is_err(),
+        "a coplanar inactive nozzle must not sweep the source's own deposited prefix"
+    );
+}
+
+#[test]
+fn fixed_dual_waste_bead_must_fit_bed_not_only_centerline() {
+    let (mut intent, plan) = fixed_dual_fixture();
+    let cancel = AtomicBool::new(false);
+    let original = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    if let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow {
+        job.tools[0].waste_line_xy_mm = [[60.0, 0.0], [80.0, 0.0]];
+    }
+    assert!(
+        crate::backend::emit(&plan, &intent, &cancel).is_err(),
+        "a legal centerline cannot authorize a waste bead extending beyond the bed"
+    );
+    let changed = original.replace("Y160.000000", "Y0.000000");
+    assert!(
+        verify(&changed, &plan, &intent, &cancel).is_err(),
+        "independent replay must reject the actual out-of-bed waste footprint"
     );
 }

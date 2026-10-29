@@ -47,7 +47,9 @@ impl TryFrom<rpc::ProcessInterfacePermission> for ProcessInterfacePermission {
         let permission = match required(value.kind, "process interface permission")? {
             rpc::process_interface_permission::Kind::SeparatorWall(_) => Self::SeparatorWall,
             rpc::process_interface_permission::Kind::HorizontalDiaphragm(value) => {
-                Self::HorizontalDiaphragm { thickness_mm: value.thickness_mm }
+                Self::HorizontalDiaphragm {
+                    thickness_mm: value.thickness_mm,
+                }
             }
         };
         permission.validate().map_err(|error| error.to_string())?;
@@ -59,17 +61,22 @@ impl From<ProcessInterfacePermission> for rpc::ProcessInterfacePermission {
         Self {
             kind: Some(match value {
                 ProcessInterfacePermission::SeparatorWall => {
-                    rpc::process_interface_permission::Kind::SeparatorWall(rpc::SeparatorWallPermission {})
+                    rpc::process_interface_permission::Kind::SeparatorWall(
+                        rpc::SeparatorWallPermission {},
+                    )
                 }
                 ProcessInterfacePermission::HorizontalDiaphragm { thickness_mm } => {
                     rpc::process_interface_permission::Kind::HorizontalDiaphragm(
-                        rpc::HorizontalDiaphragmPermission { thickness_mm })
+                        rpc::HorizontalDiaphragmPermission { thickness_mm },
+                    )
                 }
             }),
         }
     }
 }
-fn interface_to_wire(value: Option<ProcessInterfacePermission>) -> Option<rpc::ProcessInterfacePermission> {
+fn interface_to_wire(
+    value: Option<ProcessInterfacePermission>,
+) -> Option<rpc::ProcessInterfacePermission> {
     value.map(Into::into)
 }
 impl TryFrom<rpc::ProcessValue> for ProcessValue {

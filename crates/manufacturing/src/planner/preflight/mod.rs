@@ -96,6 +96,34 @@ pub(super) fn admit<'a>(
     if let Err(e) = input.intent.validate() {
         add("invalid_intent", e.to_string(), None, None);
     }
+    if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
+        if input.occurrences.len() != 2
+            || job.assignments.iter().any(|assignment| {
+                input
+                    .occurrences
+                    .iter()
+                    .filter(|occurrence| occurrence.occurrence_id == assignment.occurrence_id)
+                    .count()
+                    != 1
+            })
+        {
+            add("fixed_dual_sources", "Fixed-dual routing requires exactly the two explicitly assigned native occurrences".into(), None, None);
+        }
+        if !matches!(input.intent.recipe.supports, SupportPolicy::Disabled)
+            || !matches!(input.intent.recipe.sparse_infill, SparseInfillPolicy::Fine)
+            || !matches!(
+                input.intent.recipe.process.retraction,
+                RetractionPolicy::Disabled
+            )
+            || input
+                .process_document
+                .layers
+                .iter()
+                .any(|layer| layer.enabled && !layer.operations.is_empty())
+        {
+            add("fixed_dual_policy", "Fixed-dual routing admits only fine layers without body retraction, supports or enabled process constructions".into(), None, None);
+        }
+    }
     if input.definitions.len() > MAX_DEFINITIONS as usize
         || input.occurrences.len() > MAX_OCCURRENCES as usize
     {
@@ -186,6 +214,39 @@ pub(super) fn admit<'a>(
             );
             continue;
         };
+        if let JobWorkflow::FixedDualMarlin { .. } = &input.intent.printer.workflow {
+            let rotation = occurrence.pose.rotation_xyzw;
+            if rotation[0] != 0.0 || rotation[1] != 0.0 {
+                add(
+                    "fixed_dual_upright",
+                    "Fixed-dual routing requires an exactly upright source frame".into(),
+                    Some(occurrence.occurrence_id),
+                    None,
+                );
+            }
+            if definition.faces().iter().any(|face| {
+                input
+                    .surface_overlays
+                    .effective_layer(
+                        &occurrence.definition_id,
+                        occurrence.occurrence_id,
+                        &face.face_id,
+                    )
+                    .is_some_and(|layer| {
+                        !matches!(
+                            layer.finish,
+                            spiling_contracts::surface::SurfaceFinish::Smooth
+                        )
+                    })
+            }) {
+                add(
+                    "fixed_dual_finish",
+                    "Fixed-dual routing does not admit effective source finishes".into(),
+                    Some(occurrence.occurrence_id),
+                    None,
+                );
+            }
+        }
         if !geometry_sources.contains_key(&occurrence.definition_id) {
             let source = match spiling_geometry::prepare_solid(
                 definition,
@@ -284,6 +345,15 @@ pub(super) fn admit<'a>(
         result
             .native_bounds
             .insert(occurrence.occurrence_id, placed);
+        if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
+            match job.assignments.iter().find(|assignment| assignment.occurrence_id == occurrence.occurrence_id) {
+                Some(assignment) if (0..3).all(|axis| {
+                    placed.min[axis] >= assignment.work_envelope_mm.min[axis]
+                        && placed.max[axis] <= assignment.work_envelope_mm.max[axis]
+                }) => {}
+                _ => add("fixed_dual_source_reservation", "Complete conservative native source bounds must lie within its explicit routed work reservation".into(), Some(occurrence.occurrence_id), None),
+            }
+        }
         for face in definition
             .faces()
             .iter()

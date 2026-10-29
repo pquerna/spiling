@@ -19,6 +19,13 @@ pub fn emit(
     check_cancel(cancel)?;
     intent.validate()?;
     plan.validate(intent)?;
+    let routed = match &intent.printer.workflow {
+        JobWorkflow::FixedDualMarlin { job } => {
+            crate::routing::validate_plan(plan, intent, job, cancel)?;
+            Some(job)
+        }
+        _ => None,
+    };
     let recipe = &intent.recipe;
     let filament_area = std::f64::consts::PI * (recipe.filament_diameter_mm * 0.5).powi(2);
     let travel_feed = recipe.travel_speed_mm_s * 60.0;
@@ -29,10 +36,38 @@ pub fn emit(
         ));
     }
     let mut program = BoundedProgram(String::new());
-    program.write_str("; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\nG21\nG90\nM82\nG92 E0\n").map_err(limit)?;
+    program.write_str("; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\nG21\nG90\nM82\n").map_err(limit)?;
+    if routed.is_none() {
+        program.write_str("G92 E0\n").map_err(limit)?;
+    }
     let mut extrusion = 0.0f64;
     let mut emitted_extrusion = 0.0f64;
     let mut position = None;
+    let mut active_tool = 0u8;
+    let mut built_top = intent.printer.build_envelope.min[2];
+    let mut travels = 0u32;
+    let mut process_events = 0u32;
+    let mut deposits = 0u32;
+    if let Some(job) = routed {
+        program.write_str("M149 C\nM200 D0\nM220 S100\nM221 T0 S100\nM221 T1 S100\nM107\nM218 T0 X0.000000 Y0.000000 Z0.000000\n").map_err(limit)?;
+        let offset = job.tools[1].offset_xy_mm;
+        if offset
+            .iter()
+            .any(|coordinate| project_xyz6_coordinate_mm(*coordinate).is_err())
+            || project_xyz6_coordinate_mm(offset[0])? != offset[0]
+            || project_xyz6_coordinate_mm(offset[1])? != offset[1]
+        {
+            return Err(error(
+                ManufacturingErrorCode::InvalidSpecification,
+                "hotend offsets must be exactly representable in the frozen XYZ6 dialect",
+            ));
+        }
+        writeln!(program, "M218 T1 X{:.6} Y{:.6} Z0.000000\nT0 S1\nG28\nM420 S0\nG92 E0\nM190 R{:.6}\nM104 T0 S{:.6}\nM104 T1 S{:.6}",
+            offset[0], offset[1], job.bed_temperature_c, job.tools[0].standby_temperature_c, job.tools[1].standby_temperature_c).map_err(limit)?;
+        let home = project_xyz6_point_mm(job.home_position_mm)?;
+        crate::routing::check_motion(home, home, 0, built_top, intent, job)?;
+        position = Some(home);
+    }
     if let JobWorkflow::CompleteMarlin { job } = &intent.printer.workflow {
         // Reviewed Marlin 2 subset: resets scale/volumetric state, homes native
         // axes, explicitly disables leveling, and waits for heating OR cooling.
@@ -81,7 +116,7 @@ pub fn emit(
         .map_err(limit)?;
         position = Some(end);
     }
-    let (last, _) = crate::realization::stream(
+    let (last, last_extrusion) = crate::realization::stream(
         plan,
         intent,
         cancel,
@@ -90,8 +125,46 @@ pub fn emit(
         |event| {
             use crate::realization::Event;
             match event {
+                Event::Barrier => program.write_str("M400\n").map_err(limit)?,
+                Event::HotendTarget(tool, temperature) => {
+                    writeln!(program, "M104 T{tool} S{temperature:.6}").map_err(limit)?
+                }
+                Event::HotendWait(tool, temperature) => {
+                    writeln!(program, "M109 T{tool} R{temperature:.6}").map_err(limit)?
+                }
+                Event::ResetExtrusion => {
+                    program.write_str("G92 E0\n").map_err(limit)?;
+                    emitted_extrusion = 0.0;
+                }
+                Event::SelectTool(tool) => {
+                    let job = routed.ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "tool selection outside routed workflow",
+                        )
+                    })?;
+                    let from = position.unwrap();
+                    let old = job.tools[usize::from(active_tool)].offset_xy_mm;
+                    let new = job.tools[usize::from(tool)].offset_xy_mm;
+                    let shifted = [
+                        from[0] + new[0] - old[0],
+                        from[1] + new[1] - old[1],
+                        from[2],
+                    ];
+                    crate::routing::check_motion(shifted, shifted, tool, built_top, intent, job)?;
+                    writeln!(program, "T{tool} S1").map_err(limit)?;
+                    position = Some(shifted);
+                    active_tool = tool;
+                }
                 Event::Fan(pwm) => writeln!(program, "M106 S{pwm}").map_err(limit)?,
                 Event::Extrusion(e, speed) => {
+                    process_events += 1;
+                    if process_events > 100_000 {
+                        return Err(error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "stationary process event budget exceeded",
+                        ));
+                    }
                     let rounded = (e * 100_000_000.0).round() / 100_000_000.0;
                     let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
                     if !feed.is_finite()
@@ -109,12 +182,37 @@ pub fn emit(
                             "stationary extrusion collapses or lacks known position",
                         ));
                     }
+                    let e = if routed.is_some() { rounded } else { e };
                     writeln!(program, "G1 E{e:.8} F{feed:.6}").map_err(limit)?;
                     emitted_extrusion = rounded;
                 }
-                Event::Travel(target, speed) | Event::Deposit(target, _, speed) => {
+                Event::Travel(target, speed)
+                | Event::Deposit(target, _, speed)
+                | Event::Waste(target, _, speed) => {
                     let to = project_xyz6_point_mm(target)?;
                     writable_position(to, intent)?;
+                    if matches!(event, Event::Deposit(..) | Event::Waste(..)) {
+                        deposits += 1;
+                        built_top = built_top.max(to[2]);
+                    } else {
+                        travels += 1;
+                    }
+                    if deposits > MAX_DEPOSITION_SEGMENTS || travels > MAX_DEPOSITION_SEGMENTS {
+                        return Err(error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "actual model/waste or travel segment budget exceeded",
+                        ));
+                    }
+                    if let Some(job) = routed {
+                        crate::routing::check_motion(
+                            position.unwrap(),
+                            to,
+                            active_tool,
+                            built_top,
+                            intent,
+                            job,
+                        )?;
+                    }
                     let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
                     if !feed.is_finite()
                         || feed <= 0.0
@@ -125,7 +223,7 @@ pub fn emit(
                             "actual emitted feed exceeds printer limit or precision",
                         ));
                     }
-                    if let Event::Deposit(_, e, _) = event {
+                    if let Event::Deposit(_, e, _) | Event::Waste(_, e, _) = event {
                         let from = position.ok_or_else(|| {
                             error(
                                 ManufacturingErrorCode::InvalidSpecification,
@@ -145,6 +243,21 @@ pub fn emit(
                                 ),
                             ));
                         }
+                        let filament_area = routed.map_or(filament_area, |job| {
+                            std::f64::consts::PI
+                                * (job.tools[usize::from(active_tool)].filament_diameter_mm * 0.5)
+                                    .powi(2)
+                        });
+                        if let (Some(job), Event::Waste(..)) = (routed, event) {
+                            if delta * filament_area
+                                < job.tools[usize::from(active_tool)].minimum_reprime_volume_mm3
+                            {
+                                return Err(error(
+                                    ManufacturingErrorCode::InvalidSpecification,
+                                    "actual E8 waste volume is below declared reprime minimum",
+                                ));
+                            }
+                        }
                         let flow = delta * filament_area * feed / 60.0 / length;
                         let rounding_slack = (intent.printer.max_volumetric_flow_mm3_s * 0.000002
                             + 0.00000001 * filament_area * speed)
@@ -157,6 +270,7 @@ pub fn emit(
                                 "actual decoded deposition flow exceeds printer limit",
                             ));
                         }
+                        let e = if routed.is_some() { rounded } else { e };
                         writeln!(
                             program,
                             "G1 X{:.6} Y{:.6} Z{:.6} E{e:.8} F{feed:.6}",
@@ -206,6 +320,40 @@ pub fn emit(
         program
             .write_str("M400\nM104 S0\nM140 S0\nM107\nM84\n")
             .map_err(limit)?;
+    }
+    if let Some(job) = routed {
+        let last = position.unwrap();
+        let tool = &job.tools[usize::from(active_tool)];
+        let retract = last_extrusion - tool.retract_filament_mm;
+        let rounded = (retract * 100_000_000.0).round() / 100_000_000.0;
+        if !rounded.is_finite() || rounded >= emitted_extrusion {
+            return Err(error(
+                ManufacturingErrorCode::InvalidSpecification,
+                "final feeder retract collapses at E8 precision",
+            ));
+        }
+        let park = project_xyz6_point_mm(job.park_position_mm)?;
+        let lift = [last[0], last[1], park[2]];
+        let retract_feed = (tool.retract_speed_mm_s * 60_000_000.0).round() / 1_000_000.0;
+        if !retract_feed.is_finite()
+            || retract_feed <= 0.0
+            || retract_feed / 60.0 > intent.printer.max_feed_mm_s
+        {
+            return Err(error(
+                ManufacturingErrorCode::InvalidSpecification,
+                "final feeder retract feed exceeds actual command envelope",
+            ));
+        }
+        crate::routing::check_motion(last, lift, active_tool, built_top, intent, job)?;
+        crate::routing::check_motion(lift, park, active_tool, built_top, intent, job)?;
+        if travels > MAX_DEPOSITION_SEGMENTS - 2 || process_events >= 100_000 {
+            return Err(error(
+                ManufacturingErrorCode::ResourceLimit,
+                "final routed lifecycle budget exceeded",
+            ));
+        }
+        writeln!(program, "M400\nG1 E{rounded:.8} F{:.6}\nG0 X{:.6} Y{:.6} Z{:.6} F{travel_feed:.6}\nG0 X{:.6} Y{:.6} Z{:.6} F{travel_feed:.6}\nM400\nM104 T0 S0\nM104 T1 S0\nM140 S0\nM107\nM84",
+            retract_feed, lift[0], lift[1], lift[2], park[0], park[1], park[2]).map_err(limit)?;
     }
     check_cancel(cancel)?;
     Ok(program.0)

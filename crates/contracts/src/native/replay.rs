@@ -33,6 +33,7 @@ impl TryFrom<rpc::ManufacturingInspectionProvenance> for ManufacturingInspection
     fn try_from(v: rpc::ManufacturingInspectionProvenance) -> Result<Self, String> {
         let value = Self {
             project_id: ProjectId::parse(v.project_id).map_err(|e| e.to_string())?,
+            workflow: required(v.workflow, "inspection workflow")?.try_into()?,
             input_revision: ProjectRevision(v.input_revision),
             input_hash: SourceHash::parse(v.input_hash).map_err(|e| e.to_string())?,
             surface_overlays: required(v.surface_overlays, "inspection surface overlays")?
@@ -54,6 +55,7 @@ impl TryFrom<ManufacturingInspectionProvenance> for rpc::ManufacturingInspection
         v.validate().map_err(|e| e.to_string())?;
         Ok(Self {
             project_id: v.project_id.as_str().into(),
+            workflow: Some(v.workflow.try_into()?),
             input_revision: v.input_revision.get(),
             input_hash: v.input_hash.into(),
             surface_overlays: Some(v.surface_overlays.try_into()?),
@@ -83,6 +85,8 @@ impl TryFrom<rpc::ReplayDisplayInfo> for ReplayDisplayInfo {
             layer_count: v.layer_count,
             lifecycle_count: v.lifecycle_count,
             process_count: v.process_count,
+            tool_epoch_count: v.tool_epoch_count,
+            waste_count: v.waste_count,
             bounds_mm: required(v.bounds_mm, "replay bounds")?.try_into()?,
         };
         value.validate().map_err(|e| e.to_string())?;
@@ -106,6 +110,8 @@ impl TryFrom<ReplayDisplayInfo> for rpc::ReplayDisplayInfo {
             layer_count: v.layer_count,
             lifecycle_count: v.lifecycle_count,
             process_count: v.process_count,
+            tool_epoch_count: v.tool_epoch_count,
+            waste_count: v.waste_count,
             bounds_mm: Some(v.bounds_mm.try_into()?),
         })
     }
@@ -159,6 +165,8 @@ mod tests {
                 layer_count: 1,
                 lifecycle_count: 0,
                 process_count: 0,
+                tool_epoch_count: 0,
+                waste_count: 0,
                 bounds_mm: AabbMm::new([0.0; 3], [1.0; 3]).unwrap(),
             },
             resource: crate::ArtifactView {
@@ -226,6 +234,7 @@ mod tests {
             byte_count: 10,
             summary: ManufacturingSummary {
                 layers: 1,
+                routing: None,
                 process_resolution: vec![],
                 native_geometry: NativeGeometryCoverageSummary {
                     requested_shape_error_mm: 0.1,
@@ -259,6 +268,7 @@ mod tests {
         descriptor.validate_for_record(&record).unwrap();
         let provenance = ManufacturingInspectionProvenance {
             project_id: ProjectId::new(),
+            workflow: JobWorkflow::DiagnosticBodyOnly,
             input_revision: ProjectRevision(9),
             input_hash: record.input_hash.clone(),
             surface_overlays: crate::surface::SurfaceOverlays::empty(),
@@ -277,6 +287,9 @@ mod tests {
             ManufacturingInspectionProvenance::try_from(wire.clone()).unwrap(),
             provenance
         );
+        let mut missing = wire.clone();
+        missing.workflow = None;
+        assert!(ManufacturingInspectionProvenance::try_from(missing).is_err());
         let mut invalid = wire;
         invalid.verifier_version = "x".repeat(MAX_MANUFACTURING_LABEL_BYTES + 1);
         assert!(ManufacturingInspectionProvenance::try_from(invalid).is_err());
@@ -286,6 +299,7 @@ mod tests {
             replay_display: Some(descriptor.clone()),
             report: VerificationReport {
                 verified: true,
+                routing: None,
                 coverage: vec!["actual replay".into()],
                 limitations: vec!["software only".into()],
                 deposition_segments: 2,
@@ -349,5 +363,43 @@ mod tests {
         wrong_record.input_hash = SourceHash::from_bytes(b"other");
         assert!(descriptor.validate_for_record(&wrong_record).is_err());
         assert!(provenance.validate_for_record(&wrong_record).is_err());
+    }
+}
+
+#[cfg(test)]
+mod routed_display_wire_tests {
+    use super::*;
+    use crate::geometry::AabbMm;
+
+    #[test]
+    fn tool_epochs_and_waste_survive_wire_and_remain_counted() {
+        let info = ReplayDisplayInfo {
+            schema_version: REPLAY_SCHEMA_VERSION,
+            bundle_hash: SourceHash::from_bytes(b"bundle"),
+            input_hash: SourceHash::from_bytes(b"input"),
+            program_hash: SourceHash::from_bytes(b"program"),
+            verifier_version: "wire-test".into(),
+            frame: PrinterCoordinateFrame::RightHandedMillimetres,
+            event_count: 12,
+            deposition_count: 4,
+            travel_count: 2,
+            layer_count: 1,
+            lifecycle_count: 2,
+            process_count: 2,
+            tool_epoch_count: 2,
+            waste_count: 2,
+            bounds_mm: AabbMm::new([0.0; 3], [10.0; 3]).unwrap(),
+        };
+        let wire = rpc::ReplayDisplayInfo::try_from(info.clone()).unwrap();
+        assert_eq!(ReplayDisplayInfo::try_from(wire.clone()).unwrap(), info);
+        let mut invalid = wire.clone();
+        invalid.tool_epoch_count = 0;
+        assert!(ReplayDisplayInfo::try_from(invalid).is_err());
+        let mut invalid = wire.clone();
+        invalid.waste_count = 5;
+        assert!(ReplayDisplayInfo::try_from(invalid).is_err());
+        let mut invalid = wire;
+        invalid.event_count -= 1;
+        assert!(ReplayDisplayInfo::try_from(invalid).is_err());
     }
 }

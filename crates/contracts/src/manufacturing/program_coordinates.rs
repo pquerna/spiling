@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-//! Coordinate representation of the current CartesianAbsoluteGcodeV1 and
-//! Marlin2SingleExtruderGcodeV1 output contracts: Cartesian millimetres written
-//! with six decimal places. This is not a generic plan-rounding policy and
-//! must not be inherited by a future output dialect without explicit review.
+//! Coordinate representation explicitly adopted by CartesianAbsoluteGcodeV1,
+//! Marlin2SingleExtruderGcodeV1 and Marlin2FixedDualGcodeV1: Cartesian
+//! millimetres written with six decimal places. This is not a generic
+//! plan-rounding policy for future output dialects.
 //! Serialization/planning remain manufacturing-backend responsibilities.
 
 use super::{ManufacturingError, ManufacturingErrorCode};

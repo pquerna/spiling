@@ -14,6 +14,8 @@ pub(crate) struct ReplaySink {
     layers: u32,
     lifecycle: u32,
     process: u32,
+    epochs: u32,
+    active_tool: u32,
     expected_events: u32,
 }
 impl ReplaySink {
@@ -22,35 +24,48 @@ impl ReplaySink {
         intent: &ManufacturingIntent,
     ) -> Result<Self, ManufacturingError> {
         plan.validate(intent)?;
-        let deposition: usize = plan
+        let mut deposition: usize = plan
             .layers
             .iter()
             .flat_map(|l| &l.paths)
             .map(|p| p.points_mm.len() - 1)
             .sum();
         let paths: usize = plan.layers.iter().map(|l| l.paths.len()).sum();
-        let (travels, process) = match intent.recipe.process.retraction {
+        let (mut travels, mut process) = match intent.recipe.process.retraction {
             RetractionPolicy::Disabled => (paths, 0),
             RetractionPolicy::Enabled { z_hop_mm, .. } => (
                 (paths * if z_hop_mm > 0.0 { 3 } else { 1 }).min(100_000),
                 (paths * 2).min(100_000),
             ),
         };
-        let lifecycle = if matches!(intent.printer.workflow, JobWorkflow::CompleteMarlin { .. }) {
-            4
-        } else {
-            0
+        let (lifecycle, epochs) = match &intent.printer.workflow {
+            JobWorkflow::CompleteMarlin { .. } => (4, 0),
+            JobWorkflow::FixedDualMarlin { .. } => {
+                let groups = plan.layers.len() * 2;
+                deposition += groups;
+                travels = paths * 3 + groups * 3;
+                process = groups * 2 - 2;
+                (2, groups)
+            }
+            JobWorkflow::DiagnosticBodyOnly => (0, 0),
         };
         let events = deposition
             .checked_add(travels)
             .and_then(|n| n.checked_add(process))
             .and_then(|n| n.checked_add(lifecycle))
+            .and_then(|n| n.checked_add(epochs))
             .ok_or_else(|| super::failed("replay event count overflow"))?;
         let bytes = events
             .checked_mul(REPLAY_RECORD_BYTES)
             .and_then(|n| n.checked_add(REPLAY_HEADER_BYTES))
             .ok_or_else(|| super::failed("replay byte count overflow"))?;
-        if events > MAX_REPLAY_EVENTS as usize || bytes > MAX_REPLAY_DISPLAY_BYTES as usize {
+        if events > MAX_REPLAY_EVENTS as usize
+            || bytes > MAX_REPLAY_DISPLAY_BYTES as usize
+            || deposition > MAX_DEPOSITION_SEGMENTS as usize
+            || travels > MAX_DEPOSITION_SEGMENTS as usize
+            || process > MAX_DEPOSITION_SEGMENTS as usize
+            || epochs > MAX_TOOL_SELECTIONS as usize
+        {
             return Err(ManufacturingError::new(
                 ManufacturingErrorCode::ResourceLimit,
                 "replay display budget exceeded",
@@ -80,8 +95,20 @@ impl ReplaySink {
             layers: plan.layers.len() as u32,
             lifecycle: 0,
             process: 0,
+            epochs: 0,
+            active_tool: 0,
             expected_events: events as u32,
         })
+    }
+    pub(super) fn push_epoch(
+        &mut self,
+        position: [f64; 3],
+        tool: u8,
+        line: u32,
+        layer: u16,
+    ) -> Result<(), ManufacturingError> {
+        self.active_tool = u32::from(tool);
+        self.push(position, 0.0, 0.0, line, layer, 14)
     }
     pub(super) fn push(
         &mut self,
@@ -109,9 +136,16 @@ impl ReplaySink {
             0 => self.travels,
             6 | 7 => self.lifecycle,
             11 | 12 => self.process,
+            14 => self.epochs,
             _ => self.depositions,
         };
-        let max = if matches!(kind, 6 | 7) { 4 } else { 100_000 };
+        let max = if matches!(kind, 6 | 7) {
+            4
+        } else if kind == 14 {
+            MAX_TOOL_SELECTIONS
+        } else {
+            100_000
+        };
         if count >= max {
             return Err(ManufacturingError::new(
                 ManufacturingErrorCode::ResourceLimit,
@@ -134,8 +168,9 @@ impl ReplaySink {
         self.bytes.extend_from_slice(&line.to_le_bytes());
         self.bytes.extend_from_slice(&layer.to_le_bytes());
         self.bytes.push(kind);
-        self.bytes
-            .push(u8::from(self.events != 0) | if association.is_some() { 2 } else { 0 });
+        self.bytes.push(
+            u8::from(self.events != 0 && kind != 14) | if association.is_some() { 2 } else { 0 },
+        );
         let (width, physical_z, owner) = match association {
             Some(association) => {
                 let physical_z = association.physical_z;
@@ -159,7 +194,8 @@ impl ReplaySink {
             self.bytes.extend_from_slice(&z.to_le_bytes());
         }
         self.bytes.extend_from_slice(&owner.to_le_bytes());
-        self.bytes.extend_from_slice(&0u32.to_le_bytes());
+        self.bytes
+            .extend_from_slice(&self.active_tool.to_le_bytes());
         for (axis, value) in position.iter().enumerate() {
             self.min[axis] = self.min[axis].min(*value);
             self.max[axis] = self.max[axis].max(*value);
@@ -169,6 +205,8 @@ impl ReplaySink {
             self.lifecycle += 1;
         } else if matches!(kind, 11 | 12) {
             self.process += 1;
+        } else if kind == 14 {
+            self.epochs += 1;
         } else if kind == 0 {
             self.travels += 1;
         } else {
@@ -191,6 +229,7 @@ impl ReplaySink {
             (24, self.layers),
             (28, self.lifecycle),
             (88, self.process),
+            (92, self.epochs),
         ] {
             self.bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }

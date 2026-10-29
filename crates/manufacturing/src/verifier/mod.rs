@@ -138,16 +138,18 @@ enum Command {
     BedOff,
     MotorsOff,
     Celsius,
+    SelectTool(u8),
+    HotendOffset,
 }
 
 struct Decoded {
     command: Command,
-    fields: [Option<f64>; 8], // X, Y, Z, E, F, S, R, D
+    fields: [Option<f64>; 9], // X, Y, Z, E, F, S, R, D, T
 }
 
 // Deliberately not a general firmware parser. Only the declared inert dialect
 // has meaning here; omitted axes/feeds, checksums and firmware extensions do not.
-fn decode(line: &str) -> Result<Option<Decoded>, &'static str> {
+fn decode(line: &str, routed: bool) -> Result<Option<Decoded>, &'static str> {
     let code = line.split_once(';').map_or(line, |(code, _)| code);
     if !code.is_ascii()
         || code
@@ -182,6 +184,9 @@ fn decode(line: &str) -> Result<Option<Decoded>, &'static str> {
         Some("M140") => Command::BedOff,
         Some("M84") => Command::MotorsOff,
         Some("M149") => Command::Celsius,
+        Some("T0") if routed => Command::SelectTool(0),
+        Some("T1") if routed => Command::SelectTool(1),
+        Some("M218") if routed => Command::HotendOffset,
         _ => return Err("unsupported or malformed command"),
     };
     if command == Command::Celsius {
@@ -190,10 +195,10 @@ fn decode(line: &str) -> Result<Option<Decoded>, &'static str> {
         }
         return Ok(Some(Decoded {
             command,
-            fields: [None; 8],
+            fields: [None; 9],
         }));
     }
-    let mut fields = [None; 8];
+    let mut fields = [None; 9];
     for word in words {
         let (index, precision) = match word.as_bytes().first() {
             Some(b'X') => (0, 6),
@@ -204,6 +209,7 @@ fn decode(line: &str) -> Result<Option<Decoded>, &'static str> {
             Some(b'S') => (5, 6),
             Some(b'R') => (6, 6),
             Some(b'D') => (7, 6),
+            Some(b'T') if routed => (8, 0),
             _ => return Err("unsupported command field"),
         };
         if fields[index].is_some() {
@@ -217,7 +223,7 @@ fn decode(line: &str) -> Result<Option<Decoded>, &'static str> {
         command
     };
     let present = fields.map(|field| field.is_some());
-    let permitted = match command {
+    let base = match command {
         Command::Millimetres
         | Command::AbsolutePosition
         | Command::AbsoluteExtrusion
@@ -240,12 +246,27 @@ fn decode(line: &str) -> Result<Option<Decoded>, &'static str> {
         Command::WaitBed | Command::WaitNozzle => {
             [false, false, false, false, false, false, true, false]
         }
+        Command::SelectTool(_) => [false, false, false, false, false, true, false, false],
+        Command::HotendOffset => [true, true, true, false, false, false, false, false],
     };
+    let mut permitted = [false; 9];
+    permitted[..8].copy_from_slice(&base);
+    if routed
+        && matches!(
+            command,
+            Command::FlowScale | Command::NozzleOff | Command::WaitNozzle | Command::HotendOffset
+        )
+    {
+        permitted[8] = true;
+    }
     if present != permitted {
         return Err("missing or unsupported fields for command");
     }
     if command == Command::ResetExtrusion && fields[3] != Some(0.0) {
         return Err("extrusion reset must be exactly E0");
+    }
+    if matches!(command, Command::SelectTool(_)) && fields[5] != Some(1.0) {
+        return Err("tool selection requires the no-move S1 contract");
     }
     Ok(Some(Decoded { command, fields }))
 }
@@ -446,19 +467,27 @@ pub(crate) fn verify_actual(
     if !filament_area.is_finite() || filament_area <= 0.0 {
         return Err(failed("filament area is not finite and positive"));
     }
+    let route_job = match &printer.workflow {
+        JobWorkflow::FixedDualMarlin { job } => Some(job),
+        _ => None,
+    };
+    let mut route = route_job.map(|job| routing::RouteState::new(job, plan, recipe));
 
     let initial_position = match &printer.workflow {
         JobWorkflow::CompleteMarlin { job } => Some(project_xyz6_point_mm(job.prime_end_mm)?),
         JobWorkflow::DiagnosticBodyOnly => None,
+        JobWorkflow::FixedDualMarlin { job } => Some(project_xyz6_point_mm(job.home_position_mm)?),
     };
-    expected::validate_wall_seams(plan, recipe, initial_position, cancel)?;
-    let mut expected = expected::Expected::new(plan, recipe, initial_position).peekable();
+    expected::validate_wall_seams(plan, recipe, initial_position, route_job, cancel)?;
+    let mut expected =
+        expected::Expected::new(plan, recipe, initial_position, route_job).peekable();
     let setup = [
         Command::Millimetres,
         Command::AbsolutePosition,
         Command::AbsoluteExtrusion,
         Command::ResetExtrusion,
     ];
+    let setup_len = if route.is_some() { 3 } else { setup.len() };
     let mut setup_index = 0;
     let mut state = MotionState {
         position: None,
@@ -470,7 +499,7 @@ pub(crate) fn verify_actual(
     let mut max_position_error_mm: f64 = 0.0;
     let mut max_extrusion_error_mm: f64 = 0.0;
     let job = match &printer.workflow {
-        JobWorkflow::DiagnosticBodyOnly => None,
+        JobWorkflow::DiagnosticBodyOnly | JobWorkflow::FixedDualMarlin { .. } => None,
         JobWorkflow::CompleteMarlin { job } => Some(job),
     };
     let mut lifecycle_index = 0usize;
@@ -498,10 +527,10 @@ pub(crate) fn verify_actual(
                 format!("program line {} exceeds byte limit", line_index + 1),
             ));
         }
-        let decoded = decode(line)
+        let decoded = decode(line, route.is_some())
             .map_err(|reason| failed(format!("program line {}: {reason}", line_index + 1)))?;
         let Some(decoded) = decoded else { continue };
-        if setup_index < setup.len() {
+        if setup_index < setup_len {
             if decoded.command != setup[setup_index] {
                 return Err(failed(
                     "program must establish G21, G90, M82, G92 E0 in order",
@@ -510,6 +539,31 @@ pub(crate) fn verify_actual(
             setup_index += 1;
             continue;
         }
+        if let Some(routed) = &mut route {
+            if !routed.pending() && !routed.done() {
+                if let Some(Ok(expected::Action::BeginTool { layer, tool })) = expected.peek() {
+                    let (layer, tool) = (*layer, *tool);
+                    expected.next();
+                    routed.begin_group(layer, tool, &state, expected_e)?;
+                } else if expected.peek().is_none() {
+                    routed.begin_finish(&state, expected_e)?;
+                }
+            }
+            if routed.pending() {
+                routed.consume(
+                    &decoded,
+                    &mut state,
+                    intent,
+                    (line_index + 1) as u32,
+                    replay.as_deref_mut(),
+                )?;
+                expected_e = routed.expected_e;
+                continue;
+            }
+        }
+        let filament_area = route
+            .as_ref()
+            .map_or(filament_area, routing::RouteState::filament_area);
         if let Some(job) = job {
             let operation = if lifecycle_index < 11 {
                 let op = match lifecycle_index {
@@ -598,107 +652,113 @@ pub(crate) fn verify_actual(
         let Some(action) = expected.next() else {
             return Err(failed("extra command after final normalized motion"));
         };
-        let (target, source, layer_index, deposition_kind, association, closes_wall) = match action?
-        {
-            expected::Action::Fan(pwm) => {
-                if decoded.command != Command::Fan || decoded.fields[5] != Some(f64::from(pwm)) {
-                    return Err(failed("missing or mutated process cooling state"));
+        let (target, source, source_tool, layer_index, deposition_kind, association, closes_wall) =
+            match action? {
+                expected::Action::BeginTool { .. } => {
+                    return Err(failed("unconsumed routed tool boundary"));
                 }
-                fan_state = Some(pwm);
-                continue;
-            }
-            expected::Action::Recovery {
-                retract,
-                layer,
-                role,
-            } => {
-                let RetractionPolicy::Enabled {
-                    distance_mm,
-                    speed_mm_s,
-                    z_hop_mm,
-                    ..
-                } = recipe.process.retraction
-                else {
-                    return Err(failed("stationary extrusion without enabled retraction"));
-                };
-                if decoded.command != Command::Recovery
-                    || state.position.is_none()
-                    || retract == retracted_endpoint.is_some()
-                {
-                    return Err(failed(
-                        "missing, reordered or nonstationary retraction/recovery",
-                    ));
-                }
-                let pwm = if role == DepositionKind::Bridge {
-                    recipe.process.bridge_fan_pwm
-                } else if layer == 0 {
-                    recipe.process.fan_first_layers
-                } else {
-                    recipe.process.fan_after_first_layers
-                };
-                if fan_state != Some(pwm)
-                    || (!retract && recovery_moves != if z_hop_mm > 0.0 { 3 } else { 1 })
-                {
-                    return Err(failed(
-                        "recovery without required queued fan or complete travel/hop sequence",
-                    ));
-                }
-                let next_e = decoded.fields[3].unwrap();
-                let feed = decoded.fields[4].unwrap();
-                let delta = next_e - state.extrusion;
-                let desired = if retract { -distance_mm } else { distance_mm };
-                let wanted_e = if retract {
-                    expected_e - distance_mm
-                } else {
-                    expected_e
-                };
-                if (next_e - wanted_e).abs() > E_HALF_STEP + arithmetic_slack(wanted_e)
-                    || (delta - desired).abs() > 2.0 * E_HALF_STEP + arithmetic_slack(expected_e)
-                    || (!retract && retracted_endpoint != Some(next_e))
-                    || (retract && delta >= 0.0)
-                    || (!retract && delta <= 0.0)
-                    || (feed - speed_mm_s * 60.0).abs() > F_HALF_STEP + arithmetic_slack(feed)
-                    || feed <= 0.0
-                    || feed / 60.0 > printer.max_feed_mm_s + F_HALF_STEP / 60.0
-                {
-                    return Err(failed(
-                        "actual retraction distance, recovery or feed differs from policy",
-                    ));
-                }
-                max_extrusion_error_mm = max_extrusion_error_mm
-                    .max((next_e - wanted_e).abs())
-                    .max((delta - desired).abs());
-                if retract {
-                    recovery_moves = 0;
-                    retraction_count += 1;
-                    retracted_filament_mm -= delta;
-                    if retraction_count > 50_000 {
-                        return Err(failed("process event budget exceeded"));
+                expected::Action::Fan(pwm) => {
+                    if decoded.command != Command::Fan || decoded.fields[5] != Some(f64::from(pwm))
+                    {
+                        return Err(failed("missing or mutated process cooling state"));
                     }
+                    fan_state = Some(pwm);
+                    continue;
                 }
-                retracted_endpoint = if retract { Some(state.extrusion) } else { None };
-                state.extrusion = next_e;
-                if let Some(sink) = replay.as_deref_mut() {
-                    sink.push(
-                        state.position.unwrap(),
-                        next_e,
-                        feed,
-                        (line_index + 1) as u32,
-                        layer,
-                        if retract { 11 } else { 12 },
-                    )?;
+                expected::Action::Recovery {
+                    retract,
+                    layer,
+                    role,
+                } => {
+                    let RetractionPolicy::Enabled {
+                        distance_mm,
+                        speed_mm_s,
+                        z_hop_mm,
+                        ..
+                    } = recipe.process.retraction
+                    else {
+                        return Err(failed("stationary extrusion without enabled retraction"));
+                    };
+                    if decoded.command != Command::Recovery
+                        || state.position.is_none()
+                        || retract == retracted_endpoint.is_some()
+                    {
+                        return Err(failed(
+                            "missing, reordered or nonstationary retraction/recovery",
+                        ));
+                    }
+                    let pwm = if role == DepositionKind::Bridge {
+                        recipe.process.bridge_fan_pwm
+                    } else if layer == 0 {
+                        recipe.process.fan_first_layers
+                    } else {
+                        recipe.process.fan_after_first_layers
+                    };
+                    if fan_state != Some(pwm)
+                        || (!retract && recovery_moves != if z_hop_mm > 0.0 { 3 } else { 1 })
+                    {
+                        return Err(failed(
+                            "recovery without required queued fan or complete travel/hop sequence",
+                        ));
+                    }
+                    let next_e = decoded.fields[3].unwrap();
+                    let feed = decoded.fields[4].unwrap();
+                    let delta = next_e - state.extrusion;
+                    let desired = if retract { -distance_mm } else { distance_mm };
+                    let wanted_e = if retract {
+                        expected_e - distance_mm
+                    } else {
+                        expected_e
+                    };
+                    if (next_e - wanted_e).abs() > E_HALF_STEP + arithmetic_slack(wanted_e)
+                        || (delta - desired).abs()
+                            > 2.0 * E_HALF_STEP + arithmetic_slack(expected_e)
+                        || (!retract && retracted_endpoint != Some(next_e))
+                        || (retract && delta >= 0.0)
+                        || (!retract && delta <= 0.0)
+                        || (feed - speed_mm_s * 60.0).abs() > F_HALF_STEP + arithmetic_slack(feed)
+                        || feed <= 0.0
+                        || feed / 60.0 > printer.max_feed_mm_s + F_HALF_STEP / 60.0
+                    {
+                        return Err(failed(
+                            "actual retraction distance, recovery or feed differs from policy",
+                        ));
+                    }
+                    max_extrusion_error_mm = max_extrusion_error_mm
+                        .max((next_e - wanted_e).abs())
+                        .max((delta - desired).abs());
+                    if retract {
+                        recovery_moves = 0;
+                        retraction_count += 1;
+                        retracted_filament_mm -= delta;
+                        if retraction_count > 50_000 {
+                            return Err(failed("process event budget exceeded"));
+                        }
+                    }
+                    retracted_endpoint = if retract { Some(state.extrusion) } else { None };
+                    state.extrusion = next_e;
+                    if let Some(sink) = replay.as_deref_mut() {
+                        sink.push(
+                            state.position.unwrap(),
+                            next_e,
+                            feed,
+                            (line_index + 1) as u32,
+                            layer,
+                            if retract { 11 } else { 12 },
+                        )?;
+                    }
+                    continue;
                 }
-                continue;
-            }
-            expected::Action::Move {
-                target,
-                source,
-                layer,
-                role,
-                association,
-                closes_wall,
-            } => (target, source, layer, role, association, closes_wall),
-        };
+                expected::Action::Move {
+                    target,
+                    tool,
+                    source,
+                    layer,
+                    role,
+                    association,
+                    closes_wall,
+                } => (target, source, tool, layer, role, association, closes_wall),
+            };
         if layer_index != volume_layer {
             verify_region_volume(
                 &plan.layers[volume_layer as usize],
@@ -740,6 +800,15 @@ pub(crate) fn verify_actual(
             decoded.fields[1].ok_or_else(|| failed("missing Y"))?,
             decoded.fields[2].ok_or_else(|| failed("missing Z"))?,
         ];
+        if let Some(routed) = &route {
+            routed.check_motion(
+                state
+                    .position
+                    .ok_or_else(|| failed("routed motion before native home"))?,
+                position,
+                intent,
+            )?;
+        }
         for axis in 0..3 {
             // Independent parsing admits at most six decimal places. Compare
             // that decoded number with this output contract's projection,
@@ -976,6 +1045,12 @@ pub(crate) fn verify_actual(
             {
                 return Err(failed("decoded volumetric flow exceeds printer limit"));
             }
+            if let Some(routed) = &mut route {
+                routed.record_model(
+                    source_tool.ok_or_else(|| failed("model deposition lost its source tool"))?,
+                    delta_e,
+                )?;
+            }
             state.extrusion = next_e;
             if support {
                 support_deposition_segments += 1;
@@ -1027,11 +1102,12 @@ pub(crate) fn verify_actual(
     }
     cancelled(cancel)?;
     let remaining = expected.next().transpose()?;
-    if setup_index != setup.len()
+    if setup_index != setup_len
         || remaining.is_some()
         || deposition_segments + support_deposition_segments == 0
         || retracted_endpoint.is_some()
         || (job.is_some() && (lifecycle_index != 11 || finish_index != 8))
+        || route.as_ref().is_some_and(|routed| !routed.done())
     {
         return Err(failed("program is missing setup or normalized motions"));
     }
@@ -1064,7 +1140,32 @@ pub(crate) fn verify_actual(
     drop(plate_contacts);
     skin_bridges::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     skin_commands::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
-    let deposited_volume_mm3 = object_filament * filament_area;
+    let routing = if let Some(routed) = &mut route {
+        travel_segments += routed.travel_segments;
+        retraction_count += routed.retraction_count;
+        retracted_filament_mm += routed.retracted_filament_mm;
+        max_position_error_mm = max_position_error_mm.max(routed.max_position_error_mm);
+        max_extrusion_error_mm = max_extrusion_error_mm.max(routed.max_extrusion_error_mm);
+        let report = routed.report()?;
+        object_filament = report
+            .tools
+            .iter()
+            .map(|tool| tool.model_filament_length_mm)
+            .sum();
+        priming_filament_length_mm = report
+            .tools
+            .iter()
+            .map(|tool| tool.waste_filament_length_mm)
+            .sum();
+        Some(report)
+    } else {
+        None
+    };
+    let deposited_volume_mm3 = routing
+        .as_ref()
+        .map_or(object_filament * filament_area, |report| {
+            report.tools.iter().map(|tool| tool.model_volume_mm3).sum()
+        });
     if !deposited_volume_mm3.is_finite() {
         return Err(failed("decoded deposited volume is nonfinite"));
     }
@@ -1089,17 +1190,17 @@ pub(crate) fn verify_actual(
             "Mixed skin bridges: demanded regional terminal, actual XYZ6 transition/domains/holes, minimal nominal join, whole-stroke lower anchors, charged joint overlap and per-event ownership; no duplicate extrusion".into(),
             "Minimum skin commands: complete original required interval, same-row minimum-only construction, captured ordinary winner/source/holes and actual final-stroke bijection; added volume is stroke-derived, not enlarged mandatory area".into(),
             "Conditional stationary E-only retraction, declared distance/feed, bounded travel Z-hop and exact recovery; recovered extrusion is not deposited material".into(),
-            if job.is_some() { "Marlin 2 typed complete job: scale/volumetric reset, native homing declaration, heating/cooling waits, bounded priming, final barriers/lift/park/heater/fan/motor shutdown".into() } else { "Explicit diagnostic body-only workflow; no executable lifecycle".into() },
-            if job.is_some() { "Explicit M149 C and integral firmware Celsius targets; actual priming excluded from conservatively expanded whole-object XY ownership bounds, including coordinate serialization padding".into() } else { "Diagnostic workflow has no thermal or priming obligations".into() },
+            if routing.is_some() { "Fixed-dual Marlin 2.1.2.5: explicit offsets and S1 logical/carriage frame, selection E0 epochs, per-feeder exact E8 debt, addressed heating/cooling waits, supported waste and both-hotend shutdown independently decoded".into() } else if job.is_some() { "Marlin 2 typed complete job: scale/volumetric reset, native homing declaration, heating/cooling waits, bounded priming, final barriers/lift/park/heater/fan/motor shutdown".into() } else { "Explicit diagnostic body-only workflow; no executable lifecycle".into() },
+            if routing.is_some() { "Decoded per-tool model/waste filament and volume; full expected source reservation associations and conservative inactive-nozzle/carriage-prefix sweeps. No measured physical support or clearance claim".into() } else if job.is_some() { "Explicit M149 C and integral firmware Celsius targets; actual priming excluded from conservatively expanded whole-object XY ownership bounds, including coordinate serialization padding".into() } else { "Diagnostic workflow has no thermal or priming obligations".into() },
         ],
         limitations: vec![
             "SOFTWARE VALIDATION ONLY, NOT MACHINE READY; no physical printer support or printability certification".into(),
             "DEVELOPMENT native-first geometry: no independent original-STEP topology or material-embedding certification; native-kernel material reliance is not physical printability evidence".into(),
             "No physics, structural/mechanical or material deposition validation".into(),
-            "No collisions or component/fixture clearance validation; component shapes are metadata only".into(),
+            if routing.is_some() { "Only declared conservative coplanar-nozzle/carriage reservations checked; no physical tool geometry, homing trajectory or general fixture collision certification".into() } else { "No collisions or component/fixture clearance validation; component shapes are metadata only".into() },
             "No firmware behavior, execution, calibration or hardware accuracy validation".into(),
             "Homing path, thermal sensor truth, firmware configuration and calibration records are declared, not physically measured or certified".into(),
-            if job.is_some() { "Complete Marlin lifecycle/modal/wait/barrier semantics checked in software only".into() } else { "Diagnostic body-only workflow: no homing or thermal waits; first commanded endpoint has unknown start".into() },
+            if routing.is_some() || job.is_some() { "Complete Marlin lifecycle/modal/wait/barrier semantics checked in software only".into() } else { "Diagnostic body-only workflow: no homing or thermal waits; first commanded endpoint has unknown start".into() },
             "Generated supports/bridges are bounded software geometry/process only; no physical support certification or swept-bead guarantee".into(),
         ],
         deposition_segments,
@@ -1108,18 +1209,20 @@ pub(crate) fn verify_actual(
         filament_length_mm: object_filament,
         max_position_error_mm,
         max_extrusion_error_mm,
-        lifecycle_motion_count: if job.is_some() { 4 } else { 0 },
+        lifecycle_motion_count: if routing.is_some() { 2 } else if job.is_some() { 4 } else { 0 },
         priming_filament_length_mm,
         support_deposition_segments,
         support_deposited_volume_mm3: support_filament * filament_area,
         support_filament_length_mm: support_filament,
         retraction_count,
         retracted_filament_mm,
+        routing,
     })
 }
 
 mod diaphragms;
 mod interfaces;
+mod routing;
 mod skin_bridges;
 mod skin_commands;
 #[cfg(test)]

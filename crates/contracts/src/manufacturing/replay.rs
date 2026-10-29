@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-//! SPLR schema 5 admission. Associations are nominal plan data, not measurements.
+//! SPLR schema 6 admission. Associations are nominal plan data, not measurements.
 use super::*;
 use crate::ArtifactView;
 
@@ -9,7 +9,7 @@ pub const MAX_REPLAY_DISPLAY_BYTES: u32 = 32 * 1024 * 1024;
 pub const MAX_REPLAY_EVENTS: u32 = 300_004;
 pub const REPLAY_HEADER_BYTES: usize = 96;
 pub const REPLAY_RECORD_BYTES: usize = 80;
-pub const REPLAY_SCHEMA_VERSION: u32 = 5;
+pub const REPLAY_SCHEMA_VERSION: u32 = 6;
 pub const REPLAY_MEDIA_TYPE: &str = "application/x-spiling-replay-motion";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -31,9 +31,15 @@ pub struct ManufacturingInspectionProvenance {
     pub planner_version: String,
     pub emitter_version: String,
     pub verifier_version: String,
+    pub workflow: JobWorkflow,
 }
 impl ManufacturingInspectionProvenance {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
+        match &self.workflow {
+            JobWorkflow::DiagnosticBodyOnly => {}
+            JobWorkflow::CompleteMarlin { job } => job.validate_declaration()?,
+            JobWorkflow::FixedDualMarlin { job } => job.validate_declaration()?,
+        }
         self.surface_overlays
             .validate()
             .map_err(|e| invalid(&e.message))?;
@@ -61,6 +67,20 @@ impl ManufacturingInspectionProvenance {
         if self.input_hash != record.input_hash {
             return Err(corrupt("inspection provenance input mismatch"));
         }
+        match (&self.workflow, &record.summary.routing) {
+            (JobWorkflow::FixedDualMarlin { job }, Some(routing))
+                if job
+                    .tools
+                    .iter()
+                    .zip(&routing.tools)
+                    .all(|(declared, decoded)| declared.material.id == decoded.material_id) => {}
+            (JobWorkflow::DiagnosticBodyOnly | JobWorkflow::CompleteMarlin { .. }, None) => {}
+            _ => {
+                return Err(corrupt(
+                    "inspection workflow disagrees with captured routing",
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -76,6 +96,7 @@ impl From<&ManufacturingProvenance> for ManufacturingInspectionProvenance {
             planner_version: p.planner_version.clone(),
             emitter_version: p.emitter_version.clone(),
             verifier_version: p.verifier_version.clone(),
+            workflow: p.intent.printer.workflow.clone(),
         }
     }
 }
@@ -95,6 +116,8 @@ pub struct ReplayDisplayInfo {
     pub layer_count: u32,
     pub lifecycle_count: u32,
     pub process_count: u32,
+    pub tool_epoch_count: u32,
+    pub waste_count: u32,
     pub bounds_mm: AabbMm,
 }
 impl ReplayDisplayInfo {
@@ -108,13 +131,27 @@ impl ReplayDisplayInfo {
             || self.deposition_count > MAX_DEPOSITION_SEGMENTS
             || self.travel_count == 0
             || self.travel_count > MAX_DEPOSITION_SEGMENTS
-            || (self.lifecycle_count != 0 && self.lifecycle_count != 4)
+            || if self.tool_epoch_count == 0 {
+                self.waste_count != 0 || !matches!(self.lifecycle_count, 0 | 4)
+            } else {
+                self.lifecycle_count != 2
+                    || self.layer_count.checked_mul(2) != Some(self.tool_epoch_count)
+                    || self.tool_epoch_count > MAX_TOOL_SELECTIONS
+                    || self.waste_count != self.tool_epoch_count
+                    || self.waste_count >= self.deposition_count
+                    || self
+                        .layer_count
+                        .checked_mul(4)
+                        .and_then(|n| n.checked_sub(2))
+                        != Some(self.process_count)
+            }
             || self.process_count > MAX_DEPOSITION_SEGMENTS
             || self
                 .deposition_count
                 .checked_add(self.travel_count)
                 .and_then(|n| n.checked_add(self.lifecycle_count))
                 .and_then(|n| n.checked_add(self.process_count))
+                .and_then(|n| n.checked_add(self.tool_epoch_count))
                 != Some(self.event_count)
             || self.layer_count == 0
             || self.layer_count > MAX_PRINT_LAYERS
@@ -163,9 +200,23 @@ impl ReplayDisplayDescriptor {
             || self.info.input_hash != record.input_hash
             || self.info.layer_count != record.summary.layers
             || self.info.deposition_count
-                != record.summary.deposition_segments + record.summary.support_deposition_segments
+                != record.summary.deposition_segments
+                    + record.summary.support_deposition_segments
+                    + self.info.waste_count
         {
             return Err(corrupt("replay descriptor disagrees with bundle record"));
+        }
+        match &record.summary.routing {
+            None if self.info.tool_epoch_count == 0 && self.info.waste_count == 0 => {}
+            Some(routing)
+                if self.info.tool_epoch_count == routing.selection_count
+                    && self.info.waste_count
+                        == routing
+                            .tools
+                            .iter()
+                            .map(|tool| tool.waste_deposition_segments)
+                            .sum::<u32>() => {}
+            _ => return Err(corrupt("replay routing disagrees with bundle record")),
         }
         Ok(())
     }
@@ -181,6 +232,16 @@ fn u32_at(bytes: &[u8], offset: usize) -> u32 {
 }
 fn f64_at(bytes: &[u8], offset: usize) -> f64 {
     f64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+fn e8_ticks(value: f64) -> Result<i64, ManufacturingError> {
+    let scaled = (value * 100_000_000.0).round();
+    if !scaled.is_finite() || scaled.abs() > (1_u64 << 52) as f64 || scaled / 100_000_000.0 != value
+    {
+        return Err(corrupt(
+            "routed extrusion is outside the exact E8 tick domain",
+        ));
+    }
+    Ok(scaled as i64)
 }
 
 /// Validate one bounded immutable artifact without allocating event objects.
@@ -206,7 +267,7 @@ pub fn validate_replay_display(
         || u32_at(bytes, 28) != info.lifecycle_count
         || bytes[80..88].iter().any(|b| *b != 0)
         || u32_at(bytes, 88) != info.process_count
-        || u32_at(bytes, 92) != 0
+        || u32_at(bytes, 92) != info.tool_epoch_count
     {
         return Err(corrupt("replay header mismatch"));
     }
@@ -228,6 +289,13 @@ pub fn validate_replay_display(
     let mut lifecycle_phase = 0;
     let mut process = 0;
     let mut retracted_e = None;
+    let dual = info.tool_epoch_count != 0;
+    let mut active_tool = 0usize;
+    let mut debt = [0i64; 2];
+    let mut epochs = 0u32;
+    let mut waste = 0u32;
+    let mut epoch_waste = false;
+    let mut epoch_model = false;
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
     for (index, record) in bytes[REPLAY_HEADER_BYTES..]
@@ -243,23 +311,37 @@ pub fn validate_replay_display(
         let next_layer = u16_at(record, 44) as u32;
         let kind = record[46];
         let flags = record[47];
+        let tool = u32_at(record, 76);
         if position.iter().any(|v| !v.is_finite())
             || !e.is_finite()
-            || (e < 0.0 && kind != 11 && retracted_e.is_none())
+            || (e < 0.0
+                && kind != 11
+                && if dual {
+                    debt[active_tool] == 0
+                } else {
+                    retracted_e.is_none()
+                })
             || !feed.is_finite()
-            || feed <= 0.0
+            || if kind == 14 { feed != 0.0 } else { feed <= 0.0 }
             || line <= previous_line
             || line > MAX_MANUFACTURING_BUNDLE_BYTES
             || (!(6..8).contains(&kind) && next_layer >= info.layer_count)
-            || kind > 13
+            || kind > 15
             || flags
-                != (u8::from(index != 0)
-                    | if matches!(kind, 1..=5 | 8..=10 | 13) {
+                != (u8::from(index != 0 && kind != 14)
+                    | if matches!(kind, 1..=5 | 8..=10 | 13 | 15) {
                         2
                     } else {
                         0
                     })
-            || (index == 0 && (kind != 0 && kind != 6))
+            || (dual && (tool > 1 || (kind != 14 && tool as usize != active_tool)))
+            || (!dual && (tool != 0 || kind >= 14))
+            || (index == 0
+                && if dual {
+                    kind != 14
+                } else {
+                    kind != 0 && kind != 6
+                })
             || (index == 0 && kind == 0 && next_layer != 0)
         {
             return Err(corrupt("invalid replay record fields"));
@@ -268,8 +350,8 @@ pub fn validate_replay_display(
         let lower = f64_at(record, 56);
         let upper = f64_at(record, 64);
         let owner = u32_at(record, 72);
-        if u32_at(record, 76) != 0 {
-            return Err(corrupt("reserved replay association bytes"));
+        if kind == 15 && owner != u32::MAX {
+            return Err(corrupt("waste cannot claim model ownership"));
         }
         if flags & 2 != 0 {
             if !width.is_finite()
@@ -285,7 +367,107 @@ pub fn validate_replay_display(
         } else if record[48..72].iter().any(|b| *b != 0) || owner != u32::MAX {
             return Err(corrupt("nondeposition has an association"));
         }
-        if kind == 6 || kind == 7 {
+        if dual {
+            if kind == 14 {
+                if lifecycle != 0
+                    || epochs >= info.tool_epoch_count
+                    || tool != epochs % 2
+                    || next_layer != epochs / 2
+                    || e != 0.0
+                    || (epochs != 0 && (!epoch_waste || !epoch_model || debt[active_tool] <= 0))
+                {
+                    return Err(corrupt("invalid fixed-dual tool epoch"));
+                }
+                active_tool = tool as usize;
+                layer = next_layer;
+                epochs += 1;
+                epoch_waste = false;
+                epoch_model = false;
+                layer_deposition = false;
+            } else if kind == 6 {
+                if next_layer != u16::MAX as u32
+                    || lifecycle >= 2
+                    || depositions != info.deposition_count
+                    || travels != info.travel_count
+                    || epochs != info.tool_epoch_count
+                    || !epoch_waste
+                    || !epoch_model
+                    || debt.iter().any(|value| *value <= 0)
+                    || e != previous_e
+                    || (lifecycle == 0
+                        && (position[0] != previous[0]
+                            || position[1] != previous[1]
+                            || position[2] <= previous[2]))
+                    || (lifecycle == 1 && position[2] != previous[2])
+                {
+                    return Err(corrupt("invalid fixed-dual final lift/park"));
+                }
+                lifecycle += 1;
+            } else {
+                if lifecycle != 0
+                    || epochs == 0
+                    || kind == 7
+                    || next_layer < layer
+                    || next_layer > layer + 1
+                    || (next_layer != layer
+                        && !(tool == 1 && epoch_model && matches!(kind, 0 | 11)))
+                {
+                    return Err(corrupt("motion outside fixed-dual tool epoch"));
+                }
+                match kind {
+                    0 => {
+                        if e != previous_e {
+                            return Err(corrupt("travel changes extrusion"));
+                        }
+                        travels += 1;
+                    }
+                    11 => {
+                        if position != previous
+                            || e >= previous_e
+                            || debt[active_tool] != 0
+                            || !epoch_model
+                        {
+                            return Err(corrupt("invalid fixed-dual retraction"));
+                        }
+                        debt[active_tool] = e8_ticks(previous_e)? - e8_ticks(e)?;
+                        process += 1;
+                    }
+                    12 => {
+                        if position != previous
+                            || e <= previous_e
+                            || debt[active_tool] <= 0
+                            || e8_ticks(e)? - e8_ticks(previous_e)? != debt[active_tool]
+                            || epoch_waste
+                            || epoch_model
+                        {
+                            return Err(corrupt("invalid fixed-dual recovery"));
+                        }
+                        debt[active_tool] = 0;
+                        process += 1;
+                    }
+                    _ => {
+                        if next_layer != layer
+                            || e <= previous_e
+                            || position == previous
+                            || debt[active_tool] != 0
+                            || (kind == 15 && (epoch_waste || epoch_model))
+                            || (kind != 15 && !epoch_waste)
+                            || matches!(kind, 9 | 10 | 13)
+                        {
+                            return Err(corrupt("invalid fixed-dual model or waste deposition"));
+                        }
+                        if kind == 15 {
+                            waste += 1;
+                            epoch_waste = true;
+                        } else {
+                            epoch_model = true;
+                        }
+                        depositions += 1;
+                        layer_deposition = true;
+                    }
+                }
+            }
+        } else if kind == 6 || kind == 7 {
             if info.lifecycle_count != 4 || next_layer != u16::MAX as u32 {
                 return Err(corrupt("invalid lifecycle replay attribution"));
             }
@@ -387,6 +569,13 @@ pub fn validate_replay_display(
         || lifecycle != info.lifecycle_count
         || process != info.process_count
         || retracted_e.is_some()
+        || (dual
+            && (epochs != info.tool_epoch_count
+                || waste != info.waste_count
+                || process != info.layer_count * 4 - 2
+                || !epoch_waste
+                || !epoch_model
+                || debt.iter().any(|value| *value <= 0)))
         || min != info.bounds_mm.min
         || max != info.bounds_mm.max
     {
@@ -444,6 +633,8 @@ mod tests {
                 layer_count: 1,
                 lifecycle_count: 0,
                 process_count: 0,
+                tool_epoch_count: 0,
+                waste_count: 0,
                 bounds_mm: AabbMm::new([0.0; 3], [1.0; 3]).unwrap(),
             },
             resource: ArtifactView {
@@ -467,6 +658,98 @@ mod tests {
         }
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
+    #[test]
+    fn fixed_dual_epochs_break_frames_and_keep_waste_explicit() {
+        let (body, mut descriptor) = encoded();
+        let mut bytes = body[..REPLAY_HEADER_BYTES].to_vec();
+        let events = [
+            ([0.0, 0.0, 0.0], 0.0, 14, 0),
+            ([0.0, 0.0, 1.0], 0.0, 0, 0),
+            ([1.0, 0.0, 1.0], 1.0, 15, 0),
+            ([1.0, 1.0, 1.0], 1.0, 0, 0),
+            ([0.0, 1.0, 1.0], 2.0, 1, 0),
+            ([0.0, 1.0, 1.0], 1.5, 11, 0),
+            ([0.0, 1.0, 2.0], 1.5, 0, 0),
+            ([2.0, 1.0, 2.0], 0.0, 14, 1),
+            ([2.0, 0.0, 1.0], 0.0, 0, 1),
+            ([3.0, 0.0, 1.0], 1.0, 15, 1),
+            ([3.0, 1.0, 1.0], 1.0, 0, 1),
+            ([2.0, 1.0, 1.0], 2.0, 2, 1),
+            ([2.0, 1.0, 1.0], 1.5, 11, 1),
+            ([2.0, 1.0, 3.0], 1.5, 6, 1),
+            ([3.0, 1.0, 3.0], 1.5, 6, 1),
+        ];
+        for (index, (position, e, kind, tool)) in events.into_iter().enumerate() {
+            for coordinate in position {
+                bytes.extend_from_slice(&f64::to_le_bytes(coordinate));
+            }
+            bytes.extend_from_slice(&f64::to_le_bytes(e));
+            let feed = if kind == 14 { 0.0f64 } else { 600.0f64 };
+            bytes.extend_from_slice(&feed.to_le_bytes());
+            bytes.extend_from_slice(&(index as u32 + 1).to_le_bytes());
+            let layer = if kind == 6 { u16::MAX } else { 0 };
+            bytes.extend_from_slice(&layer.to_le_bytes());
+            let associated = matches!(kind, 1 | 2 | 15);
+            bytes.extend_from_slice(&[
+                kind,
+                u8::from(index != 0 && kind != 14) | if associated { 2 } else { 0 },
+            ]);
+            for value in if associated {
+                [0.45, position[2] - 0.2, position[2]]
+            } else {
+                [0.0; 3]
+            } {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+            bytes.extend_from_slice(&u32::to_le_bytes(tool));
+        }
+        for (offset, value) in [(8, 15u32), (16, 4), (20, 5), (28, 2), (88, 2), (92, 2)] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let bounds = AabbMm::new([0.0; 3], [3.0, 1.0, 3.0]).unwrap();
+        for axis in 0..3 {
+            bytes[56 + axis * 8..64 + axis * 8].copy_from_slice(&bounds.max[axis].to_le_bytes());
+        }
+        descriptor.info.event_count = 15;
+        descriptor.info.deposition_count = 4;
+        descriptor.info.travel_count = 5;
+        descriptor.info.lifecycle_count = 2;
+        descriptor.info.process_count = 2;
+        descriptor.info.tool_epoch_count = 2;
+        descriptor.info.waste_count = 2;
+        descriptor.info.bounds_mm = bounds;
+        descriptor.resource.size_bytes = bytes.len().to_string();
+        rebind(&bytes, &mut descriptor);
+        validate_replay_display(&bytes, &descriptor).unwrap();
+        for (record, offset, value) in [
+            (0, 47, 1u32),
+            (1, 76, 1),
+            (2, 72, 0),
+            (7, 76, 0),
+            (7, 47, 1),
+            (9, 46, 1),
+            (12, 46, 0),
+        ] {
+            let mut bad = bytes.clone();
+            let start = REPLAY_HEADER_BYTES + record * REPLAY_RECORD_BYTES + offset;
+            if offset >= 72 {
+                bad[start..start + 4].copy_from_slice(&value.to_le_bytes());
+            } else {
+                bad[start] = value as u8;
+            }
+            let mut rebound = descriptor.clone();
+            rebind(&bad, &mut rebound);
+            assert!(
+                validate_replay_display(&bad, &rebound).is_err(),
+                "record {record}, offset {offset}"
+            );
+        }
+        let mut old = bytes.clone();
+        old[4..6].copy_from_slice(&5u16.to_le_bytes());
+        rebind(&old, &mut descriptor);
+        assert!(validate_replay_display(&old, &descriptor).is_err());
     }
     #[test]
     fn nominal_associations_require_deposition_and_bounded_finite_dimensions() {

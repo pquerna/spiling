@@ -1,0 +1,14 @@
+{
+  "status": "unqualified-software-reference",
+  "machine_id": "software-fixed-dual-marlin-reference",
+  "offset_xy_mm": [[0, 0], [25, 0]],
+  "nozzle_z": "declared coplanar, not measured",
+  "carriage_body_bounds_from_tool_zero_mm": {"min": [-2, -2, 8], "max": [27, 2, 25]},
+  "carriage_travel_bounds_mm": {"min": [-30, -5, 0], "max": [220, 220, 220]},
+  "inactive_nozzle_radius_mm": 0.3,
+  "retract_filament_mm": [0.6, 0.6],
+  "minimum_reprime_volume_mm3": [0.1, 0.1],
+  "physical_measurements": [],
+  "physical_qualification": "absent",
+  "purpose": "Bind an explicit conservative software carriage, pressure and registration declaration; no physical clearance, clean color, adhesion or printer claim."
+}

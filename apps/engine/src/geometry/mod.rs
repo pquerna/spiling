@@ -206,9 +206,17 @@ pub struct Runtime {
     replay_publication: Option<(JobId, spiling_manufacturing::EncodedReplayDisplay)>,
     image_publication: Option<(JobId, Arc<spiling_core::SurfaceImageAsset>)>,
     appearance_publication: Option<(JobId, Arc<appearance::ReportPublication>)>,
-    appearance_comparison: Option<(ProjectId, ProjectRevision, Arc<appearance::ReportPublication>)>,
+    appearance_comparison: Option<(
+        ProjectId,
+        ProjectRevision,
+        Arc<appearance::ReportPublication>,
+    )>,
     optical_publication: Option<(JobId, Arc<optical::OpticalReportPublication>)>,
-    optical_comparison: Option<(ProjectId, ProjectRevision, Arc<optical::OpticalReportPublication>)>,
+    optical_comparison: Option<(
+        ProjectId,
+        ProjectRevision,
+        Arc<optical::OpticalReportPublication>,
+    )>,
     released: VecDeque<ArtifactId>,
     jobs: BTreeMap<JobId, EngineJob>,
     terminal: VecDeque<JobId>,
@@ -361,54 +369,58 @@ impl Runtime {
                 }
                 // Comparing produces evidence only, never a Core transaction. A
                 // cancelled traversal must still deliver its incomplete report.
-                let report_only = matches!(active.purpose, Purpose::CompareAppearance | Purpose::CompareOptical);
+                let report_only = matches!(
+                    active.purpose,
+                    Purpose::CompareAppearance | Purpose::CompareOptical
+                );
                 // A durable save receipt has already crossed its disk commit point.
                 // It must reach core even if cancellation arrived after replacement.
                 let durable = matches!(&result, Ok(Product::Saved(_)));
-                let publication = if !durable && !report_only && active.cancel.load(Ordering::Acquire) {
-                    Err(cancelled(&active.purpose))
-                } else if active.base != self.revision
-                    || (matches!(
-                        active.purpose,
-                        Purpose::Compile
-                            | Purpose::Preflight
-                            | Purpose::Verify
-                            | Purpose::ImportSurfaceImage { .. }
-                            | Purpose::GetSurfaceImage
-                            | Purpose::PrepareBedPose
-                            | Purpose::ImportAppearancePalette
-                            | Purpose::CompareAppearance
-                            | Purpose::GetAppearanceReport
-                            | Purpose::CompareOptical
-                            | Purpose::GetOpticalReport
-                    ) && active.project_base != self.project.info().revision)
-                {
-                    Err(
-                        if matches!(
+                let publication =
+                    if !durable && !report_only && active.cancel.load(Ordering::Acquire) {
+                        Err(cancelled(&active.purpose))
+                    } else if active.base != self.revision
+                        || (matches!(
                             active.purpose,
-                            Purpose::Compile | Purpose::Preflight | Purpose::Verify
-                        ) {
-                            ManufacturingError::new(
-                                ManufacturingErrorCode::StaleRevision,
-                                "manufacturing input revision is stale",
-                            )
-                            .into()
-                        } else if matches!(
-                            active.purpose,
-                            Purpose::ImportSurfaceImage { .. } | Purpose::GetSurfaceImage
-                        ) {
-                            project_error(
-                                ProjectErrorCode::StaleRevision,
-                                "surface image input revision is stale",
-                            )
-                            .into()
-                        } else {
-                            stale().into()
-                        },
-                    )
-                } else {
-                    result.and_then(|product| self.prepare(&active, product))
-                };
+                            Purpose::Compile
+                                | Purpose::Preflight
+                                | Purpose::Verify
+                                | Purpose::ImportSurfaceImage { .. }
+                                | Purpose::GetSurfaceImage
+                                | Purpose::PrepareBedPose
+                                | Purpose::ImportAppearancePalette
+                                | Purpose::CompareAppearance
+                                | Purpose::GetAppearanceReport
+                                | Purpose::CompareOptical
+                                | Purpose::GetOpticalReport
+                        ) && active.project_base != self.project.info().revision)
+                    {
+                        Err(
+                            if matches!(
+                                active.purpose,
+                                Purpose::Compile | Purpose::Preflight | Purpose::Verify
+                            ) {
+                                ManufacturingError::new(
+                                    ManufacturingErrorCode::StaleRevision,
+                                    "manufacturing input revision is stale",
+                                )
+                                .into()
+                            } else if matches!(
+                                active.purpose,
+                                Purpose::ImportSurfaceImage { .. } | Purpose::GetSurfaceImage
+                            ) {
+                                project_error(
+                                    ProjectErrorCode::StaleRevision,
+                                    "surface image input revision is stale",
+                                )
+                                .into()
+                            } else {
+                                stale().into()
+                            },
+                        )
+                    } else {
+                        result.and_then(|product| self.prepare(&active, product))
+                    };
                 match publication {
                     Ok(publication) => {
                         if durable || report_only || self.watchdog.begin_commit(job) {
@@ -541,7 +553,8 @@ impl Runtime {
                             })
                         }
                         PublicationKind::AppearancePaletteImported { edit, palette } => {
-                            self.project.commit(edit)
+                            self.project
+                                .commit(edit)
                                 .map_err(|error| format!("core palette ACK invariant: {error}"))?;
                             self.appearance_comparison = None;
                             self.optical_comparison = None;
@@ -555,12 +568,18 @@ impl Runtime {
                                 return Err("unreleased appearance report publication".into());
                             }
                             if matches!(active.purpose, Purpose::CompareAppearance) {
-                                self.appearance_comparison = if !active.cancel.load(Ordering::Acquire)
-                                    && report.record.complete {
-                                    Some((self.project.info().project_id, active.project_base, report.clone()))
-                                } else {
-                                    None
-                                };
+                                self.appearance_comparison =
+                                    if !active.cancel.load(Ordering::Acquire)
+                                        && report.record.complete
+                                    {
+                                        Some((
+                                            self.project.info().project_id,
+                                            active.project_base,
+                                            report.clone(),
+                                        ))
+                                    } else {
+                                        None
+                                    };
                             }
                             let record = report.record.clone();
                             self.appearance_publication = Some((job, report));
@@ -576,8 +595,13 @@ impl Runtime {
                             }
                             if matches!(active.purpose, Purpose::CompareOptical) {
                                 self.optical_comparison = if !active.cancel.load(Ordering::Acquire)
-                                    && report.record.complete {
-                                    Some((self.project.info().project_id, active.project_base, report.clone()))
+                                    && report.record.complete
+                                {
+                                    Some((
+                                        self.project.info().project_id,
+                                        active.project_base,
+                                        report.clone(),
+                                    ))
                                 } else {
                                     None
                                 };
@@ -668,26 +692,36 @@ impl Runtime {
     fn prepare(&mut self, active: &Active, product: Product) -> Result<Publication, JobError> {
         match (&active.purpose, product) {
             (Purpose::ImportAppearancePalette, Product::AppearancePalette(asset)) => {
-                let edit = self.project.prepare(Edit::ImportAppearancePalette { asset })?;
-                let palette = edit.snapshot().appearance_study.palette.clone()
-                    .ok_or_else(|| project_error(ProjectErrorCode::InvalidProject, "prepared palette missing"))?;
+                let edit = self
+                    .project
+                    .prepare(Edit::ImportAppearancePalette { asset })?;
+                let palette = edit
+                    .snapshot()
+                    .appearance_study
+                    .palette
+                    .clone()
+                    .ok_or_else(|| {
+                        project_error(ProjectErrorCode::InvalidProject, "prepared palette missing")
+                    })?;
                 Ok(Publication {
                     kind: PublicationKind::AppearancePaletteImported { edit, palette },
                     artifact: None,
                 })
             }
-            (Purpose::CompareAppearance | Purpose::GetAppearanceReport, Product::AppearanceReport(report)) => {
-                Ok(Publication {
-                    kind: PublicationKind::AppearanceCompared(report),
-                    artifact: None,
-                })
-            }
-            (Purpose::CompareOptical | Purpose::GetOpticalReport, Product::OpticalReport(report)) => {
-                Ok(Publication {
-                    kind: PublicationKind::OpticalCompared(report),
-                    artifact: None,
-                })
-            }
+            (
+                Purpose::CompareAppearance | Purpose::GetAppearanceReport,
+                Product::AppearanceReport(report),
+            ) => Ok(Publication {
+                kind: PublicationKind::AppearanceCompared(report),
+                artifact: None,
+            }),
+            (
+                Purpose::CompareOptical | Purpose::GetOpticalReport,
+                Product::OpticalReport(report),
+            ) => Ok(Publication {
+                kind: PublicationKind::OpticalCompared(report),
+                artifact: None,
+            }),
             (
                 Purpose::ImportSurfaceImage {
                     reference,
@@ -1438,37 +1472,58 @@ impl Runtime {
     }
     fn project_control_inner(&mut self, command: ProjectCommand) -> Result<Reply, ProjectError> {
         match command {
-            ProjectCommand::ImportAppearancePalette { session_id, base_revision, source } => {
-                self.import_appearance_palette(&session_id, base_revision, source)
-            }
-            ProjectCommand::SetAppearanceTarget { session_id, base_revision, target, limits } => {
+            ProjectCommand::ImportAppearancePalette {
+                session_id,
+                base_revision,
+                source,
+            } => self.import_appearance_palette(&session_id, base_revision, source),
+            ProjectCommand::SetAppearanceTarget {
+                session_id,
+                base_revision,
+                target,
+                limits,
+            } => {
                 self.metadata_base(&session_id, base_revision)?;
                 self.appearance_comparison = None;
                 self.commit_metadata_edit(Edit::SetAppearanceTarget { target, limits })
             }
-            ProjectCommand::CompareAppearance { session_id, base_revision } => {
-                self.compare_appearance(&session_id, base_revision)
-            }
-            ProjectCommand::GetAppearanceReport { session_id, base_revision } => {
-                self.get_appearance_report(&session_id, base_revision)
-            }
-            ProjectCommand::AcceptAppearanceReport { session_id, base_revision, report_hash, selection } => {
-                self.accept_appearance_report(&session_id, base_revision, &report_hash, selection)
-            }
-            ProjectCommand::SetOpticalStudy { session_id, base_revision, request } => {
+            ProjectCommand::CompareAppearance {
+                session_id,
+                base_revision,
+            } => self.compare_appearance(&session_id, base_revision),
+            ProjectCommand::GetAppearanceReport {
+                session_id,
+                base_revision,
+            } => self.get_appearance_report(&session_id, base_revision),
+            ProjectCommand::AcceptAppearanceReport {
+                session_id,
+                base_revision,
+                report_hash,
+                selection,
+            } => self.accept_appearance_report(&session_id, base_revision, &report_hash, selection),
+            ProjectCommand::SetOpticalStudy {
+                session_id,
+                base_revision,
+                request,
+            } => {
                 self.metadata_base(&session_id, base_revision)?;
                 self.optical_comparison = None;
                 self.commit_metadata_edit(Edit::SetOpticalStudy { request })
             }
-            ProjectCommand::CompareOptical { session_id, base_revision } => {
-                self.compare_optical(&session_id, base_revision)
-            }
-            ProjectCommand::GetOpticalReport { session_id, base_revision } => {
-                self.get_optical_report(&session_id, base_revision)
-            }
-            ProjectCommand::AcceptOpticalReport { session_id, base_revision, report_hash, selection } => {
-                self.accept_optical_report(&session_id, base_revision, &report_hash, selection)
-            }
+            ProjectCommand::CompareOptical {
+                session_id,
+                base_revision,
+            } => self.compare_optical(&session_id, base_revision),
+            ProjectCommand::GetOpticalReport {
+                session_id,
+                base_revision,
+            } => self.get_optical_report(&session_id, base_revision),
+            ProjectCommand::AcceptOpticalReport {
+                session_id,
+                base_revision,
+                report_hash,
+                selection,
+            } => self.accept_optical_report(&session_id, base_revision, &report_hash, selection),
             ProjectCommand::Get { session_id } => {
                 if session_id != self.session_id {
                     return Err(project_error(

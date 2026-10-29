@@ -486,6 +486,7 @@ impl TryFrom<rpc::OutputDialect> for OutputDialect {
             rpc::OutputDialect::Marlin2SingleExtruderGcodeV1 => {
                 Ok(Self::Marlin2SingleExtruderGcodeV1)
             }
+            rpc::OutputDialect::Marlin2FixedDualGcodeV1 => Ok(Self::Marlin2FixedDualGcodeV1),
             _ => Err("unsupported output dialect".into()),
         }
     }
@@ -496,6 +497,7 @@ impl TryFrom<OutputDialect> for rpc::OutputDialect {
         match value {
             OutputDialect::CartesianAbsoluteGcodeV1 => Ok(Self::CartesianAbsoluteGcodeV1),
             OutputDialect::Marlin2SingleExtruderGcodeV1 => Ok(Self::Marlin2SingleExtruderGcodeV1),
+            OutputDialect::Marlin2FixedDualGcodeV1 => Ok(Self::Marlin2FixedDualGcodeV1),
         }
     }
 }
@@ -645,6 +647,9 @@ impl TryFrom<rpc::JobWorkflow> for JobWorkflow {
         use rpc::job_workflow::Workflow;
         let result = match required(value.workflow, "job workflow selection")? {
             Workflow::DiagnosticBodyOnly(_) => Self::DiagnosticBodyOnly,
+            Workflow::FixedDualMarlin(job) => Self::FixedDualMarlin {
+                job: job.try_into()?,
+            },
             Workflow::CompleteMarlin(job) => {
                 if rpc::HomingCoordinateContract::try_from(job.homing_contract)
                     .map_err(|e| e.to_string())?
@@ -696,6 +701,7 @@ impl TryFrom<JobWorkflow> for rpc::JobWorkflow {
                 JobWorkflow::DiagnosticBodyOnly => {
                     Workflow::DiagnosticBodyOnly(rpc::DiagnosticBodyOnly {})
                 }
+                JobWorkflow::FixedDualMarlin { job } => Workflow::FixedDualMarlin(job.try_into()?),
                 JobWorkflow::CompleteMarlin { job } => {
                     Workflow::CompleteMarlin(rpc::SingleExtruderJob {
                         machine_id: job.machine_id,
@@ -1138,6 +1144,7 @@ impl TryFrom<rpc::ManufacturingSummary> for ManufacturingSummary {
         valid(
             Self {
                 layers: value.layers,
+                routing: value.routing.map(TryInto::try_into).transpose()?,
                 paths: value.paths,
                 deposition_segments: value.deposition_segments,
                 deposited_volume_mm3: value.deposited_volume_mm3,
@@ -1169,6 +1176,7 @@ impl TryFrom<ManufacturingSummary> for rpc::ManufacturingSummary {
         value.validate().map_err(|e| e.to_string())?;
         Ok(Self {
             layers: value.layers,
+            routing: value.routing.map(TryInto::try_into).transpose()?,
             paths: value.paths,
             deposition_segments: value.deposition_segments,
             deposited_volume_mm3: value.deposited_volume_mm3,
@@ -1219,6 +1227,7 @@ impl TryFrom<rpc::VerificationReport> for VerificationReport {
         valid(
             Self {
                 verified: value.verified,
+                routing: value.routing.map(TryInto::try_into).transpose()?,
                 coverage: value.coverage,
                 limitations: value.limitations,
                 deposition_segments: value.deposition_segments,
@@ -1245,6 +1254,7 @@ impl TryFrom<VerificationReport> for rpc::VerificationReport {
         value.validate().map_err(|e| e.to_string())?;
         Ok(Self {
             verified: value.verified,
+            routing: value.routing.map(TryInto::try_into).transpose()?,
             coverage: value.coverage,
             limitations: value.limitations,
             deposition_segments: value.deposition_segments,
@@ -1664,6 +1674,7 @@ mod tests {
             byte_count: 6,
             summary: ManufacturingSummary {
                 layers: 1,
+                routing: None,
                 process_resolution: vec![],
                 paths: 1,
                 deposition_segments: 2,
@@ -1814,6 +1825,7 @@ mod tests {
     fn reports_reject_unbounded_descriptions_and_nonfinite_measurements() {
         let report = VerificationReport {
             verified: true,
+            routing: None,
             coverage: vec!["software replay".into()],
             limitations: vec!["not machine ready".into()],
             deposition_segments: 2,
@@ -1943,5 +1955,672 @@ impl TryFrom<SurfaceResolutionTotals> for rpc::SurfaceResolutionTotals {
             unavailable: v.unavailable,
             coverage_complete: v.coverage_complete,
         })
+    }
+}
+
+impl TryFrom<rpc::FixedDualConfiguration> for FixedDualConfiguration {
+    type Error = String;
+    fn try_from(value: rpc::FixedDualConfiguration) -> Result<Self, String> {
+        match value {
+            rpc::FixedDualConfiguration::Marlin2125NativeFixedHotends => {
+                Ok(Self::Marlin2125NativeFixedHotends)
+            }
+            _ => Err("unsupported fixed-dual configuration".into()),
+        }
+    }
+}
+impl TryFrom<FixedDualConfiguration> for rpc::FixedDualConfiguration {
+    type Error = String;
+    fn try_from(value: FixedDualConfiguration) -> Result<Self, String> {
+        Ok(match value {
+            FixedDualConfiguration::Marlin2125NativeFixedHotends => {
+                Self::Marlin2125NativeFixedHotends
+            }
+        })
+    }
+}
+
+fn routing_label(value: &str) -> Result<(), String> {
+    if value.trim().is_empty()
+        || value.len() > MAX_MANUFACTURING_LABEL_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err("invalid routing label".into());
+    }
+    Ok(())
+}
+
+fn validate_loaded_material(value: &LoadedMaterial) -> Result<(), String> {
+    for label in [&value.id, &value.revision, &value.polymer_family] {
+        routing_label(label)?;
+    }
+    Ok(())
+}
+impl TryFrom<rpc::LoadedMaterial> for LoadedMaterial {
+    type Error = String;
+    fn try_from(value: rpc::LoadedMaterial) -> Result<Self, String> {
+        let result = Self {
+            id: value.id,
+            revision: value.revision,
+            declaration_hash: SourceHash::parse(value.declaration_hash)
+                .map_err(|e| e.to_string())?,
+            polymer_family: value.polymer_family,
+        };
+        validate_loaded_material(&result)?;
+        Ok(result)
+    }
+}
+impl TryFrom<LoadedMaterial> for rpc::LoadedMaterial {
+    type Error = String;
+    fn try_from(value: LoadedMaterial) -> Result<Self, String> {
+        validate_loaded_material(&value)?;
+        Ok(Self {
+            id: value.id,
+            revision: value.revision,
+            declaration_hash: value.declaration_hash.into(),
+            polymer_family: value.polymer_family,
+        })
+    }
+}
+
+fn validate_routed_tool(value: &FixedDualTool) -> Result<(), String> {
+    routing_label(&value.id)?;
+    routing_label(&value.feeder_id)?;
+    validate_loaded_material(&value.material)?;
+    value
+        .deposition_limits
+        .validate()
+        .map_err(|e| e.to_string())?;
+    let temperature =
+        |v: f64, maximum: f64| v.is_finite() && v >= 0.0 && v <= maximum && v.fract() == 0.0;
+    if [
+        value.nozzle_diameter_mm,
+        value.filament_diameter_mm,
+        value.max_feed_mm_s,
+        value.max_volumetric_flow_mm3_s,
+        value.retract_filament_mm,
+        value.retract_speed_mm_s,
+        value.minimum_reprime_volume_mm3,
+    ]
+    .iter()
+    .any(|v| !v.is_finite() || *v <= 0.0)
+        || value
+            .offset_xy_mm
+            .iter()
+            .chain(value.waste_line_xy_mm.iter().flatten())
+            .any(|v| !v.is_finite())
+        || value.waste_line_xy_mm[0] == value.waste_line_xy_mm[1]
+        || !temperature(
+            value.minimum_extrusion_temperature_c,
+            value.maximum_nozzle_temperature_c,
+        )
+        || !temperature(
+            value.nozzle_temperature_c,
+            value.maximum_nozzle_temperature_c,
+        )
+        || !temperature(
+            value.standby_temperature_c,
+            value.maximum_nozzle_temperature_c,
+        )
+        || !temperature(value.maximum_nozzle_temperature_c, 500.0)
+        || value.minimum_extrusion_temperature_c == 0.0
+        || value.nozzle_temperature_c < value.minimum_extrusion_temperature_c
+        || value.standby_temperature_c > value.nozzle_temperature_c
+        || value.retract_filament_mm > 10.0
+        || value.retract_speed_mm_s > value.max_feed_mm_s
+    {
+        return Err("invalid fixed-dual tool declaration".into());
+    }
+    Ok(())
+}
+impl TryFrom<rpc::FixedDualTool> for FixedDualTool {
+    type Error = String;
+    fn try_from(value: rpc::FixedDualTool) -> Result<Self, String> {
+        let offset_xy_mm = value
+            .offset_xy_mm
+            .try_into()
+            .map_err(|_| "tool offset requires exactly two coordinates")?;
+        let [x0, y0, x1, y1]: [f64; 4] = value
+            .waste_line_xy_mm
+            .try_into()
+            .map_err(|_| "waste line requires exactly four coordinates")?;
+        let result = Self {
+            id: value.id,
+            feeder_id: value.feeder_id,
+            material: required(value.material, "loaded material")?.try_into()?,
+            offset_xy_mm,
+            nozzle_diameter_mm: value.nozzle_diameter_mm,
+            filament_diameter_mm: value.filament_diameter_mm,
+            deposition_limits: required(value.deposition_limits, "tool deposition limits")?
+                .try_into()?,
+            max_feed_mm_s: value.max_feed_mm_s,
+            max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
+            nozzle_temperature_c: value.nozzle_temperature_c,
+            standby_temperature_c: value.standby_temperature_c,
+            minimum_extrusion_temperature_c: value.minimum_extrusion_temperature_c,
+            maximum_nozzle_temperature_c: value.maximum_nozzle_temperature_c,
+            retract_filament_mm: value.retract_filament_mm,
+            retract_speed_mm_s: value.retract_speed_mm_s,
+            minimum_reprime_volume_mm3: value.minimum_reprime_volume_mm3,
+            waste_line_xy_mm: [[x0, y0], [x1, y1]],
+        };
+        validate_routed_tool(&result)?;
+        Ok(result)
+    }
+}
+impl TryFrom<FixedDualTool> for rpc::FixedDualTool {
+    type Error = String;
+    fn try_from(value: FixedDualTool) -> Result<Self, String> {
+        validate_routed_tool(&value)?;
+        Ok(Self {
+            id: value.id,
+            feeder_id: value.feeder_id,
+            material: Some(value.material.try_into()?),
+            offset_xy_mm: value.offset_xy_mm.to_vec(),
+            nozzle_diameter_mm: value.nozzle_diameter_mm,
+            filament_diameter_mm: value.filament_diameter_mm,
+            deposition_limits: Some(value.deposition_limits.try_into()?),
+            max_feed_mm_s: value.max_feed_mm_s,
+            max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
+            nozzle_temperature_c: value.nozzle_temperature_c,
+            standby_temperature_c: value.standby_temperature_c,
+            minimum_extrusion_temperature_c: value.minimum_extrusion_temperature_c,
+            maximum_nozzle_temperature_c: value.maximum_nozzle_temperature_c,
+            retract_filament_mm: value.retract_filament_mm,
+            retract_speed_mm_s: value.retract_speed_mm_s,
+            minimum_reprime_volume_mm3: value.minimum_reprime_volume_mm3,
+            waste_line_xy_mm: value.waste_line_xy_mm.into_iter().flatten().collect(),
+        })
+    }
+}
+
+impl TryFrom<rpc::OccurrenceMaterialAssignment> for OccurrenceMaterialAssignment {
+    type Error = String;
+    fn try_from(value: rpc::OccurrenceMaterialAssignment) -> Result<Self, String> {
+        routing_label(&value.material_id)?;
+        let result = Self {
+            occurrence_id: OccurrenceId::new(value.occurrence_id).map_err(|e| e.to_string())?,
+            material_id: value.material_id,
+            work_envelope_mm: required(value.work_envelope_mm, "assignment work envelope")?
+                .try_into()?,
+        };
+        validate_assignment_bounds(&result)?;
+        Ok(result)
+    }
+}
+impl TryFrom<OccurrenceMaterialAssignment> for rpc::OccurrenceMaterialAssignment {
+    type Error = String;
+    fn try_from(value: OccurrenceMaterialAssignment) -> Result<Self, String> {
+        routing_label(&value.material_id)?;
+        validate_assignment_bounds(&value)?;
+        Ok(Self {
+            occurrence_id: value.occurrence_id.get(),
+            material_id: value.material_id,
+            work_envelope_mm: Some(value.work_envelope_mm.try_into()?),
+        })
+    }
+}
+
+impl TryFrom<rpc::FixedDualJob> for FixedDualJob {
+    type Error = String;
+    fn try_from(value: rpc::FixedDualJob) -> Result<Self, String> {
+        let tools: [rpc::FixedDualTool; 2] = value
+            .tools
+            .try_into()
+            .map_err(|_| "fixed-dual job requires exactly two tools")?;
+        let assignments: [rpc::OccurrenceMaterialAssignment; 2] = value
+            .assignments
+            .try_into()
+            .map_err(|_| "fixed-dual job requires exactly two assignments")?;
+        if rpc::HomingCoordinateContract::try_from(value.homing_contract)
+            .map_err(|e| e.to_string())?
+            != rpc::HomingCoordinateContract::MarlinNativeCartesian
+        {
+            return Err("unsupported fixed-dual homing contract".into());
+        }
+        let [tool0, tool1] = tools;
+        let [assignment0, assignment1] = assignments;
+        let result = Self {
+            machine_id: value.machine_id,
+            configuration: rpc::FixedDualConfiguration::try_from(value.configuration)
+                .map_err(|e| e.to_string())?
+                .try_into()?,
+            firmware_revision: value.firmware_revision,
+            configuration_hash: SourceHash::parse(value.configuration_hash)
+                .map_err(|e| e.to_string())?,
+            calibration_record_hash: SourceHash::parse(value.calibration_record_hash)
+                .map_err(|e| e.to_string())?,
+            homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
+            home_position_mm: required(value.home_position_mm, "fixed-dual home")?.try_into()?,
+            bed_temperature_c: value.bed_temperature_c,
+            maximum_bed_temperature_c: value.maximum_bed_temperature_c,
+            tools: [tool0.try_into()?, tool1.try_into()?],
+            assignments: [assignment0.try_into()?, assignment1.try_into()?],
+            transition_lift_mm: value.transition_lift_mm,
+            carriage_travel_bounds_mm: required(
+                value.carriage_travel_bounds_mm,
+                "carriage travel bounds",
+            )?
+            .try_into()?,
+            carriage_body_bounds_mm: required(
+                value.carriage_body_bounds_mm,
+                "carriage body bounds",
+            )?
+            .try_into()?,
+            inactive_nozzle_radius_mm: value.inactive_nozzle_radius_mm,
+            park_position_mm: required(value.park_position_mm, "fixed-dual park")?.try_into()?,
+        };
+        result.validate_declaration().map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+}
+impl TryFrom<FixedDualJob> for rpc::FixedDualJob {
+    type Error = String;
+    fn try_from(value: FixedDualJob) -> Result<Self, String> {
+        value.validate_declaration().map_err(|e| e.to_string())?;
+        Ok(Self {
+            machine_id: value.machine_id,
+            configuration: rpc::FixedDualConfiguration::try_from(value.configuration)? as i32,
+            firmware_revision: value.firmware_revision,
+            configuration_hash: value.configuration_hash.into(),
+            calibration_record_hash: value.calibration_record_hash.into(),
+            homing_contract: match value.homing_contract {
+                HomingCoordinateContract::MarlinNativeCartesian => {
+                    rpc::HomingCoordinateContract::MarlinNativeCartesian as i32
+                }
+            },
+            home_position_mm: Some(value.home_position_mm.try_into()?),
+            bed_temperature_c: value.bed_temperature_c,
+            maximum_bed_temperature_c: value.maximum_bed_temperature_c,
+            tools: value
+                .tools
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            assignments: value
+                .assignments
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            transition_lift_mm: value.transition_lift_mm,
+            carriage_travel_bounds_mm: Some(value.carriage_travel_bounds_mm.try_into()?),
+            carriage_body_bounds_mm: Some(value.carriage_body_bounds_mm.try_into()?),
+            inactive_nozzle_radius_mm: value.inactive_nozzle_radius_mm,
+            park_position_mm: Some(value.park_position_mm.try_into()?),
+        })
+    }
+}
+
+fn validate_tool_accounting(value: &RoutedToolAccounting) -> Result<(), String> {
+    routing_label(&value.material_id)?;
+    if value.tool > 1
+        || value.model_deposition_segments == 0
+        || value.waste_deposition_segments == 0
+        || [
+            value.model_filament_length_mm,
+            value.model_volume_mm3,
+            value.waste_filament_length_mm,
+            value.waste_volume_mm3,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v <= 0.0)
+        || !value.outstanding_retraction_mm.is_finite()
+        || value.outstanding_retraction_mm < 0.0
+        || value
+            .model_deposition_segments
+            .checked_add(value.waste_deposition_segments)
+            .is_none_or(|count| count > MAX_DEPOSITION_SEGMENTS)
+    {
+        return Err("invalid routed tool accounting".into());
+    }
+    Ok(())
+}
+impl TryFrom<rpc::RoutedToolAccounting> for RoutedToolAccounting {
+    type Error = String;
+    fn try_from(value: rpc::RoutedToolAccounting) -> Result<Self, String> {
+        let result = Self {
+            tool: value
+                .tool
+                .try_into()
+                .map_err(|_| "routed tool index exceeds u8")?,
+            material_id: value.material_id,
+            model_deposition_segments: value.model_deposition_segments,
+            model_filament_length_mm: value.model_filament_length_mm,
+            model_volume_mm3: value.model_volume_mm3,
+            waste_deposition_segments: value.waste_deposition_segments,
+            waste_filament_length_mm: value.waste_filament_length_mm,
+            waste_volume_mm3: value.waste_volume_mm3,
+            outstanding_retraction_mm: value.outstanding_retraction_mm,
+        };
+        validate_tool_accounting(&result)?;
+        Ok(result)
+    }
+}
+impl TryFrom<RoutedToolAccounting> for rpc::RoutedToolAccounting {
+    type Error = String;
+    fn try_from(value: RoutedToolAccounting) -> Result<Self, String> {
+        validate_tool_accounting(&value)?;
+        Ok(Self {
+            tool: value.tool.into(),
+            material_id: value.material_id,
+            model_deposition_segments: value.model_deposition_segments,
+            model_filament_length_mm: value.model_filament_length_mm,
+            model_volume_mm3: value.model_volume_mm3,
+            waste_deposition_segments: value.waste_deposition_segments,
+            waste_filament_length_mm: value.waste_filament_length_mm,
+            waste_volume_mm3: value.waste_volume_mm3,
+            outstanding_retraction_mm: value.outstanding_retraction_mm,
+        })
+    }
+}
+impl TryFrom<rpc::FixedDualVerification> for FixedDualVerification {
+    type Error = String;
+    fn try_from(value: rpc::FixedDualVerification) -> Result<Self, String> {
+        let [tool0, tool1]: [rpc::RoutedToolAccounting; 2] = value
+            .tools
+            .try_into()
+            .map_err(|_| "routing accounting requires exactly two tools")?;
+        let result = Self {
+            selection_count: value.selection_count,
+            tools: [tool0.try_into()?, tool1.try_into()?],
+        };
+        result.validate().map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+}
+impl TryFrom<FixedDualVerification> for rpc::FixedDualVerification {
+    type Error = String;
+    fn try_from(value: FixedDualVerification) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            selection_count: value.selection_count,
+            tools: value
+                .tools
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+fn validate_assignment_bounds(value: &OccurrenceMaterialAssignment) -> Result<(), String> {
+    value
+        .work_envelope_mm
+        .validate()
+        .map_err(|e| e.to_string())?;
+    if (0..3).any(|axis| {
+        value.work_envelope_mm.min[axis] >= value.work_envelope_mm.max[axis]
+            || !(value.work_envelope_mm.max[axis] - value.work_envelope_mm.min[axis]).is_finite()
+    }) {
+        return Err("routing requires finite positive box dimensions".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod fixed_dual_wire_tests {
+    use super::*;
+    use crate::geometry::AabbMm;
+
+    fn job() -> FixedDualJob {
+        let intent = decode_intent(include_bytes!(
+            "../../../../fixtures/manufacturing/solid-fill.intent.json"
+        ))
+        .unwrap();
+        let tool = |index: usize| FixedDualTool {
+            id: format!("tool-{index}"),
+            feeder_id: format!("feeder-{index}"),
+            material: LoadedMaterial {
+                id: format!("material-{index}"),
+                revision: "declared-1".into(),
+                declaration_hash: SourceHash::from_bytes(&[index as u8]),
+                polymer_family: "PLA".into(),
+            },
+            offset_xy_mm: [index as f64 * 20.0, 0.0],
+            nozzle_diameter_mm: 0.4,
+            filament_diameter_mm: 1.75,
+            deposition_limits: intent.printer.deposition_limits.clone(),
+            max_feed_mm_s: 100.0,
+            max_volumetric_flow_mm3_s: 10.0,
+            nozzle_temperature_c: 200.0,
+            standby_temperature_c: 150.0,
+            minimum_extrusion_temperature_c: 170.0,
+            maximum_nozzle_temperature_c: 250.0,
+            retract_filament_mm: 1.0,
+            retract_speed_mm_s: 10.0,
+            minimum_reprime_volume_mm3: 1.0,
+            waste_line_xy_mm: [
+                [index as f64 * 30.0, 1.0],
+                [index as f64 * 30.0 + 10.0, 1.0],
+            ],
+        };
+        FixedDualJob {
+            machine_id: "software-wire-test".into(),
+            configuration: FixedDualConfiguration::Marlin2125NativeFixedHotends,
+            firmware_revision: FIXED_DUAL_FIRMWARE_REVISION.into(),
+            configuration_hash: SourceHash::from_bytes(b"configuration"),
+            calibration_record_hash: SourceHash::from_bytes(b"declared-record"),
+            homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
+            home_position_mm: [0.0; 3],
+            bed_temperature_c: 60.0,
+            maximum_bed_temperature_c: 100.0,
+            tools: [tool(0), tool(1)],
+            assignments: std::array::from_fn(|index| OccurrenceMaterialAssignment {
+                occurrence_id: OccurrenceId::new(index as u32 + 1).unwrap(),
+                material_id: format!("material-{index}"),
+                work_envelope_mm: AabbMm::new(
+                    [index as f64 * 40.0, 10.0, 0.0],
+                    [index as f64 * 40.0 + 20.0, 30.0, 20.0],
+                )
+                .unwrap(),
+            }),
+            transition_lift_mm: 2.0,
+            carriage_travel_bounds_mm: AabbMm::new([-30.0, -30.0, 0.0], [200.0; 3]).unwrap(),
+            carriage_body_bounds_mm: AabbMm::new([-5.0, -5.0, 1.0], [25.0, 5.0, 10.0]).unwrap(),
+            inactive_nozzle_radius_mm: 0.5,
+            park_position_mm: [0.0, 0.0, 30.0],
+        }
+    }
+
+    #[test]
+    fn fixed_dual_workflow_round_trip_and_strict_declarations() {
+        let job = job();
+        let workflow = JobWorkflow::FixedDualMarlin { job: job.clone() };
+        let wire = rpc::JobWorkflow::try_from(workflow.clone()).unwrap();
+        assert_eq!(JobWorkflow::try_from(wire).unwrap(), workflow);
+        let wire = rpc::FixedDualJob::try_from(job.clone()).unwrap();
+        assert_eq!(FixedDualJob::try_from(wire.clone()).unwrap(), job);
+        for count in [0, 1, 3] {
+            let mut invalid = wire.clone();
+            invalid.tools = vec![wire.tools[0].clone(); count];
+            assert!(FixedDualJob::try_from(invalid).is_err());
+            let mut invalid = wire.clone();
+            invalid.assignments = vec![wire.assignments[0].clone(); count];
+            assert!(FixedDualJob::try_from(invalid).is_err());
+        }
+        for enum_value in [0, 999] {
+            let mut invalid = wire.clone();
+            invalid.configuration = enum_value;
+            assert!(FixedDualJob::try_from(invalid).is_err());
+            let mut invalid = wire.clone();
+            invalid.homing_contract = enum_value;
+            assert!(FixedDualJob::try_from(invalid).is_err());
+        }
+        let mut invalid = wire.clone();
+        invalid.tools[0].material = None;
+        assert!(FixedDualJob::try_from(invalid).is_err());
+        let mut invalid = wire.clone();
+        invalid.tools[0].deposition_limits = None;
+        assert!(FixedDualJob::try_from(invalid).is_err());
+        for coordinates in [vec![], vec![0.0], vec![0.0; 3]] {
+            let mut invalid = wire.clone();
+            invalid.tools[0].offset_xy_mm = coordinates;
+            assert!(FixedDualJob::try_from(invalid).is_err());
+        }
+        for count in [0, 3, 5] {
+            let mut invalid = wire.clone();
+            invalid.tools[0].waste_line_xy_mm = vec![0.0; count];
+            assert!(FixedDualJob::try_from(invalid).is_err());
+        }
+        let mut invalid = wire.clone();
+        invalid.home_position_mm = None;
+        assert!(FixedDualJob::try_from(invalid).is_err());
+        let mut invalid = wire.clone();
+        invalid.assignments[0].work_envelope_mm = None;
+        assert!(FixedDualJob::try_from(invalid).is_err());
+        let mut invalid = wire;
+        invalid.firmware_revision = "unreviewed".into();
+        assert!(FixedDualJob::try_from(invalid).is_err());
+        let mut invalid = job.clone();
+        invalid.tools[0].nozzle_temperature_c = f64::NAN;
+        assert!(rpc::FixedDualJob::try_from(invalid).is_err());
+        let mut invalid = job;
+        invalid.tools[0].material.id = "control\nlabel".into();
+        assert!(rpc::FixedDualJob::try_from(invalid).is_err());
+        assert_eq!(
+            OutputDialect::try_from(rpc::OutputDialect::Marlin2FixedDualGcodeV1).unwrap(),
+            OutputDialect::Marlin2FixedDualGcodeV1
+        );
+        assert!(OutputDialect::try_from(rpc::OutputDialect::Unspecified).is_err());
+    }
+
+    fn accounting() -> FixedDualVerification {
+        FixedDualVerification {
+            selection_count: 2,
+            tools: std::array::from_fn(|index| RoutedToolAccounting {
+                tool: index as u8,
+                material_id: format!("material-{index}"),
+                model_deposition_segments: 1,
+                model_filament_length_mm: 1.0,
+                model_volume_mm3: 2.0,
+                waste_deposition_segments: 1,
+                waste_filament_length_mm: 0.5,
+                waste_volume_mm3: 1.0,
+                outstanding_retraction_mm: 1.0,
+            }),
+        }
+    }
+
+    #[test]
+    fn routing_accounting_round_trip_rejects_missing_reordered_and_overflowing_tools() {
+        let accounting = accounting();
+        let wire = rpc::FixedDualVerification::try_from(accounting.clone()).unwrap();
+        assert_eq!(
+            FixedDualVerification::try_from(wire.clone()).unwrap(),
+            accounting
+        );
+        for count in [0, 1, 3] {
+            let mut invalid = wire.clone();
+            invalid.tools = vec![wire.tools[0].clone(); count];
+            assert!(FixedDualVerification::try_from(invalid).is_err());
+        }
+        let mut invalid = wire.clone();
+        invalid.tools.swap(0, 1);
+        assert!(FixedDualVerification::try_from(invalid).is_err());
+        for tool in [2, 256, u32::MAX] {
+            let mut invalid = wire.clone();
+            invalid.tools[0].tool = tool;
+            assert!(FixedDualVerification::try_from(invalid).is_err());
+        }
+        let mut invalid = wire.clone();
+        invalid.tools[0].waste_volume_mm3 = f64::NAN;
+        assert!(FixedDualVerification::try_from(invalid).is_err());
+        let mut invalid = accounting;
+        invalid.tools[0].model_deposition_segments = u32::MAX;
+        assert!(rpc::FixedDualVerification::try_from(invalid).is_err());
+    }
+}
+
+#[cfg(test)]
+mod routed_report_wire_tests {
+    use super::*;
+
+    #[test]
+    fn report_and_summary_preserve_typed_routing_and_reject_inconsistent_totals() {
+        let routing = FixedDualVerification {
+            selection_count: 2,
+            tools: std::array::from_fn(|index| RoutedToolAccounting {
+                tool: index as u8,
+                material_id: format!("material-{index}"),
+                model_deposition_segments: 1,
+                model_filament_length_mm: 1.0,
+                model_volume_mm3: 2.0,
+                waste_deposition_segments: 1,
+                waste_filament_length_mm: 0.5,
+                waste_volume_mm3: 1.0,
+                outstanding_retraction_mm: 1.0,
+            }),
+        };
+        let report = VerificationReport {
+            verified: true,
+            coverage: vec!["decoded route".into()],
+            limitations: vec!["software only".into()],
+            deposition_segments: 2,
+            travel_segments: 2,
+            deposited_volume_mm3: 4.0,
+            filament_length_mm: 2.0,
+            max_position_error_mm: 0.0,
+            max_extrusion_error_mm: 0.0,
+            lifecycle_motion_count: 2,
+            priming_filament_length_mm: 1.0,
+            support_deposition_segments: 0,
+            support_deposited_volume_mm3: 0.0,
+            support_filament_length_mm: 0.0,
+            retraction_count: 2,
+            retracted_filament_mm: 2.0,
+            routing: Some(routing.clone()),
+        };
+        let wire = rpc::VerificationReport::try_from(report.clone()).unwrap();
+        assert_eq!(VerificationReport::try_from(wire.clone()).unwrap(), report);
+        let mut invalid = wire.clone();
+        invalid.routing = None;
+        assert!(VerificationReport::try_from(invalid).is_err());
+        let mut invalid = wire;
+        invalid.routing.as_mut().unwrap().tools[0].model_volume_mm3 += 1.0;
+        assert!(VerificationReport::try_from(invalid).is_err());
+
+        let summary = ManufacturingSummary {
+            layers: 1,
+            paths: 2,
+            deposition_segments: 2,
+            deposited_volume_mm3: 4.0,
+            filament_length_mm: 2.0,
+            software_only: true,
+            support_deposition_segments: 0,
+            support_deposited_volume_mm3: 0.0,
+            support_filament_length_mm: 0.0,
+            surface_resolution: SurfaceResolutionTotals::empty(),
+            native_geometry: NativeGeometryCoverageSummary {
+                requested_shape_error_mm: 0.02,
+                achieved_shape_error_mm: 0.001,
+                height_analysis_count: 1,
+                slab_count: 1,
+                certified_layer_count: 1,
+                event_count: 0,
+                geometry_work: 1,
+                evidence: PreflightEvidence::Certified,
+                source_feature_coverage: NativeFeatureCoverageSummary {
+                    disjoint_source_layer_count: 1,
+                    invariant_source_union_layer_count: 0,
+                    native_interface_complex_layer_count: 0,
+                    owned_critical_slab_count: 0,
+                },
+                skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
+                support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
+            },
+            process_resolution: vec![],
+            routing: Some(routing),
+        };
+        let wire = rpc::ManufacturingSummary::try_from(summary.clone()).unwrap();
+        assert_eq!(
+            ManufacturingSummary::try_from(wire.clone()).unwrap(),
+            summary
+        );
+        let mut invalid = wire;
+        invalid.routing.as_mut().unwrap().tools[0].model_deposition_segments += 1;
+        assert!(ManufacturingSummary::try_from(invalid).is_err());
+        let mut invalid = summary;
+        invalid.routing.as_mut().unwrap().tools[0].waste_filament_length_mm = f64::INFINITY;
+        assert!(rpc::ManufacturingSummary::try_from(invalid).is_err());
     }
 }

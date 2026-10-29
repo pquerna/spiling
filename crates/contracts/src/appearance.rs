@@ -1184,7 +1184,11 @@ impl AppearanceStudy {
             target.validate()?;
         }
         if let Some(optical) = &self.optical {
-            optical.validate(self.palette.as_ref().ok_or_else(|| invalid("optical study has no palette"))?)?;
+            optical.validate(
+                self.palette
+                    .as_ref()
+                    .ok_or_else(|| invalid("optical study has no palette"))?,
+            )?;
         }
         if let Some(report) = &self.report {
             self.matches_report(report)?;
@@ -1235,7 +1239,10 @@ impl AppearanceStudy {
             limits: self.limits,
             report: self.report_record.clone(),
             selection: self.selection.clone(),
-            optical: self.optical.as_ref().map(crate::optical::OpticalStudy::info),
+            optical: self
+                .optical
+                .as_ref()
+                .map(crate::optical::OpticalStudy::info),
         }
     }
     /// Does not include shared Arc report storage; callers deduplicate report pointers.
@@ -1251,7 +1258,10 @@ impl AppearanceStudy {
             + self.report_record.as_ref().map_or(0, |r| {
                 r.hash.allocated_bytes() + r.input_hash.allocated_bytes() + r.producer.capacity()
             })
-            + self.optical.as_ref().map_or(0, crate::optical::OpticalStudy::allocated_bytes)
+            + self
+                .optical
+                .as_ref()
+                .map_or(0, crate::optical::OpticalStudy::allocated_bytes)
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
@@ -1279,7 +1289,11 @@ impl AppearanceStudyInfo {
             target.validate()?;
         }
         if let Some(optical) = &self.optical {
-            optical.validate(self.palette.as_ref().ok_or_else(|| invalid("optical study info has no palette"))?)?;
+            optical.validate(
+                self.palette
+                    .as_ref()
+                    .ok_or_else(|| invalid("optical study info has no palette"))?,
+            )?;
         }
         if let Some(report) = &self.report {
             report.validate()?;
@@ -1326,7 +1340,12 @@ fn optional_text128<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Str
     }
     d.deserialize_option(Optional)
 }
-pub(crate) fn bounded_sequence<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>, const N: usize>(
+pub(crate) fn bounded_sequence<
+    'de,
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+    const N: usize,
+>(
     d: D,
 ) -> Result<Vec<T>, D::Error> {
     struct Sequence<T, const N: usize>(std::marker::PhantomData<T>);
@@ -1394,7 +1413,10 @@ fn validate_encoded_report(report: &AppearanceReport, bytes: &[u8]) -> Result<()
     }
     Ok(())
 }
-pub(crate) fn hash_json<T: Serialize>(value: &T, max: usize) -> Result<(SourceHash, usize), ProjectError> {
+pub(crate) fn hash_json<T: Serialize>(
+    value: &T,
+    max: usize,
+) -> Result<(SourceHash, usize), ProjectError> {
     struct HashWriter {
         hash: Sha256,
         count: usize,

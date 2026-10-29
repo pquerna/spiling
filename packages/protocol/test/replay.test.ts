@@ -37,6 +37,9 @@ test("native actual replay exposes borrowed strided f64 bytes and unknown first 
   assert.equal(replay.eventCount, descriptor.info.event_count);
   assert.equal(replay.processCount, descriptor.info.process_count);
   assert.equal(replay.lifecycleCount, descriptor.info.lifecycle_count);
+  assert.equal(replay.toolEpochCount, 0);
+  assert.equal(replay.wasteCount, 0);
+  assert.equal(replay.activeTool(0), 0);
   assert.deepEqual(fixture.actual_positions.slice(0, 4), [
     [1, 1, 0.4],
     [5, 1, 0.4],
@@ -131,6 +134,9 @@ test("native known coincident travel remains a valid event without invented move
 const corruptions: [string, (data: DataView) => void][] = [
   ["magic", (data) => data.setUint8(0, 0)],
   ["version", (data) => data.setUint16(4, 1, true)],
+  ["obsolete version five", (data) => data.setUint16(4, 5, true)],
+  ["unannounced tool jump", (data) => data.setUint32(176 + 76, 1, true)],
+  ["invalid active tool", (data) => data.setUint32(96 + 76, 2, true)],
   ["header stride", (data) => data.setUint16(6, 80, true)],
   ["record stride", (data) => data.setUint32(12, 96, true)],
   ["header count", (data) => data.setUint32(8, 0xffffffff, true)],
@@ -524,4 +530,114 @@ test("a new object layer must begin with travel after the prior layer deposited"
   const value = await rehash(bytes);
   value.info.layer_count = 2;
   await assert.rejects(decodeReplayDisplay(bytes, value), ReplayDecodeError);
+});
+
+// Wire-admission fixture only: this does not claim native program verification.
+async function dualWire(retracted = 1) {
+  const rows = [
+    [14, 0, 0, 0, .2, 0], [0, 0, 1, 0, .2, 0],
+    [15, 0, 2, 0, .2, 1], [1, 0, 3, 0, .2, 2], [11, 0, 3, 0, .2, retracted],
+    [0, 0, 3, 0, .4, retracted],
+    [14, 1, 13, 0, .2, 0], [0, 1, 14, 0, .2, 0],
+    [15, 1, 15, 0, .2, 1], [1, 1, 16, 0, .2, 2], [11, 1, 16, 0, .2, 1],
+    [6, 1, 16, 0, 1, 1], [6, 1, 17, 0, 1, 1],
+  ];
+  const bytes = new ArrayBuffer(96 + rows.length * 80), data = new DataView(bytes);
+  data.setUint32(0, 0x524c5053, true);
+  data.setUint16(4, 6, true); data.setUint16(6, 96, true);
+  for (const [offset, value] of [[8, 13], [12, 80], [16, 4], [20, 3], [24, 1], [28, 2], [88, 2], [92, 2]])
+    data.setUint32(offset!, value!, true);
+  const min: [number, number, number] = [0, 0, .2], max: [number, number, number] = [17, 0, 1];
+  for (let axis = 0; axis < 3; axis++) {
+    data.setFloat64(32 + axis * 8, min[axis]!, true);
+    data.setFloat64(56 + axis * 8, max[axis]!, true);
+  }
+  rows.forEach(([kind, tool, x, y, z, e], index) => {
+    const start = 96 + index * 80, associated = kind === 1 || kind === 15;
+    [x, y, z, e, kind === 14 ? 0 : 600].forEach((value, axis) => data.setFloat64(start + axis * 8, value!, true));
+    data.setUint32(start + 40, index + 1, true);
+    data.setUint16(start + 44, kind === 6 ? 65535 : 0, true);
+    data.setUint8(start + 46, kind!);
+    data.setUint8(start + 47, (kind === 14 ? 0 : 1) | (associated ? 2 : 0));
+    if (associated) {
+      data.setFloat64(start + 48, .45, true);
+      data.setFloat64(start + 64, .2, true);
+    }
+    data.setUint32(start + 72, 0xffffffff, true);
+    data.setUint32(start + 76, tool!, true);
+  });
+  const base = structuredClone(descriptor);
+  Object.assign(base.info, { schema_version: 6, event_count: 13, deposition_count: 4,
+    travel_count: 3, layer_count: 1, lifecycle_count: 2, process_count: 2,
+    tool_epoch_count: 2, waste_count: 2, bounds_mm: { min, max } });
+  base.resource.size_bytes = String(bytes.byteLength);
+  return { bytes, descriptor: await rehash(bytes, base) };
+}
+
+test("SPLR6 epochs establish separate tip frames and explicitly account waste", async () => {
+  const wire = await dualWire();
+  const replay = await decodeReplayDisplay(wire.bytes, wire.descriptor);
+  assert.equal(replay.toolEpochCount, 2);
+  assert.equal(replay.wasteCount, 2);
+  assert.equal(replay.knownStart(6), false);
+  assert.equal(replay.knownStart(7), true);
+  assert.equal(replay.activeTool(6), 1);
+  assert.equal(replay.association(8)!.regionalOwner, null);
+  for (const mutate of [
+    (data: DataView) => data.setUint8(96 + 6 * 80 + 47, 1),
+    (data: DataView) => data.setUint32(96 + 6 * 80 + 76, 0, true),
+    (data: DataView) => data.setFloat64(96 + 6 * 80 + 24, 1, true),
+    (data: DataView) => data.setUint32(96 + 8 * 80 + 72, 0, true),
+    (data: DataView) => data.setUint8(96 + 8 * 80 + 46, 1),
+    (data: DataView) => data.setUint8(96 + 3 * 80 + 46, 9),
+    (data: DataView) => data.setUint8(96 + 3 * 80 + 46, 10),
+    (data: DataView) => data.setUint8(96 + 3 * 80 + 46, 13),
+    (data: DataView) => data.setUint16(96 + 3 * 80 + 44, 1, true),
+  ]) {
+    const bytes = wire.bytes.slice(0);
+    mutate(new DataView(bytes));
+    await assert.rejects(decodeReplayDisplay(bytes, await rehash(bytes, wire.descriptor)), ReplayDecodeError);
+  }
+});
+
+test("SPLR6 descriptors require exact epoch/waste fields and bounded counters", async () => {
+  for (const mutate of [
+    (info: Record<string, unknown>) => { delete info.tool_epoch_count; },
+    (info: Record<string, unknown>) => { delete info.waste_count; },
+    (info: Record<string, unknown>) => { info.extra = 0; },
+    (info: Record<string, unknown>) => { info.tool_epoch_count = 100001; },
+    (info: Record<string, unknown>) => { info.waste_count = 1; },
+    (info: Record<string, unknown>) => { info.schema_version = 5; },
+    (info: Record<string, unknown>) => { info.deposition_count = 100001; },
+  ]) {
+    const value = structuredClone(descriptor);
+    mutate(value.info as unknown as Record<string, unknown>);
+    await assert.rejects(decodeReplayDisplay(golden, value), ReplayDecodeError);
+  }
+});
+
+test("a first outgoing feeder can remain below E0 during its lifted travel", async () => {
+  const wire = await dualWire(-0.5);
+  const replay = await decodeReplayDisplay(wire.bytes, wire.descriptor);
+  assert.equal(replay.kind(4), 11);
+  assert.equal(replay.kind(5), 0);
+  assert.equal(replay.extrusion(5), -0.5);
+  assert.equal(replay.activeTool(5), 0);
+  assert.equal(replay.kind(6), 14);
+  assert.equal(replay.extrusion(6), 0);
+});
+
+test("native fixed-dual recovery rejects one E8 tick of unpaid or excess debt", async () => {
+  const native = JSON.parse(readFileSync(new URL("../../../fixtures/protocol/replay-fixed-dual.json", import.meta.url), "utf8"));
+  const bytes = Uint8Array.from(Buffer.from(native.data, "hex")).buffer;
+  const replay = await decodeReplayDisplay(bytes, native.descriptor);
+  const recovery = Array.from({ length: replay.eventCount }, (_, event) => event).find(event => replay.kind(event) === 12)!;
+  assert.notEqual(recovery, undefined);
+  for (const delta of [-0.00000001, 0.00000001]) {
+    const changed = bytes.slice(0), data = new DataView(changed);
+    const value = Math.round((replay.extrusion(recovery) + delta) * 100_000_000) / 100_000_000;
+    for (let event = recovery; event < recovery + 3; event++)
+      data.setFloat64(96 + event * 80 + 24, value, true);
+    await assert.rejects(decodeReplayDisplay(changed, await rehash(changed, native.descriptor)), ReplayDecodeError);
+  }
 });

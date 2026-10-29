@@ -783,6 +783,7 @@ fn bundle() -> ManufacturingBundle {
             support_filament_length_mm: 0.0,
             retraction_count: 0,
             retracted_filament_mm: 0.0,
+            routing: None,
         },
     }
 }
@@ -821,6 +822,32 @@ fn strict_authoring_json_requires_every_explicit_profile_and_recipe_field() {
         1,
     );
     assert!(decode_intent(duplicate.as_bytes()).is_err());
+}
+
+#[test]
+fn routing_is_required_nullable_and_cannot_relabel_old_workflows() {
+    let captured = bundle();
+    let report = serde_json::to_value(&captured.verification).unwrap();
+    assert!(report["routing"].is_null());
+    let mut missing = report.clone();
+    missing.as_object_mut().unwrap().remove("routing");
+    assert!(serde_json::from_value::<VerificationReport>(missing).is_err());
+    let summary = serde_json::to_value(captured.summary()).unwrap();
+    assert!(summary["routing"].is_null());
+    let mut missing = summary;
+    missing.as_object_mut().unwrap().remove("routing");
+    assert!(serde_json::from_value::<ManufacturingSummary>(missing).is_err());
+    let mut wrong = captured.verification.clone();
+    wrong.lifecycle_motion_count = 2;
+    assert!(wrong.validate().is_err());
+    let inspection = ManufacturingInspectionProvenance::from(&captured.provenance);
+    assert_eq!(
+        inspection.workflow,
+        captured.provenance.intent.printer.workflow
+    );
+    let mut missing = serde_json::to_value(inspection).unwrap();
+    missing.as_object_mut().unwrap().remove("workflow");
+    assert!(serde_json::from_value::<ManufacturingInspectionProvenance>(missing).is_err());
 }
 
 #[test]

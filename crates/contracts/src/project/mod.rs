@@ -3,8 +3,8 @@
 // Licensed under the Open Software License version 3.0
 
 //! Persistent source-backed project contracts, independent of storage and BREP.
-use crate::geometry::*;
 use crate::appearance::{AppearanceStudy, AppearanceStudyInfo, AppearanceTarget, SearchLimits};
+use crate::geometry::*;
 use crate::manufacturing::{ManufacturingArtifactRecord, ManufacturingIntent, input_fingerprint};
 use crate::optical::{OpticalRequest, OpticalSelection};
 use crate::process::*;

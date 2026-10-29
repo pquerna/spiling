@@ -7,7 +7,9 @@ mod process;
 pub mod storage;
 use process::apply_process_edit;
 use sha2::{Digest, Sha256};
-use spiling_contracts::{appearance::*, geometry::*, manufacturing::*, optical::*, process::*, project::*, surface::*};
+use spiling_contracts::{
+    appearance::*, geometry::*, manufacturing::*, optical::*, process::*, project::*, surface::*,
+};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex, Weak},
@@ -33,38 +35,61 @@ pub struct PaletteAsset {
     prepared: Arc<PreparedPalette>,
 }
 impl PaletteAsset {
-    pub fn new(record: PaletteRecord, original: Vec<u8>, canonical: Vec<u8>) -> Result<Self, ProjectError> {
+    pub fn new(
+        record: PaletteRecord,
+        original: Vec<u8>,
+        canonical: Vec<u8>,
+    ) -> Result<Self, ProjectError> {
         record.validate_hashes(&original, &canonical)?;
         let remaining = MAX_APPEARANCE_RETAINED_BYTES
-            .saturating_sub(original.capacity()).saturating_sub(canonical.capacity())
+            .saturating_sub(original.capacity())
+            .saturating_sub(canonical.capacity())
             .saturating_sub(record.allocated_bytes());
         let prepared = PreparedPalette::decode_bounded(&original, &canonical, remaining)?;
         Self::from_checked_prepared(record, original, canonical, prepared)
     }
     pub fn from_document(
-        record: PaletteRecord, original: Vec<u8>, canonical: Vec<u8>, document: PaletteDocument,
+        record: PaletteRecord,
+        original: Vec<u8>,
+        canonical: Vec<u8>,
+        document: PaletteDocument,
     ) -> Result<Self, ProjectError> {
         record.validate_hashes(&original, &canonical)?;
         let prepared = PreparedPalette::new(document, &canonical)?;
         Self::from_checked_prepared(record, original, canonical, prepared)
     }
     fn from_checked_prepared(
-        record: PaletteRecord, original: Vec<u8>, canonical: Vec<u8>, prepared: PreparedPalette,
+        record: PaletteRecord,
+        original: Vec<u8>,
+        canonical: Vec<u8>,
+        prepared: PreparedPalette,
     ) -> Result<Self, ProjectError> {
         record.validate_provenance(prepared.document())?;
         if prepared.canonical_hash() != &record.canonical_hash {
             return Err(invalid("palette prepared identity differs from record"));
         }
         Ok(Self {
-            record, original: Arc::new(original), canonical: Arc::new(canonical),
+            record,
+            original: Arc::new(original),
+            canonical: Arc::new(canonical),
             prepared: Arc::new(prepared),
         })
     }
-    pub fn record(&self) -> &PaletteRecord { &self.record }
-    pub fn original(&self) -> &Arc<Vec<u8>> { &self.original }
-    pub fn canonical(&self) -> &Arc<Vec<u8>> { &self.canonical }
-    pub fn document(&self) -> &PaletteDocument { self.prepared.document() }
-    pub fn prepared(&self) -> &PreparedPalette { &self.prepared }
+    pub fn record(&self) -> &PaletteRecord {
+        &self.record
+    }
+    pub fn original(&self) -> &Arc<Vec<u8>> {
+        &self.original
+    }
+    pub fn canonical(&self) -> &Arc<Vec<u8>> {
+        &self.canonical
+    }
+    pub fn document(&self) -> &PaletteDocument {
+        self.prepared.document()
+    }
+    pub fn prepared(&self) -> &PreparedPalette {
+        &self.prepared
+    }
 }
 
 /// Checked immutable canonical PGM content. Original encoded paths never enter Core.
@@ -201,11 +226,24 @@ pub struct Snapshot {
 }
 #[derive(Debug, Clone)]
 pub enum Edit {
-    ImportAppearancePalette { asset: Arc<PaletteAsset> },
-    SetAppearanceTarget { target: AppearanceTarget, limits: SearchLimits },
-    AcceptAppearanceReport { report: Arc<AppearanceReport>, selection: Option<String> },
-    SetOpticalStudy { request: OpticalRequest },
-    AcceptOpticalReport { report: Arc<OpticalReport>, selection: Option<OpticalSelection> },
+    ImportAppearancePalette {
+        asset: Arc<PaletteAsset>,
+    },
+    SetAppearanceTarget {
+        target: AppearanceTarget,
+        limits: SearchLimits,
+    },
+    AcceptAppearanceReport {
+        report: Arc<AppearanceReport>,
+        selection: Option<String>,
+    },
+    SetOpticalStudy {
+        request: OpticalRequest,
+    },
+    AcceptOpticalReport {
+        report: Arc<OpticalReport>,
+        selection: Option<OpticalSelection>,
+    },
     Process {
         edit: ProcessEdit,
     },
@@ -297,7 +335,12 @@ impl Content {
             && self.appearance_study.limits == snapshot.appearance_study.limits
             && self.appearance_study.report == snapshot.appearance_study.report_record
             && self.appearance_study.selection == snapshot.appearance_study.selection
-            && self.appearance_study.optical == snapshot.appearance_study.optical.as_ref().map(OpticalStudy::info)
+            && self.appearance_study.optical
+                == snapshot
+                    .appearance_study
+                    .optical
+                    .as_ref()
+                    .map(OpticalStudy::info)
             && self.manufacturing_artifact.as_ref()
                 == snapshot
                     .manufacturing_artifact
@@ -478,7 +521,9 @@ impl Project {
     }
     /// Includes live prepared candidates, even after their revision becomes stale.
     pub fn retained_appearance_bytes(&self) -> Result<usize, ProjectError> {
-        let staged = self.staged_appearance.lock()
+        let staged = self
+            .staged_appearance
+            .lock()
             .map_err(|_| error(ProjectErrorCode::Io, "appearance staging lock poisoned"))?;
         let staged: Vec<_> = staged.iter().filter_map(Weak::upgrade).collect();
         appearance_bytes_with_incoming(
@@ -487,7 +532,10 @@ impl Project {
                 .chain(self.redo.iter().map(Arc::as_ref))
                 .chain(staged.iter().map(Arc::as_ref)),
             None,
-            self.saved.as_ref().and_then(|(_, content)| content.appearance_study.optical.as_ref()).map(|study| &study.request),
+            self.saved
+                .as_ref()
+                .and_then(|(_, content)| content.appearance_study.optical.as_ref())
+                .map(|study| &study.request),
         )
     }
     pub fn surface_images(&self) -> &BTreeMap<SourceHash, Arc<SurfaceImageAsset>> {
@@ -603,17 +651,22 @@ impl Project {
             _ => None,
         };
         // Invalidation is part of the same atomic edit; history keeps the coherent old pair.
-        if !matches!(&edit, Edit::PublishManufacturing { .. }
-            | Edit::ImportAppearancePalette { .. }
-            | Edit::SetAppearanceTarget { .. }
-            | Edit::AcceptAppearanceReport { .. }
-            | Edit::SetOpticalStudy { .. }
-            | Edit::AcceptOpticalReport { .. }) {
+        if !matches!(
+            &edit,
+            Edit::PublishManufacturing { .. }
+                | Edit::ImportAppearancePalette { .. }
+                | Edit::SetAppearanceTarget { .. }
+                | Edit::AcceptAppearanceReport { .. }
+                | Edit::SetOpticalStudy { .. }
+                | Edit::AcceptOpticalReport { .. }
+        ) {
             snapshot.manufacturing_artifact = None;
         }
         match edit {
             Edit::ImportAppearancePalette { mut asset } => {
-                let staged = self.staged_appearance.lock()
+                let staged = self
+                    .staged_appearance
+                    .lock()
                     .map_err(|_| error(ProjectErrorCode::Io, "appearance staging lock poisoned"))?;
                 let staged: Vec<_> = staged.iter().filter_map(Weak::upgrade).collect();
                 if let Some(retained) = std::iter::once(self.current.as_ref())
@@ -623,12 +676,17 @@ impl Project {
                     .find_map(|state| state.appearance_palettes.get(&asset.record.canonical_hash))
                 {
                     if retained.canonical.as_slice() != asset.canonical.as_slice() {
-                        return Err(error(ProjectErrorCode::CorruptAsset, "conflicting canonical palette identity"));
+                        return Err(error(
+                            ProjectErrorCode::CorruptAsset,
+                            "conflicting canonical palette identity",
+                        ));
                     }
                     asset = retained.clone();
                 }
                 snapshot.appearance_palettes.clear();
-                snapshot.appearance_palettes.insert(asset.record.canonical_hash.clone(), asset.clone());
+                snapshot
+                    .appearance_palettes
+                    .insert(asset.record.canonical_hash.clone(), asset.clone());
                 let study = Arc::make_mut(&mut snapshot.appearance_study);
                 study.palette = Some(asset.record.clone());
                 study.report = None;
@@ -657,7 +715,10 @@ impl Project {
                 if !report.is_complete() {
                     return Err(invalid("incomplete appearance report cannot be accepted"));
                 }
-                if selection.as_ref().is_some_and(|key| !report.has_selection(key)) {
+                if selection
+                    .as_ref()
+                    .is_some_and(|key| !report.has_selection(key))
+                {
                     return Err(invalid("appearance selection is not a report alternative"));
                 }
                 let study = Arc::make_mut(&mut snapshot.appearance_study);
@@ -666,27 +727,48 @@ impl Project {
                 study.selection = selection;
             }
             Edit::SetOpticalStudy { request } => {
-                let palette = snapshot.appearance_study.palette.as_ref()
+                let palette = snapshot
+                    .appearance_study
+                    .palette
+                    .as_ref()
                     .ok_or_else(|| invalid("optical study requires an imported palette"))?;
-                let asset = snapshot.appearance_palettes.get(&palette.canonical_hash)
-                    .ok_or_else(|| error(ProjectErrorCode::MissingAsset, "optical palette is missing"))?;
+                let asset = snapshot
+                    .appearance_palettes
+                    .get(&palette.canonical_hash)
+                    .ok_or_else(|| {
+                        error(ProjectErrorCode::MissingAsset, "optical palette is missing")
+                    })?;
                 request.validate_palette(asset.prepared())?;
-                Arc::make_mut(&mut snapshot.appearance_study).optical = Some(OpticalStudy::new(request));
+                Arc::make_mut(&mut snapshot.appearance_study).optical =
+                    Some(OpticalStudy::new(request));
             }
             Edit::AcceptOpticalReport { report, selection } => {
-                let palette = snapshot.appearance_study.palette.as_ref()
+                let palette = snapshot
+                    .appearance_study
+                    .palette
+                    .as_ref()
                     .ok_or_else(|| invalid("optical study requires an imported palette"))?;
-                let optical = snapshot.appearance_study.optical.as_ref()
+                let optical = snapshot
+                    .appearance_study
+                    .optical
+                    .as_ref()
                     .ok_or_else(|| invalid("optical study has no request"))?;
                 optical.matches_report(palette, &report)?;
                 if !report.is_complete() {
                     return Err(invalid("incomplete optical report cannot be accepted"));
                 }
-                if selection.as_ref().is_some_and(|selection| !report.has_selection(selection)) {
-                    return Err(invalid("optical selection is not an assessed retained estimate"));
+                if selection
+                    .as_ref()
+                    .is_some_and(|selection| !report.has_selection(selection))
+                {
+                    return Err(invalid(
+                        "optical selection is not an assessed retained estimate",
+                    ));
                 }
                 let record = report.canonical_record()?;
-                let optical = Arc::make_mut(&mut snapshot.appearance_study).optical.as_mut()
+                let optical = Arc::make_mut(&mut snapshot.appearance_study)
+                    .optical
+                    .as_mut()
                     .ok_or_else(|| invalid("optical study has no request"))?;
                 optical.report_record = Some(record);
                 optical.report = Some(report);
@@ -1059,16 +1141,25 @@ impl Project {
         candidate.next_surface_layer = next_surface_layer;
         candidate.next_process_layer = next_process_layer;
         candidate.next_process_operation = next_process_operation;
-        candidate.definitions = snapshot.sources.values().map(|asset| asset.record.clone()).collect();
+        candidate.definitions = snapshot
+            .sources
+            .values()
+            .map(|asset| asset.record.clone())
+            .collect();
         candidate.occurrences = snapshot.occurrences.values().cloned().collect();
         candidate.manufacturing_intent = snapshot.manufacturing_intent.clone();
-        candidate.manufacturing_artifact = snapshot.manufacturing_artifact.as_ref().map(|asset| asset.record.clone());
+        candidate.manufacturing_artifact = snapshot
+            .manufacturing_artifact
+            .as_ref()
+            .map(|asset| asset.record.clone());
         candidate.surface_overlays = (*snapshot.surface_overlays).clone();
         candidate.process_document = (*snapshot.process_document).clone();
         candidate.appearance_study = (*snapshot.appearance_study).clone();
         validate_manifest_size(&candidate)?;
         let snapshot = Arc::new(snapshot);
-        let mut staged = self.staged_appearance.lock()
+        let mut staged = self
+            .staged_appearance
+            .lock()
             .map_err(|_| error(ProjectErrorCode::Io, "appearance staging lock poisoned"))?;
         staged.retain(|state| state.strong_count() != 0);
         let live: Vec<_> = staged.iter().filter_map(Weak::upgrade).collect();
@@ -1079,10 +1170,16 @@ impl Project {
                 .chain(self.redo.iter().map(Arc::as_ref))
                 .chain(live.iter().map(Arc::as_ref)),
             incoming_palette.as_deref(),
-            self.saved.as_ref().and_then(|(_, content)| content.appearance_study.optical.as_ref()).map(|study| &study.request),
+            self.saved
+                .as_ref()
+                .and_then(|(_, content)| content.appearance_study.optical.as_ref())
+                .map(|study| &study.request),
         )?;
         if retained > MAX_APPEARANCE_RETAINED_BYTES {
-            return Err(error(ProjectErrorCode::ResourceLimit, "retained/staged appearance allocation budget exceeded"));
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "retained/staged appearance allocation budget exceeded",
+            ));
         }
         staged.push(Arc::downgrade(&snapshot));
         Ok(PreparedEdit {
@@ -1216,33 +1313,74 @@ fn validate_appearance(snapshot: &Snapshot) -> Result<(), ProjectError> {
     snapshot.appearance_study.validate()?;
     match &snapshot.appearance_study.palette {
         Some(record) => {
-            let asset = snapshot.appearance_palettes.get(&record.canonical_hash)
-                .ok_or_else(|| error(ProjectErrorCode::MissingAsset, "appearance palette is missing"))?;
+            let asset = snapshot
+                .appearance_palettes
+                .get(&record.canonical_hash)
+                .ok_or_else(|| {
+                    error(
+                        ProjectErrorCode::MissingAsset,
+                        "appearance palette is missing",
+                    )
+                })?;
             if asset.record() != record || snapshot.appearance_palettes.len() != 1 {
-                return Err(error(ProjectErrorCode::CorruptAsset, "appearance palette metadata differs from asset"));
+                return Err(error(
+                    ProjectErrorCode::CorruptAsset,
+                    "appearance palette metadata differs from asset",
+                ));
             }
             if let Some(report) = &snapshot.appearance_study.report {
                 if report.total_rows as usize != asset.document().rows.len()
                     || report.visits.iter().any(|visit| {
-                        asset.document().rows.binary_search_by(|row| row.key.cmp(&visit.key))
-                            .ok().is_none_or(|index| asset.prepared().evidence_hashes()[index] != visit.evidence_hash)
+                        asset
+                            .document()
+                            .rows
+                            .binary_search_by(|row| row.key.cmp(&visit.key))
+                            .ok()
+                            .is_none_or(|index| {
+                                asset.prepared().evidence_hashes()[index] != visit.evidence_hash
+                            })
                     })
                     || report.alternatives.iter().any(|alternative| {
-                        asset.document().rows.binary_search_by(|row| row.key.cmp(&alternative.key))
-                            .ok().is_none_or(|index| asset.document().rows[index].name != alternative.name)
+                        asset
+                            .document()
+                            .rows
+                            .binary_search_by(|row| row.key.cmp(&alternative.key))
+                            .ok()
+                            .is_none_or(|index| {
+                                asset.document().rows[index].name != alternative.name
+                            })
                     })
                 {
-                    return Err(error(ProjectErrorCode::CorruptAsset, "appearance report evidence differs from retained palette"));
+                    return Err(error(
+                        ProjectErrorCode::CorruptAsset,
+                        "appearance report evidence differs from retained palette",
+                    ));
                 }
             }
             if let Some(optical) = &snapshot.appearance_study.optical {
                 optical.request.validate_palette(asset.prepared())?;
                 if let Some(report) = &optical.report {
-                    for (key, evidence_hash) in optical.request.materials.iter().zip(&report.material_evidence_hashes) {
-                        let index = asset.document().rows.binary_search_by(|row| row.key.cmp(key))
-                            .map_err(|_| error(ProjectErrorCode::CorruptAsset, "optical material is absent from retained palette"))?;
+                    for (key, evidence_hash) in optical
+                        .request
+                        .materials
+                        .iter()
+                        .zip(&report.material_evidence_hashes)
+                    {
+                        let index = asset
+                            .document()
+                            .rows
+                            .binary_search_by(|row| row.key.cmp(key))
+                            .map_err(|_| {
+                                error(
+                                    ProjectErrorCode::CorruptAsset,
+                                    "optical material is absent from retained palette",
+                                )
+                            })?;
                         if &asset.prepared().evidence_hashes()[index] != evidence_hash {
-                            return Err(error(ProjectErrorCode::CorruptAsset, "optical report evidence differs from retained palette"));
+                            return Err(error(
+                                ProjectErrorCode::CorruptAsset,
+                                "optical report evidence differs from retained palette",
+                            ));
                         }
                     }
                 }
@@ -1256,7 +1394,9 @@ fn validate_appearance(snapshot: &Snapshot) -> Result<(), ProjectError> {
     Ok(())
 }
 
-fn appearance_bytes<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<usize, ProjectError> {
+fn appearance_bytes<'a>(
+    snapshots: impl Iterator<Item = &'a Snapshot>,
+) -> Result<usize, ProjectError> {
     appearance_bytes_with_incoming(snapshots, None, None)
 }
 
@@ -1276,47 +1416,79 @@ fn appearance_bytes_with_incoming<'a>(
     let mut documents = BTreeMap::new();
     let mut assets = BTreeMap::new();
     for snapshot in snapshots {
-        studies.insert(Arc::as_ptr(&snapshot.appearance_study), snapshot.appearance_study.allocated_bytes());
+        studies.insert(
+            Arc::as_ptr(&snapshot.appearance_study),
+            snapshot.appearance_study.allocated_bytes(),
+        );
         if let Some(report) = &snapshot.appearance_study.report {
             reports.insert(Arc::as_ptr(report), report.allocated_bytes());
         }
         if let Some(optical) = &snapshot.appearance_study.optical {
-            optical_requests.insert(Arc::as_ptr(&optical.request), optical.request.allocated_bytes());
+            optical_requests.insert(
+                Arc::as_ptr(&optical.request),
+                optical.request.allocated_bytes(),
+            );
             if let Some(report) = &optical.report {
                 optical_reports.insert(Arc::as_ptr(report), report.allocated_bytes());
-                optical_requests.insert(Arc::as_ptr(&report.request), report.request.allocated_bytes());
+                optical_requests.insert(
+                    Arc::as_ptr(&report.request),
+                    report.request.allocated_bytes(),
+                );
             }
         }
         for asset in snapshot.appearance_palettes.values() {
             bytes.insert(Arc::as_ptr(asset.original()), asset.original().capacity());
             bytes.insert(Arc::as_ptr(asset.canonical()), asset.canonical().capacity());
-            documents.insert(Arc::as_ptr(&asset.prepared), asset.prepared.allocated_bytes());
+            documents.insert(
+                Arc::as_ptr(&asset.prepared),
+                asset.prepared.allocated_bytes(),
+            );
             assets.insert(Arc::as_ptr(asset), asset.record.allocated_bytes());
         }
     }
     if let Some(asset) = incoming {
         bytes.insert(Arc::as_ptr(asset.original()), asset.original().capacity());
         bytes.insert(Arc::as_ptr(asset.canonical()), asset.canonical().capacity());
-        documents.insert(Arc::as_ptr(&asset.prepared), asset.prepared.allocated_bytes());
+        documents.insert(
+            Arc::as_ptr(&asset.prepared),
+            asset.prepared.allocated_bytes(),
+        );
         assets.insert(asset as *const PaletteAsset, asset.record.allocated_bytes());
     }
-    bytes.values().chain(assets.values()).chain(documents.values()).chain(studies.values()).chain(reports.values())
-        .chain(optical_requests.values()).chain(optical_reports.values()).try_fold(0usize, |total, size| {
-        total.checked_add(*size).ok_or_else(|| error(ProjectErrorCode::ResourceLimit, "appearance allocation budget overflow"))
-    })
+    bytes
+        .values()
+        .chain(assets.values())
+        .chain(documents.values())
+        .chain(studies.values())
+        .chain(reports.values())
+        .chain(optical_requests.values())
+        .chain(optical_reports.values())
+        .try_fold(0usize, |total, size| {
+            total.checked_add(*size).ok_or_else(|| {
+                error(
+                    ProjectErrorCode::ResourceLimit,
+                    "appearance allocation budget overflow",
+                )
+            })
+        })
 }
 
 fn validate_manifest_size(manifest: &ProjectManifest) -> Result<(), ProjectError> {
     struct BoundedWriter(usize);
     impl std::io::Write for BoundedWriter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self.0.checked_add(bytes.len()).ok_or_else(|| std::io::Error::other("manifest size overflow"))?;
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("manifest size overflow"))?;
             if self.0 > MAX_PROJECT_MANIFEST_BYTES as usize {
                 return Err(std::io::Error::other("manifest exceeds 1 MiB"));
             }
             Ok(bytes.len())
         }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
     // Five persistent revision/allocator u32 values can each grow by at most
     // nine decimal digits. Reserve this without cloning project documents.
@@ -1482,7 +1654,10 @@ fn validate_surface_image_budget(snapshot: &Snapshot) -> Result<(), ProjectError
 fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<(), ProjectError> {
     let snapshots: Vec<_> = snapshots.collect();
     if appearance_bytes(snapshots.iter().copied())? > MAX_APPEARANCE_RETAINED_BYTES {
-        return Err(error(ProjectErrorCode::ResourceLimit, "retained appearance allocation budget exceeded"));
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "retained appearance allocation budget exceeded",
+        ));
     }
     let mut sources: BTreeMap<&DefinitionId, &Arc<SourceAsset>> = BTreeMap::new();
     let mut manufacturing: BTreeMap<&SourceHash, &Arc<ManufacturingAsset>> = BTreeMap::new();
@@ -1663,6 +1838,6 @@ fn validate_manufacturing_input(
     Ok(())
 }
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod optical_tests;
+#[cfg(test)]
+mod tests;

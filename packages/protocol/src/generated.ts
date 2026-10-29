@@ -330,9 +330,9 @@ export type PrinterCoordinateFrame = "right_handed_millimetres";
 
 export type MotionSpace = "cartesian_xyz";
 
-export type OutputDialect = "cartesian_absolute_gcode_v1" | "marlin2_single_extruder_gcode_v1";
+export type OutputDialect = "cartesian_absolute_gcode_v1" | "marlin2_single_extruder_gcode_v1" | "marlin2_fixed_dual_gcode_v1";
 
-export type JobWorkflow = { "kind": "diagnostic_body_only" } | { "kind": "complete_marlin", job: SingleExtruderJob, };
+export type JobWorkflow = { "kind": "diagnostic_body_only" } | { "kind": "complete_marlin", job: SingleExtruderJob, } | { "kind": "fixed_dual_marlin", job: FixedDualJob, };
 
 export type SingleExtruderJob = { machine_id: string, firmware_version: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], nozzle_temperature_c: number, bed_temperature_c: number, minimum_extrusion_temperature_c: number, maximum_nozzle_temperature_c: number, maximum_bed_temperature_c: number, 
 /**
@@ -345,6 +345,44 @@ prime_start_mm: [number, number, number], prime_end_mm: [number, number, number]
  * lifts vertically first, then moves XY at this Z, then barriers/shuts down.
  */
 park_position_mm: [number, number, number], };
+
+export type FixedDualJob = { machine_id: string, configuration: FixedDualConfiguration, firmware_revision: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], bed_temperature_c: number, maximum_bed_temperature_c: number, tools: [FixedDualTool, FixedDualTool], assignments: [OccurrenceMaterialAssignment, OccurrenceMaterialAssignment], transition_lift_mm: number, 
+/**
+ * Allowed tool-zero reference positions, including negative carriage X/Y.
+ */
+carriage_travel_bounds_mm: AabbMm, 
+/**
+ * Occupied body relative to the tool-zero tip, excluding the two tips.
+ */
+carriage_body_bounds_mm: AabbMm, inactive_nozzle_radius_mm: number, park_position_mm: [number, number, number], };
+
+export type FixedDualTool = { id: string, feeder_id: string, material: LoadedMaterial, 
+/**
+ * Physical nozzle displacement from tool zero; Z is identically zero.
+ */
+offset_xy_mm: [number, number], nozzle_diameter_mm: number, filament_diameter_mm: number, deposition_limits: DepositionLimits, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, nozzle_temperature_c: number, standby_temperature_c: number, minimum_extrusion_temperature_c: number, maximum_nozzle_temperature_c: number, retract_filament_mm: number, retract_speed_mm_s: number, 
+/**
+ * Declared pressure-establishment minimum; actual waste is stroke-derived.
+ */
+minimum_reprime_volume_mm3: number, 
+/**
+ * One bed-rooted, repeated line, deposited once on every actual layer.
+ */
+waste_line_xy_mm: [[number, number], [number, number]], };
+
+export type LoadedMaterial = { id: string, revision: string, 
+/**
+ * Identity of the inert material declaration, not a measured color model.
+ */
+declaration_hash: SourceHash, polymer_family: string, };
+
+export type OccurrenceMaterialAssignment = { occurrence_id: OccurrenceId, material_id: string, work_envelope_mm: AabbMm, };
+
+export type FixedDualConfiguration = "marlin2125_native_fixed_hotends";
+
+export type RoutedToolAccounting = { tool: number, material_id: string, model_deposition_segments: number, model_filament_length_mm: number, model_volume_mm3: number, waste_deposition_segments: number, waste_filament_length_mm: number, waste_volume_mm3: number, outstanding_retraction_mm: number, };
+
+export type FixedDualVerification = { selection_count: number, tools: [RoutedToolAccounting, RoutedToolAccounting], };
 
 export type HomingCoordinateContract = "marlin_native_cartesian";
 
@@ -433,13 +471,13 @@ export type NormalizedPrintPlan = { schema_version: number, layers: Array<PrintL
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
-export type VerificationReport = { verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, lifecycle_motion_count: number, priming_filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, retraction_count: number, retracted_filament_mm: number, };
+export type VerificationReport = { verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, lifecycle_motion_count: number, priming_filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, retraction_count: number, retracted_filament_mm: number, routing: FixedDualVerification | null, };
 
 export type VerificationOutput = "report_only" | "report_and_motion";
 
-export type ManufacturingInspectionProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
+export type ManufacturingInspectionProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, workflow: JobWorkflow, };
 
-export type ReplayDisplayInfo = { schema_version: number, bundle_hash: SourceHash, input_hash: SourceHash, program_hash: SourceHash, verifier_version: string, frame: PrinterCoordinateFrame, event_count: number, deposition_count: number, travel_count: number, layer_count: number, lifecycle_count: number, process_count: number, bounds_mm: AabbMm, };
+export type ReplayDisplayInfo = { schema_version: number, bundle_hash: SourceHash, input_hash: SourceHash, program_hash: SourceHash, verifier_version: string, frame: PrinterCoordinateFrame, event_count: number, deposition_count: number, travel_count: number, layer_count: number, lifecycle_count: number, process_count: number, tool_epoch_count: number, waste_count: number, bounds_mm: AabbMm, };
 
 export type ReplayDisplayDescriptor = { info: ReplayDisplayInfo, resource: ArtifactView, };
 
@@ -451,7 +489,7 @@ export type SurfaceResolution = { surface_layer_id: SurfaceLayerId, occurrence_i
 
 export type SurfaceResolutionTotals = { evaluated_witnesses: number, resolved: number, ambiguous: number, below_nominal_resolution: number, unavailable: number, coverage_complete: boolean, };
 
-export type ManufacturingSummary = { layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, software_only: boolean, surface_resolution: SurfaceResolutionTotals, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, };
+export type ManufacturingSummary = { layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, software_only: boolean, surface_resolution: SurfaceResolutionTotals, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, routing: FixedDualVerification | null, };
 
 export type ManufacturingBundle = { schema_version: number, provenance: ManufacturingProvenance, plan: NormalizedPrintPlan, program: string, verification: VerificationReport, };
 
@@ -493,7 +531,7 @@ export const MAX_REPLAY_DISPLAY_BYTES = 33554432 as const;
 export const MAX_REPLAY_EVENTS = 300004 as const;
 export const REPLAY_HEADER_BYTES = 96 as const;
 export const REPLAY_RECORD_BYTES = 80 as const;
-export const REPLAY_SCHEMA_VERSION = 5 as const;
+export const REPLAY_SCHEMA_VERSION = 6 as const;
 export const MAX_ENGINE_ARTIFACT_BYTES = 134217728 as const;
 export const MAX_GEOMETRY_CHUNK_BYTES = 1048576 as const;
 export const MAX_DISPLAY_BUFFER_BYTES = 134217728 as const;

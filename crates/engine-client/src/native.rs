@@ -71,18 +71,20 @@ impl EngineRpc {
     ) -> Result<spiling_contracts::appearance::AppearanceReport, ClientError> {
         record.validate()?;
         let limit = spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64;
-        let size = native::validate_artifact_view(descriptor, limit)
-            .map_err(ClientError::Protocol)?;
+        let size =
+            native::validate_artifact_view(descriptor, limit).map_err(ClientError::Protocol)?;
         if size != u64::from(record.byte_count)
             || descriptor.sha256 != record.hash.as_str()
             || descriptor.name.strip_prefix("artifacts/") != Some(record.hash.as_str())
             || descriptor.media_type != "application/x-spiling-appearance-report+json"
         {
-            return Err(ClientError::Protocol("appearance descriptor disagrees with record".into()));
+            return Err(ClientError::Protocol(
+                "appearance descriptor disagrees with record".into(),
+            ));
         }
-        let bytes = self.read_bounded_artifact(
-            &descriptor.name, size, &descriptor.sha256, limit,
-        ).await?;
+        let bytes = self
+            .read_bounded_artifact(&descriptor.name, size, &descriptor.sha256, limit)
+            .await?;
         Ok(record.validate_bytes(&bytes)?)
     }
     /// Retrieve the engine's named reference estimate; no optical evaluation in clients.
@@ -93,18 +95,20 @@ impl EngineRpc {
     ) -> Result<spiling_contracts::optical::OpticalReport, ClientError> {
         record.validate()?;
         let limit = spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64;
-        let size = native::validate_artifact_view(descriptor, limit)
-            .map_err(ClientError::Protocol)?;
+        let size =
+            native::validate_artifact_view(descriptor, limit).map_err(ClientError::Protocol)?;
         if size != record.byte_count
             || descriptor.sha256 != record.hash.as_str()
             || descriptor.name.strip_prefix("artifacts/") != Some(record.hash.as_str())
             || descriptor.media_type != spiling_contracts::optical::OPTICAL_REPORT_MIME
         {
-            return Err(ClientError::Protocol("optical descriptor disagrees with record".into()));
+            return Err(ClientError::Protocol(
+                "optical descriptor disagrees with record".into(),
+            ));
         }
-        let bytes = self.read_bounded_artifact(
-            &descriptor.name, size, &descriptor.sha256, limit,
-        ).await?;
+        let bytes = self
+            .read_bounded_artifact(&descriptor.name, size, &descriptor.sha256, limit)
+            .await?;
         Ok(record.validate_bytes(&bytes)?)
     }
     pub async fn geometry(
@@ -310,38 +314,58 @@ impl EngineRpc {
                 })
             }
             ProjectCall::ImportAppearancePalette(request) => {
-                let operation = client.import_appearance_palette(self.request(bounded(request)?))
-                    .await.map_err(rpc_error)?.into_inner();
+                let operation = client
+                    .import_appearance_palette(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
                 Ok(ProjectResponse::OperationAccepted {
-                    operation: native::native_operation_view(&operation).map_err(ClientError::Protocol)?,
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
                 })
             }
             ProjectCall::CompareAppearance(request) => {
-                let operation = client.compare_appearance(self.request(bounded(request)?))
-                    .await.map_err(rpc_error)?.into_inner();
+                let operation = client
+                    .compare_appearance(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
                 Ok(ProjectResponse::OperationAccepted {
-                    operation: native::native_operation_view(&operation).map_err(ClientError::Protocol)?,
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
                 })
             }
             ProjectCall::GetAppearanceReport(request) => {
-                let operation = client.get_appearance_report(self.request(bounded(request)?))
-                    .await.map_err(rpc_error)?.into_inner();
+                let operation = client
+                    .get_appearance_report(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
                 Ok(ProjectResponse::OperationAccepted {
-                    operation: native::native_operation_view(&operation).map_err(ClientError::Protocol)?,
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
                 })
             }
             ProjectCall::CompareOptical(request) => {
-                let operation = client.compare_optical(self.request(bounded(request)?))
-                    .await.map_err(rpc_error)?.into_inner();
+                let operation = client
+                    .compare_optical(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
                 Ok(ProjectResponse::OperationAccepted {
-                    operation: native::native_operation_view(&operation).map_err(ClientError::Protocol)?,
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
                 })
             }
             ProjectCall::GetOpticalReport(request) => {
-                let operation = client.get_optical_report(self.request(bounded(request)?))
-                    .await.map_err(rpc_error)?.into_inner();
+                let operation = client
+                    .get_optical_report(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
                 Ok(ProjectResponse::OperationAccepted {
-                    operation: native::native_operation_view(&operation).map_err(ClientError::Protocol)?,
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
                 })
             }
         }

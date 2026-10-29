@@ -129,6 +129,7 @@ fn project_job_attaches(job: &NativeOperationView, replacing: bool) -> bool {
         | Some(JobResult::SurfaceImagePrepared { .. })
         | Some(JobResult::AppearancePaletteImported { .. })
         | Some(JobResult::AppearanceCompared { .. })
+        | Some(JobResult::OpticalCompared { .. })
         | None => false,
     }
 }
@@ -1293,6 +1294,7 @@ mod tests {
                 surface_resolution:
                     spiling_contracts::manufacturing::SurfaceResolutionTotals::empty(),
                 software_only: true,
+                routing: None,
                 native_geometry: spiling_contracts::manufacturing::NativeGeometryCoverageSummary {
                     requested_shape_error_mm: 0.1,
                     achieved_shape_error_mm: 0.0,
@@ -1342,6 +1344,7 @@ mod tests {
                     planner_version: "1".into(),
                     emitter_version: "1".into(),
                     verifier_version: "1".into(),
+                    workflow: spiling_contracts::manufacturing::JobWorkflow::DiagnosticBodyOnly,
                 },
                 replay_display: None,
                 record,
@@ -1363,6 +1366,7 @@ mod tests {
                     support_filament_length_mm: 0.0,
                     retraction_count: 0,
                     retracted_filament_mm: 0.0,
+                    routing: None,
                 },
             },
             JobResult::Section {

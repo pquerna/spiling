@@ -13,6 +13,7 @@ use super::*;
 pub enum JobWorkflow {
     DiagnosticBodyOnly,
     CompleteMarlin { job: SingleExtruderJob },
+    FixedDualMarlin { job: FixedDualJob },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]

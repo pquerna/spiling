@@ -246,7 +246,9 @@ export function ManufacturingPanel({
           <p data-testid="manufacturing-workflow">
             {draft.intent.printer.workflow.kind === "diagnostic_body_only"
               ? "Diagnostic body-only program — no executable startup or shutdown lifecycle."
-              : "Complete Marlin 2 single-extruder job — software-verified lifecycle, physically unqualified."}{" "}
+              : draft.intent.printer.workflow.kind === "fixed_dual_marlin"
+                ? "Fixed-dual Marlin 2 job — software-only routing verification, physically unqualified."
+                : "Complete Marlin 2 single-extruder job — software-verified lifecycle, physically unqualified."}{" "}
             Dialect: {draft.intent.printer.capabilities.output_dialect}.
           </p>
           {draft.intent.printer.workflow.kind === "complete_marlin" && (
@@ -800,8 +802,25 @@ export function ManufacturingPanel({
             </dd>
             <dt>Lifecycle motion events</dt>
             <dd>{result.report.lifecycle_motion_count}</dd>
-            <dt>Priming filament length (separate from object)</dt>
+            <dt>{result.report.routing === null ? "Priming filament length (separate from object)" : "Route waste filament length (not additional to per-tool waste accounting)"}</dt>
             <dd>{result.report.priming_filament_length_mm} mm</dd>
+            {result.report.routing !== null && (
+              <>
+                <dt>Decoded tool selections</dt>
+                <dd>{result.report.routing.selection_count}</dd>
+                {result.report.routing.tools.map(tool => (
+                  <dd key={tool.tool}>
+                    Tool {tool.tool}, declared material {tool.material_id}: model{" "}
+                    {tool.model_deposition_segments} strokes / {tool.model_volume_mm3} mm³ /{" "}
+                    {tool.model_filament_length_mm} mm filament; explicit waste{" "}
+                    {tool.waste_deposition_segments} strokes / {tool.waste_volume_mm3} mm³ /{" "}
+                    {tool.waste_filament_length_mm} mm filament; final external retraction debt{" "}
+                    {tool.outstanding_retraction_mm} mm. Software accounting, not measured color
+                    or machine readiness.
+                  </dd>
+                ))}
+              </>
+            )}
             <dt>Maximum position deviation</dt>
             <dd>{result.report.max_position_error_mm} mm</dd>
             <dt>Maximum extrusion deviation</dt>
@@ -854,9 +873,10 @@ export function ManufacturingPanel({
             <fieldset disabled={!fresh || manufacturing.working}>
               <legend>Actual emitted-program replay — endpoint coordinates in mm</legend>
               <p>
-                {replay.eventCount} events, {replay.depositionCount} object + support deposition,{" "}
-                {replay.travelCount} object travel, {replay.lifecycleCount} lifecycle,{" "}
-                {replay.processCount} stationary retraction/recovery;
+                {replay.eventCount} events, {replay.depositionCount} model + support + waste deposition,{" "}
+                {replay.travelCount} body travel, {replay.lifecycleCount} lifecycle,{" "}
+                {replay.processCount} stationary retraction/recovery, {replay.toolEpochCount} tool epochs,
+                {" "}{replay.wasteCount} explicit waste strokes;
                 {replay.layerCount} object layers. Positions, E and F come from decoded program
                 bytes, not planned paths.
               </p>
@@ -889,7 +909,8 @@ export function ManufacturingPanel({
               </p>}
               <p>
                 Packed roles distinguish object walls/skins/fill/bridge, support/interface, travel,
-                lifecycle and prime. Retract/recover are stationary process events, not deposited
+                lifecycle, prime and explicit route waste. Tool epochs break tip-frame continuity
+                without drawing a connecting line. Retract/recover are stationary process events, not deposited
                 material or fictional XYZ motion. Lifecycle events have no object layer and appear
                 only with all layers selected; travel toggle excludes prime and stationary process
                 events.
@@ -988,6 +1009,7 @@ export function ManufacturingPanel({
                         replay.layer(event) === REPLAY_LIFECYCLE_LAYER ? null : replay.layer(event),
                       kind: REPLAY_KIND_LABELS[replay.kind(event)],
                       known_start: replay.knownStart(event),
+                      active_tool: replay.activeTool(event),
                       position_mm: replay.position(event),
                       absolute_extrusion_mm: replay.extrusion(event),
                       feed_mm_min: replay.feed(event),
@@ -1064,6 +1086,8 @@ export function ManufacturingPanel({
                     lifecycle_count: replay.lifecycleCount,
                     deposition_count: replay.depositionCount,
                     process_count: replay.processCount,
+                    tool_epoch_count: replay.toolEpochCount,
+                    waste_count: replay.wasteCount,
                     travel_count: replay.travelCount,
                     layer_count: replay.layerCount,
                     byte_count: replay.bytes.byteLength,

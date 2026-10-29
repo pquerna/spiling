@@ -26,6 +26,9 @@ mod diaphragm;
 pub use diaphragm::*;
 mod skin_fit_decode;
 
+mod routing;
+pub use routing::*;
+
 pub const MANUFACTURING_SCHEMA_VERSION: u32 = 11;
 pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
@@ -683,6 +686,7 @@ pub enum MotionSpace {
 pub enum OutputDialect {
     CartesianAbsoluteGcodeV1,
     Marlin2SingleExtruderGcodeV1,
+    Marlin2FixedDualGcodeV1,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -694,10 +698,15 @@ pub struct PrinterCapabilities {
 }
 impl PrinterCapabilities {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
-        if self.extruders != 1 {
+        let expected = if self.output_dialect == OutputDialect::Marlin2FixedDualGcodeV1 {
+            2
+        } else {
+            1
+        };
+        if self.extruders != expected {
             return Err(ManufacturingError::new(
                 ManufacturingErrorCode::UnsupportedCapability,
-                "only one extruder is implemented",
+                "extruder count must match the selected explicit output dialect",
             ));
         }
         Ok(())
@@ -830,6 +839,9 @@ impl PrinterSpecification {
         match (&self.workflow, self.capabilities.output_dialect) {
             (JobWorkflow::DiagnosticBodyOnly, OutputDialect::CartesianAbsoluteGcodeV1) => {}
             (JobWorkflow::CompleteMarlin { job }, OutputDialect::Marlin2SingleExtruderGcodeV1) => {
+                job.validate(self)?
+            }
+            (JobWorkflow::FixedDualMarlin { job }, OutputDialect::Marlin2FixedDualGcodeV1) => {
                 job.validate(self)?
             }
             _ => return Err(invalid("workflow and output dialect are incompatible")),
@@ -1068,6 +1080,35 @@ impl ManufacturingIntent {
             }
             if !prime_flow.is_finite() || prime_flow > p.max_volumetric_flow_mm3_s {
                 return Err(invalid("priming exceeds declared volumetric flow limit"));
+            }
+        }
+        if let JobWorkflow::FixedDualMarlin { job } = &p.workflow {
+            if !matches!(r.supports, SupportPolicy::Disabled)
+                || !matches!(r.sparse_infill, SparseInfillPolicy::Fine)
+                || !matches!(r.process.retraction, RetractionPolicy::Disabled)
+            {
+                return Err(invalid(
+                    "fixed-dual routing requires fine model deposition without generated supports",
+                ));
+            }
+            for tool in &job.tools {
+                let tool_filament_area =
+                    std::f64::consts::PI * (tool.filament_diameter_mm * 0.5).powi(2);
+                let waste_length = (tool.waste_line_xy_mm[1][0] - tool.waste_line_xy_mm[0][0])
+                    .hypot(tool.waste_line_xy_mm[1][1] - tool.waste_line_xy_mm[0][1]);
+                if !tool_filament_area.is_finite()
+                    || tool_filament_area <= 0.0
+                    || !waste_length.is_finite()
+                    || waste_length <= 0.0
+                    || !tool
+                        .deposition_limits
+                        .admits(r.bead_width_mm, r.layer_height_mm)
+                    || area * waste_length < tool.minimum_reprime_volume_mm3
+                {
+                    return Err(invalid(
+                        "fixed-dual waste or loaded-tool recipe envelope is invalid",
+                    ));
+                }
             }
         }
         json_bytes(self, MAX_PROFILE_JSON_BYTES as usize)?;
@@ -2543,11 +2584,66 @@ impl NormalizedPrintPlan {
                 }
             }
         }
+        if let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow {
+            if !self.sparse_bands.is_empty() {
+                return Err(invalid("fixed-dual routing admits no coarse sparse bands"));
+            }
+            let mut routed_segments = self
+                .layers
+                .len()
+                .checked_mul(2)
+                .ok_or_else(|| resource("fixed-dual waste count overflow"))?;
+            for layer in &self.layers {
+                let mut seen = [false; 2];
+                let mut previous_tool = 0;
+                for path in &layer.paths {
+                    if path.physical_z_mm != [layer.lower_z_mm, layer.z_mm]
+                        || matches!(
+                            path.kind,
+                            DepositionKind::Support
+                                | DepositionKind::SupportInterface
+                                | DepositionKind::SeparatorWall
+                        )
+                    {
+                        return Err(invalid(
+                            "fixed-dual model paths require ordinary fine intervals without supports or separators",
+                        ));
+                    }
+                    let tool = job.tool_for_path(path)?;
+                    routed_segments = routed_segments
+                        .checked_add(path.points_mm.len() - 1)
+                        .ok_or_else(|| resource("fixed-dual model and waste count overflow"))?;
+                    if routed_segments > MAX_DEPOSITION_SEGMENTS as usize {
+                        return Err(resource(
+                            "fixed-dual model and waste share the existing segment budget",
+                        ));
+                    }
+                    if tool < previous_tool {
+                        return Err(invalid(
+                            "fixed-dual layer model paths must be grouped tool zero then tool one",
+                        ));
+                    }
+                    previous_tool = tool;
+                    seen[usize::from(tool)] = true;
+                }
+                if seen != [true; 2] {
+                    return Err(invalid(
+                        "both fixed-dual loaded tools must deposit model on every layer",
+                    ));
+                }
+                if job.park_position_mm[2] <= layer.z_mm {
+                    return Err(invalid(
+                        "fixed-dual final park must clear every deposition layer",
+                    ));
+                }
+            }
+        }
         // Both current output identities use the reviewed Cartesian XYZ6
         // contract. A future dialect must choose its representation explicitly.
         match intent.printer.capabilities.output_dialect {
             OutputDialect::CartesianAbsoluteGcodeV1
-            | OutputDialect::Marlin2SingleExtruderGcodeV1 => {}
+            | OutputDialect::Marlin2SingleExtruderGcodeV1
+            | OutputDialect::Marlin2FixedDualGcodeV1 => {}
         }
         let envelope = &intent.printer.build_envelope;
         let mut lower_z = envelope.min[2];
@@ -3050,6 +3146,59 @@ impl ManufacturingProvenance {
         Ok(())
     }
 }
+fn required_option<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    Option::<T>::deserialize(deserializer)
+}
+
+fn validate_routing_totals(
+    routing: Option<&FixedDualVerification>,
+    model_segments: u32,
+    model_volume: f64,
+    model_filament: f64,
+    support_segments: u32,
+) -> Result<u32, ManufacturingError> {
+    let Some(routing) = routing else {
+        return Ok(0);
+    };
+    routing.validate()?;
+    if support_segments != 0
+        || !routing.selection_count.is_multiple_of(2)
+        || routing.tools.iter().any(|tool| {
+            tool.waste_deposition_segments != routing.selection_count / 2
+                || tool.model_deposition_segments < routing.selection_count / 2
+        })
+        || routing
+            .tools
+            .iter()
+            .map(|tool| tool.model_deposition_segments)
+            .sum::<u32>()
+            != model_segments
+        || routing
+            .tools
+            .iter()
+            .map(|tool| tool.model_volume_mm3)
+            .sum::<f64>()
+            != model_volume
+        || routing
+            .tools
+            .iter()
+            .map(|tool| tool.model_filament_length_mm)
+            .sum::<f64>()
+            != model_filament
+    {
+        return Err(invalid(
+            "routed model accounting disagrees with report totals",
+        ));
+    }
+    Ok(routing
+        .tools
+        .iter()
+        .map(|tool| tool.waste_deposition_segments)
+        .sum())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct VerificationReport {
@@ -3071,19 +3220,54 @@ pub struct VerificationReport {
     pub support_filament_length_mm: f64,
     pub retraction_count: u32,
     pub retracted_filament_mm: f64,
+    #[serde(deserialize_with = "required_option")]
+    pub routing: Option<FixedDualVerification>,
 }
 impl VerificationReport {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
+        let waste_segments = validate_routing_totals(
+            self.routing.as_ref(),
+            self.deposition_segments,
+            self.deposited_volume_mm3,
+            self.filament_length_mm,
+            self.support_deposition_segments,
+        )?;
         if self
             .deposition_segments
             .checked_add(self.support_deposition_segments)
+            .and_then(|n| n.checked_add(waste_segments))
             .is_none_or(|n| n > MAX_DEPOSITION_SEGMENTS)
             || self.retraction_count > 50_000
             || self.travel_segments > MAX_DEPOSITION_SEGMENTS
         {
             return Err(resource("verification segment limit exceeded"));
         }
-        if (self.lifecycle_motion_count != 0 && self.lifecycle_motion_count != 4)
+        if let Some(routing) = &self.routing {
+            if self.retraction_count != routing.selection_count
+                || routing
+                    .tools
+                    .iter()
+                    .any(|tool| tool.outstanding_retraction_mm <= 0.0)
+            {
+                return Err(invalid(
+                    "fixed-dual final pressure debt or retraction count mismatch",
+                ));
+            }
+        }
+        if (self.routing.is_some()
+            && (self.lifecycle_motion_count != 2
+                || self.priming_filament_length_mm
+                    != self
+                        .routing
+                        .as_ref()
+                        .unwrap()
+                        .tools
+                        .iter()
+                        .map(|tool| tool.waste_filament_length_mm)
+                        .sum::<f64>()))
+            || (self.routing.is_none()
+                && self.lifecycle_motion_count != 0
+                && self.lifecycle_motion_count != 4)
             || (self.lifecycle_motion_count == 0 && self.priming_filament_length_mm != 0.0)
             || (self.lifecycle_motion_count == 4 && self.priming_filament_length_mm <= 0.0)
         {
@@ -3139,9 +3323,30 @@ pub struct ManufacturingSummary {
     pub native_geometry: NativeGeometryCoverageSummary,
     #[serde(deserialize_with = "process_resolution")]
     pub process_resolution: Vec<ProcessRegionResolution>,
+    #[serde(deserialize_with = "required_option")]
+    pub routing: Option<FixedDualVerification>,
 }
 impl ManufacturingSummary {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
+        let waste_segments = validate_routing_totals(
+            self.routing.as_ref(),
+            self.deposition_segments,
+            self.deposited_volume_mm3,
+            self.filament_length_mm,
+            self.support_deposition_segments,
+        )?;
+        if let Some(routing) = &self.routing {
+            if self.layers.checked_mul(2) != Some(routing.selection_count)
+                || routing.tools.iter().any(|tool| {
+                    tool.waste_deposition_segments != self.layers
+                        || tool.outstanding_retraction_mm <= 0.0
+                })
+            {
+                return Err(invalid(
+                    "fixed-dual summary layers disagree with route accounting",
+                ));
+            }
+        }
         self.surface_resolution.validate()?;
         self.native_geometry.validate()?;
         validate_process_resolution(&self.process_resolution)?;
@@ -3163,6 +3368,7 @@ impl ManufacturingSummary {
             || self
                 .deposition_segments
                 .checked_add(self.support_deposition_segments)
+                .and_then(|n| n.checked_add(waste_segments))
                 .is_none_or(|n| n > MAX_DEPOSITION_SEGMENTS)
         {
             return Err(invalid("invalid manufacturing summary counts"));
@@ -3433,6 +3639,73 @@ impl ManufacturingBundle {
             &self.provenance.occurrences,
         )?;
         self.verification.validate()?;
+        match (
+            &self.provenance.intent.printer.workflow,
+            &self.verification.routing,
+        ) {
+            (JobWorkflow::DiagnosticBodyOnly, None)
+                if self.verification.lifecycle_motion_count == 0 => {}
+            (JobWorkflow::CompleteMarlin { .. }, None)
+                if self.verification.lifecycle_motion_count == 4 => {}
+            (JobWorkflow::FixedDualMarlin { job }, Some(routing)) => {
+                if self.provenance.occurrences.len() != 2
+                    || self
+                        .provenance
+                        .surface_overlays
+                        .layers
+                        .iter()
+                        .any(|layer| layer.enabled)
+                    || self
+                        .provenance
+                        .process_document
+                        .layers
+                        .iter()
+                        .any(|layer| layer.enabled && !layer.operations.is_empty())
+                    || routing.selection_count != self.plan.layers.len() as u32 * 2
+                {
+                    return Err(invalid(
+                        "fixed-dual captured source, finish, process or selection attribution mismatch",
+                    ));
+                }
+                for assignment in &job.assignments {
+                    if !self
+                        .provenance
+                        .occurrences
+                        .iter()
+                        .any(|occurrence| occurrence.occurrence_id == assignment.occurrence_id)
+                    {
+                        return Err(invalid(
+                            "fixed-dual assignment does not bind a captured source occurrence",
+                        ));
+                    }
+                }
+                let mut routed_segments = [0u32; 2];
+                for path in self.plan.layers.iter().flat_map(|layer| &layer.paths) {
+                    let tool = usize::from(job.tool_for_path(path)?);
+                    routed_segments[tool] = routed_segments[tool]
+                        .checked_add((path.points_mm.len() - 1) as u32)
+                        .ok_or_else(|| resource("routed model count overflow"))?;
+                }
+                for (index, tool) in routing.tools.iter().enumerate() {
+                    if tool.material_id != job.tools[index].material.id
+                        || tool.model_deposition_segments != routed_segments[index]
+                        || tool.waste_deposition_segments != self.plan.layers.len() as u32
+                        || (tool.outstanding_retraction_mm - job.tools[index].retract_filament_mm)
+                            .abs()
+                            > 0.000_000_010_001
+                    {
+                        return Err(invalid(
+                            "fixed-dual decoded tool accounting disagrees with captured route",
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(invalid(
+                    "verification routing/lifecycle does not match captured workflow",
+                ));
+            }
+        }
         if self.program.is_empty() || self.program.len() > MAX_MANUFACTURING_BUNDLE_BYTES as usize {
             return Err(resource("manufacturing program size is invalid"));
         }
@@ -3470,6 +3743,7 @@ impl ManufacturingBundle {
             support_deposition_segments: self.verification.support_deposition_segments,
             support_deposited_volume_mm3: self.verification.support_deposited_volume_mm3,
             support_filament_length_mm: self.verification.support_filament_length_mm,
+            routing: self.verification.routing.clone(),
             software_only: true,
             surface_resolution: SurfaceResolutionTotals::from_records(
                 &self.plan.surface_resolution,

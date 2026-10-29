@@ -5,9 +5,9 @@
 //! Complete source-backed checkpoints; no automatic recovery or asset GC.
 mod os;
 use super::{
-    MAX_RETAINED_SOURCE_BYTES, MAX_SOURCE_BYTES, ManufacturingAsset, SaveSnapshot, Snapshot,
-    SourceAsset, SurfaceImageAsset, error, invalid, validate_snapshot,
-    MAX_APPEARANCE_RETAINED_BYTES, PaletteAsset,
+    MAX_APPEARANCE_RETAINED_BYTES, MAX_RETAINED_SOURCE_BYTES, MAX_SOURCE_BYTES, ManufacturingAsset,
+    PaletteAsset, SaveSnapshot, Snapshot, SourceAsset, SurfaceImageAsset, error, invalid,
+    validate_snapshot,
 };
 use os::Directory;
 use serde::{Deserialize, Serialize};
@@ -101,8 +101,13 @@ impl Storage {
             (PALETTE_ORIGINALS, &self.palette_originals),
             (PALETTE_CANONICAL, &self.palette_canonical),
         ] {
-            if !attached.same(&self.directory.child(name).map_err(io)?).map_err(io)? {
-                return Err(invalid("attached appearance palette directory was substituted"));
+            if !attached
+                .same(&self.directory.child(name).map_err(io)?)
+                .map_err(io)?
+            {
+                return Err(invalid(
+                    "attached appearance palette directory was substituted",
+                ));
             }
         }
         if let Some(lock) = &self._writer_lock
@@ -758,7 +763,11 @@ pub fn open_reusing(
     let sources = load_sources(&manifest, &storage.sources, source_budget, cancel)?;
     let surface_images = load_images(&manifest, &storage.images, image_budget, cancel)?;
     let appearance_palettes = load_palettes(
-        &manifest, &storage.palette_originals, &storage.palette_canonical, appearance_budget, cancel,
+        &manifest,
+        &storage.palette_originals,
+        &storage.palette_canonical,
+        appearance_budget,
+        cancel,
     )?;
     let manufacturing_artifact = load_manufacturing(
         &manifest,
@@ -945,7 +954,12 @@ pub fn save(
             }
             validate_stored_images(&manifest, &storage.images, cancel)?;
             validate_stored_manufacturing(&manifest, &storage.manufacturing, cancel)?;
-            validate_stored_palettes(&manifest, &storage.palette_originals, &storage.palette_canonical, cancel)?;
+            validate_stored_palettes(
+                &manifest,
+                &storage.palette_originals,
+                &storage.palette_canonical,
+                cancel,
+            )?;
             Ok(manifest)
         });
         let old_manifest = match current {
@@ -963,7 +977,12 @@ pub fn save(
                 }
                 validate_stored_images(&manifest, &storage.images, cancel)?;
                 validate_stored_manufacturing(&manifest, &storage.manufacturing, cancel)?;
-                validate_stored_palettes(&manifest, &storage.palette_originals, &storage.palette_canonical, cancel)?;
+                validate_stored_palettes(
+                    &manifest,
+                    &storage.palette_originals,
+                    &storage.palette_canonical,
+                    cancel,
+                )?;
                 manifest
             }
             Err(e) => return Err(e),
@@ -1003,7 +1022,12 @@ pub fn save(
         save_assets(&snapshot.snapshot, &storage.sources, cancel)?;
         save_manufacturing(&snapshot.snapshot, &storage.manufacturing, cancel)?;
         save_images(&snapshot.snapshot, &storage.images, cancel)?;
-        save_palettes(&snapshot.snapshot, &storage.palette_originals, &storage.palette_canonical, cancel)?;
+        save_palettes(
+            &snapshot.snapshot,
+            &storage.palette_originals,
+            &storage.palette_canonical,
+            cancel,
+        )?;
         observe(SaveStage::AssetsSynced);
         cancelled(cancel)?;
         if storage.directory.exists(PREVIOUS).map_err(io)? {
@@ -1024,7 +1048,12 @@ pub fn save(
             }
             validate_stored_images(&prior.manifest, &storage.images, cancel)?;
             validate_stored_manufacturing(&prior.manifest, &storage.manufacturing, cancel)?;
-            validate_stored_palettes(&prior.manifest, &storage.palette_originals, &storage.palette_canonical, cancel)?;
+            validate_stored_palettes(
+                &prior.manifest,
+                &storage.palette_originals,
+                &storage.palette_canonical,
+                cancel,
+            )?;
         }
         let temporary = Temporary::write(&storage.directory, &bytes)?;
         Temporary::write(&storage.directory, &previous)?.replace(PREVIOUS)?;
@@ -1077,8 +1106,18 @@ pub fn save(
         };
         stage.manufacturing = Some(stage.directory.create_child(MANUFACTURING).map_err(io)?);
         stage.images = Some(stage.directory.create_child(IMAGES).map_err(io)?);
-        stage.palette_originals = Some(stage.directory.create_child(PALETTE_ORIGINALS).map_err(io)?);
-        stage.palette_canonical = Some(stage.directory.create_child(PALETTE_CANONICAL).map_err(io)?);
+        stage.palette_originals = Some(
+            stage
+                .directory
+                .create_child(PALETTE_ORIGINALS)
+                .map_err(io)?,
+        );
+        stage.palette_canonical = Some(
+            stage
+                .directory
+                .create_child(PALETTE_CANONICAL)
+                .map_err(io)?,
+        );
         let lock = writer_lock(&stage.directory)?;
         let path = stage.parent.path().join(&name);
         let directory = stage.directory.relocated(path.clone()).map_err(io)?;
@@ -1091,12 +1130,21 @@ pub fn save(
         let images = staged_images.relocated(path.join(IMAGES)).map_err(io)?;
         let staged_originals = stage.palette_originals.as_ref().expect("created directory");
         let staged_canonical = stage.palette_canonical.as_ref().expect("created directory");
-        let palette_originals = staged_originals.relocated(path.join(PALETTE_ORIGINALS)).map_err(io)?;
-        let palette_canonical = staged_canonical.relocated(path.join(PALETTE_CANONICAL)).map_err(io)?;
+        let palette_originals = staged_originals
+            .relocated(path.join(PALETTE_ORIGINALS))
+            .map_err(io)?;
+        let palette_canonical = staged_canonical
+            .relocated(path.join(PALETTE_CANONICAL))
+            .map_err(io)?;
         save_assets(&snapshot.snapshot, &stage.sources, cancel)?;
         save_manufacturing(&snapshot.snapshot, staged_manufacturing, cancel)?;
         save_images(&snapshot.snapshot, staged_images, cancel)?;
-        save_palettes(&snapshot.snapshot, staged_originals, staged_canonical, cancel)?;
+        save_palettes(
+            &snapshot.snapshot,
+            staged_originals,
+            staged_canonical,
+            cancel,
+        )?;
         observe(SaveStage::AssetsSynced);
         cancelled(cancel)?;
         let temporary = Temporary::write(&stage.directory, &bytes)?;
@@ -1126,8 +1174,18 @@ pub fn save(
                 .map_err(io)?
                 .same(staged_images)
                 .map_err(io)?
-            || !stage.directory.child(PALETTE_ORIGINALS).map_err(io)?.same(staged_originals).map_err(io)?
-            || !stage.directory.child(PALETTE_CANONICAL).map_err(io)?.same(staged_canonical).map_err(io)?
+            || !stage
+                .directory
+                .child(PALETTE_ORIGINALS)
+                .map_err(io)?
+                .same(staged_originals)
+                .map_err(io)?
+            || !stage
+                .directory
+                .child(PALETTE_CANONICAL)
+                .map_err(io)?
+                .same(staged_canonical)
+                .map_err(io)?
         {
             return Err(invalid(
                 "owned first-save staging directory was substituted",
@@ -1273,51 +1331,97 @@ fn load_palettes(
     let mut assets = BTreeMap::new();
     let budget = budget.min(MAX_APPEARANCE_RETAINED_BYTES);
     let metadata = manifest.appearance_study.allocated_bytes()
-        + manifest.appearance_study.report.as_ref().map_or(0, |report| report.allocated_bytes())
-        + manifest.appearance_study.optical.as_ref().map_or(0, |optical| {
-            optical.request.allocated_bytes()
-                + optical.report.as_ref().map_or(0, |report| report.allocated_bytes())
-        });
+        + manifest
+            .appearance_study
+            .report
+            .as_ref()
+            .map_or(0, |report| report.allocated_bytes())
+        + manifest
+            .appearance_study
+            .optical
+            .as_ref()
+            .map_or(0, |optical| {
+                optical.request.allocated_bytes()
+                    + optical
+                        .report
+                        .as_ref()
+                        .map_or(0, |report| report.allocated_bytes())
+            });
     if metadata > budget {
-        return Err(error(ProjectErrorCode::ResourceLimit, "incoming appearance metadata budget exceeded"));
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "incoming appearance metadata budget exceeded",
+        ));
     }
     let budget = budget - metadata;
     if let Some(record) = &manifest.appearance_study.palette {
         record.validate()?;
-        let budget = budget.checked_sub(record.allocated_bytes())
-            .ok_or_else(|| error(ProjectErrorCode::ResourceLimit, "incoming palette metadata budget exceeded"))?;
+        let budget = budget
+            .checked_sub(record.allocated_bytes())
+            .ok_or_else(|| {
+                error(
+                    ProjectErrorCode::ResourceLimit,
+                    "incoming palette metadata budget exceeded",
+                )
+            })?;
         cancelled(cancel)?;
         let size = record.original_bytes as usize + record.canonical_bytes as usize;
         if size > budget {
-            return Err(error(ProjectErrorCode::ResourceLimit, "incoming appearance allocation budget exceeded"));
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "incoming appearance allocation budget exceeded",
+            ));
         }
         let original = bounded_read_exact(
-            originals, &format!("{}.json", record.original_hash.as_str()),
-            MAX_PALETTE_BYTES.min(budget), ProjectErrorCode::MissingAsset, Some(record.original_bytes as usize),
+            originals,
+            &format!("{}.json", record.original_hash.as_str()),
+            MAX_PALETTE_BYTES.min(budget),
+            ProjectErrorCode::MissingAsset,
+            Some(record.original_bytes as usize),
         )?;
         let canonical = bounded_read_exact(
-            canonical, &format!("{}.json", record.canonical_hash.as_str()),
+            canonical,
+            &format!("{}.json", record.canonical_hash.as_str()),
             MAX_PALETTE_BYTES.min(budget.saturating_sub(original.capacity())),
-            ProjectErrorCode::MissingAsset, Some(record.canonical_bytes as usize),
+            ProjectErrorCode::MissingAsset,
+            Some(record.canonical_bytes as usize),
         )?;
         record.validate_hashes(&original, &canonical)?;
-        let remaining = budget.saturating_sub(original.capacity()).saturating_sub(canonical.capacity());
+        let remaining = budget
+            .saturating_sub(original.capacity())
+            .saturating_sub(canonical.capacity());
         let prepared = PreparedPalette::decode_bounded(&original, &canonical, remaining)?;
-        let asset = Arc::new(PaletteAsset::from_checked_prepared(record.clone(), original, canonical, prepared)?);
+        let asset = Arc::new(PaletteAsset::from_checked_prepared(
+            record.clone(),
+            original,
+            canonical,
+            prepared,
+        )?);
         assets.insert(record.canonical_hash.clone(), asset);
     }
     Ok(assets)
 }
 
 fn validate_stored_palette_bytes(
-    directory: &Directory, hash: &SourceHash, size: usize, expected: Option<&[u8]>, cancel: &AtomicBool,
+    directory: &Directory,
+    hash: &SourceHash,
+    size: usize,
+    expected: Option<&[u8]>,
+    cancel: &AtomicBool,
 ) -> Result<(), ProjectError> {
     let name = format!("{}.json", hash.as_str());
     let mut file = directory.read(&name).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound { error(ProjectErrorCode::MissingAsset, "palette asset missing") } else { io(e) }
+        if e.kind() == std::io::ErrorKind::NotFound {
+            error(ProjectErrorCode::MissingAsset, "palette asset missing")
+        } else {
+            io(e)
+        }
     })?;
     if size > MAX_PALETTE_BYTES || file.metadata().map_err(io)?.len() != size as u64 {
-        return Err(error(ProjectErrorCode::CorruptAsset, "palette byte count differs from metadata"));
+        return Err(error(
+            ProjectErrorCode::CorruptAsset,
+            "palette byte count differs from metadata",
+        ));
     }
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 8192];
@@ -1325,33 +1429,62 @@ fn validate_stored_palette_bytes(
     loop {
         cancelled(cancel)?;
         let count = file.read(&mut buffer).map_err(io)?;
-        if count == 0 { break; }
-        if offset + count > size || expected.is_some_and(|bytes| bytes.get(offset..offset + count) != Some(&buffer[..count])) {
-            return Err(error(ProjectErrorCode::CorruptAsset, "palette bytes differ from immutable content"));
+        if count == 0 {
+            break;
+        }
+        if offset + count > size
+            || expected
+                .is_some_and(|bytes| bytes.get(offset..offset + count) != Some(&buffer[..count]))
+        {
+            return Err(error(
+                ProjectErrorCode::CorruptAsset,
+                "palette bytes differ from immutable content",
+            ));
         }
         digest.update(&buffer[..count]);
         offset += count;
     }
     let actual: [u8; 32] = digest.finalize().into();
     if offset != size || SourceHash::from_digest(&actual) != *hash {
-        return Err(error(ProjectErrorCode::CorruptAsset, "palette content hash differs"));
+        return Err(error(
+            ProjectErrorCode::CorruptAsset,
+            "palette content hash differs",
+        ));
     }
     Ok(())
 }
 
 fn validate_stored_palettes(
-    manifest: &ProjectManifest, originals: &Directory, canonical: &Directory, cancel: &AtomicBool,
+    manifest: &ProjectManifest,
+    originals: &Directory,
+    canonical: &Directory,
+    cancel: &AtomicBool,
 ) -> Result<(), ProjectError> {
     if let Some(record) = &manifest.appearance_study.palette {
         record.validate()?;
-        validate_stored_palette_bytes(originals, &record.original_hash, record.original_bytes as usize, None, cancel)?;
-        validate_stored_palette_bytes(canonical, &record.canonical_hash, record.canonical_bytes as usize, None, cancel)?;
+        validate_stored_palette_bytes(
+            originals,
+            &record.original_hash,
+            record.original_bytes as usize,
+            None,
+            cancel,
+        )?;
+        validate_stored_palette_bytes(
+            canonical,
+            &record.canonical_hash,
+            record.canonical_bytes as usize,
+            None,
+            cancel,
+        )?;
     }
     Ok(())
 }
 
 fn save_palettes(
-    snapshot: &Snapshot, originals: &Directory, canonical: &Directory, cancel: &AtomicBool,
+    snapshot: &Snapshot,
+    originals: &Directory,
+    canonical: &Directory,
+    cancel: &AtomicBool,
 ) -> Result<(), ProjectError> {
     for (directory, original) in [(originals, true), (canonical, false)] {
         let (mut count, mut total, scratch) = asset_budget(directory, ".json", MAX_PALETTE_BYTES)?;
@@ -1359,17 +1492,23 @@ fn save_palettes(
             cancelled(cancel)?;
             let (hash, bytes) = if original {
                 (&asset.record().original_hash, asset.original())
-            } else { (&asset.record().canonical_hash, asset.canonical()) };
+            } else {
+                (&asset.record().canonical_hash, asset.canonical())
+            };
             let name = format!("{}.json", hash.as_str());
             if directory.exists(&name).map_err(io)? {
                 validate_stored_palette_bytes(directory, hash, bytes.len(), Some(bytes), cancel)?;
             } else {
                 count += 1;
                 total += bytes.len() as u64;
-                if count > MAX_PROJECT_STORED_ASSETS || total > MAX_PROJECT_STORED_SOURCE_BYTES
+                if count > MAX_PROJECT_STORED_ASSETS
+                    || total > MAX_PROJECT_STORED_SOURCE_BYTES
                     || scratch + bytes.len() as u64 > MAX_PALETTE_BYTES as u64
                 {
-                    return Err(error(ProjectErrorCode::ResourceLimit, "persisted palette asset/scratch budget exhausted"));
+                    return Err(error(
+                        ProjectErrorCode::ResourceLimit,
+                        "persisted palette asset/scratch budget exhausted",
+                    ));
                 }
                 Temporary::write(directory, bytes)?.publish_asset(&name)?;
             }

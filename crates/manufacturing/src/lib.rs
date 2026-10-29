@@ -6,6 +6,7 @@
 pub mod backend;
 pub mod planner;
 mod realization;
+mod routing;
 pub mod verifier;
 pub use planner::preflight;
 
@@ -20,9 +21,9 @@ use std::sync::{
 };
 
 /// Binds native BREP material authority, finishes and source-associated walls.
-pub const PLANNER_VERSION: &str = "25";
-pub const EMITTER_VERSION: &str = "7";
-pub const VERIFIER_VERSION: &str = "9";
+pub const PLANNER_VERSION: &str = "26";
+pub const EMITTER_VERSION: &str = "8";
+pub const VERIFIER_VERSION: &str = "10";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,
@@ -146,6 +147,19 @@ pub fn inspect_bundle(
     )?;
     check_cancel(cancel)?;
     let replay = if let Some(sink) = sink {
+        let tool_epoch_count = report
+            .routing
+            .as_ref()
+            .map_or(0, |routing| routing.selection_count);
+        let waste_count = report.routing.as_ref().map_or(0, |routing| {
+            routing
+                .tools
+                .iter()
+                .map(|tool| tool.waste_deposition_segments)
+                .sum()
+        });
+        let process_count =
+            report.retraction_count * 2 - if report.routing.is_some() { 2 } else { 0 };
         let (bytes, bounds_mm) = sink.finish()?;
         let info = ReplayDisplayInfo {
             schema_version: REPLAY_SCHEMA_VERSION,
@@ -159,12 +173,18 @@ pub fn inspect_bundle(
             event_count: report.deposition_segments
                 + report.support_deposition_segments
                 + report.travel_segments
-                + report.retraction_count * 2
-                + report.lifecycle_motion_count,
-            deposition_count: report.deposition_segments + report.support_deposition_segments,
+                + process_count
+                + report.lifecycle_motion_count
+                + tool_epoch_count
+                + waste_count,
+            deposition_count: report.deposition_segments
+                + report.support_deposition_segments
+                + waste_count,
             travel_count: report.travel_segments,
             lifecycle_count: report.lifecycle_motion_count,
-            process_count: report.retraction_count * 2,
+            process_count,
+            tool_epoch_count,
+            waste_count,
             layer_count: bundle.plan.layers.len() as u32,
             bounds_mm,
         };

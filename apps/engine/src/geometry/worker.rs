@@ -326,9 +326,11 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
                 .map(Arc::new)
                 .map(Product::AppearanceReport)
                 .map_err(JobError::from),
-            Work::CompareOptical { asset, request } => super::optical::compare_palette(asset, request, &cancel)
-                .map(Product::OpticalReport)
-                .map_err(JobError::from),
+            Work::CompareOptical { asset, request } => {
+                super::optical::compare_palette(asset, request, &cancel)
+                    .map(Product::OpticalReport)
+                    .map_err(JobError::from)
+            }
             Work::GetOpticalReport { report } => check_cancel(&cancel)
                 .map_err(super::project_geometry_error)
                 .and_then(|()| super::optical::OpticalReportPublication::new(report))

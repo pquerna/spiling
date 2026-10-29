@@ -2128,20 +2128,43 @@ fn optical_study_source_deleted_reopen_and_revision_owned_acceptance() {
     std::fs::copy(fixtures.join("optical-layer-cycle.json"), &request).unwrap();
     let created = report(
         cli("create", &project)
-            .arg("--appearance-palette").arg(&palette)
-            .arg("--appearance-target").arg(fixtures.join("target-red.json"))
+            .arg("--appearance-palette")
+            .arg(&palette)
+            .arg("--appearance-target")
+            .arg(fixtures.join("target-red.json"))
             .args(["--appearance-compare", "--appearance-accept-report"])
-            .arg("--optical-study").arg(&request)
-            .args(["--optical-compare", "--optical-accept", "requested", "--save", "--undo", "--redo"])
-            .output().unwrap(),
+            .arg("--optical-study")
+            .arg(&request)
+            .args([
+                "--optical-compare",
+                "--optical-accept",
+                "requested",
+                "--save",
+                "--undo",
+                "--redo",
+            ])
+            .output()
+            .unwrap(),
     );
     let initial: OpticalReport =
         serde_json::from_value(created["optical"][0]["report"].clone()).unwrap();
-    let OpticalAssessment::Estimate { exposure, predicted_lab, display_srgb8, delta_e00, .. } =
-        &initial.requested else { panic!("requested construction must have a numeric estimate") };
+    let OpticalAssessment::Estimate {
+        exposure,
+        predicted_lab,
+        display_srgb8,
+        delta_e00,
+        ..
+    } = &initial.requested
+    else {
+        panic!("requested construction must have a numeric estimate")
+    };
     assert_eq!(*display_srgb8, [153, 135, 136]);
     // Independent pinned upstream TS result, not a measured print or RGB average.
-    for (actual, expected) in predicted_lab.iter().zip([57.8557803945072, 7.111905584953413, 1.9501896677348116]) {
+    for (actual, expected) in
+        predicted_lab
+            .iter()
+            .zip([57.8557803945072, 7.111905584953413, 1.9501896677348116])
+    {
         assert!((actual - expected).abs() < 1e-9);
     }
     assert!(*delta_e00 < 1e-9);
@@ -2149,8 +2172,14 @@ fn optical_study_source_deleted_reopen_and_revision_owned_acceptance() {
     assert!((exposure.fractions[1] - 1.0 / 3.0).abs() < 1e-12);
     assert_eq!(initial.total_candidates, 24);
     assert_eq!(initial.visits.len(), 24);
-    assert_eq!(initial.visits.iter().filter(|visit|
-        matches!(visit.assessment, OpticalAssessment::FilteredPhase)).count(), 4);
+    assert_eq!(
+        initial
+            .visits
+            .iter()
+            .filter(|visit| matches!(visit.assessment, OpticalAssessment::FilteredPhase))
+            .count(),
+        4
+    );
     let accepted = created["project"]["appearance_study"]["optical"].clone();
     let palette_report = created["project"]["appearance_study"]["report"].clone();
     std::fs::remove_file(&palette).unwrap();
@@ -2159,18 +2188,33 @@ fn optical_study_source_deleted_reopen_and_revision_owned_acceptance() {
     let c1_exported = root.join("palette-report.json");
     let reopened = report(
         cli("inspect", &project)
-            .arg("--optical-report").arg(&exported)
+            .arg("--optical-report")
+            .arg(&exported)
             .arg("--optical-compare")
-            .arg("--appearance-report").arg(&c1_exported)
-            .output().unwrap(),
+            .arg("--appearance-report")
+            .arg(&c1_exported)
+            .output()
+            .unwrap(),
     );
-    assert_ne!(created["hello"]["session_id"], reopened["hello"]["session_id"]);
+    assert_ne!(
+        created["hello"]["session_id"],
+        reopened["hello"]["session_id"]
+    );
     assert_eq!(reopened["project"]["appearance_study"]["optical"], accepted);
-    assert_eq!(reopened["project"]["appearance_study"]["report"], palette_report);
+    assert_eq!(
+        reopened["project"]["appearance_study"]["report"],
+        palette_report
+    );
     assert_eq!(reopened["project"]["dirty"], false);
     assert_eq!(std::fs::read(&exported).unwrap(), initial.encode().unwrap());
-    assert_eq!(reopened["optical"][0]["report"], created["optical"][0]["report"]);
-    assert_eq!(reopened["optical"][1]["report"], created["optical"][0]["report"]);
+    assert_eq!(
+        reopened["optical"][0]["report"],
+        created["optical"][0]["report"]
+    );
+    assert_eq!(
+        reopened["optical"][1]["report"],
+        created["optical"][0]["report"]
+    );
 
     let mut changed = initial.request.as_ref().clone();
     changed.recipe.phase_slot = 1;
@@ -2179,9 +2223,11 @@ fn optical_study_source_deleted_reopen_and_revision_owned_acceptance() {
     terminal_error(
         cli("open", &project)
             .arg("--optical-compare")
-            .arg("--optical-study").arg(&changed_path)
+            .arg("--optical-study")
+            .arg(&changed_path)
             .args(["--undo", "--optical-accept", "requested"])
-            .output().unwrap(),
+            .output()
+            .unwrap(),
     );
     let mut limited = initial.request.as_ref().clone();
     limited.limits.max_visited = 1;
@@ -2190,14 +2236,23 @@ fn optical_study_source_deleted_reopen_and_revision_owned_acceptance() {
     let rolled_back = root.join("must-rollback.json");
     terminal_error(
         cli("open", &project)
-            .arg("--optical-report").arg(&rolled_back)
-            .arg("--optical-study").arg(&limited_path)
+            .arg("--optical-report")
+            .arg(&rolled_back)
+            .arg("--optical-study")
+            .arg(&limited_path)
             .args(["--optical-compare", "--optical-accept", "best"])
-            .output().unwrap(),
+            .output()
+            .unwrap(),
     );
     assert!(!rolled_back.exists());
     let final_state = report(cli("inspect", &project).output().unwrap());
-    assert_eq!(final_state["project"]["appearance_study"]["optical"], accepted);
-    assert_eq!(final_state["project"]["appearance_study"]["report"], palette_report);
+    assert_eq!(
+        final_state["project"]["appearance_study"]["optical"],
+        accepted
+    );
+    assert_eq!(
+        final_state["project"]["appearance_study"]["report"],
+        palette_report
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

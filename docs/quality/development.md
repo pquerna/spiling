@@ -49,7 +49,7 @@ crates are optimized independently of the desktop stack.
 ## Material authority and qualification
 
 [ADR005](../adr/ADR005-native-first-development-geometry.md) adopts the implemented
-source6/planner25 DEVELOPMENT route: one imported SolidCore BREP, exact
+source6/planner26 DEVELOPMENT route: one imported SolidCore BREP, exact
 kernel/tolerance binding, original STEP identity/provenance and original finish
 inputs. Qualify preserved operators with the actual coherent producer; do not
 relabel source5/planner24 reports or transfer older runtime evidence.
@@ -250,6 +250,41 @@ Preflight is not manufacturing authority. Inspect/replay independently decode sa
 program bytes, never trust a stored `verified` flag. Export uses the common exclusive
 writer. [Manufacturing](manufacturing-evidence.md) maps the implementation and current
 refusals; [authoring](authoring-evidence.md) maps transactions and recovery.
+
+### Fixed-dual software job
+
+Use two upright occurrences of the same committed box, not a global layer-color
+instruction. The first receipt supplies the immutable definition ID for `--add`:
+
+```sh
+"$CLI" project create NEW_DUAL_PROJECT --import fixtures/geometry/box-mm.step \
+  --pose 1 '{"translation_mm":[20,20,0],"rotation_xyzw":[0,0,0,1]}' --engine "$ENGINE"
+"$CLI" project edit NEW_DUAL_PROJECT \
+  --add DEFINITION_ID_FROM_CREATE '{"translation_mm":[120,20,0],"rotation_xyzw":[0,0,0,1]}' \
+  --intent fixtures/manufacturing/fixed-dual.intent.json --preflight --compile --verify \
+  --manufacturing-out NEW_DUAL_EXPORT --save --engine "$ENGINE"
+"$CLI" project inspect NEW_DUAL_PROJECT --verify \
+  --manufacturing-out NEW_DUAL_FRESH_EXPORT --replay-out NEW_DUAL.splr --engine "$ENGINE"
+```
+
+The intent explicitly binds occurrences1/2, both immutable material declarations,
+fixed hotend offsets, exclusive work reservations and separate supported waste
+lanes. Inspect the actual command/report/SPLR6 result for both addressed thermal
+states, actual tool epochs, exact E8 recovery and separate per-tool model/waste
+accounting. It is a source-reviewed software reference, not deployable Marlin
+configuration, measured calibration, calibrated color or a physical print claim.
+Native/finish/support/coarse eligibility is not inherited from the single-tool
+workflow; [the finite route contract](../protocol/manufacturing.md#fixed-dual-software-route)
+owns refusals.
+
+To exercise recovery, import from a disposable copy of the STEP, save, remove only
+that external copy, then repeat fresh read-only inspection/export to new names.
+Use `project edit --intent CHANGED_INTENT --undo --redo --undo --verify --save` for
+source/material route history; the restored input must restore its original
+manufacturing identity. `--replay-out` belongs to create/inspect, not edit. The
+existing CEF full-intent/replay consumer uses the same saved job and decoded bytes;
+it does not recolor source meshes or simulate physical filament appearance.
+
 
 `apps/engine/src/geometry/bed_pose.rs` prepares one immutable native source for
 the three directional material-support queries. Retained native domains and

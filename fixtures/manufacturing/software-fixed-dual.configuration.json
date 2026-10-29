@@ -1,0 +1,16 @@
+{
+  "status": "source-reviewed-software-contract-not-deployable-firmware",
+  "machine_id": "software-fixed-dual-marlin-reference",
+  "firmware_repository": "https://github.com/MarlinFirmware/Marlin",
+  "firmware_revision": "e5a167aaa0a671ea6d9b9d98dc0518c88d5caed7",
+  "firmware_version": "2.1.2.5",
+  "required_enabled": ["EXTRUDERS=2", "TEMP_SENSOR_0=1", "TEMP_SENSOR_1=1", "TEMPERATURE_UNITS_SUPPORT", "M200", "M420", "HOTEND_OFFSET_X={0,25}", "HOTEND_OFFSET_Y={0,0}", "HOTEND_OFFSET_Z={0,0}", "equal E0/E1 steps per millimetre"],
+  "required_disabled": ["NO_VOLUMETRICS", "DISTINCT_E_FACTORS", "LIN_ADVANCE", "FWRETRACT", "SKEW_CORRECTION", "EEPROM_SETTINGS", "TOOLCHANGE_FILAMENT_SWAP", "TOOLCHANGE_PARK", "TOOLCHANGE_NO_RETURN", "ZRAISE_BEFORE_RETRACT", "TOOLCHANGE_MIGRATION_FEATURE", "EVENT_GCODE_TOOLCHANGE_T0", "EVENT_GCODE_TOOLCHANGE_T1", "EVENT_GCODE_AFTER_TOOLCHANGE", "EVENT_GCODE_TOOLCHANGE_ALWAYS_RUN", "TOOL_SENSOR", "DUAL_X_CARRIAGE", "PARKING_EXTRUDER", "MAGNETIC_PARKING_EXTRUDER", "SWITCHING_EXTRUDER", "SWITCHING_NOZZLE", "SWITCHING_TOOLHEAD", "MAGNETIC_SWITCHING_TOOLHEAD", "ELECTROMAGNETIC_SWITCHING_TOOLHEAD", "SINGLENOZZLE", "MIXING_EXTRUDER", "PRUSA_MMU1", "PRUSA_MMU2", "HOTEND_IDLE_TIMEOUT", "DISABLE_E", "DISABLE_OTHER_EXTRUDERS", "POWER_LOSS_RECOVERY", "STARTUP_COMMANDS", "ADVANCED_PAUSE_FEATURE", "FILAMENT_RUNOUT_SENSOR", "NOZZLE_PARK_FEATURE", "AUTOTEMP", "LASER_SYNCHRONOUS_M106_M107", "fixed G0 feed override", "workspace and home offsets", "restore leveling after homing"],
+  "entry_state": "fresh boot/reset of the declared configuration; not arbitrary inherited live firmware state",
+  "coordinates": "native Cartesian XYZ millimetres; common coplanar nozzle Z; logical active-tip p, carriage c=p-offset[active]",
+  "tool_selection": "Tn S1 is a barrier and logical offset shift without physical carriage motion or E reset",
+  "extrusion": "absolute filament-length E; G92 E0 starts an epoch but never repays per-feeder retraction debt",
+  "cooling": "one ordinary shared print fan",
+  "physical_qualification": "absent",
+  "firmware_build_or_flash": "not performed; this file freezes reviewed branch assumptions, not complete Configuration.h or a supported printer"
+}

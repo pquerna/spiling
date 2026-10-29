@@ -312,12 +312,19 @@ fn validate_engine_cutover(hello: &Hello) -> Result<(), ClientError> {
         (&hello.project_capabilities, "surface_image_assets_v1"),
         (&hello.project_capabilities, "source_bound_process_v3"),
         (&hello.project_capabilities, "appearance_palette_study_c1a"),
-        (&hello.project_capabilities, "optical_construction_reference_study_v1"),
+        (
+            &hello.project_capabilities,
+            "optical_construction_reference_study_v1",
+        ),
         (
             &hello.manufacturing_capabilities,
             spiling_contracts::MANUFACTURING_SCHEMA_CAPABILITY,
         ),
         (&hello.manufacturing_capabilities, "mapped_image_relief_v1"),
+        (
+            &hello.manufacturing_capabilities,
+            "fixed_dual_material_routing_v1",
+        ),
         (
             &hello.manufacturing_capabilities,
             "varying_z_material_domains_v1",

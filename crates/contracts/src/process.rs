@@ -106,7 +106,9 @@ impl ProcessInterfacePermission {
         if let Self::HorizontalDiaphragm { thickness_mm } = self
             && (!thickness_mm.is_finite() || thickness_mm <= 0.0)
         {
-            return Err(invalid("diaphragm thickness must be finite positive millimetres"));
+            return Err(invalid(
+                "diaphragm thickness must be finite positive millimetres",
+            ));
         }
         Ok(())
     }
@@ -921,12 +923,23 @@ mod tests {
             interface: forbidden.interface,
         };
         assert!(crate::rpc::ProcessEdit::try_from(invalid_edit).is_err());
-        assert!(ProcessInterfacePermission::try_from(crate::rpc::ProcessInterfacePermission { kind: None }).is_err());
+        assert!(
+            ProcessInterfacePermission::try_from(crate::rpc::ProcessInterfacePermission {
+                kind: None
+            })
+            .is_err()
+        );
         for thickness_mm in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-            assert!(ProcessInterfacePermission::try_from(crate::rpc::ProcessInterfacePermission {
-                kind: Some(crate::rpc::process_interface_permission::Kind::HorizontalDiaphragm(
-                    crate::rpc::HorizontalDiaphragmPermission { thickness_mm })),
-            }).is_err());
+            assert!(
+                ProcessInterfacePermission::try_from(crate::rpc::ProcessInterfacePermission {
+                    kind: Some(
+                        crate::rpc::process_interface_permission::Kind::HorizontalDiaphragm(
+                            crate::rpc::HorizontalDiaphragmPermission { thickness_mm }
+                        )
+                    ),
+                })
+                .is_err()
+            );
         }
     }
     #[test]

@@ -613,6 +613,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             support_filament_length_mm: 0.0,
             retraction_count: 0,
             retracted_filament_mm: 0.0,
+            routing: None,
         },
     }
 }

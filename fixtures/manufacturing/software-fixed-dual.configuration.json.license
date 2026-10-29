@@ -1,0 +1,5 @@
+SPDX-FileCopyrightText: 2026 Spiling contributors
+SPDX-License-Identifier: OSL-3.0
+Licensed under the Open Software License version 3.0
+
+Original inert declaration of source-reviewed Marlin branch assumptions. No Marlin implementation or configuration header is copied; firmware build, physical hardware and calibration remain unqualified.

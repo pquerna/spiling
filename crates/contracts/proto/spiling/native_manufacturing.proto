@@ -135,6 +135,7 @@ message ManufacturingInspectionProvenance {
   string verifier_version = 7;
   SurfaceOverlays surface_overlays = 8;
   ProcessDocument process_document = 9;
+  JobWorkflow workflow = 10;
 }
 message ReplayDisplayInfo {
   uint32 schema_version = 1;
@@ -150,6 +151,8 @@ message ReplayDisplayInfo {
   AabbMm bounds_mm = 11;
   uint32 lifecycle_count = 12;
   uint32 process_count = 13;
+  uint32 tool_epoch_count = 14;
+  uint32 waste_count = 15;
 }
 message ReplayDisplayDescriptor {
   ReplayDisplayInfo info = 1;
@@ -172,6 +175,7 @@ enum OutputDialect {
   OUTPUT_DIALECT_UNSPECIFIED = 0;
   CARTESIAN_ABSOLUTE_GCODE_V1 = 1;
   MARLIN2_SINGLE_EXTRUDER_GCODE_V1 = 2;
+  MARLIN2_FIXED_DUAL_GCODE_V1 = 3;
 }
 message PrinterCapabilities {
   MotionSpace motion_space = 1;
@@ -231,6 +235,7 @@ message JobWorkflow {
   oneof workflow {
     DiagnosticBodyOnly diagnostic_body_only = 1;
     SingleExtruderJob complete_marlin = 2;
+    FixedDualJob fixed_dual_marlin = 3;
   }
 }
 message SingleExtruderJob {
@@ -254,6 +259,77 @@ message SingleExtruderJob {
   double prime_filament_length_mm = 14;
   double prime_speed_mm_s = 15;
   Vec3 park_position_mm = 16;
+}
+
+enum FixedDualConfiguration {
+  FIXED_DUAL_CONFIGURATION_UNSPECIFIED = 0;
+  MARLIN2125_NATIVE_FIXED_HOTENDS = 1;
+}
+message LoadedMaterial {
+  string id = 1;
+  string revision = 2;
+  string declaration_hash = 3;
+  string polymer_family = 4;
+}
+message FixedDualTool {
+  string id = 1;
+  string feeder_id = 2;
+  LoadedMaterial material = 3;
+  repeated double offset_xy_mm = 4;
+  double nozzle_diameter_mm = 5;
+  double filament_diameter_mm = 6;
+  DepositionLimits deposition_limits = 7;
+  double max_feed_mm_s = 8;
+  double max_volumetric_flow_mm3_s = 9;
+  double nozzle_temperature_c = 10;
+  double standby_temperature_c = 11;
+  double minimum_extrusion_temperature_c = 12;
+  double maximum_nozzle_temperature_c = 13;
+  double retract_filament_mm = 14;
+  double retract_speed_mm_s = 15;
+  double minimum_reprime_volume_mm3 = 16;
+  // Exactly four coordinates: start X/Y, then end X/Y.
+  repeated double waste_line_xy_mm = 17;
+}
+message OccurrenceMaterialAssignment {
+  uint32 occurrence_id = 1;
+  string material_id = 2;
+  AabbMm work_envelope_mm = 3;
+}
+message FixedDualJob {
+  string machine_id = 1;
+  FixedDualConfiguration configuration = 2;
+  string firmware_revision = 3;
+  string configuration_hash = 4;
+  string calibration_record_hash = 5;
+  HomingCoordinateContract homing_contract = 6;
+  Vec3 home_position_mm = 7;
+  double bed_temperature_c = 8;
+  double maximum_bed_temperature_c = 9;
+  // Exactly two tools and two assignments, in domain order.
+  repeated FixedDualTool tools = 10;
+  repeated OccurrenceMaterialAssignment assignments = 11;
+  double transition_lift_mm = 12;
+  AabbMm carriage_travel_bounds_mm = 13;
+  AabbMm carriage_body_bounds_mm = 14;
+  double inactive_nozzle_radius_mm = 15;
+  Vec3 park_position_mm = 16;
+}
+message RoutedToolAccounting {
+  uint32 tool = 1;
+  string material_id = 2;
+  uint32 model_deposition_segments = 3;
+  double model_filament_length_mm = 4;
+  double model_volume_mm3 = 5;
+  uint32 waste_deposition_segments = 6;
+  double waste_filament_length_mm = 7;
+  double waste_volume_mm3 = 8;
+  double outstanding_retraction_mm = 9;
+}
+message FixedDualVerification {
+  uint32 selection_count = 1;
+  // Exactly two entries, indexed by tool.
+  repeated RoutedToolAccounting tools = 2;
 }
 message PlanarPrintRecipe {
   string id = 1;
@@ -402,6 +478,7 @@ message ManufacturingSummary {
   SurfaceResolutionTotals surface_resolution = 10;
   NativeGeometryCoverageSummary native_geometry = 11;
   repeated ProcessRegionResolution process_resolution = 12;
+  FixedDualVerification routing = 13;
 }
 // Sampled nominal-bead advisory counts, not an emitted-verification certificate.
 message SurfaceResolutionTotals { uint64 evaluated_witnesses = 1; uint64 resolved = 2; uint64 ambiguous = 3; uint64 below_nominal_resolution = 4; uint64 unavailable = 5; bool coverage_complete = 6; }
@@ -422,4 +499,5 @@ message VerificationReport {
   double support_filament_length_mm = 14;
   uint32 retraction_count = 15;
   double retracted_filament_mm = 16;
+  FixedDualVerification routing = 17;
 }

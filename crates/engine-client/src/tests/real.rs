@@ -873,7 +873,7 @@ async fn manufacturing_bundle_survives_save_restart_and_source_removal() {
 #[ignore = "native deep check; requires SPILING_TEST_ENGINE"]
 async fn appearance_descriptor_and_allocation_refusals_preserve_supervised_child() {
     use spiling_contracts::appearance::{
-        AppearanceReportRecord, APPEARANCE_PRODUCER, MAX_APPEARANCE_REPORT_BYTES,
+        APPEARANCE_PRODUCER, AppearanceReportRecord, MAX_APPEARANCE_REPORT_BYTES,
     };
     let mut client = EngineClient::spawn(engine()).await.unwrap();
     let pid = client.pid();
@@ -892,20 +892,51 @@ async fn appearance_descriptor_and_allocation_refusals_preserve_supervised_child
         media_type: "application/x-spiling-appearance-report+json".into(),
     };
     for invalid in [
-        spiling_contracts::ArtifactView { media_type: "application/json".into(), ..descriptor.clone() },
-        spiling_contracts::ArtifactView { size_bytes: "1".into(), ..descriptor.clone() },
-        spiling_contracts::ArtifactView { name: format!("artifacts/{}", record.input_hash.as_str()), ..descriptor.clone() },
-        spiling_contracts::ArtifactView { sha256: record.input_hash.as_str().into(), ..descriptor.clone() },
+        spiling_contracts::ArtifactView {
+            media_type: "application/json".into(),
+            ..descriptor.clone()
+        },
+        spiling_contracts::ArtifactView {
+            size_bytes: "1".into(),
+            ..descriptor.clone()
+        },
+        spiling_contracts::ArtifactView {
+            name: format!("artifacts/{}", record.input_hash.as_str()),
+            ..descriptor.clone()
+        },
+        spiling_contracts::ArtifactView {
+            sha256: record.input_hash.as_str().into(),
+            ..descriptor.clone()
+        },
     ] {
-        assert!(client.fetch_appearance_report(&record, &invalid).await.is_err());
+        assert!(
+            client
+                .fetch_appearance_report(&record, &invalid)
+                .await
+                .is_err()
+        );
         client.ping().await.unwrap();
     }
     let oversized = AppearanceReportRecord {
-        byte_count: MAX_APPEARANCE_REPORT_BYTES as u64 + 1, ..record.clone()
+        byte_count: MAX_APPEARANCE_REPORT_BYTES as u64 + 1,
+        ..record.clone()
     };
-    assert!(client.fetch_appearance_report(&oversized, &descriptor).await.is_err());
-    let wrong_producer = AppearanceReportRecord { producer: "foreign".into(), ..record };
-    assert!(client.fetch_appearance_report(&wrong_producer, &descriptor).await.is_err());
+    assert!(
+        client
+            .fetch_appearance_report(&oversized, &descriptor)
+            .await
+            .is_err()
+    );
+    let wrong_producer = AppearanceReportRecord {
+        producer: "foreign".into(),
+        ..record
+    };
+    assert!(
+        client
+            .fetch_appearance_report(&wrong_producer, &descriptor)
+            .await
+            .is_err()
+    );
     client.ping().await.unwrap();
     assert_eq!(client.pid(), pid);
     assert_eq!(client.hello().session_id, session);

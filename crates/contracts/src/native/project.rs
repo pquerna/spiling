@@ -20,56 +20,114 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
     request_id(id)?;
     use rpc::project_request::Command as C;
     let (session_id, command) = match command {
-        ProjectCommand::CompareOptical { session_id, base_revision } => {
+        ProjectCommand::CompareOptical {
+            session_id,
+            base_revision,
+        } => {
             return Ok(ProjectCall::CompareOptical(rpc::CompareOpticalRequest {
-                parent: format!("sessions/{}", session_id.as_str()), request_id: id.into(),
+                parent: format!("sessions/{}", session_id.as_str()),
+                request_id: id.into(),
                 base_revision: base_revision.0,
             }));
         }
-        ProjectCommand::GetOpticalReport { session_id, base_revision } => {
-            return Ok(ProjectCall::GetOpticalReport(rpc::GetOpticalReportRequest {
-                parent: format!("sessions/{}", session_id.as_str()), request_id: id.into(),
-                base_revision: base_revision.0,
-            }));
+        ProjectCommand::GetOpticalReport {
+            session_id,
+            base_revision,
+        } => {
+            return Ok(ProjectCall::GetOpticalReport(
+                rpc::GetOpticalReportRequest {
+                    parent: format!("sessions/{}", session_id.as_str()),
+                    request_id: id.into(),
+                    base_revision: base_revision.0,
+                },
+            ));
         }
-        ProjectCommand::SetOpticalStudy { session_id, base_revision, request } => (
-            session_id, C::SetOpticalStudy(rpc::SetOpticalStudyRequest {
-                base_revision: base_revision.0, request: Some(request.try_into()?),
+        ProjectCommand::SetOpticalStudy {
+            session_id,
+            base_revision,
+            request,
+        } => (
+            session_id,
+            C::SetOpticalStudy(rpc::SetOpticalStudyRequest {
+                base_revision: base_revision.0,
+                request: Some(request.try_into()?),
             }),
         ),
-        ProjectCommand::AcceptOpticalReport { session_id, base_revision, report_hash, selection } => (
-            session_id, C::AcceptOpticalReport(rpc::AcceptOpticalReportRequest {
-                base_revision: base_revision.0, report_hash: report_hash.into(),
+        ProjectCommand::AcceptOpticalReport {
+            session_id,
+            base_revision,
+            report_hash,
+            selection,
+        } => (
+            session_id,
+            C::AcceptOpticalReport(rpc::AcceptOpticalReportRequest {
+                base_revision: base_revision.0,
+                report_hash: report_hash.into(),
                 selection: selection.map(TryInto::try_into).transpose()?,
             }),
         ),
-        ProjectCommand::ImportAppearancePalette { session_id, base_revision, source } => {
-            return Ok(ProjectCall::ImportAppearancePalette(rpc::ImportAppearancePaletteRequest {
-                parent: format!("sessions/{}", session_id.as_str()), request_id: id.into(),
-                base_revision: base_revision.0, source: Some(source.try_into()?),
-            }));
+        ProjectCommand::ImportAppearancePalette {
+            session_id,
+            base_revision,
+            source,
+        } => {
+            return Ok(ProjectCall::ImportAppearancePalette(
+                rpc::ImportAppearancePaletteRequest {
+                    parent: format!("sessions/{}", session_id.as_str()),
+                    request_id: id.into(),
+                    base_revision: base_revision.0,
+                    source: Some(source.try_into()?),
+                },
+            ));
         }
-        ProjectCommand::CompareAppearance { session_id, base_revision } => {
-            return Ok(ProjectCall::CompareAppearance(rpc::CompareAppearanceRequest {
-                parent: format!("sessions/{}", session_id.as_str()), request_id: id.into(),
+        ProjectCommand::CompareAppearance {
+            session_id,
+            base_revision,
+        } => {
+            return Ok(ProjectCall::CompareAppearance(
+                rpc::CompareAppearanceRequest {
+                    parent: format!("sessions/{}", session_id.as_str()),
+                    request_id: id.into(),
+                    base_revision: base_revision.0,
+                },
+            ));
+        }
+        ProjectCommand::GetAppearanceReport {
+            session_id,
+            base_revision,
+        } => {
+            return Ok(ProjectCall::GetAppearanceReport(
+                rpc::GetAppearanceReportRequest {
+                    parent: format!("sessions/{}", session_id.as_str()),
+                    request_id: id.into(),
+                    base_revision: base_revision.0,
+                },
+            ));
+        }
+        ProjectCommand::SetAppearanceTarget {
+            session_id,
+            base_revision,
+            target,
+            limits,
+        } => (
+            session_id,
+            C::SetAppearanceTarget(rpc::SetAppearanceTargetRequest {
                 base_revision: base_revision.0,
-            }));
-        }
-        ProjectCommand::GetAppearanceReport { session_id, base_revision } => {
-            return Ok(ProjectCall::GetAppearanceReport(rpc::GetAppearanceReportRequest {
-                parent: format!("sessions/{}", session_id.as_str()), request_id: id.into(),
-                base_revision: base_revision.0,
-            }));
-        }
-        ProjectCommand::SetAppearanceTarget { session_id, base_revision, target, limits } => (
-            session_id, C::SetAppearanceTarget(rpc::SetAppearanceTargetRequest {
-                base_revision: base_revision.0, target: Some(target.try_into()?),
+                target: Some(target.try_into()?),
                 limits: Some(limits.try_into()?),
             }),
         ),
-        ProjectCommand::AcceptAppearanceReport { session_id, base_revision, report_hash, selection } => (
-            session_id, C::AcceptAppearanceReport(rpc::AcceptAppearanceReportRequest {
-                base_revision: base_revision.0, report_hash: report_hash.into(), selection,
+        ProjectCommand::AcceptAppearanceReport {
+            session_id,
+            base_revision,
+            report_hash,
+            selection,
+        } => (
+            session_id,
+            C::AcceptAppearanceReport(rpc::AcceptAppearanceReportRequest {
+                base_revision: base_revision.0,
+                report_hash: report_hash.into(),
+                selection,
             }),
         ),
         ProjectCommand::EditProcess {
@@ -237,29 +295,37 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
         use rpc::project_request::Command as C;
         Ok(match required(v.command, "project command")? {
             C::SetOpticalStudy(value) => Self::SetOpticalStudy {
-                session_id, base_revision: ProjectRevision(value.base_revision),
+                session_id,
+                base_revision: ProjectRevision(value.base_revision),
                 request: required(value.request, "optical request")?.try_into()?,
             },
             C::AcceptOpticalReport(value) => Self::AcceptOpticalReport {
-                session_id, base_revision: ProjectRevision(value.base_revision),
-                report_hash: SourceHash::parse(value.report_hash).map_err(|error| error.to_string())?,
+                session_id,
+                base_revision: ProjectRevision(value.base_revision),
+                report_hash: SourceHash::parse(value.report_hash)
+                    .map_err(|error| error.to_string())?,
                 selection: value.selection.map(TryInto::try_into).transpose()?,
             },
             C::SetAppearanceTarget(v) => Self::SetAppearanceTarget {
-                session_id, base_revision: ProjectRevision(v.base_revision),
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
                 target: required(v.target, "appearance target")?.try_into()?,
                 limits: required(v.limits, "appearance limits")?.try_into()?,
             },
             C::AcceptAppearanceReport(v) => {
-                if v.selection.as_ref().is_some_and(|key| key.is_empty() || key.len() > 64 || key.chars().any(char::is_control)) {
+                if v.selection.as_ref().is_some_and(|key| {
+                    key.is_empty() || key.len() > 64 || key.chars().any(char::is_control)
+                }) {
                     return Err("invalid appearance selection key".into());
                 }
                 Self::AcceptAppearanceReport {
-                    session_id, base_revision: ProjectRevision(v.base_revision),
-                    report_hash: SourceHash::parse(v.report_hash).map_err(|error| error.to_string())?,
+                    session_id,
+                    base_revision: ProjectRevision(v.base_revision),
+                    report_hash: SourceHash::parse(v.report_hash)
+                        .map_err(|error| error.to_string())?,
                     selection: v.selection,
                 }
-            },
+            }
             C::EditProcess(v) => Self::EditProcess {
                 session_id,
                 base_revision: ProjectRevision(v.base_revision),
@@ -374,7 +440,8 @@ impl TryFrom<rpc::ImportAppearancePaletteRequest> for ProjectCommand {
     fn try_from(value: rpc::ImportAppearancePaletteRequest) -> Result<Self, String> {
         request_id(&value.request_id)?;
         Ok(Self::ImportAppearancePalette {
-            session_id: session_parent(&value.parent)?, base_revision: ProjectRevision(value.base_revision),
+            session_id: session_parent(&value.parent)?,
+            base_revision: ProjectRevision(value.base_revision),
             source: required(value.source, "appearance palette source")?.try_into()?,
         })
     }
@@ -383,14 +450,20 @@ impl TryFrom<rpc::CompareAppearanceRequest> for ProjectCommand {
     type Error = String;
     fn try_from(value: rpc::CompareAppearanceRequest) -> Result<Self, String> {
         request_id(&value.request_id)?;
-        Ok(Self::CompareAppearance { session_id: session_parent(&value.parent)?, base_revision: ProjectRevision(value.base_revision) })
+        Ok(Self::CompareAppearance {
+            session_id: session_parent(&value.parent)?,
+            base_revision: ProjectRevision(value.base_revision),
+        })
     }
 }
 impl TryFrom<rpc::GetAppearanceReportRequest> for ProjectCommand {
     type Error = String;
     fn try_from(value: rpc::GetAppearanceReportRequest) -> Result<Self, String> {
         request_id(&value.request_id)?;
-        Ok(Self::GetAppearanceReport { session_id: session_parent(&value.parent)?, base_revision: ProjectRevision(value.base_revision) })
+        Ok(Self::GetAppearanceReport {
+            session_id: session_parent(&value.parent)?,
+            base_revision: ProjectRevision(value.base_revision),
+        })
     }
 }
 impl TryFrom<rpc::CompareOpticalRequest> for ProjectCommand {
@@ -416,7 +489,9 @@ impl TryFrom<rpc::GetOpticalReportRequest> for ProjectCommand {
 pub fn validate_project_info(v: &ProjectInfo) -> Result<(), String> {
     v.surface_overlays.validate().map_err(|e| e.to_string())?;
     v.process_document.validate().map_err(|e| e.to_string())?;
-    v.appearance_study.validate().map_err(|error| error.to_string())?;
+    v.appearance_study
+        .validate()
+        .map_err(|error| error.to_string())?;
     if v.resolved_process.len() > MAX_OCCURRENCES as usize {
         return Err("resolved process occurrence budget exceeded".into());
     }
@@ -474,7 +549,8 @@ impl TryFrom<rpc::ProjectInfo> for ProjectInfo {
                 .try_into()?,
             process_document: required(v.process_document, "project process document")?
                 .try_into()?,
-            appearance_study: required(v.appearance_study, "project appearance study")?.try_into()?,
+            appearance_study: required(v.appearance_study, "project appearance study")?
+                .try_into()?,
             resolved_process: v
                 .resolved_process
                 .into_iter()

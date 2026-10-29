@@ -94,8 +94,10 @@ fn geometry_only_scene_accepts_saved_programs_but_rejects_display_outputs() {
     op.metadata.as_mut().unwrap().value = meta.encode_to_vec();
     let restored = native_operation_view(&op).unwrap();
     assert_eq!(restored.status, JobStatus::Completed);
-    assert!(matches!(restored.result, Some(JobResult::Scene { summary: actual })
-        if actual.unique_mesh_bytes == 0 && actual.occurrence_count == 1));
+    assert!(
+        matches!(restored.result, Some(JobResult::Scene { summary: actual })
+        if actual.unique_mesh_bytes == 0 && actual.occurrence_count == 1)
+    );
     meta.outputs.push(rpc::Artifact {
         name: format!("artifacts/{}", "a".repeat(64)),
         sha256: "a".repeat(64),

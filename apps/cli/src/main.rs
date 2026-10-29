@@ -211,13 +211,17 @@ async fn run(options: Options) -> Result<(), Error> {
         _ => None,
     };
     let mut appearance_report_output = match &options.command {
-        Command::Project { appearance_report_output: Some(path), .. } =>
-            Some(output::OutputFile::create(path)?),
+        Command::Project {
+            appearance_report_output: Some(path),
+            ..
+        } => Some(output::OutputFile::create(path)?),
         _ => None,
     };
     let mut optical_report_output = match &options.command {
-        Command::Project { optical_report_output: Some(path), .. } =>
-            Some(output::OutputFile::create(path)?),
+        Command::Project {
+            optical_report_output: Some(path),
+            ..
+        } => Some(output::OutputFile::create(path)?),
         _ => None,
     };
     let start = Instant::now();
@@ -370,8 +374,12 @@ async fn main() -> ExitCode {
         Ok(Some(options)) => run(options).await,
         Ok(None) => {
             println!("{USAGE}");
-            println!("Appearance study flags (ordered; no geometry required): --appearance-palette NATIVE_JSON_PATH --appearance-target TARGET_JSON_FILE --appearance-limits LIMITS_JSON_FILE --appearance-compare --appearance-accept KEY --appearance-accept-report --appearance-report NEW_FILE. Compare/report permit read-only; acceptance requires the latest complete current-revision comparison. Target and limits are bounded inert JSON; reports are fetched from the engine, not evaluated locally.");
-            println!("Optical reference studies (ordered, software-only): --optical-study REQUEST_JSON --optical-compare --optical-accept requested|best|INDEX --optical-accept-report --optical-report NEW_FILE. Compare/report permit read-only; explicit complete acceptance is revision-bound. Prusa v7 estimates are not calibrated Spiling color or routed printing.");
+            println!(
+                "Appearance study flags (ordered; no geometry required): --appearance-palette NATIVE_JSON_PATH --appearance-target TARGET_JSON_FILE --appearance-limits LIMITS_JSON_FILE --appearance-compare --appearance-accept KEY --appearance-accept-report --appearance-report NEW_FILE. Compare/report permit read-only; acceptance requires the latest complete current-revision comparison. Target and limits are bounded inert JSON; reports are fetched from the engine, not evaluated locally."
+            );
+            println!(
+                "Optical reference studies (ordered, software-only): --optical-study REQUEST_JSON --optical-compare --optical-accept requested|best|INDEX --optical-accept-report --optical-report NEW_FILE. Compare/report permit read-only; explicit complete acceptance is revision-bound. Prusa v7 estimates are not calibrated Spiling color or routed printing."
+            );
             Ok(())
         }
         Err(error) => Err(error),

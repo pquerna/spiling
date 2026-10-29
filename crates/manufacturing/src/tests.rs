@@ -1452,7 +1452,10 @@ fn saved_verification_cannot_authorize_an_incompatible_producer() {
         .unwrap();
     assert!(bundle.verification.verified);
     for (planner, kernel) in [
-        (format!("incompatible-{PLANNER_VERSION}"), KERNEL_NAME.into()),
+        (
+            format!("incompatible-{PLANNER_VERSION}"),
+            KERNEL_NAME.into(),
+        ),
         (PLANNER_VERSION.into(), "monstertruck".into()),
     ] {
         bundle.provenance.planner_version = planner;
@@ -1863,6 +1866,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         native_interface_complex_layer_count: 0,
         owned_critical_slab_count: 0,
     };
+    bundle.plan.layers[0].z_mm = 0.4;
     bundle.plan.layers[0].paths = vec![
         DepositionPath {
             kind: DepositionKind::SolidFill,

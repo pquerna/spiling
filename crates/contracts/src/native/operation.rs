@@ -92,8 +92,12 @@ fn native_artifact_limit(media: &str) -> Result<u64, String> {
         }
         "application/x-spiling-replay-motion" => Ok(u64::from(MAX_REPLAY_DISPLAY_BYTES)),
         SURFACE_IMAGE_MEDIA_TYPE => Ok(MAX_SURFACE_IMAGE_BYTES as u64),
-        crate::appearance::APPEARANCE_REPORT_MIME => Ok(crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64),
-        crate::optical::OPTICAL_REPORT_MIME => Ok(crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64),
+        crate::appearance::APPEARANCE_REPORT_MIME => {
+            Ok(crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)
+        }
+        crate::optical::OPTICAL_REPORT_MIME => {
+            Ok(crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)
+        }
         _ => Err("unexpected native artifact media type".into()),
     }
 }
@@ -107,14 +111,39 @@ fn validate_verified(
     provenance
         .validate_for_record(record)
         .map_err(|e| e.to_string())?;
+    match (&provenance.workflow, &report.routing) {
+        (JobWorkflow::FixedDualMarlin { job }, Some(routing))
+            if job
+                .tools
+                .iter()
+                .zip(&routing.tools)
+                .all(|(declared, decoded)| declared.material.id == decoded.material_id) => {}
+        (JobWorkflow::DiagnosticBodyOnly, None) if report.lifecycle_motion_count == 0 => {}
+        (JobWorkflow::CompleteMarlin { .. }, None) if report.lifecycle_motion_count == 4 => {}
+        _ => return Err("inspection workflow/routing mismatch".into()),
+    }
     if let Some(display) = replay_display {
         display
             .validate_for_record(record)
             .map_err(|e| e.to_string())?;
         if display.info.verifier_version != provenance.verifier_version
             || display.info.travel_count != report.travel_segments
-            || display.info.process_count != report.retraction_count * 2
+            || display.info.process_count
+                != report.retraction_count * 2 - if report.routing.is_some() { 2 } else { 0 }
             || display.info.lifecycle_count != report.lifecycle_motion_count
+            || display.info.waste_count
+                != report.routing.as_ref().map_or(0, |routing| {
+                    routing
+                        .tools
+                        .iter()
+                        .map(|tool| tool.waste_deposition_segments)
+                        .sum()
+                })
+            || display.info.tool_epoch_count
+                != report
+                    .routing
+                    .as_ref()
+                    .map_or(0, |routing| routing.selection_count)
         {
             return Err("replay/provenance/report mismatch".into());
         }
@@ -126,6 +155,7 @@ fn validate_verified(
         || report.support_filament_length_mm != record.summary.support_filament_length_mm
         || report.deposited_volume_mm3 != record.summary.deposited_volume_mm3
         || report.filament_length_mm != record.summary.filament_length_mm
+        || report.routing != record.summary.routing
     {
         return Err("verification/record mismatch".into());
     }
@@ -222,28 +252,56 @@ pub fn native_operation_view(
     if let Some(result) = &result {
         match result {
             JobResult::AppearancePaletteImported { info, palette } => {
-                if info.revision.0 != meta.captured_project_revision.checked_add(1).ok_or("project revision overflow")?
+                if info.revision.0
+                    != meta
+                        .captured_project_revision
+                        .checked_add(1)
+                        .ok_or("project revision overflow")?
                     || info.appearance_study.palette.as_ref() != Some(palette)
                     || !meta.outputs.is_empty()
                 {
-                    return Err("appearance import receipt differs from captured project/palette".into());
+                    return Err(
+                        "appearance import receipt differs from captured project/palette".into(),
+                    );
                 }
             }
-            JobResult::AppearanceCompared { captured_revision, record, resource, .. } => {
+            JobResult::AppearanceCompared {
+                captured_revision,
+                record,
+                resource,
+                ..
+            } => {
                 super::appearance::validate_report_resource(record, resource)?;
-                if captured_revision.0 != meta.captured_project_revision || meta.outputs.len() != 1
-                    || !meta.outputs.iter().any(|output| output.name == resource.name
-                        && output.sha256 == resource.sha256 && output.size_bytes == record.byte_count
-                        && output.media_type == resource.media_type)
-                { return Err("appearance report captured revision or outputs mismatch".into()); }
+                if captured_revision.0 != meta.captured_project_revision
+                    || meta.outputs.len() != 1
+                    || !meta.outputs.iter().any(|output| {
+                        output.name == resource.name
+                            && output.sha256 == resource.sha256
+                            && output.size_bytes == record.byte_count
+                            && output.media_type == resource.media_type
+                    })
+                {
+                    return Err("appearance report captured revision or outputs mismatch".into());
+                }
             }
-            JobResult::OpticalCompared { captured_revision, record, resource, .. } => {
+            JobResult::OpticalCompared {
+                captured_revision,
+                record,
+                resource,
+                ..
+            } => {
                 super::optical::validate_report_resource(record, resource)?;
-                if captured_revision.0 != meta.captured_project_revision || meta.outputs.len() != 1
-                    || !meta.outputs.iter().any(|output| output.name == resource.name
-                        && output.sha256 == resource.sha256 && output.size_bytes == record.byte_count
-                        && output.media_type == resource.media_type)
-                { return Err("optical report captured revision or outputs mismatch".into()); }
+                if captured_revision.0 != meta.captured_project_revision
+                    || meta.outputs.len() != 1
+                    || !meta.outputs.iter().any(|output| {
+                        output.name == resource.name
+                            && output.sha256 == resource.sha256
+                            && output.size_bytes == record.byte_count
+                            && output.media_type == resource.media_type
+                    })
+                {
+                    return Err("optical report captured revision or outputs mismatch".into());
+                }
             }
             JobResult::SurfaceImageImported {
                 info,
@@ -389,8 +447,10 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
         use rpc::native_operation_result::Result as R;
         Ok(match required(v.result, "native result")? {
             R::AppearancePaletteImported(value) => {
-                let info: ProjectInfo = required(value.info, "palette import project info")?.try_into()?;
-                let palette: crate::appearance::PaletteRecord = required(value.palette, "imported palette metadata")?.try_into()?;
+                let info: ProjectInfo =
+                    required(value.info, "palette import project info")?.try_into()?;
+                let palette: crate::appearance::PaletteRecord =
+                    required(value.palette, "imported palette metadata")?.try_into()?;
                 if info.appearance_study.palette.as_ref() != Some(&palette) {
                     return Err("imported palette differs from authoritative study".into());
                 }
@@ -398,22 +458,32 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
             }
             R::AppearanceCompared(value) => {
                 let record = required(value.record, "appearance report record")?.try_into()?;
-                let resource = artifact_to_view(required(value.resource, "appearance report resource")?,
-                    crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)?;
+                let resource = artifact_to_view(
+                    required(value.resource, "appearance report resource")?,
+                    crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
+                )?;
                 super::appearance::validate_report_resource(&record, &resource)?;
                 Self::AppearanceCompared {
-                    project_id: ProjectId::parse(value.project_id).map_err(|error| error.to_string())?,
-                    captured_revision: ProjectRevision(value.captured_revision), record, resource,
+                    project_id: ProjectId::parse(value.project_id)
+                        .map_err(|error| error.to_string())?,
+                    captured_revision: ProjectRevision(value.captured_revision),
+                    record,
+                    resource,
                 }
             }
             R::OpticalCompared(value) => {
                 let record = required(value.record, "optical report record")?.try_into()?;
-                let resource = artifact_to_view(required(value.resource, "optical report resource")?,
-                    crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)?;
+                let resource = artifact_to_view(
+                    required(value.resource, "optical report resource")?,
+                    crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
+                )?;
                 super::optical::validate_report_resource(&record, &resource)?;
                 Self::OpticalCompared {
-                    project_id: ProjectId::parse(value.project_id).map_err(|error| error.to_string())?,
-                    captured_revision: ProjectRevision(value.captured_revision), record, resource,
+                    project_id: ProjectId::parse(value.project_id)
+                        .map_err(|error| error.to_string())?,
+                    captured_revision: ProjectRevision(value.captured_revision),
+                    record,
+                    resource,
                 }
             }
             R::Scene(summary) => Self::Scene {
@@ -513,23 +583,42 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
                     return Err("imported palette differs from authoritative study".into());
                 }
                 R::AppearancePaletteImported(rpc::AppearancePaletteImportedResult {
-                    info: Some(info.try_into()?), palette: Some(palette.try_into()?),
+                    info: Some(info.try_into()?),
+                    palette: Some(palette.try_into()?),
                 })
             }
-            JobResult::AppearanceCompared { project_id, captured_revision, record, resource } => {
+            JobResult::AppearanceCompared {
+                project_id,
+                captured_revision,
+                record,
+                resource,
+            } => {
                 super::appearance::validate_report_resource(&record, &resource)?;
                 R::AppearanceCompared(rpc::AppearanceComparedResult {
-                    project_id: project_id.as_str().into(), captured_revision: captured_revision.0,
-                    record: Some(record.try_into()?), resource: Some(artifact_from_view(resource,
-                        crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)?),
+                    project_id: project_id.as_str().into(),
+                    captured_revision: captured_revision.0,
+                    record: Some(record.try_into()?),
+                    resource: Some(artifact_from_view(
+                        resource,
+                        crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
+                    )?),
                 })
             }
-            JobResult::OpticalCompared { project_id, captured_revision, record, resource } => {
+            JobResult::OpticalCompared {
+                project_id,
+                captured_revision,
+                record,
+                resource,
+            } => {
                 super::optical::validate_report_resource(&record, &resource)?;
                 R::OpticalCompared(rpc::OpticalComparedResult {
-                    project_id: project_id.as_str().into(), captured_revision: captured_revision.0,
-                    record: Some(record.try_into()?), resource: Some(artifact_from_view(resource,
-                        crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)?),
+                    project_id: project_id.as_str().into(),
+                    captured_revision: captured_revision.0,
+                    record: Some(record.try_into()?),
+                    resource: Some(artifact_from_view(
+                        resource,
+                        crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
+                    )?),
                 })
             }
             JobResult::Scene { summary } => R::Scene(summary.try_into()?),

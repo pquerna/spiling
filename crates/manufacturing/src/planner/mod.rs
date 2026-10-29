@@ -2182,6 +2182,21 @@ fn admit_schedule<'model>(
             surface_tolerance_mm: surface::SURFACE_TOLERANCE_MM,
             layer_quantization_mm: LAYER_QUANTIZATION_MM,
         };
+        if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
+            for layer in &mut result.layers {
+                let mut right = layer.paths.len();
+                let mut left = 0;
+                while left < right {
+                    check_cancel(cancel)?;
+                    if job.tool_for_path(&layer.paths[left])? == 0 {
+                        left += 1;
+                    } else {
+                        right -= 1;
+                        layer.paths.swap(left, right);
+                    }
+                }
+            }
+        }
         result.validate(input.intent)?;
 
         combined::combine(

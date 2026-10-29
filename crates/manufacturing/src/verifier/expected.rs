@@ -13,6 +13,7 @@ pub(super) fn validate_wall_seams(
     plan: &NormalizedPrintPlan,
     recipe: &PlanarPrintRecipe,
     mut previous: Option<[f64; 3]>,
+    routing: Option<&FixedDualJob>,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let zero = |value: f64| if value == 0.0 { 0.0 } else { value };
@@ -25,8 +26,16 @@ pub(super) fn validate_wall_seams(
             .total_cmp(&zero(b[0]))
             .then_with(|| zero(a[1]).total_cmp(&zero(b[1])))
     };
+    let mut previous_group = None;
     for layer in &plan.layers {
         for path in &layer.paths {
+            if let Some(job) = routing {
+                let tool = job.tool_for_path(path)?;
+                if previous_group != Some((layer.index, tool)) {
+                    previous = Some(job.waste_end_mm(tool, layer.z_mm));
+                    previous_group = Some((layer.index, tool));
+                }
+            }
             super::cancelled(cancel)?;
             let points = &path.points_mm;
             if path.owner == Some(DepositionOwner::Wall) && points.first() == points.last() {
@@ -79,9 +88,14 @@ pub(super) struct Association {
 
 #[derive(Clone, Copy)]
 pub(super) enum Action {
+    BeginTool {
+        layer: u16,
+        tool: u8,
+    },
     Fan(u8),
     Move {
         target: [f64; 3],
+        tool: Option<u8>,
         source: Option<[f64; 3]>,
         layer: u16,
         role: DepositionKind,
@@ -106,12 +120,16 @@ pub(super) struct Expected<'a> {
     position: Option<[f64; 3]>,
     fan: Option<u8>,
     loaded: bool,
+    routing: Option<&'a FixedDualJob>,
+    previous_group: Option<(u16, u8)>,
+    safe_z: f64,
 }
 impl<'a> Expected<'a> {
     pub(super) fn new(
         plan: &'a NormalizedPrintPlan,
         recipe: &'a PlanarPrintRecipe,
         position: Option<[f64; 3]>,
+        routing: Option<&'a FixedDualJob>,
     ) -> Self {
         Self {
             plan,
@@ -125,11 +143,17 @@ impl<'a> Expected<'a> {
             position,
             fan: None,
             loaded: false,
+            routing,
+            previous_group: None,
+            safe_z: routing.map_or(0.0, |job| {
+                plan.layers.last().unwrap().z_mm + job.transition_lift_mm
+            }),
         }
     }
     fn load(&mut self) -> Result<(), ManufacturingError> {
         let p = &self.plan.layers[self.layer].paths[self.path];
         let target = p.points_mm[0];
+        let path_tool = self.routing.map(|job| job.tool_for_path(p)).transpose()?;
         let layer = self.layer as u16;
         let role = p.kind;
         let travel = |target| {
@@ -138,6 +162,7 @@ impl<'a> Expected<'a> {
                 source: None,
                 layer,
                 role,
+                tool: path_tool,
                 association: None,
                 closes_wall: false,
             })
@@ -154,10 +179,29 @@ impl<'a> Expected<'a> {
             self.recipe.process.fan_after_first_layers
         };
         let mut n = 0;
+        if let Some(job) = self.routing {
+            let tool = job.tool_for_path(p)?;
+            if self.previous_group != Some((layer, tool)) {
+                self.prefix[n] = Some(Action::BeginTool { layer, tool });
+                n += 1;
+                self.position = Some(job.waste_end_mm(tool, p.physical_z_mm[1]));
+                self.previous_group = Some((layer, tool));
+            }
+        }
         if self.fan != Some(pwm) {
             self.prefix[n] = Some(Action::Fan(pwm));
             n += 1;
             self.fan = Some(pwm);
+        }
+        if self.routing.is_some() {
+            let previous = self
+                .position
+                .ok_or_else(|| super::failed("routed path entry lacks a known position"))?;
+            self.prefix[n] = travel([previous[0], previous[1], self.safe_z]);
+            self.prefix[n + 1] = travel([target[0], target[1], self.safe_z]);
+            self.prefix[n + 2] = travel(target);
+            self.loaded = true;
+            return Ok(());
         }
         let retract = match (&self.recipe.process.retraction, self.position) {
             (
@@ -245,6 +289,7 @@ impl Iterator for Expected<'_> {
                 self.position = Some(target);
                 return Some(Ok(Action::Move {
                     target,
+                    tool: self.routing.map(|_| self.previous_group.unwrap().1),
                     source: Some(source),
                     layer: self.layer as u16,
                     role: path.kind,
