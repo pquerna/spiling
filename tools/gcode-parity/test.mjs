@@ -292,3 +292,62 @@ test("whole-material explanation requires all real density controls and deciding
   }));
   assert.equal(explainCubeMaterialFamily(records, 2).explained, false);
 });
+
+test("bridge observer rejects missing post, missing roof, void extrusion and duplicate commands", async () => {
+  const { auditBridge } = await import("./bridges.mjs");
+  const source = { id: "span-2", widthMm: 6 };
+  const program = ({
+    missingPost = false,
+    missingRoof = false,
+    voidStroke = false,
+    duplicate = false,
+  } = {}) => {
+    const lines = ["G21", "G90", "M83", "G92 E0", "G1 X0 Y0 Z0.2 F2100"];
+    for (let layer = 1; layer <= 20; layer++) {
+      const z = layer * 0.2;
+      if (missingRoof && layer > 15) continue;
+      const intervals =
+        layer <= 15
+          ? missingPost
+            ? [[0, 2]]
+            : [
+                [0, 2],
+                [4, 6],
+              ]
+          : [[0, 6]];
+      for (const [lo, hi] of intervals)
+        for (let y = 0.225; y < 5.9; y += 0.25) {
+          lines.push(`G1 X${lo + 0.225} Y${y.toFixed(6)} Z${z.toFixed(6)}`);
+          lines.push(`G1 X${hi - 0.225} E0.04`);
+          if (duplicate) lines.push(`G1 X${lo + 0.225} E0.04`);
+        }
+      if (voidStroke && layer === 5) lines.push(`G1 X1 Y3 Z${z}`, "G1 X5 E0.1");
+    }
+    return lines.join("\n");
+  };
+  const good = auditBridge(decodeGcode(program()), source);
+  assert.equal(good.correctnessPassed, true, JSON.stringify(good.violations));
+  assert(good.layers.some((r) => r.twoEndedGapCount > 0));
+  for (const [fault, code] of [
+    [{ missingPost: true }, "mandatory_nominal_coverage"],
+    [{ missingRoof: true }, "model_height"],
+    [{ voidStroke: true }, "extrusion_in_source_void"],
+    [{ duplicate: true }, "duplicate_stroke"],
+  ])
+    assert(
+      auditBridge(decodeGcode(program(fault)), source).violations.some((v) => v.code === code),
+      code,
+    );
+});
+
+test("bridge anchor runs ignore straight command partitions but retain travel, turns and reversal", async () => {
+  const { depositionRuns } = await import("./bridges.mjs");
+  const a = { line: 10, from: [0, 0, 0.2], to: [3, 0, 0.2], lengthMm: 3 };
+  const b = { line: 11, from: [3, 0, 0.2], to: [8, 0, 0.2], lengthMm: 5 };
+  assert.equal(depositionRuns([a, b]).length, 1);
+  assert.deepEqual(depositionRuns([a, b])[0].lines, [10, 11]);
+  assert.equal(depositionRuns([a, { ...b, line: 12 }], [{ line: 11 }]).length, 2);
+  assert.equal(depositionRuns([a, { ...b, to: [3, 3, 0.2] }]).length, 2);
+  assert.equal(depositionRuns([a, { ...b, to: [0, 0, 0.2] }]).length, 2);
+  assert.equal(depositionRuns([a, { ...b, from: [3.01, 0, 0.2] }]).length, 2);
+});

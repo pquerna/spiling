@@ -20,12 +20,14 @@ import {
   referenceProbesFor,
   sha256,
 } from "./gcode-parity/corpus.mjs";
+import { runBridgeComparisons } from "./gcode-parity/bridge-run.mjs";
 import { reportHtml, overlayBands } from "./gcode-parity/report.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const options = {};
 for (let i = 2; i < process.argv.length; i++) {
   const key = process.argv[i];
   if (key === "--observe") options.observe = true;
+  else if (key === "--bridges") options.bridges = true;
   else if (
     ["--cli", "--engine", "--reference", "--reference-sha256"].includes(key) &&
     process.argv[i + 1]
@@ -162,6 +164,40 @@ try {
       "comparison contract requires PrusaSlicer 2.9.4; retain and review a separate contract for another version",
     );
   manifest.reference.version = help.split("\n").find((l) => l.startsWith("PrusaSlicer-"));
+  if (options.bridges) {
+    let bridgeReport;
+    try {
+      bridgeReport = await runBridgeComparisons({
+        root,
+        output,
+        cli,
+        engine,
+        reference,
+        manifest,
+        run,
+        save,
+      });
+    } catch (error) {
+      bridgeReport = {
+        correctnessPassed: false,
+        nativeSoftwarePassed: false,
+        differencesExplained: false,
+        error: error.message,
+      };
+    }
+    await save("report.json", bridgeReport);
+    await save("manifest.json", manifest);
+    console.error(
+      `Native bridge software gates: ${bridgeReport.nativeSoftwarePassed}; baseline audits: ${bridgeReport.correctnessPassed}; reference differences explained: ${bridgeReport.differencesExplained}. Report: ${join(output, "report.json")}`,
+    );
+    process.exit(
+      !bridgeReport.correctnessPassed
+        ? 1
+        : !bridgeReport.differencesExplained && !options.observe
+          ? 2
+          : 0,
+    );
+  }
   const source = await boundedText(join(root, "fixtures/geometry/box-mm.step"));
   manifest.originalSourceSha256 = sha256(source);
   await save("cube-10-derived.step", cubeSource(source));

@@ -43,6 +43,62 @@ refused case or failed audit pass. The complete matrix currently exposes unresol
 obligations, so a nonzero result is expected until those differences are resolved.
 Do not exclude a failing case or turn a promised positive into an expected refusal.
 
+## Native bridge and captured-profile comparison
+
+```sh
+pnpm compare:slicers --bridges --reference /usr/bin/prusa-slicer
+```
+
+This mode reuses the same bounded process runner and independent command decoder.
+[`bridge-corpus.mjs`](../../tools/gcode-parity/bridge-corpus.mjs) owns the original
+analytic STEP author; immutable sources, explicit X/Z polygons, dimensions,
+hashes and OSL sidecars live in
+[`bridges/manifest.json`](../../fixtures/manufacturing/bridges/manifest.json).
+Two 2 mm posts separated by 2/6/10 mm support a 1 mm roof at Z3 mm; the one-ended
+source deliberately omits the second post. Both importers receive the same
+unchanged source bytes and source frame. Production code never recognizes a
+coupon or substitutes this author for native geometry queries.
+
+Matched explicit controls precede the two captured synthetic material selections.
+Supports and retraction are disabled, with one wall and solid rectilinear fill.
+The declared native span limit admits the short/middle two-ended sources and
+refuses the long or missing-anchor sources. Nearby overrides on the unchanged
+middle source straddle its actual deposited gap; all admitted limit variants
+must retain byte-identical G-code. Required refusals must carry the actual anchor
+diagnostic and publish no export. An arbitrary native geometry failure is never
+an expected bridge refusal.
+
+[`bridges.mjs`](../../tools/gcode-parity/bridges.mjs) independently observes the
+analytic solid posts/roof, layer order, complete duplicate strokes, extrusion in
+the source void, declared prime, nominal capsule coverage and actual XYZ/E dose.
+Its 0.15 mm grid, nominal 0.45 mm width and 0.002 mm observation allowance are
+bounded diagnostics, not exact physical coverage. Every layer retains coverage
+sample/miss counts and witnesses; actual dose is separate from nominal footprint.
+An uninterrupted collinear deposition run can cross G-code command partitions.
+Travel, reversal and corners close it. Raw command endpoint counts remain visible
+but cannot turn a partition point into a missing physical anchor. Lower-layer
+capsules and complete straight runs independently expose gap span and both ends.
+Role comments supply none of these facts.
+
+Positive native cases require fresh export verification, expected actual thermal,
+bridge feed/cooling commands, complete two-ended observed gaps and byte-identical
+fresh read-only reopen/export. Synthetic profile changes must preserve decoded
+geometry and change total E by the declared flow ratio. This is process plumbing,
+not calibrated PLA/PCTG-CF performance. Reference integer fan percentages retain
+the explicit PWM rounding mismatch. A selected native maximum span has no matched
+reference admission control; reference emission beyond it is an explainable
+policy difference, not evidence that either print succeeds physically.
+
+The mode writes `report.json`, per-case audits/comparisons and the common manifest
+with raw/resolved inputs, output/log and observer/executable hashes. It reports
+`nativeSoftwarePassed`, `referenceAuditsPassed`, `correctnessPassed` and
+`differencesExplained` separately. Failed reference nominal coverage remains a
+baseline failure and exit 1 even while native gates pass. Exit 2 requires passed
+baseline audits with unresolved comparisons; `--observe` cannot hide an audit
+failure. Coupon-specific material, fitted-row/link and schedule differences remain
+unresolved until deciding evidence closes them. Cube circular internal-bridge
+flow evidence does not automatically explain an exterior coupon roof.
+
 ## Comparison contract
 
 [`corpus.mjs`](../../tools/gcode-parity/corpus.mjs) derives a coherent 10 mm cube
