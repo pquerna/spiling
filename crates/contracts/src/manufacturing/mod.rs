@@ -3317,17 +3317,16 @@ impl VerificationReport {
         {
             return Err(resource("verification segment limit exceeded"));
         }
-        if let Some(routing) = &self.routing {
-            if self.retraction_count != routing.selection_count
+        if let Some(routing) = &self.routing
+            && (self.retraction_count != routing.selection_count
                 || routing
                     .tools
                     .iter()
-                    .any(|tool| tool.outstanding_retraction_mm <= 0.0)
-            {
-                return Err(invalid(
-                    "fixed-dual final pressure debt or retraction count mismatch",
-                ));
-            }
+                    .any(|tool| tool.outstanding_retraction_mm <= 0.0))
+        {
+            return Err(invalid(
+                "fixed-dual final pressure debt or retraction count mismatch",
+            ));
         }
         if (self.routing.is_some()
             && (self.lifecycle_motion_count != 2
@@ -3410,17 +3409,16 @@ impl ManufacturingSummary {
             self.filament_length_mm,
             self.support_deposition_segments,
         )?;
-        if let Some(routing) = &self.routing {
-            if self.layers.checked_mul(2) != Some(routing.selection_count)
+        if let Some(routing) = &self.routing
+            && (self.layers.checked_mul(2) != Some(routing.selection_count)
                 || routing.tools.iter().any(|tool| {
                     tool.waste_deposition_segments != self.layers
                         || tool.outstanding_retraction_mm <= 0.0
-                })
-            {
-                return Err(invalid(
-                    "fixed-dual summary layers disagree with route accounting",
-                ));
-            }
+                }))
+        {
+            return Err(invalid(
+                "fixed-dual summary layers disagree with route accounting",
+            ));
         }
         self.surface_resolution.validate()?;
         self.native_geometry.validate()?;
@@ -4018,6 +4016,10 @@ pub fn input_fingerprint(
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Bounded control commands stay inline without per-call heap indirection"
+)]
 pub enum ManufacturingCommand {
     Get {
         session_id: SessionId,

@@ -113,7 +113,7 @@ fn cycle_slot_bounds(
     height: f64,
     ordinal: i64,
 ) -> Result<[f64; 2], ManufacturingError> {
-    if ordinal < -MAX_CYCLE_ORDINAL || ordinal >= MAX_CYCLE_ORDINAL {
+    if !(-MAX_CYCLE_ORDINAL..MAX_CYCLE_ORDINAL).contains(&ordinal) {
         return Err(invalid(
             "routed cycle boundary ordinal exceeds exact arithmetic",
         ));
@@ -154,7 +154,7 @@ impl OccurrenceMaterial {
                 let seed = cycle_seed(recipe, height, z[1])?;
                 let mut owns_terminal = false;
                 for ordinal in seed - 2..=seed + 2 {
-                    if ordinal < -MAX_CYCLE_ORDINAL || ordinal >= MAX_CYCLE_ORDINAL {
+                    if !(-MAX_CYCLE_ORDINAL..MAX_CYCLE_ORDINAL).contains(&ordinal) {
                         continue;
                     }
                     let [lower, upper] = cycle_slot_bounds(recipe, height, ordinal)?;
@@ -201,18 +201,17 @@ impl OccurrenceMaterial {
         // Rounded subtraction/division can put floor on either side of an
         // endpoint. Recompute a fixed neighborhood in the physical world frame.
         for ordinal in seed - 2..=seed + 2 {
-            if ordinal < -MAX_CYCLE_ORDINAL || ordinal >= MAX_CYCLE_ORDINAL {
+            if !(-MAX_CYCLE_ORDINAL..MAX_CYCLE_ORDINAL).contains(&ordinal) {
                 continue;
             }
             let [lower, upper] = cycle_slot_bounds(recipe, height, ordinal)?;
             if (start >= lower || same_cycle_boundary(start, lower))
                 && (end <= upper || same_cycle_boundary(end, upper))
+                && found.replace(ordinal).is_some()
             {
-                if found.replace(ordinal).is_some() {
-                    return Err(invalid(
-                        "routed cycle interval has ambiguous slot ownership",
-                    ));
-                }
+                return Err(invalid(
+                    "routed cycle interval has ambiguous slot ownership",
+                ));
             }
         }
         let ordinal = found.ok_or_else(|| invalid("routed interval crosses a cycle boundary"))?;
@@ -229,7 +228,7 @@ impl OccurrenceMaterial {
         let seed = cycle_seed(recipe, height, z_mm)?;
         let mut found = None;
         for ordinal in seed - 2..=seed + 2 {
-            if ordinal < -MAX_CYCLE_ORDINAL || ordinal >= MAX_CYCLE_ORDINAL {
+            if !(-MAX_CYCLE_ORDINAL..MAX_CYCLE_ORDINAL).contains(&ordinal) {
                 continue;
             }
             let [lower, upper] = cycle_slot_bounds(recipe, height, ordinal)?;
@@ -238,12 +237,11 @@ impl OccurrenceMaterial {
             if (z_mm >= lower || same_cycle_boundary(z_mm, lower))
                 && z_mm < upper
                 && !same_cycle_boundary(z_mm, upper)
+                && found.replace(upper).is_some()
             {
-                if found.replace(upper).is_some() {
-                    return Err(invalid(
-                        "routed cycle boundary has ambiguous slot ownership",
-                    ));
-                }
+                return Err(invalid(
+                    "routed cycle boundary has ambiguous slot ownership",
+                ));
             }
         }
         found
@@ -465,10 +463,9 @@ impl FixedDualJob {
             let mut contains = true;
             for edge in path.checked_edges()? {
                 for point in edge.points_mm {
-                    for axis in 0..2 {
-                        let coordinate =
-                            program_coordinates::project_xyz6_coordinate_mm(point[axis])?;
-                        let error = program_coordinates::xyz6_coordinate_error_mm(point[axis])?;
+                    for (axis, &value) in point.iter().take(2).enumerate() {
+                        let coordinate = program_coordinates::project_xyz6_coordinate_mm(value)?;
+                        let error = program_coordinates::xyz6_coordinate_error_mm(value)?;
                         let radius = (edge.width_mm * 0.5 + error).next_up();
                         if (coordinate - radius).next_down() < bounds.min[axis]
                             || (coordinate + radius).next_up() > bounds.max[axis]
@@ -639,6 +636,12 @@ impl FixedDualVerification {
         }
         Ok(())
     }
+}
+
+fn assignments<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<OccurrenceMaterialAssignment>, D::Error> {
+    bounded_vec::<D, _, 2>(d)
 }
 
 #[cfg(test)]
@@ -835,10 +838,4 @@ mod cycle_tests {
             );
         }
     }
-}
-
-fn assignments<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Vec<OccurrenceMaterialAssignment>, D::Error> {
-    bounded_vec::<D, _, 2>(d)
 }

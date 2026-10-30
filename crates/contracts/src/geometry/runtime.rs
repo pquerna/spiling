@@ -118,6 +118,10 @@ impl JobStatus {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Bounded control results stay inline without per-observation heap indirection"
+)]
 pub enum JobResult {
     OpticalConstructionApplied {
         info: crate::project::ProjectInfo,

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 use super::{request_id, required, session_parent};
-use crate::{geometry::*, process::*, project::*, rpc, surface::*};
+use crate::{geometry::*, project::*, rpc, surface::*};
 
 pub enum ProjectCall {
     ApplyOpticalConstruction(rpc::ApplyOpticalConstructionRequest),

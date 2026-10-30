@@ -357,34 +357,31 @@ pub(super) fn validate_material_domains(
             }
         }
         for region in &layer.region_coverage.process_regions {
-            if let Some(reference) = region.material_domain {
-                if !plan.material_domains.iter().any(|d| {
+            if let Some(reference) = region.material_domain
+                && (!plan.material_domains.iter().any(|d| {
                     d.reference == reference
                         && d.physical_z_mm[0] <= layer.lower_z_mm
                         && d.physical_z_mm[1] >= layer.z_mm
                 }) || (reference.role != MaterialConstructionRole::Core
-                    && region.fraction != 1.0)
-                {
-                    return Err(invalid(
-                        "solid surface construction has invalid material-domain coverage",
-                    ));
-                }
+                    && region.fraction != 1.0))
+            {
+                return Err(invalid(
+                    "solid surface construction has invalid material-domain coverage",
+                ));
             }
         }
         for path in &layer.paths {
-            if let Some(DepositionOwner::Regional { region_index }) = path.owner {
-                if let Some(reference) = layer
+            if let Some(DepositionOwner::Regional { region_index }) = path.owner
+                && let Some(reference) = layer
                     .region_coverage
                     .process_regions
                     .get(usize::from(region_index))
                     .and_then(|r| r.material_domain)
-                {
-                    if path.material_domain != Some(reference) {
-                        return Err(invalid(
-                            "regional bead disagrees with its constructed material owner",
-                        ));
-                    }
-                }
+                && path.material_domain != Some(reference)
+            {
+                return Err(invalid(
+                    "regional bead disagrees with its constructed material owner",
+                ));
             }
         }
     }

@@ -316,6 +316,10 @@ impl SearchLimits {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Bounded palette evidence stays inline; boxing adds an allocation per measured row"
+)]
 pub enum AppearanceEvidence {
     CatalogEstimate {
         srgb: [f64; 3],
@@ -1144,7 +1148,7 @@ impl AppearanceReportRecord {
         Ok(report)
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AppearanceStudy {
     #[serde(deserialize_with = "required_option")]
@@ -1160,19 +1164,6 @@ pub struct AppearanceStudy {
     pub selection: Option<String>,
     #[serde(deserialize_with = "required_option")]
     pub optical: Option<crate::optical::OpticalStudy>,
-}
-impl Default for AppearanceStudy {
-    fn default() -> Self {
-        Self {
-            palette: None,
-            target: None,
-            limits: SearchLimits::default(),
-            report: None,
-            report_record: None,
-            selection: None,
-            optical: None,
-        }
-    }
 }
 impl AppearanceStudy {
     pub fn validate(&self) -> Result<(), ProjectError> {

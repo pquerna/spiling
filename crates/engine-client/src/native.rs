@@ -73,7 +73,7 @@ impl EngineRpc {
         let limit = spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64;
         let size =
             native::validate_artifact_view(descriptor, limit).map_err(ClientError::Protocol)?;
-        if size != u64::from(record.byte_count)
+        if size != record.byte_count
             || descriptor.sha256 != record.hash.as_str()
             || descriptor.name.strip_prefix("artifacts/") != Some(record.hash.as_str())
             || descriptor.media_type != "application/x-spiling-appearance-report+json"
@@ -487,7 +487,7 @@ impl EngineRpc {
                 session_id: scene.session_id.clone(),
                 base_revision: scene.revision,
                 project_revision,
-                occurrence_id: occurrence.occurrence_id.clone(),
+                occurrence_id: occurrence.occurrence_id,
                 expected_definition_id: occurrence.definition_id.clone(),
                 expected_pose: occurrence.pose,
                 envelope_mm,

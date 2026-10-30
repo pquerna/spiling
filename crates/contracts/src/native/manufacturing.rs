@@ -2457,7 +2457,7 @@ mod fixed_dual_wire_tests {
             offset_xy_mm: [index as f64 * 20.0, 0.0],
             nozzle_diameter_mm: 0.4,
             filament_diameter_mm: 1.75,
-            deposition_limits: intent.printer.deposition_limits.clone(),
+            deposition_limits: intent.printer.deposition_limits,
             max_feed_mm_s: 100.0,
             max_volumetric_flow_mm3_s: 10.0,
             nozzle_temperature_c: 200.0,
@@ -2622,7 +2622,7 @@ mod fixed_dual_wire_tests {
                 origin_z_mm: 0.0,
             };
             match mutation {
-                0 => recipe.slots.resize(65, recipe.slots[0].clone()),
+                0 => recipe.slots.resize(65, recipe.slots[0]),
                 1 => recipe.phase_slot = 2,
                 2 => recipe.origin_z_mm = f64::NAN,
                 3 => recipe.slots[0].height_mm = 0.1,
