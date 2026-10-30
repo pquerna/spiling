@@ -8,8 +8,16 @@ import { resolve, dirname, join, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platform, release, arch } from "node:os";
 import { decodeGcode } from "./gcode-parity/decode.mjs";
+import { evaluateReferenceProbes } from "./gcode-parity/probes.mjs";
 import { auditCube, compareAudits } from "./gcode-parity/analyze.mjs";
-import { cases, cubeSource, intentFor, referenceProfile, sha256 } from "./gcode-parity/corpus.mjs";
+import {
+  cases,
+  cubeSource,
+  intentFor,
+  referenceProfile,
+  referenceProbeSettings,
+  sha256,
+} from "./gcode-parity/corpus.mjs";
 import { reportHtml, overlayBands } from "./gcode-parity/report.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const options = {};
@@ -337,7 +345,45 @@ try {
         };
         await save(`${c.id}/shape-bound-diagnostic-audit.json`, probeAudit);
       }
-      record.comparison = compareAudits(record.spiling, record.reference, { scheduleProbe });
+      if (c.infillFraction < 1) {
+        record.referenceProbes = [];
+        for (const probe of referenceProbeSettings) {
+          const prefix = `reference-${probe.id}`;
+          await save(`${c.id}/${prefix}.ini`, referenceProfile(c, probe.settings));
+          await run(
+            reference,
+            [
+              "--load",
+              join(directory, `${prefix}.ini`),
+              "--export-gcode",
+              "--threads",
+              "1",
+              "--center",
+              "5,5",
+              "--save",
+              join(directory, `${prefix}-resolved.ini`),
+              "--output",
+              join(directory, `${prefix}.gcode`),
+              join(output, "cube-10-derived.step"),
+            ],
+            `${c.id}/${prefix}`,
+          );
+          const probeAudit = auditCube(
+            decodeGcode(await boundedText(join(directory, `${prefix}.gcode`))),
+            c,
+          );
+          await save(`${c.id}/${prefix}-audit.json`, probeAudit);
+          record.referenceProbes.push({ ...probe, audit: probeAudit });
+        }
+        record.referenceProbeEvidence = evaluateReferenceProbes(
+          record.reference,
+          record.referenceProbes,
+        );
+      }
+      record.comparison = compareAudits(record.spiling, record.reference, {
+        scheduleProbe,
+        referenceProbeEvidence: record.referenceProbeEvidence,
+      });
       await save(`${c.id}/comparison.json`, record.comparison);
       console.error(
         `  correctness ${record.comparison.correctnessPassed}; unexplained ${record.comparison.differences.filter((d) => d.status === "unresolved").length}`,
@@ -352,7 +398,15 @@ try {
   console.error(error.message);
 }
 // Hash the evidence consumed by each comparison, including the observer itself.
-for (const name of ["decode.mjs", "analyze.mjs", "anchors.mjs", "corpus.mjs", "report.mjs"])
+for (const name of [
+  "decode.mjs",
+  "analyze.mjs",
+  "anchors.mjs",
+  "construction.mjs",
+  "probes.mjs",
+  "corpus.mjs",
+  "report.mjs",
+])
   manifest.files[`tools/gcode-parity/${name}`] = sha256(
     await readFile(join(root, "tools/gcode-parity", name)),
   );
@@ -373,6 +427,12 @@ for (const c of report.cases)
     "reopened-export/program.gcode",
     "reopened-export/verification.json",
     "reopened-export/provenance.json",
+    ...referenceProbeSettings.flatMap((p) => [
+      `reference-${p.id}.ini`,
+      `reference-${p.id}-resolved.ini`,
+      `reference-${p.id}.gcode`,
+      `reference-${p.id}-audit.json`,
+    ]),
     "shape-bound-diagnostic.intent.json",
     "shape-bound-diagnostic-export/plan.json",
     "shape-bound-diagnostic-export/program.gcode",

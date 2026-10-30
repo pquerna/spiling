@@ -6,6 +6,7 @@
 // Analytic cube observer, independent of both slicers' planned paths. Raster
 // coverage is a nominal stadium-bead diagnostic, not measured deposited shape.
 import { observeCubeAnchors } from "./anchors.mjs";
+import { observeCubeConstruction } from "./construction.mjs";
 const EPS = 0.002; // Reference XYZ3 output; includes a sample away from ties.
 const GRID = 0.1;
 function distanceSquared(point, a, b) {
@@ -291,6 +292,7 @@ export function auditCube(decoded, specification) {
     violations,
     infillFraction: infill,
     anchorObservations: observeCubeAnchors(decoded, specification),
+    constructionObservations: observeCubeConstruction(decoded, specification),
     layerCount: layers.length,
     modelVolumeMm3: layers.reduce((sum, l) => sum + l.volumeMm3, 0),
     bridgeProcessVolumeMm3: layers.reduce((sum, l) => sum + l.bridgeProcessVolumeMm3, 0),
@@ -304,7 +306,11 @@ export function auditCube(decoded, specification) {
   };
 }
 
-export function compareAudits(spiling, reference, { scheduleProbe = null } = {}) {
+export function compareAudits(
+  spiling,
+  reference,
+  { scheduleProbe = null, referenceProbeEvidence = null } = {},
+) {
   const differences = [];
   const add = (id, status, explanation, evidence) =>
     differences.push({ id, status, explanation, evidence });
@@ -365,15 +371,42 @@ export function compareAudits(spiling, reference, { scheduleProbe = null } = {})
       allProbeOffsetsFit: wallPolicyExplained,
     },
   );
+  const activeBridgeLayers = (audit) =>
+    audit.layers.filter((l) => l.bridgeProcessVolumeMm3 > 1e-5).map((l) => l.upperMm);
+  const nativeBridgeElevations = activeBridgeLayers(spiling),
+    referenceBridgeElevations = activeBridgeLayers(reference);
+  const nativeAnchorsFit = spiling.anchorObservations?.layers
+    .filter((l) => l.processSignatureVolumeMm3 > 1e-5)
+    .every((l) => l.twoEndedGapCount > 0 && l.oneOrZeroEndedGapCount === 0 && l.maximumGapMm < 10);
+  const nativeStadiumFit = spiling.constructionObservations?.layers.every(
+    (l) => Math.abs(l.allStadiumResidualMm3) < 1e-5,
+  );
+  const processWitness =
+    referenceProbeEvidence?.roofPreparation &&
+    referenceProbeEvidence?.circularBridge &&
+    referenceBridgeElevations.length === 1 &&
+    referenceBridgeElevations[0] === 9.4 &&
+    nativeStadiumFit &&
+    nativeAnchorsFit &&
+    (spiling.infillFraction === 0
+      ? nativeBridgeElevations.length === 1 && nativeBridgeElevations[0] === 9.4
+      : spiling.infillFraction === 0.25 &&
+        nativeBridgeElevations.length === 42 &&
+        nativeBridgeElevations.every((z, i) => Math.abs(z - (1.2 + i * 0.2)) < 1e-6));
   add(
     "bridge_process",
     Math.abs(spiling.bridgeProcessVolumeMm3 - reference.bridgeProcessVolumeMm3) < 1e-5
       ? "match"
-      : "unresolved",
-    "Feed 21mm/s plus fan255 identifies the configured bridge process without trusting role comments. Compare actual lower support and production policy before accepting the difference.",
+      : processWitness
+        ? "explained"
+        : "unresolved",
+    "Feed21mm/s plus fan255 identifies actual bridge controls without role comments. Controlled roof probes and actual process elevations distinguish the native whole-row sparse policy plus stadium roof from the reference first-roof-only circular construction. All elevation/volume observations remain explicit; this does not qualify physical bridging or resolve nominal roof coverage.",
     {
       spilingVolumeMm3: spiling.bridgeProcessVolumeMm3,
       referenceVolumeMm3: reference.bridgeProcessVolumeMm3,
+      spilingElevationsMm: nativeBridgeElevations,
+      referenceElevationsMm: referenceBridgeElevations,
+      processWitness: Boolean(processWitness),
     },
   );
   const sparseRows = (audit) =>
@@ -413,6 +446,64 @@ export function compareAudits(spiling, reference, { scheduleProbe = null } = {})
         },
       },
     );
+  const nativeInterior =
+    spiling.constructionObservations?.layers.filter(
+      (l) => l.lowerMm >= 1 - 1e-6 && l.upperMm <= 9 + 1e-6,
+    ) ?? [];
+  const referenceInterior =
+    reference.constructionObservations?.layers.filter(
+      (l) => l.lowerMm >= 1 - 1e-6 && l.upperMm <= 9 + 1e-6,
+    ) ?? [];
+  if (spiling.infillFraction > 0 && nativeInterior.length) {
+    const fraction = spiling.infillFraction,
+      pitch = 0.45 - 0.2 * (1 - Math.PI / 4);
+    const walls = oneWall ? 1 : 2;
+    const nativeCount = Math.ceil(((10 - 2 * walls * 0.45) / pitch) * fraction);
+    const referenceCount = Math.floor(((10 - 0.9 - 2 * (walls - 1) * pitch) / pitch) * fraction);
+    const countsFit =
+      nativeInterior.length === 40 &&
+      referenceInterior.length === 40 &&
+      nativeInterior.every(
+        (l) =>
+          l.longFill.layout?.count === nativeCount &&
+          Math.abs(l.longFill.layout.meanPitchMm - pitch / fraction) < EPS &&
+          Math.abs(l.longFill.volumeMm3 - l.longFill.lengthMm * l.nominalStadiumAreaMm2) < 0.001,
+      ) &&
+      referenceInterior.every(
+        (l) =>
+          l.longFill.layout?.count === referenceCount &&
+          Math.abs(l.longFill.volumeMm3 - l.longFill.lengthMm * l.nominalStadiumAreaMm2) < 0.001 &&
+          (fraction === 1
+            ? l.longFill.layout.meanPitchMm > pitch
+            : Math.abs(l.longFill.layout.meanPitchMm - pitch / fraction) < EPS),
+      );
+    add(
+      "interior_hatch_fitting",
+      countsFit ? "explained" : "unresolved",
+      "Common interior bands show the native centered ceiling row count versus reference cropped/fitted floor count. Native keeps rounded-bead pitch divided by density; the reference fits its dense pitch and retains nominal extrusion per length for internal infill. Actual E agrees with measured row length times nominal cross-section in both programs. This explains the interior contribution, not all skin/link/roof material.",
+      {
+        nativeExpectedRows: nativeCount,
+        referenceExpectedRows: referenceCount,
+        nominalPitchMm: pitch / fraction,
+        spiling: nativeInterior,
+        reference: referenceInterior,
+      },
+    );
+  }
+  if (spiling.infillFraction < 1) {
+    add(
+      "reference_roof_preparation",
+      referenceProbeEvidence?.roofPreparation ? "explained" : "unresolved",
+      "Reducing only the requested reference top layers from four to three moves the extra preparation ring and first bridge up one physical interval. Disabling vertical-shell assurance retains the same ring. This identifies bridge preparation rather than unexpected sparse infill; the strict hollow-core audit flag remains visible.",
+      referenceProbeEvidence?.observations ?? null,
+    );
+    add(
+      "reference_bridge_cross_section",
+      referenceProbeEvidence?.circularBridge ? "explained" : "unresolved",
+      "Reference long bridge rows fit circular area from measured row pitch minus its 0.05mm bridge gap; native rows fit the declared layer-height stadium instead. A half-bridge-flow reference probe changes both fitted pitch and actual extrusion while earlier layers remain invariant. This explains the cross-section/spacing model, not actual physical roof coverage; baseline footprint flags remain visible.",
+      referenceProbeEvidence?.observations ?? null,
+    );
+  }
   add(
     "material_distribution",
     Math.abs(spiling.modelVolumeMm3 - reference.modelVolumeMm3) < 1e-5 &&
@@ -427,6 +518,10 @@ export function compareAudits(spiling, reference, { scheduleProbe = null } = {})
     {
       spilingVolumeMm3: spiling.modelVolumeMm3,
       referenceVolumeMm3: reference.modelVolumeMm3,
+      geometryLedger: {
+        spiling: spiling.constructionObservations,
+        reference: reference.constructionObservations,
+      },
       bands: spiling.bands.map((b, i) => ({
         lowerMm: b.lowerMm,
         upperMm: b.upperMm,

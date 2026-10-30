@@ -145,3 +145,61 @@ roof-adjacent material and nominal bridge-footprint audit differences; retain
 these as unresolved model/intent questions rather than declaring reference
 correctness or weakening the analytic obligation. Broader geometry, retraction, supports and
 multi-tool comparisons belong in later explicitly scoped corpus cases.
+
+## Controlled roof probes and construction ledger
+
+The runner retains three separate reference-only diagnostics for every hollow
+and 25% case: request three rather than four top layers, halve bridge flow, and
+disable vertical-shell assurance. Each changes one explicit setting; baseline
+inputs and audit obligations remain fixed. Raw G-code, resolved configuration,
+audit and file hashes are retained for each diagnostic. A deliberately thinner
+roof can fail the original roof obligation; it never replaces the baseline.
+
+[`probes.mjs`](../../tools/gcode-parity/probes.mjs) requires the extra material at
+Z9.2 and the bridge at Z9.4 to move together to Z9.4/Z9.6 when roof thickness
+changes, with the earlier ordinary layer restored. Disabling vertical-shell
+assurance must preserve the preparation and first bridge. This identifies the
+reference's bridge preparation rather than blaming that shell option or treating
+all interior extrusion as sparse infill. The reference's
+[`PrintObject::bridge_over_infill`](https://github.com/prusa3d/PrusaSlicer/blob/69c8e569410efe82259e706cd09a05ea82da9359/src/libslic3r/PrintObject.cpp)
+adds ensuring material near the next bridge's perimeter. This explains the
+construction policy; the stricter hollow-core diagnostic remains visible.
+
+[`construction.mjs`](../../tools/gcode-parity/construction.mjs) independently
+buckets actual model strokes into geometric wall centerlines, long fill strokes
+(over 6 mm) and all remaining links/short fill. Every layer reconciles all
+E-derived volume; the buckets are diagnostic geometry, not slicer semantic roles.
+Wall accounting tolerates subdivision and reversal. Parallel long strokes retain
+row count, projected pitch, length, volume and bounded line/XYZ/E witnesses. The
+observer is bounded to 100 elevations and 100,000 decoded strokes. Geometry
+buckets can change with subdivision of fill; total extrusion is conserved.
+
+A circular bridge hypothesis uses the observed projected row pitch minus the
+reference's explicit 0.05 mm bridge gap. All admitted long bridge rows must fit
+that area within 0.001 mm², with pitch spread at most 0.004 mm. The observer also
+retains the layer-height stadium countermodel and both volume residuals. The
+half-flow diagnostic must change actual extrusion and fitted diameter while
+leaving earlier layers invariant. No role comments identify bridges. Native
+bridge rows continue to fit the layer-height stadium; fan/feed signatures alone
+cannot establish a circular model or physical bead shape.
+
+The reference source at commit `69c8e569410efe82259e706cd09a05ea82da9359`
+explains this hypothesis: [`Fill.cpp`](https://github.com/prusa3d/PrusaSlicer/blob/69c8e569410efe82259e706cd09a05ea82da9359/src/libslic3r/Fill/Fill.cpp)
+forces thick flow for internal bridges and adjusts non-internal-fill flow after
+row fitting; [`LayerRegion.cpp`](https://github.com/prusa3d/PrusaSlicer/blob/69c8e569410efe82259e706cd09a05ea82da9359/src/libslic3r/LayerRegion.cpp),
+[`Flow.cpp`](https://github.com/prusa3d/PrusaSlicer/blob/69c8e569410efe82259e706cd09a05ea82da9359/src/libslic3r/Flow.cpp)
+and [`Flow.hpp`](https://github.com/prusa3d/PrusaSlicer/blob/69c8e569410efe82259e706cd09a05ea82da9359/src/libslic3r/Flow.hpp)
+define circular area, diameter and bridge gap. The installed executable identity
+and actual-byte observations are retained separately; a source tag is not build
+attestation. Source is inspected as reference research, not imported into the
+production planner.
+
+For the forty common interior intervals, the report separately checks native
+centered ceiling row counts and reference cropped/fitted floor counts against
+the declared cube/wall dimensions. Both retain nominal extrusion per length for
+internal infill; dense reference pitch is fitted, while sparse pitch stays
+nominal. This explains that interior volume contribution through measured row
+length/count, rather than mistaking bridge fan/feed changes for extra extrusion.
+Whole-job material distribution, variable-width internal solids and physical
+roof footprint remain separate questions. A reconciled ledger alone never turns
+an unexplained policy or failed baseline audit green.
