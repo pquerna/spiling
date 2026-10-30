@@ -216,3 +216,60 @@ test("anchor observations preserve subdivision, reversal and zero-area tangency"
   observeGaps(s, split, 0.4, () => charged++);
   assert.equal(charged, 2);
 });
+
+test("nominal circular bridge fit uses XYZ/E and rejects changed extrusion or pitch", async () => {
+  const { observeCubeConstruction } = await import("./construction.mjs");
+  const specimen = ({ flow = 1, pitch = 0.45, hint = "arbitrary" } = {}) => {
+    const lines = [
+      "G21",
+      "G90",
+      "M83",
+      "G92 E0",
+      "G1 X1 Y1 Z9.4 F1260",
+      "M106 S255",
+      `;TYPE:${hint}`,
+    ];
+    for (let i = 0; i < 8; i++) {
+      lines.push(`G1 X1 Y${1 + i * pitch}`);
+      lines.push(
+        `G1 X9 E${((((8 * Math.PI * 0.4 ** 2) / 4) * flow) / (Math.PI * (1.75 / 2) ** 2)).toFixed(8)}`,
+      );
+    }
+    return observeCubeConstruction(decodeGcode(lines.join("\n")), spec).layers[0].bridgeRows;
+  };
+  const a = specimen(),
+    b = specimen({ hint: "External perimeter" });
+  assert(a.circularAgreement);
+  assert.deepEqual(a, b);
+  assert(!specimen({ flow: 0.5 }).circularAgreement);
+  assert(!specimen({ pitch: 0.5 }).circularAgreement);
+});
+
+test("construction wall accounting preserves subdivision, reversal and all extrusion", async () => {
+  const { observeCubeConstruction } = await import("./construction.mjs");
+  const prefix = "G21\nG90\nM83\nG92 E0\nG1 X0.225 Y0.225 Z0.2 F2100\n";
+  const a = observeCubeConstruction(decodeGcode(prefix + "G1 Y9.775 E1"), spec).layers[0];
+  const b = observeCubeConstruction(decodeGcode(prefix + "G1 Y5 E0.5\nG1 Y9.775 E0.5"), spec)
+    .layers[0];
+  const c = observeCubeConstruction(decodeGcode(prefix + "G1 Y9.775\nG1 Y0.225 E1"), spec)
+    .layers[0];
+  for (const x of [b, c]) {
+    assert(Math.abs(x.walls.volumeMm3 - a.walls.volumeMm3) < 1e-12);
+    assert(Math.abs(x.walls.lengthMm - a.walls.lengthMm) < 1e-12);
+    assert.equal(x.linksAndShortFill.volumeMm3, 0);
+    assert.equal(x.reconciliationResidualMm3, 0);
+  }
+});
+
+test("reference probes cannot explain roofs from missing or unchanged controls", async () => {
+  const { evaluateReferenceProbes } = await import("./probes.mjs");
+  const a = audit(synthetic());
+  assert.equal(evaluateReferenceProbes(a, []).roofPreparation, false);
+  assert.equal(evaluateReferenceProbes(a, []).circularBridge, false);
+  const unchanged = ["roof-shift", "half-bridge-flow", "shell-disabled"].map((id) => ({
+    id,
+    audit: a,
+  }));
+  assert.equal(evaluateReferenceProbes(a, unchanged).roofPreparation, false);
+  assert.equal(evaluateReferenceProbes(a, unchanged).circularBridge, false);
+});

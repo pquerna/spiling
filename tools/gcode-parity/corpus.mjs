@@ -65,7 +65,16 @@ export function intentFor(base, c) {
   intent.recipe.supports = { kind: "disabled" };
   return intent;
 }
-export function referenceProfile(c) {
+export function referenceProfile(
+  c,
+  { topSolidLayers = 4, bridgeFlowRatio = 1, verticalShell = "enabled" } = {},
+) {
+  if (
+    ![3, 4].includes(topSolidLayers) ||
+    ![0.5, 1].includes(bridgeFlowRatio) ||
+    !["enabled", "disabled"].includes(verticalShell)
+  )
+    throw new Error("unsupported reference diagnostic settings");
   const values = {
     layer_height: 0.2,
     first_layer_height: 0.2,
@@ -78,13 +87,13 @@ export function referenceProfile(c) {
     fill_angle: 0,
     top_fill_pattern: "rectilinear",
     bottom_fill_pattern: "rectilinear",
-    top_solid_layers: 4,
+    top_solid_layers: topSolidLayers,
     bottom_solid_layers: 4,
     solid_infill_below_area: 0,
     infill_every_layers: 1,
     infill_anchor: 0,
     infill_anchor_max: 0,
-    ensure_vertical_shell_thickness: "enabled",
+    ensure_vertical_shell_thickness: verticalShell,
     skirts: 0,
     brim_width: 0,
     support_material: 0,
@@ -100,7 +109,7 @@ export function referenceProfile(c) {
     extrusion_multiplier: 1,
     retract_length: 0,
     retract_lift: 0,
-    bridge_flow_ratio: 1,
+    bridge_flow_ratio: bridgeFlowRatio,
     thick_bridges: 0,
     temperature: 200,
     first_layer_temperature: 200,
@@ -144,3 +153,10 @@ export function referenceProfile(c) {
       .join("\n") + "\n"
   );
 }
+
+// These perturb the existing cube only; they are not alternative baseline settings.
+export const referenceProbeSettings = [
+  { id: "roof-shift", settings: { topSolidLayers: 3 } },
+  { id: "half-bridge-flow", settings: { bridgeFlowRatio: 0.5 } },
+  { id: "shell-disabled", settings: { verticalShell: "disabled" } },
+];
