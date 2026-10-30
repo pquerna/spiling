@@ -64,7 +64,17 @@ canonical PNG/PGM relief, layer enable/remove and stored-image reuse. Review ret
 H1 decisions, physical plate/region accounting, native coverage, surface exposure/
 optical reassessment and declared tool tints. Study loads retained complete optical
 reports and explicitly binds accepted selections to existing loaded declarations
-and source constructions. Palette/study authoring remains available through CLI. Captured single-tool material profiles are retained and inspected in Prepare; selecting a profile or changing its explicit overrides remains CLI authoring. Conflicting edits retain their drafts and fail the existing engine validation.
+and source constructions. Palette/study authoring remains available through CLI.
+
+Prepare selects bounded inert material/setup profile JSON through a parented native
+picker. Loading is transient; **Apply material profile** uses the existing engine
+transaction. Explicit temperature, speed, flow and whole-process overrides retain
+their provenance separately from profile values. Selected setup and source remain inspectable; **Applied engine values** shows
+the committed process values and effective machine/material flow ceiling. Conflicting
+or stale edits retain their drafts; **Reload captured profile** explicitly discards
+them. Material-bound recipe fields are edited through these overrides. Complete
+single-tool Marlin intent is required; synthetic declarations and imported
+recommendations are not calibration.
 The legacy browser frontend and its build/runtime paths have been removed.
 
 ```sh
@@ -134,6 +144,16 @@ a destination must fail and preserve it. Undo/Redo invalidates captured review;
 save, close/reap, delete only the owned external STEP copy, reopen read-only in a
 fresh engine, then freshly Verify/replay/export again. Compare program bytes and
 captured identities. This is software workflow evidence, never machine readiness.
+
+For native material acceptance, load a matching explicit single-tool intent, select
+a profile/setup JSON through **Load material profile…**, and inspect its source
+and hardware declarations before Apply. Enable a temperature/speed override,
+apply and inspect **Applied engine values**; Undo/Redo must restore the complete
+capture. Attempt an incompatible profile and a stale draft: neither may replace
+the committed intent. Save, close/reap, remove only the owned external profile,
+reopen and inspect the captured values, then Preflight/Compile/freshly Verify and
+exclusively export. Compare emitted bytes and captured values with the CLI on
+that saved project. Clearing an override restores inheritance only after Apply.
 
 The host separates request acknowledgements from background display publications.
 Review/export workers retain captured identities and recheck the active record;

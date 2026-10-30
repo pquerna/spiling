@@ -28,7 +28,7 @@ pub(super) fn prepared(value: &ManufacturingIntent) -> Result<ManufacturingInten
 pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
     ui.collapsing("Native accuracy and material",|ui|{
         ui::number(ui,"Native shape error (mm)",&mut intent.recipe.native_shape_error_mm,0.001);
-        ui::number(ui,"Filament diameter (mm)",&mut intent.recipe.filament_diameter_mm,0.01);
+        ui.add_enabled_ui(intent.material_profile.is_none(), |ui| { ui::number(ui,"Filament diameter (mm)",&mut intent.recipe.filament_diameter_mm,0.01); });
         ui::number(ui,"Minimum wall width (mm)",&mut intent.printer.deposition_limits.min_bead_width_mm,0.01);
         ui::number(ui,"Maximum wall width (mm)",&mut intent.printer.deposition_limits.max_bead_width_mm,0.01);
         ui.weak("Declared software limits; native admission and actual-program verification remain mandatory.");
@@ -39,64 +39,10 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
         if let SparseInfillPolicy::CombineEligible{max_height_mm}=&mut intent.recipe.sparse_infill {ui::number(ui,"Maximum physical height (mm)",max_height_mm,0.01);}
         ui.weak("Walls, skins and protected construction remain fine. Native vetoes can retain fine sparse intervals.");
     });
-    ui.collapsing("First layer, cooling and bridges", |ui| {
-        let p = &mut intent.recipe.process;
-        for (label, value) in [
-            ("First layer speed factor", &mut p.first_layer_speed_factor),
-            ("First layer flow factor", &mut p.first_layer_flow_factor),
-            ("Bridge speed factor", &mut p.bridge_speed_factor),
-            ("Bridge flow factor", &mut p.bridge_flow_factor),
-            ("Maximum bridge span (mm)", &mut p.max_bridge_span_mm),
-        ] {
-            ui::number(ui, label, value, 0.01);
-        }
-        for (label, value) in [
-            ("First-layer fan PWM", &mut p.fan_first_layers),
-            ("Later-layer fan PWM", &mut p.fan_after_first_layers),
-            ("Bridge fan PWM", &mut p.bridge_fan_pwm),
-        ] {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(label);
-                ui.add(egui::DragValue::new(value));
-            });
-        }
-    });
-    ui.collapsing("Retraction", |ui| {
-        let mut enabled = matches!(
-            intent.recipe.process.retraction,
-            RetractionPolicy::Enabled { .. }
-        );
-        if ui
-            .checkbox(&mut enabled, "External absolute-E retraction")
-            .changed()
-        {
-            intent.recipe.process.retraction = if enabled {
-                RetractionPolicy::Enabled {
-                    distance_mm: 0.0,
-                    speed_mm_s: 0.0,
-                    minimum_travel_mm: 0.0,
-                    z_hop_mm: 0.0,
-                }
-            } else {
-                RetractionPolicy::Disabled
-            };
-        }
-        if let RetractionPolicy::Enabled {
-            distance_mm,
-            speed_mm_s,
-            minimum_travel_mm,
-            z_hop_mm,
-        } = &mut intent.recipe.process.retraction
-        {
-            for (label, value) in [
-                ("Withdrawn filament (mm)", distance_mm),
-                ("Feeder speed (mm/s)", speed_mm_s),
-                ("Minimum travel (mm)", minimum_travel_mm),
-                ("Z hop (mm)", z_hop_mm),
-            ] {
-                ui::number(ui, label, value, 0.01);
-            }
-        }
+    ui.add_enabled_ui(intent.material_profile.is_none(), |ui| {
+        ui.push_id("recipe-process", |ui| {
+            process_fields(ui, &mut intent.recipe.process)
+        });
     });
     ui.collapsing("Bed-rooted breakaway supports", |ui| {
         let mut enabled = matches!(intent.recipe.supports, SupportPolicy::Breakaway { .. });
@@ -138,6 +84,65 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
         if let SeamPolicy::PreferredBuildDirection{xy}=&mut intent.recipe.seam_policy{ui::number(ui,"Build X direction",&mut xy[0],0.1);ui::number(ui,"Build Y direction",&mut xy[1],0.1);ui.weak("Apply normalizes a finite nonzero direction. It selects existing perimeter vertices; bridge/support orientation remains native.");}
         for (label,value) in [("Interior hatch",&mut intent.recipe.rectilinear_axis),("Top skin hatch",&mut intent.recipe.top_skin_axis)]{
             egui::ComboBox::from_id_salt(label).selected_text(format!("{label}: {value:?}")).show_ui(ui,|ui|{for variant in [RectilinearAxisPolicy::X,RectilinearAxisPolicy::Y,RectilinearAxisPolicy::AlternatingXY,RectilinearAxisPolicy::AlternatingYX]{ui.selectable_value(value,variant,format!("{variant:?}"));}});
+        }
+    });
+}
+
+/// Shared controls for explicit recipe policy or one captured profile override.
+pub(super) fn process_fields(ui: &mut egui::Ui, p: &mut ProcessPolicy) {
+    ui.collapsing("First layer, cooling and bridges", |ui| {
+        for (label, value) in [
+            ("First layer speed factor", &mut p.first_layer_speed_factor),
+            ("First layer flow factor", &mut p.first_layer_flow_factor),
+            ("Bridge speed factor", &mut p.bridge_speed_factor),
+            ("Bridge flow factor", &mut p.bridge_flow_factor),
+            ("Maximum bridge span (mm)", &mut p.max_bridge_span_mm),
+        ] {
+            ui::number(ui, label, value, 0.01);
+        }
+        for (label, value) in [
+            ("First-layer fan PWM", &mut p.fan_first_layers),
+            ("Later-layer fan PWM", &mut p.fan_after_first_layers),
+            ("Bridge fan PWM", &mut p.bridge_fan_pwm),
+        ] {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(label);
+                ui.add(egui::DragValue::new(value));
+            });
+        }
+    });
+    ui.collapsing("Retraction", |ui| {
+        let mut enabled = matches!(p.retraction, RetractionPolicy::Enabled { .. });
+        if ui
+            .checkbox(&mut enabled, "External absolute-E retraction")
+            .changed()
+        {
+            p.retraction = if enabled {
+                RetractionPolicy::Enabled {
+                    distance_mm: 0.0,
+                    speed_mm_s: 0.0,
+                    minimum_travel_mm: 0.0,
+                    z_hop_mm: 0.0,
+                }
+            } else {
+                RetractionPolicy::Disabled
+            };
+        }
+        if let RetractionPolicy::Enabled {
+            distance_mm,
+            speed_mm_s,
+            minimum_travel_mm,
+            z_hop_mm,
+        } = &mut p.retraction
+        {
+            for (label, value) in [
+                ("Withdrawn filament (mm)", distance_mm),
+                ("Feeder speed (mm/s)", speed_mm_s),
+                ("Minimum travel (mm)", minimum_travel_mm),
+                ("Z hop (mm)", z_hop_mm),
+            ] {
+                ui::number(ui, label, value, 0.01);
+            }
         }
     });
 }

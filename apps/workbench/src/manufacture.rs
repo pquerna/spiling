@@ -19,6 +19,15 @@ pub struct LoadedIntent {
     pub intent: Arc<ManufacturingIntent>,
 }
 #[derive(Debug, Clone)]
+pub struct LoadedMaterial {
+    pub nonce: u64,
+    pub label: String,
+    pub project: spiling_contracts::project::ProjectId,
+    pub revision: spiling_contracts::project::ProjectRevision,
+    pub session: SessionId,
+    pub selection: MaterialProfileSelection,
+}
+#[derive(Debug, Clone)]
 pub struct Capture {
     pub nonce: u64,
     pub session: SessionId,
@@ -46,6 +55,7 @@ pub struct State {
     pub artifact: Option<ManufacturingArtifactRecord>,
     pub resource: Option<ArtifactView>,
     pub loaded: Option<Arc<LoadedIntent>>,
+    pub loaded_material: Option<Arc<LoadedMaterial>>,
     pub preflight: Option<Arc<PreflightReport>>,
     pub capture: Option<Arc<Capture>>,
     pub review: Option<Arc<Review>>,
@@ -88,23 +98,36 @@ impl State {
 fn invalid(message: impl Into<String>) -> ClientError {
     ClientError::InvalidRequest(message.into())
 }
-pub fn read_intent(path: &NativePath) -> Result<(Arc<ManufacturingIntent>, String), String> {
+fn read_declaration(path: &NativePath) -> Result<(Vec<u8>, String), String> {
     let path = PathBuf::from(path.to_os_string().map_err(|e| e.to_string())?);
-    let file =
-        std::fs::File::open(&path).map_err(|e| format!("Cannot open manufacturing intent: {e}"))?;
+    let file = std::fs::File::open(&path).map_err(|e| format!("Cannot open declaration: {e}"))?;
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-        return Err("Manufacturing intent must be a regular JSON file".into());
+        return Err("Declaration must be a regular JSON file".into());
     }
     let mut bytes = Vec::new();
     file.take(u64::from(MAX_PROFILE_JSON_BYTES) + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    let intent = decode_intent(&bytes).map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_PROFILE_JSON_BYTES as usize {
+        return Err("Declaration exceeds the profile JSON byte limit".into());
+    }
     let label = spiling_contracts::geometry::bounded_text(
         &path.file_name().unwrap_or_default().to_string_lossy(),
         256,
     );
+    Ok((bytes, label))
+}
+pub fn read_intent(path: &NativePath) -> Result<(Arc<ManufacturingIntent>, String), String> {
+    let (bytes, label) = read_declaration(path)?;
+    let intent = decode_intent(&bytes).map_err(|e| e.to_string())?;
     Ok((Arc::new(intent), label))
+}
+pub fn read_material(path: &NativePath) -> Result<(MaterialProfileSelection, String), String> {
+    let (bytes, label) = read_declaration(path)?;
+    let selection: MaterialProfileSelection = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("Invalid material profile selection: {e}"))?;
+    selection.validate().map_err(|e| e.to_string())?;
+    Ok((selection, label))
 }
 pub async fn check_current(rpc: &EngineRpc, capture: &Capture) -> Result<(), ClientError> {
     capture.provenance.validate_for_record(&capture.record)?;
@@ -206,4 +229,37 @@ pub async fn stage_export(
         capture,
         label,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn profile_files_are_bounded_strict_and_preserve_setup_and_overrides() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("Matériau Ω.json");
+        let native = NativePath::from_os_str(path.as_os_str()).unwrap();
+        let mut selection: MaterialProfileSelection = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/manufacturing/material-profile-a.json"
+        ))
+        .unwrap();
+        selection.overrides.flow_multiplier = Some(0.95);
+        std::fs::write(&path, serde_json::to_vec(&selection).unwrap()).unwrap();
+        let (loaded, label) = read_material(&native).unwrap();
+        assert_eq!(loaded, selection);
+        assert_eq!(label, "Matériau Ω.json");
+        let mut unknown = serde_json::to_value(&selection).unwrap();
+        unknown["implicit_default"] = serde_json::Value::Bool(true);
+        std::fs::write(&path, serde_json::to_vec(&unknown).unwrap()).unwrap();
+        assert!(
+            read_material(&native)
+                .unwrap_err()
+                .contains("unknown field")
+        );
+        std::fs::write(&path, vec![b' '; MAX_PROFILE_JSON_BYTES as usize + 1]).unwrap();
+        assert!(read_material(&native).unwrap_err().contains("byte limit"));
+        selection.setup.hotend_id = "incompatible".into();
+        std::fs::write(&path, serde_json::to_vec(&selection).unwrap()).unwrap();
+        assert!(read_material(&native).is_err());
+    }
 }

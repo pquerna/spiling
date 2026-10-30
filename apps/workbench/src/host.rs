@@ -184,6 +184,7 @@ pub enum Picker {
     Save,
     Import,
     Intent,
+    Material,
     Export,
     Image,
 }
@@ -197,6 +198,7 @@ impl Picker {
             Self::Import => "Import a native STEP part",
             Self::Image => "Import height image PNG or canonical PGM",
             Self::Intent => "Load inert manufacturing intent JSON",
+            Self::Material => "Select material and setup profile JSON",
             Self::Export => "Choose a new manufacturing export directory name",
         }
     }
@@ -216,6 +218,7 @@ enum Action {
     },
     Import(NativePath),
     LoadIntent(NativePath),
+    LoadMaterial(NativePath),
     ImportImage {
         source: NativePath,
         request: Box<crate::assets::ImageRequest>,
@@ -235,6 +238,7 @@ impl Action {
             Self::Import(_) => "Import part",
             Self::ImportImage { .. } => "Import image and apply relief",
             Self::LoadIntent(_) => "Load manufacturing intent",
+            Self::LoadMaterial(_) => "Load material profile",
             Self::Export(_) => "Export verified program",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
@@ -417,7 +421,10 @@ impl Host {
         let wake = ctx.clone();
         let future: std::pin::Pin<
             Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>,
-        > = if matches!(picker, Picker::Import | Picker::Intent | Picker::Image) {
+        > = if matches!(
+            picker,
+            Picker::Import | Picker::Intent | Picker::Material | Picker::Image
+        ) {
             // Both branches return different opaque future types, so erase only this OS boundary.
             Box::pin(
                 dialog
@@ -426,6 +433,8 @@ impl Host {
                             "STEP"
                         } else if picker == Picker::Image {
                             "Height image PNG / PGM"
+                        } else if picker == Picker::Material {
+                            "Material profile selection JSON"
                         } else {
                             "Manufacturing intent JSON"
                         },
@@ -506,6 +515,7 @@ fn selected_action(picker: Picker, path: &std::path::Path) -> Result<Action, Str
         Picker::Save => Action::Save { target: Some(path) },
         Picker::Import => Action::Import(path),
         Picker::Intent => Action::LoadIntent(path),
+        Picker::Material => Action::LoadMaterial(path),
         Picker::Export => Action::Export(path),
         Picker::Image => {
             return Err("Height image selection requires captured mapping intent".into());
@@ -956,6 +966,7 @@ impl Actor {
             .is_some_and(|(id, _)| *id != project.project_id)
         {
             m.loaded = None;
+            m.loaded_material = None;
         }
         m.revision = Some((project.project_id.clone(), project.revision));
         m.intent = intent;
@@ -1241,7 +1252,10 @@ impl Actor {
             .await;
             return;
         }
-        if matches!(action, Action::LoadIntent(_) | Action::Export(_)) {
+        if matches!(
+            action,
+            Action::LoadIntent(_) | Action::LoadMaterial(_) | Action::Export(_)
+        ) {
             self.file_action(action).await;
             return;
         }
@@ -1339,6 +1353,7 @@ impl Actor {
             Action::Close
             | Action::Restart
             | Action::LoadIntent(_)
+            | Action::LoadMaterial(_)
             | Action::Export(_)
             | Action::ImportImage { .. } => {
                 unreachable!()

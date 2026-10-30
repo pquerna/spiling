@@ -68,6 +68,7 @@ impl Actor {
             ManufacturingCommand::SetIntent { .. }
                 | ManufacturingCommand::ApplyMaterialProfile { .. }
         );
+        let material = matches!(&command, ManufacturingCommand::ApplyMaterialProfile { .. });
         let result = self
             .client
             .as_ref()
@@ -81,6 +82,9 @@ impl Actor {
             Ok(ManufacturingResponse::Status { .. }) => {
                 if applying {
                     Arc::make_mut(&mut self.state.manufacturing).loaded = None;
+                    if material {
+                        Arc::make_mut(&mut self.state.manufacturing).loaded_material = None;
+                    }
                     self.state.message = format!("{label} completed");
                 }
                 self.refresh_after_failure().await;
@@ -205,6 +209,33 @@ impl Actor {
                             }));
                         self.state.message =
                             "Intent loaded for review; Apply commits the full declaration".into();
+                    }
+                    Ok(Err(error)) => self.problem(error),
+                    Err(error) => self.problem(error.to_string()),
+                }
+            }
+            Action::LoadMaterial(path) => {
+                let Some(project) = self.state.project.clone() else {
+                    return;
+                };
+                let Some(hello) = self.state.hello.clone() else {
+                    return;
+                };
+                match tokio::task::spawn_blocking(move || manufacture::read_material(&path)).await {
+                    Ok(Ok((selection, label))) => {
+                        self.nonce += 1;
+                        Arc::make_mut(&mut self.state.manufacturing).loaded_material =
+                            Some(Arc::new(manufacture::LoadedMaterial {
+                                nonce: self.nonce,
+                                label,
+                                project: project.project_id.clone(),
+                                revision: project.revision,
+                                session: hello.session_id.clone(),
+                                selection,
+                            }));
+                        self.state.message =
+                            "Material profile loaded for review; Apply commits through the engine"
+                                .into();
                     }
                     Ok(Err(error)) => self.problem(error),
                     Err(error) => self.problem(error.to_string()),

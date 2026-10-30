@@ -978,18 +978,18 @@ fn checked_review(host: &Host) -> Snapshot {
     });
     wait(host, |s| s.manufacturing.review.is_some())
 }
-fn retain_project(host: &Host, name: &str) {
-    if let Some(root) = std::env::var_os("SPILING_NATIVE_EVIDENCE_ROOT") {
-        let root = PathBuf::from(root);
-        std::fs::create_dir_all(&root).unwrap();
-        let s = send(
-            host,
-            Action::Save {
-                target: Some(native(&root.join(name))),
-            },
-        );
-        assert!(!s.project.as_ref().unwrap().dirty, "{:?}", s.problems);
-    }
+fn retain_project(host: &Host, temporary_root: &std::path::Path, name: &str) {
+    let root = std::env::var_os("SPILING_NATIVE_EVIDENCE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| temporary_root.join("saved-projects"));
+    std::fs::create_dir_all(&root).unwrap();
+    let s = send(
+        host,
+        Action::Save {
+            target: Some(native(&root.join(name))),
+        },
+    );
+    assert!(!s.project.as_ref().unwrap().dirty, "{:?}", s.problems);
 }
 #[test]
 #[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
@@ -1090,7 +1090,7 @@ fn native_h1_housing_and_physical_plate_parity() {
                 "Combine selection alone is not genuine H1"
             );
         }
-        retain_project(&host, name);
+        retain_project(&host, root.path(), name);
         assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
     }
 }
@@ -1223,7 +1223,7 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
             assert!(r.batches.iter().all(|b| b.kind != 14));
             assert!(review.capture.report.routing.is_some());
         }
-        retain_project(&host, name);
+        retain_project(&host, root.path(), name);
         assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
     }
 }
@@ -1279,9 +1279,37 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
             intent: Arc::new(original),
         }
     });
-    let selection: MaterialProfileSelection =
-        serde_json::from_slice(&std::fs::read(fixtures.join("material-profile-a.json")).unwrap())
-            .unwrap();
+    let profile_path = root.path().join("Matériau Ω.json");
+    std::fs::copy(fixtures.join("material-profile-a.json"), &profile_path).unwrap();
+    let before_load = host.snapshot();
+    let loaded = send(&host, Action::LoadMaterial(native(&profile_path)));
+    assert_eq!(
+        loaded.project.as_ref().unwrap().revision,
+        before_load.project.as_ref().unwrap().revision
+    );
+    let selected = loaded.manufacturing.loaded_material.as_ref().unwrap();
+    assert_eq!(selected.revision, loaded.project.as_ref().unwrap().revision);
+    assert_eq!(selected.label, "Matériau Ω.json");
+    let mut selection = selected.selection.clone();
+    selection.overrides.nozzle_temperature_c = Some(210.0);
+    selection.overrides.print_speed_mm_s = Some(28.0);
+    // Invalid input must retain the prior selected file/draft and committed intent.
+    let invalid = root.path().join("invalid.json");
+    std::fs::write(&invalid, b"{unexpected}").unwrap();
+    let failed = send(&host, Action::LoadMaterial(native(&invalid)));
+    assert_eq!(
+        failed
+            .manufacturing
+            .loaded_material
+            .as_ref()
+            .unwrap()
+            .selection,
+        selected.selection
+    );
+    assert_eq!(failed.project.as_ref().unwrap().revision, selected.revision);
+    host.command(Command::DismissProblems).unwrap();
+    idle_after(&host, failed.serial);
+    std::fs::remove_file(&profile_path).unwrap();
     let before = host.snapshot();
     let mut oversized = selection.clone();
     oversized.profile.material.product = "oversized".repeat(8192);
@@ -1302,7 +1330,51 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
         }
     });
     assert!(s.problems.is_empty(), "{:?}", s.problems);
+    assert!(s.manufacturing.loaded_material.is_none());
     let resolved = s.manufacturing.intent.as_ref().unwrap();
+    assert_eq!(resolved.recipe.print_speed_mm_s, 28.0);
+    let accepted_revision = s.project.as_ref().unwrap().revision;
+    let undo = send(&host, Action::Undo);
+    assert!(
+        undo.manufacturing
+            .intent
+            .as_ref()
+            .unwrap()
+            .material_profile
+            .is_none()
+    );
+    let redo = send(&host, Action::Redo);
+    assert_eq!(redo.manufacturing.intent, s.manufacturing.intent);
+    let mut incompatible = selection.clone();
+    incompatible.profile.printer_revision = "different-printer".into();
+    let rejected = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::ApplyMaterialProfile {
+            session_id,
+            base_revision,
+            selection: incompatible,
+        }
+    });
+    assert_eq!(
+        rejected.project.as_ref().unwrap().revision,
+        redo.project.as_ref().unwrap().revision
+    );
+    assert_eq!(rejected.manufacturing.intent, redo.manufacturing.intent);
+    assert!(!rejected.problems.is_empty());
+    let stale_serial = rejected.serial;
+    host.manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+        session_id: rejected.hello.as_ref().unwrap().session_id.clone(),
+        base_revision: accepted_revision,
+        selection: selection.clone(),
+    })
+    .unwrap();
+    let stale = idle_after(&host, stale_serial);
+    assert_eq!(
+        stale.project.as_ref().unwrap().revision,
+        rejected.project.as_ref().unwrap().revision
+    );
+    assert_eq!(stale.manufacturing.intent, rejected.manufacturing.intent);
+    host.command(Command::DismissProblems).unwrap();
+    idle_after(&host, stale.serial);
     assert_eq!(
         resolved.material_profile.as_ref().unwrap().selection,
         selection
@@ -1331,7 +1403,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
         host.snapshot().project.as_ref().unwrap().revision,
         s.project.as_ref().unwrap().revision
     );
-    retain_project(&host, "material-profile");
+    retain_project(&host, root.path(), "material-profile");
     let saved = send(
         &host,
         Action::Save {

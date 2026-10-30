@@ -23,6 +23,13 @@ pub(super) struct ManufacturingUi {
     pub replay: crate::replay::View,
     pub review_nonce: Option<u64>,
 }
+impl ManufacturingUi {
+    pub(super) fn has_intent_draft(&self, project: &ProjectId) -> bool {
+        self.draft
+            .as_ref()
+            .is_some_and(|d| &d.project == project && d.value != *d.original)
+    }
+}
 impl Workbench {
     pub(super) fn manufacturing_current(&self) -> bool {
         self.state.phase == Phase::Running
@@ -56,6 +63,9 @@ impl Workbench {
             ui.heading("Prepare");
             ui.label("Declared printer and process");
             self.button(ui, Action::LoadIntent);
+            self.material_ui(ui, writable);
+            ui.separator();
+            ui.heading("Recipe and construction");
             let (source, nonce) = if let Some(loaded) = &m.loaded {
                 (Some(loaded.intent.clone()), loaded.nonce)
             } else {
@@ -101,15 +111,6 @@ impl Workbench {
                     "Recipe {} / {}",
                     d.value.recipe.id, d.value.recipe.revision
                 ));
-                if let Some(profile) = &d.value.material_profile {
-                    ui.collapsing("Captured material profile", |ui| {
-                        let selection = &profile.selection;
-                        ui.label(format!("{} · {} / {}", selection.profile.material.product, selection.profile.id, selection.profile.revision));
-                        ui.label(format!("Source: {:?} · {} / {}", selection.profile.source.kind, selection.profile.source.source_id, selection.profile.source.source_revision));
-                        ui.label(format!("Effective flow ceiling: {:.3} mm³/s", d.value.effective_max_volumetric_flow_mm3_s()));
-                        ui.weak("Profile selection and explicit overrides are authored through the CLI. The full capture is retained; conflicting recipe edits are rejected by the engine. Declarations are not calibration.");
-                    });
-                }
                 ui.add_enabled_ui(writable && !conflict, |ui| {
                     for (label, value) in [
                         ("Layer height (mm)", &mut d.value.recipe.layer_height_mm),
@@ -120,11 +121,16 @@ impl Workbench {
                             "Bottom skin (mm)",
                             &mut d.value.recipe.bottom_skin_thickness_mm,
                         ),
-                        ("Print speed (mm/s)", &mut d.value.recipe.print_speed_mm_s),
                         ("Travel speed (mm/s)", &mut d.value.recipe.travel_speed_mm_s),
-                        ("Flow multiplier", &mut d.value.recipe.flow_multiplier),
                     ] {
                         ui::number(ui, label, value, 0.01);
+                    }
+                    ui.add_enabled_ui(d.value.material_profile.is_none(), |ui| {
+                        ui::number(ui, "Print speed (mm/s)", &mut d.value.recipe.print_speed_mm_s, 0.1);
+                        ui::number(ui, "Flow multiplier", &mut d.value.recipe.flow_multiplier, 0.01);
+                    });
+                    if d.value.material_profile.is_some() {
+                        ui.weak("Material-bound speed, flow and process are edited as explicit overrides above. Filament diameter belongs to the captured material.");
                     }
                     ui.horizontal(|ui| {
                         ui.label("Perimeters");

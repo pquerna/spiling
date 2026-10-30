@@ -59,6 +59,7 @@ pub struct Workbench {
     queued_manufacturing: Option<spiling_contracts::manufacturing::ManufacturingCommand>,
     queued_project: Option<spiling_contracts::project::ProjectCommand>,
     manufacturing: manufacturing::ManufacturingUi,
+    material: material::MaterialUi,
     process: process::ProcessUi,
     surface: surface::SurfaceUi,
     study: study::StudyUi,
@@ -117,6 +118,7 @@ impl Workbench {
             queued_manufacturing: None,
             queued_project: None,
             manufacturing: manufacturing::ManufacturingUi::default(),
+            material: material::MaterialUi::default(),
             process: process::ProcessUi::default(),
             surface: surface::SurfaceUi::default(),
             study: study::StudyUi::default(),
@@ -188,6 +190,7 @@ impl Workbench {
             }
             Action::Import => host.choose(frame, ctx, Picker::Import),
             Action::LoadIntent => host.choose(frame, ctx, Picker::Intent),
+            Action::LoadMaterial => host.choose(frame, ctx, Picker::Material),
             Action::Export => host.choose(frame, ctx, Picker::Export),
             Action::Preflight | Action::Compile | Action::Verify => {
                 use spiling_contracts::manufacturing::{ManufacturingCommand, VerificationOutput};
@@ -394,6 +397,7 @@ impl Workbench {
     }
 }
 mod manufacturing;
+mod material;
 mod policies;
 mod process;
 mod review;
@@ -584,6 +588,7 @@ impl eframe::App for Workbench {
                 ui.menu_button("Manufacturing", |ui| {
                     for action in [
                         Action::LoadIntent,
+                        Action::LoadMaterial,
                         Action::Preflight,
                         Action::Compile,
                         Action::Verify,
@@ -649,6 +654,8 @@ impl eframe::App for Workbench {
                 .resizable(true)
                 .default_size(if compact { 250.0 } else { 340.0 })
                 .min_size(210.0)
+                // A pasted numeric draft or long source label must retain a canvas.
+                .max_size((ui.available_width() * 0.5).max(210.0))
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if self.manufacturing.panel == 0 {

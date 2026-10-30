@@ -14,6 +14,7 @@ pub enum Action {
     SaveAs,
     Import,
     LoadIntent,
+    LoadMaterial,
     Preflight,
     Compile,
     Verify,
@@ -39,6 +40,7 @@ impl Action {
         Self::Undo,
         Self::Redo,
         Self::LoadIntent,
+        Self::LoadMaterial,
         Self::Preflight,
         Self::Compile,
         Self::Verify,
@@ -60,6 +62,7 @@ impl Action {
             Self::SaveAs => "Save to new directory…",
             Self::Import => "Import STEP…",
             Self::LoadIntent => "Load intent JSON…",
+            Self::LoadMaterial => "Load material profile…",
             Self::Preflight => "Preflight current inputs",
             Self::Compile => "Compile current inputs",
             Self::Verify => "Fresh Verify and load motion",
@@ -104,13 +107,29 @@ impl Action {
         };
         if matches!(
             self,
-            Self::Save | Self::SaveAs | Self::Import | Self::Undo | Self::Redo | Self::Compile
+            Self::Save
+                | Self::SaveAs
+                | Self::Import
+                | Self::LoadMaterial
+                | Self::Undo
+                | Self::Redo
+                | Self::Compile
         ) && project.read_only
         {
             return Some("This project is read-only");
         }
         let m = &state.manufacturing;
         match self {
+            Self::LoadMaterial
+                if !m.intent.as_ref().is_some_and(|i| {
+                    matches!(
+                        i.printer.workflow,
+                        spiling_contracts::manufacturing::JobWorkflow::CompleteMarlin { .. }
+                    )
+                }) =>
+            {
+                Some("Apply a complete single-tool Marlin intent first")
+            }
             Self::Preflight if m.intent.is_none() => {
                 Some("Apply a complete manufacturing intent first")
             }
