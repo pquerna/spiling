@@ -8,6 +8,7 @@ import { resolve, dirname, join, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platform, release, arch } from "node:os";
 import { decodeGcode } from "./gcode-parity/decode.mjs";
+import { explainCubeMaterialFamily } from "./gcode-parity/material-ledger.mjs";
 import { evaluateReferenceProbes, evaluateSolidProbe } from "./gcode-parity/probes.mjs";
 import { auditCube, compareAudits } from "./gcode-parity/analyze.mjs";
 import {
@@ -439,7 +440,6 @@ try {
         referenceProbeEvidence: record.referenceProbeEvidence,
         solidProbeEvidence: record.solidProbeEvidence,
       });
-      await save(`${c.id}/comparison.json`, record.comparison);
       console.error(
         `  correctness ${record.comparison.correctnessPassed}; unexplained ${record.comparison.differences.filter((d) => d.status === "unresolved").length}`,
       );
@@ -453,11 +453,75 @@ try {
   console.error(error.message);
 }
 // Hash the evidence consumed by each comparison, including the observer itself.
+report.materialFamilies = [1, 2].map((walls) => explainCubeMaterialFamily(report.cases, walls));
+report.materialLedgerFaults = [];
+for (const evidence of report.materialFamilies.filter((f) => f.explained)) {
+  const walls = evidence.walls;
+  const selected = report.cases.filter((c) => c.specification.walls === walls);
+  const dense = selected.find((c) => c.specification.infillFraction === 1);
+  const modified = (change) => selected.map((c) => (c === dense ? change(c) : c));
+  const faults = [
+    ["missing-density-control", selected.slice(1)],
+    [
+      "missing-solid-policy-witness",
+      modified((c) => ({
+        ...c,
+        solidProbeEvidence: { ...c.solidProbeEvidence, explained: false },
+      })),
+    ],
+    [
+      "conserved-total-shifted-bands",
+      modified((c) => ({
+        ...c,
+        reference: {
+          ...c.reference,
+          bands: c.reference.bands.map((b, i) => ({
+            ...b,
+            volumeMm3: b.volumeMm3 + (i === 0 ? 1 : i === 1 ? -1 : 0),
+          })),
+        },
+      })),
+    ],
+    [
+      "new-reference-audit-failure",
+      modified((c) => ({
+        ...c,
+        reference: {
+          ...c.reference,
+          violations: [
+            ...c.reference.violations,
+            { code: "wall_count", message: "injected missing wall" },
+          ],
+        },
+      })),
+    ],
+  ];
+  for (const [name, records] of faults) {
+    const rejected = !explainCubeMaterialFamily(records, walls).explained;
+    report.materialLedgerFaults.push({ walls, name, rejected });
+    if (!rejected) report.error ??= `material ledger did not reject ${name} with ${walls} walls`;
+  }
+}
+for (const c of report.cases) {
+  const evidence = report.materialFamilies.find((f) => f.walls === c.specification.walls);
+  const distribution = c.comparison?.differences.find((d) => d.id === "material_distribution");
+  if (distribution && evidence?.explained && !report.error) {
+    distribution.status = "explained";
+    distribution.explanation =
+      "Frozen cube-family controls explain the wall, ordinary-row, bridge/preparation, internal variable-width skin, external fitted-flow and terminal-schedule contributions. Independent cross-case invariance and volume reconciliation retain every emitted component; baseline audit flags remain binding. This accepts the reason for a software policy difference, not equal physical output.";
+    distribution.evidence.causalFamily = evidence;
+    c.comparison.differencesExplained = c.comparison.differences.every(
+      (d) => d.status !== "unresolved",
+    );
+  }
+  if (c.comparison) await save(`${c.id}/comparison.json`, c.comparison);
+}
 for (const name of [
   "decode.mjs",
   "analyze.mjs",
   "anchors.mjs",
   "construction.mjs",
+  "material-ledger.mjs",
   "probes.mjs",
   "corpus.mjs",
   "report.mjs",
@@ -506,6 +570,13 @@ for (const c of report.cases)
   }
 manifest.files["cube-10-derived.step"] = sha256(
   await readFile(join(output, "cube-10-derived.step")).catch(() => ""),
+);
+report.policyDifferencesExplained =
+  !report.error &&
+  report.cases.length === cases.length &&
+  report.cases.every((c) => c.comparison?.differencesExplained === true);
+console.error(
+  `Frozen cube policy explanations: ${report.policyDifferencesExplained}; baseline audit obligations remain independent.`,
 );
 report.correctnessPassed =
   !report.error &&

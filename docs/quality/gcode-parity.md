@@ -224,3 +224,35 @@ perimeters” does not imply uniform-width internal skins. The diagnostic retain
 actual nominal width ranges inferred from E/length/height, row/link accounting,
 and the controlled programs. It identifies a specific material-volume contribution
 without adopting that filler or claiming the full remaining distribution resolved.
+
+## Frozen cube-family material explanation
+
+[`material-ledger.mjs`](../../tools/gcode-parity/material-ledger.mjs) closes a
+**specific policy explanation**, never a claim of equal material or physical
+quality. It requires the complete 0/25/100% family for each wall count, successful
+native audits, and all independently established schedule/wall/hatch/bridge/roof
+and internal-solid witnesses. Its cross-case checks require unchanged native
+walls/skins, unchanged reference walls and ordinary skins, empty hollow interiors,
+and the observed reference internal-solid template. Reference first/top external
+skin row volume must fit measured pitch times actual height/length within
+0.005 mm³; this diagnostic accounts for XYZ3/E5 precision and fitted flow, not a
+whole-job tolerance. Native E must retain its nominal stadium model.
+
+Every layer's geometric buckets must reconcile with actual E-derived volume.
+Every common physical band's volume/core/wall-zone values are reprojected from
+actual intervals; equal totals cannot hide shifted material. The ledger exposes
+separate wall, external/internal bottom, ordinary-interior, pre-roof, first-roof,
+internal-roof and terminal-band deltas. The policy witnesses establish causes;
+the ledger alone cannot establish an explanation.
+
+The real runner fault-checks each admitted family by removing a density control,
+removing the internal-solid witness, shifting material between bands while
+conserving total extrusion, and injecting an unrelated reference audit failure.
+Each must reject the explanation. Reference hollow flags remain binding at their
+original Z9.2 preparation and Z9.4 footprint obligations; any other reference
+violation prevents this bounded family explanation. The frozen comparison can
+therefore report `policyDifferencesExplained:true` while its baseline audit still
+fails and its exit remains 1. `correctnessPassed` and the overall
+`differencesExplained` success condition keep their original stricter meaning.
+A policy explanation does not certify a reference roof, adopt another algorithm,
+or establish physical printability.

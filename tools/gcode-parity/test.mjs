@@ -280,3 +280,15 @@ test("internal-solid probe refuses unchanged reference and unproven native invar
   assert.equal(evaluateSolidProbe(a, a, a, a, true).explained, false);
   assert.equal(evaluateSolidProbe(a, a, a, a, false).explained, false);
 });
+
+test("whole-material explanation requires all real density controls and deciding policy witnesses", async () => {
+  const { explainCubeMaterialFamily } = await import("./material-ledger.mjs");
+  assert.equal(explainCubeMaterialFamily([], 2).explained, false);
+  const a = audit(synthetic());
+  const records = [0, 0.25, 1].map((infillFraction) => ({
+    specification: { ...spec, infillFraction },
+    spiling: a,
+    reference: a,
+  }));
+  assert.equal(explainCubeMaterialFamily(records, 2).explained, false);
+});
