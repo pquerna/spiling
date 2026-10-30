@@ -101,6 +101,15 @@ impl Workbench {
                     "Recipe {} / {}",
                     d.value.recipe.id, d.value.recipe.revision
                 ));
+                if let Some(profile) = &d.value.material_profile {
+                    ui.collapsing("Captured material profile", |ui| {
+                        let selection = &profile.selection;
+                        ui.label(format!("{} · {} / {}", selection.profile.material.product, selection.profile.id, selection.profile.revision));
+                        ui.label(format!("Source: {:?} · {} / {}", selection.profile.source.kind, selection.profile.source.source_id, selection.profile.source.source_revision));
+                        ui.label(format!("Effective flow ceiling: {:.3} mm³/s", d.value.effective_max_volumetric_flow_mm3_s()));
+                        ui.weak("Profile selection and explicit overrides are authored through the CLI. The full capture is retained; conflicting recipe edits are rejected by the engine. Declarations are not calibration.");
+                    });
+                }
                 ui.add_enabled_ui(writable && !conflict, |ui| {
                     for (label, value) in [
                         ("Layer height (mm)", &mut d.value.recipe.layer_height_mm),

@@ -341,7 +341,8 @@ impl Host {
         self.send(Request::Geometry(Box::new(command)))
     }
     pub fn manufacturing(&self, command: ManufacturingCommand) -> Result<(), String> {
-        // The existing client checks the strict encoded intent limit before RPC admission.
+        // Validate variable-sized controls before bounded host admission; the engine
+        // independently validates them and owns mutation authority.
         if let ManufacturingCommand::SetIntent { intent, .. } = &command {
             intent.validate().map_err(|e| e.to_string())?;
             if serde_json::to_vec(intent).map_err(|e| e.to_string())?.len()
@@ -349,6 +350,16 @@ impl Host {
             {
                 return Err("Manufacturing intent exceeds the control limit".into());
             }
+        }
+        if let ManufacturingCommand::ApplyMaterialProfile { selection, .. } = &command {
+            selection.validate().map_err(|e| e.to_string())?;
+        }
+        if serde_json::to_vec(&command)
+            .map_err(|e| e.to_string())?
+            .len()
+            > spiling_contracts::MAX_CONTROL_BYTES as usize
+        {
+            return Err("Manufacturing command exceeds the host control limit".into());
         }
         self.send(Request::Manufacturing(Box::new(command)))
     }

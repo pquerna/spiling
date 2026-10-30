@@ -24,8 +24,10 @@ The supervised engine remains a separate process. The workbench uses the same
 `EngineClient`/`EngineRpc`, authenticated loopback gRPC, Google Operations and
 ByteStream as the CLI. Core remains the sole project writer; geometry,
 manufacturing, persistence, history and emitted-program verification retain their
-current owners and contracts. This changes neither file versions nor supported
-geometry/process scope. Disposable meshes never become material authority.
+current owners and contracts. Captured material profiles remain part of the complete checked intent; the native
+Prepare view retains and inspects them while profile selection/overrides remain
+CLI authoring. New headless services do not silently expand the frozen migration
+parity set. This changes neither file versions nor supported geometry/process scope. Disposable meshes never become material authority.
 
 The workbench host owns the child, checked project snapshots, native file dialogs,
 accepted-operation observation and saved checkpoint route. A bounded command queue

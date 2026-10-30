@@ -1253,3 +1253,100 @@ fn diagnostic_operations_remain_separate_cancellable_and_checked() {
     assert_eq!(s.scene.as_ref().unwrap().occurrence_count, 0);
     assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
 }
+
+#[test]
+#[ignore = "actual supervised material-profile engine; requires SPILING_TEST_ENGINE"]
+fn captured_material_profiles_preserve_full_intent_and_recover() {
+    use spiling_contracts::manufacturing::*;
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("ops"),
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&host, |s| s.phase == Phase::Running);
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/manufacturing");
+    let original =
+        decode_intent(&std::fs::read(fixtures.join("complete-sparse.intent.json")).unwrap())
+            .unwrap();
+    manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::SetIntent {
+            session_id,
+            base_revision,
+            intent: Arc::new(original),
+        }
+    });
+    let selection: MaterialProfileSelection =
+        serde_json::from_slice(&std::fs::read(fixtures.join("material-profile-a.json")).unwrap())
+            .unwrap();
+    let before = host.snapshot();
+    let mut oversized = selection.clone();
+    oversized.profile.material.product = "oversized".repeat(8192);
+    assert!(
+        host.manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+            session_id: before.hello.as_ref().unwrap().session_id.clone(),
+            base_revision: before.project.as_ref().unwrap().revision,
+            selection: oversized,
+        })
+        .is_err()
+    );
+    assert_eq!(host.snapshot().serial, before.serial);
+    let s = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::ApplyMaterialProfile {
+            session_id,
+            base_revision,
+            selection: selection.clone(),
+        }
+    });
+    assert!(s.problems.is_empty(), "{:?}", s.problems);
+    let resolved = s.manufacturing.intent.as_ref().unwrap();
+    assert_eq!(
+        resolved.material_profile.as_ref().unwrap().selection,
+        selection
+    );
+    let mut draft = (**resolved).clone();
+    draft.recipe.infill_fraction = 0.2;
+    let s = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::SetIntent {
+            session_id,
+            base_revision,
+            intent: Arc::new(draft.clone()),
+        }
+    });
+    assert_eq!(s.manufacturing.intent.as_deref(), Some(&draft));
+    let mut inconsistent = draft.clone();
+    inconsistent.recipe.print_speed_mm_s += 1.0;
+    assert!(
+        host.manufacturing(ManufacturingCommand::SetIntent {
+            session_id: s.hello.as_ref().unwrap().session_id.clone(),
+            base_revision: s.project.as_ref().unwrap().revision,
+            intent: Arc::new(inconsistent)
+        })
+        .is_err()
+    );
+    assert_eq!(
+        host.snapshot().project.as_ref().unwrap().revision,
+        s.project.as_ref().unwrap().revision
+    );
+    retain_project(&host, "material-profile");
+    let saved = send(
+        &host,
+        Action::Save {
+            target: Some(native(&root.path().join("captured"))),
+        },
+    );
+    assert!(
+        !saved.project.as_ref().unwrap().dirty,
+        "{:?}",
+        saved.problems
+    );
+    let old_session = saved.hello.as_ref().unwrap().session_id.clone();
+    let reopened = send(&host, Action::Restart);
+    assert_ne!(reopened.hello.as_ref().unwrap().session_id, old_session);
+    assert_eq!(reopened.manufacturing.intent.as_deref(), Some(&draft));
+    send(&host, Action::Close);
+    wait(&host, |s| s.phase == Phase::Closed);
+}

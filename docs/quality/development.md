@@ -64,7 +64,7 @@ canonical PNG/PGM relief, layer enable/remove and stored-image reuse. Review ret
 H1 decisions, physical plate/region accounting, native coverage, surface exposure/
 optical reassessment and declared tool tints. Study loads retained complete optical
 reports and explicitly binds accepted selections to existing loaded declarations
-and source constructions. Palette/study authoring remains available through CLI.
+and source constructions. Palette/study authoring remains available through CLI. Captured single-tool material profiles are retained and inspected in Prepare; selecting a profile or changing its explicit overrides remains CLI authoring. Conflicting edits retain their drafts and fail the existing engine validation.
 The legacy browser frontend and its build/runtime paths have been removed.
 
 ```sh

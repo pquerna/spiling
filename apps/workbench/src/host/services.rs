@@ -57,12 +57,17 @@ impl Actor {
         }
         let label = match &command {
             ManufacturingCommand::SetIntent { .. } => "Apply full manufacturing intent",
+            ManufacturingCommand::ApplyMaterialProfile { .. } => "Apply captured material profile",
             ManufacturingCommand::Preflight { .. } => "Manufacturing preflight",
             ManufacturingCommand::Compile { .. } => "Compile manufacturing",
             ManufacturingCommand::Inspect { .. } => "Fresh actual-program verification",
             ManufacturingCommand::Get { .. } => "Manufacturing status",
         };
-        let applying = matches!(&command, ManufacturingCommand::SetIntent { .. });
+        let applying = matches!(
+            &command,
+            ManufacturingCommand::SetIntent { .. }
+                | ManufacturingCommand::ApplyMaterialProfile { .. }
+        );
         let result = self
             .client
             .as_ref()
@@ -76,7 +81,7 @@ impl Actor {
             Ok(ManufacturingResponse::Status { .. }) => {
                 if applying {
                     Arc::make_mut(&mut self.state.manufacturing).loaded = None;
-                    self.state.message = "Full manufacturing intent applied".into();
+                    self.state.message = format!("{label} completed");
                 }
                 self.refresh_after_failure().await;
             }
