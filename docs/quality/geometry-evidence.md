@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source6/planner25 DEVELOPMENT route: the imported SolidCore BREP is its sole
+source6 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -302,6 +302,18 @@ a tolerance label does not replace a complete measured query bound.
   or loop count does not discharge births/deaths, a pocket floor, disappearing
   voids or attachment. Missing/ambiguous incidence refuses; this is not an
   independent original-STEP material-embedding claim.
+  Exact regular vertical-tangent face cells have no transverse vertical-ray
+  crossing: their boundary-point cover retains their own enclosed height image.
+  Uncertain or degenerate normals retain the complete shadow. All other faces,
+  closed event/port ownership and the filled-sample obligation remain mandatory.
+  A single exact-height, single-wire native coface may join hole-free disjoint
+  components to one, or split one into them, only with complete paired ports,
+  no other interface event/critical band and independently proved whole actual
+  child-in-parent nesting. General material merge/split arrangements, holes,
+  cycles and partial overlap retain explicit refusals. Frozen original bridge
+  coupons in `fixtures/manufacturing/bridges/manifest.json` exercise the native
+  source and the real compiler/fresh-replay boundary; they are not calibrated
+  physical bridge limits.
 - **Filled-material metrics:** [`critical/material_link/radial_product.rs`](../../crates/geometry/src/analysis/critical/material_link/radial_product.rs)
   and [`joint/radial_metric.rs`](../../crates/geometry/src/analysis/joint/radial_metric.rs)
   qualify the actual used polygon over its complete native scope. Directed,

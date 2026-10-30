@@ -451,8 +451,9 @@ impl NativeCriticalCollarCell {
         self.world_xy
     }
     /// Height range of the represented source-column shadow, not merely its
-    /// native boundary witness. Sample and non-event cells retain the whole
-    /// source-occupied CLOSED interval; certified world event faces/ports
+    /// native boundary witness. Sample and ordinary crossing cells retain the
+    /// whole source-occupied CLOSED interval; exact regular vertical-tangent
+    /// cells retain their own boundary-point height image. World event faces/ports
     /// restrict only the shadow's non-material-facing end. Material distance
     /// covers this entire range. An XY envelope does not assert occupancy
     /// throughout its rectangle; the captured request remains unchanged.
@@ -1034,11 +1035,12 @@ fn spatial_split(
     depth: u8,
     jet: &SurfaceFirstEnclosure,
     matrix: Matrix,
+    include_height: bool,
 ) -> Result<[Box2; 2], GeometryError> {
     let motion = [jet.du, jet.dv].map(|tangent| {
         matrix
             .into_iter()
-            .take(2)
+            .take(if include_height { 3 } else { 2 })
             .map(|row| dot(row, tangent))
             .map(Interval::abs_upper)
             .fold(0.0_f64, f64::max)
@@ -1049,9 +1051,9 @@ fn spatial_split(
             .mul(Interval::point(motion[axis]))
             .hi
     });
-    // Only projected XY coverage is unresolved here: the CLOSED height column
-    // and its target distance were already checked independently. Splitting a
-    // purely vertical chart direction cannot improve that remaining obligation.
+    // Ordinary crossing shadows need only projected XY refinement. Exact
+    // vertical tangent faces instead retain their own height image, so reducing
+    // a vertical chart span can improve target eligibility across a cap event.
     // Parameter-domain scale is not spatial conditioning. Independent NURBS
     // domains receive the same geometric split as their affine reparameterization.
     split_axis(uv, depth, usize::from(scores[1] > scores[0]))
@@ -1736,16 +1738,32 @@ fn certify_native_critical_collar_using(
                 // Uncertain/degenerate signs retain the full existing shadow.
                 // All incident original-face shadows remain covered by closure;
                 // a coedge is never assigned an independent smooth normal.
-                work.charge(64, cancel)?;
-                let du = [dot(matrix[0], jet.du), dot(matrix[1], jet.du)];
-                let dv = [dot(matrix[0], jet.dv), dot(matrix[1], jet.dv)];
-                let normal_z = du[0].mul(dv[1]).sub(du[1].mul(dv[0]));
+                work.charge(128, cancel)?;
+                let world_du = matrix.map(|row| dot(row, jet.du));
+                let world_dv = matrix.map(|row| dot(row, jet.dv));
+                let normal = cross(world_du, world_dv);
+                let normal_z = normal[2];
                 let normal_z = if domain.orientation() {
                     normal_z
                 } else {
                     normal_z.neg()
                 };
-                let source_column = if normal_z.lo > 0.0 {
+                // A regular face with identically zero world normal-Z has no
+                // transverse vertical crossing. Its boundary points still need
+                // coverage, but it cannot cast a material shadow beyond its own
+                // height image. Interior crossing shadows are owned by the
+                // other original faces and the filled sample; the independent
+                // closed native event/port complex remains mandatory. An
+                // uncertain zero or a degenerate normal grants no restriction.
+                let vertical_tangent = normal_z.lo == 0.0
+                    && normal_z.hi == 0.0
+                    && (!normal[0].contains_zero() || !normal[1].contains_zero());
+                let source_column = if vertical_tangent {
+                    [
+                        source_column[0].max(world[2].lo),
+                        source_column[1].min(world[2].hi),
+                    ]
+                } else if normal_z.lo > 0.0 {
                     [source_column[0], source_column[1].min(world[2].hi)]
                 } else if normal_z.hi < 0.0 {
                     [source_column[0].max(world[2].lo), source_column[1]]
@@ -1877,15 +1895,17 @@ fn certify_native_critical_collar_using(
                             continue;
                         }
                         let _ = other?;
-                        for child in spatial_split(uv, depth, &jet, matrix).map_err(|error| {
-                            failure(
-                                error.code,
-                                format!(
-                                    "native collar original face {face_index}, UV {uv:?}: {}",
-                                    error.message
-                                ),
-                            )
-                        })? {
+                        for child in spatial_split(uv, depth, &jet, matrix, vertical_tangent)
+                            .map_err(|error| {
+                                failure(
+                                    error.code,
+                                    format!(
+                                        "native collar original face {face_index}, UV {uv:?}: {}",
+                                        error.message
+                                    ),
+                                )
+                            })?
+                        {
                             stack.push((child, depth + 1));
                         }
                     }

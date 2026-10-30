@@ -1888,6 +1888,8 @@ fn native_component_transition_error(
 /// its whole actual overlap needs a common strict kernel, exact closed Jordan
 /// nesting or an embedded actual outer collar. Independent hole containment,
 /// forbidden-pair separation and the native void-port forest remain mandatory.
+/// A single exact-height disk may own a hole-free outer star, with complete
+/// paired ports and whole actual child-in-parent nesting for every edge.
 /// Whole-component birth/death requires a genuinely absent accepted source-M
 /// contribution.
 pub fn certify_native_collar_incidence(
@@ -1989,7 +1991,7 @@ pub fn certify_native_collar_incidence(
         scratch.push(&mut dependencies, target.leaf().clone(), work, cancel)?;
     }
     let mut digest = Sha256::new();
-    digest.update(b"spiling-native-critical-source-m-interface-3\0");
+    digest.update(b"spiling-native-critical-source-m-interface-4\0");
     digest.update(collar.complex_sha256());
     hash_leaf(&mut digest, current);
     let sample = collar.actual_sample_world_height_interval_mm();
@@ -2027,7 +2029,6 @@ pub fn certify_native_collar_incidence(
             work,
             cancel,
         )?;
-        let mut native_outer_pair = None;
         let n = before.map_or(0, |m| m.rings.len());
         let m = after.map_or(0, |m| m.rings.len());
         let size = n.checked_mul(m).ok_or_else(|| {
@@ -2036,6 +2037,10 @@ pub fn certify_native_collar_incidence(
                 "critical incidence capacity overflow",
             )
         })?;
+        let mut outer_pairs = Vec::new();
+        scratch.reserve(&mut outer_pairs, size, work, cancel)?;
+        outer_pairs.resize(size, false);
+        let mut outer_star = false;
         let mut holes = Vec::new();
         scratch.reserve(&mut holes, size, work, cancel)?;
         holes.resize(size, false);
@@ -2129,29 +2134,63 @@ pub fn certify_native_collar_incidence(
                         }
                         _ => None,
                     };
-                    let Some(pair) = pair else {
-                        return Err(native_component_transition_error(
-                            complex,
-                            collar,
-                            interface,
-                            face,
-                            [before, after],
-                            &port_assignments,
-                            &mut scratch,
-                            work,
-                            cancel,
-                        )?);
-                    };
-                    if native_outer_pair.is_some_and(|previous| previous != pair) {
-                        return Err(error(
-                            GeometryErrorCode::AnalysisIndeterminate,
-                            "native cofaces disagree on the continuing material component",
-                        ));
+                    if let Some((i, j)) = pair {
+                        outer_pairs[i * m + j] = true;
+                    } else {
+                        // A single unperforated native coface may join a forest
+                        // of disjoint filled components into one (or the dual
+                        // split). Its COMPLETE paired port inventory must own
+                        // every ring on both sides. Only a star is admitted:
+                        // no holes, handles, other events or uncertain critical
+                        // connections. Actual closed nesting is proved below;
+                        // a port census by itself never grants actual-M glue.
+                        let mut event_count = 0;
+                        for (_, other_height, _) in complex.event_faces() {
+                            work.charge(1, cancel)?;
+                            if (if other_height[1] < sample[0] { 0 } else { 1 }) == interface {
+                                event_count += 1;
+                            }
+                        }
+                        let mut single_wire = true;
+                        for port in collar.native_event_ports() {
+                            work.charge(1, cancel)?;
+                            if port.event_face_ordinal() == face
+                                && port.event_coedge_ordinal()[0] != 0
+                            {
+                                single_wire = false;
+                            }
+                        }
+                        let star = event_count == 1
+                            && height[0] == height[1]
+                            && complex.boundary_critical_bands().is_empty()
+                            && single_wire
+                            && a.rings.iter().all(|ring| !ring.hole)
+                            && b.rings.iter().all(|ring| !ring.hole)
+                            && left.len() == n
+                            && right.len() == m
+                            && (n > 1 && m == 1 && sign == -1 || n == 1 && m > 1 && sign == 1);
+                        if !star {
+                            return Err(native_component_transition_error(
+                                complex,
+                                collar,
+                                interface,
+                                face,
+                                [before, after],
+                                &port_assignments,
+                                &mut scratch,
+                                work,
+                                cancel,
+                            )?);
+                        }
+                        outer_star = true;
+                        for &i in &left {
+                            for &j in &right {
+                                work.charge(1, cancel)?;
+                                outer_pairs[i * m + j] = true;
+                            }
+                        }
+                        digest.update(b"native-single-disk-outer-star");
                     }
-                    // This exact coface's ports identify one continuing global
-                    // outer component, not a generic merge/split arrangement.
-                    // Its actual filled overlap is proved below independently.
-                    native_outer_pair = Some(pair);
                     left.retain(|&index| a.rings[index].hole);
                     right.retain(|&index| b.rings[index].hole);
                 }
@@ -2191,14 +2230,34 @@ pub fn certify_native_collar_incidence(
                 for (j, outer_b) in b.rings.iter().enumerate().filter(|(_, r)| !r.hole) {
                     work.charge(1, cancel)?;
                     let source_b = &b.leaf.sample_loops[j].source_face_ordinals;
-                    let owned_outer_pair = native_outer_pair == Some((i, j));
+                    let owned_outer_pair = outer_pairs[i * m + j];
                     if owned_outer_pair || !source_a.is_empty() && source_a == source_b {
                         matches += 1;
                         if owned_outer_pair {
                             digest.update(b"native-coface-actual-outer-continuation");
                             digest.update((i as u64).to_le_bytes());
                             digest.update((j as u64).to_le_bytes());
-                            if common_kernel(outer_a, outer_b, radius, work, cancel)? {
+                            if outer_star {
+                                let checkpoint = scratch.bytes;
+                                let nesting = planar::actual_outer_nesting(
+                                    &a.actual[i],
+                                    &b.actual[j],
+                                    &mut scratch,
+                                    work,
+                                    cancel,
+                                );
+                                scratch.bytes = checkpoint;
+                                let nesting =
+                                    nesting?.filter(|nesting| nesting.inner == usize::from(n == 1));
+                                let Some(nesting) = nesting else {
+                                    return Err(error(
+                                        GeometryErrorCode::AnalysisIndeterminate,
+                                        "native material star lacks complete actual child-in-parent nesting",
+                                    ));
+                                };
+                                digest.update([3, nesting.inner as u8]);
+                                digest.update(nesting.geometry);
+                            } else if common_kernel(outer_a, outer_b, radius, work, cancel)? {
                                 // This existing all-edge proof establishes a
                                 // common kernel of BOTH complete filled outers.
                                 digest.update([0]);
@@ -2325,7 +2384,7 @@ pub fn certify_native_collar_incidence(
                         ));
                     }
                 }
-                if matches != 1 {
+                if matches != (if outer_star { m } else { 1 }) {
                     return Err(error(
                         GeometryErrorCode::AnalysisIndeterminate,
                         "native outer branch correspondence is missing or ambiguous",
@@ -2337,12 +2396,12 @@ pub fn certify_native_collar_incidence(
                 for (i, _) in a.rings.iter().enumerate().filter(|(_, r)| !r.hole) {
                     work.charge(1, cancel)?;
                     matches += usize::from(
-                        native_outer_pair == Some((i, j))
+                        outer_pairs[i * m + j]
                             || a.leaf.sample_loops[i].source_face_ordinals
                                 == b.leaf.sample_loops[j].source_face_ordinals,
                     );
                 }
-                if matches != 1 {
+                if matches != (if outer_star { n } else { 1 }) {
                     return Err(error(
                         GeometryErrorCode::AnalysisIndeterminate,
                         "critical interface changes unsupported material component branches",
@@ -10199,6 +10258,139 @@ mod tests {
             );
         Some(certify_native_collar_incidence(analysis,leaf,&metric,&targets,work,&cancel)
             .expect("original source coface/coedge/neighbor loop incidence and actual source-M interface graph"))
+    }
+    #[test]
+    fn frozen_two_post_native_event_requires_complete_actual_star_and_targets() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/manufacturing/bridges/span-6.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let lower = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [2.98, 3.02],
+            2.99,
+            0,
+            &mut work,
+        );
+        let upper = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [3.02, 3.06],
+            3.04,
+            lower.retained_bytes(),
+            &mut work,
+        );
+        let lower_m = xy_candidate(&lower, 2.99);
+        let upper_m = xy_candidate(&upper, 3.04);
+        assert_eq!(lower_m.len(), 2);
+        assert_eq!(upper_m.len(), 1);
+        let lower_leaf = source_leaf(&source, 13, RigidPoseMm::IDENTITY, &lower, &mut work);
+        let upper_leaf = source_leaf(&source, 13, RigidPoseMm::IDENTITY, &upper, &mut work);
+        for (analysis, leaf, other_leaf) in [(&lower, &lower_leaf, &upper_leaf)] {
+            let targets = [
+                NativeCriticalCollarTarget {
+                    leaf: &lower_leaf,
+                    actual_material: &lower_m,
+                },
+                NativeCriticalCollarTarget {
+                    leaf: &upper_leaf,
+                    actual_material: &upper_m,
+                },
+            ];
+            let metric = source
+                .certify_native_critical_collar(
+                    analysis,
+                    &targets,
+                    super::super::collar::NativeCriticalCollarPolicy {
+                        maximum_xy_cover_error_mm: 0.05,
+                        maximum_distance_mm: 0.1,
+                        byte_limit: MAX_SCRATCH as u32,
+                    },
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+            let proof = certify_native_collar_incidence(
+                analysis, leaf, &metric, &targets, &mut work, &cancel,
+            )
+            .unwrap();
+            assert!(
+                proof
+                    .used_source_leaves()
+                    .iter()
+                    .any(|d| same_leaf(d, other_leaf))
+            );
+            // No one-sided subset, conserved loop count, or stale metric grants
+            // permission to omit an actual native material component.
+            let missing = &targets[..1];
+            assert!(
+                certify_native_collar_incidence(
+                    analysis, leaf, &metric, missing, &mut work, &cancel
+                )
+                .is_err()
+            );
+            let mut changed: Vec<_> = lower_m
+                .iter()
+                .map(|r| SectionLoopMm {
+                    is_hole: r.is_hole,
+                    points_mm: r.points_mm.clone(),
+                })
+                .collect();
+            changed[1].points_mm.iter_mut().for_each(|p| p[0] += 0.5);
+            let altered = [
+                NativeCriticalCollarTarget {
+                    leaf: &lower_leaf,
+                    actual_material: &changed,
+                },
+                NativeCriticalCollarTarget {
+                    leaf: &upper_leaf,
+                    actual_material: &upper_m,
+                },
+            ];
+            assert!(
+                certify_native_collar_incidence(
+                    analysis, leaf, &metric, &altered, &mut work, &cancel
+                )
+                .is_err()
+            );
+            assert_eq!(
+                certify_native_collar_incidence(
+                    analysis,
+                    leaf,
+                    &metric,
+                    &targets,
+                    &mut GeometryWorkBudget::new(0),
+                    &cancel
+                )
+                .unwrap_err()
+                .code,
+                GeometryErrorCode::ResourceLimit
+            );
+            assert_eq!(
+                certify_native_collar_incidence(
+                    analysis,
+                    leaf,
+                    &metric,
+                    &targets,
+                    &mut work,
+                    &AtomicBool::new(true)
+                )
+                .unwrap_err()
+                .code,
+                GeometryErrorCode::Cancelled
+            );
+        }
     }
     fn source_evidence<'a>(
         analysis: &'a SlabAnalysis,

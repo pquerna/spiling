@@ -1,0 +1,177 @@
+{
+  "SPDX-License-Identifier": "OSL-3.0",
+  "fixtures": [
+    {
+      "path": "span-2.step",
+      "sha256": "4f7a79b0660d6bf5a33f7102edebad4da222ab88dc106d5705ba83356a53a059",
+      "byte_count": 12555,
+      "xz_vertices_mm": [
+        [
+          0,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          4,
+          3
+        ],
+        [
+          4,
+          0
+        ],
+        [
+          6,
+          0
+        ],
+        [
+          6,
+          4
+        ],
+        [
+          0,
+          4
+        ]
+      ],
+      "depth_mm": 6,
+      "roof_z_mm": [
+        3,
+        4
+      ],
+      "provenance": "Original Spiling analytic closed planar prism; tools/gcode-parity/bridge-corpus.mjs"
+    },
+    {
+      "path": "span-6.step",
+      "sha256": "d95c5ed4f619fec22891b5f868eaef1a4d8d955a69a268751d0ed8de95167a38",
+      "byte_count": 12561,
+      "xz_vertices_mm": [
+        [
+          0,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          8,
+          3
+        ],
+        [
+          8,
+          0
+        ],
+        [
+          10,
+          0
+        ],
+        [
+          10,
+          4
+        ],
+        [
+          0,
+          4
+        ]
+      ],
+      "depth_mm": 6,
+      "roof_z_mm": [
+        3,
+        4
+      ],
+      "provenance": "Original Spiling analytic closed planar prism; tools/gcode-parity/bridge-corpus.mjs"
+    },
+    {
+      "path": "span-10.step",
+      "sha256": "e75301712bb9733a6e57ca8fa314305865c751397b190546f737c4ee46342258",
+      "byte_count": 12568,
+      "xz_vertices_mm": [
+        [
+          0,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          12,
+          3
+        ],
+        [
+          12,
+          0
+        ],
+        [
+          14,
+          0
+        ],
+        [
+          14,
+          4
+        ],
+        [
+          0,
+          4
+        ]
+      ],
+      "depth_mm": 6,
+      "roof_z_mm": [
+        3,
+        4
+      ],
+      "provenance": "Original Spiling analytic closed planar prism; tools/gcode-parity/bridge-corpus.mjs"
+    },
+    {
+      "path": "one-ended.step",
+      "sha256": "98dd3333acf247270b5edb4126d4072fa3bb8577306a2226595e80552632bc73",
+      "byte_count": 9900,
+      "xz_vertices_mm": [
+        [
+          0,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          10,
+          3
+        ],
+        [
+          10,
+          4
+        ],
+        [
+          0,
+          4
+        ]
+      ],
+      "depth_mm": 6,
+      "roof_z_mm": [
+        3,
+        4
+      ],
+      "provenance": "Original Spiling analytic closed planar prism; tools/gcode-parity/bridge-corpus.mjs"
+    }
+  ]
+}

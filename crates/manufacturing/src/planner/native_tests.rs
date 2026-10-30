@@ -4077,3 +4077,86 @@ fn material_profile_native_compile_replay_and_thermal_process_mutations() {
         assert!(crate::verifier::verify(&tampered, &bundle.plan, &resolved, &cancel).is_err());
     }
 }
+
+// The same frozen sources drive the external slicer comparison. A missing
+// second anchor and an excessive span must fail AFTER native event admission.
+#[test]
+fn frozen_bridge_component_merge_and_split_preserve_actual_replay_and_anchor_refusals() {
+    let cancel = AtomicBool::new(false);
+    let mut selected: ManufacturingIntent = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/manufacturing/complete-sparse.intent.json"
+    ))
+    .unwrap();
+    let mut selection: spiling_contracts::manufacturing::MaterialProfileSelection =
+        serde_json::from_slice(include_bytes!(
+            "../../../../fixtures/manufacturing/material-profile-a.json"
+        ))
+        .unwrap();
+    selected.recipe.infill_fraction = 1.0;
+    selected.recipe.supports = SupportPolicy::Disabled;
+    selected.recipe.perimeter_count = 1;
+    selection.profile.process.max_bridge_span_mm = 8.0;
+    selected = crate::material::resolve_material_profile(&selected, selection).unwrap();
+    for (bytes, admitted) in [
+        (
+            include_bytes!("../../../../fixtures/manufacturing/bridges/span-2.step").as_slice(),
+            true,
+        ),
+        (
+            include_bytes!("../../../../fixtures/manufacturing/bridges/span-6.step").as_slice(),
+            true,
+        ),
+        (
+            include_bytes!("../../../../fixtures/manufacturing/bridges/span-10.step").as_slice(),
+            false,
+        ),
+        (
+            include_bytes!("../../../../fixtures/manufacturing/bridges/one-ended.step").as_slice(),
+            false,
+        ),
+    ] {
+        let scene = NativeScene::new(bytes, &[RigidPoseMm::IDENTITY]);
+        let result = compile(scene.input(&selected), &cancel);
+        if admitted {
+            let bundle = result.unwrap();
+            assert!(
+                bundle
+                    .plan
+                    .layers
+                    .iter()
+                    .flat_map(|layer| &layer.paths)
+                    .any(|path| path.kind == DepositionKind::Bridge)
+            );
+            visit_fresh_replayed_object_segments(&bundle, |_, _| {});
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.code,
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "{error:?}"
+            );
+            assert!(
+                error.message.contains("bounded deposited anchors"),
+                "{error:?}"
+            );
+        }
+    }
+    let inverted = RigidPoseMm {
+        translation_mm: [0.0, 6.0, 4.0],
+        rotation_xyzw: [1.0, 0.0, 0.0, 0.0],
+    };
+    let scene = NativeScene::new(
+        include_bytes!("../../../../fixtures/manufacturing/bridges/span-6.step"),
+        &[inverted],
+    );
+    let bundle = compile(scene.input(&selected), &cancel).unwrap();
+    assert!(
+        !bundle
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.paths)
+            .any(|path| path.kind == DepositionKind::Bridge)
+    );
+    visit_fresh_replayed_object_segments(&bundle, |_, _| {});
+}
