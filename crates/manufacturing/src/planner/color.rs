@@ -52,91 +52,97 @@ pub(super) fn capture(
     if job.surface_constructions.is_empty() {
         return Ok(Construction::default());
     }
-    // Initial consumed envelope: one native part and one finite arrangement.
-    if input.occurrences.len() != 1 || job.surface_constructions.len() != 1 {
-        return Err(unsupported("requires one explicitly assigned native part"));
+    // One bounded arrangement on one native part, with independent regional shells.
+    if input.occurrences.len() != 1 || job.surface_constructions.len() > 2 {
+        return Err(unsupported(
+            "requires one native part and at most two regional constructions",
+        ));
     }
-    let construction = &job.surface_constructions[0];
     let occurrence = &input.occurrences[0];
     let definition = &input.definitions[&occurrence.definition_id];
-    if construction.occurrence_id != occurrence.occurrence_id
-        || construction.definition_id != occurrence.definition_id
-        || construction.source_hash != definition.provenance().source_hash
-    {
-        return Err(unsupported(
-            "immutable source/definition/occurrence binding changed",
-        ));
-    }
-    if construction.faces.len() != 1 {
-        return Err(unsupported(
-            "shared-corner material construction remains unqualified; select one planar face",
-        ));
+    for construction in &job.surface_constructions {
+        if construction.occurrence_id != occurrence.occurrence_id
+            || construction.definition_id != occurrence.definition_id
+            || construction.source_hash != definition.provenance().source_hash
+        {
+            return Err(unsupported(
+                "immutable source/definition/occurrence binding changed",
+            ));
+        }
+        if construction.faces.len() != 1 {
+            return Err(unsupported(
+                "shared-corner material construction remains unqualified; select one planar face per region",
+            ));
+        }
     }
     let bounds = native_bounds[&occurrence.occurrence_id];
     let mut result = Construction::default();
     let mut bands = Vec::new();
-    for face in &construction.faces {
-        check_cancel(cancel)?;
-        let cert = definition
-            .vertical_wall_face_with_cancel(&face.face_id, cancel)
-            .map_err(|e| super::native_error(e, "surface native-face certificate"))?;
-        surface::admit_extrusion(
-            input,
-            occurrence,
-            bounds,
-            &face.face_id,
-            cert.min_z_mm,
-            cert.max_z_mm,
-            cancel,
-        )?;
-        let u = face
-            .mask
-            .as_ref()
-            .map_or([0.0, cert.width_mm], |m| [m.min_u_mm, m.max_u_mm]);
-        if u[0] < 0.0 || u[0] >= u[1] || u[1] > cert.width_mm {
-            return Err(unsupported(
-                "finite mask exceeds its certified native-face frame",
+    for (construction_index, construction) in job.surface_constructions.iter().enumerate() {
+        for face in &construction.faces {
+            check_cancel(cancel)?;
+            let cert = definition
+                .vertical_wall_face_with_cancel(&face.face_id, cancel)
+                .map_err(|e| super::native_error(e, "surface native-face certificate"))?;
+            surface::admit_extrusion(
+                input,
+                occurrence,
+                bounds,
+                &face.face_id,
+                cert.min_z_mm,
+                cert.max_z_mm,
+                cancel,
+            )?;
+            let u = face
+                .mask
+                .as_ref()
+                .map_or([0.0, cert.width_mm], |m| [m.min_u_mm, m.max_u_mm]);
+            if u[0] < 0.0 || u[0] >= u[1] || u[1] > cert.width_mm {
+                return Err(unsupported(
+                    "finite mask exceeds its certified native-face frame",
+                ));
+            }
+            let strip = |depth: f64| {
+                let points = [
+                    [u[0], 0.0],
+                    [u[1], 0.0],
+                    [u[1], depth],
+                    [u[0], depth],
+                    [u[0], 0.0],
+                ];
+                MultiPolygon(vec![Polygon::new(
+                    LineString(
+                        points
+                            .into_iter()
+                            .map(|[horizontal, depth]| {
+                                let source = std::array::from_fn(|axis| {
+                                    cert.origin_mm[axis]
+                                        + cert.horizontal_direction[axis] * horizontal
+                                        - cert.outward_normal[axis] * depth
+                                });
+                                let p = forward(&occurrence.pose, source);
+                                Coord { x: p[0], y: p[1] }
+                            })
+                            .collect(),
+                    ),
+                    Vec::new(),
+                )])
+            };
+            result.frames.push(SurfaceColorFrame {
+                construction_index: construction_index as u16,
+                face_id: face.face_id.clone(),
+                origin_mm: cert.origin_mm,
+                horizontal_direction: cert.horizontal_direction,
+                outward_normal: cert.outward_normal,
+                width_mm: cert.width_mm,
+                source_z_mm: [cert.min_z_mm, cert.max_z_mm],
+                selected_u_mm: u,
+            });
+            bands.push((
+                strip(face.skin_depth_mm),
+                strip(face.skin_depth_mm + face.backing_depth_mm),
             ));
         }
-        let strip = |depth: f64| {
-            let points = [
-                [u[0], 0.0],
-                [u[1], 0.0],
-                [u[1], depth],
-                [u[0], depth],
-                [u[0], 0.0],
-            ];
-            MultiPolygon(vec![Polygon::new(
-                LineString(
-                    points
-                        .into_iter()
-                        .map(|[horizontal, depth]| {
-                            let source = std::array::from_fn(|axis| {
-                                cert.origin_mm[axis] + cert.horizontal_direction[axis] * horizontal
-                                    - cert.outward_normal[axis] * depth
-                            });
-                            let p = forward(&occurrence.pose, source);
-                            Coord { x: p[0], y: p[1] }
-                        })
-                        .collect(),
-                ),
-                Vec::new(),
-            )])
-        };
-        result.frames.push(SurfaceColorFrame {
-            construction_index: 0,
-            face_id: face.face_id.clone(),
-            origin_mm: cert.origin_mm,
-            horizontal_direction: cert.horizontal_direction,
-            outward_normal: cert.outward_normal,
-            width_mm: cert.width_mm,
-            source_z_mm: [cert.min_z_mm, cert.max_z_mm],
-            selected_u_mm: u,
-        });
-        bands.push((
-            strip(face.skin_depth_mm),
-            strip(face.skin_depth_mm + face.backing_depth_mm),
-        ));
     }
     result.bytes = result.frames.capacity() * size_of::<SurfaceColorFrame>()
         + result
@@ -149,7 +155,7 @@ pub(super) fn capture(
         if section.material.0.is_empty() {
             continue;
         }
-        if result.domains.len() + 3 > MAX_MATERIAL_DOMAINS {
+        if result.domains.len() + bands.len() + 2 > MAX_MATERIAL_DOMAINS {
             return Err(error(
                 ManufacturingErrorCode::ResourceLimit,
                 "surface domain count exceeds its bounded table",
@@ -180,24 +186,57 @@ pub(super) fn capture(
             retained_points + result.points + staging_points,
             owned_bytes + result.bytes + staging_bytes,
         )?;
-        let (shell_strip, backed_strip) = &bands[0];
-        boolean::budget_accumulated(&section.material, shell_strip, work, cancel)?;
-        let shell = section.material.intersection(shell_strip);
-        boolean::budget_accumulated(&section.material, backed_strip, work, cancel)?;
-        let backed = section.material.intersection(backed_strip);
-        boolean::budget_accumulated(&backed, &shell, work, cancel)?;
-        let backing = backed.difference(&shell);
-        boolean::budget_accumulated(&section.material, &backed, work, cancel)?;
-        let core = section.material.difference(&backed);
+        let mut shells = Vec::new();
+        let mut all_shell = MultiPolygon(Vec::new());
+        let mut all_backed = MultiPolygon(Vec::new());
+        for (construction_index, (shell_strip, backed_strip)) in bands.iter().enumerate() {
+            boolean::budget_accumulated(&section.material, shell_strip, work, cancel)?;
+            let shell = section.material.intersection(shell_strip);
+            boolean::budget_accumulated(&section.material, backed_strip, work, cancel)?;
+            let backed = section.material.intersection(backed_strip);
+            boolean::budget_accumulated(&all_backed, &backed, work, cancel)?;
+            if all_backed.intersection(&backed).unsigned_area() > 0.0 {
+                return Err(unsupported(
+                    "independent regional constructions overlap in positive native material",
+                ));
+            }
+            boolean::budget_accumulated(&all_shell, &shell, work, cancel)?;
+            all_shell = all_shell.union(&shell);
+            boolean::budget_accumulated(&all_backed, &backed, work, cancel)?;
+            all_backed = all_backed.union(&backed);
+            shells.push((
+                MaterialDomainRef {
+                    construction_index: construction_index as u16,
+                    role: MaterialConstructionRole::Shell,
+                },
+                shell,
+            ));
+        }
+        boolean::budget_accumulated(&all_backed, &all_shell, work, cancel)?;
+        let backing = all_backed.difference(&all_shell);
+        boolean::budget_accumulated(&section.material, &all_backed, work, cancel)?;
+        let core = section.material.difference(&all_backed);
         let physical_z_mm = [
             schedule[section.start as usize].lower_z,
             schedule[section.end as usize - 1].z,
         ];
-        for (role, mut material) in [
-            (MaterialConstructionRole::Shell, shell),
-            (MaterialConstructionRole::Backing, backing),
-            (MaterialConstructionRole::Core, core),
-        ] {
+        shells.extend([
+            (
+                MaterialDomainRef {
+                    construction_index: 0,
+                    role: MaterialConstructionRole::Backing,
+                },
+                backing,
+            ),
+            (
+                MaterialDomainRef {
+                    construction_index: 0,
+                    role: MaterialConstructionRole::Core,
+                },
+                core,
+            ),
+        ]);
+        for (reference, mut material) in shells {
             region::check_size(&material)?;
             if material.0.len() > MAX_MATERIAL_DOMAIN_POLYGONS
                 || material.0.iter().any(|p| {
@@ -218,10 +257,6 @@ pub(super) fn capture(
                     "skin/backing consumes the core or has no positive native material",
                 ));
             }
-            let reference = MaterialDomainRef {
-                construction_index: 0,
-                role,
-            };
             result.points += region::point_count(&material);
             result.bytes += native::material_bytes(&mut material) * 2;
             if result.bytes > MAX_MANUFACTURING_RETAINED_BYTES as usize / 4

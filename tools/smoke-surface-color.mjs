@@ -34,15 +34,18 @@ async function invoke(args, failure = false) {
   }
   assert.equal(result.status, 0, `${receipt}: ${result.stderr}`);
   const report = JSON.parse(result.stdout);
-  assert.match(report.hello.engine_build, /planner30;emitter11;verifier14/);
+  assert.match(report.hello.engine_build, /planner31;emitter11;verifier15/);
   return report;
 }
 const json = async (path) => JSON.parse(await readFile(path, "utf8"));
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const results = [];
 const cases = ["box-mm.step", "through-hole.step"].flatMap((source) => [[source, "full"], [source, "window"]]);
-cases.push(["box-mm.step", "cycle"], ["box-mm.step", "all-white"]);
+cases.push(["box-mm.step", "cycle"], ["box-mm.step", "all-white"], ["box-mm.step", "regional"], ["through-hole.step", "regional"]);
+const modes = new Set(process.argv.slice(2));
+assert.ok([...modes].every((mode) => cases.some((c) => c[1] === mode)), "unknown smoke mode");
 for (const [sourceName, mode] of cases) {
+  if (modes.size && !modes.has(mode)) continue;
   const name = sourceName.replace(/\.step$/, "") + "-" + mode;
   const source = join(output, sourceName);
   const project = join(output, `${name}.spiling`);
@@ -73,7 +76,14 @@ for (const [sourceName, mode] of cases) {
     shell: { kind: "uniform", material_id: job.tools[0].material.id },
     white_material_id: job.tools[1].material.id,
   }];
-  if (mode === "cycle") {
+  if (mode === "regional") {
+    job.surface_constructions.push(structuredClone(job.surface_constructions[0]));
+    for (const [index, construction] of job.surface_constructions.entries()) {
+      construction.faces[0].mask = { min_u_mm: [2, 12][index], max_u_mm: [8, 18][index] };
+      construction.shell = { kind: "layer_cycle", material_ids: job.tools.map((tool) => tool.material.id),
+        recipe: { slots: [{ material: 0, height_mm: 0.2 }, { material: 1, height_mm: 0.2 }], phase_slot: index, origin_z_mm: 0.03 } };
+    }
+  } else if (mode === "cycle") {
     job.surface_constructions[0].shell = {
       kind: "layer_cycle", material_ids: job.tools.map((tool) => tool.material.id),
       recipe: { slots: [{ material: 0, height_mm: 0.2 }, { material: 1, height_mm: 0.2 }], phase_slot: 0, origin_z_mm: 0.03 },
@@ -106,9 +116,26 @@ for (const [sourceName, mode] of cases) {
     assert.ok(plan.layers.flatMap((l) => l.paths).filter((p) => p.material_domain.role === "shell")
       .every((p) => p.points_mm.every((point) => point[0] > 24 && point[0] < 36)));
   }
+  if (mode === "regional") {
+    assert.deepEqual(plan.material_frames.map((f) => f.selected_u_mm), [[2, 8], [12, 18]]);
+    for (const layer of plan.layers) {
+      const tools = [new Set(), new Set()];
+      for (const path of layer.paths) {
+        const ref = path.material_domain;
+        if (ref.role === "shell") {
+          const material = job.surface_constructions[ref.construction_index].shell;
+          const slot = Math.floor(((path.physical_z_mm[0] + path.physical_z_mm[1]) / 2 - material.recipe.origin_z_mm) / 0.2);
+          tools[ref.construction_index].add(((slot + material.recipe.phase_slot) % 2 + 2) % 2);
+        } else assert.equal(ref.construction_index, 0);
+      }
+      assert.equal(tools[0].size, 1);
+      assert.equal(tools[1].size, 1);
+      assert.notDeepEqual(tools[0], tools[1]);
+    }
+  }
   const baseline = await readFile(join(exported, "program.gcode"));
   const changed = structuredClone(intent);
-  if (mode === "cycle") {
+  if (mode === "cycle" || mode === "regional") {
     changed.printer.workflow.job.surface_constructions[0].shell.recipe.phase_slot = 1;
   } else if (mode === "window") {
     changed.printer.workflow.job.surface_constructions[0].faces[0].mask = { min_u_mm: 5, max_u_mm: 17 };
@@ -146,6 +173,22 @@ for (const [sourceName, mode] of cases) {
       if (model === 0) wasteOnly++;
     }
   }
+  if (mode === "regional") {
+    const seen = Array.from({ length: plan.layers.length }, () => [new Set(), new Set()]);
+    for (let event = 1; event < decoded.eventCount; event++) {
+      if (![1, 2, 3, 4, 5, 8].includes(decoded.kind(event))) continue;
+      const points = [decoded.position(event - 1), decoded.position(event)];
+      for (const region of [0, 1]) {
+        const [lo, hi] = region === 0 ? [22, 28] : [32, 38];
+        if (points.every((p) => p[0] > lo && p[0] < hi && p[1] > 20 && p[1] < 21.2))
+          seen[decoded.layer(event)][region].add(decoded.activeTool(event));
+      }
+    }
+    for (const layer of seen) {
+      assert.equal(layer[0].size, 1); assert.equal(layer[1].size, 1);
+      assert.notDeepEqual(layer[0], layer[1], "actual common-Z region tools lost independent phase");
+    }
+  }
   if (mode === "cycle" || mode === "all-white") assert.ok(wasteOnly > 0);
   if (mode === "all-white") {
     assert.equal(compiled.manufacturing.verification.routing.tools[0].model_deposition_segments, 0);
@@ -166,6 +209,14 @@ for (const [sourceName, mode] of cases) {
     const invalidFile = join(output, `${name}-${key}.json`);
     await writeFile(invalidFile, JSON.stringify(invalid));
     await invoke(["project", "edit", project, "--intent", invalidFile, "--compile"], true);
+  }
+  if (mode === "regional") {
+    const invalid = structuredClone(intent);
+    invalid.printer.workflow.job.surface_constructions[1].faces[0].mask = { min_u_mm: 7, max_u_mm: 15 };
+    const invalidFile = join(output, `${name}-regional-overlap.json`);
+    await writeFile(invalidFile, JSON.stringify(invalid));
+    const error = await invoke(["project", "edit", project, "--intent", invalidFile, "--compile"], true);
+    assert.match(error.message, /overlap/);
   }
   results.push({ source: sourceName, mode, program_sha256: hash(baseline), replay_sha256: hash(await readFile(replay)), layers: plan.layers.length });
 }

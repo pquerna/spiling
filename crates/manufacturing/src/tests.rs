@@ -433,6 +433,77 @@ fn finite_surface_window_preserves_white_inheritance_hole_and_source_frame() {
     }
 }
 
+#[test]
+fn regional_surface_cycles_resolve_opposite_phases_at_common_z_with_shared_white_backing() {
+    use spiling_contracts::optical::{LayerCycle, OpticalSlot};
+    for bytes in [BOX, HOLE] {
+        let scene = Scene::new(bytes, &[pose(20.0, 20.0, 0.0)]);
+        let mut intent = surface_color_intent(&scene);
+        let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+            unreachable!()
+        };
+        let first = job.surface_constructions[0].clone();
+        job.surface_constructions.push(first);
+        let material_ids = job.tools.each_ref().map(|t| t.material.id.clone());
+        for (index, construction) in job.surface_constructions.iter_mut().enumerate() {
+            construction.faces[0].mask = Some(SurfaceColorMask {
+                min_u_mm: [2.0, 12.0][index],
+                max_u_mm: [8.0, 18.0][index],
+            });
+            construction.shell = OccurrenceMaterial::LayerCycle {
+                recipe: LayerCycle {
+                    slots: vec![
+                        OpticalSlot {
+                            material: 0,
+                            height_mm: 0.2,
+                        },
+                        OpticalSlot {
+                            material: 1,
+                            height_mm: 0.2,
+                        },
+                    ],
+                    phase_slot: index as u16,
+                    origin_z_mm: 0.03,
+                },
+                material_ids: material_ids.clone(),
+            };
+        }
+        let bundle = scene.compile(&intent).unwrap();
+        let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow else {
+            unreachable!()
+        };
+        assert_eq!(bundle.plan.material_frames.len(), 2);
+        for layer in &bundle.plan.layers {
+            let mut tools = [None; 2];
+            for path in &layer.paths {
+                let owner = path.material_domain.unwrap();
+                let tool = job.tool_for_path(path).unwrap();
+                if owner.role == MaterialConstructionRole::Shell {
+                    tools[owner.construction_index as usize] = Some(tool);
+                } else {
+                    assert_eq!(owner.construction_index, 0);
+                    assert_eq!(tool, 1);
+                }
+            }
+            assert!(tools[0].is_some() && tools[1].is_some());
+            assert_ne!(tools[0], tools[1]);
+        }
+        actual_motion(&bundle);
+        let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+            unreachable!()
+        };
+        job.surface_constructions[1].faces[0].mask =
+            job.surface_constructions[0].faces[0].mask.clone();
+        assert!(
+            scene
+                .compile(&intent)
+                .unwrap_err()
+                .message
+                .contains("overlap")
+        );
+    }
+}
+
 fn pose(x: f64, y: f64, z: f64) -> RigidPoseMm {
     RigidPoseMm {
         translation_mm: [x, y, z],

@@ -138,6 +138,8 @@ pub enum MaterialConstructionRole {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MaterialDomainRef {
+    /// Shell selects its regional request. Shared white backing/core use index0
+    /// and cover the union of all admitted constructions on the same native part.
     pub construction_index: u16,
     pub role: MaterialConstructionRole,
 }
@@ -282,6 +284,13 @@ pub(super) fn validate_material_domains(
         }) {
             return Err(invalid("material domain references an absent construction"));
         }
+        if domain.reference.construction_index != 0
+            && domain.reference.role != MaterialConstructionRole::Shell
+        {
+            return Err(invalid(
+                "shared white backing/core must have one canonical arrangement owner",
+            ));
+        }
         if plan.material_domains[..index].iter().any(|other| {
             other.reference == domain.reference
                 && other.physical_z_mm[0] < domain.physical_z_mm[1]
@@ -318,6 +327,9 @@ pub(super) fn validate_material_domains(
                 MaterialConstructionRole::Backing,
                 MaterialConstructionRole::Core,
             ] {
+                if construction_index != 0 && role != MaterialConstructionRole::Shell {
+                    continue;
+                }
                 if plan
                     .material_domains
                     .iter()

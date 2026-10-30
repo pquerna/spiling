@@ -366,7 +366,12 @@ export type SurfaceColorFrame = { construction_index: number, face_id: FaceId, o
 
 export type MaterialConstructionRole = "shell" | "backing" | "core";
 
-export type MaterialDomainRef = { construction_index: number, role: MaterialConstructionRole, };
+export type MaterialDomainRef = {
+/**
+ * Shell selects its regional request. Shared white backing/core use index0
+ * and cover the union of all admitted constructions on the same native part.
+ */
+construction_index: number, role: MaterialConstructionRole, };
 
 export type MaterialDomainPolygon = { exterior_mm: Array<[number, number]>, holes_mm: Array<Array<[number, number]>>, };
 

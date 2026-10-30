@@ -419,11 +419,15 @@ impl FixedDualJob {
         }
         for (index, construction) in self.surface_constructions.iter().enumerate() {
             construction.validate(self)?;
-            if self.surface_constructions[..index]
-                .iter()
-                .any(|c| c.occurrence_id == construction.occurrence_id)
-            {
-                return Err(invalid("one surface arrangement owns each occurrence"));
+            if self.surface_constructions[..index].iter().any(|c| {
+                c.occurrence_id == construction.occurrence_id
+                    && (c.definition_id != construction.definition_id
+                        || c.source_hash != construction.source_hash
+                        || c.white_material_id != construction.white_material_id)
+            }) {
+                return Err(invalid(
+                    "regional constructions must share immutable source and white base authority",
+                ));
             }
         }
         if self.surface_constructions.len() > 16 {

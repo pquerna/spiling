@@ -36,7 +36,7 @@
           0.4
         ]
       },
-      "bundle_hash": "017d9b94dda5b4f338225bbd5049ec36f77eb06d4e69fb656279c1250c0f318c",
+      "bundle_hash": "c14aab22ff9376d1ce2af0b9050ba9681ac354abbd2e5d259433273fd720a98a",
       "deposition_count": 2,
       "event_count": 4,
       "frame": "right_handed_millimetres",
@@ -48,7 +48,7 @@
       "schema_version": 6,
       "tool_epoch_count": 0,
       "travel_count": 2,
-      "verifier_version": "14",
+      "verifier_version": "15",
       "waste_count": 0
     },
     "resource": {
