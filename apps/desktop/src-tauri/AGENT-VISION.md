@@ -6,6 +6,8 @@ Licensed under the Open Software License version 3.0
 
 # Native desktop shell vision
 
+This shell remains the temporary legacy baseline during [ADR006](../../../docs/adr/006-native-egui-workbench.md). The selected native frontend lives in `apps/workbench`; retain this shell until the defined parity and retirement gates.
+
 Provide one packaged Chromium Embedded Framework host with narrow typed gRPC authoring and durable diagnostic bridges to a separately supervised engine. EngineClient owns child/auth/startup/liveness; EngineRpc owns authenticated RPCs. Standard Google Operations observation/cancellation and ByteStream retrieval are shared across native and diagnostic work, with separately checked metadata/result views.
 
 Native paths remain byte/code-unit preserving shell-private values behind bounded session/intent tokens. The shell remembers an attached checkpoint route only for explicit reopen, never implements storage or replays unsaved changes. Native import/shared placement/inspection/sections, bounded history and save/open/recovery/read-only snapshots use the same client as CLI. Manufacturing control/replay and exclusive four-file export reuse shared services and the common output transaction; captured fresh current-session verification, active content checks and dialog-minted destination tokens own export authority. Recoverable domain errors preserve the child; retained historical results cannot become current session state. No machine-ready claims.

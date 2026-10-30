@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# Licensed under the Open Software License version 3.0
+
+[package]
+name = "spiling-workbench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+default-run = "spiling-workbench"
+description = "Native egui project workbench and supervised engine client"
+
+[dependencies]
+eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu_no_default_features", "wayland", "x11"] }
+egui = "=0.37.0"
+egui-wgpu = { version = "=0.37.0", default-features = false }
+wgpu = { version = "=30.0.0", default-features = false, features = ["std", "vulkan", "metal", "dx12", "wgsl"] }
+rfd = { version = "=0.17.2", default-features = false, features = ["xdg-portal"] }
+directories = "=6.0.0"
+serde.workspace = true
+tokio.workspace = true
+spiling-contracts.workspace = true
+spiling-engine-client.workspace = true
+
+[features]
+default = []
+inspection = ["eframe/inspection"]
+
+[dev-dependencies]
+tempfile.workspace = true

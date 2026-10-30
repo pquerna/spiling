@@ -118,6 +118,18 @@ async function copyNotices(packageRoot, output) {
       await copyNoticeDirectory(join(packageRoot, entry.name), join(output, entry.name));
     }
   }
+  // epaint's bundled font licenses use upstream filenames inside fonts/.
+  // Keep the copyright/license text alongside the crate's provenance, without
+  // copying the embedded font binaries into the notice directory.
+  if (/^epaint_default_fonts-/.test(packageRoot.split(/[\\/]/).at(-1))) {
+    const fonts = join(packageRoot, "fonts");
+    for (const entry of await readdir(fonts)) {
+      if (entry.endsWith(".txt")) {
+        await mkdir(join(output, "fonts"), { recursive: true });
+        await copyFile(join(fonts, entry), join(output, "fonts", entry));
+      }
+    }
+  }
 }
 
 async function copyNoticeDirectory(source, destination) {
@@ -205,17 +217,24 @@ async function provenance() {
       join(directory, "third-party", "npm", `${pkg.name.replaceAll("/", "_")}-${pkg.version}`),
     );
   }
-  const sourceComponents = [{
-    name: "prusa-fdm-mixer",
-    source: "https://github.com/prusa3d/prusa-fdm-mixer",
-    revision: "007bb922994cdf985c324cb734f6504e805f6790",
-    license: "MIT",
-    path: "crates/appearance/src/prusa_v7.rs",
-    modifications: "Allocation-free Rust port of the pinned TypeScript v7 reference functions; no measurement dataset imported.",
-  }];
+  const sourceComponents = [
+    {
+      name: "prusa-fdm-mixer",
+      source: "https://github.com/prusa3d/prusa-fdm-mixer",
+      revision: "007bb922994cdf985c324cb734f6504e805f6790",
+      license: "MIT",
+      path: "crates/appearance/src/prusa_v7.rs",
+      modifications:
+        "Allocation-free Rust port of the pinned TypeScript v7 reference functions; no measurement dataset imported.",
+    },
+  ];
   await copyNotices(
     join(root, "crates", "appearance"),
     join(directory, "third-party", "source", "prusa-fdm-mixer-007bb922"),
+  );
+  await copyNoticeDirectory(
+    join(root, "apps", "workbench", "licenses", "egui"),
+    join(directory, "third-party", "source", "egui-0.37.0"),
   );
   const commit = await run("git", ["rev-parse", "HEAD"], { capture: true });
   const dirty = (await run("git", ["status", "--porcelain"], { capture: true })).length > 0;
@@ -346,6 +365,36 @@ async function main() {
       break;
     case "provenance":
       await provenance();
+      break;
+    case "build:native":
+      await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-workbench"]);
+      break;
+    case "dev:native":
+      await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-workbench"]);
+      await run(join(cargoTarget, "debug", `spiling-workbench${binSuffix}`), []);
+      break;
+    case "gallery:native":
+      await run("cargo", ["run", "--locked", "-p", "spiling-workbench", "--bin", "gallery"]);
+      break;
+    case "test:native":
+      await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-workbench"]);
+      await run("cargo", ["test", "--locked", "-p", "spiling-workbench", "--lib"]);
+      await run(
+        "cargo",
+        [
+          "test",
+          "--locked",
+          "-p",
+          "spiling-workbench",
+          "--lib",
+          "--",
+          "--ignored",
+          "--test-threads=1",
+        ],
+        {
+          env: { SPILING_TEST_ENGINE: join(cargoTarget, "debug", `spiling-engine${binSuffix}`) },
+        },
+      );
       break;
     case "dev": {
       const engine = await prepare();

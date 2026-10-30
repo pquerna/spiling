@@ -47,6 +47,8 @@ npm install --global pnpm@10.32.1
 pnpm bootstrap
 ```
 
+The selected frontend is a native Rust egui/wgpu workbench. `pnpm dev:native` builds and opens its project-management increment; 3D display and manufacturing UI are still being ported. `pnpm dev` retains the working CEF frontend until native operator-flow acceptance. See [ADR006](docs/adr/006-native-egui-workbench.md) for the bounded migration.
+
 The repository pins the Rust toolchain and dependencies. The first native build downloads a substantial CEF distribution. See the [development and packaging guide](docs/quality/development.md) for launching the development shell, checks, and experimental packages.
 
 ## Technical documentation

@@ -22,22 +22,22 @@ pnpm bootstrap
 pnpm dev
 ```
 
-macOS development must use the Tauri CLI so CEF's application bundle/helpers
+Legacy macOS CEF development must use the Tauri CLI so CEF's application bundle/helpers
 launch correctly; a bare Rust executable is not equivalent.
 
 [`tools/run.mjs`](../../tools/run.mjs) owns root commands:
 
-| Command            | Purpose                                                              |
-| ------------------ | -------------------------------------------------------------------- |
-| `pnpm bootstrap`   | Locked install, generation and integrated native/frontend build      |
-| `pnpm dev`         | Native CEF development workbench                                     |
-| `pnpm build`       | Generate contracts → build/stage engine and CLI → frontend → desktop |
-| `pnpm contracts`   | Rust-owned TypeScript generation; `--check` rejects drift            |
-| `pnpm check`       | Formatting, Clippy, TypeScript and generated-contract checks         |
-| `pnpm test`        | Workspace behavior and real CLI/binary interoperability              |
-| `pnpm smoke:cli`   | Actual child startup, operations, transfer and reap                  |
-| `pnpm bench:smoke` | Diagnostic process/transfer benchmark, not geometry performance      |
-| `pnpm package`     | Current-platform package with sidecar, CEF and notices               |
+| Command                         | Purpose                                                                  |
+| ------------------------------- | ------------------------------------------------------------------------ |
+| `pnpm bootstrap`                | Locked install, generation and integrated native/frontend build          |
+| `pnpm dev`                      | Native CEF development workbench                                         |
+| `pnpm build`                    | Generate contracts → build/stage engine and CLI → frontend → desktop     |
+| `pnpm contracts`                | Rust-owned TypeScript generation; `--check` rejects drift                |
+| `pnpm check`                    | Formatting, Clippy, TypeScript and generated-contract checks             |
+| `pnpm test`                     | Workspace behavior and real CLI/binary interoperability                  |
+| `pnpm smoke:cli`                | Actual child startup, operations, transfer and reap                      |
+| `pnpm bench:smoke`              | Diagnostic process/transfer benchmark, not geometry performance          |
+| `pnpm package`                  | Current-platform package with sidecar, CEF and notices                   |
 | `node tools/run.mjs provenance` | Collect dependency provenance/notices without rebuilding the application |
 
 **Build before running real surfaces.** Direct desktop Cargo builds can overwrite
@@ -45,6 +45,58 @@ a fresh engine with a stale staged sidecar. Do not build while a desktop smoke
 is live. Reuse one disk-backed Cargo target/profile; development/test profiles
 already disable debug information and incremental compilation. Selected numerical
 crates are optimized independently of the desktop stack.
+
+## Native egui workbench
+
+[ADR006](../adr/006-native-egui-workbench.md) selects the permanent
+`apps/workbench` application. The current increment manages projects through the
+existing supervised engine; it explicitly has no 3D display, face picking or
+manufacturing controls. The CEF workbench remains usable until the migration gates
+are met. `pnpm dev` switches at the complete native manufacturing-flow gate.
+
+```sh
+pnpm build:native     # locked matching engine and window, no CEF or frontend build
+pnpm dev:native       # build, then run the native window
+pnpm gallery:native   # production theme/components, illustrative data, no engine
+pnpm test:native      # matching binaries, host checks, sequential actual-child checks
+```
+
+The native route needs Rust/native build tools, Vulkan/Metal/DX12 graphics and
+OS window/dialog services. On Linux, X11 or Wayland and a working XDG desktop
+portal/file chooser are required. GTK4/CEF prerequisites above belong to the
+legacy route. These commands honor `CARGO_TARGET_DIR` and resource overrides.
+Use a separate target when concurrent engine work would replace workspace
+artifacts; do not build into another live smoke's target. The installed lookup
+expects `spiling-engine` beside `spiling-workbench`. Debug builds alone allow an
+absolute `SPILING_ENGINE_PATH` override. Startup validates the existing exact
+engine identity, kernel and capability contract; no mixed-build negotiation exists.
+
+First save chooses a **new project directory name** through the native Save
+dialog; Core creates it. Open/read-only/recovery choose an existing project
+directory. Ordinary Save checkpoints the attached route. A failed Save As does not
+attach its destination. A receipt-owned uncertain save can attach a route and is
+shown explicitly; a prior uncertainty flag cannot attach a later failed action.
+Restart reopens only a route attached by an observed Open/Save receipt. Undo/Redo
+and dirty replacement retain engine authority. Preferences store only local
+license assent, theme and eframe window state.
+
+For actual-window acceptance, use a coherent current saved project created by this
+engine. Launch in the real graphical session, accept the offline license, select
+the project through the parented native picker and inspect its path, revisions,
+native definition/occurrence counts and expanded build/session/PID. Import an owned
+admitted STEP copy to make it dirty, cancel New/Open/close discard and verify the
+same project/revision remains. Save to a new directory, then checkpoint that route.
+Reopen read-only, inspect state, close and observe that the child PID has exited.
+Exercise picker cancellation, engine death/restart and startup mismatch separately;
+accepted operations must have bounded visible progress/errors and explicit
+observation/cancellation semantics. Host checks do not substitute for dialogs,
+actual window/GPU or platform packaging acceptance. Preserve run output and
+producer/environment identities in ignored artifacts or PR verification notes.
+
+The `inspection` Cargo feature enables upstream development inspection tooling;
+it is off by default and must stay off in distributions. It is not a second
+mutation API or qualification of native dialogs. Upstream default fonts do not cover all CJK labels. Native packaging and additional
+font/input/assistive combinations remain separately unqualified.
 
 ## Material authority and qualification
 
@@ -307,7 +359,6 @@ Swap both phase values in a disposable intent to obtain a different actual progr
 undo/redo/undo must restore the original manufacturing input and output. A changed
 height/origin must re-resolve or refuse, never silently advance by layer number.
 
-
 ### Source-bound planar surface-color smoke
 
 After building the matching engine and CLI, run:
@@ -317,8 +368,6 @@ node tools/smoke-surface-color.mjs
 ```
 
 The runner honors `CARGO_TARGET_DIR`, uses fresh owned project/source copies and exclusive export destinations, and retains receipts under ignored `.cache/surface-color-*`. It selects actual returned upright planar face identities on the committed box and through-hole input, then exercises full-face and finite horizontal-window construction, inspectable native source frames, physical skin/backing depth, sparse core, shell physical cycles with native partial intervals, all-white model jobs with a waste-only feeder, actual tool operations, revision/history and source-deleted fresh replay/export. Two independent finite windows additionally exercise opposite same-Z regional phases and positive-volume overlap refusal. The `corner` cases select both returned adjoining faces, union compatible bands once, edit physical depths and refuse intersecting incompatible depths while retaining source holes. The independent TypeScript decoder checks actual regional tool operations and every tool/layer epoch/supported waste stroke. Optional positional mode names (for example `regional`) select a focused subset; no arguments runs every case. Unsupported source identity, thin skin and consumed core must fail. Native material assets in saved projects are retained. The [surface-color contract](../protocol/manufacturing.md#source-bound-planar-surface-color) defines software scope; no physical print, calibrated white/color or desktop authoring claim follows.
-
-
 
 `apps/engine/src/geometry/bed_pose.rs` prepares one immutable native source for
 the three directional material-support queries. Retained native domains and
