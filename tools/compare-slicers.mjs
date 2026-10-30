@@ -188,7 +188,7 @@ try {
     await save("report.json", bridgeReport);
     await save("manifest.json", manifest);
     console.error(
-      `Native bridge software gates: ${bridgeReport.nativeSoftwarePassed}; baseline audits: ${bridgeReport.correctnessPassed}; reference differences explained: ${bridgeReport.differencesExplained}. Report: ${join(output, "report.json")}`,
+      `Native bridge software gates: ${bridgeReport.nativeSoftwarePassed}; baseline audits: ${bridgeReport.correctnessPassed}; reference differences explained: ${bridgeReport.differencesExplained}; selected roof policy explained: ${bridgeReport.selectedPolicyExplained ?? false}. Report: ${join(output, "report.json")}`,
     );
     process.exit(
       !bridgeReport.correctnessPassed

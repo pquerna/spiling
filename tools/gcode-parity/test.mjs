@@ -496,3 +496,142 @@ test("bridge coverage witnesses retain every miss, control response and dose cou
   shifted.overlap.audit.layers[0].lowerMm = 0.1;
   assert.throws(() => bridgeCoverageWitnesses({}, shifted), /matching physical intervals/);
 });
+
+test("external roof forward geometry rejects missing/duplicate links and balanced local dose errors", async () => {
+  const { predictExternalRoof, observeExternalRoof } = await import("./bridge-policy.mjs");
+  const source = { id: "span-6", widthMm: 10 };
+  const prediction = predictExternalRoof(source);
+  // These generated inputs exercise observer invariants. The actual Prusa
+  // importer/emitter and frozen-before-control predictions are a separate gate.
+  const make = (angleDeg = 0, split = false) => {
+    const p = predictExternalRoof(source, { angleDeg });
+    const lines = ["G21", "G90", "M83", "G92 E0"];
+    for (const s of p.candidates[0].strokes) {
+      lines.push(`G1 X${s.from[0].toFixed(3)} Y${s.from[1].toFixed(3)} Z4 F2100`);
+      const a = s.from.map((v) => Number(v.toFixed(3))),
+        b = s.to.map((v) => Number(v.toFixed(3)));
+      if (split) {
+        const mid = a.map((v, i) => (v + b[i]) / 2);
+        lines.push(
+          `G1 X${mid[0]} Y${mid[1]} E${(((Math.hypot(b[0] - a[0], b[1] - a[1]) / 2) * s.doseMm2) / (Math.PI * (1.75 / 2) ** 2)).toFixed(8)}`,
+        );
+      }
+      lines.push(
+        `G1 X${b[0]} Y${b[1]} E${((Math.hypot(b[0] - a[0], b[1] - a[1]) * (split ? 0.5 : 1) * s.doseMm2) / (Math.PI * (1.75 / 2) ** 2)).toFixed(8)}`,
+      );
+    }
+    return decodeGcode(lines.join("\n"));
+  };
+  const decoded = make();
+  const good = observeExternalRoof(decoded, prediction);
+  assert.equal(good.accepted, true, JSON.stringify(good.violations));
+  assert.equal(good.everyCommandAccounted, true);
+  assert.equal(observeExternalRoof(make(0, true), prediction).accepted, true);
+  const balanced = structuredClone(decoded);
+  const row = good.matches.find((m) => m.bucket === "row"),
+    link = good.matches.find((m) => m.bucket === "link");
+  const a = balanced.strokes.find((s) => s.line === row.lines[0]),
+    b = balanced.strokes.find((s) => s.line === link.lines[0]);
+  a.volumeMm3 += 0.01;
+  b.volumeMm3 -= 0.01;
+  assert.equal(observeExternalRoof(balanced, prediction).accepted, false);
+  const missing = structuredClone(decoded);
+  const index = missing.strokes.findIndex((s) => s.line === link.lines[0]);
+  const volume = missing.strokes[index].volumeMm3;
+  missing.strokes.splice(index, 1);
+  missing.strokes[0].volumeMm3 += volume;
+  assert.equal(observeExternalRoof(missing, prediction).accepted, false);
+  const duplicate = structuredClone(decoded);
+  duplicate.strokes.push({ ...duplicate.strokes[0], line: 9999 });
+  assert.equal(observeExternalRoof(duplicate, prediction).accepted, false);
+  assert.equal(observeExternalRoof(make(90), prediction).accepted, false);
+  const comments = structuredClone(decoded);
+  for (const s of comments.strokes) s.roleHint = "made up role";
+  assert.equal(observeExternalRoof(comments, prediction).accepted, true);
+  assert.throws(() => predictExternalRoof({ id: "span-6", widthMm: 14 }), /frozen source/);
+});
+
+test("external roof control requires complete resolved configuration with exactly the selected change", async () => {
+  const { referenceSettingsChanges, evaluateExternalRoofControl, predictExternalRoof } =
+    await import("./bridge-policy.mjs");
+  assert.deepEqual(
+    referenceSettingsChanges(
+      "# time A\nfill_angle = 0\ntemperature = 200\n",
+      "# time B\ntemperature = 200\nfill_angle = 90\n",
+    ),
+    [{ key: "fill_angle", baseline: "0", control: "90" }],
+  );
+  assert.throws(
+    () => referenceSettingsChanges("fill_angle = 0\nfill_angle = 0", "fill_angle = 90"),
+    /duplicate/,
+  );
+  const source = { id: "span-6", widthMm: 10 },
+    prediction = predictExternalRoof(source),
+    controlPrediction = predictExternalRoof(source, { angleDeg: 90 });
+  const observed = {
+    accepted: true,
+    everyCommandAccounted: true,
+    matches: [],
+    buckets: { perimeter: { runCount: 4, volumeMm3: 1 }, row: { runCount: 22 } },
+  };
+  const control = { ...observed, buckets: { ...observed.buckets, row: { runCount: 12 } } };
+  const query = {
+    prediction,
+    controlPrediction,
+    baseline: observed,
+    control,
+    resolvedSettingsChanges: [{ key: "fill_angle", baseline: "0", control: "90" }],
+  };
+  assert.equal(evaluateExternalRoofControl(query).accepted, true);
+  assert.equal(
+    evaluateExternalRoofControl({ ...query, resolvedSettingsChanges: [] }).accepted,
+    false,
+  );
+  assert.equal(
+    evaluateExternalRoofControl({
+      ...query,
+      resolvedSettingsChanges: [
+        ...query.resolvedSettingsChanges,
+        { key: "temperature", baseline: "200", control: "205" },
+      ],
+    }).accepted,
+    false,
+  );
+  assert.equal(
+    evaluateExternalRoofControl({ ...query, resolvedSettingsChanges: undefined }).accepted,
+    false,
+  );
+});
+
+test("terminal miss forecast preserves fixed nominal capsules and requires both control seam alternatives", async () => {
+  const { predictExternalRoof, forecastTerminalMisses } = await import("./bridge-policy.mjs");
+  const source = { id: "span-6", widthMm: 10 };
+  const baseline = predictExternalRoof(source),
+    rotated = predictExternalRoof(source, { angleDeg: 90 });
+  const audit = { upperMm: 4, uncoveredGridSamples: 1, uncoveredPoints: [[1.637, 5.537]] };
+  const forecast = forecastTerminalMisses(baseline, { reflectAlong: false }, rotated, audit);
+  assert.equal(forecast.accepted, true);
+  assert.equal(forecast.radiusMm, 0.227);
+  assert.equal(forecast.points[0].controlDistancesMm.length, 2);
+  const wrongSeam = structuredClone(rotated);
+  wrongSeam.candidates[1].strokes = [];
+  assert.equal(
+    forecastTerminalMisses(baseline, { reflectAlong: false }, wrongSeam, audit).accepted,
+    false,
+  );
+  assert.equal(
+    forecastTerminalMisses(baseline, { reflectAlong: false }, rotated, {
+      ...audit,
+      uncoveredPoints: [[5, 3]],
+    }).accepted,
+    false,
+  );
+  assert.throws(
+    () =>
+      forecastTerminalMisses(baseline, { reflectAlong: false }, rotated, {
+        ...audit,
+        uncoveredPoints: [],
+      }),
+    /complete terminal/,
+  );
+});

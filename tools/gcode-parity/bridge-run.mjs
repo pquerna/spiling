@@ -9,6 +9,7 @@ import { cases, intentFor, referenceProfile, sha256 } from "./corpus.mjs";
 import { decodeGcode } from "./decode.mjs";
 import { auditBridge } from "./bridges.mjs";
 import { bridgeMaterialLedger, bridgeLedgerDelta } from "./bridge-ledger.mjs";
+import { predictExternalRoof, observeExternalRoof } from "./bridge-policy.mjs";
 import { referenceValues, runBridgeProbes } from "./bridge-probes.mjs";
 const EPS = 0.002;
 
@@ -120,6 +121,10 @@ export async function runBridgeComparisons({
         settings[key] = selection.profile.print_speed_mm_s;
       referenceIni = referenceValues(referenceIni, settings);
       await save(`${id}/prusa.ini`, referenceIni);
+      record.roofPolicyPrediction = predictExternalRoof(source, {
+        flowMultiplier: record.resolvedControls.flowMultiplier,
+      });
+      await save(`${id}/roof-policy-prediction.json`, record.roofPolicyPrediction);
       await run(
         reference,
         [
@@ -140,6 +145,11 @@ export async function runBridgeComparisons({
       );
       const referenceDecoded = decodeGcode(await readFile(join(directory, "prusa.gcode"), "utf8"));
       record.reference = auditBridge(referenceDecoded, source);
+      record.roofPolicyObservation = observeExternalRoof(
+        referenceDecoded,
+        record.roofPolicyPrediction,
+      );
+      await save(`${id}/roof-policy-observation.json`, record.roofPolicyObservation);
       record.referenceMaterial = bridgeMaterialLedger(referenceDecoded, record.reference, source, {
         flowMultiplier: record.resolvedControls.flowMultiplier,
       });
@@ -281,7 +291,7 @@ export async function runBridgeComparisons({
           knownConventions: [
             "Native deposited-anchor admission uses the selected declared span; reference has no equivalent maximum-span gate.",
             "Reference integer fan percent is rounded from the captured PWM; actual commands are retained.",
-            "The cube's circular internal-bridge explanation does not automatically transfer to this exterior roof; actual dose, fitted rows and links require coupon-specific evidence.",
+            "The terminal external solid roof has a forward fitted-row/link/dose witness; first-roof process, other construction policies and complete-comparison explanation remain distinct.",
           ],
         };
       }
@@ -358,6 +368,17 @@ export async function runBridgeComparisons({
   report.differencesExplained =
     report.nativeSoftwarePassed &&
     report.cases.every((c) => c.comparison?.explanationStatus === "explained");
+  report.selectedPolicyExplained =
+    report.nativeSoftwarePassed &&
+    report.controlledProbes?.accepted === true &&
+    report.controlledProbes.externalRoofPolicy?.accepted === true &&
+    report.cases.length === scenarios.length &&
+    report.cases.every(
+      (c) =>
+        c.roofPolicyObservation?.accepted === true && c.roofPolicyObservation.everyCommandAccounted,
+    );
+  report.selectedPolicyScope =
+    "Frozen external terminal rectilinear roof: integer row fit, links/free ends and fitted dose, decided by a one-setting 90-degree reference control. This does not change strict nominal coverage or claim every comparison/physical difference explained.";
   report.referenceDifferences = report.cases.map((c) => ({ id: c.id, ...c.comparison }));
   const hashTree = async (relative) => {
     for (const item of await readdir(join(output, relative), { withFileTypes: true })) {
@@ -372,6 +393,7 @@ export async function runBridgeComparisons({
     "bridge-run.mjs",
     "bridge-probes.mjs",
     "bridge-ledger.mjs",
+    "bridge-policy.mjs",
     "bridge-corpus.mjs",
     "bridges.mjs",
     "corpus.mjs",

@@ -95,12 +95,15 @@ with raw/resolved inputs, output/log and observer/executable hashes. It reports
 `differencesExplained` separately. Failed reference nominal coverage remains a
 baseline failure and exit 1 even while native gates pass. Exit 2 requires passed
 baseline audits with unresolved comparisons; `--observe` cannot hide an audit
-failure. Coupon-specific material, fitted-row/link and schedule differences remain
-unresolved until deciding evidence closes them. Cube circular internal-bridge
-flow evidence does not automatically explain an exterior coupon roof.
+failure. The selected external terminal-roof rule has independent forward/control
+explanation through `selectedPolicyExplained`; complete-comparison
+`differencesExplained` remains distinct. Other coupon policies and strict audit
+flags retain their own open disposition. Cube circular internal-bridge flow
+evidence does not automatically explain an exterior coupon roof.
 
 The middle matched coupon also retains one-setting reference probes for 15%
-and 25% infill overlap, full-height top skin and half bridge flow, plus a native
+and 25% infill overlap, full-height top skin, half bridge flow and a 90-degree
+fill-angle control, plus a native
 full-height-skin compile with fresh verification.
 [`bridge-probes.mjs`](../../tools/gcode-parity/bridge-probes.mjs) refuses missing
 or duplicate reference settings rather than silently failing to change them.
@@ -172,6 +175,60 @@ balanced stroke dose defects despite conserved layer/job material, omitted
 coverage witnesses and missing controls. Accounting acceptance remains separate
 from baseline correctness and complete policy explanation; no broad material
 or coverage tolerance closes either gate.
+
+## Forward external-roof policy
+
+[`bridge-policy.mjs`](../../tools/gcode-parity/bridge-policy.mjs) predicts the
+frozen reference terminal roof from source dimensions and captured controls,
+without measuring a pitch, counting decoded rows or reading role comments first.
+The prediction is written before reference emission. For nominal width `w`,
+actual interval height `h`, cross-fill extent `C` and flow multiplier `m`:
+
+```text
+s = w - h(1 - pi/4)           nominal stadium pitch
+b = (w + s)/2                source-to-fill boundary inset
+n = floor((C - 2b)/s)        fitted row count
+p = (C - 2b)/n               fitted pitch
+row center i = b + (i+1/2)p
+fill dose = h*p*m
+inner turn inset = b + s/2
+free-end inset = b + 0.05s
+```
+
+The model admits only the frozen zero-overlap, classic single-wall, external
+rectilinear 0/90-degree roof and captured profiles. Its fit stays below the
+reference's 20% spacing cap. The pinned source distinguishes
+[solid spacing adjustment](https://github.com/prusa3d/PrusaSlicer/blob/69c8e569410efe82259e706cd09a05ea82da9359/src/libslic3r/Fill/FillBase.cpp),
+[rectilinear contour offsets and linking](https://github.com/prusa3d/PrusaSlicer/blob/69c8e569410efe82259e706cd09a05ea82da9359/src/libslic3r/Fill/FillRectilinear.cpp)
+and [external versus internal flow realization](https://github.com/prusa3d/PrusaSlicer/blob/69c8e569410efe82259e706cd09a05ea82da9359/src/libslic3r/Fill/Fill.cpp).
+The independent observer is not a second production planner.
+
+An unchanged-source control changes only `fill_angle` from 0 to 90. Complete
+resolved INI comparison must confirm that single change, excluding only comments
+and blank lines. The forecast swaps cross/along extents and predicts every row,
+link, free end and local dose, while the perimeter remains invariant. Two
+opposite seam alternatives are explicit. Uninterrupted straight command
+partitions normalize to one geometric run; each original command retains its
+own dose obligation, so cancellation cannot conceal a local defect.
+
+Position allowances derive from reference XYZ serialization and micrometre-grid
+rounding; local E-volume allowances additionally include five-decimal absolute-E
+rounding. They do not change the baseline nominal-coverage tolerance. Before the
+control emits, the terminal missed-point forecast must predict the baseline
+gaps and coverage of those same coordinates under **both** rotated seam
+alternatives. The actual control must also retain its complete audit; covered
+coordinates from different programs never merge into one passing program.
+
+Per-case `roof-policy-prediction.json` and `roof-policy-observation.json` retain
+all expected/observed geometry and E. The middle case additionally retains the
+rotation prediction, coverage forecast, complete `roof-policy-witness.json` and
+raw fault programs. No-op controls, unrelated resolved-setting changes, fixed
+nominal dose on fitted paths, balanced E defects and removed links with conserved
+terminal material must reject. `selectedPolicyExplained` requires this deciding
+control, every frozen reference roof observation, complete accounting and all
+native positive/refusal/recovery gates. It qualifies this bounded construction
+explanation; strict reference coverage, complete-comparison explanation and
+physical printability remain separate.
 
 ## Comparison contract
 

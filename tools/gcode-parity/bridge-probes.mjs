@@ -7,6 +7,13 @@ import { join } from "node:path";
 import { decodeGcode } from "./decode.mjs";
 import { auditBridge } from "./bridges.mjs";
 import {
+  predictExternalRoof,
+  observeExternalRoof,
+  evaluateExternalRoofControl,
+  referenceSettingsChanges,
+  forecastTerminalMisses,
+} from "./bridge-policy.mjs";
+import {
   bridgeMaterialLedger,
   bridgeLedgerDelta,
   bridgeCoverageWitnesses,
@@ -188,12 +195,25 @@ export async function runBridgeProbes({ record, output, cli, engine, reference, 
     directory = join(output, prefix);
   const source = record.source;
   const original = await readFile(join(directory, "prusa.ini"), "utf8");
+  const rotationPrediction = predictExternalRoof(source, {
+    angleDeg: 90,
+    flowMultiplier: record.resolvedControls.flowMultiplier,
+  });
+  await save(`${prefix}/roof-policy-rotation-prediction.json`, rotationPrediction);
+  const terminalForecast = forecastTerminalMisses(
+    record.roofPolicyPrediction,
+    record.roofPolicyObservation,
+    rotationPrediction,
+    record.reference.layers.at(-1),
+  );
+  await save(`${prefix}/roof-policy-coverage-forecast.json`, terminalForecast);
   const observations = {};
   for (const [id, settings] of [
     ["overlap", { infill_overlap: "15%" }],
     ["overlap-25", { infill_overlap: "25%" }],
     ["full-skin", { top_solid_layers: 20 }],
     ["half-bridge", { bridge_flow_ratio: 0.5 }],
+    ["rotate-roof", { fill_angle: 90 }],
   ]) {
     const stem = `probe-${id}`;
     await save(`${prefix}/${stem}.ini`, referenceValues(original, settings));
@@ -403,6 +423,101 @@ export async function runBridgeProbes({ record, output, cli, engine, reference, 
     controlMisses: coverage.controlMisses,
   };
   result.accepted = result.accepted && accounting.accepted;
+  const rotation = observations["rotate-roof"];
+  const policyQuery = {
+    prediction: record.roofPolicyPrediction,
+    controlPrediction: rotationPrediction,
+    baseline: record.roofPolicyObservation,
+    control: observeExternalRoof(rotation.decoded, rotationPrediction),
+    resolvedSettingsChanges: referenceSettingsChanges(
+      await readFile(join(directory, "prusa-resolved.ini"), "utf8"),
+      await readFile(join(directory, "probe-rotate-roof-resolved.ini"), "utf8"),
+    ),
+  };
+  const policy = evaluateExternalRoofControl(policyQuery);
+  const rotatedTop = rotation.audit.layers.at(-1);
+  policy.terminalCoverageForecast = terminalForecast;
+  policy.checks.terminalBaselineMissesFollowPredictedGeometry =
+    terminalForecast.accepted &&
+    rotatedTop.uncoveredGridSamples === 0 &&
+    rotatedTop.uncoveredPoints.length === 0;
+  policy.accepted = policy.accepted && policy.checks.terminalBaselineMissesFollowPredictedGeometry;
+
+  const referenceProgram = await readFile(join(directory, "prusa.gcode"), "utf8");
+  const firstRowLine = policyQuery.baseline.matches.find((m) => m.bucket === "row").lines[0];
+  const firstLinkLine = policyQuery.baseline.matches.find((m) => m.bucket === "link").lines[0];
+  const changeReference = (line, mutate) => {
+    const lines = referenceProgram.split("\n");
+    const original = lines[line - 1];
+    lines[line - 1] = mutate(original);
+    if (lines[line - 1] === original)
+      throw Error("reference policy fault did not change its command");
+    return lines.join("\n");
+  };
+  const badDoseProgram = changeReference(firstRowLine, (line) =>
+    line.replace(/\bE(-?(?:\d*\.\d+|\d+))/, (_, v) => `E${(Number(v) + 0.001).toFixed(5)}`),
+  );
+  const missingLinkProgram = changeReference(firstLinkLine, (line) =>
+    line.replace(/ E-?(?:\d*\.\d+|\d+)/, ""),
+  );
+  await save(`${prefix}/fault-reference-balanced-dose.gcode`, badDoseProgram);
+  await save(`${prefix}/fault-reference-missing-link.gcode`, missingLinkProgram);
+  const badDose = observeExternalRoof(decodeGcode(badDoseProgram), policyQuery.prediction);
+  const missingLink = observeExternalRoof(decodeGcode(missingLinkProgram), policyQuery.prediction);
+  const fixedDosePrediction = structuredClone(policyQuery.prediction);
+  const ordinaryDose =
+    0.2 * fixedDosePrediction.nominalPitchMm * fixedDosePrediction.flowMultiplier;
+  for (const c of fixedDosePrediction.candidates)
+    for (const s of c.strokes) if (s.bucket !== "perimeter") s.doseMm2 = ordinaryDose;
+  const fixedDose = observeExternalRoof(query.baselineDecoded, fixedDosePrediction);
+  const wrongSettingQuery = {
+    ...policyQuery,
+    resolvedSettingsChanges: [
+      ...policyQuery.resolvedSettingsChanges,
+      { key: "temperature", baseline: "200", control: "205" },
+    ],
+  };
+  policy.faultChecks = [
+    {
+      name: "unchanged control cannot decide rotation",
+      rejected: !evaluateExternalRoofControl({
+        ...policyQuery,
+        control: observeExternalRoof(query.baselineDecoded, rotationPrediction),
+      }).accepted,
+    },
+    {
+      name: "fitted geometry with unchanged nominal dose",
+      rejected:
+        !fixedDose.accepted && fixedDose.violations.some((v) => v.code === "unpredicted_dose"),
+    },
+    {
+      name: "balanced reference E defect with conserved terminal material",
+      rejected:
+        !badDose.accepted &&
+        Math.abs(badDose.observedVolumeMm3 - policyQuery.baseline.observedVolumeMm3) < 1e-6 &&
+        badDose.violations.some((v) => v.code === "unpredicted_dose"),
+    },
+    {
+      name: "missing link with conserved terminal material",
+      rejected:
+        !missingLink.accepted &&
+        Math.abs(missingLink.observedVolumeMm3 - policyQuery.baseline.observedVolumeMm3) < 1e-6 &&
+        missingLink.violations.some((v) => v.code === "missing_predicted_geometry"),
+    },
+    {
+      name: "unrelated resolved setting changed",
+      rejected: !evaluateExternalRoofControl(wrongSettingQuery).accepted,
+    },
+  ];
+  policy.accepted = policy.accepted && policy.faultChecks.every((f) => f.rejected);
+  await save(`${prefix}/roof-policy-witness.json`, {
+    ...policy,
+    ...policyQuery,
+    countermodels: { fixedDose, badDose, missingLink },
+  });
+  result.externalRoofPolicy = policy;
+  result.accepted = result.accepted && policy.accepted;
+
   await save(`${prefix}/probe-witnesses.json`, result);
   return result;
 }
