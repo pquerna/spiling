@@ -3,7 +3,7 @@
     "schema_version": 11,
     "id": "software-fixed-dual-marlin-reference",
     "revision": "1",
-    "name": "Fixed-dual Marlin reference — software only, physically unqualified",
+    "name": "Fixed-dual Marlin reference \u2014 software only, physically unqualified",
     "coordinate_frame": "right_handed_millimetres",
     "build_envelope": {
       "min": [
@@ -114,7 +114,7 @@
             "deposition_limits": {
               "min_bead_width_mm": 0.3,
               "max_bead_width_mm": 0.75,
-              "min_bead_height_mm": 0.000001,
+              "min_bead_height_mm": 1e-06,
               "max_bead_height_mm": 0.3
             },
             "max_feed_mm_s": 150,
@@ -155,7 +155,7 @@
             "deposition_limits": {
               "min_bead_width_mm": 0.3,
               "max_bead_width_mm": 0.75,
-              "min_bead_height_mm": 0.000001,
+              "min_bead_height_mm": 1e-06,
               "max_bead_height_mm": 0.3
             },
             "max_feed_mm_s": 150,
@@ -182,7 +182,10 @@
         "assignments": [
           {
             "occurrence_id": 1,
-            "material": { "kind": "uniform", "material_id": "software-pla-a" },
+            "material": {
+              "kind": "uniform",
+              "material_id": "software-pla-a"
+            },
             "work_envelope_mm": {
               "min": [
                 19,
@@ -198,7 +201,10 @@
           },
           {
             "occurrence_id": 2,
-            "material": { "kind": "uniform", "material_id": "software-pla-b" },
+            "material": {
+              "kind": "uniform",
+              "material_id": "software-pla-b"
+            },
             "work_envelope_mm": {
               "min": [
                 119,
@@ -243,14 +249,15 @@
           0,
           210,
           20
-        ]
+        ],
+        "surface_constructions": []
       }
     },
     "nozzle_diameter_mm": 0.4,
     "deposition_limits": {
       "min_bead_width_mm": 0.3,
       "max_bead_width_mm": 0.75,
-      "min_bead_height_mm": 0.000001,
+      "min_bead_height_mm": 1e-06,
       "max_bead_height_mm": 0.3
     },
     "max_feed_mm_s": 150,

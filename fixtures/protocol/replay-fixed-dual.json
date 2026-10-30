@@ -310,7 +310,7 @@
       "deposition_count": 16,
       "event_count": 58,
       "frame": "right_handed_millimetres",
-      "input_hash": "c633e2cfa8e2408fd02ecef2d4cfdb85ef4e9886338a01f927453976c40a5310",
+      "input_hash": "d4dd884443b2a628095ead910f7a2c0e23e146a3ac07cefb907e3712a2ad3ba7",
       "layer_count": 2,
       "lifecycle_count": 2,
       "process_count": 6,
@@ -318,7 +318,7 @@
       "schema_version": 6,
       "tool_epoch_count": 4,
       "travel_count": 30,
-      "verifier_version": "11",
+      "verifier_version": "12",
       "waste_count": 4
     },
     "resource": {

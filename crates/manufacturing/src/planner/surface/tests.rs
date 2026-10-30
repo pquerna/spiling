@@ -352,6 +352,7 @@ fn actual_first_wall_diagnostics_detect_displaced_lobes_with_identical_extrema()
                     });
                 }
                 paths.push(DepositionPath {
+                    material_domain: None,
                     kind: DepositionKind::Perimeter,
                     owner: Some(DepositionOwner::Wall),
                     width: WidthProfile::Constant { width_mm: 0.4 },

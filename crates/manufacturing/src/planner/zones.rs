@@ -656,6 +656,7 @@ pub(super) fn partition(
             if !outside.0.is_empty() {
                 next.push(InteriorRegion {
                     coverage: ProcessRegionCoverage {
+                        material_domain: None,
                         area_mm2: outside.unsigned_area(),
                         ..owner.coverage.clone()
                     },
@@ -734,6 +735,7 @@ pub(super) fn partition(
                 }
                 next.push(InteriorRegion {
                     coverage: ProcessRegionCoverage {
+                        material_domain: None,
                         area_mm2: eligible.unsigned_area(),
                         fraction: value.fraction,
                         contributions,
@@ -960,6 +962,7 @@ pub(super) fn partition(
                 }
                 next.push(InteriorRegion {
                     coverage: ProcessRegionCoverage {
+                        material_domain: None,
                         area_mm2: piece.unsigned_area(),
                         fraction: zone.values[side].fraction,
                         contributions,

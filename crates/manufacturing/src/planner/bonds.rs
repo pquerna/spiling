@@ -264,6 +264,7 @@ pub(super) fn construct(
                 .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
                 .ok_or_else(|| resource("separator segment budget exceeded"))?;
             paths.push(DepositionPath {
+                material_domain: None,
                 kind: DepositionKind::SeparatorWall,
                 width: WidthProfile::Constant {
                     width_mm: recipe.bead_width_mm,

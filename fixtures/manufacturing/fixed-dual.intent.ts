@@ -57,6 +57,7 @@ const intent = {
         bed_temperature_c: 60,
         maximum_bed_temperature_c: 100,
         tools: [tool(0), tool(1)],
+        surface_constructions: [],
         assignments: [
           { occurrence_id: 1, material: { kind: "uniform", material_id: "software-pla-a" }, work_envelope_mm: { min: [19, 19, -1], max: [41, 31, 9] } },
           { occurrence_id: 2, material: { kind: "uniform", material_id: "software-pla-b" }, work_envelope_mm: { min: [119, 19, -1], max: [141, 31, 9] } },

@@ -172,6 +172,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         JobWorkflow::decl(&config),
         SingleExtruderJob::decl(&config),
         FixedDualJob::decl(&config),
+        SurfaceColorConstruction::decl(&config),
+        SurfaceColorFace::decl(&config),
+        MaterialConstructionRole::decl(&config),
+        MaterialDomainRef::decl(&config),
+        MaterialDomainPolygon::decl(&config),
+        ResolvedMaterialDomain::decl(&config),
         FixedDualTool::decl(&config),
         LoadedMaterial::decl(&config),
         OccurrenceMaterial::decl(&config),
@@ -229,10 +235,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ManufacturingResponse::decl(&config),
     ] {
         output.push_str("export ");
-        output.push_str(&declaration);
+        output.push_str(
+            &declaration
+                .lines()
+                .map(str::trim_end)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
         output.push_str("\n\n");
     }
     for (name, value) in [
+        ("MAX_MATERIAL_DOMAINS", MAX_MATERIAL_DOMAINS as u64),
+        (
+            "MAX_MATERIAL_DOMAIN_POLYGONS",
+            MAX_MATERIAL_DOMAIN_POLYGONS as u64,
+        ),
+        (
+            "MAX_MATERIAL_DOMAIN_HOLES",
+            MAX_MATERIAL_DOMAIN_HOLES as u64,
+        ),
+        (
+            "MAX_MATERIAL_DOMAIN_RING_POINTS",
+            MAX_MATERIAL_DOMAIN_RING_POINTS as u64,
+        ),
         ("MAX_CONTROL_BYTES", u64::from(MAX_CONTROL_BYTES)),
         ("MAX_PALETTE_BYTES", MAX_PALETTE_BYTES as u64),
         ("MAX_PALETTE_ROWS", MAX_PALETTE_ROWS as u64),

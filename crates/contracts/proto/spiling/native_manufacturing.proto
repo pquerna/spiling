@@ -320,7 +320,7 @@ message FixedDualJob {
   Vec3 home_position_mm = 7;
   double bed_temperature_c = 8;
   double maximum_bed_temperature_c = 9;
-  // Exactly two tools and two assignments, in domain order.
+  // Exactly two tools and one or two occurrence reservations, in domain order.
   repeated FixedDualTool tools = 10;
   repeated OccurrenceMaterialAssignment assignments = 11;
   double transition_lift_mm = 12;
@@ -328,6 +328,23 @@ message FixedDualJob {
   AabbMm carriage_body_bounds_mm = 14;
   double inactive_nozzle_radius_mm = 15;
   Vec3 park_position_mm = 16;
+  repeated SurfaceColorConstruction surface_constructions = 17;
+}
+message SurfaceColorFace {
+  string face_id = 1;
+  double skin_depth_mm = 2;
+  double backing_depth_mm = 3;
+}
+message SurfaceColorConstruction {
+  uint32 occurrence_id = 1;
+  string definition_id = 2;
+  string source_hash = 3;
+  repeated SurfaceColorFace faces = 4;
+  oneof shell {
+    UniformOccurrenceMaterial uniform = 5;
+    LayerCycleOccurrenceMaterial layer_cycle = 6;
+  }
+  string white_material_id = 7;
 }
 message RoutedToolAccounting {
   uint32 tool = 1;

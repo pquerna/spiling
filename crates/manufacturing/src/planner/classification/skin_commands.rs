@@ -759,6 +759,7 @@ fn reserve_regional_material(
             )?;
             let p = &paths[other];
             let mut remainder = DepositionPath {
+                material_domain: None,
                 kind: p.kind,
                 owner: p.owner,
                 width: WidthProfile::Constant {

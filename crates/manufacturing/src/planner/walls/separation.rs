@@ -301,6 +301,7 @@ mod tests {
 
     fn stroke(points: &[[f64; 2]], width: f64) -> DepositionPath {
         DepositionPath {
+            material_domain: None,
             kind: DepositionKind::Perimeter,
             owner: Some(DepositionOwner::Wall),
             width: WidthProfile::Constant { width_mm: width },

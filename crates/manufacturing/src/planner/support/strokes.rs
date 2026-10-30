@@ -242,6 +242,7 @@ mod tests {
             [21.0, 0.3, 8.4],
         ];
         let path = DepositionPath {
+            material_domain: None,
             kind: DepositionKind::Perimeter,
             owner: Some(spiling_contracts::manufacturing::DepositionOwner::Wall),
             width: WidthProfile::Constant { width_mm: 0.6 },
@@ -253,6 +254,7 @@ mod tests {
         assert_eq!(points.first(), points.last());
         let anchors = [
             DepositionPath {
+                material_domain: None,
                 kind: spiling_contracts::manufacturing::DepositionKind::SolidFill,
                 width: WidthProfile::Constant { width_mm: 0.6 },
                 physical_z_mm: [7.6, 8.0],
@@ -260,6 +262,7 @@ mod tests {
                 points_mm: vec![[0.3, 0.3, 8.0], [19.7, 0.3, 8.0]],
             },
             DepositionPath {
+                material_domain: None,
                 kind: spiling_contracts::manufacturing::DepositionKind::SolidFill,
                 width: WidthProfile::Constant { width_mm: 0.6 },
                 physical_z_mm: [7.6, 8.0],
@@ -289,6 +292,7 @@ mod tests {
     fn curved_strokes_are_not_flattened_by_native_sample_aggregation() {
         let points = [[0.0, 0.0, 0.4], [1.0, 0.001, 0.4], [2.0, 0.0, 0.4]];
         let path = DepositionPath {
+            material_domain: None,
             kind: DepositionKind::Perimeter,
             owner: Some(spiling_contracts::manufacturing::DepositionOwner::Wall),
             width: WidthProfile::Constant { width_mm: 0.6 },
@@ -343,6 +347,7 @@ mod tests {
     fn endpoint_footprint_positive_area_certifies_bridge_without_dilating_interior_capsules() {
         use spiling_contracts::manufacturing::DepositionKind;
         let previous = [0.0, 2.0].map(|x| DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             width: WidthProfile::Constant { width_mm: 0.5 },
             physical_z_mm: [0.0, 0.4],
@@ -350,6 +355,7 @@ mod tests {
             points_mm: vec![[x, -2.0, 0.4], [x, 2.0, 0.4]],
         });
         let path = DepositionPath {
+            material_domain: None,
             kind: DepositionKind::TopSkin,
             width: WidthProfile::Constant { width_mm: 0.5 },
             physical_z_mm: [0.4, 0.8],
@@ -427,6 +433,7 @@ mod tests {
     fn endpoint_footprint_tangency_and_absence_never_certify_unanchored_strokes() {
         use spiling_contracts::manufacturing::DepositionKind;
         let previous = [0.0, 2.0].map(|x| DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             width: WidthProfile::Constant { width_mm: 0.5 },
             physical_z_mm: [0.0, 0.4],
@@ -440,6 +447,7 @@ mod tests {
         recipe.process.max_bridge_span_mm = 10.0;
         for (a, b) in [(0.5, 1.5), (0.51, 1.49)] {
             let path = DepositionPath {
+                material_domain: None,
                 kind: DepositionKind::TopSkin,
                 width: WidthProfile::Constant { width_mm: 0.5 },
                 physical_z_mm: [0.4, 0.8],
@@ -491,6 +499,7 @@ mod dimension_tests {
         let mut recipe = crate::planner::tests::recipe(1.0);
         recipe.bead_width_mm = 0.8;
         let path = DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             owner: Some(
                 spiling_contracts::manufacturing::DepositionOwner::Regional { region_index: 0 },
@@ -500,6 +509,7 @@ mod dimension_tests {
             points_mm: vec![[0.0, 0.0, 0.5], [0.4, 0.0, 0.5]],
         };
         let mut lower = DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             owner: Some(
                 spiling_contracts::manufacturing::DepositionOwner::Regional { region_index: 0 },

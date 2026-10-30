@@ -20,7 +20,7 @@ export type AppearanceIlluminant = "d65" | "d50" | "unknown";
 
 export type AppearanceObserver = "cie1931_two_degree" | "cie1964_ten_degree" | "unknown";
 
-export type AppearanceConditions = { illuminant: AppearanceIlluminant, observer: AppearanceObserver, geometry: string | null, backing: string | null, thickness_mm: number | null, cohort: string | null, instrument: string | null, calibration: string | null, aperture_mm: number | null, specular: string | null, orientation: string | null, 
+export type AppearanceConditions = { illuminant: AppearanceIlluminant, observer: AppearanceObserver, geometry: string | null, backing: string | null, thickness_mm: number | null, cohort: string | null, instrument: string | null, calibration: string | null, aperture_mm: number | null, specular: string | null, orientation: string | null,
 /**
  * Declared process/construction context references only. They bind supplied
  * readings, not execution authority or physical qualification.
@@ -33,7 +33,7 @@ export type AppearanceTarget = { color: AppearanceColor, delta_e00_tolerance: nu
 
 export type SearchLimits = { max_visited: number, max_alternatives: number, };
 
-export type AppearanceEvidence = { "kind": "catalog_estimate", srgb: [number, number, number], } | { "kind": "measured", color: AppearanceColor, conditions: AppearanceConditions, 
+export type AppearanceEvidence = { "kind": "catalog_estimate", srgb: [number, number, number], } | { "kind": "measured", color: AppearanceColor, conditions: AppearanceConditions,
 /**
  * Candidate-specific declared lot. Never a target/global filter.
  */
@@ -135,7 +135,7 @@ export type PlaneFrameMm = { origin_mm: [number, number, number], x_axis: [numbe
 
 export type SourceUnit = "millimetre" | "metre" | "inch";
 
-export type SourceProvenance = { source_hash: SourceHash, source_name: string, source_unit: SourceUnit, 
+export type SourceProvenance = { source_hash: SourceHash, source_name: string, source_unit: SourceUnit,
 /**
  * Declared source uncertainty, normalized to mm; not a program-created accuracy guarantee.
  */
@@ -155,11 +155,11 @@ export type FaceDomainSummary = { trim_loop_count: number, inner_loop_count: num
 
 export type FaceGeometryInfo = { family: SurfaceFamily, analytic: AnalyticSurfaceDescription | null, domain: FaceDomainSummary, };
 
-export type FaceInfo = { face_id: FaceId, 
+export type FaceInfo = { face_id: FaceId,
 /**
  * Decimal string preserves STEP entity IDs above JavaScript's exact integer range.
  */
-surface_face_entity: string, source_entity_kind: string, source_surface_entity_kind: string, 
+surface_face_entity: string, source_entity_kind: string, source_surface_entity_kind: string,
 /**
  * Material-side direction relative to the regular analytic/native frame.
  * At singular points, operations require an oriented limiting chart/fan.
@@ -182,7 +182,7 @@ export type BedPosePreparation = { session_id: SessionId, scene_revision: SceneR
 
 export type NativePath = { "kind": "unix_bytes", hex: string, } | { "kind": "windows_wide", units: Array<number>, };
 
-export type MeshChunkMetadata = { session_id: SessionId, artifact_id: ArtifactId, definition_id: DefinitionId, schema_version: number, mesh_profile: DisplayProfile, chunk_index: number, chunk_count: number, byte_count: number, sha256: SourceHash, face_count: number, bounds_mm: AabbMm, carrier_deviation_mm: number, 
+export type MeshChunkMetadata = { session_id: SessionId, artifact_id: ArtifactId, definition_id: DefinitionId, schema_version: number, mesh_profile: DisplayProfile, chunk_index: number, chunk_count: number, byte_count: number, sha256: SourceHash, face_count: number, bounds_mm: AabbMm, carrier_deviation_mm: number,
 /**
  * Whole trimmed-domain triangle-chain approximation, independent of interpolation.
  */
@@ -268,11 +268,11 @@ export type ProcessProvenance = { layer_id: ProcessLayerId, operation_id: Proces
 
 export type ResolvedProcessValue = { fraction: number, provenance: ProcessProvenance | null, };
 
-export type ResolvedOccurrenceProcess = { occurrence_id: OccurrenceId, definition_id: DefinitionId, global_fraction: number, 
+export type ResolvedOccurrenceProcess = { occurrence_id: OccurrenceId, definition_id: DefinitionId, global_fraction: number,
 /**
  * Definition inheritance for the whole-volume base, ignoring spatial masks.
  */
-inherited: ResolvedProcessValue, 
+inherited: ResolvedProcessValue,
 /**
  * Whole-volume base for this occurrence; not a uniform spatial-density claim.
  */
@@ -282,7 +282,7 @@ export type ProcessEdit = { "op": "set_sparse_fraction", scope: SurfaceScope, fr
 
 export type ProcessRegionContribution = { occurrence_id: OccurrenceId, definition_id: DefinitionId, provenance: ProcessProvenance | null, };
 
-export type ProcessRegionCoverage = { area_mm2: number, fraction: number, contributions: Array<ProcessRegionContribution>, };
+export type ProcessRegionCoverage = { material_domain: MaterialDomainRef | null, area_mm2: number, fraction: number, contributions: Array<ProcessRegionContribution>, };
 
 export type ProcessSkinKind = "bottom_skin" | "top_skin";
 
@@ -334,43 +334,55 @@ export type OutputDialect = "cartesian_absolute_gcode_v1" | "marlin2_single_extr
 
 export type JobWorkflow = { "kind": "diagnostic_body_only" } | { "kind": "complete_marlin", job: SingleExtruderJob, } | { "kind": "fixed_dual_marlin", job: FixedDualJob, };
 
-export type SingleExtruderJob = { machine_id: string, firmware_version: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], nozzle_temperature_c: number, bed_temperature_c: number, minimum_extrusion_temperature_c: number, maximum_nozzle_temperature_c: number, maximum_bed_temperature_c: number, 
+export type SingleExtruderJob = { machine_id: string, firmware_version: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], nozzle_temperature_c: number, bed_temperature_c: number, minimum_extrusion_temperature_c: number, maximum_nozzle_temperature_c: number, maximum_bed_temperature_c: number,
 /**
  * Priming is excluded from conservative all-layer object XY ownership,
  * independent of Z, protected holes or gaps; plan admission checks rounding.
  */
-prime_start_mm: [number, number, number], prime_end_mm: [number, number, number], prime_filament_length_mm: number, prime_speed_mm_s: number, 
+prime_start_mm: [number, number, number], prime_end_mm: [number, number, number], prime_filament_length_mm: number, prime_speed_mm_s: number,
 /**
  * Final park Z must exceed all object and priming coordinates. The backend
  * lifts vertically first, then moves XY at this Z, then barriers/shuts down.
  */
 park_position_mm: [number, number, number], };
 
-export type FixedDualJob = { machine_id: string, configuration: FixedDualConfiguration, firmware_revision: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], bed_temperature_c: number, maximum_bed_temperature_c: number, tools: [FixedDualTool, FixedDualTool], assignments: [OccurrenceMaterialAssignment, OccurrenceMaterialAssignment], transition_lift_mm: number, 
+export type FixedDualJob = { machine_id: string, configuration: FixedDualConfiguration, firmware_revision: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], bed_temperature_c: number, maximum_bed_temperature_c: number, tools: [FixedDualTool, FixedDualTool], assignments: Array<OccurrenceMaterialAssignment>, surface_constructions: Array<SurfaceColorConstruction>, transition_lift_mm: number,
 /**
  * Allowed tool-zero reference positions, including negative carriage X/Y.
  */
-carriage_travel_bounds_mm: AabbMm, 
+carriage_travel_bounds_mm: AabbMm,
 /**
  * Occupied body relative to the tool-zero tip, excluding the two tips.
  */
 carriage_body_bounds_mm: AabbMm, inactive_nozzle_radius_mm: number, park_position_mm: [number, number, number], };
 
-export type FixedDualTool = { id: string, feeder_id: string, material: LoadedMaterial, 
+export type SurfaceColorConstruction = { occurrence_id: OccurrenceId, definition_id: DefinitionId, source_hash: SourceHash, faces: Array<SurfaceColorFace>, shell: OccurrenceMaterial, white_material_id: string, };
+
+export type SurfaceColorFace = { face_id: FaceId, skin_depth_mm: number, backing_depth_mm: number, };
+
+export type MaterialConstructionRole = "shell" | "backing" | "core";
+
+export type MaterialDomainRef = { construction_index: number, role: MaterialConstructionRole, };
+
+export type MaterialDomainPolygon = { exterior_mm: Array<[number, number]>, holes_mm: Array<Array<[number, number]>>, };
+
+export type ResolvedMaterialDomain = { reference: MaterialDomainRef, physical_z_mm: [number, number], polygons: Array<MaterialDomainPolygon>, };
+
+export type FixedDualTool = { id: string, feeder_id: string, material: LoadedMaterial,
 /**
  * Physical nozzle displacement from tool zero; Z is identically zero.
  */
-offset_xy_mm: [number, number], nozzle_diameter_mm: number, filament_diameter_mm: number, deposition_limits: DepositionLimits, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, nozzle_temperature_c: number, standby_temperature_c: number, minimum_extrusion_temperature_c: number, maximum_nozzle_temperature_c: number, retract_filament_mm: number, retract_speed_mm_s: number, 
+offset_xy_mm: [number, number], nozzle_diameter_mm: number, filament_diameter_mm: number, deposition_limits: DepositionLimits, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, nozzle_temperature_c: number, standby_temperature_c: number, minimum_extrusion_temperature_c: number, maximum_nozzle_temperature_c: number, retract_filament_mm: number, retract_speed_mm_s: number,
 /**
  * Declared pressure-establishment minimum; actual waste is stroke-derived.
  */
-minimum_reprime_volume_mm3: number, 
+minimum_reprime_volume_mm3: number,
 /**
  * One bed-rooted, repeated line, deposited once on every actual layer.
  */
 waste_line_xy_mm: [[number, number], [number, number]], };
 
-export type LoadedMaterial = { id: string, revision: string, 
+export type LoadedMaterial = { id: string, revision: string,
 /**
  * Identity of the inert material declaration, not a measured color model.
  */
@@ -430,11 +442,11 @@ export type DepositionKind = "perimeter" | "solid_fill" | "bottom_skin" | "top_s
 
 export type WidthProfile = { "kind": "constant", width_mm: number, } | { "kind": "per_edge", widths_mm: Array<number>, };
 
-export type DepositionPath = { kind: DepositionKind, 
+export type DepositionPath = { material_domain: MaterialDomainRef | null, kind: DepositionKind,
 /**
  * Immutable original construction purpose, never inferred from Bridge shape.
  */
-owner: DepositionOwner | null, width: WidthProfile, 
+owner: DepositionOwner | null, width: WidthProfile,
 /**
  * Explicit occupied interval; upper endpoint belongs to the owning layer.
  */
@@ -448,7 +460,7 @@ export type SparseBandVeto = "process_height" | "mandatory_neighborhood" | "chan
 
 export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, process_diaphragms: Array<ProcessDiaphragmCoverage>, diaphragm_area_mm2: number, skin_bridge_domains: Array<SkinBridgeDomain>, };
 
-export type PrintLayer = { index: number, z_mm: number, lower_z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage, 
+export type PrintLayer = { index: number, z_mm: number, lower_z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage,
 /**
  * Source-owned minimum-length realization, distinct from skin classification
  * and independently qualified Bridge/permanent-interface construction.
@@ -461,7 +473,7 @@ export type SupportClearanceScope = "continuous_target_outer_occupancy";
 
 export type NativeFeatureCoverageSummary = { disjoint_source_layer_count: number, invariant_source_union_layer_count: number, native_interface_complex_layer_count: number, owned_critical_slab_count: number, };
 
-export type NativeGeometryCoverageSummary = { requested_shape_error_mm: number, achieved_shape_error_mm: number, height_analysis_count: number, 
+export type NativeGeometryCoverageSummary = { requested_shape_error_mm: number, achieved_shape_error_mm: number, height_analysis_count: number,
 /**
  * Accepted original-occurrence/slab evidence captures, including endpoint ownership.
  * One certified invariant slab may cover several scheduled layers. Every
@@ -469,7 +481,7 @@ export type NativeGeometryCoverageSummary = { requested_shape_error_mm: number, 
  */
 slab_count: number, certified_layer_count: number, event_count: number, geometry_work: bigint, evidence: PreflightEvidence, source_feature_coverage: NativeFeatureCoverageSummary, skin_coverage: SkinCoverageScope, support_clearance: SupportClearanceScope, };
 
-export type NormalizedPrintPlan = { schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, };
+export type NormalizedPrintPlan = { material_domains: Array<ResolvedMaterialDomain>, schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, };
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
@@ -501,6 +513,10 @@ export type ManufacturingCommand = { "op": "get", session_id: SessionId, } | { "
 
 export type ManufacturingResponse = { "type": "status", info: ProjectInfo, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, } | { "type": "preflight", report: PreflightReport, } | { "type": "error", error: ManufacturingError, };
 
+export const MAX_MATERIAL_DOMAINS = 24 as const;
+export const MAX_MATERIAL_DOMAIN_POLYGONS = 2 as const;
+export const MAX_MATERIAL_DOMAIN_HOLES = 4 as const;
+export const MAX_MATERIAL_DOMAIN_RING_POINTS = 256 as const;
 export const MAX_CONTROL_BYTES = 65536 as const;
 export const MAX_PALETTE_BYTES = 16777216 as const;
 export const MAX_PALETTE_ROWS = 4096 as const;

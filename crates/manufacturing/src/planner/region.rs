@@ -1277,6 +1277,7 @@ fn push_path(
         ));
     }
     paths.push(DepositionPath {
+        material_domain: None,
         kind,
         width: WidthProfile::Constant {
             width_mm: bead_width_mm,

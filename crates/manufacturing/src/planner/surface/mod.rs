@@ -312,7 +312,7 @@ pub(super) fn validate_targets(
     Ok(())
 }
 
-fn admit_extrusion(
+pub(super) fn admit_extrusion(
     input: &CompilerInput<'_>,
     occurrence: &OccurrenceRecord,
     source_bounds: AabbMm,

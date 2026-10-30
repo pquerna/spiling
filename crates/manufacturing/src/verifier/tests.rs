@@ -163,6 +163,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         },
     };
     let mut plan = NormalizedPrintPlan {
+        material_domains: Vec::new(),
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         sparse_bands: vec![],
         process_resolution: Vec::new(),
@@ -200,6 +201,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                 region_coverage: coverage(),
                 paths: vec![
                     DepositionPath {
+                        material_domain: None,
                         kind: DepositionKind::Perimeter,
                         owner: Some(DepositionOwner::Wall),
                         width: WidthProfile::Constant { width_mm: 1.0 },
@@ -213,6 +215,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                         ],
                     },
                     DepositionPath {
+                        material_domain: None,
                         kind: DepositionKind::SolidFill,
                         owner: None,
                         width: WidthProfile::Constant { width_mm: 1.0 },
@@ -230,6 +233,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                 section_z_mm: 1.5,
                 region_coverage: coverage(),
                 paths: vec![DepositionPath {
+                    material_domain: None,
                     kind: DepositionKind::SolidFill,
                     owner: None,
                     width: WidthProfile::Constant { width_mm: 1.0 },
@@ -496,6 +500,7 @@ fn diagonal_numeric_golden_measures_euclidean_length() {
     let (intent, mut plan) = fixture();
     plan.layers.truncate(1);
     plan.layers[0].paths = vec![DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Perimeter,
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::Constant { width_mm: 1.0 },
@@ -683,6 +688,7 @@ fn zero_length_after_serialization_is_not_positive_deposition() {
     plan.layers.truncate(1);
     plan.native_geometry.certified_layer_count = 1;
     plan.layers[0].paths = vec![DepositionPath {
+        material_domain: None,
         kind: DepositionKind::SolidFill,
         owner: None,
         width: WidthProfile::Constant { width_mm: 1.0 },
@@ -718,6 +724,7 @@ fn wall_command_fixture(path: DepositionPath) -> (ManufacturingIntent, Normalize
 #[test]
 fn variable_width_wall_bridge_keeps_rotated_edge_associations_and_bridge_process() {
     let (mut intent, mut plan) = wall_command_fixture(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Bridge,
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::PerEdge {
@@ -776,6 +783,7 @@ fn variable_width_wall_bridge_keeps_rotated_edge_associations_and_bridge_process
 #[test]
 fn minimum_deposition_length_is_the_decoded_xyz6_segment_not_the_raw_edge() {
     let (intent, plan) = wall_command_fixture(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Bridge,
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::Constant { width_mm: 0.45 },
@@ -806,6 +814,7 @@ fn minimum_deposition_length_is_the_decoded_xyz6_segment_not_the_raw_edge() {
 #[test]
 fn actual_e8_width_cannot_borrow_the_nominal_width_association() {
     let (intent, plan) = wall_command_fixture(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Bridge,
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::Constant { width_mm: 0.45 },
@@ -823,6 +832,7 @@ fn actual_e8_width_cannot_borrow_the_nominal_width_association() {
 fn wall_gradient_uses_actual_e8_widths_and_checks_the_closed_seam() {
     let cancel = AtomicBool::new(false);
     let (intent, plan) = wall_command_fixture(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Bridge,
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::PerEdge {
@@ -840,6 +850,7 @@ fn wall_gradient_uses_actual_e8_widths_and_checks_the_closed_seam() {
     );
 
     let (intent, plan) = wall_command_fixture(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Bridge,
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::PerEdge {
@@ -923,6 +934,7 @@ fn packed_sink_admits_two_hundred_thousand_actual_events_once() {
     plan.layers.truncate(1);
     plan.layers[0].paths = vec![
         spiling_contracts::manufacturing::DepositionPath {
+            material_domain: None,
             kind: spiling_contracts::manufacturing::DepositionKind::SolidFill,
             owner: None,
             width: WidthProfile::Constant { width_mm: 1.0 },
@@ -1217,6 +1229,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     };
     plan.layers[0].paths = vec![
         DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SolidFill,
             owner: None,
             width: WidthProfile::Constant { width_mm: 1.0 },
@@ -1224,6 +1237,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             points_mm: vec![[9.0, 1.0, 1.0], [11.0, 1.0, 1.0]],
         },
         DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SupportInterface,
             owner: None,
             width: WidthProfile::Constant { width_mm: 1.0 },
@@ -1231,6 +1245,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             points_mm: vec![[5.0, 1.0, 1.0], [7.0, 1.0, 1.0]],
         },
         DepositionPath {
+            material_domain: None,
             kind: DepositionKind::Support,
             owner: None,
             width: WidthProfile::Constant { width_mm: 1.0 },
@@ -1243,6 +1258,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     plan.layers[1].z_mm = 1.5;
     plan.layers[1].section_z_mm = 1.25;
     plan.layers[1].paths = vec![DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Bridge,
         owner: None,
         width: WidthProfile::Constant { width_mm: 1.0 },
@@ -1523,6 +1539,7 @@ fn preferred_seam_ties_follow_the_previous_actual_contour_endpoint() {
         point[1] += 9.0;
     }
     plan.layers[0].paths.push(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Perimeter,
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::Constant { width_mm: 1.0 },
@@ -1638,6 +1655,7 @@ fn nearest_seam_and_open_direction_are_useful_and_deterministic() {
     // The second perimeter's stored seam is distant; the previous end is near
     // its third vertex. The following open stroke should enter its far endpoint.
     plan.layers[0].paths.push(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Perimeter,
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::Constant { width_mm: 1.0 },
@@ -1838,6 +1856,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     plan.layers.truncate(1);
     plan.layers[0].paths.truncate(1);
     plan.layers[0].paths[0] = DepositionPath {
+        material_domain: None,
         kind: DepositionKind::SolidFill,
         owner: None,
         width: WidthProfile::Constant { width_mm: 0.45 },
@@ -1980,6 +1999,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
         layer.region_coverage.sparse_interior_area_mm2 = 16.0;
         layer.region_coverage.intentional_void_area_mm2 = 12.8;
         layer.region_coverage.process_regions = vec![ProcessRegionCoverage {
+            material_domain: None,
             area_mm2: 16.0,
             fraction: 0.2,
             contributions: vec![],
@@ -2030,6 +2050,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
         operation_id: ProcessOperationId::new(1).unwrap(),
     };
     let region = ProcessRegionCoverage {
+        material_domain: None,
         area_mm2: 4.0,
         fraction: 0.2,
         contributions: vec![ProcessRegionContribution {
@@ -2072,6 +2093,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
             layer.region_coverage.process_regions = vec![region.clone(), other.clone()];
             layer.region_coverage.process_interfaces = vec![interface.clone()];
             layer.paths = vec![DepositionPath {
+                material_domain: None,
                 kind: DepositionKind::SeparatorWall,
                 owner: None,
                 width: WidthProfile::Constant { width_mm: 0.45 },
@@ -2085,6 +2107,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
     plan.layers[3].region_coverage.process_regions.swap(0, 1);
     plan.layers[3].region_coverage.process_interfaces[0].region_indices = [1, 0];
     plan.layers[3].paths.push(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::SparseFill,
         owner: Some(DepositionOwner::Regional { region_index: 1 }),
         width: WidthProfile::Constant { width_mm: 0.45 },
@@ -2247,6 +2270,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
         layer.height_mm = 0.1;
         layer.section_z_mm = (layer.lower_z_mm + layer.z_mm) * 0.5;
         layer.paths = vec![DepositionPath {
+            material_domain: None,
             kind: DepositionKind::Perimeter,
             owner: Some(DepositionOwner::Wall),
             width: WidthProfile::Constant { width_mm: 0.45 },
@@ -2263,6 +2287,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
     // The lower separator anchor is actual earlier deposition, not a future
     // fill or a synthetic declared band. Keep its explicit closed traversal.
     plan.layers[0].paths.push(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Perimeter,
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::Constant { width_mm: 0.45 },
@@ -2270,6 +2295,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
         points_mm: vec![[3.0, 1.0, 0.1], [3.0, 5.0, 0.1], [3.0, 1.0, 0.1]],
     });
     plan.layers[0].paths.push(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::SolidFill,
         owner: None,
         width: WidthProfile::Constant { width_mm: 0.45 },
@@ -2279,6 +2305,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
     let fine = &mut plan.layers[1];
     fine.paths.extend([
         DepositionPath {
+            material_domain: None,
             kind: DepositionKind::TopSkin,
             owner: Some(DepositionOwner::MandatorySkin {
                 skin: ProcessSkinKind::TopSkin,
@@ -2288,6 +2315,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             points_mm: vec![[3.0, 1.0, 0.2], [3.0, start_y, 0.2]],
         },
         DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SeparatorWall,
             owner: None,
             width: WidthProfile::Constant { width_mm: 0.45 },
@@ -2295,6 +2323,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             points_mm: vec![[3.0, start_y, 0.2], [3.0, end_y, 0.2]],
         },
         DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             owner: Some(DepositionOwner::Regional { region_index: 0 }),
             width: WidthProfile::Constant { width_mm: 0.45 },
@@ -2302,6 +2331,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             points_mm: vec![[1.225, 3.0, 0.2], [2.775, 3.0, 0.2]],
         },
         DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             owner: Some(DepositionOwner::Regional { region_index: 1 }),
             width: WidthProfile::Constant { width_mm: 0.45 },
@@ -2311,6 +2341,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
     ]);
     fine.region_coverage.process_regions = [0.2, 0.4]
         .map(|fraction| ProcessRegionCoverage {
+            material_domain: None,
             area_mm2: 4.0,
             fraction,
             contributions: vec![ProcessRegionContribution {
@@ -2381,6 +2412,7 @@ fn affected_fine_regional_rows_require_actual_support_or_genuine_bounded_bridge(
     following.region_coverage.sparse_interior_area_mm2 = 16.0;
     following.region_coverage.intentional_void_area_mm2 = 12.8;
     following.region_coverage.process_regions = vec![ProcessRegionCoverage {
+        material_domain: None,
         area_mm2: 16.0,
         fraction: 0.2,
         contributions: vec![],
@@ -2453,6 +2485,7 @@ fn minimum_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     plan.layers.truncate(1);
     let layer = &mut plan.layers[0];
     let region = ProcessRegionCoverage {
+        material_domain: None,
         area_mm2: 15.98,
         fraction: 1.0,
         contributions: vec![ProcessRegionContribution {
@@ -2466,6 +2499,7 @@ fn minimum_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         fitted_mm: [[2.0, 2.0, 1.0], [2.020003, 2.0, 1.0]],
     };
     layer.paths = vec![DepositionPath {
+        material_domain: None,
         kind: DepositionKind::BottomSkin,
         owner: Some(DepositionOwner::MandatorySkin {
             skin: ProcessSkinKind::BottomSkin,
@@ -2777,6 +2811,7 @@ fn mixed_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     plan.layers[0].paths = [[2.0, 2.1], [5.9, 6.0]]
         .into_iter()
         .map(|x| DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SolidFill,
             owner: None,
             width: WidthProfile::Constant { width_mm: 1.0 },
@@ -2786,6 +2821,7 @@ fn mixed_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         .collect();
     let layer = &mut plan.layers[1];
     layer.paths = vec![DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Bridge,
         owner: Some(DepositionOwner::RegionalSkinBridge {
             region_index: 0,
@@ -2800,6 +2836,7 @@ fn mixed_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     layer.region_coverage.bottom_skin_area_mm2 = 1.2;
     layer.region_coverage.solid_interior_area_mm2 = 0.8;
     layer.region_coverage.process_regions = vec![ProcessRegionCoverage {
+        material_domain: None,
         area_mm2: 0.8,
         fraction: 1.0,
         contributions: Vec::new(),

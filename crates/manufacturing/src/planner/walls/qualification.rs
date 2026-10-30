@@ -1857,6 +1857,7 @@ mod tests {
 
     fn path(points: &[[f64; 2]]) -> DepositionPath {
         DepositionPath {
+            material_domain: None,
             kind: DepositionKind::Perimeter,
             owner: Some(DepositionOwner::Wall),
             width: WidthProfile::Constant { width_mm: 0.6 },
@@ -1909,6 +1910,7 @@ mod tests {
             "legal command subdivision exceeds the Boolean primitive boundary staging cap"
         );
         let subdivided = DepositionPath {
+            material_domain: None,
             points_mm: (0..=1600).map(|i| [i as f64 / 40.0, 0., 0.2]).collect(),
             ..path(&[])
         };

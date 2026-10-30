@@ -297,6 +297,17 @@ undo/redo/undo must restore the original manufacturing input and output. A chang
 height/origin must re-resolve or refuse, never silently advance by layer number.
 
 
+### Source-bound planar surface-color smoke
+
+After building the matching engine and CLI, run:
+
+```sh
+node tools/smoke-surface-color.mjs
+```
+
+The runner honors `CARGO_TARGET_DIR`, uses fresh owned project/source copies and exclusive export destinations, and retains receipts under ignored `.cache/surface-color-*`. It selects actual returned upright planar face identities on the committed box and through-hole input, then exercises physical skin/backing depth, sparse core, actual tool operations, revision/history and source-deleted fresh replay/export. Unsupported source identity, thin skin and consumed core must fail. Native material assets in saved projects are retained. The [surface-color contract](../protocol/manufacturing.md#source-bound-planar-surface-color) defines software scope; no physical print, calibrated white/color or desktop authoring claim follows.
+
+
 
 `apps/engine/src/geometry/bed_pose.rs` prepares one immutable native source for
 the three directional material-support queries. Retained native domains and

@@ -399,8 +399,10 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project10/manufacturing11/process3/surface3, source6/planner25,
-emitter7/verifier9 and SPLR5; executable constants and exact native pins remain authoritative.
+Source-bound planar surface color is exercised through the real CLI on the committed box and protected-hole source: one full-height planar face, physical colored skin, solid white backing and sparse white core. Depth edits change actual emitted operations; undo/redo and source-absent fresh read-only verification/export retain the captured program and motion. `tools/smoke-surface-color.mjs` resolves returned native face identities, checks region attribution and protected voids, and exercises source/depth/core refusals. The [construction contract](../protocol/manufacturing.md#source-bound-planar-surface-color) owns the finite envelope. This is software construction evidence, not physical color, adhesion or printer qualification.
+
+Current identities are project10/manufacturing11/process3/surface3, source6/planner28,
+emitter10/verifier12 and SPLR6; executable constants and exact native pins remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
 Raw inspection, an older producer's successful job or historical hardware

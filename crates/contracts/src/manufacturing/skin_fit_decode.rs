@@ -317,7 +317,7 @@ impl<'de> DeserializeSeed<'de> for RegionSeed<'_> {
     fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
         d.deserialize_struct(
             "ProcessRegionCoverage",
-            &["area_mm2", "fraction", "contributions"],
+            &["material_domain", "area_mm2", "fraction", "contributions"],
             self,
         )
     }
@@ -328,9 +328,16 @@ impl<'de> Visitor<'de> for RegionSeed<'_> {
         f.write_str("a bounded skin fitting process region")
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut material_domain = None;
         let (mut area_mm2, mut fraction, mut contributions) = (None, None, None);
         while let Some(field) = map.next_key::<ProcessRegionField>()? {
             match field {
+                ProcessRegionField::MaterialDomain => {
+                    if material_domain.is_some() {
+                        return Err(A::Error::duplicate_field("material_domain"));
+                    }
+                    material_domain = Some(map.next_value()?);
+                }
                 ProcessRegionField::AreaMm2 => {
                     if area_mm2.is_some() {
                         return Err(A::Error::duplicate_field("area_mm2"));
@@ -356,6 +363,8 @@ impl<'de> Visitor<'de> for RegionSeed<'_> {
             }
         }
         Ok(ProcessRegionCoverage {
+            material_domain: material_domain
+                .ok_or_else(|| A::Error::missing_field("material_domain"))?,
             area_mm2: area_mm2.ok_or_else(|| A::Error::missing_field("area_mm2"))?,
             fraction: fraction.ok_or_else(|| A::Error::missing_field("fraction"))?,
             contributions: contributions.ok_or_else(|| A::Error::missing_field("contributions"))?,
@@ -508,6 +517,7 @@ mod tests {
         SkinCommandFitDomain {
             region_index: 0,
             region: ProcessRegionCoverage {
+                material_domain: None,
                 area_mm2: 0.96,
                 fraction: 1.0,
                 contributions: vec![

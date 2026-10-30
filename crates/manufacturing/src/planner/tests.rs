@@ -842,6 +842,7 @@ fn deposited_footprint_holes_and_sparse_void_are_real_anchor_gaps() {
     let mut query = support::AnchorWorkspace::default();
     let anchors = [
         DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             owner: None,
             width: WidthProfile::Constant { width_mm: 0.6 },
@@ -849,6 +850,7 @@ fn deposited_footprint_holes_and_sparse_void_are_real_anchor_gaps() {
             points_mm: vec![[2.0, 0.0, 0.4], [2.0, 10.0, 0.4]],
         },
         DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             owner: None,
             width: WidthProfile::Constant { width_mm: 0.6 },
@@ -871,6 +873,7 @@ fn deposited_footprint_holes_and_sparse_void_are_real_anchor_gaps() {
     assert_eq!(gaps.len(), 3);
     assert!(((gaps[1].end - gaps[1].start) * 10.0 - 5.4).abs() < 1e-10);
     let holed = [DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Perimeter,
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::Constant { width_mm: 0.6 },
@@ -946,6 +949,7 @@ fn exact_deposited_capsules_keep_curved_caps_and_bounded_work() {
     let cancel = AtomicBool::new(false);
     let mut query = support::AnchorWorkspace::default();
     let paths = [DepositionPath {
+        material_domain: None,
         kind: DepositionKind::SparseFill,
         owner: None,
         width: WidthProfile::Constant { width_mm: 0.6 },
@@ -1008,6 +1012,7 @@ fn support_raster_wall_center_entry_has_positive_previous_bead_overlap() {
     let cancel = AtomicBool::new(false);
     let mut query = support::AnchorWorkspace::default();
     let paths = [20.5, 21.5, 22.5].map(|x| DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Support,
         owner: None,
         width: WidthProfile::Constant { width_mm: 0.6 },
@@ -1052,6 +1057,7 @@ fn support_raster_wall_center_entry_has_positive_previous_bead_overlap() {
 #[test]
 fn lower_interface_capsules_do_not_forge_direct_previous_layer_anchors() {
     let previous = [DepositionPath {
+        material_domain: None,
         kind: DepositionKind::BottomSkin,
         owner: Some(
             spiling_contracts::manufacturing::DepositionOwner::MandatorySkin {
@@ -1063,6 +1069,7 @@ fn lower_interface_capsules_do_not_forge_direct_previous_layer_anchors() {
         points_mm: vec![[0.0, 0.0, 0.8], [2.0, 0.0, 0.8]],
     }];
     let contact = [DepositionPath {
+        material_domain: None,
         kind: DepositionKind::SupportInterface,
         owner: None,
         width: WidthProfile::Constant { width_mm: 0.6 },

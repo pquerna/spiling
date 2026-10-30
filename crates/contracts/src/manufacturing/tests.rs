@@ -197,6 +197,7 @@ fn regional_bundle() -> ManufacturingBundle {
                 captured.provenance.intent.recipe.infill_fraction,
             );
             ProcessRegionCoverage {
+                material_domain: None,
                 area_mm2,
                 fraction: resolved.fraction,
                 contributions: vec![ProcessRegionContribution {
@@ -366,6 +367,7 @@ fn regional_bundle_accepts_compatible_contributors_and_global_no_override_record
     coverage.wall_area_mm2 = 0.0;
     coverage.solid_interior_area_mm2 = 50.0;
     coverage.process_regions = vec![ProcessRegionCoverage {
+        material_domain: None,
         area_mm2: 50.0,
         fraction: 1.0,
         contributions: vec![],
@@ -388,6 +390,7 @@ fn regional_admission_caps_regions_and_cumulative_contributions() {
     coverage.solid_interior_area_mm2 = 50.0;
     coverage.process_regions = vec![
         ProcessRegionCoverage {
+            material_domain: None,
             area_mm2: 50.0 / MAX_PROCESS_REGIONS as f64,
             fraction: 1.0,
             contributions: vec![contribution.clone()],
@@ -419,6 +422,7 @@ fn regional_admission_caps_regions_and_cumulative_contributions() {
         ManufacturingErrorCode::ResourceLimit
     );
     let oversized = ProcessRegionCoverage {
+        material_domain: None,
         area_mm2: 1.0,
         fraction: 1.0,
         contributions: vec![contribution; MAX_PROCESS_REGION_CONTRIBUTIONS + 1],
@@ -433,7 +437,7 @@ fn regional_admission_caps_regions_and_cumulative_contributions() {
 fn regional_admission_requires_strict_region_and_contribution_shapes() {
     let captured = regional_bundle();
     let value = serde_json::to_value(&captured).unwrap();
-    for field in ["area_mm2", "fraction", "contributions"] {
+    for field in ["area_mm2", "fraction", "contributions", "material_domain"] {
         let mut missing = value.clone();
         missing["plan"]["layers"][0]["region_coverage"]["process_regions"][0]
             .as_object_mut()
@@ -699,6 +703,7 @@ fn accepted_coverage_binds_recipe_occurrences_schedule_and_visible_summary() {
 
 fn plan() -> NormalizedPrintPlan {
     NormalizedPrintPlan {
+        material_domains: Vec::new(),
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         sparse_bands: vec![],
         process_resolution: vec![],
@@ -717,6 +722,7 @@ fn plan() -> NormalizedPrintPlan {
             section_z_mm: 5.1,
             region_coverage: coverage(),
             paths: vec![DepositionPath {
+                material_domain: None,
                 kind: DepositionKind::Perimeter,
                 owner: Some(DepositionOwner::Wall),
                 width: WidthProfile::Constant { width_mm: 0.45 },
@@ -1103,6 +1109,7 @@ fn ordinary_deposition_rejects_orthogonal_and_diagonal_segments_for_each_axis_po
                 }
                 if matches!(kind, DepositionKind::SolidFill | DepositionKind::SparseFill) {
                     coverage.process_regions = vec![ProcessRegionCoverage {
+                        material_domain: None,
                         area_mm2: 50.0,
                         fraction: data.recipe.infill_fraction,
                         contributions: vec![],
@@ -1194,6 +1201,7 @@ fn ordinary_axis_uses_scheduled_index_and_excludes_bridge_support_and_perimeters
     ] {
         let mut accepted = plan();
         accepted.layers[0].paths.push(DepositionPath {
+            material_domain: None,
             kind,
             width: WidthProfile::Constant { width_mm: 0.45 },
             physical_z_mm: [5.0, 5.2],
@@ -1543,6 +1551,7 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
                 paths: counts
                     .iter()
                     .map(|count| DepositionPath {
+                        material_domain: None,
                         kind: DepositionKind::SolidFill,
                         owner: None,
                         width: WidthProfile::Constant { width_mm: 0.45 },
@@ -1690,7 +1699,15 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
         expected
     );
     for (level, fields) in [
-        (0, &["schema_version", "layers", "sparse_bands"][..]),
+        (
+            0,
+            &[
+                "schema_version",
+                "layers",
+                "sparse_bands",
+                "material_domains",
+            ][..],
+        ),
         (
             1,
             &[
@@ -1705,7 +1722,14 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
         ),
         (
             2,
-            &["kind", "owner", "width", "physical_z_mm", "points_mm"][..],
+            &[
+                "kind",
+                "owner",
+                "width",
+                "physical_z_mm",
+                "material_domain",
+                "points_mm",
+            ][..],
         ),
     ] {
         for field in fields {
@@ -1863,6 +1887,7 @@ fn true_layer_height_and_support_ownership_are_not_nominal_grid_aliases() {
     };
     let mut mixed = plan();
     mixed.layers[0].paths.push(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Support,
         owner: None,
         width: WidthProfile::Constant { width_mm: 0.45 },
@@ -2599,6 +2624,7 @@ fn separator_accounting_is_distinct_and_actual_centerlines_are_bijective() {
     ]
     .into_iter()
     .map(|(fraction, provenance)| ProcessRegionCoverage {
+        material_domain: None,
         area_mm2: 1.0,
         fraction,
         contributions: vec![ProcessRegionContribution {
@@ -2626,6 +2652,7 @@ fn separator_accounting_is_distinct_and_actual_centerlines_are_bijective() {
         .map(|r| r.area_mm2 * (1. - r.fraction))
         .sum();
     planned.layers[0].paths.push(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::SeparatorWall,
         owner: None,
         width: WidthProfile::Constant { width_mm: 0.45 },
@@ -2735,6 +2762,7 @@ fn separator_bundle_requires_explicit_permission_and_consistent_source_binding()
     ]
     .into_iter()
     .map(|(fraction, provenance)| ProcessRegionCoverage {
+        material_domain: None,
         area_mm2: 1.0,
         fraction,
         contributions: vec![ProcessRegionContribution {
@@ -2782,6 +2810,7 @@ fn separator_bundle_requires_explicit_permission_and_consistent_source_binding()
         ]],
     }];
     captured.plan.layers[0].paths.push(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::SeparatorWall,
         owner: None,
         width: WidthProfile::Constant { width_mm: 0.45 },
@@ -2924,7 +2953,7 @@ fn immutable_construction_owner_is_required_and_role_checked() {
         ("sparse_fill", "bottom_skin", false),
     ] {
         let json = format!(
-            r#"{{"kind":"{kind}","owner":{{"kind":"mandatory_skin","skin":"{origin}"}},"width":{{"kind":"constant","width_mm":0.45}},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
+            r#"{{"kind":"{kind}","owner":{{"kind":"mandatory_skin","skin":"{origin}"}},"width":{{"kind":"constant","width_mm":0.45}},"material_domain":null,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
         );
         assert_eq!(serde_json::from_str::<DepositionPath>(&json).is_ok(), valid);
     }
@@ -2936,14 +2965,14 @@ fn immutable_construction_owner_is_required_and_role_checked() {
         "top_skin",
     ] {
         let json = format!(
-            r#"{{"kind":"{kind}","owner":null,"width":{{"kind":"constant","width_mm":0.45}},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
+            r#"{{"kind":"{kind}","owner":null,"width":{{"kind":"constant","width_mm":0.45}},"material_domain":null,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
         );
         assert_eq!(
             serde_json::from_str::<DepositionPath>(&json).is_ok(),
             !matches!(kind, "bottom_skin" | "top_skin" | "perimeter")
         );
         let missing = format!(
-            r#"{{"kind":"{kind}","width":{{"kind":"constant","width_mm":0.45}},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
+            r#"{{"kind":"{kind}","width":{{"kind":"constant","width_mm":0.45}},"material_domain":null,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
         );
         assert!(serde_json::from_str::<DepositionPath>(&missing).is_err());
     }
@@ -2955,7 +2984,7 @@ fn immutable_construction_owner_is_required_and_role_checked() {
         "separator_wall",
     ] {
         let json = format!(
-            r#"{{"kind":"{kind}","owner":{{"kind":"regional","region_index":0}},"width":{{"kind":"constant","width_mm":0.45}},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
+            r#"{{"kind":"{kind}","owner":{{"kind":"regional","region_index":0}},"width":{{"kind":"constant","width_mm":0.45}},"material_domain":null,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
         );
         assert_eq!(
             serde_json::from_str::<DepositionPath>(&json).is_ok(),
@@ -3063,6 +3092,7 @@ fn xyz6_nominal_bead_inner_interval_proves_only_guaranteed_vertical_overlap() {
 
 fn varying_width_path() -> DepositionPath {
     DepositionPath {
+        material_domain: None,
         kind: DepositionKind::Perimeter,
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::PerEdge {
@@ -3176,9 +3206,9 @@ fn width_profiles_admit_cardinality_dimensions_and_malformed_json_once() {
     assert!(path.checked_edges().is_err());
     path.width = WidthProfile::Constant { width_mm: 0.0 };
     assert!(path.checked_edges().is_err());
-    let malformed = r#"{"kind":"solid_fill","owner":null,"width":{"kind":"per_edge","widths_mm":[0.45,0.45]},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}"#;
+    let malformed = r#"{"kind":"solid_fill","owner":null,"width":{"kind":"per_edge","widths_mm":[0.45,0.45]},"material_domain":null,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}"#;
     assert!(serde_json::from_str::<DepositionPath>(malformed).is_err());
-    let negative = r#"{"kind":"solid_fill","owner":null,"width":{"kind":"constant","width_mm":-0.45},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}"#;
+    let negative = r#"{"kind":"solid_fill","owner":null,"width":{"kind":"constant","width_mm":-0.45},"material_domain":null,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}"#;
     assert!(serde_json::from_str::<DepositionPath>(negative).is_err());
 }
 
@@ -3195,7 +3225,7 @@ fn unit_wall_ownership_is_limited_to_immutable_walls() {
         ("top_skin", false),
     ] {
         let json = format!(
-            r#"{{"kind":"{kind}","owner":{{"kind":"wall"}},"width":{{"kind":"constant","width_mm":0.45}},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
+            r#"{{"kind":"{kind}","owner":{{"kind":"wall"}},"width":{{"kind":"constant","width_mm":0.45}},"material_domain":null,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
         );
         assert_eq!(
             serde_json::from_str::<DepositionPath>(&json).is_ok(),
@@ -3203,7 +3233,7 @@ fn unit_wall_ownership_is_limited_to_immutable_walls() {
             "{kind}"
         );
     }
-    let no_wall = r#"{"kind":"perimeter","owner":null,"width":{"kind":"constant","width_mm":0.45},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}"#;
+    let no_wall = r#"{"kind":"perimeter","owner":null,"width":{"kind":"constant","width_mm":0.45},"material_domain":null,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}"#;
     assert!(serde_json::from_str::<DepositionPath>(no_wall).is_err());
     let mut missing_owner = plan();
     missing_owner.layers[0].paths[0].owner = None;
@@ -3265,6 +3295,7 @@ fn skin_witness_deserialization_shares_remaining_allowance_across_domains() {
     let domain = SkinCommandFitDomain {
         region_index: 0,
         region: ProcessRegionCoverage {
+            material_domain: None,
             area_mm2: 0.99,
             fraction: 1.0,
             contributions: vec![ProcessRegionContribution {

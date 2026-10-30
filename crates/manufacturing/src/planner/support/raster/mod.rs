@@ -484,6 +484,7 @@ fn wall_piece(
         paths.last_mut().unwrap().points_mm.push(to);
     } else {
         paths.push(DepositionPath {
+            material_domain: None,
             kind,
             width: WidthProfile::Constant {
                 width_mm: bead_width_mm,

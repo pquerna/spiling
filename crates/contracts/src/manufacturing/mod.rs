@@ -26,6 +26,8 @@ mod diaphragm;
 pub use diaphragm::*;
 mod skin_fit_decode;
 
+mod construction;
+pub use construction::*;
 mod routing;
 pub use routing::*;
 
@@ -414,6 +416,7 @@ enum PathField {
     Owner,
     Width,
     PhysicalZMm,
+    MaterialDomain,
     PointsMm,
 }
 struct PathSeed<'a>(&'a mut SegmentBudget);
@@ -422,7 +425,14 @@ impl<'de> serde::de::DeserializeSeed<'de> for PathSeed<'_> {
     fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
         d.deserialize_struct(
             "DepositionPath",
-            &["kind", "owner", "width", "physical_z_mm", "points_mm"],
+            &[
+                "kind",
+                "owner",
+                "width",
+                "physical_z_mm",
+                "material_domain",
+                "points_mm",
+            ],
             self,
         )
     }
@@ -433,6 +443,7 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
         f.write_str("a deposition path")
     }
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut material_domain = None;
         let mut kind = None;
         let mut owner = None;
         let mut width = None;
@@ -440,6 +451,12 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
         let mut points_mm = None;
         while let Some(field) = map.next_key::<PathField>()? {
             match field {
+                PathField::MaterialDomain => {
+                    if material_domain.is_some() {
+                        return Err(serde::de::Error::duplicate_field("material_domain"));
+                    }
+                    material_domain = Some(map.next_value()?);
+                }
                 PathField::Kind => {
                     if kind.is_some() {
                         return Err(serde::de::Error::duplicate_field("kind"));
@@ -473,6 +490,8 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
             }
         }
         let path = DepositionPath {
+            material_domain: material_domain
+                .ok_or_else(|| serde::de::Error::missing_field("material_domain"))?,
             kind: kind.ok_or_else(|| serde::de::Error::missing_field("kind"))?,
             owner: owner.ok_or_else(|| serde::de::Error::missing_field("owner"))?,
             width: width.ok_or_else(|| serde::de::Error::missing_field("width"))?,
@@ -1329,6 +1348,7 @@ impl ExactSizeIterator for DepositionEdges<'_> {}
 #[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DepositionPath {
+    pub material_domain: Option<MaterialDomainRef>,
     pub kind: DepositionKind,
     /// Immutable original construction purpose, never inferred from Bridge shape.
     pub owner: Option<DepositionOwner>,
@@ -1491,6 +1511,8 @@ pub struct ProcessRegionContribution {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessRegionCoverage {
+    #[serde(deserialize_with = "required_option")]
+    pub material_domain: Option<MaterialDomainRef>,
     pub area_mm2: f64,
     pub fraction: f64,
     #[serde(deserialize_with = "process_contributions")]
@@ -1778,6 +1800,7 @@ fn process_contributions<'de, D: serde::Deserializer<'de>>(
 #[derive(Deserialize)]
 #[serde(field_identifier, rename_all = "snake_case")]
 enum ProcessRegionField {
+    MaterialDomain,
     AreaMm2,
     Fraction,
     Contributions,
@@ -1788,7 +1811,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for ProcessRegionSeed<'_> {
     fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
         d.deserialize_struct(
             "ProcessRegionCoverage",
-            &["area_mm2", "fraction", "contributions"],
+            &["material_domain", "area_mm2", "fraction", "contributions"],
             self,
         )
     }
@@ -1799,11 +1822,18 @@ impl<'de> serde::de::Visitor<'de> for ProcessRegionSeed<'_> {
         f.write_str("a process region with bounded contributions")
     }
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut material_domain = None;
         let mut area_mm2 = None;
         let mut fraction = None;
         let mut contributions = None;
         while let Some(field) = map.next_key::<ProcessRegionField>()? {
             match field {
+                ProcessRegionField::MaterialDomain => {
+                    if material_domain.is_some() {
+                        return Err(serde::de::Error::duplicate_field("material_domain"));
+                    }
+                    material_domain = Some(map.next_value()?);
+                }
                 ProcessRegionField::AreaMm2 => {
                     if area_mm2.is_some() {
                         return Err(serde::de::Error::duplicate_field("area_mm2"));
@@ -1826,6 +1856,8 @@ impl<'de> serde::de::Visitor<'de> for ProcessRegionSeed<'_> {
             }
         }
         Ok(ProcessRegionCoverage {
+            material_domain: material_domain
+                .ok_or_else(|| serde::de::Error::missing_field("material_domain"))?,
             area_mm2: area_mm2.ok_or_else(|| serde::de::Error::missing_field("area_mm2"))?,
             fraction: fraction.ok_or_else(|| serde::de::Error::missing_field("fraction"))?,
             contributions: contributions
@@ -1990,7 +2022,12 @@ impl PlanarRegionCoverage {
                 || !region.fraction.is_finite()
                 || region.fraction <= 0.0
                 || region.fraction > 1.0
-                || (region.contributions.is_empty() && region.fraction != recipe.infill_fraction)
+                || (region.contributions.is_empty()
+                    && region.fraction != recipe.infill_fraction
+                    && !(region.fraction == 1.0
+                        && region
+                            .material_domain
+                            .is_some_and(|r| r.role != MaterialConstructionRole::Core)))
             {
                 return Err(invalid("invalid process region domain or fraction"));
             }
@@ -2252,6 +2289,8 @@ fn sparse_bands<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedPrintPlan {
+    #[serde(deserialize_with = "construction::material_domains")]
+    pub material_domains: Vec<ResolvedMaterialDomain>,
     pub schema_version: u32,
     #[serde(deserialize_with = "layers")]
     pub layers: Vec<PrintLayer>,
@@ -2327,6 +2366,7 @@ impl NormalizedPrintPlan {
             return Err(invalid("unsupported plan schema"));
         }
         self.native_geometry.validate()?;
+        construction::validate_material_domains(self, intent)?;
         diaphragm::validate_layers(&self.layers)?;
         if self.skin_command_fit_bytes()? > MAX_MANUFACTURING_BUNDLE_BYTES as usize {
             return Err(resource(
@@ -3648,7 +3688,7 @@ impl ManufacturingBundle {
             (JobWorkflow::CompleteMarlin { .. }, None)
                 if self.verification.lifecycle_motion_count == 4 => {}
             (JobWorkflow::FixedDualMarlin { job }, Some(routing)) => {
-                if self.provenance.occurrences.len() != 2
+                if self.provenance.occurrences.len() != job.assignments.len()
                     || self
                         .provenance
                         .surface_overlays
@@ -3676,6 +3716,27 @@ impl ManufacturingBundle {
                     {
                         return Err(invalid(
                             "fixed-dual assignment does not bind a captured source occurrence",
+                        ));
+                    }
+                }
+                for construction in &job.surface_constructions {
+                    let occurrence = self
+                        .provenance
+                        .occurrences
+                        .iter()
+                        .find(|o| {
+                            o.occurrence_id == construction.occurrence_id
+                                && o.definition_id == construction.definition_id
+                        })
+                        .ok_or_else(|| {
+                            invalid("surface construction has no captured source occurrence")
+                        })?;
+                    if !self.provenance.definitions.iter().any(|d| {
+                        d.definition_id == occurrence.definition_id
+                            && d.provenance.source_hash == construction.source_hash
+                    }) {
+                        return Err(invalid(
+                            "surface construction immutable source binding mismatch",
                         ));
                     }
                 }

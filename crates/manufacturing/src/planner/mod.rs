@@ -5,6 +5,7 @@
 mod boolean;
 use boolean::budget as boolean_budget;
 mod classification;
+mod color;
 mod neighborhood;
 use neighborhood::SkinNeighborhoods;
 mod bonds;
@@ -865,8 +866,26 @@ fn admit_schedule<'model>(
     } else {
         count
     };
+    let construction_owned_bytes = geometry_bytes(&[
+        native::output_bytes(&sections, &native_surfaces, retained_section_bytes),
+        retained_support_native_bytes,
+        native_coverage.retained_bytes(),
+        schedule.capacity() * std::mem::size_of::<LayerElevation>(),
+    ])?;
+    let mut construction = color::capture(
+        input,
+        &sections,
+        &schedule,
+        &admission.native_bounds,
+        retained_points,
+        construction_owned_bytes,
+        surface_work,
+        cancel,
+    )?;
+    retained_points += construction.points;
     let mut layers = Vec::with_capacity(count as usize);
-    let mut retained_plan_bytes = layers.capacity() * std::mem::size_of::<PrintLayer>();
+    let mut retained_plan_bytes =
+        layers.capacity() * std::mem::size_of::<PrintLayer>() + construction.bytes;
     let mut segments = 0usize;
     let skin_inset = (recipe.perimeter_count as f64 - 0.5) * recipe.bead_width_mm;
     let mut neighborhoods = SkinNeighborhoods::new(&sections, skin_inset, *surface_work)?;
@@ -1041,7 +1060,7 @@ fn admit_schedule<'model>(
                                 )
                             })?;
 
-                        let layout = walls::plan_section_walls(
+                        let layout = construction.walls(
                         walls::WallRequest {
                             material: &sections[current].material,
                             required: &required_material,
@@ -1161,6 +1180,12 @@ fn admit_schedule<'model>(
                         cancel,
                     )?,
                 );
+                construction.classify(
+                    classified.as_mut().expect("classified material regions"),
+                    [elevation.lower_z, z],
+                    neighborhoods.work_mut(),
+                    cancel,
+                )?;
                 classified_owned_bytes = classified
                     .as_mut()
                     .expect("classified process regions")
@@ -1507,6 +1532,7 @@ fn admit_schedule<'model>(
             for path in template {
                 check_cancel(cancel)?;
                 paths.push(DepositionPath {
+                    material_domain: path.material_domain,
                     kind: path.kind,
                     owner: path.owner,
                     width: path.width.clone(),
@@ -2126,6 +2152,7 @@ fn admit_schedule<'model>(
             ));
         }
         let mut result = NormalizedPrintPlan {
+            material_domains: std::mem::take(&mut construction.stored),
             schema_version: MANUFACTURING_SCHEMA_VERSION,
             sparse_bands: Vec::new(),
             process_resolution: process_captures
@@ -2182,6 +2209,7 @@ fn admit_schedule<'model>(
             surface_tolerance_mm: surface::SURFACE_TOLERANCE_MM,
             layer_quantization_mm: LAYER_QUANTIZATION_MM,
         };
+        construction.attribute(&mut result.layers, neighborhoods.work_mut(), cancel)?;
         if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
             for layer in &mut result.layers {
                 let mut right = layer.paths.len();
@@ -2284,6 +2312,7 @@ fn process_domain(
     Ok(ProcessDomain {
         material,
         coverage: ProcessRegionCoverage {
+            material_domain: None,
             area_mm2: 0.0,
             fraction: value.fraction,
             contributions: vec![ProcessRegionContribution {
@@ -2693,10 +2722,15 @@ fn scheduled_layers(
         }
     }
     if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
-        for assignment in &job.assignments {
+        for material in job
+            .assignments
+            .iter()
+            .map(|a| &a.material)
+            .chain(job.surface_constructions.iter().map(|c| &c.shell))
+        {
             let mut previous = bed;
             let mut visited = 0usize;
-            while let Some(boundary) = assignment.material.next_boundary_after(previous)? {
+            while let Some(boundary) = material.next_boundary_after(previous)? {
                 check_cancel(cancel)?;
                 let identical_to_top = (boundary - top).abs()
                     <= 4.0 * f64::EPSILON * boundary.abs().max(top.abs()).max(1.0);

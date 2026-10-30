@@ -275,7 +275,10 @@ pub struct FixedDualJob {
     pub bed_temperature_c: f64,
     pub maximum_bed_temperature_c: f64,
     pub tools: [FixedDualTool; 2],
-    pub assignments: [OccurrenceMaterialAssignment; 2],
+    #[serde(deserialize_with = "assignments")]
+    pub assignments: Vec<OccurrenceMaterialAssignment>,
+    #[serde(deserialize_with = "construction::constructions")]
+    pub surface_constructions: Vec<SurfaceColorConstruction>,
     pub transition_lift_mm: f64,
     /// Allowed tool-zero reference positions, including negative carriage X/Y.
     pub carriage_travel_bounds_mm: AabbMm,
@@ -387,7 +390,14 @@ impl FixedDualJob {
                 ));
             }
         }
-        if self.assignments[0].occurrence_id == self.assignments[1].occurrence_id {
+        if self.assignments.is_empty() || self.assignments.len() > 2 {
+            return Err(invalid(
+                "fixed-dual job requires one or two assigned occurrences",
+            ));
+        }
+        if self.assignments.len() == 2
+            && self.assignments[0].occurrence_id == self.assignments[1].occurrence_id
+        {
             return Err(invalid("each routed occurrence must have one assignment"));
         }
         for assignment in &self.assignments {
@@ -407,12 +417,26 @@ impl FixedDualJob {
                 }
             }
         }
-        let a = &self.assignments[0].work_envelope_mm;
-        let b = &self.assignments[1].work_envelope_mm;
-        if !(0..2).any(|axis| a.max[axis] < b.min[axis] || b.max[axis] < a.min[axis]) {
-            return Err(invalid(
-                "routed occurrence work envelopes must be strictly separated in XY",
-            ));
+        for (index, construction) in self.surface_constructions.iter().enumerate() {
+            construction.validate(self)?;
+            if self.surface_constructions[..index]
+                .iter()
+                .any(|c| c.occurrence_id == construction.occurrence_id)
+            {
+                return Err(invalid("one surface arrangement owns each occurrence"));
+            }
+        }
+        if self.surface_constructions.len() > 16 {
+            return Err(invalid("too many surface constructions"));
+        }
+        if self.assignments.len() == 2 {
+            let a = &self.assignments[0].work_envelope_mm;
+            let b = &self.assignments[1].work_envelope_mm;
+            if !(0..2).any(|axis| a.max[axis] < b.min[axis] || b.max[axis] < a.min[axis]) {
+                return Err(invalid(
+                    "routed occurrence work envelopes must be strictly separated in XY",
+                ));
+            }
         }
         Ok(())
     }
@@ -465,7 +489,36 @@ impl FixedDualJob {
     }
 
     pub fn tool_for_path(&self, path: &DepositionPath) -> Result<u8, ManufacturingError> {
+        if let Some(reference) = path.material_domain {
+            let construction = self
+                .surface_constructions
+                .get(usize::from(reference.construction_index))
+                .ok_or_else(|| invalid("path refers to a missing material construction"))?;
+            let assignment = &self.assignments[self.assignment_for_path(path)?];
+            if assignment.occurrence_id != construction.occurrence_id {
+                return Err(invalid(
+                    "material domain belongs to a different source occurrence",
+                ));
+            }
+            return self.tool_for_material(match reference.role {
+                MaterialConstructionRole::Shell => construction
+                    .shell
+                    .material_id_for_interval(path.physical_z_mm)?,
+                MaterialConstructionRole::Backing | MaterialConstructionRole::Core => {
+                    &construction.white_material_id
+                }
+            });
+        }
         let assignment = &self.assignments[self.assignment_for_path(path)?];
+        if self
+            .surface_constructions
+            .iter()
+            .any(|c| c.occurrence_id == assignment.occurrence_id)
+        {
+            return Err(invalid(
+                "constructed model bead has no material-domain owner",
+            ));
+        }
         self.tool_for_material(
             assignment
                 .material
@@ -777,4 +830,10 @@ mod cycle_tests {
             );
         }
     }
+}
+
+fn assignments<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<OccurrenceMaterialAssignment>, D::Error> {
+    bounded_vec::<D, _, 2>(d)
 }

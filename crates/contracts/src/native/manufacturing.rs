@@ -2202,10 +2202,12 @@ impl TryFrom<rpc::FixedDualJob> for FixedDualJob {
             .tools
             .try_into()
             .map_err(|_| "fixed-dual job requires exactly two tools")?;
-        let assignments: [rpc::OccurrenceMaterialAssignment; 2] = value
-            .assignments
-            .try_into()
-            .map_err(|_| "fixed-dual job requires exactly two assignments")?;
+        if value.assignments.is_empty()
+            || value.assignments.len() > 2
+            || value.surface_constructions.len() > 16
+        {
+            return Err("fixed-dual assignment/construction limits exceeded".into());
+        }
         if rpc::HomingCoordinateContract::try_from(value.homing_contract)
             .map_err(|e| e.to_string())?
             != rpc::HomingCoordinateContract::MarlinNativeCartesian
@@ -2213,7 +2215,6 @@ impl TryFrom<rpc::FixedDualJob> for FixedDualJob {
             return Err("unsupported fixed-dual homing contract".into());
         }
         let [tool0, tool1] = tools;
-        let [assignment0, assignment1] = assignments;
         let result = Self {
             machine_id: value.machine_id,
             configuration: rpc::FixedDualConfiguration::try_from(value.configuration)
@@ -2229,7 +2230,16 @@ impl TryFrom<rpc::FixedDualJob> for FixedDualJob {
             bed_temperature_c: value.bed_temperature_c,
             maximum_bed_temperature_c: value.maximum_bed_temperature_c,
             tools: [tool0.try_into()?, tool1.try_into()?],
-            assignments: [assignment0.try_into()?, assignment1.try_into()?],
+            assignments: value
+                .assignments
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            surface_constructions: value
+                .surface_constructions
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
             transition_lift_mm: value.transition_lift_mm,
             carriage_travel_bounds_mm: required(
                 value.carriage_travel_bounds_mm,
@@ -2268,6 +2278,11 @@ impl TryFrom<FixedDualJob> for rpc::FixedDualJob {
             maximum_bed_temperature_c: value.maximum_bed_temperature_c,
             tools: value
                 .tools
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            surface_constructions: value
+                .surface_constructions
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<_, _>>()?,
@@ -2443,17 +2458,20 @@ mod fixed_dual_wire_tests {
             bed_temperature_c: 60.0,
             maximum_bed_temperature_c: 100.0,
             tools: [tool(0), tool(1)],
-            assignments: std::array::from_fn(|index| OccurrenceMaterialAssignment {
-                occurrence_id: OccurrenceId::new(index as u32 + 1).unwrap(),
-                material: OccurrenceMaterial::Uniform {
-                    material_id: format!("material-{index}"),
-                },
-                work_envelope_mm: AabbMm::new(
-                    [index as f64 * 40.0, 10.0, 0.0],
-                    [index as f64 * 40.0 + 20.0, 30.0, 20.0],
-                )
-                .unwrap(),
-            }),
+            surface_constructions: Vec::new(),
+            assignments: (0..2)
+                .map(|index| OccurrenceMaterialAssignment {
+                    occurrence_id: OccurrenceId::new(index as u32 + 1).unwrap(),
+                    material: OccurrenceMaterial::Uniform {
+                        material_id: format!("material-{index}"),
+                    },
+                    work_envelope_mm: AabbMm::new(
+                        [index as f64 * 40.0, 10.0, 0.0],
+                        [index as f64 * 40.0 + 20.0, 30.0, 20.0],
+                    )
+                    .unwrap(),
+                })
+                .collect(),
             transition_lift_mm: 2.0,
             carriage_travel_bounds_mm: AabbMm::new([-30.0, -30.0, 0.0], [200.0; 3]).unwrap(),
             carriage_body_bounds_mm: AabbMm::new([-5.0, -5.0, 1.0], [25.0, 5.0, 10.0]).unwrap(),
@@ -2476,7 +2494,7 @@ mod fixed_dual_wire_tests {
             assert!(FixedDualJob::try_from(invalid).is_err());
             let mut invalid = wire.clone();
             invalid.assignments = vec![wire.assignments[0].clone(); count];
-            assert!(FixedDualJob::try_from(invalid).is_err());
+            assert_eq!(FixedDualJob::try_from(invalid).is_err(), count != 1);
         }
         for enum_value in [0, 999] {
             let mut invalid = wire.clone();
@@ -2748,5 +2766,84 @@ mod routed_report_wire_tests {
         let mut invalid = summary;
         invalid.routing.as_mut().unwrap().tools[0].waste_filament_length_mm = f64::INFINITY;
         assert!(rpc::ManufacturingSummary::try_from(invalid).is_err());
+    }
+}
+
+impl TryFrom<rpc::SurfaceColorConstruction> for SurfaceColorConstruction {
+    type Error = String;
+    fn try_from(value: rpc::SurfaceColorConstruction) -> Result<Self, String> {
+        if value.faces.is_empty() || value.faces.len() > MAX_SURFACE_COLOR_FACES {
+            return Err("surface construction face limit exceeded".into());
+        }
+        let shell = match required(value.shell, "surface shell material")? {
+            rpc::surface_color_construction::Shell::Uniform(v) => OccurrenceMaterial::Uniform {
+                material_id: v.material_id,
+            },
+            rpc::surface_color_construction::Shell::LayerCycle(v) => {
+                OccurrenceMaterial::LayerCycle {
+                    recipe: required(v.recipe, "surface shell cycle")?.try_into()?,
+                    material_ids: v
+                        .material_ids
+                        .try_into()
+                        .map_err(|_| "surface cycle needs two materials")?,
+                }
+            }
+        };
+        Ok(Self {
+            occurrence_id: OccurrenceId::new(value.occurrence_id).map_err(|e| e.to_string())?,
+            definition_id: DefinitionId::parse(value.definition_id).map_err(|e| e.to_string())?,
+            source_hash: SourceHash::parse(value.source_hash).map_err(|e| e.to_string())?,
+            faces: value
+                .faces
+                .into_iter()
+                .map(|v| {
+                    Ok(SurfaceColorFace {
+                        face_id: crate::geometry::FaceId::parse(v.face_id)
+                            .map_err(|e| e.to_string())?,
+                        skin_depth_mm: v.skin_depth_mm,
+                        backing_depth_mm: v.backing_depth_mm,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+            shell,
+            white_material_id: value.white_material_id,
+        })
+    }
+}
+impl TryFrom<SurfaceColorConstruction> for rpc::SurfaceColorConstruction {
+    type Error = String;
+    fn try_from(value: SurfaceColorConstruction) -> Result<Self, String> {
+        let shell = match value.shell {
+            OccurrenceMaterial::Uniform { material_id } => {
+                rpc::surface_color_construction::Shell::Uniform(rpc::UniformOccurrenceMaterial {
+                    material_id,
+                })
+            }
+            OccurrenceMaterial::LayerCycle {
+                recipe,
+                material_ids,
+            } => rpc::surface_color_construction::Shell::LayerCycle(
+                rpc::LayerCycleOccurrenceMaterial {
+                    recipe: Some((&recipe).try_into()?),
+                    material_ids: material_ids.into(),
+                },
+            ),
+        };
+        Ok(Self {
+            occurrence_id: value.occurrence_id.get(),
+            definition_id: value.definition_id.into(),
+            source_hash: value.source_hash.into(),
+            faces: value
+                .faces
+                .into_iter()
+                .map(|v| rpc::SurfaceColorFace {
+                    face_id: v.face_id.into(),
+                    skin_depth_mm: v.skin_depth_mm,
+                    backing_depth_mm: v.backing_depth_mm,
+                })
+                .collect(),
+            shell: Some(shell),
+            white_material_id: value.white_material_id,
+        })
     }
 }

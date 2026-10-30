@@ -3123,6 +3123,7 @@ mod tests {
 
     fn row(kind: DepositionKind, a: f64, b: f64, z: f64) -> DepositionPath {
         DepositionPath {
+            material_domain: None,
             kind,
             width: WidthProfile::Constant { width_mm: 0.6 },
             physical_z_mm: [z - 0.4, z],
@@ -3331,6 +3332,7 @@ mod tests {
         let recipe = crate::planner::tests::recipe(0.2);
         let cancel = AtomicBool::new(false);
         let previous = [3.0, 7.5].map(|x| DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             width: WidthProfile::Constant { width_mm: 0.6 },
             physical_z_mm: [0.0, 0.4],
@@ -3450,6 +3452,7 @@ mod tests {
                 .into_iter()
                 .flatten()
                 .map(|x| DepositionPath {
+                    material_domain: None,
                     kind: DepositionKind::SparseFill,
                     width: WidthProfile::Constant { width_mm: 0.6 },
                     physical_z_mm: [0.0, 0.4],
@@ -3558,6 +3561,7 @@ mod tests {
             };
             let previous = [2.5, 7.5].map(|x| {
                 orient(DepositionPath {
+                    material_domain: None,
                     kind: DepositionKind::SparseFill,
                     width: WidthProfile::Constant { width_mm: width },
                     physical_z_mm: [0.0, 0.4],
@@ -3662,6 +3666,7 @@ mod tests {
         // another demanded row cannot simply relabel that supported alternative.
         let required = vec![row(DepositionKind::TopSkin, 1.1, 1.355, 0.8)];
         let prior = [0.75, 3.0].map(|x| DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             owner: None,
             width: WidthProfile::PerEdge {
@@ -3751,6 +3756,7 @@ mod tests {
         ]]);
         let required = vec![row(DepositionKind::TopSkin, 3.2, 6.8, 0.8)];
         let prior = [2.5, 7.5].map(|x| DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             width: WidthProfile::Constant { width_mm: 0.6 },
             physical_z_mm: [0.0, 0.4],
@@ -4070,6 +4076,7 @@ mod tests {
             recipe: &recipe,
         };
         let required = vec![DepositionPath {
+            material_domain: None,
             kind: DepositionKind::TopSkin,
             width: WidthProfile::Constant {
                 width_mm: recipe.bead_width_mm,

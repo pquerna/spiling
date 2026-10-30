@@ -97,7 +97,28 @@ pub(super) fn admit<'a>(
         add("invalid_intent", e.to_string(), None, None);
     }
     if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
-        if input.occurrences.len() != 2
+        for construction in &job.surface_constructions {
+            let source = input
+                .occurrences
+                .iter()
+                .find(|o| {
+                    o.occurrence_id == construction.occurrence_id
+                        && o.definition_id == construction.definition_id
+                })
+                .and_then(|o| input.definitions.get(&o.definition_id));
+            if source.is_none_or(|native| {
+                native.provenance().source_hash != construction.source_hash
+                    || construction.faces.iter().any(|f| {
+                        !native
+                            .faces()
+                            .iter()
+                            .any(|actual| actual.face_id == f.face_id)
+                    })
+            }) {
+                add("invalid_surface_targets", "Surface material construction does not bind the immutable native source/face table".into(), Some(construction.occurrence_id), None);
+            }
+        }
+        if input.occurrences.len() != job.assignments.len()
             || job.assignments.iter().any(|assignment| {
                 input
                     .occurrences
@@ -107,7 +128,13 @@ pub(super) fn admit<'a>(
                     != 1
             })
         {
-            add("fixed_dual_sources", "Fixed-dual routing requires exactly the two explicitly assigned native occurrences".into(), None, None);
+            add(
+                "fixed_dual_sources",
+                "Fixed-dual routing requires exactly the explicitly assigned native occurrences"
+                    .into(),
+                None,
+                None,
+            );
         }
         if !matches!(input.intent.recipe.supports, SupportPolicy::Disabled)
             || !matches!(input.intent.recipe.sparse_infill, SparseInfillPolicy::Fine)

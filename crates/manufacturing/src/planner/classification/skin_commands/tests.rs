@@ -22,6 +22,7 @@ fn domain() -> SkinCommandFitDomain {
     SkinCommandFitDomain {
         region_index: 0,
         region: ProcessRegionCoverage {
+            material_domain: None,
             area_mm2: 23.96,
             fraction: 1.0,
             contributions: vec![ProcessRegionContribution {
@@ -39,6 +40,7 @@ fn domain() -> SkinCommandFitDomain {
 }
 fn paths() -> Vec<DepositionPath> {
     vec![DepositionPath {
+        material_domain: None,
         kind: DepositionKind::BottomSkin,
         owner: Some(DepositionOwner::MandatorySkin {
             skin: ProcessSkinKind::BottomSkin,
@@ -100,6 +102,7 @@ fn minimum_skin_never_extends_through_a_protected_source_hole() {
 fn minimum_skin_cannot_leave_a_positive_subminimum_regional_remainder() {
     let mut paths = paths();
     paths.push(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::SolidFill,
         owner: Some(DepositionOwner::Regional { region_index: 0 }),
         width: WidthProfile::Constant { width_mm: 0.45 },
@@ -182,6 +185,7 @@ fn minimum_skin_searches_shorter_permitted_lengths_to_preserve_regional_material
     let mut paths = paths();
     paths[0].points_mm = vec![[0.0, 1.5, 0.4], [0.010, 1.5, 0.4]];
     paths.push(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::SolidFill,
         owner: Some(DepositionOwner::Regional { region_index: 0 }),
         width: WidthProfile::Constant { width_mm: 0.45 },
@@ -200,6 +204,7 @@ fn regional_reservation_consumes_complete_actual_stroke_without_a_zero_command_t
     let mut paths = paths();
     paths[0].points_mm = vec![[0.0, 1.5, 0.4], [0.000003, 1.5, 0.4]];
     paths.push(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::SolidFill,
         owner: Some(DepositionOwner::Regional { region_index: 0 }),
         width: WidthProfile::Constant { width_mm: 0.45 },

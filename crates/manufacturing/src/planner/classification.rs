@@ -312,6 +312,7 @@ impl ClassifiedRegions {
             process_interfaces: Vec::new(),
             process_regions: if interior_area > 0.0 {
                 vec![ProcessRegionCoverage {
+                    material_domain: None,
                     area_mm2: interior_area,
                     fraction: recipe.infill_fraction,
                     contributions: Vec::new(),
@@ -610,6 +611,7 @@ impl ClassifiedRegions {
                     domain: owned,
                     frame_origin_mm: None,
                     coverage: ProcessRegionCoverage {
+                        material_domain: None,
                         area_mm2: area,
                         fraction,
                         contributions: contributors,
@@ -2642,6 +2644,7 @@ impl ClassifiedRegions {
                             let mut proposal = super::support::RasterCandidate {
                                 skin_command_fits: Vec::new(),
                                 paths: vec![DepositionPath {
+                                    material_domain: None,
                                     kind: DepositionKind::Bridge,
                                     owner: Some(DepositionOwner::RegionalSkinBridge {
                                         region_index,
@@ -3893,6 +3896,7 @@ mod ownership_tests {
         // Only rows y=1 and y=5 have actual lower strokes. The earlier Half
         // proposal touches the minimum vertex and cannot construct its row.
         let previous = [1.0, 5.0].map(|y| DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             owner: Some(DepositionOwner::Regional { region_index: 0 }),
             width: WidthProfile::Constant {
@@ -4015,6 +4019,7 @@ mod skin_bridge_tests {
         let interior = InteriorRegion {
             domain: MultiPolygon(vec![regional.clone()]),
             coverage: ProcessRegionCoverage {
+                material_domain: None,
                 area_mm2: regional.unsigned_area(),
                 fraction: 0.20,
                 contributions: Vec::new(),
@@ -4047,6 +4052,7 @@ mod skin_bridge_tests {
             111.7226159864175,
         ]
         .map(|y| DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             owner: None,
             width: WidthProfile::Constant { width_mm: 0.45 },
@@ -4055,6 +4061,7 @@ mod skin_bridge_tests {
         })
         .to_vec();
         previous.push(DepositionPath {
+            material_domain: None,
             kind: DepositionKind::Perimeter,
             owner: Some(DepositionOwner::Wall),
             width: WidthProfile::Constant { width_mm: 0.45 },
@@ -4065,6 +4072,7 @@ mod skin_bridge_tests {
             ],
         });
         let required = vec![DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SparseFill,
             owner: Some(DepositionOwner::Regional { region_index: 0 }),
             width: WidthProfile::Constant { width_mm: 0.45 },

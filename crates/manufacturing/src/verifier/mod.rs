@@ -10,6 +10,7 @@ use spiling_contracts::manufacturing::program_coordinates::{
 };
 use spiling_contracts::manufacturing::*;
 
+mod construction;
 mod expected;
 mod replay;
 pub(crate) use replay::ReplaySink;
@@ -1140,6 +1141,7 @@ pub(crate) fn verify_actual(
     drop(plate_contacts);
     skin_bridges::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     skin_commands::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
+    construction::verify(plan, &mut geometry_work, cancel)?;
     let routing = if let Some(routed) = &mut route {
         travel_segments += routed.travel_segments;
         retraction_count += routed.retraction_count;
@@ -1188,6 +1190,7 @@ pub(crate) fn verify_actual(
             "Permanent plate coverage (when present): source permission/winner, exact slab/layer/region bijection, separate area, actual XYZ6 whole-line raw-extent/protected-hole coverage and no ordinary duplicate material".into(),
             "Permanent plate support (when present): actual base/later intervals and first upper landing use direct lower strokes/genuine Bridge; separate exterior/hole-wall attachment and order are checked without temporary-support substitution".into(),
             "Mixed skin bridges: demanded regional terminal, actual XYZ6 transition/domains/holes, minimal nominal join, whole-stroke lower anchors, charged joint overlap and per-event ownership; no duplicate extrusion".into(),
+            if plan.material_domains.is_empty() { "No source-bound surface material construction".into() } else { "Source-bound physical shell/solid backing/core: complete nominal bead ownership, protected voids, disjoint intended volumes and independent interval clearance from neighboring material domains".into() },
             "Minimum skin commands: complete original required interval, same-row minimum-only construction, captured ordinary winner/source/holes and actual final-stroke bijection; added volume is stroke-derived, not enlarged mandatory area".into(),
             "Conditional stationary E-only retraction, declared distance/feed, bounded travel Z-hop and exact recovery; recovered extrusion is not deposited material".into(),
             if routing.is_some() { "Fixed-dual Marlin 2.1.2.5: explicit offsets and S1 logical/carriage frame, selection E0 epochs, per-feeder exact E8 debt, addressed heating/cooling waits, supported waste and both-hotend shutdown independently decoded".into() } else if job.is_some() { "Marlin 2 typed complete job: scale/volumetric reset, native homing declaration, heating/cooling waits, bounded priming, final barriers/lift/park/heater/fan/motor shutdown".into() } else { "Explicit diagnostic body-only workflow; no executable lifecycle".into() },

@@ -161,6 +161,134 @@ impl Scene {
 const BOX: &[u8] = include_bytes!("../../../fixtures/geometry/box-mm.step");
 const CYLINDER: &[u8] = include_bytes!("../../../fixtures/geometry/cylinder.step");
 const HOLE: &[u8] = include_bytes!("../../../fixtures/geometry/through-hole.step");
+
+fn surface_color_intent(scene: &Scene) -> ManufacturingIntent {
+    let mut intent: ManufacturingIntent = serde_json::from_str(include_str!(
+        "../../../fixtures/manufacturing/fixed-dual.intent.json"
+    ))
+    .unwrap();
+    let native = scene.definitions.values().next().unwrap();
+    let occurrence = &scene.occurrences[0];
+    let face = native
+        .faces()
+        .iter()
+        .find(|face| {
+            native
+                .vertical_wall_face(&face.face_id)
+                .is_ok_and(|f| f.outward_normal[1] < -0.5)
+        })
+        .unwrap();
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    job.assignments.truncate(1);
+    job.assignments[0].material = OccurrenceMaterial::Uniform {
+        material_id: job.tools[1].material.id.clone(),
+    };
+    let bounds = native.bounds_mm();
+    job.assignments[0].work_envelope_mm = AabbMm::new(
+        std::array::from_fn(|i| bounds.min[i] + occurrence.pose.translation_mm[i] - 1.0),
+        std::array::from_fn(|i| bounds.max[i] + occurrence.pose.translation_mm[i] + 1.0),
+    )
+    .unwrap();
+    job.surface_constructions = vec![SurfaceColorConstruction {
+        occurrence_id: occurrence.occurrence_id,
+        definition_id: occurrence.definition_id.clone(),
+        source_hash: native.provenance().source_hash.clone(),
+        faces: vec![SurfaceColorFace {
+            face_id: face.face_id.clone(),
+            skin_depth_mm: 1.2,
+            backing_depth_mm: 1.2,
+        }],
+        shell: OccurrenceMaterial::Uniform {
+            material_id: job.tools[0].material.id.clone(),
+        },
+        white_material_id: job.tools[1].material.id.clone(),
+    }];
+    intent
+}
+
+#[test]
+fn native_face_color_constructs_owned_skin_backing_core_and_replays_protected_hole() {
+    for bytes in [BOX, HOLE] {
+        let scene = Scene::new(bytes, &[pose(20.0, 20.0, 0.0)]);
+        let mut intent = surface_color_intent(&scene);
+        intent.recipe.infill_fraction = 0.25;
+        let bundle = scene.compile(&intent).unwrap();
+        assert!(!bundle.plan.material_domains.is_empty());
+        for role in [
+            MaterialConstructionRole::Shell,
+            MaterialConstructionRole::Backing,
+            MaterialConstructionRole::Core,
+        ] {
+            assert!(
+                bundle
+                    .plan
+                    .layers
+                    .iter()
+                    .flat_map(|l| &l.paths)
+                    .any(|p| p.material_domain.is_some_and(|r| r.role == role))
+            );
+        }
+        assert!(
+            bundle
+                .plan
+                .layers
+                .iter()
+                .all(|l| l.paths.iter().all(|p| p.material_domain.is_some()))
+        );
+        if bytes == HOLE {
+            assert!(
+                bundle
+                    .plan
+                    .layers
+                    .iter()
+                    .all(|l| l.region_coverage.protected_hole_area_mm2 > 0.0)
+            );
+        }
+        let saved = serde_json::to_vec(&bundle).unwrap();
+        let restored = decode_bundle(&saved).unwrap();
+        assert_eq!(bundle.program, restored.program);
+        assert!(
+            verify_bundle(&restored, &AtomicBool::new(false))
+                .unwrap()
+                .verified
+        );
+        let mut wrong = restored.clone();
+        let path = wrong
+            .plan
+            .layers
+            .iter_mut()
+            .flat_map(|l| &mut l.paths)
+            .find(|p| p.material_domain.unwrap().role == MaterialConstructionRole::Shell)
+            .unwrap();
+        path.material_domain.as_mut().unwrap().role = MaterialConstructionRole::Core;
+        assert!(
+            verify_bundle(&wrong, &AtomicBool::new(false)).is_err(),
+            "matching geometry cannot authorize the wrong material"
+        );
+    }
+}
+
+#[test]
+fn native_face_color_rejects_lost_core_wrong_source_and_unprintable_skin() {
+    let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+    for kind in 0..3 {
+        let mut intent = surface_color_intent(&scene);
+        let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+            unreachable!()
+        };
+        match kind {
+            0 => {
+                job.surface_constructions[0].source_hash =
+                    SourceHash::from_bytes(b"different source")
+            }
+            1 => job.surface_constructions[0].faces[0].backing_depth_mm = 100.0,
+            _ => job.surface_constructions[0].faces[0].skin_depth_mm = 0.01,
+        }
+        assert!(scene.compile(&intent).is_err());
+    }
+}
 fn pose(x: f64, y: f64, z: f64) -> RigidPoseMm {
     RigidPoseMm {
         translation_mm: [x, y, z],
@@ -1133,6 +1261,7 @@ fn through_bore_splits_actual_separator_and_replay_refuses_a_forged_hole_crossin
         .paths
         .retain(|p| p.kind != DepositionKind::SeparatorWall);
     layer.paths.push(DepositionPath {
+        material_domain: None,
         kind: DepositionKind::SeparatorWall,
         owner: None,
         width: WidthProfile::Constant {
@@ -1869,6 +1998,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
     bundle.plan.layers[0].z_mm = 0.4;
     bundle.plan.layers[0].paths = vec![
         DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SolidFill,
             owner: None,
             width: WidthProfile::Constant {
@@ -1878,6 +2008,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             points_mm: vec![[1.000_000_4, 1.0, 0.4], [5.0, 1.0, 0.4]],
         },
         DepositionPath {
+            material_domain: None,
             kind: DepositionKind::SolidFill,
             owner: None,
             width: WidthProfile::Constant {

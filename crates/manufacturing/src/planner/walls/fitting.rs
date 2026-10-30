@@ -1547,6 +1547,7 @@ mod tests {
                 owned_bytes: 0,
             };
             let mut path = DepositionPath {
+                material_domain: None,
                 kind: DepositionKind::Perimeter,
                 owner: Some(DepositionOwner::Wall),
                 width: WidthProfile::Constant { width_mm: 0.6 },
@@ -1693,6 +1694,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut path = DepositionPath {
+            material_domain: None,
             kind: DepositionKind::Perimeter,
             owner: Some(DepositionOwner::Wall),
             width: WidthProfile::Constant { width_mm: 0.45 },
@@ -1779,6 +1781,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut path = DepositionPath {
+            material_domain: None,
             kind: DepositionKind::Perimeter,
             owner: Some(DepositionOwner::Wall),
             width: WidthProfile::PerEdge {
@@ -1895,6 +1898,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut path = DepositionPath {
+            material_domain: None,
             kind: DepositionKind::Perimeter,
             owner: Some(DepositionOwner::Wall),
             width: WidthProfile::Constant { width_mm: 0.45 },
@@ -2002,6 +2006,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut path = DepositionPath {
+            material_domain: None,
             kind: DepositionKind::Perimeter,
             owner: Some(DepositionOwner::Wall),
             width: WidthProfile::Constant { width_mm: 0.45 },
@@ -2130,6 +2135,7 @@ mod tests {
             owned_bytes: 0,
         };
         let mut path = DepositionPath {
+            material_domain: None,
             kind: DepositionKind::Perimeter,
             owner: Some(DepositionOwner::Wall),
             width: WidthProfile::Constant { width_mm: 0.45 },

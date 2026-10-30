@@ -265,6 +265,15 @@ pub(super) fn plan_section_walls(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<WallPlan, ManufacturingError> {
+    plan_section_walls_against(request, false, work, cancel)
+}
+
+fn plan_section_walls_against<'a>(
+    request: WallRequest<'a>,
+    strict_material: bool,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<WallPlan, ManufacturingError> {
     check_cancel(cancel)?;
 
     request.limits.validate()?;
@@ -366,8 +375,11 @@ pub(super) fn plan_section_walls(
                 // values; constant-to-fitted output needs at most two N buffers.
                 + 3 * std::mem::size_of::<f64>() + 256);
             let assembly_request = staged_request(&candidate_request, assembly_bytes)?;
-            let (paths, correspondence) =
+            let (mut paths, correspondence) =
                 assemble(&edge_output, &junctions, &assembly_request, work, cancel)?;
+            if strict_material {
+                fit_material_boundaries(&mut paths, &candidate_request, work, cancel)?;
+            }
             candidate_request.owned_bytes = candidate_request
                 .owned_bytes
                 .checked_add(path_bytes(&paths))
@@ -460,6 +472,66 @@ pub(super) fn plan_section_walls(
         wall_area_mm2,
         protected_hole_area_mm2,
     })
+}
+
+/// Use the same source wall construction and qualification with an additional
+/// actual-edge width fit at material boundaries. Neither source domains nor the
+/// existing coverage allowance change.
+pub(super) fn plan_material_domain_walls(
+    request: WallRequest<'_>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<WallPlan, ManufacturingError> {
+    plan_section_walls_against(request, true, work, cancel)
+}
+
+fn fit_material_boundaries(
+    paths: &mut [DepositionPath],
+    request: &WallRequest<'_>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    use geo::{Coord, Distance, Euclidean, Line};
+    for path in paths {
+        let mut widths = Vec::with_capacity(path.points_mm.len() - 1);
+        for edge in path.checked_edges()? {
+            let a = program_coordinates::project_xyz6_point_mm(edge.points_mm[0])?;
+            let b = program_coordinates::project_xyz6_point_mm(edge.points_mm[1])?;
+            let line = Line::new(Coord { x: a[0], y: a[1] }, Coord { x: b[0], y: b[1] });
+            let mut clearance = f64::INFINITY;
+            for boundary in request
+                .material
+                .0
+                .iter()
+                .flat_map(|p| std::iter::once(p.exterior()).chain(p.interiors()))
+                .flat_map(|r| r.lines())
+            {
+                check_cancel(cancel)?;
+                boolean::charge(work, 1)?;
+                clearance = clearance.min(Euclidean.distance(&line, &boundary));
+            }
+            // One Cartesian quantum provides a strict candidate reserve. The
+            // independent interval capsule predicate owns final admission.
+            let width = edge.width_mm.min(2.0 * (clearance - 0.000001));
+            if !request.limits.admits(width, path.height_mm()) {
+                return Err(unsupported(
+                    "material boundary leaves no admitted full-bead width",
+                ));
+            }
+            widths.push(width);
+        }
+        if widths.iter().any(|w| !w.is_finite() || *w <= 0.0) {
+            return Err(unsupported("unconditioned material-boundary width"));
+        }
+        if widths.iter().all(|w| *w == widths[0]) {
+            path.width = WidthProfile::Constant {
+                width_mm: widths[0],
+            };
+        } else {
+            path.width = WidthProfile::PerEdge { widths_mm: widths };
+        }
+    }
+    Ok(())
 }
 
 fn refine(
@@ -821,6 +893,7 @@ fn assemble(
                 current = next;
             }
             let mut path = DepositionPath {
+                material_domain: None,
                 kind: DepositionKind::Perimeter,
                 owner: Some(DepositionOwner::Wall),
                 width,

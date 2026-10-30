@@ -542,6 +542,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             verifier_version: "5".into(),
         },
         plan: NormalizedPrintPlan {
+            material_domains: Vec::new(),
             schema_version: MANUFACTURING_SCHEMA_VERSION,
             process_resolution: vec![],
             sparse_bands: vec![],
@@ -576,6 +577,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                 height_mm: 0.2,
                 section_z_mm: 0.1,
                 paths: vec![DepositionPath {
+                    material_domain: None,
                     kind: DepositionKind::BottomSkin,
                     width: spiling_contracts::manufacturing::WidthProfile::Constant {
                         width_mm: 0.4,

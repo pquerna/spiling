@@ -4164,6 +4164,7 @@ mod actual_deposition_tests {
                 support_nominal_deposition_volume_mm3: support_area * volume,
                 process_regions: if object_area > 0.0 {
                     vec![ProcessRegionCoverage {
+                material_domain: None,
                         area_mm2: object_area,
                         fraction: 1.0,
                         contributions: Vec::new(),
@@ -4172,6 +4173,7 @@ mod actual_deposition_tests {
                     Vec::new()
                 }, },
                 paths: vec![DepositionPath {
+                    material_domain: None,
                     kind,
                     owner: match kind { DepositionKind::BottomSkin => Some(spiling_contracts::manufacturing::DepositionOwner::MandatorySkin { skin: spiling_contracts::manufacturing::ProcessSkinKind::BottomSkin }), DepositionKind::TopSkin => Some(spiling_contracts::manufacturing::DepositionOwner::MandatorySkin { skin: spiling_contracts::manufacturing::ProcessSkinKind::TopSkin }), _ => None },
                     width: spiling_contracts::manufacturing::WidthProfile::Constant { width_mm: 0.5 },

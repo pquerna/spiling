@@ -3,7 +3,7 @@
     "schema_version": 11,
     "id": "software-fixed-dual-marlin-reference",
     "revision": "1",
-    "name": "Fixed-dual Marlin reference — software only, physically unqualified",
+    "name": "Fixed-dual Marlin reference \u2014 software only, physically unqualified",
     "coordinate_frame": "right_handed_millimetres",
     "build_envelope": {
       "min": [
@@ -283,7 +283,8 @@
           0,
           210,
           20
-        ]
+        ],
+        "surface_constructions": []
       }
     },
     "nozzle_diameter_mm": 0.4,

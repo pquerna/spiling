@@ -803,6 +803,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "bounded_cylindrical_rib_construction_v1",
             "fixed_dual_material_routing_v1",
             "whole_occurrence_layer_cycles_v1",
+            "source_bound_surface_color_construction_v1",
         ]
         .into_iter()
         .map(str::to_owned)
