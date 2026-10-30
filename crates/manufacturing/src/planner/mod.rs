@@ -2152,6 +2152,7 @@ fn admit_schedule<'model>(
             ));
         }
         let mut result = NormalizedPrintPlan {
+            material_frames: std::mem::take(&mut construction.frames),
             material_domains: std::mem::take(&mut construction.stored),
             schema_version: MANUFACTURING_SCHEMA_VERSION,
             sparse_bands: Vec::new(),

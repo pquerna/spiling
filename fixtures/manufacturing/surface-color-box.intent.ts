@@ -10,7 +10,7 @@ const construction: SurfaceColorConstruction = {
   occurrence_id: 1,
   definition_id: "ff6a13679b0d6c958f4bbd9716249290a72e4cec9c5df3a61cb4c4f3f93e2495",
   source_hash: "1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98",
-  faces: [{ face_id: "step:25", skin_depth_mm: 1.2, backing_depth_mm: 1.2 }],
+  faces: [{ face_id: "step:25", skin_depth_mm: 1.2, backing_depth_mm: 1.2, mask: null }],
   shell: { kind: "uniform", material_id: "software-pla-a" },
   white_material_id: "software-pla-b",
 };

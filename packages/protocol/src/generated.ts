@@ -358,7 +358,11 @@ carriage_body_bounds_mm: AabbMm, inactive_nozzle_radius_mm: number, park_positio
 
 export type SurfaceColorConstruction = { occurrence_id: OccurrenceId, definition_id: DefinitionId, source_hash: SourceHash, faces: Array<SurfaceColorFace>, shell: OccurrenceMaterial, white_material_id: string, };
 
-export type SurfaceColorFace = { face_id: FaceId, skin_depth_mm: number, backing_depth_mm: number, };
+export type SurfaceColorFace = { face_id: FaceId, skin_depth_mm: number, backing_depth_mm: number, mask: SurfaceColorMask | null, };
+
+export type SurfaceColorMask = { min_u_mm: number, max_u_mm: number, };
+
+export type SurfaceColorFrame = { construction_index: number, face_id: FaceId, origin_mm: [number, number, number], horizontal_direction: [number, number, number], outward_normal: [number, number, number], width_mm: number, source_z_mm: [number, number], selected_u_mm: [number, number], };
 
 export type MaterialConstructionRole = "shell" | "backing" | "core";
 
@@ -481,7 +485,7 @@ export type NativeGeometryCoverageSummary = { requested_shape_error_mm: number, 
  */
 slab_count: number, certified_layer_count: number, event_count: number, geometry_work: bigint, evidence: PreflightEvidence, source_feature_coverage: NativeFeatureCoverageSummary, skin_coverage: SkinCoverageScope, support_clearance: SupportClearanceScope, };
 
-export type NormalizedPrintPlan = { material_domains: Array<ResolvedMaterialDomain>, schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, };
+export type NormalizedPrintPlan = { material_frames: Array<SurfaceColorFrame>, material_domains: Array<ResolvedMaterialDomain>, schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, };
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 

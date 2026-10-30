@@ -334,6 +334,11 @@ message SurfaceColorFace {
   string face_id = 1;
   double skin_depth_mm = 2;
   double backing_depth_mm = 3;
+  SurfaceColorMask mask = 4;
+}
+message SurfaceColorMask {
+  double min_u_mm = 1;
+  double max_u_mm = 2;
 }
 message SurfaceColorConstruction {
   uint32 occurrence_id = 1;

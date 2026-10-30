@@ -188,7 +188,8 @@
               {
                 "face_id": "step:25",
                 "skin_depth_mm": 1.2,
-                "backing_depth_mm": 1.2
+                "backing_depth_mm": 1.2,
+                "mask": null
               }
             ],
             "shell": {

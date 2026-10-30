@@ -174,6 +174,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         FixedDualJob::decl(&config),
         SurfaceColorConstruction::decl(&config),
         SurfaceColorFace::decl(&config),
+        SurfaceColorMask::decl(&config),
+        SurfaceColorFrame::decl(&config),
         MaterialConstructionRole::decl(&config),
         MaterialDomainRef::decl(&config),
         MaterialDomainPolygon::decl(&config),

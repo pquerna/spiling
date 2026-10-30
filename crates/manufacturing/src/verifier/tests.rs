@@ -163,6 +163,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         },
     };
     let mut plan = NormalizedPrintPlan {
+        material_frames: Vec::new(),
         material_domains: Vec::new(),
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         sparse_bands: vec![],

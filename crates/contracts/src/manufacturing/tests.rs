@@ -703,6 +703,7 @@ fn accepted_coverage_binds_recipe_occurrences_schedule_and_visible_summary() {
 
 fn plan() -> NormalizedPrintPlan {
     NormalizedPrintPlan {
+        material_frames: Vec::new(),
         material_domains: Vec::new(),
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         sparse_bands: vec![],

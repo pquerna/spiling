@@ -2798,6 +2798,10 @@ impl TryFrom<rpc::SurfaceColorConstruction> for SurfaceColorConstruction {
                 .into_iter()
                 .map(|v| {
                     Ok(SurfaceColorFace {
+                        mask: v.mask.map(|m| SurfaceColorMask {
+                            min_u_mm: m.min_u_mm,
+                            max_u_mm: m.max_u_mm,
+                        }),
                         face_id: crate::geometry::FaceId::parse(v.face_id)
                             .map_err(|e| e.to_string())?,
                         skin_depth_mm: v.skin_depth_mm,
@@ -2837,6 +2841,10 @@ impl TryFrom<SurfaceColorConstruction> for rpc::SurfaceColorConstruction {
                 .faces
                 .into_iter()
                 .map(|v| rpc::SurfaceColorFace {
+                    mask: v.mask.map(|m| rpc::SurfaceColorMask {
+                        min_u_mm: m.min_u_mm,
+                        max_u_mm: m.max_u_mm,
+                    }),
                     face_id: v.face_id.into(),
                     skin_depth_mm: v.skin_depth_mm,
                     backing_depth_mm: v.backing_depth_mm,

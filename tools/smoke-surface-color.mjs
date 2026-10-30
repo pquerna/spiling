@@ -33,14 +33,14 @@ async function invoke(args, failure = false) {
   }
   assert.equal(result.status, 0, `${receipt}: ${result.stderr}`);
   const report = JSON.parse(result.stdout);
-  assert.match(report.hello.engine_build, /planner28;emitter10;verifier12/);
+  assert.match(report.hello.engine_build, /planner29;emitter10;verifier13/);
   return report;
 }
 const json = async (path) => JSON.parse(await readFile(path, "utf8"));
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const results = [];
-for (const sourceName of ["box-mm.step", "through-hole.step"]) {
-  const name = sourceName.replace(/\.step$/, "");
+for (const [sourceName, mode] of ["box-mm.step", "through-hole.step"].flatMap((source) => [[source, "full"], [source, "window"]])) {
+  const name = sourceName.replace(/\.step$/, "") + "-" + mode;
   const source = join(output, sourceName);
   const project = join(output, `${name}.spiling`);
   await copyFile(join(root, "fixtures", "geometry", sourceName), source);
@@ -66,7 +66,7 @@ for (const sourceName of ["box-mm.step", "through-hole.step"]) {
   job.surface_constructions = [{
     occurrence_id: 1, definition_id: selected.reference.definition_id,
     source_hash: selected.provenance.source_hash,
-    faces: [{ face_id: selected.face.face_id, skin_depth_mm: 1.2, backing_depth_mm: 1.2 }],
+    faces: [{ face_id: selected.face.face_id, skin_depth_mm: 1.2, backing_depth_mm: 1.2, mask: mode === "window" ? { min_u_mm: 4, max_u_mm: 16 } : null }],
     shell: { kind: "uniform", material_id: job.tools[0].material.id },
     white_material_id: job.tools[1].material.id,
   }];
@@ -89,9 +89,19 @@ for (const sourceName of ["box-mm.step", "through-hole.step"]) {
     assert.ok(plan.layers.every((l) => l.region_coverage.protected_hole_area_mm2 > 0));
     assert.ok(plan.material_domains.some((d) => d.polygons.some((p) => p.holes_mm.length > 0)));
   }
+  if (mode === "window") {
+    assert.deepEqual(plan.material_frames[0].selected_u_mm, [4, 16]);
+    assert.deepEqual(plan.material_frames[0].horizontal_direction, [1, 0, 0]);
+    assert.ok(plan.layers.flatMap((l) => l.paths).filter((p) => p.material_domain.role === "shell")
+      .every((p) => p.points_mm.every((point) => point[0] > 24 && point[0] < 36)));
+  }
   const baseline = await readFile(join(exported, "program.gcode"));
   const changed = structuredClone(intent);
-  changed.printer.workflow.job.surface_constructions[0].faces[0].skin_depth_mm = 1.35;
+  if (mode === "window") {
+    changed.printer.workflow.job.surface_constructions[0].faces[0].mask = { min_u_mm: 5, max_u_mm: 17 };
+  } else {
+    changed.printer.workflow.job.surface_constructions[0].faces[0].skin_depth_mm = 1.35;
+  }
   const changedFile = join(output, `${name}-changed.intent.json`);
   await writeFile(changedFile, JSON.stringify(changed, null, 2));
   const changedExport = join(output, `${name}-changed`);
@@ -113,6 +123,8 @@ for (const sourceName of ["box-mm.step", "through-hole.step"]) {
     ["wrong-source", (c) => { c.source_hash = "0".repeat(64); }],
     ["thin-skin", (c) => { c.faces[0].skin_depth_mm = 0.01; }],
     ["lost-core", (c) => { c.faces[0].backing_depth_mm = 100; }],
+    ["mask-outside-face", (c) => { c.faces[0].mask = { min_u_mm: 1, max_u_mm: 1000 }; }],
+    ["thin-window", (c) => { c.faces[0].mask = { min_u_mm: 4, max_u_mm: 4.01 }; }],
   ]) {
     const invalid = structuredClone(intent);
     alter(invalid.printer.workflow.job.surface_constructions[0]);
@@ -120,7 +132,7 @@ for (const sourceName of ["box-mm.step", "through-hole.step"]) {
     await writeFile(invalidFile, JSON.stringify(invalid));
     await invoke(["project", "edit", project, "--intent", invalidFile, "--compile"], true);
   }
-  results.push({ source: sourceName, program_sha256: hash(baseline), replay_sha256: hash(await readFile(replay)), layers: plan.layers.length });
+  results.push({ source: sourceName, mode, program_sha256: hash(baseline), replay_sha256: hash(await readFile(replay)), layers: plan.layers.length });
 }
 await writeFile(join(output, "result.json"), JSON.stringify({ software_only: true, results }, null, 2));
 console.log(JSON.stringify({ output, software_only: true, results }, null, 2));

@@ -1,0 +1,310 @@
+{
+  "printer": {
+    "schema_version": 11,
+    "id": "software-fixed-dual-marlin-reference",
+    "revision": "1",
+    "name": "Fixed-dual Marlin reference — software only, physically unqualified",
+    "coordinate_frame": "right_handed_millimetres",
+    "build_envelope": {
+      "min": [
+        0,
+        0,
+        0
+      ],
+      "max": [
+        220,
+        220,
+        220
+      ]
+    },
+    "components": [
+      {
+        "id": "bed",
+        "role": "bed",
+        "pose": {
+          "translation_mm": [
+            0,
+            0,
+            0
+          ],
+          "rotation_xyzw": [
+            0,
+            0,
+            0,
+            1
+          ]
+        },
+        "shape": {
+          "kind": "box",
+          "bounds_mm": {
+            "min": [
+              0,
+              0,
+              -4
+            ],
+            "max": [
+              220,
+              220,
+              0
+            ]
+          }
+        }
+      },
+      {
+        "id": "toolhead-envelope",
+        "role": "toolhead",
+        "pose": {
+          "translation_mm": [
+            0,
+            0,
+            0
+          ],
+          "rotation_xyzw": [
+            0,
+            0,
+            0,
+            1
+          ]
+        },
+        "shape": {
+          "kind": "cylinder",
+          "radius_mm": 10,
+          "height_mm": 25
+        }
+      }
+    ],
+    "capabilities": {
+      "motion_space": "cartesian_xyz",
+      "extruders": 2,
+      "output_dialect": "marlin2_fixed_dual_gcode_v1",
+      "generated_supports": false
+    },
+    "workflow": {
+      "kind": "fixed_dual_marlin",
+      "job": {
+        "machine_id": "software-fixed-dual-marlin-reference",
+        "configuration": "marlin2125_native_fixed_hotends",
+        "firmware_revision": "e5a167aaa0a671ea6d9b9d98dc0518c88d5caed7",
+        "configuration_hash": "7baa388a82815c8388f786b0c03e7d73fc8df1a1a9e859989e42174ba188b654",
+        "calibration_record_hash": "cfa5864bc575b22bd8131af8bc480d983f67e2cda796a90f5f7f5b7890a776b4",
+        "homing_contract": "marlin_native_cartesian",
+        "home_position_mm": [
+          0,
+          0,
+          0
+        ],
+        "bed_temperature_c": 60,
+        "maximum_bed_temperature_c": 100,
+        "tools": [
+          {
+            "id": "fixed-hotend-0",
+            "feeder_id": "direct-feeder-0",
+            "material": {
+              "id": "software-pla-a",
+              "revision": "1",
+              "declaration_hash": "883b1eaa92941d652997e2092ad5f5cf9aabeba3991c8654782a281dbfbf0111",
+              "polymer_family": "PLA"
+            },
+            "offset_xy_mm": [
+              0,
+              0
+            ],
+            "nozzle_diameter_mm": 0.4,
+            "filament_diameter_mm": 1.75,
+            "deposition_limits": {
+              "min_bead_width_mm": 0.3,
+              "max_bead_width_mm": 0.75,
+              "min_bead_height_mm": 0.000001,
+              "max_bead_height_mm": 0.3
+            },
+            "max_feed_mm_s": 150,
+            "max_volumetric_flow_mm3_s": 12,
+            "nozzle_temperature_c": 200,
+            "standby_temperature_c": 150,
+            "minimum_extrusion_temperature_c": 170,
+            "maximum_nozzle_temperature_c": 250,
+            "retract_filament_mm": 0.6,
+            "retract_speed_mm_s": 25,
+            "minimum_reprime_volume_mm3": 0.1,
+            "waste_line_xy_mm": [
+              [
+                60,
+                160
+              ],
+              [
+                80,
+                160
+              ]
+            ]
+          },
+          {
+            "id": "fixed-hotend-1",
+            "feeder_id": "direct-feeder-1",
+            "material": {
+              "id": "software-pla-b",
+              "revision": "1",
+              "declaration_hash": "fabb4a0c776b0f4d2c0448b562bd106abe5cf10aee2a8e31fca120a1d2cc2f89",
+              "polymer_family": "PLA"
+            },
+            "offset_xy_mm": [
+              25,
+              0
+            ],
+            "nozzle_diameter_mm": 0.4,
+            "filament_diameter_mm": 1.75,
+            "deposition_limits": {
+              "min_bead_width_mm": 0.3,
+              "max_bead_width_mm": 0.75,
+              "min_bead_height_mm": 0.000001,
+              "max_bead_height_mm": 0.3
+            },
+            "max_feed_mm_s": 150,
+            "max_volumetric_flow_mm3_s": 12,
+            "nozzle_temperature_c": 200,
+            "standby_temperature_c": 150,
+            "minimum_extrusion_temperature_c": 170,
+            "maximum_nozzle_temperature_c": 250,
+            "retract_filament_mm": 0.6,
+            "retract_speed_mm_s": 25,
+            "minimum_reprime_volume_mm3": 0.1,
+            "waste_line_xy_mm": [
+              [
+                160,
+                160
+              ],
+              [
+                180,
+                160
+              ]
+            ]
+          }
+        ],
+        "surface_constructions": [
+          {
+            "occurrence_id": 1,
+            "definition_id": "ff6a13679b0d6c958f4bbd9716249290a72e4cec9c5df3a61cb4c4f3f93e2495",
+            "source_hash": "1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98",
+            "faces": [
+              {
+                "face_id": "step:25",
+                "skin_depth_mm": 1.2,
+                "backing_depth_mm": 1.2,
+                "mask": {
+                  "min_u_mm": 4,
+                  "max_u_mm": 16
+                }
+              }
+            ],
+            "shell": {
+              "kind": "uniform",
+              "material_id": "software-pla-a"
+            },
+            "white_material_id": "software-pla-b"
+          }
+        ],
+        "assignments": [
+          {
+            "occurrence_id": 1,
+            "material": {
+              "kind": "uniform",
+              "material_id": "software-pla-b"
+            },
+            "work_envelope_mm": {
+              "min": [
+                19,
+                19,
+                -1
+              ],
+              "max": [
+                41,
+                31,
+                9
+              ]
+            }
+          }
+        ],
+        "transition_lift_mm": 0.5,
+        "carriage_travel_bounds_mm": {
+          "min": [
+            -30,
+            -5,
+            0
+          ],
+          "max": [
+            220,
+            220,
+            220
+          ]
+        },
+        "carriage_body_bounds_mm": {
+          "min": [
+            -2,
+            -2,
+            8
+          ],
+          "max": [
+            27,
+            2,
+            25
+          ]
+        },
+        "inactive_nozzle_radius_mm": 0.3,
+        "park_position_mm": [
+          0,
+          210,
+          20
+        ]
+      }
+    },
+    "nozzle_diameter_mm": 0.4,
+    "deposition_limits": {
+      "min_bead_width_mm": 0.3,
+      "max_bead_width_mm": 0.75,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.3
+    },
+    "max_feed_mm_s": 150,
+    "max_volumetric_flow_mm3_s": 12
+  },
+  "recipe": {
+    "id": "surface-color-window",
+    "revision": "1",
+    "material_id": "software-pla-a",
+    "material_revision": "1",
+    "filament_diameter_mm": 1.75,
+    "layer_height_mm": 0.2,
+    "native_shape_error_mm": 0.1,
+    "bead_width_mm": 0.45,
+    "perimeter_count": 2,
+    "infill_fraction": 0.25,
+    "sparse_infill": {
+      "kind": "fine"
+    },
+    "top_skin_thickness_mm": 0.8,
+    "bottom_skin_thickness_mm": 0.8,
+    "print_speed_mm_s": 35,
+    "travel_speed_mm_s": 100,
+    "flow_multiplier": 1,
+    "process": {
+      "first_layer_speed_factor": 0.5,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 128,
+      "bridge_speed_factor": 0.6,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 255,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "disabled"
+      }
+    },
+    "supports": {
+      "kind": "disabled"
+    },
+    "seam_policy": {
+      "kind": "nearest"
+    },
+    "rectilinear_axis": "alternating_xy",
+    "top_skin_axis": "alternating_xy"
+  }
+}

@@ -21,6 +21,7 @@ pub(super) struct Domain {
 pub(super) struct Construction {
     pub domains: Vec<Domain>,
     pub stored: Vec<ResolvedMaterialDomain>,
+    pub frames: Vec<SurfaceColorFrame>,
     pub bytes: usize,
     pub points: usize,
 }
@@ -68,51 +69,81 @@ pub(super) fn capture(
     }
     if construction.faces.len() != 1 {
         return Err(unsupported(
-            "first construction admits one full-height planar face",
+            "shared-corner material construction remains unqualified; select one planar face",
         ));
     }
-    let face = &construction.faces[0];
-    let cert = definition
-        .vertical_wall_face_with_cancel(&face.face_id, cancel)
-        .map_err(|e| super::native_error(e, "surface native-face certificate"))?;
     let bounds = native_bounds[&occurrence.occurrence_id];
-    surface::admit_extrusion(
-        input,
-        occurrence,
-        bounds,
-        &face.face_id,
-        cert.min_z_mm,
-        cert.max_z_mm,
-        cancel,
-    )?;
-    let strip = |depth: f64| {
-        let points = [
-            [0.0, 0.0],
-            [cert.width_mm, 0.0],
-            [cert.width_mm, depth],
-            [0.0, depth],
-            [0.0, 0.0],
-        ];
-        MultiPolygon(vec![Polygon::new(
-            LineString(
-                points
-                    .into_iter()
-                    .map(|[u, d]| {
-                        let source = std::array::from_fn(|axis| {
-                            cert.origin_mm[axis] + cert.horizontal_direction[axis] * u
-                                - cert.outward_normal[axis] * d
-                        });
-                        let p = forward(&occurrence.pose, source);
-                        Coord { x: p[0], y: p[1] }
-                    })
-                    .collect(),
-            ),
-            Vec::new(),
-        )])
-    };
-    let shell_strip = strip(face.skin_depth_mm);
-    let backed_strip = strip(face.skin_depth_mm + face.backing_depth_mm);
     let mut result = Construction::default();
+    let mut bands = Vec::new();
+    for face in &construction.faces {
+        check_cancel(cancel)?;
+        let cert = definition
+            .vertical_wall_face_with_cancel(&face.face_id, cancel)
+            .map_err(|e| super::native_error(e, "surface native-face certificate"))?;
+        surface::admit_extrusion(
+            input,
+            occurrence,
+            bounds,
+            &face.face_id,
+            cert.min_z_mm,
+            cert.max_z_mm,
+            cancel,
+        )?;
+        let u = face
+            .mask
+            .as_ref()
+            .map_or([0.0, cert.width_mm], |m| [m.min_u_mm, m.max_u_mm]);
+        if u[0] < 0.0 || u[0] >= u[1] || u[1] > cert.width_mm {
+            return Err(unsupported(
+                "finite mask exceeds its certified native-face frame",
+            ));
+        }
+        let strip = |depth: f64| {
+            let points = [
+                [u[0], 0.0],
+                [u[1], 0.0],
+                [u[1], depth],
+                [u[0], depth],
+                [u[0], 0.0],
+            ];
+            MultiPolygon(vec![Polygon::new(
+                LineString(
+                    points
+                        .into_iter()
+                        .map(|[horizontal, depth]| {
+                            let source = std::array::from_fn(|axis| {
+                                cert.origin_mm[axis] + cert.horizontal_direction[axis] * horizontal
+                                    - cert.outward_normal[axis] * depth
+                            });
+                            let p = forward(&occurrence.pose, source);
+                            Coord { x: p[0], y: p[1] }
+                        })
+                        .collect(),
+                ),
+                Vec::new(),
+            )])
+        };
+        result.frames.push(SurfaceColorFrame {
+            construction_index: 0,
+            face_id: face.face_id.clone(),
+            origin_mm: cert.origin_mm,
+            horizontal_direction: cert.horizontal_direction,
+            outward_normal: cert.outward_normal,
+            width_mm: cert.width_mm,
+            source_z_mm: [cert.min_z_mm, cert.max_z_mm],
+            selected_u_mm: u,
+        });
+        bands.push((
+            strip(face.skin_depth_mm),
+            strip(face.skin_depth_mm + face.backing_depth_mm),
+        ));
+    }
+    result.bytes = result.frames.capacity() * size_of::<SurfaceColorFrame>()
+        + result
+            .frames
+            .iter()
+            .map(|f| f.face_id.as_str().len())
+            .sum::<usize>();
     for section in sections {
         check_cancel(cancel)?;
         if section.material.0.is_empty() {
@@ -129,7 +160,7 @@ pub(super) fn capture(
         // before calling the overlay kernel, alongside the native caller.
         let staging_points = region::point_count(&section.material)
             .checked_mul(64)
-            .and_then(|n| n.checked_add(256))
+            .and_then(|n| n.checked_add(256 + bands.len() * 128))
             .ok_or_else(|| {
                 error(
                     ManufacturingErrorCode::ResourceLimit,
@@ -149,10 +180,11 @@ pub(super) fn capture(
             retained_points + result.points + staging_points,
             owned_bytes + result.bytes + staging_bytes,
         )?;
-        boolean::budget_accumulated(&section.material, &shell_strip, work, cancel)?;
-        let shell = section.material.intersection(&shell_strip);
-        boolean::budget_accumulated(&section.material, &backed_strip, work, cancel)?;
-        let backed = section.material.intersection(&backed_strip);
+        let (shell_strip, backed_strip) = &bands[0];
+        boolean::budget_accumulated(&section.material, shell_strip, work, cancel)?;
+        let shell = section.material.intersection(shell_strip);
+        boolean::budget_accumulated(&section.material, backed_strip, work, cancel)?;
+        let backed = section.material.intersection(backed_strip);
         boolean::budget_accumulated(&backed, &shell, work, cancel)?;
         let backing = backed.difference(&shell);
         boolean::budget_accumulated(&section.material, &backed, work, cancel)?;

@@ -2289,6 +2289,8 @@ fn sparse_bands<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedPrintPlan {
+    #[serde(deserialize_with = "construction::frames")]
+    pub material_frames: Vec<SurfaceColorFrame>,
     #[serde(deserialize_with = "construction::material_domains")]
     pub material_domains: Vec<ResolvedMaterialDomain>,
     pub schema_version: u32,

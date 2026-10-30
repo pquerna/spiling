@@ -196,6 +196,7 @@ fn surface_color_intent(scene: &Scene) -> ManufacturingIntent {
         definition_id: occurrence.definition_id.clone(),
         source_hash: native.provenance().source_hash.clone(),
         faces: vec![SurfaceColorFace {
+            mask: None,
             face_id: face.face_id.clone(),
             skin_depth_mm: 1.2,
             backing_depth_mm: 1.2,
@@ -289,6 +290,57 @@ fn native_face_color_rejects_lost_core_wrong_source_and_unprintable_skin() {
         assert!(scene.compile(&intent).is_err());
     }
 }
+
+#[test]
+fn finite_surface_window_preserves_white_inheritance_hole_and_source_frame() {
+    for bytes in [BOX, HOLE] {
+        let scene = Scene::new(bytes, &[pose(20.0, 20.0, 0.0)]);
+        let mut intent = surface_color_intent(&scene);
+        let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+            unreachable!()
+        };
+        job.surface_constructions[0].faces[0].mask = Some(SurfaceColorMask {
+            min_u_mm: 4.0,
+            max_u_mm: 16.0,
+        });
+        let bundle = scene.compile(&intent).unwrap();
+        assert_eq!(bundle.plan.material_frames[0].selected_u_mm, [4.0, 16.0]);
+        assert_eq!(bundle.plan.material_frames[0].origin_mm, [0.0, 0.0, 0.0]);
+        assert_eq!(
+            bundle.plan.material_frames[0].horizontal_direction,
+            [1.0, 0.0, 0.0]
+        );
+        let first = &bundle.plan.layers[0];
+        assert!(
+            first
+                .paths
+                .iter()
+                .filter(|p| p.material_domain.unwrap().role == MaterialConstructionRole::Shell)
+                .flat_map(|p| &p.points_mm)
+                .all(|p| p[0] > 24.0 && p[0] < 36.0)
+        );
+        assert_eq!(
+            first.region_coverage.source_section_area_mm2,
+            first.region_coverage.section_area_mm2
+        );
+        assert!(
+            verify_bundle(&bundle, &AtomicBool::new(false))
+                .unwrap()
+                .verified
+        );
+        if bytes == HOLE {
+            assert!(
+                bundle
+                    .plan
+                    .layers
+                    .iter()
+                    .all(|l| l.region_coverage.protected_hole_area_mm2 > 0.0)
+            );
+        }
+    }
+}
+
+
 fn pose(x: f64, y: f64, z: f64) -> RigidPoseMm {
     RigidPoseMm {
         translation_mm: [x, y, z],

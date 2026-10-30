@@ -18,6 +18,37 @@ pub struct SurfaceColorFace {
     pub face_id: FaceId,
     pub skin_depth_mm: f64,
     pub backing_depth_mm: f64,
+    #[serde(deserialize_with = "required_option")]
+    pub mask: Option<SurfaceColorMask>,
+}
+
+/// A hard finite window in the certified face's source-local horizontal frame.
+/// Height is the complete finite native face; transparency inherits white base.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceColorMask {
+    pub min_u_mm: f64,
+    pub max_u_mm: f64,
+}
+
+/// Inspectable source frame, not an independent native material certificate.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceColorFrame {
+    pub construction_index: u16,
+    pub face_id: FaceId,
+    pub origin_mm: [f64; 3],
+    pub horizontal_direction: [f64; 3],
+    pub outward_normal: [f64; 3],
+    pub width_mm: f64,
+    pub source_z_mm: [f64; 2],
+    pub selected_u_mm: [f64; 2],
+}
+
+pub(super) fn frames<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<SurfaceColorFrame>, D::Error> {
+    bounded_vec::<D, _, MAX_SURFACE_COLOR_FACES>(d)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
@@ -68,6 +99,16 @@ impl SurfaceColorConstruction {
             ));
         }
         for (index, face) in self.faces.iter().enumerate() {
+            if face.mask.as_ref().is_some_and(|m| {
+                !m.min_u_mm.is_finite()
+                    || !m.max_u_mm.is_finite()
+                    || m.min_u_mm < 0.0
+                    || m.min_u_mm >= m.max_u_mm
+            }) {
+                return Err(invalid(
+                    "surface color mask requires a finite positive source-face U window",
+                ));
+            }
             if !face.skin_depth_mm.is_finite()
                 || face.skin_depth_mm <= 0.0
                 || !face.backing_depth_mm.is_finite()
@@ -172,6 +213,52 @@ pub(super) fn validate_material_domains(
         JobWorkflow::FixedDualMarlin { job } => Some(job),
         _ => None,
     };
+    if plan.material_frames.len() > MAX_SURFACE_COLOR_FACES
+        || plan.material_frames.len()
+            != job.map_or(0, |j| {
+                j.surface_constructions.iter().map(|c| c.faces.len()).sum()
+            })
+    {
+        return Err(invalid(
+            "surface frame table does not bind the requested faces",
+        ));
+    }
+    for (index, frame) in plan.material_frames.iter().enumerate() {
+        let face = job
+            .and_then(|j| {
+                j.surface_constructions
+                    .get(usize::from(frame.construction_index))
+            })
+            .and_then(|c| c.faces.iter().find(|f| f.face_id == frame.face_id))
+            .ok_or_else(|| invalid("surface frame has no captured native-face request"))?;
+        let requested = face
+            .mask
+            .as_ref()
+            .map_or([0.0, frame.width_mm], |m| [m.min_u_mm, m.max_u_mm]);
+        if frame
+            .origin_mm
+            .iter()
+            .chain(&frame.horizontal_direction)
+            .chain(&frame.outward_normal)
+            .chain(&frame.source_z_mm)
+            .chain(&frame.selected_u_mm)
+            .any(|v| !v.is_finite())
+            || !frame.width_mm.is_finite()
+            || frame.width_mm <= 0.0
+            || frame.selected_u_mm != requested
+            || frame.selected_u_mm[0] < 0.0
+            || frame.selected_u_mm[0] >= frame.selected_u_mm[1]
+            || frame.selected_u_mm[1] > frame.width_mm
+            || frame.source_z_mm[0] >= frame.source_z_mm[1]
+            || frame.horizontal_direction[2] != 0.0
+            || frame.outward_normal[2] != 0.0
+            || plan.material_frames[..index].iter().any(|f| {
+                f.construction_index == frame.construction_index && f.face_id == frame.face_id
+            })
+        {
+            return Err(invalid("invalid source-bound surface frame or finite mask"));
+        }
+    }
     if plan.material_domains.is_empty() {
         if job.is_some_and(|j| !j.surface_constructions.is_empty()) {
             return Err(invalid("surface construction has no resolved domains"));
