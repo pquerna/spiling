@@ -5,6 +5,7 @@
 
 // Analytic cube observer, independent of both slicers' planned paths. Raster
 // coverage is a nominal stadium-bead diagnostic, not measured deposited shape.
+import { observeCubeAnchors } from "./anchors.mjs";
 const EPS = 0.002; // Reference XYZ3 output; includes a sample away from ties.
 const GRID = 0.1;
 function distanceSquared(point, a, b) {
@@ -288,6 +289,8 @@ export function auditCube(decoded, specification) {
   return {
     correctnessPassed: violations.length === 0,
     violations,
+    infillFraction: infill,
+    anchorObservations: observeCubeAnchors(decoded, specification),
     layerCount: layers.length,
     modelVolumeMm3: layers.reduce((sum, l) => sum + l.volumeMm3, 0),
     bridgeProcessVolumeMm3: layers.reduce((sum, l) => sum + l.bridgeProcessVolumeMm3, 0),
@@ -373,6 +376,43 @@ export function compareAudits(spiling, reference, { scheduleProbe = null } = {})
       referenceVolumeMm3: reference.bridgeProcessVolumeMm3,
     },
   );
+  const sparseRows = (audit) =>
+    audit.infillFraction !== 0.25
+      ? []
+      : (audit.anchorObservations?.layers.filter(
+          (l) => l.lowerMm >= 1 - 1e-6 && l.upperMm <= 9 + 1e-6 && l.interiorStraightRows > 0,
+        ) ?? []);
+  const nativeSparse = sparseRows(spiling),
+    referenceSparse = sparseRows(reference);
+  const sparseWitness =
+    nativeSparse.length === 40 &&
+    referenceSparse.length === 40 &&
+    nativeSparse.every(
+      (l) =>
+        l.processSignatureWithGapsMm3 > 0 &&
+        l.twoEndedGapCount > 0 &&
+        l.oneOrZeroEndedGapCount === 0 &&
+        l.maximumGapMm < 10,
+    ) &&
+    referenceSparse.every(
+      (l) =>
+        l.ordinaryWithGapsMm3 > 0 && l.twoEndedGapCount > 0 && l.processSignatureVolumeMm3 === 0,
+    );
+  if (nativeSparse.length || referenceSparse.length)
+    add(
+      "sparse_bridge_policy",
+      sparseWitness ? "explained" : "unresolved",
+      "On common interior bands the independent lower-capsule observer exposes real two-ended nominal gaps in both programs. Native whole-row bridge process versus reference ordinary sparse process is a policy difference. Row counts/lengths and E-derived volumes expose hatch-fitting cost separately. This bounded explanation does not resolve roof construction, calibrate material behavior or establish physical superiority.",
+      {
+        witnessMatches: sparseWitness,
+        spiling: nativeSparse,
+        reference: referenceSparse,
+        examples: {
+          spiling: spiling.anchorObservations?.examples,
+          reference: reference.anchorObservations?.examples,
+        },
+      },
+    );
   add(
     "material_distribution",
     Math.abs(spiling.modelVolumeMm3 - reference.modelVolumeMm3) < 1e-5 &&

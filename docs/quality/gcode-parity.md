@@ -117,14 +117,25 @@ reference. The baseline keeps its stricter bound. Native certification/refinemen
 lives in [`planner/native.rs`](../../crates/manufacturing/src/planner/native.rs).
 No extra layer is automatically excused from its count or a planner comment.
 
-Sparse bridging still needs a quantitative distribution explanation. Actual
-21 mm/s plus fan255 identifies the configured process independently of hints.
-[`support/strokes.rs`](../../crates/manufacturing/src/planner/support/strokes.rs)
-can classify a whole path as Bridge when genuine bounded gaps have two direct
-previous-stroke anchors. That policy explains why sparse rows may receive bridge
-controls, but does not by itself justify their extent or speed/cooling cost.
-Keep this and material-distribution differences unresolved until the deciding
-actual-command/anchor evidence is retained.
+The independent `tools/gcode-parity/anchors.mjs` observer intersects each emitted
+centerline with nominal declared-width capsules from the immediately preceding
+actual deposition elevation. Endpoint-disk overlap is separate from interior
+coverage. It retains bounded line-number witnesses, unsupported spans, row
+counts/lengths and E-derived volumes. Its command-precision assumptions and
+0.002 mm substantial-gap threshold are explicit; it is not the production
+anchor certificate or a physical bead model. No role comments supply geometry.
+
+For the 25% cube's common sparse bands, a narrow policy explanation requires
+actual two-ended gaps in both programs, native bridge-process signatures and
+reference ordinary-process signatures, with native spans below the configured
+limit. The native whole-row Bridge policy lives in
+[`support/strokes.rs`](../../crates/manufacturing/src/planner/support/strokes.rs).
+The report separately exposes fitted row count/length and extrusion, so process
+classification is not mistaken for extra material. A speed/fan signature is a
+command observation, not proof of a semantic role. Roof construction, full
+bridge-process totals and material-distribution differences remain unresolved
+until their own deciding evidence exists; this explanation does not approve the
+whole comparison or establish either policy's physical superiority.
 
 Global zero infill retains source-bound interior/intentional-void accounting and
 emits zero centered/alternate/common-phase hatch rows. Required walls/skins,

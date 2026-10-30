@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
+import { observeGaps } from "./anchors.mjs";
 import { decodeGcode } from "./decode.mjs";
 import { auditCube, compareAudits } from "./analyze.mjs";
 import { cases, cubeSource, intentFor, referenceProfile } from "./corpus.mjs";
@@ -179,4 +180,39 @@ test("local deficits, duplicated strokes and hidden speed defaults cannot pass o
     compareAudits(a, b).differences.find((d) => d.id === "material_distribution").status,
     "unresolved",
   );
+});
+
+test("independent anchor observer separates interior gaps, endpoint overlap and missing anchors", () => {
+  const candidate = { from: [0, 0, 0.4], to: [10, 0, 0.4] };
+  const crossing = (x) => ({ from: [x, -1, 0.2], to: [x, 1, 0.2] });
+  const observed = observeGaps(candidate, [crossing(0), crossing(5), crossing(10)], 0.4);
+  assert.equal(observed.gaps.length, 2);
+  assert(observed.gaps.every((g) => g.left && g.right && Math.abs(g.spanMm - 4.6) < 1e-10));
+  assert(Math.abs(observed.coveredLengthMm - 0.8) < 1e-10);
+  const missing = observeGaps(candidate, [crossing(5)], 0.4);
+  assert(missing.gaps.every((g) => !(g.left && g.right)));
+  const shifted = observeGaps(candidate, [crossing(-0.3), crossing(10.3)], 0.4);
+  assert.equal(shifted.coveredLengthMm, 0);
+  assert(shifted.gaps[0].left && shifted.gaps[0].right);
+  const empty = observeGaps(candidate, [], 0.4);
+  assert.equal(empty.gaps[0].spanMm, 10);
+  assert(!empty.gaps[0].left && !empty.gaps[0].right);
+  assert.throws(() => observeGaps(candidate, [], NaN));
+});
+
+test("anchor observations preserve subdivision, reversal and zero-area tangency", () => {
+  const s = { from: [0, 0, 0.4], to: [10, 0, 0.4] };
+  const whole = [{ from: [5, -1, 0.2], to: [5, 1, 0.2] }];
+  const split = [
+    { from: [5, -1, 0.2], to: [5, 0, 0.2] },
+    { from: [5, 0, 0.2], to: [5, 1, 0.2] },
+  ];
+  assert.deepEqual(observeGaps(s, whole, 0.4), observeGaps(s, split, 0.4));
+  assert.deepEqual(observeGaps(s, whole, 0.4), observeGaps({ from: s.to, to: s.from }, whole, 0.4));
+  const tangent = observeGaps(s, [{ from: [0, 0.4, 0.2], to: [10, 0.4, 0.2] }], 0.4);
+  assert.equal(tangent.coveredLengthMm, 0);
+  assert(!tangent.gaps[0].left && !tangent.gaps[0].right);
+  let charged = 0;
+  observeGaps(s, split, 0.4, () => charged++);
+  assert.equal(charged, 2);
 });
