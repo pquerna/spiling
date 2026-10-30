@@ -37,9 +37,14 @@ message ManufacturingRequest {
   oneof command {
     GetManufacturingRequest get = 2;
     SetManufacturingIntentRequest set_intent = 3;
+    ApplyMaterialProfileRequest apply_material_profile = 4;
   }
 }
 message GetManufacturingRequest {}
+message ApplyMaterialProfileRequest {
+  uint32 base_revision = 1;
+  MaterialProfileSelection selection = 2;
+}
 message SetManufacturingIntentRequest {
   uint32 base_revision = 1; // Project revision, not scene publication revision.
   ManufacturingIntent intent = 2;
@@ -164,6 +169,7 @@ message ReplayDisplayDescriptor {
 message ManufacturingIntent {
   PrinterSpecification printer = 1;
   PlanarPrintRecipe recipe = 2;
+  ResolvedMaterialProfile material_profile = 3;
 }
 enum PrinterCoordinateFrame {
   PRINTER_COORDINATE_FRAME_UNSPECIFIED = 0;
@@ -606,4 +612,86 @@ message SurfaceColorInspection {
  double tool_zero_fraction = 7;
  double tool_one_fraction = 8;
  OpticalInspectionAssessment reference = 9;
+}
+
+enum MaterialFillerKind {
+  MATERIAL_FILLER_KIND_UNSPECIFIED = 0;
+  MATERIAL_FILLER_KIND_CARBON_FIBER = 1;
+  MATERIAL_FILLER_KIND_GLASS_FIBER = 2;
+}
+
+enum MaterialProfileSourceKind {
+  MATERIAL_PROFILE_SOURCE_KIND_UNSPECIFIED = 0;
+  MATERIAL_PROFILE_SOURCE_KIND_SYNTHETIC_TEST = 1;
+  MATERIAL_PROFILE_SOURCE_KIND_IMPORTED_RECOMMENDATION = 2;
+  MATERIAL_PROFILE_SOURCE_KIND_OPERATOR_DECLARATION = 3;
+}
+
+message MaterialDefinition {
+  string id = 1;
+  string revision = 2;
+  string manufacturer = 3;
+  string product = 4;
+  string polymer_family = 5;
+  MaterialFiller filler = 6;
+  double filament_diameter_mm = 7;
+  optional bool requires_abrasion_resistant_nozzle = 8;
+}
+
+message MaterialFiller {
+  MaterialFillerKind kind = 1;
+  optional double mass_fraction = 2;
+}
+
+message MaterialToolSetup {
+  string hotend_id = 4;
+  string nozzle_material = 1;
+  optional bool abrasion_resistant_nozzle = 2;
+  string cooling_configuration_id = 3;
+}
+
+message MaterialProfileSource {
+  MaterialProfileSourceKind kind = 1;
+  string source_id = 2;
+  string source_revision = 3;
+  string source_hash = 4;
+}
+
+message MaterialProcessProfile {
+  string hotend_id = 16;
+  string nozzle_material = 17;
+  string id = 1;
+  string revision = 2;
+  MaterialDefinition material = 3;
+  string printer_id = 4;
+  string printer_revision = 5;
+  double nozzle_diameter_mm = 6;
+  string cooling_configuration_id = 7;
+  DepositionLimits deposition_limits = 8;
+  double nozzle_temperature_c = 9;
+  double bed_temperature_c = 10;
+  double print_speed_mm_s = 11;
+  double flow_multiplier = 12;
+  double max_volumetric_flow_mm3_s = 13;
+  ProcessPolicy process = 14;
+  MaterialProfileSource source = 15;
+}
+
+message MaterialProfileOverrides {
+  optional double nozzle_temperature_c = 1;
+  optional double bed_temperature_c = 2;
+  optional double print_speed_mm_s = 3;
+  optional double flow_multiplier = 4;
+  ProcessPolicy process = 5;
+}
+
+message MaterialProfileSelection {
+  MaterialProcessProfile profile = 1;
+  MaterialToolSetup setup = 2;
+  MaterialProfileOverrides overrides = 3;
+}
+
+message ResolvedMaterialProfile {
+  uint32 resolver_version = 1;
+  MaterialProfileSelection selection = 2;
 }

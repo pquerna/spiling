@@ -12,6 +12,7 @@ use spiling_contracts::surface::SurfaceScope;
 
 fn intent() -> ManufacturingIntent {
     ManufacturingIntent {
+        material_profile: None,
         printer: PrinterSpecification {
             schema_version: MANUFACTURING_SCHEMA_VERSION,
             id: "software-cartesian".into(),

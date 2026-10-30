@@ -23,6 +23,7 @@
     "gallery:native": "node tools/run.mjs gallery:native",
     "test:native": "node tools/run.mjs test:native",
     "compare:slicers": "node tools/run.mjs compare:slicers",
+    "test:materials": "node tools/run.mjs test:materials",
     "test:parity": "node tools/run.mjs test:parity"
   },
   "devDependencies": {

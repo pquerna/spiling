@@ -531,6 +531,10 @@ async function main() {
       await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-cli"]);
       await run("node", ["tools/compare-slicers.mjs", ...process.argv.slice(3)]);
       break;
+    case "test:materials":
+      await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-cli"]);
+      await run("node", ["tools/smoke-material-profiles.mjs"]);
+      break;
     case "test:parity":
       await run("node", ["--test", "tools/gcode-parity/test.mjs"]);
       break;

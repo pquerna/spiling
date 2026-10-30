@@ -517,3 +517,15 @@ and remaining risks. Detailed logs, screenshots, identities and measurements bel
 in CI or ignored `artifacts/`. Keep this runbook and code maps current; do not append
 checkpoint histories. [SOURCE](SOURCE.md) and [license](../license.md) govern source,
 notices, assent and release obligations.
+
+## Material-profile engine smoke
+
+`pnpm test:materials` builds the matching engine and CLI, applies paired explicit
+synthetic material/setup profiles to an admitted native cube, inspects actual
+thermal/fan/feed/extrusion commands, exercises Core Undo/Redo and rejected profile
+edits, then removes external authoring inputs before fresh-process verification
+and byte-identical export. Evidence is retained in ignored
+`.cache/material-profiles-*` directories. The runner records executable identities,
+inputs and outcomes; its independent decoder is shared with the
+[G-code comparison](gcode-parity.md), not the production verifier. Synthetic profile
+values and nominal output accounting do not establish physical material behavior.

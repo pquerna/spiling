@@ -78,6 +78,17 @@ impl TryFrom<ManufacturingCommand> for rpc::ManufacturingRequest {
                     intent: Some(Arc::unwrap_or_clone(intent).try_into()?),
                 }),
             ),
+            ManufacturingCommand::ApplyMaterialProfile {
+                session_id,
+                base_revision,
+                selection,
+            } => (
+                session_id,
+                Command::ApplyMaterialProfile(rpc::ApplyMaterialProfileRequest {
+                    base_revision: base_revision.get(),
+                    selection: Some(selection.try_into()?),
+                }),
+            ),
             _ => return Err("long manufacturing command requires its dedicated RPC".into()),
         };
         let parent = format!("sessions/{}", session_id.as_str());
@@ -95,6 +106,11 @@ impl TryFrom<rpc::ManufacturingRequest> for ManufacturingCommand {
         let session_id = super::session_parent(&value.parent)?;
         match required(value.command, "manufacturing command")? {
             Command::Get(_) => Ok(Self::Get { session_id }),
+            Command::ApplyMaterialProfile(request) => Ok(Self::ApplyMaterialProfile {
+                session_id,
+                base_revision: ProjectRevision(request.base_revision),
+                selection: required(request.selection, "material profile selection")?.try_into()?,
+            }),
             Command::SetIntent(request) => Ok(Self::SetIntent {
                 session_id,
                 base_revision: ProjectRevision(request.base_revision),
@@ -966,6 +982,7 @@ impl TryFrom<rpc::ManufacturingIntent> for ManufacturingIntent {
     fn try_from(value: rpc::ManufacturingIntent) -> Result<Self, String> {
         valid(
             Self {
+                material_profile: value.material_profile.map(TryInto::try_into).transpose()?,
                 printer: required(value.printer, "printer specification")?.try_into()?,
                 recipe: required(value.recipe, "planar recipe")?.try_into()?,
             },
@@ -980,6 +997,7 @@ impl TryFrom<ManufacturingIntent> for rpc::ManufacturingIntent {
         Ok(Self {
             printer: Some(value.printer.try_into()?),
             recipe: Some(value.recipe.try_into()?),
+            material_profile: value.material_profile.map(TryInto::try_into).transpose()?,
         })
     }
 }
@@ -2881,6 +2899,289 @@ impl TryFrom<SurfaceColorConstruction> for rpc::SurfaceColorConstruction {
             shell: Some(shell),
             white_material_id: value.white_material_id,
             optical_origin: value.optical_origin.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+
+impl TryFrom<i32> for MaterialFillerKind {
+    type Error = String;
+    fn try_from(value: i32) -> Result<Self, String> {
+        match value {
+            1 => Ok(Self::CarbonFiber),
+            2 => Ok(Self::GlassFiber),
+            _ => Err("unknown MaterialFillerKind".into()),
+        }
+    }
+}
+
+impl TryFrom<i32> for MaterialProfileSourceKind {
+    type Error = String;
+    fn try_from(value: i32) -> Result<Self, String> {
+        match value {
+            1 => Ok(Self::SyntheticTest),
+            2 => Ok(Self::ImportedRecommendation),
+            3 => Ok(Self::OperatorDeclaration),
+            _ => Err("unknown MaterialProfileSourceKind".into()),
+        }
+    }
+}
+
+impl TryFrom<rpc::MaterialDefinition> for MaterialDefinition {
+    type Error = String;
+    fn try_from(value: rpc::MaterialDefinition) -> Result<Self, String> {
+        valid(
+            Self {
+                id: value.id,
+                revision: value.revision,
+                manufacturer: value.manufacturer,
+                product: value.product,
+                polymer_family: value.polymer_family,
+                filler: value.filler.map(TryInto::try_into).transpose()?,
+                filament_diameter_mm: value.filament_diameter_mm,
+                requires_abrasion_resistant_nozzle: required(
+                    value.requires_abrasion_resistant_nozzle,
+                    "requires_abrasion_resistant_nozzle",
+                )?,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<MaterialDefinition> for rpc::MaterialDefinition {
+    type Error = String;
+    fn try_from(value: MaterialDefinition) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            id: value.id,
+            revision: value.revision,
+            manufacturer: value.manufacturer,
+            product: value.product,
+            polymer_family: value.polymer_family,
+            filler: value.filler.map(TryInto::try_into).transpose()?,
+            filament_diameter_mm: value.filament_diameter_mm,
+            requires_abrasion_resistant_nozzle: Some(value.requires_abrasion_resistant_nozzle),
+        })
+    }
+}
+
+impl TryFrom<rpc::MaterialFiller> for MaterialFiller {
+    type Error = String;
+    fn try_from(value: rpc::MaterialFiller) -> Result<Self, String> {
+        valid(
+            Self {
+                kind: MaterialFillerKind::try_from(value.kind)?,
+                mass_fraction: value.mass_fraction,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<MaterialFiller> for rpc::MaterialFiller {
+    type Error = String;
+    fn try_from(value: MaterialFiller) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            kind: match value.kind {
+                MaterialFillerKind::CarbonFiber => 1,
+                MaterialFillerKind::GlassFiber => 2,
+            },
+            mass_fraction: value.mass_fraction,
+        })
+    }
+}
+
+impl TryFrom<rpc::MaterialToolSetup> for MaterialToolSetup {
+    type Error = String;
+    fn try_from(value: rpc::MaterialToolSetup) -> Result<Self, String> {
+        valid(
+            Self {
+                hotend_id: value.hotend_id,
+
+                nozzle_material: value.nozzle_material,
+                abrasion_resistant_nozzle: required(
+                    value.abrasion_resistant_nozzle,
+                    "abrasion_resistant_nozzle",
+                )?,
+                cooling_configuration_id: value.cooling_configuration_id,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<MaterialToolSetup> for rpc::MaterialToolSetup {
+    type Error = String;
+    fn try_from(value: MaterialToolSetup) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            hotend_id: value.hotend_id,
+
+            nozzle_material: value.nozzle_material,
+            abrasion_resistant_nozzle: Some(value.abrasion_resistant_nozzle),
+            cooling_configuration_id: value.cooling_configuration_id,
+        })
+    }
+}
+
+impl TryFrom<rpc::MaterialProfileSource> for MaterialProfileSource {
+    type Error = String;
+    fn try_from(value: rpc::MaterialProfileSource) -> Result<Self, String> {
+        valid(
+            Self {
+                kind: MaterialProfileSourceKind::try_from(value.kind)?,
+                source_id: value.source_id,
+                source_revision: value.source_revision,
+                source_hash: SourceHash::parse(value.source_hash).map_err(|e| e.to_string())?,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<MaterialProfileSource> for rpc::MaterialProfileSource {
+    type Error = String;
+    fn try_from(value: MaterialProfileSource) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            kind: match value.kind {
+                MaterialProfileSourceKind::SyntheticTest => 1,
+                MaterialProfileSourceKind::ImportedRecommendation => 2,
+                MaterialProfileSourceKind::OperatorDeclaration => 3,
+            },
+            source_id: value.source_id,
+            source_revision: value.source_revision,
+            source_hash: value.source_hash.as_str().to_owned(),
+        })
+    }
+}
+
+impl TryFrom<rpc::MaterialProcessProfile> for MaterialProcessProfile {
+    type Error = String;
+    fn try_from(value: rpc::MaterialProcessProfile) -> Result<Self, String> {
+        valid(
+            Self {
+                hotend_id: value.hotend_id,
+                nozzle_material: value.nozzle_material,
+
+                id: value.id,
+                revision: value.revision,
+                material: required(value.material, "material")?.try_into()?,
+                printer_id: value.printer_id,
+                printer_revision: value.printer_revision,
+                nozzle_diameter_mm: value.nozzle_diameter_mm,
+                cooling_configuration_id: value.cooling_configuration_id,
+                deposition_limits: required(value.deposition_limits, "deposition_limits")?
+                    .try_into()?,
+                nozzle_temperature_c: value.nozzle_temperature_c,
+                bed_temperature_c: value.bed_temperature_c,
+                print_speed_mm_s: value.print_speed_mm_s,
+                flow_multiplier: value.flow_multiplier,
+                max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
+                process: required(value.process, "process")?.try_into()?,
+                source: required(value.source, "source")?.try_into()?,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<MaterialProcessProfile> for rpc::MaterialProcessProfile {
+    type Error = String;
+    fn try_from(value: MaterialProcessProfile) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            hotend_id: value.hotend_id,
+            nozzle_material: value.nozzle_material,
+
+            id: value.id,
+            revision: value.revision,
+            material: Some(value.material.try_into()?),
+            printer_id: value.printer_id,
+            printer_revision: value.printer_revision,
+            nozzle_diameter_mm: value.nozzle_diameter_mm,
+            cooling_configuration_id: value.cooling_configuration_id,
+            deposition_limits: Some(value.deposition_limits.try_into()?),
+            nozzle_temperature_c: value.nozzle_temperature_c,
+            bed_temperature_c: value.bed_temperature_c,
+            print_speed_mm_s: value.print_speed_mm_s,
+            flow_multiplier: value.flow_multiplier,
+            max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
+            process: Some(value.process.try_into()?),
+            source: Some(value.source.try_into()?),
+        })
+    }
+}
+
+impl TryFrom<rpc::MaterialProfileOverrides> for MaterialProfileOverrides {
+    type Error = String;
+    fn try_from(value: rpc::MaterialProfileOverrides) -> Result<Self, String> {
+        valid(
+            Self {
+                nozzle_temperature_c: value.nozzle_temperature_c,
+                bed_temperature_c: value.bed_temperature_c,
+                print_speed_mm_s: value.print_speed_mm_s,
+                flow_multiplier: value.flow_multiplier,
+                process: value.process.map(TryInto::try_into).transpose()?,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<MaterialProfileOverrides> for rpc::MaterialProfileOverrides {
+    type Error = String;
+    fn try_from(value: MaterialProfileOverrides) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            nozzle_temperature_c: value.nozzle_temperature_c,
+            bed_temperature_c: value.bed_temperature_c,
+            print_speed_mm_s: value.print_speed_mm_s,
+            flow_multiplier: value.flow_multiplier,
+            process: value.process.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+
+impl TryFrom<rpc::MaterialProfileSelection> for MaterialProfileSelection {
+    type Error = String;
+    fn try_from(value: rpc::MaterialProfileSelection) -> Result<Self, String> {
+        valid(
+            Self {
+                profile: required(value.profile, "profile")?.try_into()?,
+                setup: required(value.setup, "setup")?.try_into()?,
+                overrides: required(value.overrides, "overrides")?.try_into()?,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<MaterialProfileSelection> for rpc::MaterialProfileSelection {
+    type Error = String;
+    fn try_from(value: MaterialProfileSelection) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            profile: Some(value.profile.try_into()?),
+            setup: Some(value.setup.try_into()?),
+            overrides: Some(value.overrides.try_into()?),
+        })
+    }
+}
+
+impl TryFrom<rpc::ResolvedMaterialProfile> for ResolvedMaterialProfile {
+    type Error = String;
+    fn try_from(value: rpc::ResolvedMaterialProfile) -> Result<Self, String> {
+        valid(
+            Self {
+                resolver_version: value.resolver_version,
+                selection: required(value.selection, "selection")?.try_into()?,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<ResolvedMaterialProfile> for rpc::ResolvedMaterialProfile {
+    type Error = String;
+    fn try_from(value: ResolvedMaterialProfile) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            resolver_version: value.resolver_version,
+            selection: Some(value.selection.try_into()?),
         })
     }
 }

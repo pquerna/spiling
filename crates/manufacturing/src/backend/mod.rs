@@ -259,11 +259,12 @@ pub fn emit(
                             }
                         }
                         let flow = delta * filament_area * feed / 60.0 / length;
-                        let rounding_slack = (intent.printer.max_volumetric_flow_mm3_s * 0.000002
+                        let rounding_slack = (intent.effective_max_volumetric_flow_mm3_s()
+                            * 0.000002
                             + 0.00000001 * filament_area * speed)
                             / length;
                         if !flow.is_finite()
-                            || flow > intent.printer.max_volumetric_flow_mm3_s + rounding_slack
+                            || flow > intent.effective_max_volumetric_flow_mm3_s() + rounding_slack
                         {
                             return Err(error(
                                 ManufacturingErrorCode::InvalidSpecification,

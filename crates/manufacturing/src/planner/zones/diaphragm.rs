@@ -385,8 +385,7 @@ pub(in crate::planner) fn schedule_diagnostic(
     };
     let minimum = input
         .intent
-        .printer
-        .deposition_limits
+        .effective_deposition_limits()
         .min_bead_height_mm
         .max(2.0 * spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM);
     let minimum_half = ((zone.coordinate + minimum).next_up() - zone.coordinate)
@@ -455,9 +454,7 @@ pub(in crate::planner) fn schedule_diagnostic(
                 if schedule.iter().all(|layer| {
                     input
                         .intent
-                        .printer
-                        .deposition_limits
-                        .admits(recipe.bead_width_mm, layer.z - layer.lower_z)
+                        .admits_deposition(recipe.bead_width_mm, layer.z - layer.lower_z)
                 }) =>
             {
                 offered[side] = Some(thickness)

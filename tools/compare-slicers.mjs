@@ -352,7 +352,7 @@ try {
   console.error(error.message);
 }
 // Hash the evidence consumed by each comparison, including the observer itself.
-for (const name of ["decode.mjs", "analyze.mjs", "corpus.mjs", "report.mjs"])
+for (const name of ["decode.mjs", "analyze.mjs", "anchors.mjs", "corpus.mjs", "report.mjs"])
   manifest.files[`tools/gcode-parity/${name}`] = sha256(
     await readFile(join(root, "tools/gcode-parity", name)),
   );

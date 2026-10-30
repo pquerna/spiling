@@ -42,6 +42,7 @@ fn native(path: &Path) -> NativePath {
 }
 fn intent() -> ManufacturingIntent {
     serde_json::from_value(serde_json::json!({
+        "material_profile": null,
         "printer": {
             "schema_version":MANUFACTURING_SCHEMA_VERSION,"id":"software-test","revision":"1","name":"Software only",
             "coordinate_frame":"right_handed_millimetres",

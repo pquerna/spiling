@@ -1,0 +1,65 @@
+{
+  "profile": {
+    "id": "synthetic-material-profile-a",
+    "revision": "1",
+    "material": {
+      "id": "synthetic-material-a",
+      "revision": "1",
+      "manufacturer": "Spiling synthetic test declarations",
+      "product": "Synthetic PLA regression input",
+      "polymer_family": "PLA",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "printer_id": "software-marlin2-reference",
+    "printer_revision": "10",
+    "nozzle_diameter_mm": 0.4,
+    "cooling_configuration_id": "synthetic-cooling-1",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.3,
+      "max_bead_width_mm": 0.75,
+      "min_bead_height_mm": 1e-06,
+      "max_bead_height_mm": 0.3
+    },
+    "nozzle_temperature_c": 200,
+    "bed_temperature_c": 60,
+    "print_speed_mm_s": 35,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 6,
+    "process": {
+      "first_layer_speed_factor": 0.5,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 128,
+      "bridge_speed_factor": 0.6,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 255,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "disabled"
+      }
+    },
+    "source": {
+      "kind": "synthetic_test",
+      "source_id": "material-profile-test-source.txt",
+      "source_revision": "1",
+      "source_hash": "95c80eb53239470982522fdb2bcf56168a6fa279790d057fe2d62fdf1978d865"
+    },
+    "hotend_id": "synthetic-hotend-1",
+    "nozzle_material": "brass"
+  },
+  "setup": {
+    "nozzle_material": "brass",
+    "abrasion_resistant_nozzle": false,
+    "cooling_configuration_id": "synthetic-cooling-1",
+    "hotend_id": "synthetic-hotend-1"
+  },
+  "overrides": {
+    "nozzle_temperature_c": null,
+    "bed_temperature_c": null,
+    "print_speed_mm_s": null,
+    "flow_multiplier": null,
+    "process": null
+  }
+}
