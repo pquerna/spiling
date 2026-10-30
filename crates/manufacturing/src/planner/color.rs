@@ -24,6 +24,7 @@ pub(super) struct Construction {
     pub frames: Vec<SurfaceColorFrame>,
     pub bytes: usize,
     pub points: usize,
+    arrange_corners: bool,
 }
 
 fn unsupported(message: &str) -> ManufacturingError {
@@ -69,16 +70,20 @@ pub(super) fn capture(
                 "immutable source/definition/occurrence binding changed",
             ));
         }
-        if construction.faces.len() != 1 {
+        if construction.faces.len() > 2 {
             return Err(unsupported(
-                "shared-corner material construction remains unqualified; select one planar face per region",
+                "at most two adjoining planar faces per regional construction",
             ));
         }
     }
     let bounds = native_bounds[&occurrence.occurrence_id];
-    let mut result = Construction::default();
+    let mut result = Construction {
+        arrange_corners: job.surface_constructions.iter().any(|c| c.faces.len() > 1),
+        ..Construction::default()
+    };
     let mut bands = Vec::new();
     for (construction_index, construction) in job.surface_constructions.iter().enumerate() {
+        let mut faces = Vec::new();
         for face in &construction.faces {
             check_cancel(cancel)?;
             let cert = definition
@@ -138,11 +143,12 @@ pub(super) fn capture(
                 source_z_mm: [cert.min_z_mm, cert.max_z_mm],
                 selected_u_mm: u,
             });
-            bands.push((
+            faces.push((
                 strip(face.skin_depth_mm),
                 strip(face.skin_depth_mm + face.backing_depth_mm),
             ));
         }
+        bands.push(faces);
     }
     result.bytes = result.frames.capacity() * size_of::<SurfaceColorFrame>()
         + result
@@ -150,6 +156,14 @@ pub(super) fn capture(
             .iter()
             .map(|f| f.face_id.as_str().len())
             .sum::<usize>();
+    let mut band_bytes =
+        bands.capacity() * size_of::<Vec<(MultiPolygon<f64>, MultiPolygon<f64>)>>();
+    for faces in &mut bands {
+        band_bytes += faces.capacity() * size_of::<(MultiPolygon<f64>, MultiPolygon<f64>)>();
+        for (shell, backed) in faces {
+            band_bytes += native::material_bytes(shell) + native::material_bytes(backed);
+        }
+    }
     for section in sections {
         check_cancel(cancel)?;
         if section.material.0.is_empty() {
@@ -184,16 +198,39 @@ pub(super) fn capture(
             })?;
         super::remaining_geometry_units(
             retained_points + result.points + staging_points,
-            owned_bytes + result.bytes + staging_bytes,
+            owned_bytes + result.bytes + band_bytes + staging_bytes,
         )?;
         let mut shells = Vec::new();
         let mut all_shell = MultiPolygon(Vec::new());
         let mut all_backed = MultiPolygon(Vec::new());
-        for (construction_index, (shell_strip, backed_strip)) in bands.iter().enumerate() {
-            boolean::budget_accumulated(&section.material, shell_strip, work, cancel)?;
-            let shell = section.material.intersection(shell_strip);
-            boolean::budget_accumulated(&section.material, backed_strip, work, cancel)?;
-            let backed = section.material.intersection(backed_strip);
+        for (construction_index, face_bands) in bands.iter().enumerate() {
+            let mut shell = MultiPolygon(Vec::new());
+            let mut backed = MultiPolygon(Vec::new());
+            for (face_index, (shell_strip, backed_strip)) in face_bands.iter().enumerate() {
+                boolean::budget_accumulated(&section.material, shell_strip, work, cancel)?;
+                let face_shell = section.material.intersection(shell_strip);
+                boolean::budget_accumulated(&section.material, backed_strip, work, cancel)?;
+                let face_backed = section.material.intersection(backed_strip);
+                boolean::budget_accumulated(&backed, &face_backed, work, cancel)?;
+                if backed.intersection(&face_backed).unsigned_area() > 0.0 {
+                    let current = &job.surface_constructions[construction_index].faces[face_index];
+                    if job.surface_constructions[construction_index].faces[..face_index]
+                        .iter()
+                        .any(|f| {
+                            f.skin_depth_mm != current.skin_depth_mm
+                                || f.backing_depth_mm != current.backing_depth_mm
+                        })
+                    {
+                        return Err(unsupported(
+                            "intersecting face constructions require equal physical skin and backing depths",
+                        ));
+                    }
+                }
+                boolean::budget_accumulated(&shell, &face_shell, work, cancel)?;
+                shell = shell.union(&face_shell);
+                boolean::budget_accumulated(&backed, &face_backed, work, cancel)?;
+                backed = backed.union(&face_backed);
+            }
             boolean::budget_accumulated(&all_backed, &backed, work, cancel)?;
             if all_backed.intersection(&backed).unsigned_area() > 0.0 {
                 return Err(unsupported(
@@ -269,7 +306,7 @@ pub(super) fn capture(
             }
             super::remaining_geometry_units(
                 retained_points + result.points,
-                owned_bytes + result.bytes,
+                owned_bytes + result.bytes + band_bytes,
             )?;
             result.stored.push(ResolvedMaterialDomain {
                 reference,
@@ -321,49 +358,90 @@ impl Construction {
         let mut retained_bytes = 0;
         for domain in self.active([request.lower_z, request.upper_z]) {
             check_cancel(cancel)?;
-            let required = region::RequiredMaterial::from_section(&domain.material);
-            let mut layout = walls::plan_material_domain_walls(
-                walls::WallRequest {
-                    material: &domain.material,
-                    required: &required,
-                    owned_bytes: request.owned_bytes + retained_bytes,
-                    retained_points: request.retained_points + retained_points,
-                    ..request
-                },
-                work,
-                cancel,
-            )
-            .map_err(|mut e| {
-                e.message = format!("{:?} material domain: {}", domain.reference.role, e.message);
-                e
-            })?;
-            for path in &mut layout.paths {
-                path.material_domain = Some(domain.reference);
+            let mut cells = if self.arrange_corners {
+                corner_cells(
+                    &domain.material,
+                    request.retained_points + retained_points,
+                    request.owned_bytes
+                        + retained_bytes
+                        + paths.capacity() * size_of::<DepositionPath>()
+                        + fill.0.capacity() * size_of::<Polygon<f64>>(),
+                    work,
+                    cancel,
+                )?
+            } else {
+                None
+            };
+            let cell_points = cells
+                .as_ref()
+                .map_or(0, |c| c.iter().map(region::point_count).sum());
+            let cell_bytes = cells.as_mut().map_or(0, |c| {
+                c.capacity() * size_of::<MultiPolygon<f64>>()
+                    + c.iter_mut().map(native::material_bytes).sum::<usize>()
+            });
+            let materials = cells
+                .as_deref()
+                .unwrap_or(std::slice::from_ref(&domain.material));
+            for material in materials {
+                let required = region::RequiredMaterial::from_section(material);
+                let mut layout = walls::plan_material_domain_walls(
+                    walls::WallRequest {
+                        material,
+                        required: &required,
+                        owned_bytes: request.owned_bytes
+                            + retained_bytes
+                            + cell_bytes
+                            + paths.capacity() * size_of::<DepositionPath>()
+                            + fill.0.capacity() * size_of::<Polygon<f64>>(),
+                        retained_points: request.retained_points + retained_points + cell_points,
+                        ..request
+                    },
+                    work,
+                    cancel,
+                )
+                .map_err(|mut e| {
+                    e.message =
+                        format!("{:?} material domain: {}", domain.reference.role, e.message);
+                    e
+                })?;
+                for path in &mut layout.paths {
+                    path.material_domain = Some(domain.reference);
+                }
+                retained_points += layout.retained_points;
+                retained_bytes += layout.retained_bytes;
+                let merged_bytes = request.owned_bytes
+                    + cell_bytes
+                    + retained_bytes
+                    + paths.capacity() * size_of::<DepositionPath>()
+                    + fill.0.capacity() * size_of::<Polygon<f64>>();
+                super::remaining_geometry_units(
+                    request.retained_points + retained_points + cell_points,
+                    merged_bytes,
+                )?;
+                // Vector growth may retain both old and replacement metadata
+                // alongside the still-owned source layout until extension ends.
+                let metadata_growth = (paths.len() + layout.paths.len())
+                    * size_of::<DepositionPath>()
+                    + (fill.0.len() + layout.fill.0.len()) * size_of::<Polygon<f64>>();
+                super::remaining_geometry_units(
+                    request.retained_points + retained_points + cell_points,
+                    merged_bytes + metadata_growth,
+                )?;
+                paths.try_reserve_exact(layout.paths.len()).map_err(|_| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "material wall path allocation refused",
+                    )
+                })?;
+                fill.0.try_reserve_exact(layout.fill.0.len()).map_err(|_| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "material fill allocation refused",
+                    )
+                })?;
+                paths.extend(layout.paths);
+                fill.0.extend(layout.fill.0);
             }
-            retained_points += layout.retained_points;
-            retained_bytes += layout.retained_bytes;
-            let merged_bytes = request.owned_bytes
-                + retained_bytes
-                + paths.capacity() * size_of::<DepositionPath>()
-                + fill.0.capacity() * size_of::<Polygon<f64>>();
-            super::remaining_geometry_units(
-                request.retained_points + retained_points,
-                merged_bytes,
-            )?;
-            paths.try_reserve_exact(layout.paths.len()).map_err(|_| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "material wall path allocation refused",
-                )
-            })?;
-            fill.0.try_reserve_exact(layout.fill.0.len()).map_err(|_| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "material fill allocation refused",
-                )
-            })?;
-            paths.extend(layout.paths);
-            fill.0.extend(layout.fill.0);
         }
         if paths.is_empty() {
             return Err(unsupported(
@@ -521,4 +599,118 @@ fn contains(
         }
     }
     Ok(true)
+}
+
+/// Shared source-edge ledgers partition the complete domain into adjacent X
+/// slabs. Every original edge and paired cut is retained; no positive sliver is
+/// discarded. The same wall planner consumes each cell, retaining its original
+/// material-domain owner for full-bead attribution and independent replay.
+fn corner_cells(
+    material: &MultiPolygon<f64>,
+    retained_points: usize,
+    owned_bytes: usize,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<Vec<MultiPolygon<f64>>>, ManufacturingError> {
+    let mut orthogonal_corner = false;
+    for polygon in &material.0 {
+        check_cancel(cancel)?;
+        let ring = &polygon.exterior().0;
+        boolean::charge(work, ring.len() * 2)?;
+        // An orthogonal simple exterior with more than four turns has a
+        // reentrant corner. Collinear source subdivisions do not add turns.
+        orthogonal_corner |= ring
+            .windows(2)
+            .all(|e| e[0].x == e[1].x || e[0].y == e[1].y)
+            && ring
+                .windows(3)
+                .filter(|e| (e[0].x == e[1].x) != (e[1].x == e[2].x))
+                .count()
+                > 3;
+    }
+    if !orthogonal_corner {
+        return Ok(None);
+    }
+    let exterior_points = material
+        .0
+        .iter()
+        .map(|p| p.exterior().0.len())
+        .sum::<usize>();
+    super::remaining_geometry_units(
+        retained_points + exterior_points,
+        owned_bytes + exterior_points * size_of::<f64>(),
+    )?;
+    boolean::charge(
+        work,
+        exterior_points.saturating_mul(exterior_points.ilog2() as usize + 2),
+    )?;
+    let mut cuts = Vec::new();
+    cuts.try_reserve_exact(exterior_points).map_err(|_| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "corner boundary allocation refused",
+        )
+    })?;
+    cuts.extend(material.0.iter().flat_map(|p| &p.exterior().0).map(|p| p.x));
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    if cuts.len() > 32 {
+        return Err(error(
+            ManufacturingErrorCode::ResourceLimit,
+            "shared-corner cell partition exceeds 32 source X boundaries",
+        ));
+    }
+    let mut cells = Vec::new();
+    let mut points = 0;
+    let mut bytes = cuts.capacity() * size_of::<f64>();
+    for cut in cuts.windows(2) {
+        let [_, mut middle, _] = super::partition::split(
+            material,
+            0,
+            [cut[0], cut[1]],
+            |scratch, scratch_bytes| {
+                super::remaining_geometry_units(
+                    retained_points + points + scratch,
+                    owned_bytes
+                        + bytes
+                        + cells.capacity() * size_of::<MultiPolygon<f64>>()
+                        + scratch_bytes,
+                )
+                .map(|_| ())
+            },
+            work,
+            cancel,
+        )?;
+        if middle.0.is_empty() {
+            continue;
+        }
+        if middle
+            .0
+            .iter()
+            .any(|polygon| polygon.unsigned_area() <= 0.0)
+        {
+            return Err(unsupported(
+                "shared-corner partition contains a nonpositive cell",
+            ));
+        }
+        points += region::point_count(&middle);
+        bytes += native::material_bytes(&mut middle);
+        let metadata_peak = (cells.capacity() + cells.len() + 1) * size_of::<MultiPolygon<f64>>();
+        super::remaining_geometry_units(
+            retained_points + points,
+            owned_bytes + bytes + metadata_peak,
+        )?;
+        cells.try_reserve_exact(1).map_err(|_| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "corner cell allocation refused",
+            )
+        })?;
+        cells.push(middle);
+        super::remaining_geometry_units(
+            retained_points + points,
+            owned_bytes + bytes + cells.capacity() * size_of::<MultiPolygon<f64>>(),
+        )?;
+    }
+    Ok(Some(cells))
 }

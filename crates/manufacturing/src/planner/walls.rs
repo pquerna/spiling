@@ -375,8 +375,14 @@ fn plan_section_walls_against<'a>(
                 // values; constant-to-fitted output needs at most two N buffers.
                 + 3 * std::mem::size_of::<f64>() + 256);
             let assembly_request = staged_request(&candidate_request, assembly_bytes)?;
-            let (mut paths, correspondence) =
-                assemble(&edge_output, &junctions, &assembly_request, work, cancel)?;
+            let (mut paths, correspondence) = assemble(
+                &edge_output,
+                &junctions,
+                &assembly_request,
+                strict_material,
+                work,
+                cancel,
+            )?;
             if strict_material {
                 fit_material_boundaries(&mut paths, &candidate_request, work, cancel)?;
             }
@@ -820,6 +826,7 @@ fn assemble(
     edges: &[BoundaryEdge],
     permissions: &[Junction],
     request: &WallRequest<'_>,
+    omit_inner_subcommand_loops: bool,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(Vec<DepositionPath>, Vec<BoundaryCorrespondence>), ManufacturingError> {
@@ -891,6 +898,30 @@ fn assemble(
                     ));
                 }
                 current = next;
+            }
+            // A count-death proposal can close into a sub-command inner loop
+            // through skeleton/command rounding. It is not an admitted path or
+            // source boundary. Retain all exterior ordinals and open strokes;
+            // propose omission only for the complete tiny inner loop, then run
+            // unchanged original-component coverage, extent, source/void, dose
+            // and junction-connection qualification over the complete candidate.
+            if omit_inner_subcommand_loops
+                && points_mm.first() == points_mm.last()
+                && correspondence[correspondence_base..]
+                    .iter()
+                    .all(|c| c.ordinal > 0)
+                && points_mm.len() <= 8
+            {
+                boolean::charge(work, points_mm.len() * points_mm.len())?;
+                if points_mm.iter().all(|a| {
+                    points_mm.iter().all(|b| {
+                        (a[0] - b[0]).hypot(a[1] - b[1])
+                            < program_coordinates::MIN_DEPOSITION_COMMAND_MM
+                    })
+                }) {
+                    correspondence.truncate(correspondence_base);
+                    continue;
+                }
             }
             let mut path = DepositionPath {
                 material_domain: None,

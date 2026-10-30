@@ -504,6 +504,64 @@ fn regional_surface_cycles_resolve_opposite_phases_at_common_z_with_shared_white
     }
 }
 
+#[test]
+fn adjoining_equal_surface_bands_union_once_and_conflicting_depths_refuse() {
+    for source in [BOX, HOLE] {
+        let scene = Scene::new(source, &[pose(20.0, 20.0, 0.0)]);
+        let native = scene.definitions.values().next().unwrap();
+        let side = native
+            .faces()
+            .iter()
+            .find(|face| {
+                native
+                    .vertical_wall_face(&face.face_id)
+                    .is_ok_and(|f| f.outward_normal[0] > 0.5)
+            })
+            .unwrap();
+        let mut intent = surface_color_intent(&scene);
+        let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+            unreachable!()
+        };
+        let mut next = job.surface_constructions[0].faces[0].clone();
+        next.face_id = side.face_id.clone();
+        job.surface_constructions[0].faces.push(next);
+        let bundle = scene.compile(&intent).unwrap();
+        assert_eq!(bundle.plan.material_frames.len(), 2);
+        if source == HOLE {
+            assert!(
+                bundle
+                    .plan
+                    .layers
+                    .iter()
+                    .all(|layer| layer.region_coverage.protected_hole_area_mm2 > 0.0)
+            );
+        }
+
+        assert!(
+            verify_bundle(&bundle, &AtomicBool::new(false))
+                .unwrap()
+                .verified
+        );
+        let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+            unreachable!()
+        };
+        for face in &mut job.surface_constructions[0].faces {
+            face.skin_depth_mm = 1.35;
+        }
+        let edited = scene.compile(&intent).unwrap();
+        assert_ne!(bundle.program, edited.program);
+        actual_motion(&edited);
+        let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+            unreachable!()
+        };
+        job.surface_constructions[0].faces[1].skin_depth_mm = 1.5;
+        let failure = scene.compile(&intent).unwrap_err();
+        assert!(
+            failure.message.contains("intersecting face constructions"),
+            "{failure}"
+        );
+    }
+}
 fn pose(x: f64, y: f64, z: f64) -> RigidPoseMm {
     RigidPoseMm {
         translation_mm: [x, y, z],

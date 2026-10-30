@@ -11,6 +11,7 @@ use neighborhood::SkinNeighborhoods;
 mod bonds;
 mod combined;
 mod native;
+mod partition;
 mod preflight;
 mod region;
 pub(crate) mod support;

@@ -20,7 +20,7 @@ use spiling_contracts::{
 use std::sync::atomic::AtomicBool;
 
 pub(super) mod diaphragm;
-mod partition;
+use super::partition;
 
 fn owner_points(owner: &InteriorRegion) -> usize {
     region::point_count(&owner.domain)

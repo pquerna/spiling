@@ -34,14 +34,14 @@ async function invoke(args, failure = false) {
   }
   assert.equal(result.status, 0, `${receipt}: ${result.stderr}`);
   const report = JSON.parse(result.stdout);
-  assert.match(report.hello.engine_build, /planner31;emitter11;verifier15/);
+  assert.match(report.hello.engine_build, /planner32;emitter11;verifier15/);
   return report;
 }
 const json = async (path) => JSON.parse(await readFile(path, "utf8"));
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const results = [];
 const cases = ["box-mm.step", "through-hole.step"].flatMap((source) => [[source, "full"], [source, "window"]]);
-cases.push(["box-mm.step", "cycle"], ["box-mm.step", "all-white"], ["box-mm.step", "regional"], ["through-hole.step", "regional"]);
+cases.push(["box-mm.step", "cycle"], ["box-mm.step", "all-white"], ["box-mm.step", "regional"], ["through-hole.step", "regional"], ["box-mm.step", "corner"], ["through-hole.step", "corner"]);
 const modes = new Set(process.argv.slice(2));
 assert.ok([...modes].every((mode) => cases.some((c) => c[1] === mode)), "unknown smoke mode");
 for (const [sourceName, mode] of cases) {
@@ -76,7 +76,14 @@ for (const [sourceName, mode] of cases) {
     shell: { kind: "uniform", material_id: job.tools[0].material.id },
     white_material_id: job.tools[1].material.id,
   }];
-  if (mode === "regional") {
+  if (mode === "corner") {
+    const side = inspected.face_inspections.find((row) => {
+      const plane = row.face.geometry.analytic;
+      return plane?.kind === "plane" && plane.normal[0] > 0.5 && plane.normal[2] === 0;
+    });
+    assert.ok(side, "native source has no adjoining upright exterior face");
+    job.surface_constructions[0].faces.push({ ...job.surface_constructions[0].faces[0], face_id: side.face.face_id });
+  } else if (mode === "regional") {
     job.surface_constructions.push(structuredClone(job.surface_constructions[0]));
     for (const [index, construction] of job.surface_constructions.entries()) {
       construction.faces[0].mask = { min_u_mm: [2, 12][index], max_u_mm: [8, 18][index] };
@@ -135,7 +142,9 @@ for (const [sourceName, mode] of cases) {
   }
   const baseline = await readFile(join(exported, "program.gcode"));
   const changed = structuredClone(intent);
-  if (mode === "cycle" || mode === "regional") {
+  if (mode === "corner") {
+    for (const face of changed.printer.workflow.job.surface_constructions[0].faces) face.skin_depth_mm = 1.35;
+  } else if (mode === "cycle" || mode === "regional") {
     changed.printer.workflow.job.surface_constructions[0].shell.recipe.phase_slot = 1;
   } else if (mode === "window") {
     changed.printer.workflow.job.surface_constructions[0].faces[0].mask = { min_u_mm: 5, max_u_mm: 17 };
@@ -217,6 +226,15 @@ for (const [sourceName, mode] of cases) {
     await writeFile(invalidFile, JSON.stringify(invalid));
     const error = await invoke(["project", "edit", project, "--intent", invalidFile, "--compile"], true);
     assert.match(error.message, /overlap/);
+  }
+  if (mode === "corner") {
+    assert.equal(plan.material_frames.length, 2);
+    const invalid = structuredClone(intent);
+    invalid.printer.workflow.job.surface_constructions[0].faces[1].skin_depth_mm = 1.5;
+    const invalidFile = join(output, `${name}-conflicting-corner.json`);
+    await writeFile(invalidFile, JSON.stringify(invalid));
+    const error = await invoke(["project", "edit", project, "--intent", invalidFile, "--compile"], true);
+    assert.match(error.message, /intersecting face constructions/);
   }
   results.push({ source: sourceName, mode, program_sha256: hash(baseline), replay_sha256: hash(await readFile(replay)), layers: plan.layers.length });
 }

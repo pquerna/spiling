@@ -3315,8 +3315,15 @@ mod corner_width_tests {
             retained_points: region::point_count(&material),
             owned_bytes: 0,
         };
-        let (paths, associations) =
-            assemble(&sources, &[], &request, &mut 0, &AtomicBool::new(false)).unwrap();
+        let (paths, associations) = assemble(
+            &sources,
+            &[],
+            &request,
+            false,
+            &mut 0,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         assert_eq!(paths.len(), 2, "both original continuing lanes survive");
         let packed_minimum = caps[0].min(caps[1]);
         for path in &paths {

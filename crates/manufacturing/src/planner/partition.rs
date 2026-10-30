@@ -22,7 +22,7 @@ use std::cmp::Ordering;
 use std::mem::size_of;
 use std::sync::atomic::AtomicBool;
 
-use super::super::boolean;
+use super::boolean;
 
 const NONE: usize = usize::MAX;
 type Interval = [f64; 2];
@@ -290,8 +290,8 @@ fn angular(
         });
     }
     if [origin, a, b].into_iter().any(|p| {
-        !super::super::native::merge_predicate_coordinate(p.x)
-            || !super::super::native::merge_predicate_coordinate(p.y)
+        !super::native::merge_predicate_coordinate(p.x)
+            || !super::native::merge_predicate_coordinate(p.y)
     }) {
         return Err(unsupported(
             "axis partition tangent orientation is not conditioned",
@@ -903,7 +903,7 @@ pub(super) fn split(
                 .sum::<usize>();
         for output in &mut result {
             actual_bytes = actual_bytes
-                .checked_add(super::super::native::material_bytes(output))
+                .checked_add(super::native::material_bytes(output))
                 .ok_or_else(|| resource("axis partition actual storage overflow"))?;
         }
         admit(actual_bytes.div_ceil(size_of::<Coord<f64>>()), actual_bytes)?;
@@ -932,8 +932,8 @@ pub(super) fn split(
                 {
                     check_cancel(cancel)?;
                     boolean::charge(work, 1)?;
-                    if !super::super::native::merge_predicate_coordinate(point.x)
-                        || !super::super::native::merge_predicate_coordinate(point.y)
+                    if !super::native::merge_predicate_coordinate(point.x)
+                        || !super::native::merge_predicate_coordinate(point.y)
                     {
                         return Err(unsupported(
                             "axis partition hole predicate is not conditioned",
@@ -991,7 +991,7 @@ pub(super) fn split(
         + cycles.capacity() * size_of::<Cycle>();
     for output in &mut result {
         actual_bytes = actual_bytes
-            .checked_add(super::super::native::material_bytes(output))
+            .checked_add(super::native::material_bytes(output))
             .ok_or_else(|| resource("axis partition actual storage overflow"))?;
     }
     admit(actual_bytes.div_ceil(size_of::<Coord<f64>>()), actual_bytes)?;
