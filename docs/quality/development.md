@@ -37,6 +37,8 @@ launch correctly; a bare Rust executable is not equivalent.
 | `pnpm test`                     | Workspace behavior and real CLI/binary interoperability                  |
 | `pnpm smoke:cli`                | Actual child startup, operations, transfer and reap                      |
 | `pnpm bench:smoke`              | Diagnostic process/transfer benchmark, not geometry performance          |
+| `pnpm compare:slicers`          | Native/reference commanded G-code comparison; see [contract](gcode-parity.md) |
+| `pnpm test:parity`              | Independent observer fault and accounting tests                         |
 | `pnpm package`                  | Current-platform package with sidecar, CEF and notices                   |
 | `node tools/run.mjs provenance` | Collect dependency provenance/notices without rebuilding the application |
 

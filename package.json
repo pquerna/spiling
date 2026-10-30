@@ -23,7 +23,9 @@
     "dev:native": "node tools/run.mjs dev:native",
     "build:native": "node tools/run.mjs build:native",
     "gallery:native": "node tools/run.mjs gallery:native",
-    "test:native": "node tools/run.mjs test:native"
+    "test:native": "node tools/run.mjs test:native",
+    "compare:slicers": "node tools/run.mjs compare:slicers",
+    "test:parity": "node tools/run.mjs test:parity"
   },
   "devDependencies": {
     "@tauri-apps/cli": "3.0.0-alpha.4",

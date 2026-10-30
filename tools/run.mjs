@@ -425,6 +425,13 @@ async function main() {
     case "check":
       await check();
       break;
+    case "compare:slicers":
+      await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-cli"]);
+      await run("node", ["tools/compare-slicers.mjs", ...process.argv.slice(3)]);
+      break;
+    case "test:parity":
+      await run("node", ["--test", "tools/gcode-parity/test.mjs"]);
+      break;
     case "test":
       await stageEngine();
       await run("cargo", ["test", "--locked", "--workspace"]);
@@ -436,6 +443,7 @@ async function main() {
         "--test",
         "apps/desktop/test/manufacturing-state.test.mjs",
         "packages/viewport/test/replay-materials.test.mjs",
+        "tools/gcode-parity/test.mjs",
       ]);
       break;
     case "smoke:cli":

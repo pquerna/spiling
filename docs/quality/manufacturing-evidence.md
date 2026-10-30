@@ -41,6 +41,11 @@ Enabled finishes/process constructions, supports, coarse bands and fixtures refu
 first route. Original single-tool operator evidence retains its producer/input identity;
 the routing increment does not requalify every historical geometry journey.
 
+The [engine G-code comparison](gcode-parity.md) independently audits a bounded
+analytic cube matrix against a versioned mature slicer. It retains explicit
+refusals and unresolved process/material differences; reference agreement is
+separate from the native verifier and physical qualification.
+
 ## Entry points and immutable capture
 
 - [`CompilerInput`, `compile`, `inspect_bundle`](../../crates/manufacturing/src/lib.rs)
