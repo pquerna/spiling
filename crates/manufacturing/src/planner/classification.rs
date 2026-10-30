@@ -1666,9 +1666,9 @@ impl ClassifiedRegions {
                         while band_index < bands.len() && bands[band_index].paths.end <= index {
                             band_index += 1;
                         }
-                        if band_index == bands.len() || !bands[band_index].paths.contains(&index) {
-                            continue;
-                        }
+                        let band = bands
+                            .get(band_index)
+                            .filter(|band| band.paths.contains(&index));
                         let path = &alternative.paths[index];
                         let along = if normal_fixed == 0 {
                             [bounds.min().x, bounds.max().x]
@@ -1693,13 +1693,31 @@ impl ClassifiedRegions {
                         });
                         // At a run edge, a neighboring fully-supported row is
                         // a finite boundary proposal, not an extra emitted row.
-                        if first == bands[band_index].paths.start {
-                            lo = bands[band_index].interval[0];
+                        if let Some(band) = band {
+                            if first == band.paths.start {
+                                lo = band.interval[0];
+                            }
+                            if end == band.paths.end {
+                                hi = band.interval[1];
+                            }
+                        } else {
+                            // Hole-split rows have independent along-axis owners.
+                            // A supported sibling cannot disqualify this genuine
+                            // Bridge, nor may this Bridge erase that sibling's cell.
+                            let a = path.points_mm[0][normal_fixed];
+                            let b = path.points_mm[1][normal_fixed];
+                            let demanded = end - first > 1
+                                && original.demands.iter().any(|gap| {
+                                    gap[0][normal_along].min(gap[1][normal_along]).max(lo)
+                                        < gap[0][normal_along].max(gap[1][normal_along]).min(hi)
+                                        && gap[0][normal_fixed] >= a.min(b)
+                                        && gap[0][normal_fixed] <= a.max(b)
+                                });
+                            if !demanded {
+                                continue;
+                            }
                         }
-                        if end == bands[band_index].paths.end {
-                            hi = bands[band_index].interval[1];
-                        }
-                        if index == first {
+                        if band.is_some() && index == first {
                             reserve_recovery_record(
                                 &mut patches,
                                 BRIDGE_PATCH_POINTS,
@@ -4181,5 +4199,189 @@ mod skin_bridge_tests {
             refusal.failure.is_some(),
             "the same constructed Bridge must refuse without its actual lower endpoint anchor"
         );
+    }
+}
+
+#[cfg(test)]
+mod split_skin_tests {
+    use super::*;
+    use crate::planner::support::{self, AnchorWorkspace};
+
+    #[test]
+    fn demanded_hole_split_bridge_preserves_supported_sibling_and_anchor_limits() {
+        for rotate in [false, true] {
+            for (far_anchor, limit, expected) in
+                [(true, 10., true), (false, 10., false), (true, 0.3, false)]
+            {
+                let cancel = AtomicBool::new(false);
+                let mut recipe = crate::planner::tests::recipe(0.2);
+                recipe.bead_width_mm = 0.45;
+                recipe.process.max_bridge_span_mm = limit;
+                let transform = |[x, y]: [f64; 2]| if rotate { [y, x] } else { [x, y] };
+                let ring = |points: &[[f64; 2]]| {
+                    points
+                        .iter()
+                        .map(|p| {
+                            let [x, y] = transform(*p);
+                            (x, y)
+                        })
+                        .collect()
+                };
+                let material = MultiPolygon(vec![Polygon::new(
+                    ring(&[[0., 0.], [20., 0.], [20., 16.], [0., 16.], [0., 0.]]),
+                    vec![ring(&[
+                        [0.8, 1.3],
+                        [0.8, 14.7],
+                        [19.2, 14.7],
+                        [19.2, 1.3],
+                        [0.8, 1.3],
+                    ])],
+                )]);
+                let classified = ClassifiedRegions {
+                    layout: Arc::new(WallPlan {
+                        paths: Vec::new(),
+                        fill: material.clone(),
+                        correspondence: Vec::new(),
+                        retained_points: 0,
+                        retained_bytes: 0,
+                        section_area_mm2: material.unsigned_area(),
+                        wall_area_mm2: 0.,
+                        protected_hole_area_mm2: 0.,
+                    }),
+                    bottom: MultiPolygon(Vec::new()),
+                    top: material,
+                    interiors: Vec::new(),
+                    separator_bands: Vec::new(),
+                    coverage: crate::planner::empty_coverage(0.2),
+                    applied_operations: Vec::new(),
+                };
+                let stroke = |a, b| {
+                    let a = transform(a);
+                    let b = transform(b);
+                    DepositionPath {
+                        material_domain: None,
+                        kind: DepositionKind::TopSkin,
+                        owner: Some(DepositionOwner::MandatorySkin {
+                            skin: ProcessSkinKind::TopSkin,
+                        }),
+                        width: WidthProfile::Constant { width_mm: 0.45 },
+                        physical_z_mm: [0., 0.2],
+                        points_mm: vec![[a[0], a[1], 0.2], [b[0], b[1], 0.2]],
+                    }
+                };
+                let mut previous = vec![
+                    stroke([0.2, 0.], [0.2, 16.]),
+                    stroke([19.8, 0.], [19.8, 16.]),
+                    stroke([0.6, 0.], [0.6, 16.]),
+                    stroke([19.4, 0.], [19.4, 16.]),
+                    stroke([0., 0.], [20., 0.]),
+                ];
+                if far_anchor {
+                    previous.push(stroke([0., 1.3], [20., 1.3]));
+                }
+                for y in [14.7, 15.1, 15.5, 15.9] {
+                    previous.push(stroke([0., y], [20., y]));
+                }
+                let axis = if rotate {
+                    region::HatchAxis::Y
+                } else {
+                    region::HatchAxis::X
+                };
+                let layer = region::HatchLayer {
+                    z: 0.4,
+                    lower_z: 0.2,
+                    height: 0.2,
+                    axis,
+                    top_axis: axis,
+                    recipe: &recipe,
+                };
+                let mut anchors = AnchorWorkspace::default();
+                let mut work = 0;
+                let mut check = |candidate: &mut support::RasterCandidate, axis, _, _| {
+                    support::component_admission(
+                        (candidate, axis, 100_000, false),
+                        previous.iter(),
+                        std::iter::empty(),
+                        &recipe,
+                        &mut anchors,
+                        &mut work,
+                        &cancel,
+                    )
+                };
+                let recovered = classified
+                    .paths_with_bridge_recovery_unfitted(
+                        &layer,
+                        region::OrdinaryHatchPhase::Centered,
+                        &[],
+                        0,
+                        0,
+                        &mut 0,
+                        |_, _, _| Ok(()),
+                        &mut check,
+                        &mut Vec::new(),
+                        &cancel,
+                    )
+                    .unwrap();
+                let proof = support::strokes::analyze(
+                    &recovered,
+                    previous.iter(),
+                    std::iter::empty(),
+                    &recipe,
+                    &mut anchors,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+                assert_eq!(
+                    proof.failure.is_none(),
+                    expected,
+                    "rotation={rotate}, far anchor={far_anchor}, limit={limit}"
+                );
+                if !expected {
+                    continue;
+                }
+                let bridges: Vec<_> = recovered
+                    .iter()
+                    .filter(|p| p.kind == DepositionKind::Bridge)
+                    .collect();
+                assert!(!bridges.is_empty());
+                // Genuine short front bridges stay in their own hole-split
+                // interval; they cannot acquire the supported rear interval.
+                let along = usize::from(!rotate);
+                assert!(
+                    bridges
+                        .iter()
+                        .all(|p| p.points_mm.iter().all(|v| v[along] <= 1.3))
+                );
+                let (ordinary, _, _) = classified
+                    .paths(
+                        layer.z,
+                        layer.lower_z,
+                        axis,
+                        axis,
+                        &recipe,
+                        region::OrdinaryHatchPhase::Centered,
+                        0,
+                        &[],
+                        &mut 0,
+                        |_, _, _| Ok(()),
+                        &cancel,
+                    )
+                    .unwrap();
+                let rear = |paths: &[DepositionPath]| -> Vec<Vec<[f64; 3]>> {
+                    paths
+                        .iter()
+                        .filter(|p| p.points_mm.iter().all(|v| v[along] > 14.7))
+                        .map(|p| {
+                            assert_eq!(p.kind, DepositionKind::TopSkin);
+                            p.points_mm.clone()
+                        })
+                        .collect()
+                };
+                let expected_rear = rear(&ordinary);
+                assert!(!expected_rear.is_empty());
+                assert_eq!(rear(&recovered), expected_rear);
+            }
+        }
     }
 }

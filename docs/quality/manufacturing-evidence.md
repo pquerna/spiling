@@ -396,7 +396,7 @@ Source-bound planar surface color is exercised through the real CLI on the commi
 
 Retained optical studies apply through typed Core/engine/client/CLI transactions with complete accepted report/selection and explicit two-material evidence/declaration bindings. Queued cancellation and stale revisions preserve the committed project; ACK commits one revision without changing SceneRevision or publishing scene artifacts. Both native source workflows exercise application, physical depth/history edits, changed-pose reassessment and source/palette/study-deleted fresh verification/export. Inspection distinguishes the small requested patch from complete realized side exposure and reuses the existing model with captured evidence; it does not reuse the requested prediction as a printed outcome. Unknown evidence/conditions remain unassessed and backing optics remain unmodelled. The native Review panel supports source-hidden actual replay and catalog metadata tint by decoded tool, plus requested/realized inspection and fresh four-file export. The native window can consume a CLI-produced recovered project; local hardware evidence does not qualify other GPUs/platforms or physical color.
 
-Current identities are project10/manufacturing11/process3/surface3, source6/planner33,
+Current identities are project10/manufacturing11/process3/surface3, source6/planner34,
 emitter11/verifier17 and SPLR6; executable constants and exact native pins remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
@@ -416,6 +416,17 @@ classification and complete coefficient exclusion of potential carrier roots
 without increasing source/error/work limits. A necessary zero-set overcover
 does not establish that a root exists. These constructions do not waive source
 metrics, void topology or the union gate.
+
+The source-zoned XY-separator journey also admits fixed-X ordinary hatch with
+independently alternating top skin through native bed placement and fresh
+source-independent replay/export. Hole-split orthogonal rows select genuine
+Bridge intervals independently of supported siblings, replacing only their
+actual bead corridors. The supported siblings retain their authored hatch;
+missing actual anchors and over-limit spans still refuse. Reproduce the shared
+engine journey with `cargo test --locked -p spiling-engine --test manufacturing
+rounded_housing_two_zone_separator_survives_native_bed_placement_and_fresh_export`.
+The planner's `demanded_hole_split_bridge_preserves_supported_sibling_and_anchor_limits`
+regression exercises both axes and the nearby anchor/span refusals.
 
 The source-zoned ordinary job retains lower0.20/upper0.60 and the centered0.23mm
 plate at sourceZ5.03. Independent replay checks its actual slab intervals,
@@ -462,12 +473,13 @@ canonical PNG preview and source-independent image authoring/history are
 exercised, not successful manufactured output for that parameter set. The
 separate cylindrical-image CLI journey retains its own narrower input evidence.
 
-The ordinary housing's additional fixed-Y workbench Compile remains unqualified:
-source5/planner24 refuses an earlier protected wall/floor obligation, while the
-native-first route still refuses actual top-skin support. Those are not a shared
-root-cause claim. The accepted ordinary/physical-plate reference retains
-alternating XY; authoring another axis does not establish manufacturing support.
-Keep fixed-Y diagnostics visible without expanding this native landing.
+The fixed-Y native consumer
+`authored_housing_bridge_recovery_keeps_supported_fill_on_its_axis` verifies
+ordinary-axis preservation, genuine orthogonal bridges and unique aligned
+actual deposition. The separately captured fixed-Y workbench parameter set
+remains unqualified until exercised through its own recovery/export flow;
+a shared axis label does not equate its inputs to that native consumer.
+The accepted ordinary/physical-plate reference retains alternating XY.
 
 The native operator acceptance uses the actual local Vulkan workbench:
 physical native-face picking, Compile, fresh actual-program report/preview,
