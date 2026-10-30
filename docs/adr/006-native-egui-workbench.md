@@ -6,8 +6,8 @@ Licensed under the Open Software License version 3.0
 
 # Native egui workbench
 
-Status: adopted. The native project-window increment is implemented in
-`apps/workbench`; geometry display and manufacturing UI migration follow separately.
+Status: adopted. Native project and source-display increments are implemented in
+`apps/workbench`; manufacturing UI migration follows separately.
 
 ## Decision
 

@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 //! Native admission and the sole frontend owner of EngineClient. No engine domain logic lives here.
+use crate::scene::{Scene, Section};
 use spiling_contracts::{
     Hello, NativeOperationView,
     geometry::{
@@ -12,7 +13,15 @@ use spiling_contracts::{
     project::{ProjectCommand, ProjectId, ProjectInfo, ProjectResponse, ProjectRevision},
 };
 use spiling_engine_client::{ClientError, EngineClient};
-use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{
     runtime::Runtime,
     sync::{mpsc, oneshot, watch},
@@ -55,6 +64,12 @@ pub struct Snapshot {
     pub hello: Option<Arc<Hello>>,
     pub project: Option<Arc<ProjectInfo>>,
     pub scene: Option<SceneSummary>,
+    pub display: Option<Arc<Scene>>,
+    pub section: Option<Arc<Section>>,
+    pub section_loading: bool,
+    pub display_loading: bool,
+    pub display_paused: bool,
+    pub inspection: Option<Arc<spiling_contracts::geometry::FaceInspection>>,
     pub busy: bool,
     pub active_operation: bool,
     pub picker_open: bool,
@@ -72,6 +87,12 @@ impl Default for Snapshot {
             hello: None,
             project: None,
             scene: None,
+            display: None,
+            section: None,
+            section_loading: false,
+            display_loading: false,
+            display_paused: false,
+            inspection: None,
             busy: true,
             active_operation: false,
             picker_open: false,
@@ -131,6 +152,9 @@ pub enum Command {
     Cancel,
     Resume,
     DismissProblems,
+    PauseDisplay,
+    ResumeDisplay,
+    CancelSection,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Picker {
@@ -191,6 +215,7 @@ impl Action {
     }
 }
 enum Request {
+    Geometry(Box<GeometryCommand>),
     Command(Command),
     #[cfg(test)]
     Action(Action),
@@ -240,6 +265,10 @@ impl Host {
             dialog: None,
             nonce: 0,
             executing: false,
+            section_task: None,
+            section_cancel: Arc::new(AtomicBool::new(false)),
+            display_task: None,
+            display_cancel: Arc::new(AtomicBool::new(false)),
         };
         let worker = runtime.spawn(actor.run(requests, stopped));
         Ok(Self {
@@ -258,6 +287,9 @@ impl Host {
         self.sender
             .try_send(request)
             .map_err(|e| format!("Native host admission: {e}"))
+    }
+    pub fn geometry(&self, command: GeometryCommand) -> Result<(), String> {
+        self.send(Request::Geometry(Box::new(command)))
     }
     pub fn command(&self, command: Command) -> Result<(), String> {
         self.send(Request::Command(command))
@@ -355,6 +387,7 @@ enum Receipt {
     Open(Route),
     Save(Option<Route>),
     Import,
+    Geometry,
 }
 struct Pending {
     name: String,
@@ -381,10 +414,16 @@ struct Actor {
     dialog: Option<u64>,
     nonce: u64,
     executing: bool,
+    section_task: Option<JoinHandle<Result<Arc<Section>, ClientError>>>,
+    section_cancel: Arc<AtomicBool>,
+    display_task: Option<JoinHandle<Result<Arc<Scene>, ClientError>>>,
+    display_cancel: Arc<AtomicBool>,
 }
 impl Actor {
     fn publish(&mut self) {
         self.state.serial += 1;
+        self.state.section_loading = self.section_task.is_some();
+        self.state.display_loading = self.display_task.is_some();
         self.state.active_operation = self.pending.is_some();
         self.state.busy = self.executing
             || self.pending.is_some()
@@ -435,6 +474,22 @@ impl Actor {
                         Err(error) => self.problem(format!("Operation observer failed: {error}")),
                     }
                 },
+                result = async { match &mut self.display_task { Some(task)=> task.await,None=>std::future::pending().await } } => {
+                    self.display_task=None;
+                    match result {
+                        Ok(Ok(scene)) if self.state.scene.as_ref().is_some_and(|s|scene.same_revision(s)) => { self.state.display=Some(scene);self.state.display_paused=false; },
+                        Ok(Ok(_))=>{},
+                        Ok(Err(error))=>{self.state.display_paused=true;self.failure(error).await;},
+                        Err(error)=>{self.state.display_paused=true;self.problem(format!("Display transfer failed: {error}"));},
+                    }
+                },
+                result=async {match &mut self.section_task {Some(task)=>task.await,None=>std::future::pending().await}}=>{
+                    self.section_task=None;
+                    match result {
+                        Ok(Ok(section)) if self.state.scene.as_ref().is_some_and(|s|s.session_id==section.summary.session_id && s.revision==section.summary.revision)=>self.state.section=Some(section),
+                        Ok(Ok(_))=>{},Ok(Err(error))=>self.failure(error).await,Err(error)=>self.problem(format!("Section transfer failed: {error}")),
+                    }
+                },
                 _ = timer.tick() => {
                     self.check_exit().await;
                     if observation.is_none() && let (Some(pending), Some(client)) = (&self.pending, &self.client) && !pending.paused {
@@ -453,9 +508,55 @@ impl Actor {
         if let Some(task) = observation {
             task.abort();
         }
+        self.section_cancel.store(true, Ordering::Relaxed);
+        self.cancel_display();
         self.cleanup().await;
     }
+    fn cancel_display(&mut self) {
+        self.display_cancel.store(true, Ordering::Relaxed);
+        if let Some(task) = self.display_task.take() {
+            task.abort();
+        }
+    }
+    fn schedule_display(&mut self) {
+        if self.display_task.is_some() || self.state.display_paused {
+            return;
+        }
+        let (Some(client), Some(summary)) = (&self.client, &self.state.scene) else {
+            return;
+        };
+        if self
+            .state
+            .display
+            .as_ref()
+            .is_some_and(|s| s.same_revision(summary))
+        {
+            return;
+        }
+        self.display_cancel = Arc::new(AtomicBool::new(false));
+        self.display_task = Some(tokio::spawn(crate::scene::load(
+            client.rpc(),
+            summary.clone(),
+            self.state.display.clone(),
+            self.display_cancel.clone(),
+            self.state
+                .section
+                .as_ref()
+                .map_or(0, |s| s.summary.total_bytes as usize * 6)
+                + if self.section_task.is_some() {
+                    spiling_contracts::geometry::MAX_SECTION_BYTES as usize * 6
+                } else {
+                    0
+                },
+        )));
+    }
     async fn start(&mut self) {
+        self.cancel_display();
+        self.section_cancel.store(true, Ordering::Relaxed);
+        self.state.section = None;
+        self.state.display = None;
+        self.state.inspection = None;
+        self.state.display_paused = false;
         self.state.phase = Phase::Starting;
         self.state.generation += 1;
         self.state.hello = None;
@@ -518,6 +619,7 @@ impl Actor {
         }
     }
     async fn disconnect(&mut self, reason: String) {
+        self.cancel_display();
         if let Some(mut client) = self.client.take() {
             let _ = client.terminate().await;
         }
@@ -567,12 +669,63 @@ impl Actor {
                 ));
             }
         };
+        if self.state.scene.as_ref().is_none_or(|s| s != &scene) {
+            self.cancel_display();
+            self.section_cancel.store(true, Ordering::Relaxed);
+            self.state.section = None;
+            self.state.inspection = None;
+            self.state.display_paused = false;
+        }
         self.state.project = Some(Arc::new(project));
         self.state.scene = Some(scene);
+        self.schedule_display();
         Ok(())
     }
     async fn request(&mut self, request: Request) {
         match request {
+            Request::Geometry(command) => {
+                if matches!(*command, GeometryCommand::StartSection { .. })
+                    && self.section_task.is_some()
+                {
+                    self.problem("Finish or cancel the current section transfer");
+                    return;
+                }
+                if self.pending.is_some() || self.dialog.is_some() || self.confirmation.is_some() {
+                    self.problem("Finish the active native action first");
+                    return;
+                }
+                let Some(client) = &self.client else {
+                    self.problem("Engine is disconnected");
+                    return;
+                };
+                match client.geometry(*command).await {
+                    Ok(GeometryResponse::FaceInspection { inspection }) => {
+                        self.state.inspection = Some(Arc::new(inspection))
+                    }
+                    Ok(GeometryResponse::SceneChanged { .. }) => self.refresh_after_failure().await,
+                    Ok(GeometryResponse::OperationAccepted { operation }) => {
+                        self.accept(operation, Receipt::Geometry, "Native geometry")
+                            .await
+                    }
+                    Ok(GeometryResponse::Error { error }) => self.problem(error.to_string()),
+                    Ok(GeometryResponse::ProjectError { error }) => self.problem(error.to_string()),
+                    Ok(_) => self.problem("Unexpected geometry control reply"),
+                    Err(error) => self.failure(error).await,
+                }
+            }
+            Request::Command(Command::CancelSection) => {
+                self.section_cancel.store(true, Ordering::Relaxed);
+            }
+            Request::Command(Command::PauseDisplay) => {
+                self.display_cancel.store(true, Ordering::Relaxed);
+                self.state.display_paused = true;
+            }
+            Request::Command(Command::ResumeDisplay) => {
+                if self.display_task.is_none() {
+                    self.state.display_paused = false;
+                    self.schedule_display();
+                }
+            }
             Request::Command(Command::DismissProblems) => self.state.problems.clear(),
             Request::Command(Command::Cancel) => self.cancel().await,
             Request::Command(Command::Resume) => {
@@ -814,8 +967,9 @@ impl Actor {
                     self.route = None;
                 }
                 self.state.project = Some(Arc::new(info));
-                self.state.scene = Some(summary);
+                let _ = summary;
                 self.state.message = format!("{label} completed");
+                self.refresh_after_failure().await;
             }
             Ok(ProjectResponse::OperationAccepted { operation }) => {
                 if let Some(receipt) = receipt {
@@ -911,7 +1065,7 @@ impl Actor {
         match (&pending.receipt, &operation.result) {
             (Receipt::Open(route), Some(JobResult::Scene { summary })) if completed => {
                 self.route = Some(route.clone());
-                self.state.scene = Some(summary.clone());
+                let _ = summary;
             }
             (Receipt::Save(route), Some(JobResult::ProjectSaved { info }))
                 if completed || info.save_uncertain =>
@@ -921,7 +1075,20 @@ impl Actor {
                 }
                 self.state.project = Some(Arc::new(info.clone()));
             }
-            (Receipt::Import, Some(JobResult::Scene { .. })) if completed => {}
+            (Receipt::Geometry, Some(JobResult::Section { artifact_id })) if completed => {
+                if self.section_task.is_some() {
+                    self.problem("Finish the current section transfer first");
+                } else if let (Some(client), Some(scene)) = (&self.client, &self.state.scene) {
+                    self.section_cancel = Arc::new(AtomicBool::new(false));
+                    self.section_task = Some(tokio::spawn(crate::scene::load_section(
+                        client.rpc(),
+                        scene.clone(),
+                        *artifact_id,
+                        self.section_cancel.clone(),
+                    )));
+                }
+            }
+            (Receipt::Import | Receipt::Geometry, Some(JobResult::Scene { .. })) if completed => {}
             _ if completed => {
                 self.disconnect(
                     "Native completion did not contain the required project receipt".into(),

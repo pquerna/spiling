@@ -5,7 +5,9 @@
 pub mod app;
 pub mod commands;
 pub mod host;
+pub mod scene;
 pub mod ui;
+pub mod viewport;
 
 pub fn native_options() -> eframe::NativeOptions {
     eframe::NativeOptions {
@@ -13,6 +15,7 @@ pub fn native_options() -> eframe::NativeOptions {
             .with_inner_size([1120.0, 760.0])
             .with_min_inner_size([640.0, 480.0]),
         renderer: eframe::Renderer::Wgpu,
+        depth_buffer: 24,
         ..Default::default()
     }
 }

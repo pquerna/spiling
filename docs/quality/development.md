@@ -50,8 +50,8 @@ crates are optimized independently of the desktop stack.
 
 [ADR006](../adr/006-native-egui-workbench.md) selects the permanent
 `apps/workbench` application. The current increment manages projects through the
-existing supervised engine; it explicitly has no 3D display, face picking or
-manufacturing controls. The CEF workbench remains usable until the migration gates
+existing supervised engine and displays admitted native sources, shared occurrences,
+source-face inspection/picking and sections. Manufacturing controls migrate separately. The CEF workbench remains usable until the migration gates
 are met. `pnpm dev` switches at the complete native manufacturing-flow gate.
 
 ```sh
@@ -92,6 +92,18 @@ accepted operations must have bounded visible progress/errors and explicit
 observation/cancellation semantics. Host checks do not substitute for dialogs,
 actual window/GPU or platform packaging acceptance. Preserve run output and
 producer/environment identities in ignored artifacts or PR verification notes.
+
+Native source inspection uses `scene` for revision-bound pages, complete face tables and
+checked SPLM/SPLS transfers, and `viewport` for shared raw GPU storage, f64-rebased
+placement, camera and native face picking. Import an admitted part, click a source
+face and compare the exact engine inspection with the tree selection. Add a copy
+at an explicit edited pose, fit the source, and request a native section at a declared
+Z. Metadata-only project edits do not reload meshes. Pause/resume retains the prior
+labelled source; stale revisions cannot pick or mutate. Geometry-only definitions
+retain native face-list inspection without invented display. A source projection
+exceeding the additional 0.001 mm display budget refuses publication and retains
+the previous scene; native queries remain authoritative. This is not exact display
+measurement or general STEP qualification.
 
 The `inspection` Cargo feature enables upstream development inspection tooling;
 it is off by default and must stay off in distributions. It is not a second

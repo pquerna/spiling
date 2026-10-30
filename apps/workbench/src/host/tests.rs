@@ -193,6 +193,10 @@ fn native_path_limit_and_problem_history_are_bounded() {
         dialog: None,
         nonce: 0,
         executing: false,
+        section_task: None,
+        section_cancel: Arc::new(AtomicBool::new(false)),
+        display_task: None,
+        display_cancel: Arc::new(AtomicBool::new(false)),
     };
     for i in 0..20 {
         actor.problem(format!("{i}:{}", "界".repeat(PROBLEM_BYTES)));
@@ -298,4 +302,121 @@ fn startup_build_mismatch_is_visible_and_reaps_the_child() {
         );
     }
     assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
+}
+
+fn displayed(host: &Host) -> Snapshot {
+    wait(host, |s| {
+        !s.display_loading
+            && s.display.as_ref().is_some_and(|d| {
+                s.scene
+                    .as_ref()
+                    .is_some_and(|summary| d.same_revision(summary))
+            })
+    })
+}
+#[test]
+#[ignore = "actual native scene, sections and source mappings; requires SPILING_TEST_ENGINE"]
+fn checked_scene_picking_shared_occurrences_sections_and_large_origin() {
+    use spiling_contracts::geometry::*;
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&host, |s| s.phase == Phase::Running);
+    imported(&host);
+    let snapshot = displayed(&host);
+    let scene = snapshot.display.unwrap();
+    assert_eq!(scene.definitions.len(), 1);
+    assert!(!scene.definitions[0].chunks.is_empty());
+    let bounds = scene.summary.bounds_mm.unwrap();
+    let center = glam::DVec3::from_array(std::array::from_fn(|i| {
+        (bounds.min[i] + bounds.max[i]) * 0.5
+    }));
+    let reference = crate::viewport::pick(&scene, center + glam::DVec3::Z * 100.0, -glam::DVec3::Z)
+        .expect("ray must hit the admitted source");
+    host.geometry(GeometryCommand::InspectFace {
+        reference: reference.clone(),
+    })
+    .unwrap();
+    let inspected = wait(&host, |s| {
+        s.inspection
+            .as_ref()
+            .is_some_and(|i| i.reference == reference)
+    });
+    assert_eq!(inspected.inspection.unwrap().reference, reference);
+    let mut pose = RigidPoseMm::IDENTITY;
+    pose.translation_mm = [40.0, 0.0, 0.0];
+    host.geometry(GeometryCommand::AddInstance {
+        session_id: scene.summary.session_id.clone(),
+        base_revision: scene.summary.revision,
+        definition_id: scene.definitions[0].record.definition_id.clone(),
+        pose,
+    })
+    .unwrap();
+    wait(&host, |s| {
+        s.scene.as_ref().is_some_and(|s| s.occurrence_count == 2)
+    });
+    let copied = displayed(&host).display.unwrap();
+    assert!(
+        Arc::ptr_eq(&scene.definitions[0], &copied.definitions[0]),
+        "pose/occurrence edits must reuse checked bytes"
+    );
+    host.geometry(GeometryCommand::StartSection {
+        session_id: copied.summary.session_id.clone(),
+        base_revision: copied.summary.revision,
+        plane: PlaneMm {
+            origin_mm: center.to_array(),
+            normal: [0.0, 0.0, 1.0],
+        },
+    })
+    .unwrap();
+    let section = wait(&host, |s| s.section.is_some());
+    assert!(section.section.unwrap().summary.total_loop_count >= 2);
+    let original = copied.occurrences[0].clone();
+    host.geometry(GeometryCommand::RemoveInstance {
+        session_id: copied.summary.session_id.clone(),
+        base_revision: copied.summary.revision,
+        occurrence_id: copied.occurrences[1].occurrence_id,
+    })
+    .unwrap();
+    wait(&host, |s| {
+        s.scene.as_ref().is_some_and(|s| s.occurrence_count == 1)
+    });
+    let copied = displayed(&host).display.unwrap();
+    // Move the first occurrence near a large origin without changing its definition.
+    let project = host.snapshot().project.unwrap();
+    pose.translation_mm = [1e9, 1e9, 0.0];
+    host.geometry(GeometryCommand::SetInstancePose {
+        session_id: copied.summary.session_id.clone(),
+        base_revision: copied.summary.revision,
+        project_revision: project.revision,
+        occurrence_id: original.occurrence_id,
+        pose,
+    })
+    .unwrap();
+    wait(&host, |s| {
+        s.scene
+            .as_ref()
+            .is_some_and(|s| s.revision != copied.summary.revision)
+    });
+    let placed = displayed(&host).display.unwrap();
+    let hit = crate::viewport::pick(
+        &placed,
+        center + glam::DVec3::new(1e9, 1e9, 100.0),
+        -glam::DVec3::Z,
+    )
+    .expect("large-origin source must remain pickable in f64");
+    assert_eq!(hit.occurrence_id, original.occurrence_id);
+    assert!(
+        host.snapshot().section.is_none(),
+        "revision changes invalidate sections"
+    );
+    let close = send(&host, Action::Close);
+    host.confirm(close.confirmation.unwrap().id, true).unwrap();
+    wait(&host, |s| s.phase == Phase::Closed);
 }

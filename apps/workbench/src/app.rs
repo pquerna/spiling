@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+use crate::viewport::Viewport;
 use crate::{
     commands::Action,
     host::{Command, Config, Host, Phase, Picker, Snapshot},
@@ -9,6 +10,7 @@ use crate::{
 };
 use egui::{Key, KeyboardShortcut, Modifiers, RichText};
 use serde::{Deserialize, Serialize};
+use spiling_contracts::geometry::*;
 
 const LICENSE: &str = include_str!("../../../LICENSE.md");
 const PREFS: &str = "spiling-native-preferences-v1";
@@ -40,6 +42,14 @@ pub struct Workbench {
     close_requested: bool,
     gpu: String,
     title: String,
+    viewport: Viewport,
+    selected: Option<FaceRef>,
+    occurrence: Option<OccurrenceId>,
+    pose: [f64; 6],
+    pose_revision: Option<SceneRevision>,
+    section_z: f64,
+    queued_geometry: Option<GeometryCommand>,
+    queued_host: Option<Command>,
 }
 impl Workbench {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -74,6 +84,14 @@ impl Workbench {
             close_requested: false,
             gpu,
             title: String::new(),
+            viewport: Viewport::new(cc),
+            selected: None,
+            occurrence: None,
+            pose: [0.0; 6],
+            pose_revision: None,
+            section_z: 1.0,
+            queued_geometry: None,
+            queued_host: None,
         }
     }
     fn start(&mut self, ctx: &egui::Context) {
@@ -282,6 +300,8 @@ impl Workbench {
         });
     }
 }
+mod workspace;
+
 impl eframe::App for Workbench {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if self.start_requested {
@@ -295,6 +315,28 @@ impl eframe::App for Workbench {
                 .is_some_and(|serial| self.state.serial > serial)
             {
                 self.awaiting_serial = None;
+            }
+        }
+        if self.selected.as_ref().is_some_and(|r| {
+            self.state
+                .scene
+                .as_ref()
+                .is_none_or(|s| s.session_id != r.session_id || s.revision != r.scene_revision)
+        }) {
+            self.selected = None;
+        }
+        if let Some(command) = self.queued_host.take()
+            && let Some(host) = &self.host
+            && let Err(error) = host.command(command)
+        {
+            self.local_problem = Some(error);
+        }
+        if let Some(command) = self.queued_geometry.take()
+            && let Some(host) = &self.host
+        {
+            match host.geometry(command) {
+                Ok(()) => self.awaiting_serial = Some(self.state.serial),
+                Err(error) => self.local_problem = Some(error),
             }
         }
         let title = self
@@ -347,7 +389,7 @@ impl eframe::App for Workbench {
             self.shortcuts(ctx);
         }
     }
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let previous_theme = self.prefs.theme;
         if !self.prefs.accepted_osl3 {
@@ -425,18 +467,62 @@ impl eframe::App for Workbench {
             .default_size(280.0)
             .min_size(210.0)
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.project(ui));
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.selection_ui(ui);
+                    self.project(ui);
+                });
             });
-        egui::Frame::central_panel(ui.style()).fill(self.prefs.theme.tokens().canvas).show(ui,|ui| {
-            ui.set_min_size(ui.available_size());
-            ui.add_space(24.0);
-            ui::notice(ui,"3D display not implemented", "This development increment manages real native projects. Source geometry rendering and source-face picking arrive in the next increment.", self.prefs.theme.tokens());
-            ui.add_space(20.0);
-            ui.label("The project inspector shows information returned by the supervised engine.");
-            ui.label("Manufacturing programs are not machine ready.");
-            if self.state.phase == Phase::Interrupted { self.button(ui,Action::Restart); }
-            ui.add_space(24.0); ui::theme_choice(ui,&mut self.prefs.theme);
-        });
+        egui::Panel::left("model-tree")
+            .resizable(true)
+            .default_size(210.0)
+            .min_size(140.0)
+            .show(ui, |ui| self.tree_ui(ui));
+        egui::Frame::central_panel(ui.style())
+            .fill(self.prefs.theme.tokens().canvas)
+            .show(ui, |ui| {
+                if self.state.display_loading {
+                    ui.label("Updating source display · previous revision retained");
+                    if ui.button("Pause transfer").clicked() {
+                        self.queued_host = Some(Command::PauseDisplay);
+                    }
+                }
+                if self.state.display_paused {
+                    ui.colored_label(
+                        self.prefs.theme.tokens().warning,
+                        "Source display paused · previous revision retained",
+                    );
+                    if ui.button("Resume transfer").clicked() {
+                        self.queued_host = Some(Command::ResumeDisplay);
+                    }
+                }
+                let current = self.display_current();
+                if !current && self.state.display.is_some() {
+                    ui.colored_label(
+                        self.prefs.theme.tokens().warning,
+                        "Displayed source is stale · picking and edits disabled",
+                    );
+                }
+                if self
+                    .state
+                    .display
+                    .as_ref()
+                    .is_none_or(|s| s.occurrences.is_empty())
+                {
+                    ui.label(
+                        "Import STEP or open a saved project to inspect native source geometry.",
+                    );
+                }
+                if let Some(reference) = self.viewport.show(
+                    ui,
+                    self.state.display.clone(),
+                    self.state.section.clone(),
+                    self.selected.as_ref(),
+                    current,
+                    frame,
+                ) {
+                    self.select_face(reference);
+                }
+            });
         if let Some(confirmation) = &self.state.confirmation {
             let id = confirmation.id;
             let modal = egui::Modal::new(egui::Id::unique("discard-project")).show(&ctx,|ui| {
@@ -467,7 +553,11 @@ impl eframe::App for Workbench {
             self.prefs.theme.apply(&ctx);
         }
         // Side effects execute once in logic(), even if egui lays out the UI in multiple passes.
-        if self.queued.is_some() || self.confirmation.is_some() {
+        if self.queued.is_some()
+            || self.confirmation.is_some()
+            || self.queued_geometry.is_some()
+            || self.queued_host.is_some()
+        {
             ctx.request_repaint();
         }
     }
