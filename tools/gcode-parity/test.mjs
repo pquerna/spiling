@@ -273,3 +273,10 @@ test("reference probes cannot explain roofs from missing or unchanged controls",
   assert.equal(evaluateReferenceProbes(a, unchanged).roofPreparation, false);
   assert.equal(evaluateReferenceProbes(a, unchanged).circularBridge, false);
 });
+
+test("internal-solid probe refuses unchanged reference and unproven native invariance", async () => {
+  const { evaluateSolidProbe } = await import("./probes.mjs");
+  const a = audit(synthetic());
+  assert.equal(evaluateSolidProbe(a, a, a, a, true).explained, false);
+  assert.equal(evaluateSolidProbe(a, a, a, a, false).explained, false);
+});

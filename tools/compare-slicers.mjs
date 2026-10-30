@@ -8,7 +8,7 @@ import { resolve, dirname, join, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platform, release, arch } from "node:os";
 import { decodeGcode } from "./gcode-parity/decode.mjs";
-import { evaluateReferenceProbes } from "./gcode-parity/probes.mjs";
+import { evaluateReferenceProbes, evaluateSolidProbe } from "./gcode-parity/probes.mjs";
 import { auditCube, compareAudits } from "./gcode-parity/analyze.mjs";
 import {
   cases,
@@ -16,6 +16,7 @@ import {
   intentFor,
   referenceProfile,
   referenceProbeSettings,
+  referenceProbesFor,
   sha256,
 } from "./gcode-parity/corpus.mjs";
 import { reportHtml, overlayBands } from "./gcode-parity/report.mjs";
@@ -345,9 +346,10 @@ try {
         };
         await save(`${c.id}/shape-bound-diagnostic-audit.json`, probeAudit);
       }
-      if (c.infillFraction < 1) {
+      {
         record.referenceProbes = [];
-        for (const probe of referenceProbeSettings) {
+        const probeAudits = [];
+        for (const probe of referenceProbesFor(c)) {
           const prefix = `reference-${probe.id}`;
           await save(`${c.id}/${prefix}.ini`, referenceProfile(c, probe.settings));
           await run(
@@ -373,16 +375,69 @@ try {
             c,
           );
           await save(`${c.id}/${prefix}-audit.json`, probeAudit);
-          record.referenceProbes.push({ ...probe, audit: probeAudit });
+          probeAudits.push({ ...probe, audit: probeAudit });
+          record.referenceProbes.push({
+            ...probe,
+            auditFile: `${prefix}-audit.json`,
+            correctnessPassed: probeAudit.correctnessPassed,
+            violations: probeAudit.violations,
+            modelVolumeMm3: probeAudit.modelVolumeMm3,
+          });
         }
-        record.referenceProbeEvidence = evaluateReferenceProbes(
-          record.reference,
-          record.referenceProbes,
-        );
+        if (c.infillFraction < 1)
+          record.referenceProbeEvidence = evaluateReferenceProbes(record.reference, probeAudits);
+        else {
+          const diagnostic = structuredClone(intent);
+          diagnostic.recipe.top_skin_thickness_mm = 10;
+          await save(`${c.id}/solid-all.intent.json`, diagnostic);
+          const solidStdout = await run(
+            cli,
+            [
+              "project",
+              "create",
+              join(directory, "solid-all.spiling"),
+              "--import",
+              join(output, "cube-10-derived.step"),
+              "--intent",
+              join(directory, "solid-all.intent.json"),
+              "--compile",
+              "--verify",
+              "--manufacturing-out",
+              join(directory, "solid-all-export"),
+              "--engine",
+              engine,
+            ],
+            `${c.id}/solid-all`,
+          );
+          if (JSON.parse(solidStdout).hello?.engine_build !== manifest.engineBuild)
+            throw new Error("solid diagnostic engine identity changed");
+          const verification = JSON.parse(
+            await boundedText(join(directory, "solid-all-export/verification.json")),
+          );
+          if (verification.verified !== true) throw new Error("solid diagnostic replay failed");
+          const program = await boundedText(join(directory, "solid-all-export/program.gcode"));
+          const audit = auditCube(decodeGcode(program), {
+            ...c,
+            prime: {
+              from: prime.prime_start_mm,
+              to: prime.prime_end_mm,
+              filamentMm: prime.prime_filament_length_mm,
+            },
+          });
+          await save(`${c.id}/solid-all-audit.json`, audit);
+          record.solidProbeEvidence = evaluateSolidProbe(
+            record.spiling,
+            record.reference,
+            audit,
+            probeAudits[0].audit,
+            program === (await boundedText(join(directory, "spiling-export/program.gcode"))),
+          );
+        }
       }
       record.comparison = compareAudits(record.spiling, record.reference, {
         scheduleProbe,
         referenceProbeEvidence: record.referenceProbeEvidence,
+        solidProbeEvidence: record.solidProbeEvidence,
       });
       await save(`${c.id}/comparison.json`, record.comparison);
       console.error(
@@ -433,6 +488,12 @@ for (const c of report.cases)
       `reference-${p.id}.gcode`,
       `reference-${p.id}-audit.json`,
     ]),
+    "solid-all.intent.json",
+    "solid-all-audit.json",
+    "solid-all-export/program.gcode",
+    "solid-all-export/plan.json",
+    "solid-all-export/verification.json",
+    "solid-all-export/provenance.json",
     "shape-bound-diagnostic.intent.json",
     "shape-bound-diagnostic-export/plan.json",
     "shape-bound-diagnostic-export/program.gcode",
