@@ -3,8 +3,11 @@
 // Licensed under the Open Software License version 3.0
 
 pub mod app;
+pub mod assets;
 pub mod commands;
+pub mod diagnostics;
 pub mod host;
+pub mod launch;
 pub mod manufacture;
 pub mod replay;
 pub mod scene;

@@ -127,3 +127,11 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
         "Save outcome uncertain — inspect the project before another action",
     );
 }
+
+/// A local draft field; project mutation occurs only on its form's explicit Apply.
+pub fn number(ui: &mut Ui, label: &str, value: &mut f64, speed: f64) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(label);
+        ui.add(egui::DragValue::new(value).speed(speed));
+    });
+}

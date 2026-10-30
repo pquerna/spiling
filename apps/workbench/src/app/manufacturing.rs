@@ -5,9 +5,7 @@
 use super::*;
 use spiling_contracts::{
     manufacturing::*,
-    process::ProcessEdit,
-    project::{ProjectCommand, ProjectId, ProjectRevision},
-    surface::SurfaceScope,
+    project::{ProjectId, ProjectRevision},
 };
 use std::sync::Arc;
 
@@ -24,8 +22,6 @@ pub(super) struct ManufacturingUi {
     pub panel: usize,
     pub replay: crate::replay::View,
     pub review_nonce: Option<u64>,
-    sparse: f64,
-    sparse_source: Option<(ProjectId, ProjectRevision, OccurrenceId)>,
 }
 impl Workbench {
     pub(super) fn manufacturing_current(&self) -> bool {
@@ -75,7 +71,8 @@ impl Workbench {
                     d.project != project.project_id
                         || d.nonce != nonce
                         || (d.revision != project.revision
-                            && (d.value == *d.original || d.value == *source))
+                            && (d.value == *d.original
+                                || super::policies::prepared(&d.value).is_ok_and(|v| v == *source)))
                 });
                 if reset {
                     self.manufacturing.draft = Some(IntentDraft {
@@ -134,18 +131,22 @@ impl Workbench {
                             egui::DragValue::new(&mut d.value.recipe.perimeter_count).range(1..=8),
                         );
                     });
-                    let valid = d.value.validate();
+                    super::policies::fields(ui, &mut d.value);
+                    let valid = super::policies::prepared(&d.value);
                     if let Err(error) = &valid {
                         ui.colored_label(self.prefs.theme.tokens().warning, error.to_string());
                     }
                     if ui
-                        .add_enabled(valid.is_ok(), egui::Button::new("Apply full intent"))
+                        .add_enabled(
+                            valid.as_ref().is_ok_and(|v| m.intent.as_deref() != Some(v)),
+                            egui::Button::new("Apply full intent"),
+                        )
                         .clicked()
                     {
                         self.queued_manufacturing = Some(ManufacturingCommand::SetIntent {
                             session_id: hello.session_id.clone(),
                             base_revision: d.revision,
-                            intent: Arc::new(d.value.clone()),
+                            intent: Arc::new(valid.expect("validated complete intent")),
                         });
                     }
                 });
@@ -159,58 +160,14 @@ impl Workbench {
                 ui.weak("Load an explicit inert intent. No printer or material is inferred.");
             }
             ui.separator();
-            ui.heading("Occurrence process");
+            self.process_ui(ui, writable && self.display_current());
+            ui.heading("Native placement");
             if let Some(scene) = self.state.display.clone()
                 && let Some(o) = scene
                     .occurrences
                     .iter()
                     .find(|o| Some(o.occurrence_id) == self.occurrence)
             {
-                let identity = (
-                    project.project_id.clone(),
-                    project.revision,
-                    o.occurrence_id,
-                );
-                if self.manufacturing.sparse_source.as_ref() != Some(&identity) {
-                    self.manufacturing.sparse = project
-                        .resolved_process
-                        .iter()
-                        .find(|r| {
-                            r.occurrence_id == o.occurrence_id && r.definition_id == o.definition_id
-                        })
-                        .map_or_else(
-                            || m.intent.as_ref().map_or(0.2, |i| i.recipe.infill_fraction),
-                            |r| r.value.fraction,
-                        );
-                    self.manufacturing.sparse_source = Some(identity);
-                }
-                ui.horizontal(|ui| {
-                    ui.label("Sparse fraction");
-                    ui.add(
-                        egui::DragValue::new(&mut self.manufacturing.sparse)
-                            .speed(0.01)
-                            .range(0.001..=1.0),
-                    );
-                });
-                if ui
-                    .add_enabled(
-                        writable && self.display_current(),
-                        egui::Button::new("Apply occurrence sparse fraction"),
-                    )
-                    .clicked()
-                {
-                    self.queued_project = Some(ProjectCommand::EditProcess {
-                        session_id: hello.session_id.clone(),
-                        base_revision: project.revision,
-                        edit: ProcessEdit::SetSparseFraction {
-                            scope: SurfaceScope::Occurrence {
-                                occurrence_id: o.occurrence_id,
-                                expected_definition_id: o.definition_id.clone(),
-                            },
-                            fraction: self.manufacturing.sparse,
-                        },
-                    });
-                }
                 if let Some(intent) = &m.intent
                     && ui
                         .add_enabled(
@@ -356,6 +313,7 @@ impl Workbench {
                     "{:.3} mm³ deposited · {:.3} mm filament",
                     report.deposited_volume_mm3, report.filament_length_mm
                 ));
+                super::review::details(ui, review);
                 ui.collapsing("Coverage", |ui| {
                     for row in &report.coverage {
                         ui.label(row);
@@ -400,11 +358,24 @@ impl Workbench {
                         ui.weak("Empty gap layer · no events");
                     }
                     ui.collapsing("Resolved regional coverage", |ui| {
-                        ui.label(format!("{:#?}", layer.region_coverage));
+                        super::review::layer(ui, layer);
                     });
                 }
                 ui.collapsing("Sparse band decisions", |ui| {
-                    ui.label(format!("{:#?}", plan.sparse_bands));
+                    egui::ScrollArea::vertical().max_height(240.0).show_rows(
+                        ui,
+                        24.0,
+                        plan.sparse_bands.len(),
+                        |ui, range| {
+                            for index in range {
+                                let band = &plan.sparse_bands[index];
+                                ui.label(format!(
+                                    "Layers {}–{} · {:?} · {:?}",
+                                    band.first_layer, band.last_layer, band.owner, band.disposition
+                                ));
+                            }
+                        },
+                    );
                 });
             } else {
                 ui.weak("Freshly verify the active compiled output to enable replay and export.");
@@ -433,6 +404,9 @@ impl Workbench {
             ui.checkbox(&mut view.source, "Show source");
             ui.checkbox(&mut view.travels, "Travels");
             ui.checkbox(&mut view.visible, "Motion");
+            if crate::replay::declared_tool_colors(&review.capture.provenance.workflow).is_some() {
+                ui.checkbox(&mut view.material, "Declared material tints");
+            }
         });
         ui.horizontal_wrapped(|ui| {
             let mut all = view.layer.is_none();

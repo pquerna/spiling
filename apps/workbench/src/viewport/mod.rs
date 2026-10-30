@@ -13,6 +13,7 @@ use std::{collections::HashMap, sync::Arc};
 struct Uniform {
     matrix: [[f32; 4]; 4],
     selected: [u32; 4],
+    tool_color: [f32; 4],
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -37,6 +38,8 @@ struct Resources {
     replay: Option<Arc<crate::manufacture::Review>>,
     replay_buffers: Vec<wgpu::Buffer>,
     point_pipeline: wgpu::RenderPipeline,
+    tool_uniforms: [wgpu::Buffer; 2],
+    tool_groups: [wgpu::BindGroup; 2],
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
@@ -158,7 +161,7 @@ impl Viewport {
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Spiling camera"),
-            size: 80,
+            size: 96,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -223,11 +226,11 @@ impl Viewport {
             layout: Some(&line_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &line_shader,
-                entry_point: Some("vs"),
+                entry_point: Some("vs_point"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: 24,
-                    step_mode: wgpu::VertexStepMode::Vertex,
+                    step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3],
                 })],
             },
@@ -238,7 +241,7 @@ impl Viewport {
                 targets: &[Some(state.target_format.into())],
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::PointList,
+                topology: wgpu::PrimitiveTopology::TriangleList,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -260,10 +263,30 @@ impl Viewport {
                 resource: uniform.as_entire_binding(),
             }],
         });
+        let tool_uniforms = std::array::from_fn(|_| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Declared tool tint camera"),
+                size: 96,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        let tool_groups = std::array::from_fn(|i| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Declared tool tint"),
+                layout: &line_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: tool_uniforms[i].as_entire_binding(),
+                }],
+            })
+        });
         state.renderer.write().callback_resources.insert(Resources {
             replay: None,
             replay_buffers: Vec::new(),
             point_pipeline,
+            tool_uniforms,
+            tool_groups,
             pipeline,
             layout,
             uniform,
@@ -440,7 +463,13 @@ impl Viewport {
                 view,
                 uniform: Uniform {
                     matrix: matrix.as_mat4().to_cols_array_2d(),
-                    selected: selection,
+                    selected: [
+                        selection[0],
+                        selection[1],
+                        (rect.width() * ui.ctx().pixels_per_point()) as u32,
+                        (rect.height() * ui.ctx().pixels_per_point()) as u32,
+                    ],
+                    tool_color: [0.0; 4],
                 },
             },
         ));
@@ -538,6 +567,20 @@ impl egui_wgpu::CallbackTrait for Callback {
             r.replay = self.review.clone();
         }
         queue.write_buffer(&r.uniform, 0, bytemuck::bytes_of(&self.uniform));
+        let colors = self
+            .review
+            .as_ref()
+            .filter(|_| self.view.material)
+            .and_then(|review| {
+                crate::replay::declared_tool_colors(&review.capture.provenance.workflow)
+            });
+        for (i, buffer) in r.tool_uniforms.iter().enumerate() {
+            let uniform = Uniform {
+                tool_color: colors.map_or([0.0; 4], |c| c[i]),
+                ..self.uniform
+            };
+            queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
+        }
         vec![]
     }
     fn paint(
@@ -571,9 +614,22 @@ impl egui_wgpu::CallbackTrait for Callback {
                 } else {
                     &r.line_pipeline
                 });
-                pass.set_bind_group(0, &r.line_group, &[]);
+                let deposition = matches!(batch.kind,1..=5|8..=10|13|15);
+                pass.set_bind_group(
+                    0,
+                    if deposition {
+                        &r.tool_groups[batch.tool as usize]
+                    } else {
+                        &r.line_group
+                    },
+                    &[],
+                );
                 pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(range, 0..1);
+                if batch.points {
+                    pass.draw(0..6, range);
+                } else {
+                    pass.draw(range, 0..1);
+                }
             }
         }
     }

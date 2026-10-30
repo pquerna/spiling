@@ -212,6 +212,10 @@ fn native_path_limit_and_problem_history_are_bounded() {
         dialog: None,
         nonce: 0,
         executing: false,
+        optical_task: None,
+        diagnostic_task: None,
+        diagnostic_paused: false,
+        image_task: None,
         review_task: None,
         export_task: None,
         section_task: None,
@@ -219,6 +223,10 @@ fn native_path_limit_and_problem_history_are_bounded() {
         display_task: None,
         display_cancel: Arc::new(AtomicBool::new(false)),
     };
+    eprintln!(
+        "Native request future bytes: {}",
+        std::mem::size_of_val(&actor.request(Request::Command(Command::Restart)))
+    );
     for i in 0..20 {
         actor.problem(format!("{i}:{}", "界".repeat(PROBLEM_BYTES)));
     }
@@ -664,5 +672,584 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
         std::fs::read(root.path().join("reopened-output/program.gcode")).unwrap(),
         program
     );
+    assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
+}
+
+fn project_edit(
+    host: &Host,
+    build: impl FnOnce(spiling_contracts::geometry::SessionId, ProjectRevision) -> ProjectCommand,
+) -> Snapshot {
+    let s = host.snapshot();
+    let serial = s.serial;
+    host.project(build(
+        s.hello.as_ref().unwrap().session_id.clone(),
+        s.project.as_ref().unwrap().revision,
+    ))
+    .unwrap();
+    idle_after(host, serial)
+}
+fn manufacture_control(
+    host: &Host,
+    build: impl FnOnce(spiling_contracts::geometry::SessionId, ProjectRevision) -> ManufacturingCommand,
+) -> Snapshot {
+    let s = host.snapshot();
+    let serial = s.serial;
+    host.manufacturing(build(
+        s.hello.as_ref().unwrap().session_id.clone(),
+        s.project.as_ref().unwrap().revision,
+    ))
+    .unwrap();
+    idle_after(host, serial)
+}
+fn place_on_bed(
+    host: &Host,
+    intent: &spiling_contracts::manufacturing::ManufacturingIntent,
+) -> Snapshot {
+    let s = wait(host, |s| {
+        s.display
+            .as_ref()
+            .is_some_and(|d| d.same_revision(s.scene.as_ref().unwrap()))
+    });
+    let o = &s.display.as_ref().unwrap().occurrences[0];
+    let scene = s.scene.as_ref().unwrap();
+    let serial = s.serial;
+    host.geometry(GeometryCommand::PrepareBedPose {
+        session_id: scene.session_id.clone(),
+        base_revision: scene.revision,
+        project_revision: s.project.as_ref().unwrap().revision,
+        occurrence_id: o.occurrence_id,
+        expected_definition_id: o.definition_id.clone(),
+        expected_pose: o.pose,
+        envelope_mm: intent.printer.build_envelope,
+        center_xy: true,
+        contact_tolerance_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
+    })
+    .unwrap();
+    let s = idle_after(host, serial);
+    let p = s.bed_proposal.as_ref().expect("native bed proposal");
+    let serial = s.serial;
+    host.geometry(GeometryCommand::SetInstancePose {
+        session_id: p.session_id.clone(),
+        base_revision: p.scene_revision,
+        project_revision: p.project_revision,
+        occurrence_id: p.occurrence_id,
+        pose: p.pose,
+    })
+    .unwrap();
+    idle_after(host, serial)
+}
+#[test]
+#[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
+fn finish_layers_canonical_image_preview_and_recovery() {
+    use spiling_contracts::{geometry::AnalyticSurfaceDescription, manufacturing::*, surface::*};
+    let root = tempfile::tempdir().unwrap();
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("ops"),
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&host, |s| s.phase == Phase::Running);
+    let source = root.path().join("box-mm.step");
+    std::fs::copy(repo.join("fixtures/geometry/box-mm.step"), &source).unwrap();
+    send(&host, Action::Import(native(&source)));
+    let s = wait(&host, |s| {
+        s.display
+            .as_ref()
+            .is_some_and(|d| d.same_revision(s.scene.as_ref().unwrap()))
+    });
+    let scene = s.display.as_ref().unwrap();
+    let o = &scene.occurrences[0];
+    let definition = scene.definition(&o.definition_id).unwrap();
+    let mut selected = None;
+    for ordinal in 0..definition.faces.len() {
+        let reference = scene.reference(o, ordinal).unwrap();
+        let serial = host.snapshot().serial;
+        host.geometry(GeometryCommand::InspectFace {
+            reference: reference.clone(),
+        })
+        .unwrap();
+        let s = idle_after(&host, serial);
+        if matches!(s.inspection.as_ref().unwrap().face.geometry.analytic,Some(AnalyticSurfaceDescription::Plane{normal,..}) if normal[2].abs()<1e-12)
+        {
+            selected = Some(reference);
+            break;
+        }
+    }
+    let mut reference = selected.expect("vertical native plane");
+    let intent = Arc::new(
+        decode_intent(
+            &std::fs::read(repo.join("fixtures/manufacturing/solid-fill.intent.json")).unwrap(),
+        )
+        .unwrap(),
+    );
+    manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::SetIntent {
+            session_id,
+            base_revision,
+            intent: intent.clone(),
+        }
+    });
+    let placed = place_on_bed(&host, &intent);
+    reference.scene_revision = placed.scene.as_ref().unwrap().revision;
+    let s = project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::AddSurfaceFinish {
+            session_id,
+            base_revision,
+            face_ref: reference.clone(),
+            scope: SurfaceScopeKind::Definition,
+            finish: SurfaceFinish::VerticalRibs {
+                depth_mm: 0.1,
+                pitch_mm: 2.0,
+                edge_margin_mm: 1.0,
+                phase_mm: 0.0,
+            },
+        }
+    });
+    assert_eq!(
+        s.project.as_ref().unwrap().surface_overlays.layers.len(),
+        1,
+        "{:?}",
+        s.problems
+    );
+    let preflight = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::Preflight {
+            session_id,
+            base_revision,
+        }
+    });
+    assert_eq!(
+        preflight
+            .manufacturing
+            .preflight
+            .as_ref()
+            .unwrap()
+            .disposition,
+        PreflightDisposition::Admitted,
+        "{:?}",
+        preflight.manufacturing.preflight
+    );
+    let s = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::Compile {
+            session_id,
+            base_revision,
+        }
+    });
+    assert!(s.manufacturing.artifact.is_some(), "{:?}", s.problems);
+    manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::Inspect {
+            session_id,
+            base_revision,
+            output: VerificationOutput::ReportAndMotion,
+        }
+    });
+    let s = wait(&host, |s| s.manufacturing.review.is_some());
+    assert!(
+        s.manufacturing
+            .review
+            .as_ref()
+            .unwrap()
+            .capture
+            .report
+            .verified
+    );
+    let image = root.path().join("height.pgm");
+    std::fs::write(&image, b"P5\n2 2\n255\n\x00\xff\xff\x00").unwrap();
+    let s = project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::ImportSurfaceImageFinish {
+            session_id,
+            base_revision,
+            reference: reference.clone(),
+            scope: SurfaceScopeKind::Occurrence,
+            source: native(&image),
+            parameters: ImageReliefParameters {
+                depth_mm: 0.1,
+                u_repeats: 1,
+                u_phase_fraction: 0.0,
+                z_period_mm: 10.0,
+                z_phase_mm: 0.0,
+                edge_margin_mm: 1.0,
+                vertical_error_mm: 0.05,
+            },
+        }
+    });
+    let p = s.project.as_ref().unwrap();
+    assert_eq!(p.surface_overlays.layers.len(), 2, "{:?}", s.problems);
+    assert!(s.manufacturing.capture.is_none());
+    let record = p.surface_overlays.images[0].clone();
+    let id = p.surface_overlays.layers[1].layer_id;
+    project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::SetSurfaceFinishEnabled {
+            session_id,
+            base_revision,
+            layer_id: id,
+            enabled: false,
+        }
+    });
+    let serial = host.snapshot().serial;
+    host.command(Command::Undo).unwrap();
+    let s = idle_after(&host, serial);
+    assert!(s.project.as_ref().unwrap().surface_overlays.layers[1].enabled);
+    project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::GetSurfaceImage {
+            session_id,
+            base_revision,
+            image_hash: record.image_hash.clone(),
+        }
+    });
+    let s = wait(&host, |s| s.image_preview.is_some());
+    assert_eq!(s.image_preview.as_ref().unwrap().pixels.size, [2, 2]);
+    let saved = root.path().join("project");
+    send(
+        &host,
+        Action::Save {
+            target: Some(native(&saved)),
+        },
+    );
+    send(&host, Action::Close);
+    drop(host);
+    std::fs::remove_file(source).unwrap();
+    std::fs::remove_file(image).unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("ops2"),
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&host, |s| s.phase == Phase::Running);
+    send(
+        &host,
+        Action::Open {
+            path: native(&saved),
+            read_only: true,
+            recover_previous: false,
+        },
+    );
+    project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::GetSurfaceImage {
+            session_id,
+            base_revision,
+            image_hash: record.image_hash.clone(),
+        }
+    });
+    let s = wait(&host, |s| s.image_preview.is_some());
+    assert_eq!(s.image_preview.as_ref().unwrap().record, record);
+    assert_eq!(s.project.as_ref().unwrap().surface_overlays.layers.len(), 2);
+    assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
+}
+
+fn checked_review(host: &Host) -> Snapshot {
+    use spiling_contracts::manufacturing::*;
+    let preflight = manufacture_control(host, |session_id, base_revision| {
+        ManufacturingCommand::Preflight {
+            session_id,
+            base_revision,
+        }
+    });
+    assert_eq!(
+        preflight
+            .manufacturing
+            .preflight
+            .as_ref()
+            .unwrap()
+            .disposition,
+        PreflightDisposition::Admitted,
+        "{:?}",
+        preflight.manufacturing.preflight
+    );
+    let s = manufacture_control(host, |session_id, base_revision| {
+        ManufacturingCommand::Compile {
+            session_id,
+            base_revision,
+        }
+    });
+    assert!(s.manufacturing.artifact.is_some(), "{:?}", s.problems);
+    manufacture_control(host, |session_id, base_revision| {
+        ManufacturingCommand::Inspect {
+            session_id,
+            base_revision,
+            output: VerificationOutput::ReportAndMotion,
+        }
+    });
+    wait(host, |s| s.manufacturing.review.is_some())
+}
+fn retain_project(host: &Host, name: &str) {
+    if let Some(root) = std::env::var_os("SPILING_NATIVE_EVIDENCE_ROOT") {
+        let root = PathBuf::from(root);
+        std::fs::create_dir_all(&root).unwrap();
+        let s = send(
+            host,
+            Action::Save {
+                target: Some(native(&root.join(name))),
+            },
+        );
+        assert!(!s.project.as_ref().unwrap().dirty, "{:?}", s.problems);
+    }
+}
+#[test]
+#[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
+fn native_h1_housing_and_physical_plate_parity() {
+    use spiling_contracts::{manufacturing::*, process::*, surface::SurfaceScope};
+    let root = tempfile::tempdir().unwrap();
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (name, profile, plate) in [
+        ("h1-housing", "housing-h1-combined", false),
+        ("zoned-plate", "housing-ordinary", true),
+    ] {
+        let host = Host::new(
+            Config {
+                engine: engine(),
+                store: root.path().join(name),
+            },
+            || {},
+        )
+        .unwrap();
+        wait(&host, |s| s.phase == Phase::Running);
+        send(
+            &host,
+            Action::Import(native(&repo.join(
+                "fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step",
+            ))),
+        );
+        let intent = Arc::new(
+            decode_intent(
+                &std::fs::read(repo.join(format!("fixtures/manufacturing/{profile}.intent.json")))
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+        manufacture_control(&host, |session_id, base_revision| {
+            ManufacturingCommand::SetIntent {
+                session_id,
+                base_revision,
+                intent: intent.clone(),
+            }
+        });
+        let s = place_on_bed(&host, &intent);
+        let scope = SurfaceScope::Definition {
+            definition_id: s.display.as_ref().unwrap().occurrences[0]
+                .definition_id
+                .clone(),
+        };
+        project_edit(&host, |session_id, base_revision| {
+            ProjectCommand::EditProcess {
+                session_id,
+                base_revision,
+                edit: ProcessEdit::SetSparseFraction {
+                    scope: scope.clone(),
+                    fraction: if plate { 0.6 } else { 0.2 },
+                },
+            }
+        });
+        project_edit(&host, |session_id, base_revision| {
+            ProjectCommand::EditProcess {
+                session_id,
+                base_revision,
+                edit: ProcessEdit::SetBoxSparseFraction {
+                    scope: scope.clone(),
+                    min: [-1.0, -1.0, -1.0],
+                    max: if plate {
+                        [25.0, 19.0, 5.03]
+                    } else {
+                        [8.0, 19.0, 11.0]
+                    },
+                    fraction: if plate { 0.2 } else { 0.6 },
+                    interface: Some(if plate {
+                        ProcessInterfacePermission::HorizontalDiaphragm { thickness_mm: 0.23 }
+                    } else {
+                        ProcessInterfacePermission::SeparatorWall
+                    }),
+                },
+            }
+        });
+        let s = checked_review(&host);
+        let review = s.manufacturing.review.as_ref().unwrap();
+        assert!(review.capture.report.verified);
+        if plate {
+            assert!(
+                review
+                    .bundle
+                    .plan
+                    .layers
+                    .iter()
+                    .any(|l| !l.region_coverage.process_diaphragms.is_empty())
+            );
+        } else {
+            assert!(
+                review
+                    .bundle
+                    .plan
+                    .sparse_bands
+                    .iter()
+                    .any(|b| b.disposition == SparseBandDisposition::Combined),
+                "Combine selection alone is not genuine H1"
+            );
+        }
+        retain_project(&host, name);
+        assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
+    }
+}
+#[test]
+#[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
+fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
+    use spiling_contracts::{manufacturing::*, surface::*};
+    let root = tempfile::tempdir().unwrap();
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (name, cylinder) in [
+        ("cylinder-ribs", true),
+        ("fixed-dual", false),
+        ("fixed-dual-cycle", false),
+    ] {
+        let host = Host::new(
+            Config {
+                engine: engine(),
+                store: root.path().join(name),
+            },
+            || {},
+        )
+        .unwrap();
+        wait(&host, |s| s.phase == Phase::Running);
+        send(
+            &host,
+            Action::Import(native(&repo.join(if cylinder {
+                "fixtures/geometry/independent-exporters/occt-cylinder-mm.step"
+            } else {
+                "fixtures/geometry/box-mm.step"
+            }))),
+        );
+        let intent = Arc::new(
+            decode_intent(
+                &std::fs::read(repo.join(if cylinder {
+                    "fixtures/manufacturing/solid-fill.intent.json"
+                } else if name == "fixed-dual-cycle" {
+                    "fixtures/manufacturing/fixed-dual-cycle.intent.json"
+                } else {
+                    "fixtures/manufacturing/fixed-dual.intent.json"
+                }))
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        manufacture_control(&host, |session_id, base_revision| {
+            ManufacturingCommand::SetIntent {
+                session_id,
+                base_revision,
+                intent: intent.clone(),
+            }
+        });
+        if cylinder {
+            place_on_bed(&host, &intent);
+            let s = wait(&host, |s| {
+                s.display
+                    .as_ref()
+                    .is_some_and(|d| d.same_revision(s.scene.as_ref().unwrap()))
+            });
+            let scene = s.display.as_ref().unwrap();
+            let o = &scene.occurrences[0];
+            let d = scene.definition(&o.definition_id).unwrap();
+            let mut reference = None;
+            for ordinal in 0..d.faces.len() {
+                let r = scene.reference(o, ordinal).unwrap();
+                let serial = host.snapshot().serial;
+                host.geometry(GeometryCommand::InspectFace {
+                    reference: r.clone(),
+                })
+                .unwrap();
+                let s = idle_after(&host, serial);
+                if matches!(
+                    s.inspection.as_ref().unwrap().face.geometry.analytic,
+                    Some(spiling_contracts::geometry::AnalyticSurfaceDescription::Cylinder { .. })
+                ) {
+                    reference = Some(r);
+                    break;
+                }
+            }
+            project_edit(&host, |session_id, base_revision| {
+                ProjectCommand::AddSurfaceFinish {
+                    session_id,
+                    base_revision,
+                    face_ref: reference.unwrap(),
+                    scope: SurfaceScopeKind::Definition,
+                    finish: SurfaceFinish::CylindricalRibs {
+                        depth_mm: 0.1,
+                        rib_count: 8,
+                        phase_fraction: 0.0,
+                    },
+                }
+            });
+        } else {
+            let s = wait(&host, |s| s.display.is_some());
+            let scene = s.scene.as_ref().unwrap();
+            let o = &s.display.as_ref().unwrap().occurrences[0];
+            let serial = s.serial;
+            host.geometry(GeometryCommand::SetInstancePose {
+                session_id: scene.session_id.clone(),
+                base_revision: scene.revision,
+                project_revision: s.project.as_ref().unwrap().revision,
+                occurrence_id: o.occurrence_id,
+                pose: RigidPoseMm {
+                    translation_mm: [20.0, 20.0, 0.0],
+                    ..RigidPoseMm::IDENTITY
+                },
+            })
+            .unwrap();
+            let s = idle_after(&host, serial);
+            let scene = s.scene.as_ref().unwrap();
+            let serial = s.serial;
+            host.geometry(GeometryCommand::AddInstance {
+                session_id: scene.session_id.clone(),
+                base_revision: scene.revision,
+                definition_id: o.definition_id.clone(),
+                pose: RigidPoseMm {
+                    translation_mm: [120.0, 20.0, 0.0],
+                    ..RigidPoseMm::IDENTITY
+                },
+            })
+            .unwrap();
+            idle_after(&host, serial);
+        }
+        let s = checked_review(&host);
+        let review = s.manufacturing.review.as_ref().unwrap();
+        assert!(review.capture.report.verified);
+        if !cylinder {
+            let r = review.display.as_ref().unwrap();
+            assert!(r.batches.iter().any(|b| b.tool == 1 && b.kind == 15));
+            assert!(r.batches.iter().any(|b| b.kind == 11 && b.points));
+            assert!(r.batches.iter().all(|b| b.kind != 14));
+            assert!(review.capture.report.routing.is_some());
+        }
+        retain_project(&host, name);
+        assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
+    }
+}
+#[test]
+#[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
+fn diagnostic_operations_remain_separate_cancellable_and_checked() {
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("ops"),
+        },
+        || {},
+    )
+    .unwrap();
+    let s = wait(&host, |s| s.phase == Phase::Running);
+    let project = s.project.as_ref().unwrap().clone();
+    let serial = s.serial;
+    host.command(Command::Diagnostic).unwrap();
+    wait(&host, |s| s.serial > serial && s.diagnostic.is_some());
+    host.command(Command::Cancel).unwrap();
+    wait(&host, |s| s.diagnostic.as_ref().is_some_and(|d| d.done));
+    host.command(Command::Diagnostic).unwrap();
+    let s = wait(&host, |s| s.diagnostic_triangle);
+    assert_eq!(s.project.as_ref().unwrap().project_id, project.project_id);
+    assert_eq!(s.project.as_ref().unwrap().revision, project.revision);
+    assert_eq!(s.scene.as_ref().unwrap().occurrence_count, 0);
     assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
 }

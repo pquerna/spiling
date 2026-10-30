@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
 struct Camera { view_projection: mat4x4<f32>, selected: vec4<u32> };
 struct Instance { rotation: vec4<f32>, translation: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;

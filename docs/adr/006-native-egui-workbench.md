@@ -8,7 +8,8 @@ Licensed under the Open Software License version 3.0
 
 Status: adopted. Native project, source display and recoverable manufacturing
 through fresh actual-program replay/export are implemented in `apps/workbench`.
-The native development command is the default; legacy retirement follows parity.
+The native development command is the default. Existing source/process/finish/image
+and actual-program review workflows are ported; native packaging gates retirement.
 
 ## Decision
 

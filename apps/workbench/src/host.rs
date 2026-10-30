@@ -60,6 +60,8 @@ pub struct JobView {
 
 #[derive(Debug, Clone)]
 pub struct Snapshot {
+    pub diagnostic: Option<Arc<spiling_contracts::OperationView>>,
+    pub diagnostic_triangle: bool,
     pub generation: u64,
     pub serial: u64,
     pub phase: Phase,
@@ -73,6 +75,10 @@ pub struct Snapshot {
     pub display_paused: bool,
     pub inspection: Option<Arc<spiling_contracts::geometry::FaceInspection>>,
     pub manufacturing: Arc<manufacture::State>,
+    pub image_preview: Option<Arc<crate::assets::ImagePreview>>,
+    pub image_loading: bool,
+    pub optical_report: Option<Arc<crate::assets::OpticalCapture>>,
+    pub optical_loading: bool,
     pub bed_proposal: Option<Arc<spiling_contracts::geometry::BedPosePreparation>>,
     pub busy: bool,
     pub active_operation: bool,
@@ -85,6 +91,8 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            diagnostic: None,
+            diagnostic_triangle: false,
             generation: 0,
             serial: 0,
             phase: Phase::Starting,
@@ -98,6 +106,10 @@ impl Default for Snapshot {
             display_paused: false,
             inspection: None,
             manufacturing: Arc::default(),
+            image_preview: None,
+            image_loading: false,
+            optical_report: None,
+            optical_loading: false,
             bed_proposal: None,
             busy: true,
             active_operation: false,
@@ -162,6 +174,7 @@ pub enum Command {
     ResumeDisplay,
     CancelSection,
     CancelReview,
+    Diagnostic,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Picker {
@@ -172,6 +185,7 @@ pub enum Picker {
     Import,
     Intent,
     Export,
+    Image,
 }
 impl Picker {
     fn title(self) -> &'static str {
@@ -181,6 +195,7 @@ impl Picker {
             Self::Recover => "Recover previous committed checkpoint",
             Self::Save => "Choose a new project directory name",
             Self::Import => "Import a native STEP part",
+            Self::Image => "Import height image PNG or canonical PGM",
             Self::Intent => "Load inert manufacturing intent JSON",
             Self::Export => "Choose a new manufacturing export directory name",
         }
@@ -201,6 +216,10 @@ enum Action {
     },
     Import(NativePath),
     LoadIntent(NativePath),
+    ImportImage {
+        source: NativePath,
+        request: Box<crate::assets::ImageRequest>,
+    },
     Export(NativePath),
     Undo,
     Redo,
@@ -214,6 +233,7 @@ impl Action {
             Self::Open { .. } => "Open another project",
             Self::Save { .. } => "Save project",
             Self::Import(_) => "Import part",
+            Self::ImportImage { .. } => "Import image and apply relief",
             Self::LoadIntent(_) => "Load manufacturing intent",
             Self::Export(_) => "Export verified program",
             Self::Undo => "Undo",
@@ -231,6 +251,7 @@ impl Action {
 }
 enum Request {
     Geometry(Box<GeometryCommand>),
+    StartupOpen(crate::launch::Open),
     Manufacturing(Box<ManufacturingCommand>),
     Project(Box<ProjectCommand>),
     Command(Command),
@@ -263,6 +284,8 @@ impl Host {
     pub fn new(config: Config, wake: impl Fn() + Send + Sync + 'static) -> Result<Self, String> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
+            // Bounded debug-build frames for generated typed operations and nested restart/open.
+            .thread_stack_size(8 * 1024 * 1024)
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?;
@@ -284,6 +307,10 @@ impl Host {
             executing: false,
             section_task: None,
             section_cancel: Arc::new(AtomicBool::new(false)),
+            optical_task: None,
+            diagnostic_task: None,
+            diagnostic_paused: false,
+            image_task: None,
             review_task: None,
             export_task: None,
             display_task: None,
@@ -306,6 +333,9 @@ impl Host {
         self.sender
             .try_send(request)
             .map_err(|e| format!("Native host admission: {e}"))
+    }
+    pub fn open_from_launch(&self, open: crate::launch::Open) -> Result<(), String> {
+        self.send(Request::StartupOpen(open))
     }
     pub fn geometry(&self, command: GeometryCommand) -> Result<(), String> {
         self.send(Request::Geometry(Box::new(command)))
@@ -347,6 +377,24 @@ impl Host {
         ctx: &egui::Context,
         picker: Picker,
     ) -> Result<(), String> {
+        self.choose_native(parent, ctx, picker, None)
+    }
+    pub fn choose_image(
+        &mut self,
+        parent: &eframe::Frame,
+        ctx: &egui::Context,
+        request: crate::assets::ImageRequest,
+    ) -> Result<(), String> {
+        request.parameters.validate().map_err(|e| e.to_string())?;
+        self.choose_native(parent, ctx, Picker::Image, Some(request))
+    }
+    fn choose_native(
+        &mut self,
+        parent: &eframe::Frame,
+        ctx: &egui::Context,
+        picker: Picker,
+        image: Option<crate::assets::ImageRequest>,
+    ) -> Result<(), String> {
         self.next_picker += 1;
         let id = self.next_picker;
         let generation = self.snapshot().generation;
@@ -358,18 +406,22 @@ impl Host {
         let wake = ctx.clone();
         let future: std::pin::Pin<
             Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>,
-        > = if matches!(picker, Picker::Import | Picker::Intent) {
+        > = if matches!(picker, Picker::Import | Picker::Intent | Picker::Image) {
             // Both branches return different opaque future types, so erase only this OS boundary.
             Box::pin(
                 dialog
                     .add_filter(
                         if picker == Picker::Import {
                             "STEP"
+                        } else if picker == Picker::Image {
+                            "Height image PNG / PGM"
                         } else {
                             "Manufacturing intent JSON"
                         },
                         if picker == Picker::Import {
                             &["step", "stp", "STEP", "STP"][..]
+                        } else if picker == Picker::Image {
+                            &["png", "pgm"][..]
                         } else {
                             &["json"][..]
                         },
@@ -398,7 +450,18 @@ impl Host {
             .spawn(async move {
                 let action = future
                     .await
-                    .map(|file| selected_action(picker, file.path()))
+                    .map(|file| {
+                        if let Some(request) = image {
+                            NativePath::from_os_str(file.path().as_os_str())
+                                .map(|source| Action::ImportImage {
+                                    source,
+                                    request: Box::new(request),
+                                })
+                                .map_err(|e| e.to_string())
+                        } else {
+                            selected_action(picker, file.path())
+                        }
+                    })
                     .transpose();
                 let _ = sender
                     .send(Request::PickerFinished {
@@ -433,6 +496,9 @@ fn selected_action(picker: Picker, path: &std::path::Path) -> Result<Action, Str
         Picker::Import => Action::Import(path),
         Picker::Intent => Action::LoadIntent(path),
         Picker::Export => Action::Export(path),
+        Picker::Image => {
+            return Err("Height image selection requires captured mapping intent".into());
+        }
         _ => Action::Open {
             path,
             read_only: picker == Picker::OpenReadOnly,
@@ -479,6 +545,11 @@ struct Actor {
     dialog: Option<u64>,
     nonce: u64,
     executing: bool,
+    optical_task: Option<JoinHandle<Result<Arc<crate::assets::OpticalCapture>, ClientError>>>,
+    diagnostic_task:
+        Option<JoinHandle<Result<(spiling_contracts::OperationView, bool), ClientError>>>,
+    diagnostic_paused: bool,
+    image_task: Option<JoinHandle<Result<Arc<crate::assets::ImagePreview>, ClientError>>>,
     review_task: Option<JoinHandle<Result<Arc<manufacture::Review>, ClientError>>>,
     export_task: Option<JoinHandle<Result<manufacture::StagedExport, String>>>,
     section_task: Option<JoinHandle<Result<Arc<Section>, ClientError>>>,
@@ -488,13 +559,16 @@ struct Actor {
 }
 impl Actor {
     fn publish(&mut self) {
+        self.state.optical_loading = self.optical_task.is_some();
+        self.state.image_loading = self.image_task.is_some();
         self.state.section_loading = self.section_task.is_some();
         self.state.display_loading = self.display_task.is_some();
         Arc::make_mut(&mut self.state.manufacturing).loading = self.review_task.is_some();
         Arc::make_mut(&mut self.state.manufacturing).export_busy = self.export_task.is_some();
-        self.state.active_operation = self.pending.is_some();
+        self.state.active_operation =
+            self.pending.is_some() || self.state.diagnostic.as_ref().is_some_and(|d| !d.done);
         self.state.busy = self.executing
-            || self.pending.is_some()
+            || self.state.active_operation
             || self.state.phase == Phase::Starting
             || self.deferred.is_some()
             || self.export_task.is_some();
@@ -532,7 +606,7 @@ impl Actor {
                 biased;
                 _ = &mut stop => break,
                 request = requests.recv() => match request {
-                    Some(request) => { self.executing = true; self.publish(); self.request(request).await; self.state.serial += 1; self.executing = false; },
+                    Some(request) => { self.executing = true; self.publish(); Box::pin(self.request(request)).await; self.state.serial += 1; self.executing = false; },
                     None => break,
                 },
                 result = async { match &mut observation { Some(task) => task.await, None => std::future::pending().await } } => {
@@ -541,6 +615,24 @@ impl Actor {
                         Ok(Ok(job)) => self.observe(job).await,
                         Ok(Err(error)) => { if let Some(pending) = &mut self.pending { pending.paused = true; } self.failure(error).await; }
                         Err(error) => self.problem(format!("Operation observer failed: {error}")),
+                    }
+                },
+                result=async{match &mut self.optical_task{Some(task)=>task.await,None=>std::future::pending().await}}=>{
+                    self.optical_task=None;
+                    match result{Ok(Ok(report)) if self.state.project.as_ref().is_some_and(|p|p.project_id==report.project && p.revision==report.revision)=>self.state.optical_report=Some(report),Ok(Ok(_))=>{},Ok(Err(error))=>self.failure(error).await,Err(error)=>self.problem(error.to_string())}
+                },
+                result=async{match &mut self.diagnostic_task{Some(task)=>task.await,None=>std::future::pending().await}}=>{
+                    self.diagnostic_task=None;
+                    match result{
+                        Ok(Ok((operation,triangle)))=>{let done=operation.done;self.state.diagnostic=Some(Arc::new(operation));self.state.diagnostic_triangle=triangle;if done && let Some(action)=self.deferred.take(){self.admit(action).await;}},
+                        Ok(Err(error))=>{self.diagnostic_paused=true;self.failure(error).await;},Err(error)=>{self.diagnostic_paused=true;self.problem(error.to_string());},
+                    }
+                },
+                result=async{match &mut self.image_task{Some(task)=>task.await,None=>std::future::pending().await}}=>{
+                    self.image_task=None;
+                    match result{
+                        Ok(Ok(image)) if self.state.project.as_ref().is_some_and(|p|p.project_id==image.project && p.revision==image.revision) && self.state.hello.as_ref().is_some_and(|h|h.session_id==image.session)=>self.state.image_preview=Some(image),
+                        Ok(Ok(_))=>{},Ok(Err(error))=>self.failure(error).await,Err(error)=>self.problem(error.to_string()),
                     }
                 },
                 result = async {match &mut self.review_task {Some(task)=>task.await,None=>std::future::pending().await}} => {
@@ -583,6 +675,7 @@ impl Actor {
                 },
                 _ = timer.tick() => {
                     self.check_exit().await;
+                    if self.diagnostic_task.is_none() && !self.diagnostic_paused && let (Some(operation),Some(client))=(&self.state.diagnostic,&self.client) && !operation.done{self.diagnostic_task=Some(tokio::spawn(crate::diagnostics::observe(client.rpc(),operation.name.clone())));}
                     if observation.is_none() && let (Some(pending), Some(client)) = (&self.pending, &self.client) && !pending.paused {
                         let rpc = client.rpc(); let name = pending.name.clone();
                         observation = Some(tokio::spawn(async move { rpc.native_operation(name).await }));
@@ -650,6 +743,7 @@ impl Actor {
         self.state.inspection = None;
         self.state.display_paused = false;
         self.clear_review();
+        self.state.image_preview = None;
         self.state.manufacturing = Arc::default();
         self.state.bed_proposal = None;
         self.state.phase = Phase::Starting;
@@ -701,6 +795,21 @@ impl Actor {
         }
     }
     async fn cleanup(&mut self) {
+        if let Some(task) = self.optical_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.state.optical_report = None;
+        if let Some(task) = self.diagnostic_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.state.diagnostic = None;
+        self.state.diagnostic_triangle = false;
+        if let Some(task) = self.image_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         self.clear_review();
         // A staged transaction must finish and drop before the engine/session is released.
         if let Some(task) = self.export_task.take() {
@@ -727,6 +836,11 @@ impl Actor {
             let _ = client.terminate().await;
         }
         self.pending = None;
+        if let Some(task) = self.diagnostic_task.take() {
+            task.abort();
+        }
+        self.state.diagnostic = None;
+        self.state.diagnostic_triangle = false;
         self.confirmation = None;
         self.state.confirmation = None;
         self.deferred = None;
@@ -812,6 +926,17 @@ impl Actor {
         if changed {
             self.clear_review();
             self.state.bed_proposal = None;
+            if self.state.optical_report.as_ref().is_some_and(|r| {
+                r.project != project.project_id
+                    || info
+                        .appearance_study
+                        .optical
+                        .as_ref()
+                        .and_then(|s| s.report.as_ref())
+                        != Some(&r.record)
+            }) {
+                self.state.optical_report = None;
+            }
             Arc::make_mut(&mut self.state.manufacturing).preflight = None;
         }
         let m = Arc::make_mut(&mut self.state.manufacturing);
@@ -832,6 +957,14 @@ impl Actor {
     }
     async fn request(&mut self, request: Request) {
         match request {
+            Request::StartupOpen(open) => {
+                self.admit(Action::Open {
+                    path: open.path,
+                    read_only: open.read_only,
+                    recover_previous: false,
+                })
+                .await
+            }
             Request::Manufacturing(command) => self.manufacturing(*command).await,
             Request::Project(command) => self.project_edit(*command).await,
             Request::Geometry(command) => {
@@ -842,6 +975,7 @@ impl Actor {
                     return;
                 }
                 if self.pending.is_some()
+                    || self.state.diagnostic.as_ref().is_some_and(|d| !d.done)
                     || self.export_task.is_some()
                     || self.dialog.is_some()
                     || self.confirmation.is_some()
@@ -868,6 +1002,41 @@ impl Actor {
                     Err(error) => self.failure(error).await,
                 }
             }
+            Request::Command(Command::Diagnostic) => {
+                if self.export_task.is_some()
+                    || self.dialog.is_some()
+                    || self.confirmation.is_some()
+                    || self.pending.is_some()
+                    || self.state.diagnostic.as_ref().is_some_and(|d| !d.done)
+                {
+                    self.problem("Finish the active action before the diagnostic");
+                    return;
+                }
+                if let Some(client) = &self.client {
+                    match client
+                        .rpc()
+                        .run_diagnostic(spiling_contracts::rpc::RunDiagnosticRequest {
+                            parent: "diagnostics/workbench".into(),
+                            request_id: String::new(),
+                            chunk_count: 4,
+                            delay_ms: 250,
+                            chunk_bytes: 64,
+                            input_revision: "explicit-unitless-diagnostic".into(),
+                        })
+                        .await
+                    {
+                        Ok(operation) => match spiling_contracts::operation_view(&operation) {
+                            Ok(view) => {
+                                self.state.diagnostic = Some(Arc::new(view));
+                                self.state.diagnostic_triangle = false;
+                                self.diagnostic_paused = false;
+                            }
+                            Err(error) => self.problem(error),
+                        },
+                        Err(error) => self.failure(error).await,
+                    }
+                }
+            }
             Request::Command(Command::CancelReview) => {
                 self.clear_review();
                 self.state.message = "Review transfer cancelled; verify again to reload".into();
@@ -888,6 +1057,7 @@ impl Actor {
             Request::Command(Command::DismissProblems) => self.state.problems.clear(),
             Request::Command(Command::Cancel) => self.cancel().await,
             Request::Command(Command::Resume) => {
+                self.diagnostic_paused = false;
                 if let Some(pending) = &mut self.pending {
                     pending.paused = false;
                     self.state.message = "Resuming operation observation".into();
@@ -968,6 +1138,20 @@ impl Actor {
         }
     }
     async fn cancel(&mut self) {
+        if self.pending.is_none()
+            && let (Some(operation), Some(client)) = (&self.state.diagnostic, &self.client)
+            && !operation.done
+        {
+            match client.rpc().cancel_operation(&operation.name).await {
+                Ok(()) => {
+                    self.diagnostic_paused = false;
+                    self.state.message =
+                        "Diagnostic cancellation requested; awaiting terminal receipt".into();
+                }
+                Err(error) => self.failure(error).await,
+            }
+            return;
+        }
         if let (Some(pending), Some(client)) = (&mut self.pending, &self.client) {
             pending.paused = false;
             match client.rpc().cancel_operation(&pending.name).await {
@@ -980,7 +1164,11 @@ impl Actor {
         }
     }
     async fn admit(&mut self, action: Action) {
-        if self.pending.is_some() || self.export_task.is_some() || self.dialog.is_some() {
+        if self.pending.is_some()
+            || self.state.diagnostic.as_ref().is_some_and(|d| !d.done)
+            || self.export_task.is_some()
+            || self.dialog.is_some()
+        {
             if matches!(action, Action::Close | Action::Restart) {
                 self.deferred = Some(action);
                 self.cancel().await;
@@ -1030,6 +1218,18 @@ impl Actor {
         self.execute(action, false).await;
     }
     async fn execute(&mut self, action: Action, discard: bool) {
+        if let Action::ImportImage { source, request } = action {
+            self.project_edit(ProjectCommand::ImportSurfaceImageFinish {
+                session_id: request.session,
+                base_revision: request.revision,
+                reference: request.reference,
+                scope: request.scope,
+                source,
+                parameters: request.parameters,
+            })
+            .await;
+            return;
+        }
         if matches!(action, Action::LoadIntent(_) | Action::Export(_)) {
             self.file_action(action).await;
             return;
@@ -1125,7 +1325,11 @@ impl Actor {
                 }
                 return;
             }
-            Action::Close | Action::Restart | Action::LoadIntent(_) | Action::Export(_) => {
+            Action::Close
+            | Action::Restart
+            | Action::LoadIntent(_)
+            | Action::Export(_)
+            | Action::ImportImage { .. } => {
                 unreachable!()
             }
         };
@@ -1271,6 +1475,63 @@ impl Actor {
             }
             (Receipt::Geometry, Some(JobResult::BedPosePrepared { preparation })) if completed => {
                 self.state.bed_proposal = Some(Arc::new(preparation.clone()));
+            }
+            (
+                Receipt::Project,
+                Some(
+                    JobResult::SurfaceImageImported { .. }
+                    | JobResult::AppearancePaletteImported { .. }
+                    | JobResult::OpticalConstructionApplied { .. },
+                ),
+            ) if completed => {}
+            (
+                Receipt::Project,
+                Some(JobResult::OpticalCompared {
+                    project_id,
+                    record,
+                    resource,
+                    ..
+                }),
+            ) if completed => {
+                self.refresh_after_failure().await;
+                if let Some(task) = self.optical_task.take() {
+                    task.abort();
+                }
+                if let (Some(client), Some(project)) = (&self.client, &self.state.project)
+                    && project.project_id == *project_id
+                {
+                    self.optical_task = Some(tokio::spawn(crate::assets::load_optical(
+                        client.rpc(),
+                        client.hello().session_id.clone(),
+                        project_id.clone(),
+                        project.revision,
+                        record.clone(),
+                        resource.clone(),
+                    )));
+                }
+            }
+            (
+                Receipt::Project,
+                Some(JobResult::SurfaceImagePrepared {
+                    project_id,
+                    captured_revision,
+                    record,
+                    resource,
+                }),
+            ) if completed => {
+                if let Some(task) = self.image_task.take() {
+                    task.abort();
+                }
+                if let Some(client) = &self.client {
+                    self.image_task = Some(tokio::spawn(crate::assets::load_image(
+                        client.rpc(),
+                        client.hello().session_id.clone(),
+                        project_id.clone(),
+                        *captured_revision,
+                        record.clone(),
+                        resource.clone(),
+                    )));
+                }
             }
             (Receipt::Project, Some(JobResult::Scene { .. })) if completed => {}
             (Receipt::Geometry, Some(JobResult::Section { artifact_id })) if completed => {

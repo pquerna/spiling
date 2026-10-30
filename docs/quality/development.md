@@ -54,11 +54,16 @@ crates are optimized independently of the desktop stack.
 `apps/workbench` application. The current increment manages projects through the
 existing supervised engine and displays admitted native sources, shared occurrences,
 source-face inspection/picking and sections. Prepare loads a complete inert intent,
-commits scalar recipe/occurrence sparse edits, reviews native bed placement and
+commits full policy and whole/boxed source-sparse edits, reviews native bed placement and
 runs engine Preflight/Compile. Review performs fresh independent verification,
 retrieves checked actual SPLR6 motion and exclusively exports four files. `pnpm dev`
-is native. `pnpm dev:legacy` preserves the temporary baseline while box/interface,
-finish/image, complete policy and appearance parity migrate before retirement.
+is native. Finish authors scoped planar/cylindrical ribs, Smooth overrides and
+canonical PNG/PGM relief, layer enable/remove and stored-image reuse. Review retains
+H1 decisions, physical plate/region accounting, native coverage, surface exposure/
+optical reassessment and declared tool tints. Study loads retained complete optical
+reports and explicitly binds accepted selections to existing loaded declarations
+and source constructions. Palette/study authoring remains available through CLI.
+`pnpm dev:legacy` remains only until the native packaging/retirement cut.
 
 ```sh
 pnpm build:native     # locked matching engine and window, no CEF or frontend build
@@ -76,6 +81,11 @@ artifacts; do not build into another live smoke's target. The installed lookup
 expects `spiling-engine` beside `spiling-workbench`. Debug builds alone allow an
 absolute `SPILING_ENGINE_PATH` override. Startup validates the existing exact
 engine identity, kernel and capability contract; no mixed-build negotiation exists.
+
+The native binary also accepts `--read-only --open PROJECT_DIRECTORY`; paths
+preserve native encoding and use the same guarded Open as the picker. License
+assent still precedes engine/project admission. One process supervises one project;
+Core's writer lock remains authoritative.
 
 First save chooses a **new project directory name** through the native Save
 dialog; Core creates it. Open/read-only/recovery choose an existing project

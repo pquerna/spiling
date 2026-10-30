@@ -27,7 +27,8 @@ impl Actor {
         Arc::make_mut(&mut self.state.manufacturing).invalidate();
     }
     fn control_ready(&mut self) -> bool {
-        if self.pending.is_some()
+        if self.state.diagnostic.as_ref().is_some_and(|d| !d.done)
+            || self.pending.is_some()
             || self.export_task.is_some()
             || self.dialog.is_some()
             || self.confirmation.is_some()
@@ -95,7 +96,9 @@ impl Actor {
             Ok(ManufacturingResponse::Error { error }) => self.problem(error.to_string()),
             Err(error) => self.failure(error).await,
         }
-        self.refresh_after_failure().await;
+        if self.pending.is_none() {
+            self.refresh_after_failure().await;
+        }
     }
     pub(super) async fn project_edit(&mut self, command: ProjectCommand) {
         if !self.control_ready() {
@@ -116,7 +119,9 @@ impl Actor {
             Ok(ProjectResponse::Error { error }) => self.problem(error.to_string()),
             Err(error) => self.failure(error).await,
         }
-        self.refresh_after_failure().await;
+        if self.pending.is_none() {
+            self.refresh_after_failure().await;
+        }
     }
     pub(super) async fn verified(
         &mut self,

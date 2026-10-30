@@ -34,6 +34,7 @@ pub struct View {
     pub travels: bool,
     pub source: bool,
     pub visible: bool,
+    pub material: bool,
 }
 impl Default for View {
     fn default() -> Self {
@@ -43,6 +44,7 @@ impl Default for View {
             travels: true,
             source: false,
             visible: true,
+            material: false,
         }
     }
 }
@@ -214,6 +216,37 @@ impl Replay {
             owned_bytes,
         })
     }
+}
+
+/// Catalog tints from captured evidence, never a local mixture/color predictor.
+pub fn declared_tool_colors(workflow: &JobWorkflow) -> Option<[[f32; 4]; 2]> {
+    let JobWorkflow::FixedDualMarlin { job } = workflow else {
+        return None;
+    };
+    let mut colors = [None, None];
+    for construction in &job.surface_constructions {
+        for capture in construction
+            .optical_origin
+            .iter()
+            .flat_map(|origin| &origin.materials)
+        {
+            let tool = job
+                .tools
+                .iter()
+                .position(|tool| tool.material.id == capture.loaded_material.id)?;
+            let spiling_contracts::appearance::AppearanceEvidence::CatalogEstimate { srgb } =
+                capture.evidence.evidence
+            else {
+                continue;
+            };
+            let color = [srgb[0] as f32, srgb[1] as f32, srgb[2] as f32, 1.0];
+            if colors[tool].is_some_and(|old| old != color) {
+                return None;
+            }
+            colors[tool] = Some(color);
+        }
+    }
+    Some([colors[0]?, colors[1]?])
 }
 
 #[cfg(test)]

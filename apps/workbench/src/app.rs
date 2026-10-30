@@ -29,6 +29,7 @@ impl Default for Preferences {
 }
 
 pub struct Workbench {
+    startup_open: Option<crate::launch::Open>,
     prefs: Preferences,
     host: Option<Host>,
     state: Snapshot,
@@ -54,9 +55,16 @@ pub struct Workbench {
     queued_manufacturing: Option<spiling_contracts::manufacturing::ManufacturingCommand>,
     queued_project: Option<spiling_contracts::project::ProjectCommand>,
     manufacturing: manufacturing::ManufacturingUi,
+    process: process::ProcessUi,
+    surface: surface::SurfaceUi,
+    study: study::StudyUi,
+    queued_image: Option<crate::assets::ImageRequest>,
 }
 impl Workbench {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::with_open(cc, None)
+    }
+    pub fn with_open(cc: &eframe::CreationContext<'_>, open: Option<crate::launch::Open>) -> Self {
         let prefs: Preferences = cc
             .storage
             .and_then(|s| eframe::get_value(s, PREFS))
@@ -75,6 +83,7 @@ impl Workbench {
             .unwrap_or_else(|| "wgpu adapter unavailable".into());
         eprintln!("Spiling native graphics: {gpu}");
         Self {
+            startup_open: open,
             start_requested: prefs.accepted_osl3,
             prefs,
             host: None,
@@ -100,6 +109,10 @@ impl Workbench {
             queued_manufacturing: None,
             queued_project: None,
             manufacturing: manufacturing::ManufacturingUi::default(),
+            process: process::ProcessUi::default(),
+            surface: surface::SurfaceUi::default(),
+            study: study::StudyUi::default(),
+            queued_image: None,
         }
     }
     fn start(&mut self, ctx: &egui::Context) {
@@ -280,6 +293,25 @@ impl Workbench {
     fn feedback(&mut self, ui: &mut egui::Ui) {
         ui.columns(2, |columns| {
             columns[0].heading("Jobs");
+            if let Some(d) = &self.state.diagnostic {
+                columns[0].label(format!(
+                    "Unitless diagnostic · {} · {}/{}",
+                    d.state, d.completed_units, d.total_units
+                ));
+                if let Some(error) = &d.error_message {
+                    columns[0].label(error);
+                }
+            }
+            if self.state.diagnostic_triangle {
+                let (rect, _) =
+                    columns[0].allocate_exact_size(egui::vec2(80.0, 40.0), egui::Sense::hover());
+                columns[0].painter().add(egui::Shape::convex_polygon(
+                    vec![rect.left_bottom(), rect.right_bottom(), rect.center_top()],
+                    self.prefs.theme.tokens().accent,
+                    egui::Stroke::NONE,
+                ));
+                columns[0].weak("Checked SPLT · unitless diagnostic, separate from project BREP");
+            }
             egui::ScrollArea::vertical()
                 .id_salt("jobs")
                 .show(&mut columns[0], |ui| {
@@ -309,6 +341,11 @@ impl Workbench {
     }
 }
 mod manufacturing;
+mod policies;
+mod process;
+mod review;
+mod study;
+mod surface;
 mod workspace;
 
 impl eframe::App for Workbench {
@@ -324,6 +361,26 @@ impl eframe::App for Workbench {
                 .is_some_and(|serial| self.state.serial > serial)
             {
                 self.awaiting_serial = None;
+            }
+        }
+        if self.state.phase == Phase::Running
+            && !self.state.busy
+            && self.awaiting_serial.is_none()
+            && let Some(open) = self.startup_open.take()
+            && let Some(host) = &self.host
+        {
+            match host.open_from_launch(open) {
+                Ok(()) => self.awaiting_serial = Some(self.state.serial),
+                Err(error) => self.local_problem = Some(error),
+            }
+        }
+        self.image_texture(ctx);
+        if let Some(request) = self.queued_image.take()
+            && let Some(host) = &mut self.host
+        {
+            match host.choose_image(frame, ctx, request) {
+                Ok(()) => self.awaiting_serial = Some(self.state.serial),
+                Err(error) => self.local_problem = Some(error),
             }
         }
         if self.selected.as_ref().is_some_and(|r| {
@@ -471,13 +528,25 @@ impl eframe::App for Workbench {
                     self.button(ui, Action::Restart);
                     self.button(ui, Action::Cancel);
                     self.button(ui, Action::Resume);
+                    if ui
+                        .add_enabled(
+                            self.state.phase == Phase::Running && !self.state.busy,
+                            egui::Button::new("Run unitless triangle diagnostic"),
+                        )
+                        .clicked()
+                    {
+                        self.queued_host = Some(Command::Diagnostic);
+                    }
                 });
                 ui.menu_button("Help", |ui| {
                     self.button(ui, Action::License);
                     self.button(ui, Action::Gallery);
                 });
                 ui.separator();
-                for (index, label) in ["Inspect", "Prepare", "Review"].into_iter().enumerate() {
+                for (index, label) in ["Inspect", "Prepare", "Review", "Finish", "Study"]
+                    .into_iter()
+                    .enumerate()
+                {
                     ui.selectable_value(&mut self.manufacturing.panel, index, label);
                 }
                 ui.separator();
@@ -508,6 +577,10 @@ impl eframe::App for Workbench {
                     if self.manufacturing.panel == 0 {
                         self.selection_ui(ui);
                         self.project(ui);
+                    } else if self.manufacturing.panel == 3 {
+                        self.surface_ui(ui);
+                    } else if self.manufacturing.panel == 4 {
+                        self.study_ui(ui);
                     } else {
                         self.manufacturing_ui(ui);
                     }
@@ -621,6 +694,10 @@ impl eframe::App for Workbench {
             || self.confirmation.is_some()
             || self.queued_geometry.is_some()
             || self.queued_host.is_some()
+            || self.queued_picker.is_some()
+            || self.queued_manufacturing.is_some()
+            || self.queued_project.is_some()
+            || self.queued_image.is_some()
         {
             ctx.request_repaint();
         }
