@@ -131,6 +131,7 @@ export function auditBridge(decoded, source, { prime = null, widthMm = 0.45 } = 
       requiredGridSamples: 0,
       uncoveredGridSamples: 0,
       uncoveredExamples: [],
+      uncoveredPoints: [],
     };
     const feeds = new Set(),
       fans = new Set(),
@@ -195,6 +196,7 @@ export function auditBridge(decoded, source, { prime = null, widthMm = 0.45 } = 
           }
           if (!covered) {
             row.uncoveredGridSamples++;
+            row.uncoveredPoints.push([x, y]);
             if (row.uncoveredExamples.length < 4) row.uncoveredExamples.push([x, y]);
             problem("mandatory_nominal_coverage", { z, point: [x, y] });
           }

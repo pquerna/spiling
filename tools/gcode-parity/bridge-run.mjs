@@ -8,6 +8,7 @@ import { bridgeSources } from "./bridge-corpus.mjs";
 import { cases, intentFor, referenceProfile, sha256 } from "./corpus.mjs";
 import { decodeGcode } from "./decode.mjs";
 import { auditBridge } from "./bridges.mjs";
+import { bridgeMaterialLedger, bridgeLedgerDelta } from "./bridge-ledger.mjs";
 import { referenceValues, runBridgeProbes } from "./bridge-probes.mjs";
 const EPS = 0.002;
 
@@ -137,10 +138,13 @@ export async function runBridgeComparisons({
         ],
         `${id}/prusa`,
       );
-      record.reference = auditBridge(
-        decodeGcode(await readFile(join(directory, "prusa.gcode"), "utf8")),
-        source,
-      );
+      const referenceDecoded = decodeGcode(await readFile(join(directory, "prusa.gcode"), "utf8"));
+      record.reference = auditBridge(referenceDecoded, source);
+      record.referenceMaterial = bridgeMaterialLedger(referenceDecoded, record.reference, source, {
+        flowMultiplier: record.resolvedControls.flowMultiplier,
+      });
+      record.checks.referenceMaterialAccounted = record.referenceMaterial.reconciled;
+      await save(`${id}/reference-material.json`, record.referenceMaterial);
       await save(`${id}/reference-audit.json`, record.reference);
       let failed = null,
         nativeResult;
@@ -216,6 +220,19 @@ export async function runBridgeComparisons({
         const decoded = decodeGcode(program);
         record.spiling = auditBridge(decoded, source, { prime: intent.printer.workflow.job });
         await save(`${id}/spiling-audit.json`, record.spiling);
+        record.nativeMaterial = bridgeMaterialLedger(decoded, record.spiling, source, {
+          prime: intent.printer.workflow.job,
+          flowMultiplier: record.resolvedControls.flowMultiplier,
+        });
+        record.checks.nativeMaterialAccounted = record.nativeMaterial.reconciled;
+        record.checks.nativeDeclaredDose =
+          process.bridge_flow_factor === 1 &&
+          record.nativeMaterial.doseModel.mismatchedStrokeCount === 0;
+        await save(`${id}/native-material.json`, record.nativeMaterial);
+        await save(
+          `${id}/material-difference.json`,
+          bridgeLedgerDelta(record.nativeMaterial, record.referenceMaterial),
+        );
         record.checks.nativeNominalGeometry = record.spiling.correctnessPassed;
         const gaps = record.spiling.layers.filter(
           (r) => r.upperMm > 3.002 && r.lowerMm < 3.202 && r.twoEndedGapCount > 0,
@@ -354,6 +371,7 @@ export async function runBridgeComparisons({
   for (const name of [
     "bridge-run.mjs",
     "bridge-probes.mjs",
+    "bridge-ledger.mjs",
     "bridge-corpus.mjs",
     "bridges.mjs",
     "corpus.mjs",

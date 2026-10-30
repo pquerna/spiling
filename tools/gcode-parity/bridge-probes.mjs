@@ -6,6 +6,12 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { decodeGcode } from "./decode.mjs";
 import { auditBridge } from "./bridges.mjs";
+import {
+  bridgeMaterialLedger,
+  bridgeLedgerDelta,
+  bridgeCoverageWitnesses,
+  evaluateBridgeAccounting,
+} from "./bridge-ledger.mjs";
 
 export function referenceValues(ini, values) {
   for (const [key, value] of Object.entries(values)) {
@@ -185,6 +191,7 @@ export async function runBridgeProbes({ record, output, cli, engine, reference, 
   const observations = {};
   for (const [id, settings] of [
     ["overlap", { infill_overlap: "15%" }],
+    ["overlap-25", { infill_overlap: "25%" }],
     ["full-skin", { top_solid_layers: 20 }],
     ["half-bridge", { bridge_flow_ratio: 0.5 }],
   ]) {
@@ -277,6 +284,125 @@ export async function runBridgeProbes({ record, output, cli, engine, reference, 
     ["shifted material with conserved total", { ...query, half: moved }],
   ].map(([name, changed]) => ({ name, rejected: !evaluateBridgeProbes(changed).accepted }));
   result.accepted = result.accepted && result.faultChecks.every((f) => f.rejected);
+  const prime = intent.printer.workflow.job;
+  const variants = {
+    baseline: { decoded: query.baselineDecoded, audit: record.reference },
+    overlap: observations.overlap,
+    overlap25: observations["overlap-25"],
+    fullSkin: observations["full-skin"],
+    half: observations["half-bridge"],
+    native: { decoded: decodeGcode(baselineProgram), audit: record.spiling, prime },
+    nativeSkin: { decoded: decodeGcode(nativeSkinProgram), prime },
+  };
+  variants.nativeSkin.audit = auditBridge(variants.nativeSkin.decoded, source, { prime });
+  const flowMultiplier = record.resolvedControls.flowMultiplier;
+  const ledgers = {},
+    audits = {};
+  for (const [name, variant] of Object.entries(variants)) {
+    variant.flowMultiplier = flowMultiplier;
+    ledgers[name] = bridgeMaterialLedger(variant.decoded, variant.audit, source, {
+      prime: variant.prime,
+      flowMultiplier,
+    });
+    audits[name] = variant.audit;
+  }
+  const coverage = bridgeCoverageWitnesses(
+    source,
+    Object.fromEntries(
+      ["baseline", "overlap", "overlap25", "fullSkin", "half"].map((name) => [
+        name,
+        variants[name],
+      ]),
+    ),
+  );
+  const accounting = evaluateBridgeAccounting(ledgers, audits, coverage);
+  const movedRegion = structuredClone(ledgers);
+  for (const key of [
+    "volumeMm3",
+    "lengthMm",
+    "commonHeightVolumeMm3",
+    "heightAdjustmentMm3",
+    "doseResidualMm3",
+  ]) {
+    const shift = movedRegion.native.bands[0].cells[0][key] * 0.1;
+    movedRegion.native.bands[0].cells[0][key] -= shift;
+    movedRegion.native.bands[0].cells[1][key] += shift;
+  }
+  const firstLayer = variants.native.decoded.strokes.filter(
+    (s) => Math.abs(s.to[2] - 0.2) < 1e-6 && s.to[1] <= 6.002,
+  );
+  if (!baselineProgram.split("\n").includes("M82") || firstLayer.length < 2)
+    throw Error("balanced dose fault requires the captured absolute-E native program");
+  // Alter one absolute E coordinate. The next stroke compensates exactly,
+  // preserving layer and job totals while changing two local doses.
+  const changedLines = baselineProgram.split("\n");
+  const changedLine = firstLayer[0].line;
+  const eField = /\bE(-?\d+\.\d{8})\b/g;
+  if ([...changedLines[changedLine - 1].matchAll(eField)].length !== 1)
+    throw Error("balanced dose fault requires one eight-decimal E coordinate");
+  changedLines[changedLine - 1] = changedLines[changedLine - 1].replace(
+    eField,
+    (_, value) => `E${(Number(value) + 0.001).toFixed(8)}`,
+  );
+  const balancedProgram = changedLines.join("\n");
+  await save(`${prefix}/fault-balanced-dose.gcode`, balancedProgram);
+  const balancedDose = decodeGcode(balancedProgram);
+  const alteredDoseLedgers = {
+    ...ledgers,
+    native: bridgeMaterialLedger(balancedDose, audits.native, source, { prime, flowMultiplier }),
+  };
+  accounting.balancedDoseWitness = {
+    changedLine,
+    filamentCoordinateShiftMm: 0.001,
+    nominalGeometryUnchanged: auditBridge(balancedDose, source, { prime }).correctnessPassed,
+    materialTotalsReconcile: alteredDoseLedgers.native.reconciled,
+    rejectedStrokeCount: alteredDoseLedgers.native.doseModel.mismatchedStrokeCount,
+  };
+  const incompleteCoverage = structuredClone(coverage);
+  incompleteCoverage.witnesses.pop();
+  const missingControl = { ...ledgers };
+  delete missingControl.half;
+  accounting.faultChecks = [
+    {
+      name: "balanced stroke dose defect with conserved layer and job material",
+      rejected:
+        accounting.balancedDoseWitness.nominalGeometryUnchanged &&
+        accounting.balancedDoseWitness.materialTotalsReconcile &&
+        accounting.balancedDoseWitness.rejectedStrokeCount === 2 &&
+        !evaluateBridgeAccounting(alteredDoseLedgers, audits, coverage).accepted,
+    },
+    {
+      name: "shifted spatial material with conserved band total",
+      rejected: !evaluateBridgeAccounting(movedRegion, audits, coverage).accepted,
+    },
+    {
+      name: "omitted baseline coverage witness",
+      rejected: !evaluateBridgeAccounting(ledgers, audits, incompleteCoverage).accepted,
+    },
+    {
+      name: "missing accounting control",
+      rejected: !evaluateBridgeAccounting(missingControl, audits, coverage).accepted,
+    },
+  ];
+  accounting.accepted = accounting.accepted && accounting.faultChecks.every((f) => f.rejected);
+  await save(`${prefix}/material-accounting.json`, {
+    ...accounting,
+    ledgers,
+    differencesFromReference: Object.fromEntries(
+      ["native", "overlap", "overlap25", "fullSkin", "half"].map((name) => [
+        name,
+        bridgeLedgerDelta(ledgers[name], ledgers.baseline),
+      ]),
+    ),
+  });
+  await save(`${prefix}/coverage-witnesses.json`, coverage);
+  result.materialAccounting = {
+    ...accounting,
+    baselineMisses: coverage.sampleCount,
+    coverageResponses: coverage.counts,
+    controlMisses: coverage.controlMisses,
+  };
+  result.accepted = result.accepted && accounting.accepted;
   await save(`${prefix}/probe-witnesses.json`, result);
   return result;
 }

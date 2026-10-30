@@ -100,7 +100,7 @@ unresolved until deciding evidence closes them. Cube circular internal-bridge
 flow evidence does not automatically explain an exterior coupon roof.
 
 The middle matched coupon also retains one-setting reference probes for 15%
-infill overlap, full-height top skin and half bridge flow, plus a native
+and 25% infill overlap, full-height top skin and half bridge flow, plus a native
 full-height-skin compile with fresh verification.
 [`bridge-probes.mjs`](../../tools/gcode-parity/bridge-probes.mjs) refuses missing
 or duplicate reference settings rather than silently failing to change them.
@@ -132,7 +132,46 @@ coverage or total-material tolerances. The runner fault-checks them against
 changed native material, an unrelated reference geometry failure, a missing
 half-flow control and shifted interval material with conserved total. Every
 fault must reject acceptance. Accepted contribution witnesses remain separate
-from unresolved whole-job distribution and failed baseline observations.
+from policy explanations and failed baseline observations.
+
+## Bridge material and coverage witnesses
+
+[`bridge-ledger.mjs`](../../tools/gcode-parity/bridge-ledger.mjs) accounts for every
+model stroke in actual physical intervals and common 0.2 mm bands. It clips
+centerlines into left-post/span/right-post X regions, independently of source
+material presence below the roof. Boundary-parallel, X/Y-aligned and oblique
+classes describe commanded geometry, not inferred wall/fill roles. These are
+centerline partitions, not bead-volume intersections. Per-case ledgers and
+`material-difference.json` retain the complete native/reference distribution;
+the matched middle case's `material-accounting.json` also retains every control.
+
+Each cell separates common-height nominal stadium path volume, the correction
+for its actual interval height, and remaining commanded E dose. All cells,
+layers and bands must reconcile; terminal half-height intervals cannot be
+compared by layer index. This algebra localizes material differences without
+proving their policy or physical validity. The frozen native profiles use unity
+bridge flow: every native stroke must independently match its selected
+0.45 mm stadium/flow model within 2e-7 mm³ command quantization, preventing
+balanced local dose defects from disappearing in layer or job totals. Fitted
+reference flow has its own evidence and is not required to match that model.
+
+`coverage-witnesses.json` retains every baseline missed coordinate and the
+nearest actual stroke, endpoint projection, distance and E/length for each
+control. An explicitly labelled countermodel inverts dose/height to stadium
+width; this is never measured bead width or a widened baseline tolerance.
+Every control retains repaired, retained and newly introduced misses. More
+overlap can close one fill-corner gap while hatch refitting creates another;
+coverage across several different programs cannot qualify a single program.
+All baseline and probe audits remain available with complete missed points.
+
+The matched witness requires native full-skin band/region invariance, later-roof
+invariance under the reference skin control and non-roof invariance under the
+half-flow control. It additionally retains the nonmonotone overlap response.
+Fault checks reject shifted spatial contributions despite conserved band totals,
+balanced stroke dose defects despite conserved layer/job material, omitted
+coverage witnesses and missing controls. Accounting acceptance remains separate
+from baseline correctness and complete policy explanation; no broad material
+or coverage tolerance closes either gate.
 
 ## Comparison contract
 

@@ -383,3 +383,116 @@ test("solid construction comparison retains byte/order differences and rejects c
     false,
   );
 });
+
+test("bridge material accounting conserves physical bands and spatial cells across command splits", async () => {
+  const { bridgeMaterialLedger, bridgeLedgerReconciles, bridgeLedgerDelta } =
+    await import("./bridge-ledger.mjs");
+  const source = { id: "span-6", widthMm: 10 };
+  const area = (h) => h * (0.45 - h * (1 - Math.PI / 4));
+  const make = (split) => {
+    const lines = ["G21", "G90", "M83", "G92 E0"];
+    const layers = [];
+    let lower = 0;
+    for (const z of [3.8, 3.9, 4]) {
+      // Only the terminal physical bands are exercised here, independently
+      // of the complete coupon audit's earlier post/roof obligations.
+      const lo = z === 3.8 ? 3.6 : lower;
+      const length = 9,
+        h = z - lo;
+      lines.push(`G1 X0.5 Y3 Z${z} F2100`);
+      if (split) lines.push(`G1 X5 E${((4.5 * area(h)) / (Math.PI * (1.75 / 2) ** 2)).toFixed(8)}`);
+      lines.push(
+        `G1 X9.5 E${(((split ? 4.5 : 9) * area(h)) / (Math.PI * (1.75 / 2) ** 2)).toFixed(8)}`,
+      );
+      layers.push({ lowerMm: lo, upperMm: z, lengthMm: length });
+      lower = z;
+    }
+    const decoded = decodeGcode(lines.join("\n"));
+    for (const l of layers)
+      l.volumeMm3 = decoded.strokes
+        .filter((s) => s.to[2] === l.upperMm)
+        .reduce((v, s) => v + s.volumeMm3, 0);
+    const audit = { layers, modelVolumeMm3: layers.reduce((v, l) => v + l.volumeMm3, 0) };
+    return { decoded, audit, ledger: bridgeMaterialLedger(decoded, audit, source) };
+  };
+  const a = make(false),
+    b = make(true);
+  assert(a.ledger.reconciled && b.ledger.reconciled);
+  assert(Math.abs(a.ledger.heightAdjustmentMm3) > 0.5);
+  assert(Math.abs(bridgeLedgerDelta(a.ledger, b.ledger).volumeMm3) < 1e-6);
+  const last = a.ledger.bands.at(-1);
+  assert(Math.abs(last.lengthMm - 18) < 1e-6);
+  assert.deepEqual(last.cells.map((c) => c.region).sort(), ["left-post", "right-post", "span"]);
+  assert(Math.abs(last.cells.find((c) => c.region === "span").lengthMm - 12) < 1e-6);
+  const moved = structuredClone(a.ledger);
+  // Move an entire consistent contribution between regions: totals and
+  // V=nominal+height+residual still hold, but spatial resampling must reject.
+  for (const key of [
+    "volumeMm3",
+    "lengthMm",
+    "commonHeightVolumeMm3",
+    "heightAdjustmentMm3",
+    "doseResidualMm3",
+  ]) {
+    const shift = moved.bands.at(-1).cells[0][key] * 0.1;
+    moved.bands.at(-1).cells[0][key] -= shift;
+    moved.bands.at(-1).cells[1][key] += shift;
+  }
+  assert.equal(bridgeLedgerReconciles(moved, a.audit), false);
+  const balanced = structuredClone(b.decoded);
+  balanced.strokes[0].volumeMm3 += 0.01;
+  balanced.strokes[1].volumeMm3 -= 0.01;
+  const broken = bridgeMaterialLedger(balanced, b.audit, source);
+  assert.equal(broken.reconciled, true);
+  assert.equal(broken.doseModel.mismatchedStrokeCount, 2);
+  assert.equal(b.ledger.doseModel.mismatchedStrokeCount, 0);
+
+  const unaccounted = structuredClone(a.decoded);
+  unaccounted.strokes[0].to[2] = 3.7;
+  assert.throws(() => bridgeMaterialLedger(unaccounted, a.audit, source), /unaccounted/);
+});
+
+test("bridge coverage witnesses retain every miss, control response and dose countermodel", async () => {
+  const { bridgeCoverageWitnesses } = await import("./bridge-ledger.mjs");
+  const variant = (x, dose) => {
+    const p = [0.5, 3],
+      z = 0.2;
+    const lines = `${preamble}G1 X${x} Y1\nG1 X${x} Y5 E${((4 * dose) / (Math.PI * (1.75 / 2) ** 2)).toFixed(8)}`;
+    return {
+      decoded: decodeGcode(lines),
+      audit: {
+        layers: [
+          {
+            lowerMm: 0,
+            upperMm: z,
+            uncoveredGridSamples: Math.abs(x - p[0]) > 0.227 ? 1 : 0,
+            uncoveredPoints: Math.abs(x - p[0]) > 0.227 ? [p] : [],
+          },
+        ],
+      },
+    };
+  };
+  const variants = {
+    baseline: variant(0.75, 0.0814159),
+    overlap: variant(0.7, 0.0814159),
+    wide: variant(0.75, 0.11),
+  };
+  const result = bridgeCoverageWitnesses({ id: "span-6", widthMm: 10 }, variants);
+  assert.equal(result.sampleCount, 1);
+  assert.equal(result.controlMisses.overlap.baselineMissesRepaired, 1);
+  assert.equal(result.controlMisses.wide.baselineMissesRetained, 1);
+  const w = result.witnesses[0];
+  assert.equal(w.disposition, "covered-by-controlled-construction");
+  assert.deepEqual(w.coveringControls, ["overlap"]);
+  assert.equal(w.observations.baseline.nominalCovered, false);
+  assert.equal(w.observations.baseline.equivalentStadiumCovered, false);
+  assert.equal(w.observations.wide.nominalCovered, false);
+  assert.equal(w.observations.wide.equivalentStadiumCovered, true);
+  assert(Math.abs(w.observations.baseline.nearest.distanceMm - 0.25) < 1e-8);
+  const changed = structuredClone(variants);
+  changed.baseline.audit.layers[0].uncoveredPoints = [];
+  assert.throws(() => bridgeCoverageWitnesses({}, changed), /complete baseline/);
+  const shifted = structuredClone(variants);
+  shifted.overlap.audit.layers[0].lowerMm = 0.1;
+  assert.throws(() => bridgeCoverageWitnesses({}, shifted), /matching physical intervals/);
+});
