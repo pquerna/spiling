@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod beads;
 use crate::scene::{Scene, Section};
 use egui_wgpu::wgpu::{self, util::DeviceExt};
 use glam::{DMat4, DQuat, DVec3};
@@ -37,6 +38,8 @@ struct LineVertex {
 struct Resources {
     replay: Option<Arc<crate::manufacture::Review>>,
     replay_buffers: Vec<wgpu::Buffer>,
+    bead_buffers: Vec<wgpu::Buffer>,
+    bead_pipeline: wgpu::RenderPipeline,
     point_pipeline: wgpu::RenderPipeline,
     tool_uniforms: [wgpu::Buffer; 2],
     tool_groups: [wgpu::BindGroup; 2],
@@ -221,6 +224,7 @@ impl Viewport {
             multiview_mask: None,
             cache: None,
         });
+        let bead_pipeline = beads::pipeline(device, &line_pipeline_layout, state.target_format);
         let point_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("stationary actual-program events"),
             layout: Some(&line_pipeline_layout),
@@ -284,6 +288,8 @@ impl Viewport {
         state.renderer.write().callback_resources.insert(Resources {
             replay: None,
             replay_buffers: Vec::new(),
+            bead_buffers: Vec::new(),
+            bead_pipeline,
             point_pipeline,
             tool_uniforms,
             tool_groups,
@@ -346,12 +352,10 @@ impl Viewport {
             if ui.button("Isometric").clicked() {
                 self.yaw = -0.8;
                 self.pitch = 0.7;
-                self.fit = true;
             }
             if ui.button("Top").clicked() {
                 self.pitch = 1.56;
                 self.yaw = -std::f64::consts::FRAC_PI_2;
-                self.fit = true;
             }
             ui.weak("Drag: orbit · right-drag: pan · wheel: zoom");
         });
@@ -407,12 +411,10 @@ impl Viewport {
             if top {
                 self.pitch = 1.56;
                 self.yaw = -std::f64::consts::FRAC_PI_2;
-                self.fit = true;
             }
             if iso {
                 self.pitch = 0.7;
                 self.yaw = -0.8;
-                self.fit = true;
             }
         }
         let bounds = scene.as_ref().and_then(|s| s.summary.bounds_mm);
@@ -610,12 +612,29 @@ impl egui_wgpu::CallbackTrait for Callback {
         };
         if replay_changed {
             r.replay_buffers.clear();
+            r.bead_buffers.clear();
             if let Some(display) = self.review.as_ref().and_then(|r| r.display.as_ref()) {
                 for batch in &display.batches {
                     r.replay_buffers.push(device.create_buffer_init(
                         &wgpu::util::BufferInitDescriptor {
                             label: Some("checked SPLR6 actual events"),
                             contents: bytemuck::cast_slice(&batch.vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        },
+                    ));
+                }
+            }
+            if let Some(beads) = self
+                .review
+                .as_ref()
+                .and_then(|review| review.display.as_ref())
+                .and_then(|display| display.beads.as_ref().ok())
+            {
+                for batch in &beads.batches {
+                    r.bead_buffers.push(device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("Checked nominal bead instances"),
+                            contents: bytemuck::cast_slice(&batch.instances),
                             usage: wgpu::BufferUsages::VERTEX,
                         },
                     ));
@@ -661,7 +680,28 @@ impl egui_wgpu::CallbackTrait for Callback {
             pass.draw(0..r.line_count, 0..1);
         }
         if let Some(display) = r.replay.as_ref().and_then(|r| r.display.as_ref()) {
+            let beads = display.beads.as_ref().ok().filter(|_| self.view.beads);
+            if let Some(beads) = beads {
+                pass.set_pipeline(&r.bead_pipeline);
+                for (batch, buffer) in beads.batches.iter().zip(&r.bead_buffers) {
+                    let range = batch.range(self.view);
+                    if range.is_empty() {
+                        continue;
+                    }
+                    pass.set_bind_group(0, &r.tool_groups[batch.tool as usize], &[]);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..beads.vertices_per_instance(), range);
+                }
+            }
             for (batch, buffer) in display.batches.iter().zip(&r.replay_buffers) {
+                if beads.is_some_and(|beads| {
+                    beads
+                        .batches
+                        .iter()
+                        .any(|b| b.kind == batch.kind && b.tool == batch.tool)
+                }) {
+                    continue;
+                }
                 let range = batch.range(self.view);
                 if range.is_empty() {
                     continue;

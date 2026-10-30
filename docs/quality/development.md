@@ -75,6 +75,27 @@ or stale edits retain their drafts; **Reload captured profile** explicitly disca
 them. Material-bound recipe fields are edited through these overrides. Complete
 single-tool Marlin intent is required; synthetic declarations and imported
 recommendations are not calibration.
+Review switches between actual centerlines and nominal bead surfaces, with layer,
+event, role and tool filters. Visible width/height ranges follow the current
+selection; cached statistics bind the immutable display identity. A layer schedule
+interval is distinct from a combined stroke's physical interval. Beads retain
+decoded straight endpoints and each nominal width/physical Z interval. Sections are stadium envelopes; bridges use
+elliptical envelopes, with explicit flat ends and visible overlapping strokes.
+This display neither predicts physical bead shape/sag nor computes deposited mass.
+Numerical expansion and cross-section chord errors each stay within 0.001 mm.
+The view admits at most 100,000 strokes and 40 million vertex invocations inside
+the existing combined CPU/GPU budget; otherwise it explains the limit and retains
+checked centerlines. Camera orientation and fresh review preserve existing framing;
+Fit and Fit source remain explicit actions. Review does not regenerate geometry
+when scrubbing or filtering.
+
+For actual-window acceptance, inspect an admitted wall/bridge and genuine H1
+physical intervals, switch layer/role/tool and centerline/bead views, and change a
+consumed width/process value. Observe old review invalidation, fresh output,
+history, save/close/source-independent reopen and fresh verified exclusive export.
+Compare native/CLI output under the same captured input and observe child cleanup.
+Large-input/projection refusals must preserve usable centerlines.
+
 The legacy browser frontend and its build/runtime paths have been removed.
 
 ```sh

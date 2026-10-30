@@ -9,6 +9,8 @@ use spiling_contracts::{
 };
 use std::sync::Arc;
 
+const BEAD_MODEL: &str = "Nominal width and physical height over decoded straight strokes. Stadium sections; bridges use elliptical envelopes without sag prediction. Flat ends preserve breaks; intersecting strokes overlap. Displayed surface and overlap are not deposited mass or measured physical shape. Numerical projection ≤ 0.001 mm; section chord error ≤ 0.001 mm. Large reviews retain centerlines when the bead view reaches display limits.";
+
 pub(super) struct IntentDraft {
     project: ProjectId,
     revision: ProjectRevision,
@@ -16,12 +18,19 @@ pub(super) struct IntentDraft {
     original: Arc<ManufacturingIntent>,
     value: ManufacturingIntent,
 }
+struct BeadStatistics {
+    display: std::sync::Weak<crate::replay::Replay>,
+    nonce: u64,
+    view: crate::replay::View,
+    value: Option<crate::replay::beads::Statistics>,
+}
 #[derive(Default)]
 pub(super) struct ManufacturingUi {
     draft: Option<IntentDraft>,
     pub panel: usize,
     pub replay: crate::replay::View,
     pub review_nonce: Option<u64>,
+    bead_statistics: Option<BeadStatistics>,
 }
 impl ManufacturingUi {
     pub(super) fn has_intent_draft(&self, project: &ProjectId) -> bool {
@@ -307,7 +316,7 @@ impl Workbench {
                     ui.separator();
                     ui.heading(format!("Layer {}", index + 1));
                     ui.label(format!(
-                        "Physical interval {:.6}…{:.6} mm",
+                        "Layer schedule interval {:.6}…{:.6} mm",
                         layer.lower_z_mm, layer.z_mm
                     ));
                     ui.label(format!(
@@ -357,8 +366,10 @@ impl Workbench {
             self.manufacturing.review_nonce = Some(review.capture.nonce);
             self.manufacturing.replay.events = descriptor.info.event_count;
             self.manufacturing.replay.layer = None;
-            self.viewport.fit();
+            self.manufacturing.replay.role = None;
+            self.manufacturing.replay.tool = None;
         }
+        let compact = ui.available_height() < 500.0 || ui.available_width() < 600.0;
         let view = &mut self.manufacturing.replay;
         ui.horizontal_wrapped(|ui| {
             ui.label("Actual emitted motion");
@@ -369,6 +380,89 @@ impl Workbench {
                 ui.checkbox(&mut view.material, "Declared material tints");
             }
         });
+        if let Some(display) = &review.display {
+            if display.beads.is_err() {
+                view.beads = false;
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(&mut view.beads, false, "Centerlines");
+                ui.add_enabled_ui(display.beads.is_ok(), |ui| {
+                    ui.selectable_value(&mut view.beads, true, "Nominal beads");
+                });
+                egui::ComboBox::from_id_salt("replay-role")
+                    .selected_text(
+                        view.role
+                            .map_or("All roles", |role| crate::replay::ROLES[role as usize]),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut view.role, None, "All roles");
+                        for (role, name) in crate::replay::ROLES.iter().enumerate() {
+                            ui.selectable_value(&mut view.role, Some(role as u8), *name);
+                        }
+                    });
+                if descriptor.info.tool_epoch_count > 0 {
+                    egui::ComboBox::from_id_salt("replay-tool")
+                        .selected_text(
+                            view.tool
+                                .map_or_else(|| "All tools".into(), |tool| format!("Tool {tool}")),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut view.tool, None, "All tools");
+                            for tool in 0..2 {
+                                ui.selectable_value(
+                                    &mut view.tool,
+                                    Some(tool),
+                                    format!("Tool {tool}"),
+                                );
+                            }
+                        });
+                }
+            });
+            match &display.beads {
+                Ok(beads) if view.beads => {
+                    let cache = &mut self.manufacturing.bead_statistics;
+                    if cache.as_ref().is_none_or(|c| {
+                        c.nonce != review.capture.nonce
+                            || !c.display.ptr_eq(&Arc::downgrade(display))
+                            || c.view != *view
+                    }) {
+                        *cache = Some(BeadStatistics {
+                            display: Arc::downgrade(display),
+                            nonce: review.capture.nonce,
+                            view: *view,
+                            value: beads.statistics(*view),
+                        });
+                    }
+                    let label = if let Some(stats) = cache.as_ref().and_then(|c| c.value) {
+                        let dimension = |range: [f32; 2]| {
+                            if range[1] - range[0] < 0.000001 {
+                                format!("{:.3}", range[0])
+                            } else {
+                                format!("{:.3}…{:.3}", range[0], range[1])
+                            }
+                        };
+                        format!(
+                            "Nominal W {} · H {} mm · {} strokes",
+                            dimension(stats.width),
+                            dimension(stats.height),
+                            stats.count
+                        )
+                    } else {
+                        "No nominal deposition in this selection".into()
+                    };
+                    ui.weak(label).on_hover_text(format!("Visible nominal widths and physical stroke heights, distinct from the layer schedule. Section chord bound {:.6} mm; numerical expansion ≤ 0.001 mm. No physical bead-shape or mass measurement.",beads.chord_error_mm));
+                }
+                Err(reason) => {
+                    ui.weak(format!("Centerlines · {reason}"));
+                }
+                _ => {}
+            }
+            if !compact {
+                ui.collapsing("Bead display model", |ui| {
+                    ui.label(BEAD_MODEL);
+                });
+            }
+        }
         ui.horizontal_wrapped(|ui| {
             let mut all = view.layer.is_none();
             if ui.checkbox(&mut all, "All layers").changed() {
@@ -384,40 +478,61 @@ impl Workbench {
                 );
             }
         });
-        ui.add(
-            egui::Slider::new(&mut view.events, 0..=descriptor.info.event_count)
-                .text("Actual events"),
-        );
-        if let Some(index) = view.events.checked_sub(1)
-            && let Some(bytes) = &review.motion
-        {
-            let start = REPLAY_HEADER_BYTES + index as usize * REPLAY_RECORD_BYTES;
-            let r = &bytes[start..start + REPLAY_RECORD_BYTES];
-            let number = |offset| {
-                f64::from_le_bytes(
-                    r[offset..offset + 8]
-                        .try_into()
-                        .expect("checked SPLR6 record"),
-                )
-            };
-            let tool = u32::from_le_bytes(r[76..80].try_into().expect("checked active tool"));
-            ui.add(
-                egui::Label::new(format!(
-                    "{} · tool {} · XYZ {:.6}, {:.6}, {:.6} mm · E {:.8} mm · F {:.1} mm/min",
-                    crate::replay::ROLES[r[46] as usize],
-                    tool,
-                    number(0),
-                    number(8),
-                    number(16),
-                    number(24),
-                    number(32)
-                ))
-                .wrap(),
-            );
-            if r[47] & 2 != 0 {
-                ui.weak(format!("Nominal association: width {:.6} mm · physical Z {:.6}…{:.6} mm · height {:.6} mm",number(48),number(56),number(64),number(64)-number(56)));
-            }
+        if compact {
+            ui.collapsing("Event and model details", |ui| {
+                ui.label(BEAD_MODEL);
+                event_controls(ui, view, &review, descriptor);
+            });
+        } else {
+            event_controls(ui, view, &review, descriptor);
         }
-        ui.collapsing("Actual motion legend",|ui|{ui.label("Perimeter · solid · top/bottom · sparse · bridge · support/interface · prime · waste · travel · stationary retract/unretract. Tool epochs change state without a connecting segment. Dimensions and tool colors are nominal declarations.");});
     }
+}
+
+fn event_controls(
+    ui: &mut egui::Ui,
+    view: &mut crate::replay::View,
+    review: &crate::manufacture::Review,
+    descriptor: &ReplayDisplayDescriptor,
+) {
+    ui.add(
+        egui::Slider::new(&mut view.events, 0..=descriptor.info.event_count).text("Actual events"),
+    );
+    if let Some(index) = view.events.checked_sub(1)
+        && let Some(bytes) = &review.motion
+    {
+        let start = REPLAY_HEADER_BYTES + index as usize * REPLAY_RECORD_BYTES;
+        let r = &bytes[start..start + REPLAY_RECORD_BYTES];
+        let number = |offset| {
+            f64::from_le_bytes(
+                r[offset..offset + 8]
+                    .try_into()
+                    .expect("checked SPLR6 record"),
+            )
+        };
+        let tool = u32::from_le_bytes(r[76..80].try_into().expect("checked active tool"));
+        ui.add(
+            egui::Label::new(format!(
+                "{} · tool {} · XYZ {:.6}, {:.6}, {:.6} mm · E {:.8} mm · F {:.1} mm/min",
+                crate::replay::ROLES[r[46] as usize],
+                tool,
+                number(0),
+                number(8),
+                number(16),
+                number(24),
+                number(32)
+            ))
+            .wrap(),
+        );
+        if r[47] & 2 != 0 {
+            ui.weak(format!(
+                "Nominal association: width {:.6} mm · physical Z {:.6}…{:.6} mm · height {:.6} mm",
+                number(48),
+                number(56),
+                number(64),
+                number(64) - number(56)
+            ));
+        }
+    }
+    ui.collapsing("Actual motion legend",|ui|{ui.label("Perimeter · solid · top/bottom · sparse · bridge · support/interface · prime · waste · travel · stationary retract/unretract. Tool epochs change state without a connecting segment. Dimensions and tool colors are nominal declarations.");});
 }

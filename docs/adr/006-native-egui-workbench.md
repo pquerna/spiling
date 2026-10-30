@@ -49,6 +49,14 @@ Source/replay rendering belongs in a dedicated wgpu renderer with checked
 binary input, revision-aware selection and explicit GPU resource lifetimes. Layout,
 camera and drafts are UI state; project requirements are engine transactions.
 
+Actual-program review can instance bounded nominal cross sections from checked
+SPLR endpoints, widths and physical intervals. It never infers a new planner or
+physical simulation. The declared stadium/elliptical bridge envelopes have flat
+ends; overlap is explicit and is not mass. Projection/chord and CPU/GPU/work caps
+retain centerlines with an explanation when bead display is unavailable.
+Immutable role/tool/layer/event ranges serve both representations. Camera
+orientation preserves framing; Fit is explicit.
+
 ## Migration and alternatives
 
 The migration used complete operator-flow gates. Its legacy baseline is now

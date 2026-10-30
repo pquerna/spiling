@@ -3,6 +3,8 @@
 // Licensed under the Open Software License version 3.0
 
 //! Projection of validated SPLR6 events, never a machine-program parser.
+pub mod beads;
+const METADATA_BYTES: usize = 16_384;
 use glam::DVec3;
 use spiling_contracts::manufacturing::*;
 use std::{collections::BTreeMap, ops::Range};
@@ -26,8 +28,9 @@ pub struct Replay {
     pub origin: DVec3,
     pub batches: Vec<Batch>,
     pub owned_bytes: usize,
+    pub beads: Result<beads::Beads, String>,
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct View {
     pub layer: Option<u16>,
     pub events: u32,
@@ -35,6 +38,9 @@ pub struct View {
     pub source: bool,
     pub visible: bool,
     pub material: bool,
+    pub beads: bool,
+    pub role: Option<u8>,
+    pub tool: Option<u32>,
 }
 impl Default for View {
     fn default() -> Self {
@@ -45,6 +51,9 @@ impl Default for View {
             source: false,
             visible: true,
             material: false,
+            beads: true,
+            role: None,
+            tool: None,
         }
     }
 }
@@ -84,23 +93,40 @@ const COLORS: [[u8; 3]; 16] = [
     [255, 119, 183],
     [215, 167, 255],
 ];
+fn event_range(
+    events: &[(u32, u16)],
+    kind: u8,
+    tool: u32,
+    view: View,
+    vertices: usize,
+) -> Range<u32> {
+    if !view.visible
+        || (!view.travels && matches!(kind, 0 | 6))
+        || view.role.is_some_and(|role| role != kind)
+        || view.tool.is_some_and(|selected| selected != tool)
+    {
+        return 0..0;
+    }
+    let start = view
+        .layer
+        .map_or(0, |layer| events.partition_point(|(_, l)| *l < layer));
+    let end = events.partition_point(|(event, layer)| {
+        *event < view.events && view.layer.is_none_or(|l| *layer <= l)
+    });
+    (start * vertices) as u32..(end.max(start) * vertices) as u32
+}
 impl Batch {
     pub fn range(&self, view: View) -> Range<u32> {
-        if !view.visible || (!view.travels && matches!(self.kind, 0 | 6)) {
-            return 0..0;
-        }
-        let start = if let Some(layer) = view.layer {
-            self.events.partition_point(|(_, l)| *l < layer)
-        } else {
-            0
-        };
-        let end = self.events.partition_point(|(event, layer)| {
-            *event < view.events && view.layer.is_none_or(|l| *layer <= l)
-        });
-        let n = if self.points { 1 } else { 2 };
-        (start * n) as u32..(end.max(start) * n) as u32
+        event_range(
+            &self.events,
+            self.kind,
+            self.tool,
+            view,
+            if self.points { 1 } else { 2 },
+        )
     }
 }
+
 impl Replay {
     pub fn project(
         bytes: &[u8],
@@ -111,7 +137,8 @@ impl Replay {
         validate_replay_display(bytes, descriptor).map_err(|e| e.to_string())?;
         let count = descriptor.info.event_count as usize;
         // Raw input plus CPU vertices, GPU copy, event indices and a bounded staging copy.
-        let upper = bytes.len() + count * (2 * std::mem::size_of::<Vertex>() * 3 + 8);
+        let upper =
+            METADATA_BYTES + bytes.len() + count * (2 * std::mem::size_of::<Vertex>() * 3 + 8);
         if reserved
             .checked_add(upper)
             .is_none_or(|n| n > spiling_contracts::geometry::MAX_DISPLAY_BUFFER_BYTES as usize)
@@ -130,7 +157,7 @@ impl Replay {
                 f64::from_le_bytes(r[16..24].try_into().unwrap()),
             ) - origin;
             let f = p.as_vec3();
-            if (f.as_dvec3() - p).length() > 0.001 {
+            if !p.is_finite() || !f.is_finite() || (f.as_dvec3() - p).length() > 0.001 {
                 return Err("Replay projection exceeds 0.001 mm".into());
             }
             Ok(f.to_array())
@@ -202,7 +229,8 @@ impl Replay {
                 .push((i as u32, u16::from_le_bytes(r[44..46].try_into().unwrap())));
         }
         let batches: Vec<_> = groups.into_values().collect();
-        let owned_bytes = bytes.len()
+        let owned_bytes = METADATA_BYTES
+            + bytes.len()
             + batches
                 .iter()
                 .map(|b| {
@@ -210,7 +238,10 @@ impl Replay {
                         + b.events.capacity() * 8
                 })
                 .sum::<usize>();
+        let beads = beads::Beads::project(bytes, origin, reserved + upper);
+        let owned_bytes = owned_bytes + beads.as_ref().map_or(0, |b| b.owned_bytes);
         Ok(Self {
+            beads,
             origin,
             batches,
             owned_bytes,
@@ -337,5 +368,159 @@ mod tests {
             }
             assert!(replay.owned_bytes >= bytes.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod bead_tests {
+    use super::*;
+    fn fixture(name: &str) -> (Vec<u8>, ReplayDisplayDescriptor) {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../fixtures/protocol/{name}.json"));
+        let fixture: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let bytes = fixture["data"]
+            .as_str()
+            .unwrap()
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
+            .collect();
+        (
+            bytes,
+            serde_json::from_value(fixture["descriptor"].clone()).unwrap(),
+        )
+    }
+    #[test]
+    fn nominal_envelopes_keep_actual_endpoints_intervals_roles_and_epochs() {
+        for name in [
+            "replay",
+            "replay-sparse",
+            "replay-fixed-dual",
+            "replay-waste-only",
+        ] {
+            let (bytes, descriptor) = fixture(name);
+            let origin = DVec3::splat(0.125);
+            let replay = Replay::project(&bytes, &descriptor, 0, origin).unwrap();
+            let beads = replay.beads.as_ref().unwrap();
+            assert!(beads.chord_error_mm <= 0.001);
+            assert_eq!(
+                beads.statistics(View::default()).unwrap().count,
+                descriptor.info.deposition_count as usize
+            );
+            assert!(
+                beads
+                    .statistics(View {
+                        events: 0,
+                        ..View::default()
+                    })
+                    .is_none()
+            );
+            assert!(
+                beads
+                    .statistics(View {
+                        role: Some(14),
+                        ..View::default()
+                    })
+                    .is_none()
+            );
+            assert!(
+                beads
+                    .statistics(View {
+                        tool: Some(2),
+                        ..View::default()
+                    })
+                    .is_none()
+            );
+            let number = |record: &[u8], offset| {
+                f64::from_le_bytes(record[offset..offset + 8].try_into().unwrap())
+            };
+            let records = bytes[REPLAY_HEADER_BYTES..]
+                .as_chunks::<REPLAY_RECORD_BYTES>()
+                .0;
+            assert_eq!(
+                beads.instance_count,
+                records.iter().filter(|r| r[47] & 2 != 0).count()
+            );
+            for batch in &beads.batches {
+                assert!(!matches!(batch.kind, 0 | 6 | 7 | 11 | 12 | 14));
+                for (instance, (event, layer)) in batch.instances.iter().zip(&batch.events) {
+                    let record = &records[*event as usize];
+                    let prior = &records[*event as usize - 1];
+                    for (p, r) in [(instance.start, prior), (instance.end, record)] {
+                        let expected =
+                            DVec3::new(number(r, 0), number(r, 8), number(r, 16)) - origin;
+                        assert!((DVec3::from_array(p.map(f64::from)) - expected).length() <= 0.001);
+                    }
+                    assert!((f64::from(instance.width) - number(record, 48)).abs() < 0.000001);
+                    assert!(
+                        (f64::from(instance.height) - (number(record, 64) - number(record, 56)))
+                            .abs()
+                            < 0.000001
+                    );
+                    assert!(
+                        (f64::from(instance.end[2]) - f64::from(instance.height) + origin.z
+                            - number(record, 56))
+                        .abs()
+                            < 0.000001
+                    );
+                    let selected = View {
+                        role: Some(batch.kind),
+                        tool: Some(batch.tool),
+                        layer: Some(*layer),
+                        events: event + 1,
+                        ..View::default()
+                    };
+                    assert!(!batch.range(selected).is_empty());
+                    assert!(
+                        batch
+                            .range(View {
+                                role: Some(14),
+                                ..selected
+                            })
+                            .is_empty()
+                    );
+                    assert!(
+                        batch
+                            .range(View {
+                                tool: Some(2),
+                                ..selected
+                            })
+                            .is_empty()
+                    );
+                    assert!(
+                        batch
+                            .range(View {
+                                events: 0,
+                                ..selected
+                            })
+                            .is_empty()
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn exhausted_bead_budget_and_large_local_extent_keep_checked_centerlines() {
+        let (bytes, descriptor) = fixture("replay");
+        assert!(Replay::project(&bytes, &descriptor, 0, DVec3::NAN).is_err());
+        assert!(Replay::project(&bytes, &descriptor, 0, DVec3::splat(f64::INFINITY)).is_err());
+        let base_peak = METADATA_BYTES
+            + bytes.len()
+            + descriptor.info.event_count as usize * (2 * std::mem::size_of::<Vertex>() * 3 + 8);
+        let reserved = spiling_contracts::geometry::MAX_DISPLAY_BUFFER_BYTES as usize - base_peak;
+        let replay = Replay::project(&bytes, &descriptor, reserved, DVec3::ZERO).unwrap();
+        assert!(replay.beads.as_ref().unwrap_err().contains("budget"));
+        assert!(!replay.batches.is_empty());
+        assert!(
+            reserved + replay.owned_bytes
+                <= spiling_contracts::geometry::MAX_DISPLAY_BUFFER_BYTES as usize
+        );
+        let replay =
+            Replay::project(&bytes, &descriptor, 0, DVec3::new(10_000.0, 0.0, 0.0)).unwrap();
+        assert!(replay.beads.as_ref().unwrap_err().contains("numerical"));
+        assert!(!replay.batches.is_empty());
     }
 }

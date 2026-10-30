@@ -1070,6 +1070,24 @@ fn native_h1_housing_and_physical_plate_parity() {
         let s = checked_review(&host);
         let review = s.manufacturing.review.as_ref().unwrap();
         assert!(review.capture.report.verified);
+        let bead_display = review
+            .display
+            .as_ref()
+            .unwrap()
+            .beads
+            .as_ref()
+            .expect("real H1/plate nominal-bead admission");
+        assert!(bead_display.instance_count > 0);
+        if !plate {
+            assert!(
+                bead_display
+                    .batches
+                    .iter()
+                    .flat_map(|batch| &batch.instances)
+                    .any(|bead| f64::from(bead.height) > intent.recipe.layer_height_mm + 0.01),
+                "H1 bead display must retain genuinely thick physical intervals"
+            );
+        }
         if plate {
             assert!(
                 review
