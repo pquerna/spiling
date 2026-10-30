@@ -99,6 +99,41 @@ failure. Coupon-specific material, fitted-row/link and schedule differences rema
 unresolved until deciding evidence closes them. Cube circular internal-bridge
 flow evidence does not automatically explain an exterior coupon roof.
 
+The middle matched coupon also retains one-setting reference probes for 15%
+infill overlap, full-height top skin and half bridge flow, plus a native
+full-height-skin compile with fresh verification.
+[`bridge-probes.mjs`](../../tools/gcode-parity/bridge-probes.mjs) refuses missing
+or duplicate reference settings rather than silently failing to change them.
+Coverage counts distinguish the overlap and solid-classification contributions
+without dismissing remaining baseline or probe misses.
+
+A full-height skin request on this already-solid native coupon preserves the
+complete unoriented deposition/process/dose multiset, but changes roof order and
+the following layer's nearest seam and path direction. The witness retains the
+raw byte difference, the actual changed physical heights, the prior endpoint
+and the independently observed nearest admissible corner. It never reports
+byte-identical programs. Per-stroke E comparison allows only the two-coordinate
+rounding bound of 2.1e-8 mm filament; total dose and fresh replay remain mandatory.
+The cube's stronger byte-invariance witness has its own narrower scope.
+
+For the reference exterior roof with `thick_bridges=0`, the half-flow probe
+observes a smaller dose per length and tighter fitted pitch together. Long-row
+E/length divided by measured pitch must recover the actual 0.2 mm interval;
+bridge path length increases while bridge-process volume stays close to the
+baseline. Non-roof intervals must remain unchanged. This identifies a local
+flow/spacing contribution; it does not predict a halved whole-job volume or
+transfer the cube's circular internal-bridge model to this roof. The source
+selection in the pinned reference `LayerRegion::bridging_flow` distinguishes
+ordinary modified flow from forced thick bridges; retained actual commands are
+the deciding evidence for fitted pitch and dose.
+
+These probe bounds are confined diagnostic witnesses, never broad baseline
+coverage or total-material tolerances. The runner fault-checks them against
+changed native material, an unrelated reference geometry failure, a missing
+half-flow control and shifted interval material with conserved total. Every
+fault must reject acceptance. Accepted contribution witnesses remain separate
+from unresolved whole-job distribution and failed baseline observations.
+
 ## Comparison contract
 
 [`corpus.mjs`](../../tools/gcode-parity/corpus.mjs) derives a coherent 10 mm cube

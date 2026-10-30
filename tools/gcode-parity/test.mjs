@@ -351,3 +351,35 @@ test("bridge anchor runs ignore straight command partitions but retain travel, t
   assert.equal(depositionRuns([a, { ...b, to: [0, 0, 0.2] }]).length, 2);
   assert.equal(depositionRuns([a, { ...b, from: [3.01, 0, 0.2] }]).length, 2);
 });
+
+test("reference probe settings refuse missing, duplicate and injected fields", async () => {
+  const { referenceValues } = await import("./bridge-probes.mjs");
+  assert.equal(
+    referenceValues("infill_overlap = 0\n", { infill_overlap: "15%" }),
+    "infill_overlap = 15%\n",
+  );
+  assert.throws(() => referenceValues("other = 0\n", { infill_overlap: 1 }), /absent or ambiguous/);
+  assert.throws(
+    () => referenceValues("infill_overlap = 0\ninfill_overlap = 1\n", { infill_overlap: 2 }),
+    /absent or ambiguous/,
+  );
+  assert.throws(
+    () => referenceValues("infill_overlap = 0\n", { infill_overlap: "0\nextra = 1" }),
+    /invalid reference setting/,
+  );
+});
+
+test("solid construction comparison retains byte/order differences and rejects changed dose", async () => {
+  const { compareSolidPrograms } = await import("./bridge-probes.mjs");
+  const pre = "G21\nG90\nM83\nG92 E0\nG1 X0 Y0 Z3.2 F2100\n";
+  const a = pre + "G1 X2 E.1\nG1 Y1\nG1 X0 E.1\n";
+  const b = pre + "G1 Y1\nG1 X2 E.1\nG1 Y0\nG1 X0 E.1\n";
+  const comparison = compareSolidPrograms(a, b);
+  assert.equal(comparison.byteIdentical, false);
+  assert.equal(comparison.depositionMultisetIdentical, true);
+  assert.deepEqual(comparison.changedDepositionOrderHeightsMm, [3.2]);
+  assert.equal(
+    compareSolidPrograms(a, b.replaceAll("E.1", "E.05")).depositionMultisetIdentical,
+    false,
+  );
+});

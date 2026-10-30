@@ -8,6 +8,7 @@ import { bridgeSources } from "./bridge-corpus.mjs";
 import { cases, intentFor, referenceProfile, sha256 } from "./corpus.mjs";
 import { decodeGcode } from "./decode.mjs";
 import { auditBridge } from "./bridges.mjs";
+import { referenceValues, runBridgeProbes } from "./bridge-probes.mjs";
 const EPS = 0.002;
 
 export async function runBridgeComparisons({
@@ -116,8 +117,7 @@ export async function runBridgeComparisons({
         "top_solid_infill_speed",
       ])
         settings[key] = selection.profile.print_speed_mm_s;
-      for (const [key, value] of Object.entries(settings))
-        referenceIni = referenceIni.replace(new RegExp(`^${key} = .*`, "m"), `${key} = ${value}`);
+      referenceIni = referenceValues(referenceIni, settings);
       await save(`${id}/prusa.ini`, referenceIni);
       await run(
         reference,
@@ -309,6 +309,22 @@ export async function runBridgeComparisons({
       byId("span-6-limit-below")?.checks.noRejectedExport === true &&
       byId("span-6-limit-below")?.checks.expectedRefusal === true;
   }
+  const baseline = byId("span-6-matched");
+  if (baseline?.passed) {
+    try {
+      report.controlledProbes = await runBridgeProbes({
+        record: baseline,
+        output,
+        cli,
+        engine,
+        reference,
+        run,
+        save,
+      });
+    } catch (error) {
+      report.controlledProbes = { accepted: false, error: error.message };
+    }
+  }
   report.nativeSoftwarePassed =
     report.cases.length === scenarios.length &&
     report.cases.every((c) => c.passed) &&
@@ -317,7 +333,10 @@ export async function runBridgeComparisons({
   report.referenceAuditsPassed =
     report.cases.length === scenarios.length &&
     report.cases.every((c) => c.reference?.correctnessPassed === true);
-  report.correctnessPassed = report.nativeSoftwarePassed && report.referenceAuditsPassed;
+  report.correctnessPassed =
+    report.nativeSoftwarePassed &&
+    report.referenceAuditsPassed &&
+    report.controlledProbes?.accepted === true;
   // Correct software gates do not silently close unexplained reference output.
   report.differencesExplained =
     report.nativeSoftwarePassed &&
@@ -334,6 +353,7 @@ export async function runBridgeComparisons({
   for (const c of report.cases) await hashTree(c.id);
   for (const name of [
     "bridge-run.mjs",
+    "bridge-probes.mjs",
     "bridge-corpus.mjs",
     "bridges.mjs",
     "corpus.mjs",
