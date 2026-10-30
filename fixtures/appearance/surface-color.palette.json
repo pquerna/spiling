@@ -1,0 +1,23 @@
+{
+  "name": "Software surface-color reference estimates",
+  "source_url": "https://github.com/pquerna/spiling",
+  "source_revision": "surface-color-software-1",
+  "license": "OSL-3.0",
+  "conversion": "spiling-c1a-explicit-color-1",
+  "rows": [
+    {
+      "key": "software-blue/catalog",
+      "material_id": "software-blue",
+      "evidence_id": "catalog",
+      "name": "Declared software blue",
+      "evidence": {"kind": "catalog_estimate", "srgb": [0.1, 0.3, 0.9]}
+    },
+    {
+      "key": "software-white/catalog",
+      "material_id": "software-white",
+      "evidence_id": "catalog",
+      "name": "Declared software white",
+      "evidence": {"kind": "catalog_estimate", "srgb": [1, 1, 1]}
+    }
+  ]
+}

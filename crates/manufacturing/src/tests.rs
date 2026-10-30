@@ -192,6 +192,7 @@ fn surface_color_intent(scene: &Scene) -> ManufacturingIntent {
     )
     .unwrap();
     job.surface_constructions = vec![SurfaceColorConstruction {
+        optical_origin: None,
         occurrence_id: occurrence.occurrence_id,
         definition_id: occurrence.definition_id.clone(),
         source_hash: native.provenance().source_hash.clone(),

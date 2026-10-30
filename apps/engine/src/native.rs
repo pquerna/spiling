@@ -177,6 +177,9 @@ impl NativeHost {
                     ..
                 }
                 | spiling_contracts::project::ProjectCommand::CompareOptical { .. }
+                | spiling_contracts::project::ProjectCommand::ApplyOpticalConstruction {
+                    ..
+                }
                 | spiling_contracts::project::ProjectCommand::GetOpticalReport { .. }),
             ) => Some(Control::Project(command.clone())),
             _ => None,
@@ -420,6 +423,7 @@ fn publish_terminal(
         &private,
         geometry::JobResult::ManufacturingPreflight { .. }
             | geometry::JobResult::BedPosePrepared { .. }
+            | geometry::JobResult::OpticalConstructionApplied { .. }
     ) {
         let result = public_result(private, resources, None)?;
         jobs.native_finish(name, Ok(result), vec![])?;
@@ -610,6 +614,13 @@ fn public_result(
     use spiling_contracts::geometry::JobResult as Public;
     Ok(match result {
         geometry::JobResult::Scene { summary } => Public::Scene { summary },
+        geometry::JobResult::OpticalConstructionApplied {
+            info,
+            construction_index,
+        } => Public::OpticalConstructionApplied {
+            info,
+            construction_index,
+        },
         geometry::JobResult::Section { artifact_id } => Public::Section { artifact_id },
         geometry::JobResult::BedPosePrepared { preparation } => {
             Public::BedPosePrepared { preparation }

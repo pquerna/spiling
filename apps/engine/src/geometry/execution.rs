@@ -53,6 +53,10 @@ impl JobStatus {
 )]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum JobResult {
+    OpticalConstructionApplied {
+        info: ProjectInfo,
+        construction_index: u16,
+    },
     Scene {
         summary: SceneSummary,
     },

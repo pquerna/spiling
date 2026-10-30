@@ -284,6 +284,21 @@ pub fn native_operation_view(
                     return Err("appearance report captured revision or outputs mismatch".into());
                 }
             }
+            JobResult::OpticalConstructionApplied {
+                info,
+                construction_index,
+            } => {
+                if *construction_index >= 16
+                    || info.revision.0
+                        != meta
+                            .captured_project_revision
+                            .checked_add(1)
+                            .ok_or("project revision overflow")?
+                    || !meta.outputs.is_empty()
+                {
+                    return Err("applied optical construction revision/output mismatch".into());
+                }
+            }
             JobResult::OpticalCompared {
                 captured_revision,
                 record,
@@ -471,6 +486,19 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
                     resource,
                 }
             }
+            R::OpticalConstructionApplied(value) => {
+                let construction_index: u16 = value
+                    .construction_index
+                    .try_into()
+                    .map_err(|_| "applied construction index overflow")?;
+                if construction_index >= 16 {
+                    return Err("applied construction index exceeds its bounded table".into());
+                }
+                Self::OpticalConstructionApplied {
+                    info: required(value.info, "applied project info")?.try_into()?,
+                    construction_index,
+                }
+            }
             R::OpticalCompared(value) => {
                 let record = required(value.record, "optical report record")?.try_into()?;
                 let resource = artifact_to_view(
@@ -602,6 +630,18 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
                         resource,
                         crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
                     )?),
+                })
+            }
+            JobResult::OpticalConstructionApplied {
+                info,
+                construction_index,
+            } => {
+                if construction_index >= 16 {
+                    return Err("applied construction index exceeds its bounded table".into());
+                }
+                R::OpticalConstructionApplied(rpc::OpticalConstructionAppliedResult {
+                    info: Some(info.try_into()?),
+                    construction_index: u32::from(construction_index),
                 })
             }
             JobResult::OpticalCompared {

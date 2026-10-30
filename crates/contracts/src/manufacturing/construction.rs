@@ -61,6 +61,8 @@ pub struct SurfaceColorConstruction {
     pub faces: Vec<SurfaceColorFace>,
     pub shell: OccurrenceMaterial,
     pub white_material_id: String,
+    #[serde(deserialize_with = "required_option")]
+    pub optical_origin: Option<OpticalConstructionOrigin>,
 }
 
 fn faces<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<SurfaceColorFace>, D::Error> {
@@ -97,6 +99,9 @@ impl SurfaceColorConstruction {
             return Err(invalid(
                 "surface construction requires the occurrence's uniform base material to be its declared white core/backing",
             ));
+        }
+        if let Some(origin) = &self.optical_origin {
+            origin.validate(job, &self.shell)?;
         }
         for (index, face) in self.faces.iter().enumerate() {
             if face.mask.as_ref().is_some_and(|m| {
@@ -399,4 +404,152 @@ pub(super) fn constructions<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Vec<SurfaceColorConstruction>, D::Error> {
     bounded_vec::<D, _, 16>(d)
+}
+
+/// Explicit evidence-to-loaded-material binding; no key/index inference.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OpticalMaterialBinding {
+    pub evidence_key: String,
+    pub evidence_hash: SourceHash,
+    pub loaded_material_id: String,
+    pub loaded_declaration_hash: SourceHash,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyOpticalConstruction {
+    pub construction_index: u16,
+    pub report_hash: SourceHash,
+    pub selection: crate::optical::OpticalSelection,
+    pub bindings: [OpticalMaterialBinding; 2],
+}
+impl ApplyOpticalConstruction {
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        if self.construction_index >= 16 {
+            return Err(invalid(
+                "optical construction index exceeds the bounded request table",
+            ));
+        }
+        for binding in &self.bindings {
+            for value in [&binding.evidence_key, &binding.loaded_material_id] {
+                if value.is_empty()
+                    || value.len() > 64
+                    || value.trim() != value
+                    || value.chars().any(char::is_control)
+                {
+                    return Err(invalid(
+                        "optical application requires bounded explicit evidence/material keys",
+                    ));
+                }
+            }
+        }
+        if self.bindings[0].loaded_material_id == self.bindings[1].loaded_material_id {
+            return Err(invalid(
+                "optical recipe materials require two distinct loaded materials",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Immutable evidence closure captured by Core when an accepted study is applied.
+/// This is historical authoring provenance, not backing optics or print authority.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AppliedOpticalMaterial {
+    pub evidence: crate::appearance::PaletteRow,
+    pub evidence_hash: SourceHash,
+    pub loaded_material: LoadedMaterial,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OpticalConstructionOrigin {
+    pub report: crate::optical::OpticalReportRecord,
+    pub palette_hash: SourceHash,
+    pub selection: crate::optical::OpticalSelection,
+    pub model: crate::optical::OpticalModel,
+    pub observation: crate::optical::OpticalObservation,
+    pub target: crate::optical::OpticalTarget,
+    pub requested_patch: crate::optical::OpticalPatch,
+    pub recipe: crate::optical::LayerCycle,
+    pub materials: [AppliedOpticalMaterial; 2],
+    pub applied_pose: RigidPoseMm,
+}
+impl OpticalConstructionOrigin {
+    pub fn validate_capture(&self) -> Result<(), ManufacturingError> {
+        let convert = |e: crate::project::ProjectError| invalid(&e.message);
+        self.report.validate().map_err(convert)?;
+        self.requested_patch.validate().map_err(convert)?;
+        self.recipe
+            .validate(2, &self.requested_patch)
+            .map_err(convert)?;
+        self.applied_pose
+            .validate()
+            .map_err(|e| invalid(&e.message))?;
+        self.target.color.validate().map_err(convert)?;
+        if !self.report.complete
+            || !self.target.delta_e00_tolerance.is_finite()
+            || self.target.delta_e00_tolerance < 0.0
+            || self
+                .target
+                .lightness_tolerance
+                .is_some_and(|v| !v.is_finite() || v < 0.0)
+            || matches!(self.selection, crate::optical::OpticalSelection::Candidate { index } if index >= crate::optical::MAX_OPTICAL_CANDIDATES as u32)
+            || self.materials[0].evidence.key == self.materials[1].evidence.key
+        {
+            return Err(invalid(
+                "optical construction origin requires a complete bounded retained selection",
+            ));
+        }
+        for material in &self.materials {
+            material.evidence.validate().map_err(convert)?;
+            if material.evidence.evidence_hash().map_err(convert)? != material.evidence_hash {
+                return Err(invalid(
+                    "optical construction evidence content hash changed",
+                ));
+            }
+            for value in [
+                &material.loaded_material.id,
+                &material.loaded_material.revision,
+                &material.loaded_material.polymer_family,
+            ] {
+                if value.is_empty()
+                    || value.len() > 64
+                    || value.trim() != value
+                    || value.chars().any(char::is_control)
+                {
+                    return Err(invalid("invalid captured loaded-material declaration"));
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn validate(
+        &self,
+        job: &FixedDualJob,
+        shell: &OccurrenceMaterial,
+    ) -> Result<(), ManufacturingError> {
+        self.validate_capture()?;
+        let mut ids = Vec::new();
+        for material in &self.materials {
+            if job.tools[usize::from(job.tool_for_material(&material.loaded_material.id)?)].material
+                != material.loaded_material
+            {
+                return Err(invalid(
+                    "optical construction evidence or loaded-material identity changed",
+                ));
+            }
+            ids.push(material.loaded_material.id.clone());
+        }
+        if ids[0] == ids[1]
+            || !matches!(shell, OccurrenceMaterial::LayerCycle { recipe, material_ids } if recipe == &self.recipe && material_ids.as_slice() == ids.as_slice())
+        {
+            return Err(invalid(
+                "applied optical origin disagrees with the executable shell recipe; clear origin before independent recipe edits",
+            ));
+        }
+        Ok(())
+    }
 }

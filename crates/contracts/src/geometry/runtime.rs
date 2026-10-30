@@ -128,6 +128,10 @@ impl JobStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobResult {
+    OpticalConstructionApplied {
+        info: crate::project::ProjectInfo,
+        construction_index: u16,
+    },
     Scene {
         summary: SceneSummary,
     },

@@ -3,7 +3,9 @@
 // Licensed under the Open Software License version 3.0
 
 //! Runtime-independent authoring authority. Native caches are engine-owned.
+mod optical_construction;
 mod process;
+pub use optical_construction::{OpticalConstructionCandidate, prepare_optical_construction};
 pub mod storage;
 use process::apply_process_edit;
 use sha2::{Digest, Sha256};
@@ -226,6 +228,9 @@ pub struct Snapshot {
 }
 #[derive(Debug, Clone)]
 pub enum Edit {
+    ApplyOpticalConstruction {
+        candidate: OpticalConstructionCandidate,
+    },
     ImportAppearancePalette {
         asset: Arc<PaletteAsset>,
     },
@@ -663,6 +668,17 @@ impl Project {
             snapshot.manufacturing_artifact = None;
         }
         match edit {
+            Edit::ApplyOpticalConstruction { candidate } => {
+                if candidate.captured_revision != self.revision
+                    || !Arc::ptr_eq(&candidate.captured, &self.current)
+                {
+                    return Err(error(
+                        ProjectErrorCode::StaleRevision,
+                        "optical construction was prepared from a different project snapshot",
+                    ));
+                }
+                snapshot.manufacturing_intent = Some(candidate.intent);
+            }
             Edit::ImportAppearancePalette { mut asset } => {
                 let staged = self
                     .staged_appearance

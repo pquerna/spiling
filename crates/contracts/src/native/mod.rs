@@ -10,6 +10,7 @@ pub mod geometry;
 pub mod manufacturing;
 mod operation;
 mod optical;
+mod optical_construction;
 mod process;
 pub mod project;
 mod replay;

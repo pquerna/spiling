@@ -8,6 +8,9 @@ import "spiling/native_common.proto";
 import "spiling/native_geometry.proto";
 import "spiling/native_appearance.proto";
 service Projects {
+ rpc ApplyOpticalConstruction(ApplyOpticalConstructionRequest) returns (google.longrunning.Operation) {
+  option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
+ }
  rpc Execute(ProjectRequest) returns (ProjectReply);
  rpc Open(OpenProjectRequest) returns (google.longrunning.Operation) {
   option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
@@ -144,3 +147,26 @@ message AcceptOpticalReportRequest { uint32 base_revision = 1; string report_has
 message CompareOpticalRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }
 message GetOpticalReportRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }
 message OpticalComparedResult { string project_id = 1; uint32 captured_revision = 2; OpticalReportRecord record = 3; Artifact resource = 4; }
+
+message OpticalMaterialBinding {
+ string evidence_key = 1;
+ string evidence_hash = 2;
+ string loaded_material_id = 3;
+ string loaded_declaration_hash = 4;
+}
+message ApplyOpticalConstructionParameters {
+ uint32 construction_index = 1;
+ string report_hash = 2;
+ OpticalSelection selection = 3;
+ repeated OpticalMaterialBinding bindings = 4;
+}
+message ApplyOpticalConstructionRequest {
+ string parent = 1;
+ string request_id = 2;
+ uint32 base_revision = 3;
+ ApplyOpticalConstructionParameters application = 4;
+}
+message OpticalConstructionAppliedResult {
+ ProjectInfo info = 1;
+ uint32 construction_index = 2;
+}

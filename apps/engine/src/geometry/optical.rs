@@ -42,6 +42,77 @@ pub(super) fn compare_palette(
 }
 
 impl Runtime {
+    pub(crate) fn apply_optical_construction(
+        &mut self,
+        session: &SessionId,
+        base: ProjectRevision,
+        application: spiling_contracts::manufacturing::ApplyOpticalConstruction,
+        initially_cancelled: bool,
+    ) -> Result<Reply, ProjectError> {
+        self.metadata_base(session, base)?;
+        if self.active.is_some() {
+            return Err(project_error(
+                ProjectErrorCode::Busy,
+                "native job already active",
+            ));
+        }
+        let snapshot = self.project.snapshot();
+        // Existing immutable construction IDs bind the complete native face
+        // table; application never guesses or remaps a picked topology reference.
+        let intent = snapshot.manufacturing_intent.as_ref().ok_or_else(|| {
+            project_error(
+                ProjectErrorCode::InvalidProject,
+                "application requires an existing manufacturing intent",
+            )
+        })?;
+        let spiling_contracts::manufacturing::JobWorkflow::FixedDualMarlin { job } =
+            &intent.printer.workflow
+        else {
+            return Err(project_error(
+                ProjectErrorCode::InvalidProject,
+                "application requires the fixed-dual route",
+            ));
+        };
+        let construction = job
+            .surface_constructions
+            .get(usize::from(application.construction_index))
+            .ok_or_else(|| {
+                project_error(
+                    ProjectErrorCode::InvalidProject,
+                    "selected surface construction is absent",
+                )
+            })?;
+        let native = self
+            .definitions
+            .get(&construction.definition_id)
+            .ok_or_else(|| {
+                project_error(
+                    ProjectErrorCode::InvalidProject,
+                    "selected native source is absent",
+                )
+            })?;
+        if construction
+            .faces
+            .iter()
+            .any(|face| !native.faces.iter().any(|f| f.face_id == face.face_id))
+        {
+            return Err(project_error(
+                ProjectErrorCode::InvalidProject,
+                "selected construction face is absent from the native source table",
+            ));
+        }
+        self.start_with_cancel(
+            Purpose::ApplyOpticalConstruction,
+            0,
+            initially_cancelled,
+            move |_, _, _| Work::ApplyOpticalConstruction {
+                snapshot,
+                base,
+                application,
+            },
+        )
+        .map_err(super::project_geometry_error)
+    }
     fn optical_inputs(&self) -> Result<(Arc<PaletteAsset>, Arc<OpticalRequest>), ProjectError> {
         let study = self.project.appearance_study();
         let palette = study.palette.as_ref().ok_or_else(|| {
@@ -77,6 +148,16 @@ impl Runtime {
         command: &ProjectCommand,
     ) -> Result<(), ProjectError> {
         match command {
+            ProjectCommand::ApplyOpticalConstruction {
+                session_id,
+                base_revision,
+                application,
+            } => {
+                self.metadata_base(session_id, *base_revision)?;
+                application
+                    .validate()
+                    .map_err(|e| project_error(ProjectErrorCode::InvalidProject, &e.message))
+            }
             ProjectCommand::SetOpticalStudy {
                 session_id,
                 base_revision,

@@ -131,6 +131,8 @@ The predictor uses only positive-exposure components. Catalog base RGB is explic
 
 `Projects.Execute` carries typed `SetOpticalStudy`/`AcceptOpticalReport`; `CompareOptical`/`GetOpticalReport` use the existing worker/ACK/native Operations and checked ByteStream path. `OpticalCompared` binds captured project/revision, a producer/input-bound record and `application/x-spiling-optical-report+json` bytes (<=1MiB). ProjectInfo contains request/selection/report metadata, never the full report. Compare/Get permit read-only; stale queued work and historical operations cannot authorize current acceptance. Existing development projects missing the strict field must be recreated; no format-counter change or compatibility default is introduced.
 
+`Projects.ApplyOpticalConstruction` applies a retained complete selection to an existing source-bound surface construction. Exactly two ordered bindings name each palette evidence key/hash and the loaded material ID/declaration hash. Core captures the selected physical recipe, original target/patch/observation, complete evidence rows, loaded declarations and occurrence pose in the manufacturing intent; no external palette path is needed to recover it. Preparation/cancellation/stale checks and the promotion ACK precede one atomic revision increment, manufacturing invalidation and ordinary undo/redo. Application preserves SceneRevision and publishes no scene/artifact outputs. Independent recipe edits must explicitly clear the captured origin. The CLI exposes `--apply-optical CONSTRUCTION_INDEX BINDINGS_JSON_FILE`; the supplied file contains two typed `OpticalMaterialBinding` values, not a copied recipe.
+
 The CLI consumes real engine computation, not a local predictor:
 
 ```sh

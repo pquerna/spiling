@@ -2832,6 +2832,7 @@ impl TryFrom<rpc::SurfaceColorConstruction> for SurfaceColorConstruction {
                 .collect::<Result<_, String>>()?,
             shell,
             white_material_id: value.white_material_id,
+            optical_origin: value.optical_origin.map(TryInto::try_into).transpose()?,
         })
     }
 }
@@ -2873,6 +2874,7 @@ impl TryFrom<SurfaceColorConstruction> for rpc::SurfaceColorConstruction {
                 .collect(),
             shell: Some(shell),
             white_material_id: value.white_material_id,
+            optical_origin: value.optical_origin.map(TryInto::try_into).transpose()?,
         })
     }
 }

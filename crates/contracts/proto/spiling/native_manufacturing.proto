@@ -350,6 +350,7 @@ message SurfaceColorConstruction {
     LayerCycleOccurrenceMaterial layer_cycle = 6;
   }
   string white_material_id = 7;
+  OpticalConstructionOrigin optical_origin = 8;
 }
 message RoutedToolAccounting {
   uint32 tool = 1;
@@ -536,4 +537,22 @@ message VerificationReport {
   uint32 retraction_count = 15;
   double retracted_filament_mm = 16;
   FixedDualVerification routing = 17;
+}
+
+message AppliedOpticalMaterial {
+ AppearancePaletteRow evidence = 1;
+ string evidence_hash = 2;
+ LoadedMaterial loaded_material = 3;
+}
+message OpticalConstructionOrigin {
+ OpticalReportRecord report = 1;
+ string palette_hash = 2;
+ OpticalSelection selection = 3;
+ OpticalModel model = 4;
+ OpticalObservation observation = 5;
+ OpticalTarget target = 6;
+ OpticalPatch requested_patch = 7;
+ OpticalLayerCycle recipe = 8;
+ repeated AppliedOpticalMaterial materials = 9;
+ RigidPoseMm applied_pose = 10;
 }

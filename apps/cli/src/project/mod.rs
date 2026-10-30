@@ -82,6 +82,7 @@ enum Operation {
     OpticalCompare,
     OpticalAccept(Option<OpticalChoice>),
     OpticalReport,
+    ApplyOptical(u16, [OpticalMaterialBinding; 2]),
     Import(NativePath),
     Add(DefinitionId, RigidPoseMm),
     Pose(OccurrenceId, RigidPoseMm),
@@ -210,6 +211,15 @@ pub fn parse(
         match arg.to_str() {
             Some("--optical-study") => {
                 operations.push(Operation::OpticalStudy(optical_json(&mut args)?))
+            }
+            Some("--apply-optical") => {
+                let index =
+                    text(&mut args, "--apply-optical construction index")?.parse::<u16>()?;
+                let bindings = appearance_json::<[OpticalMaterialBinding; 2]>(
+                    &mut args,
+                    "--apply-optical bindings",
+                )?;
+                operations.push(Operation::ApplyOptical(index, bindings));
             }
             Some("--optical-compare") => operations.push(Operation::OpticalCompare),
             Some("--optical-accept") => {
@@ -833,6 +843,42 @@ async fn execute(
         let label;
         let mut process_resolution = None;
         match operation {
+            Operation::ApplyOptical(construction_index, bindings) => {
+                label = "apply_optical";
+                let captured = info(client).await?;
+                let study = captured
+                    .appearance_study
+                    .optical
+                    .as_ref()
+                    .ok_or("application requires a retained optical study")?;
+                let record = study
+                    .report
+                    .as_ref()
+                    .ok_or("application requires an accepted optical report")?;
+                let selection = study
+                    .selection
+                    .ok_or("application requires an explicitly accepted optical selection")?;
+                let response = client
+                    .project(ProjectCommand::ApplyOpticalConstruction {
+                        session_id: session.clone(),
+                        base_revision: captured.revision,
+                        application: ApplyOpticalConstruction {
+                            construction_index,
+                            report_hash: record.hash.clone(),
+                            selection,
+                            bindings,
+                        },
+                    })
+                    .await?;
+                let ProjectResponse::OperationAccepted { operation } = response else {
+                    return Err("optical application did not return its native operation".into());
+                };
+                match geometry::wait_operation(client,&session,operation).await? {
+                    JobResult::OpticalConstructionApplied {info,construction_index:index}
+                        if index==construction_index && info.revision.0==captured.revision.0+1 => {},
+                    _=>return Err("optical application result does not bind the requested construction/revision".into()),
+                }
+            }
             Operation::OpticalStudy(request) => {
                 label = "optical_study";
                 let captured = info(client).await?;

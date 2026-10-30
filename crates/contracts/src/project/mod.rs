@@ -5,7 +5,9 @@
 //! Persistent source-backed project contracts, independent of storage and BREP.
 use crate::appearance::{AppearanceStudy, AppearanceStudyInfo, AppearanceTarget, SearchLimits};
 use crate::geometry::*;
-use crate::manufacturing::{ManufacturingArtifactRecord, ManufacturingIntent, input_fingerprint};
+use crate::manufacturing::{
+    ApplyOpticalConstruction, ManufacturingArtifactRecord, ManufacturingIntent, input_fingerprint,
+};
 use crate::optical::{OpticalRequest, OpticalSelection};
 use crate::process::*;
 use crate::surface::*;
@@ -301,6 +303,11 @@ pub struct ProjectInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectCommand {
+    ApplyOpticalConstruction {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        application: ApplyOpticalConstruction,
+    },
     ImportAppearancePalette {
         session_id: SessionId,
         base_revision: ProjectRevision,

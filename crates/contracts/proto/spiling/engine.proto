@@ -124,5 +124,6 @@ message NativeOperationResult {
     AppearancePaletteImportedResult appearance_palette_imported = 10;
     AppearanceComparedResult appearance_compared = 11;
     OpticalComparedResult optical_compared = 12;
+    OpticalConstructionAppliedResult optical_construction_applied = 13;
   }
 }

@@ -222,6 +222,11 @@ impl EngineRpc {
             target.validate()?;
             limits.validate()?;
         }
+        if let ProjectCommand::ApplyOpticalConstruction { application, .. } = &command {
+            application
+                .validate()
+                .map_err(|e| ClientError::InvalidRequest(e.to_string()))?;
+        }
         if let ProjectCommand::SetOpticalStudy { request, .. } = &command {
             request.validate()?;
         }
@@ -233,6 +238,7 @@ impl EngineRpc {
                 target: Some(path), ..
             } => path.validate(),
             ProjectCommand::Get { .. }
+            | ProjectCommand::ApplyOpticalConstruction { .. }
             | ProjectCommand::New { .. }
             | ProjectCommand::Save { target: None, .. }
             | ProjectCommand::Undo { .. }
@@ -258,6 +264,17 @@ impl EngineRpc {
             .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
             .max_encoding_message_size(MAX_CONTROL_BYTES as usize);
         match call {
+            ProjectCall::ApplyOpticalConstruction(request) => {
+                let operation = client
+                    .apply_optical_construction(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
+                Ok(ProjectResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
+                })
+            }
             ProjectCall::Execute(request) => {
                 let reply = client
                     .execute(self.request(bounded(request)?))

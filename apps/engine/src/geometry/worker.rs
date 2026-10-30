@@ -91,6 +91,11 @@ pub struct CompileRequest {
     pub surface_images: BTreeMap<SourceHash, Arc<spiling_surface_fields::HeightImage>>,
 }
 pub enum Work {
+    ApplyOpticalConstruction {
+        snapshot: Arc<spiling_core::Snapshot>,
+        base: spiling_contracts::project::ProjectRevision,
+        application: spiling_contracts::manufacturing::ApplyOpticalConstruction,
+    },
     Import {
         source: NativePath,
         allowed_reuse: BTreeSet<DefinitionId>,
@@ -194,6 +199,7 @@ pub struct Imported {
     reason = "The single native worker returns bounded products without extra heap indirection"
 )]
 pub enum Product {
+    OpticalConstruction(spiling_core::OpticalConstructionCandidate),
     Import(Imported),
     Open {
         project: Project,
@@ -307,6 +313,15 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
         let mut pending = BTreeMap::new();
         let mut pending_records = BTreeMap::new();
         let result = match work {
+            Work::ApplyOpticalConstruction {
+                snapshot,
+                base,
+                application,
+            } => spiling_core::prepare_optical_construction(snapshot, base, application, &|| {
+                cancel.load(Ordering::Acquire)
+            })
+            .map(Product::OpticalConstruction)
+            .map_err(JobError::from),
             Work::ImportAppearancePalette {
                 source,
                 retained_budget,

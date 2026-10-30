@@ -5,6 +5,7 @@ use super::{request_id, required, session_parent};
 use crate::{geometry::*, process::*, project::*, rpc, surface::*};
 
 pub enum ProjectCall {
+    ApplyOpticalConstruction(rpc::ApplyOpticalConstructionRequest),
     Execute(rpc::ProjectRequest),
     Open(rpc::OpenProjectRequest),
     Save(rpc::SaveProjectRequest),
@@ -20,6 +21,20 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
     request_id(id)?;
     use rpc::project_request::Command as C;
     let (session_id, command) = match command {
+        ProjectCommand::ApplyOpticalConstruction {
+            session_id,
+            base_revision,
+            application,
+        } => {
+            return Ok(ProjectCall::ApplyOpticalConstruction(
+                rpc::ApplyOpticalConstructionRequest {
+                    parent: format!("sessions/{}", session_id.as_str()),
+                    request_id: id.into(),
+                    base_revision: base_revision.0,
+                    application: Some(application.try_into()?),
+                },
+            ));
+        }
         ProjectCommand::CompareOptical {
             session_id,
             base_revision,
@@ -873,4 +888,17 @@ pub fn validate_surface_image_imported_binding(
         return Err("imported image result disagrees with project metadata".into());
     }
     Ok(())
+}
+
+impl TryFrom<rpc::ApplyOpticalConstructionRequest> for ProjectCommand {
+    type Error = String;
+    fn try_from(value: rpc::ApplyOpticalConstructionRequest) -> Result<Self, String> {
+        request_id(&value.request_id)?;
+        Ok(Self::ApplyOpticalConstruction {
+            session_id: session_parent(&value.parent)?,
+            base_revision: ProjectRevision(value.base_revision),
+            application: required(value.application, "optical construction application")?
+                .try_into()?,
+        })
+    }
 }

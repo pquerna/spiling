@@ -67,7 +67,7 @@ impl TryFrom<&LayerCycle> for rpc::OpticalLayerCycle {
     }
 }
 
-fn observation(value: rpc::OpticalObservation) -> Result<OpticalObservation, String> {
+pub(super) fn observation(value: rpc::OpticalObservation) -> Result<OpticalObservation, String> {
     let illuminant = match rpc::AppearanceIlluminant::try_from(value.illuminant)
         .map_err(|_| "unknown optical illuminant")?
     {
@@ -95,7 +95,7 @@ fn observation(value: rpc::OpticalObservation) -> Result<OpticalObservation, Str
     })
 }
 
-fn observation_wire(value: &OpticalObservation) -> rpc::OpticalObservation {
+pub(super) fn observation_wire(value: &OpticalObservation) -> rpc::OpticalObservation {
     rpc::OpticalObservation {
         illuminant: match value.illuminant {
             AppearanceIlluminant::D65 => rpc::AppearanceIlluminant::D65,

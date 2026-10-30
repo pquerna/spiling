@@ -19,7 +19,7 @@ const engine = join(target, "debug", `spiling-engine${suffix}`);
 await mkdir(join(root, ".cache"), { recursive: true });
 const output = await mkdtemp(join(root, ".cache", "surface-color-"));
 let sequence = 0;
-async function invoke(args, failure = false) {
+async function invoke(args, failure = false, domain = "manufacturing") {
   const result = spawnSync(cli, [...args, "--engine", engine], {
     cwd: root, encoding: "utf8", timeout: 330_000, maxBuffer: 16 * 1024 * 1024,
   });
@@ -28,7 +28,7 @@ async function invoke(args, failure = false) {
   if (result.error) throw result.error;
   if (failure) {
     assert.notEqual(result.status, 0, `unsupported construction succeeded: ${receipt}`);
-    const diagnostic = result.stderr.trim().split("\n").map((line) => { try { return JSON.parse(line); } catch { return null; } }).find((row) => row?.domain === "manufacturing");
+    const diagnostic = result.stderr.trim().split("\n").map((line) => { try { return JSON.parse(line); } catch { return null; } }).find((row) => row?.domain === domain);
     assert.ok(diagnostic?.error, `missing typed refusal: ${receipt}`);
     return diagnostic.error;
   }
@@ -41,7 +41,7 @@ const json = async (path) => JSON.parse(await readFile(path, "utf8"));
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const results = [];
 const cases = ["box-mm.step", "through-hole.step"].flatMap((source) => [[source, "full"], [source, "window"]]);
-cases.push(["box-mm.step", "cycle"], ["box-mm.step", "all-white"], ["box-mm.step", "regional"], ["through-hole.step", "regional"], ["box-mm.step", "corner"], ["through-hole.step", "corner"]);
+cases.push(["box-mm.step", "cycle"], ["box-mm.step", "all-white"], ["box-mm.step", "regional"], ["through-hole.step", "regional"], ["box-mm.step", "corner"], ["through-hole.step", "corner"], ["box-mm.step", "study"], ["through-hole.step", "study"]);
 const modes = new Set(process.argv.slice(2));
 assert.ok([...modes].every((mode) => cases.some((c) => c[1] === mode)), "unknown smoke mode");
 for (const [sourceName, mode] of cases) {
@@ -60,7 +60,7 @@ for (const [sourceName, mode] of cases) {
     return plane?.kind === "plane" && plane.normal[1] < -0.5 && plane.normal[2] === 0;
   });
   assert.ok(selected, "native source has no selected upright exterior face");
-  const intent = await json(join(root, "fixtures", "manufacturing", "fixed-dual.intent.json"));
+  let intent = await json(join(root, "fixtures", "manufacturing", "fixed-dual.intent.json"));
   const job = intent.printer.workflow.job;
   job.assignments = job.assignments.slice(0, 1);
   job.assignments[0].material = { kind: "uniform", material_id: job.tools[1].material.id };
@@ -70,9 +70,10 @@ for (const [sourceName, mode] of cases) {
     max: bounds.max.map((v, axis) => v + [20, 20, 0][axis] + 1),
   };
   job.surface_constructions = [{
+    optical_origin: null,
     occurrence_id: 1, definition_id: selected.reference.definition_id,
     source_hash: selected.provenance.source_hash,
-    faces: [{ face_id: selected.face.face_id, skin_depth_mm: 1.2, backing_depth_mm: 1.2, mask: mode === "window" ? { min_u_mm: 4, max_u_mm: 16 } : null }],
+    faces: [{ face_id: selected.face.face_id, skin_depth_mm: 1.2, backing_depth_mm: 1.2, mask: mode === "window" || mode === "study" ? { min_u_mm: 4, max_u_mm: 16 } : null }],
     shell: { kind: "uniform", material_id: job.tools[0].material.id },
     white_material_id: job.tools[1].material.id,
   }];
@@ -102,8 +103,46 @@ for (const [sourceName, mode] of cases) {
   const intentFile = join(output, `${name}.intent.json`);
   await writeFile(intentFile, JSON.stringify(intent, null, 2));
   const exported = join(output, `${name}-baseline`);
-  const compiled = await invoke(["project", "edit", project, "--intent", intentFile,
+  let applyArgs = ["--intent", intentFile];
+  let bindingsFile;
+  let studyFile;
+  let paletteFile;
+  if (mode === "study") {
+    const palette = await json(join(root, "fixtures", "appearance", "surface-color.palette.json"));
+    const study = await json(join(root, "fixtures", "appearance", "optical-layer-cycle.json"));
+    study.materials = palette.rows.map((row) => row.key);
+    study.recipe = { slots: [{ material: 0, height_mm: 0.2 }, { material: 1, height_mm: 0.2 }], phase_slot: 0, origin_z_mm: 0.03 };
+    study.patch = { origin_mm: [24, 20, 0], normal_xy: [0, -1], width_mm: 12, height_mm: 0.15 };
+    study.search = { patterns: [{ materials: [0, 1] }, { materials: [1, 0] }], slot_heights_mm: [0.2], phase_slots: [0, 1], origin_z_mm: 0.03 };
+    paletteFile = join(output, `${name}.palette.json`);
+    studyFile = join(output, `${name}.study.json`);
+    await writeFile(paletteFile, JSON.stringify(palette));
+    await writeFile(studyFile, JSON.stringify(study));
+    const retained = await invoke(["project", "edit", project, "--intent", intentFile,
+      "--appearance-palette", paletteFile, "--optical-study", studyFile, "--optical-compare", "--optical-accept", "requested", "--save"]);
+    const evidence = retained.optical[0].report;
+    const bindings = study.materials.map((key, index) => ({ evidence_key: key, evidence_hash: evidence.material_evidence_hashes[index],
+      loaded_material_id: job.tools[index].material.id, loaded_declaration_hash: job.tools[index].material.declaration_hash }));
+    bindingsFile = join(output, `${name}.bindings.json`);
+    await writeFile(bindingsFile, JSON.stringify(bindings));
+    const wrong = structuredClone(bindings);
+    wrong[0].evidence_hash = "0".repeat(64);
+    const wrongFile = join(output, `${name}-wrong-binding.json`);
+    await writeFile(wrongFile, JSON.stringify(wrong));
+    await invoke(["project", "edit", project, "--apply-optical", "0", wrongFile], true, "project");
+    applyArgs = ["--apply-optical", "0", bindingsFile];
+  }
+  const compiled = await invoke(["project", "edit", project, ...applyArgs,
     "--preflight", "--compile", "--verify", "--save", "--manufacturing-out", exported]);
+  if (mode === "study") {
+    intent = compiled.manufacturing.intent;
+    const applied = intent.printer.workflow.job.surface_constructions[0];
+    assert.equal(applied.shell.kind, "layer_cycle");
+    assert.equal(applied.optical_origin.materials[0].evidence.key, "software-blue/catalog");
+    assert.deepEqual(applied.optical_origin.applied_pose.translation_mm, [20, 20, 0]);
+    assert.equal(compiled.scene.revision, 1, "reopened application must preserve its initial native scene epoch");
+    await writeFile(intentFile, JSON.stringify(intent));
+  }
   assert.equal(compiled.manufacturing.verification.verified, true);
   const plan = await json(join(exported, "plan.json"));
   for (const role of ["shell", "backing", "core"]) {
@@ -161,6 +200,7 @@ for (const [sourceName, mode] of cases) {
   assert.deepEqual(await readFile(join(restoredExport, "program.gcode")), baseline);
   await invoke(["project", "edit", project, "--intent", changedFile, "--undo", "--redo", "--undo", "--verify", "--save"]);
   await unlink(source); // Never remove repository fixtures or Core-owned assets.
+  if (mode === "study") { await unlink(paletteFile); await unlink(studyFile); }
   const recoveredExport = join(output, `${name}-source-absent`);
   const replay = join(output, `${name}.splr`);
   const recovered = await invoke(["project", "inspect", project, "--verify", "--manufacturing-out", recoveredExport, "--replay-out", replay]);

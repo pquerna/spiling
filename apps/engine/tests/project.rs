@@ -2391,3 +2391,241 @@ async fn optical_cancelled_report_is_transient_and_stale_comparisons_cannot_publ
     assert_eq!(scene(&mut client).await, original_scene);
     client.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn optical_application_uses_ack_revision_fences_and_no_scene_outputs() {
+    use spiling_contracts::{manufacturing::*, metadata, optical::*, rpc};
+    use std::sync::Arc;
+    let mut client = spawn().await;
+    let session = client.hello().session_id.clone();
+    import(
+        &mut client,
+        &fixture("box-mm.step"),
+        RigidPoseMm {
+            translation_mm: [20.0, 20.0, 0.0],
+            ..RigidPoseMm::IDENTITY
+        },
+    )
+    .await;
+    let (definitions, occurrences) = records(&mut client).await;
+    let mut intent: ManufacturingIntent = serde_json::from_str(include_str!(
+        "../../../fixtures/manufacturing/surface-color-box.intent.json"
+    ))
+    .unwrap();
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    job.assignments[0].occurrence_id = occurrences[0].occurrence_id;
+    let construction = &mut job.surface_constructions[0];
+    construction.occurrence_id = occurrences[0].occurrence_id;
+    construction.definition_id = definitions[0].definition_id.clone();
+    construction.source_hash = definitions[0].provenance.source_hash.clone();
+    let tools = job.tools.clone();
+    let base = info(&mut client).await.revision;
+    client
+        .manufacturing(ManufacturingCommand::SetIntent {
+            session_id: session.clone(),
+            base_revision: base,
+            intent: Arc::new(intent),
+        })
+        .await
+        .unwrap();
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/appearance");
+    let base = info(&mut client).await.revision;
+    let ProjectResponse::OperationAccepted { operation } = client
+        .project(ProjectCommand::ImportAppearancePalette {
+            session_id: session.clone(),
+            base_revision: base,
+            source: native(&fixtures.join("surface-color.palette.json")),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        wait_job(&mut client, operation.name).await.status,
+        JobStatus::Completed
+    );
+    let mut request =
+        OpticalRequest::decode(&std::fs::read(fixtures.join("optical-layer-cycle.json")).unwrap())
+            .unwrap();
+    request.materials = vec![
+        "software-blue/catalog".into(),
+        "software-white/catalog".into(),
+    ];
+    request.recipe = LayerCycle {
+        slots: vec![
+            OpticalSlot {
+                material: 0,
+                height_mm: 0.2,
+            },
+            OpticalSlot {
+                material: 1,
+                height_mm: 0.2,
+            },
+        ],
+        phase_slot: 0,
+        origin_z_mm: 0.03,
+    };
+    let base = info(&mut client).await.revision;
+    client
+        .project(ProjectCommand::SetOpticalStudy {
+            session_id: session.clone(),
+            base_revision: base,
+            request: request.clone(),
+        })
+        .await
+        .unwrap();
+    let base = info(&mut client).await.revision;
+    let ProjectResponse::OperationAccepted { operation } = client
+        .project(ProjectCommand::CompareOptical {
+            session_id: session.clone(),
+            base_revision: base,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let Some(JobResult::OpticalCompared {
+        record, resource, ..
+    }) = wait_job(&mut client, operation.name).await.result
+    else {
+        panic!()
+    };
+    let rpc = client.rpc();
+    let report = rpc.fetch_optical_report(&record, &resource).await.unwrap();
+    client
+        .project(ProjectCommand::AcceptOpticalReport {
+            session_id: session.clone(),
+            base_revision: base,
+            report_hash: record.hash.clone(),
+            selection: Some(OpticalSelection::Requested),
+        })
+        .await
+        .unwrap();
+    let application = ApplyOpticalConstruction {
+        construction_index: 0,
+        report_hash: record.hash,
+        selection: OpticalSelection::Requested,
+        bindings: std::array::from_fn(|i| OpticalMaterialBinding {
+            evidence_key: request.materials[i].clone(),
+            evidence_hash: report.material_evidence_hashes[i].clone(),
+            loaded_material_id: tools[i].material.id.clone(),
+            loaded_declaration_hash: tools[i].material.declaration_hash.clone(),
+        }),
+    };
+    let original_scene = scene(&mut client).await;
+    let baseline = info(&mut client).await;
+    // Force both publication fences through the real shared execution lease.
+    for cancel in [true, false] {
+        let blocker = rpc
+            .run_diagnostic(rpc::RunDiagnosticRequest {
+                parent: "diagnostics/optical-application-fence".into(),
+                request_id: String::new(),
+                chunk_count: 4,
+                delay_ms: 500,
+                chunk_bytes: 64,
+                input_revision: "lease-control".into(),
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let op = rpc.get_operation(&blocker.name).await.unwrap();
+                if metadata(&op).unwrap().state == rpc::DiagnosticState::Running as i32 {
+                    break;
+                }
+                assert!(!op.done);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let base = info(&mut client).await.revision;
+        let ProjectResponse::OperationAccepted { operation } = client
+            .project(ProjectCommand::ApplyOpticalConstruction {
+                session_id: session.clone(),
+                base_revision: base,
+                application: application.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        if cancel {
+            rpc.cancel_operation(&operation.name).await.unwrap();
+        } else {
+            client
+                .project(ProjectCommand::SetOpticalStudy {
+                    session_id: session.clone(),
+                    base_revision: base,
+                    request: request.clone(),
+                })
+                .await
+                .unwrap();
+        }
+        let result = wait_job(&mut client, operation.name).await;
+        if cancel {
+            assert_eq!(result.status, JobStatus::Cancelled);
+            assert_eq!(info(&mut client).await, baseline);
+        } else {
+            project_job_error(&result, ProjectErrorCode::StaleRevision);
+        }
+        assert!(result.outputs.is_empty());
+        assert_eq!(scene(&mut client).await, original_scene);
+        if !cancel {
+            let base = info(&mut client).await.revision;
+            let ProjectResponse::OperationAccepted { operation } = client
+                .project(ProjectCommand::CompareOptical {
+                    session_id: session.clone(),
+                    base_revision: base,
+                })
+                .await
+                .unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(
+                wait_job(&mut client, operation.name).await.status,
+                JobStatus::Completed
+            );
+            client
+                .project(ProjectCommand::AcceptOpticalReport {
+                    session_id: session.clone(),
+                    base_revision: base,
+                    report_hash: application.report_hash.clone(),
+                    selection: Some(OpticalSelection::Requested),
+                })
+                .await
+                .unwrap();
+        }
+    }
+    let base = info(&mut client).await.revision;
+    let ProjectResponse::OperationAccepted { operation } = client
+        .project(ProjectCommand::ApplyOpticalConstruction {
+            session_id: session.clone(),
+            base_revision: base,
+            application,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let result = wait_job(&mut client, operation.name).await;
+    assert_eq!(result.status, JobStatus::Completed, "{result:?}");
+    assert!(result.outputs.is_empty());
+    let Some(JobResult::OpticalConstructionApplied {
+        info: applied,
+        construction_index: 0,
+    }) = result.result
+    else {
+        panic!()
+    };
+    assert_eq!(applied.revision.0, base.0 + 1);
+    assert_eq!(scene(&mut client).await, original_scene);
+    client.shutdown().await.unwrap();
+}

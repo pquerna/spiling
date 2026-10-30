@@ -133,6 +133,7 @@ enum Purpose {
     GetAppearanceReport,
     CompareOptical,
     GetOpticalReport,
+    ApplyOpticalConstruction,
 }
 struct Publication {
     kind: PublicationKind,
@@ -167,6 +168,10 @@ enum PublicationKind {
     },
     AppearanceCompared(Arc<appearance::ReportPublication>),
     OpticalCompared(Arc<optical::OpticalReportPublication>),
+    OpticalConstructionApplied {
+        edit: PreparedEdit,
+        construction_index: u16,
+    },
     Section,
     Manufacturing {
         edit: PreparedEdit,
@@ -393,6 +398,7 @@ impl Runtime {
                                 | Purpose::GetAppearanceReport
                                 | Purpose::CompareOptical
                                 | Purpose::GetOpticalReport
+                                | Purpose::ApplyOpticalConstruction
                         ) && active.project_base != self.project.info().revision)
                     {
                         Err(
@@ -589,6 +595,18 @@ impl Runtime {
                                 record,
                             })
                         }
+                        PublicationKind::OpticalConstructionApplied {
+                            edit,
+                            construction_index,
+                        } => {
+                            self.project.commit(edit).map_err(|error| {
+                                format!("core optical construction ACK invariant: {error}")
+                            })?;
+                            Some(JobResult::OpticalConstructionApplied {
+                                info: self.project.info(),
+                                construction_index,
+                            })
+                        }
                         PublicationKind::OpticalCompared(report) => {
                             if self.optical_publication.is_some() {
                                 return Err("unreleased optical report publication".into());
@@ -691,6 +709,19 @@ impl Runtime {
     }
     fn prepare(&mut self, active: &Active, product: Product) -> Result<Publication, JobError> {
         match (&active.purpose, product) {
+            (Purpose::ApplyOpticalConstruction, Product::OpticalConstruction(candidate)) => {
+                let construction_index = candidate.construction_index();
+                let edit = self
+                    .project
+                    .prepare(Edit::ApplyOpticalConstruction { candidate })?;
+                Ok(Publication {
+                    kind: PublicationKind::OpticalConstructionApplied {
+                        edit,
+                        construction_index,
+                    },
+                    artifact: None,
+                })
+            }
             (Purpose::ImportAppearancePalette, Product::AppearancePalette(asset)) => {
                 let edit = self
                     .project
@@ -1501,6 +1532,11 @@ impl Runtime {
                 report_hash,
                 selection,
             } => self.accept_appearance_report(&session_id, base_revision, &report_hash, selection),
+            ProjectCommand::ApplyOpticalConstruction {
+                session_id,
+                base_revision,
+                application,
+            } => self.apply_optical_construction(&session_id, base_revision, application, false),
             ProjectCommand::SetOpticalStudy {
                 session_id,
                 base_revision,
@@ -1796,6 +1832,7 @@ impl Runtime {
             Purpose::GetAppearanceReport => "preparing_appearance_report",
             Purpose::CompareOptical => "comparing_optical",
             Purpose::GetOpticalReport => "preparing_optical_report",
+            Purpose::ApplyOpticalConstruction => "applying_optical_construction",
         };
         self.watchdog.start(job, cancel.clone());
         let work = work(job, artifact, &self.watchdog);
@@ -1903,7 +1940,8 @@ fn cancelled(purpose: &Purpose) -> JobError {
         | Purpose::GetAppearanceReport
         | Purpose::CompareOptical
         | Purpose::GetOpticalReport
-        | Purpose::GetSurfaceImage => project_error(
+        | Purpose::GetSurfaceImage
+        | Purpose::ApplyOpticalConstruction => project_error(
             ProjectErrorCode::Cancelled,
             "project job cancelled before publication",
         )
