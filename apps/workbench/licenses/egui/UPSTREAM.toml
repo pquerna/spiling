@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# Licensed under the Open Software License version 3.0
+
+repository = "https://github.com/emilk/egui"
+tag = "0.37.0"
+commit = "841a328ba2dd8f6996beb7189ebb7fc00e668a2a"
+files = ["LICENSE-MIT", "LICENSE-APACHE"]
+modifications = "None; license texts copied verbatim for the registry egui family, whose archives omit the workspace-root license files. No application source imported."

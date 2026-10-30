@@ -4,7 +4,7 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/contracts", "crates/core", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/desktop/src-tauri", "tests"]
+members = ["crates/contracts", "crates/core", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/desktop/src-tauri", "apps/workbench", "tests"]
 default-members = ["crates/contracts", "crates/core", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli"]
 exclude = ["vendor/solidcraft/crates/geom", "vendor/solidcraft/crates/step"]
 

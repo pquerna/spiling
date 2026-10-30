@@ -6,6 +6,8 @@ Licensed under the Open Software License version 3.0
 
 # Desktop rules
 
+This is the temporary legacy frontend during the [native egui migration](../../docs/adr/006-native-egui-workbench.md). Preserve existing operator workflows and correctness; new frontend development belongs in `apps/workbench`. Default cutover and retirement follow the ADR gates.
+
 - Own transient React authoring/inspection forms and disposable display state only. Core is the sole project authority. `src/native.ts` alone invokes the CEF shell; generated Rust shell DTOs adapt typed Protobuf RPCs, not gRPC-Web or a JSON command tunnel.
 - Ship canonical root LICENSE.md offline. Explicit checkbox assent precedes mounting; persist only local versioned acknowledgement. Reviewing assent unmounts the session and stops its engine.
 - Browser-only use shows desktop-required. Initialize strictly WebGPU geometry rendering before starting/restarting the sidecar; unsupported devices fail visibly, never fall back to WebGL. The separate diagnostic triangle is explicitly unitless synthetic output, never imported geometry.

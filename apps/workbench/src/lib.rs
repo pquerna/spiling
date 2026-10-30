@@ -1,0 +1,18 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
+
+pub mod app;
+pub mod commands;
+pub mod host;
+pub mod ui;
+
+pub fn native_options() -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1120.0, 760.0])
+            .with_min_inner_size([640.0, 480.0]),
+        renderer: eframe::Renderer::Wgpu,
+        ..Default::default()
+    }
+}

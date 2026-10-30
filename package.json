@@ -18,7 +18,11 @@
     "build": "node tools/run.mjs build",
     "smoke:cli": "node tools/run.mjs smoke:cli",
     "smoke:desktop": "node tools/run.mjs smoke:desktop",
-    "manufacturing:intent": "node --experimental-strip-types tools/compile-manufacturing-intent.mjs"
+    "manufacturing:intent": "node --experimental-strip-types tools/compile-manufacturing-intent.mjs",
+    "dev:native": "node tools/run.mjs dev:native",
+    "build:native": "node tools/run.mjs build:native",
+    "gallery:native": "node tools/run.mjs gallery:native",
+    "test:native": "node tools/run.mjs test:native"
   },
   "devDependencies": {
     "@tauri-apps/cli": "3.0.0-alpha.4",

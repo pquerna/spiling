@@ -6,6 +6,8 @@ Licensed under the Open Software License version 3.0
 
 # Desktop vision
 
+This is the temporary legacy frontend during the [native egui migration](../../docs/adr/006-native-egui-workbench.md). Preserve existing operator workflows and correctness; new frontend development belongs in `apps/workbench`. Default cutover and retirement follow the ADR gates.
+
 Provide one thin CEF/WebGPU native workbench over authenticated gRPC: source-backed STEP import, shared rigid occurrences, exact native face inspection/sections, bounded undo/redo and explicit save/open/recovery/read-only snapshots. Core owns durable project transactions; the engine owns native caches and revisions; React owns transient forms and synchronization; WebGPU owns disposable approximations.
 
 Retain durable incremental diagnostic progress/cancellation, synthetic triangle transfer, process/build identity, interruption and restart alongside authoring. Native operations use standard Google Operations names and ByteStream resources, with distinct checked native and diagnostic metadata views. Diagnostic output is never a geometry fallback.

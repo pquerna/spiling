@@ -24,11 +24,11 @@ Runtime SolidCore dependency pins in `Cargo.toml` and `geometry::KERNEL_REVISION
 
 During active SolidCore work, refresh upstream each UTC workday and before a fork change or pin. Long-lived `pquerna/*` branches isolate each logical change; compose them on `pquerna/integration-spiling-tracking` and fast-forward the tested integration directly to fork `main`, without requiring GitHub issues or PRs. Cargo pins an exercised exact published main/integration commit only after consumer qualification. Update published lanes by normal merges; rebase only unpublished work. Never force-push shared/pinned history or open an upstream issue or PR without explicit approval. Follow the [daily fork procedure](docs/quality/development.md#solidcore-fork-freshness) and maintain each change's rationale, SMLib relationship, evidence and upstream/removal criteria in the [assessment](docs/quality/solidcore-upstream-review.md).
 
-Initial implementation direction:
+Selected implementation direction ([ADR006](docs/adr/006-native-egui-workbench.md)):
 
 - One Cargo workspace and one pnpm workspace.
 - A supervised Rust engine process, independent of the desktop runtime.
-- Tauri 3 with CEF, React/TypeScript/Vite, and a Three.js WebGPU viewport. Pin tested versions; packaged viability on declared Windows, macOS, and Linux reference machines is a gate, not an assumption.
+- Rust eframe/egui/wgpu workbench in `apps/workbench`, using the supervised engine through engine-client. N1 manages real projects; native geometry display/picking follows at N2. Keep the existing Tauri/CEF/React/Three frontend usable only during the bounded migration. Switch the development default at N3 operator-flow acceptance and remove the legacy frontend at N5 parity/packaging acceptance. Pin tested versions; platform packaging remains an evidence gate.
 - [SolidCore](https://github.com/pquerna/solidcore) is the runtime CAD/BREP kernel behind the geometry adapter; [upstream](https://github.com/tangency-labs/solidcore) and the public fork retain native ownership. Pin SolidCore and solidcore-mesh to the same exact published fork commit, never a moving branch. Only SolidCraft's geometry/STEP companion libraries are vendored; preserve their upstream licensing and `vendor/solidcraft/UPSTREAM.toml` provenance, not a second application fork. The native-first route uses the imported BREP as its single material authority; original STEP preserves identity/provenance and finish inputs, not a second reconstructed solid. Qualification is producer- and operator-specific. Historical Monstertruck-authored fixture bytes retain their original identity, not current runtime authority.
 - Protobuf-defined gRPC services, standard Google Operations/ByteStream, Rust-derived TypeScript shell views, and separately specified packed binary payloads.
 - Printer specifications are TypeScript-authored data against generated Rust-defined domain contracts: configuration, capabilities, coordinate frames, component shapes and process limits. Rust validates inert data and owns planning, backend execution and mandatory verification. Ordinary printer additions should be data; genuinely new behavior requires a reviewed Rust backend extension. Arbitrary TypeScript profile execution does not belong in the engine, and a declared capability does not establish machine support.
@@ -78,24 +78,25 @@ Use directories to express ownership first. Create a separate crate only for jus
 
 B0 establishes contracts and a shared `crates/engine-client` used by the CLI and shell; that second crate is justified by two consumers. The domain areas below describe ownership as they are introduced, not a requirement to create empty future crates.
 
-| Planned area                                   | Ownership                                                                        |
-| ---------------------------------------------- | -------------------------------------------------------------------------------- |
-| `apps/desktop/src/`                            | Workbench features and transient UI state                                        |
-| `apps/desktop/src-tauri/`                      | Shell, engine supervision, native dialogs, binary bridge, packaging              |
-| `apps/engine/`                                 | Sidecar entry point and composition of native services                           |
-| `apps/cli/`                                    | Client commands using the same protocol and services; no alternate planner       |
-| `crates/contracts/`                            | IDs, revisions, commands, events, errors, manifest schemas                       |
-| `crates/engine-client/`                        | Shared protocol client, child-process lifecycle, request deadlines               |
-| `crates/core/`                                 | Project transactions, undo, persistence/recovery, artifacts, jobs                |
-| `crates/geometry/`                             | Kernel adapter, import, tessellation, sections, capability contract              |
-| `crates/surface-fields/`                       | Bounded image normalization and shared source-frame scalar-grid evaluation       |
+| Planned area                                   | Ownership                                                                            |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `apps/workbench/`                              | Native egui window, transient interaction, asynchronous host and future wgpu display |
+| `apps/desktop/src/`                            | Temporary legacy workbench features and transient UI state                           |
+| `apps/desktop/src-tauri/`                      | Shell, engine supervision, native dialogs, binary bridge, packaging                  |
+| `apps/engine/`                                 | Sidecar entry point and composition of native services                               |
+| `apps/cli/`                                    | Client commands using the same protocol and services; no alternate planner           |
+| `crates/contracts/`                            | IDs, revisions, commands, events, errors, manifest schemas                           |
+| `crates/engine-client/`                        | Shared protocol client, child-process lifecycle, request deadlines                   |
+| `crates/core/`                                 | Project transactions, undo, persistence/recovery, artifacts, jobs                    |
+| `crates/geometry/`                             | Kernel adapter, import, tessellation, sections, capability contract                  |
+| `crates/surface-fields/`                       | Bounded image normalization and shared source-frame scalar-grid evaluation           |
 | `crates/appearance/`                           | D65 colorimetry, bounded palette matching and optical reference construction studies |
-| `crates/manufacturing/`                        | Planning, operations/resources, backend, packaging, emitted-program verification |
-| `packages/protocol/`                           | Generated TypeScript contracts and binary decoder; no UI dependencies            |
-| `packages/viewport/`                           | Scene, picking, GPU resources, mesh/toolpath rendering                           |
-| `fixtures/`, `bench/`                          | Redistributable correctness corpus and reproducible workloads                    |
-| `docs/adr/`, `docs/protocol/`, `docs/quality/` | Decisions, wire specifications, support and evidence                             |
-| `tools/`                                       | Bootstrap, generation, and release tooling                                       |
+| `crates/manufacturing/`                        | Planning, operations/resources, backend, packaging, emitted-program verification     |
+| `packages/protocol/`                           | Generated TypeScript contracts and binary decoder; no UI dependencies                |
+| `packages/viewport/`                           | Scene, picking, GPU resources, mesh/toolpath rendering                               |
+| `fixtures/`, `bench/`                          | Redistributable correctness corpus and reproducible workloads                        |
+| `docs/adr/`, `docs/protocol/`, `docs/quality/` | Decisions, wire specifications, support and evidence                                 |
+| `tools/`                                       | Bootstrap, generation, and release tooling                                           |
 
 Dependencies flow inward:
 
@@ -106,7 +107,7 @@ Dependencies flow inward:
 - Shell and CLI are protocol clients, not owners of geometry or planning logic.
 - Viewport uses display contracts and rendering libraries, never Tauri directly.
 
-Keep backend, packager, connector interfaces, and verifier as distinct logical modules within manufacturing initially. Separate contracts do not require separate crates. Tauri-specific dependencies stay in the shell. Generated TypeScript must not become a second hand-maintained domain model.
+Keep backend, packager, connector interfaces, and verifier as distinct logical modules within manufacturing initially. Separate contracts do not require separate crates. Tauri-specific dependencies stay in the temporary legacy shell; egui/wgpu application dependencies stay in the native workbench. Generated TypeScript must not become a second hand-maintained domain model.
 
 ## 4. Architectural invariants
 
@@ -186,6 +187,6 @@ Numerical targets from the implementation RFC are proposed until frozen for a ga
 
 Retain reproducible run evidence with commit/dependency identity, inputs, environment, procedure and outcomes in CI or ignored artifacts; summarize exercised checks and known failures in commit/PR verification notes. Committed Markdown should explain the lasting contract, how to navigate the implementation and how to reproduce the workflow—not copy each run's output. Physical qualification additionally requires retained setup and measurements. Review the complete operator workflow, not just microbenchmarks.
 
-Root commands are `pnpm bootstrap`, `pnpm dev`, `pnpm contracts`, `pnpm check`, `pnpm test`, `pnpm bench:smoke`, and `pnpm package`; real-surface smoke runners are documented in [development.md](docs/quality/development.md). Keep commands consistent with tools/run.mjs and report only commands actually exercised. Native runtime/toolchain pins and dependency lockfiles are repository contracts.
+Root commands include `pnpm dev:native`, `pnpm build:native`, `pnpm gallery:native`, `pnpm test:native`, `pnpm bootstrap`, `pnpm dev`, `pnpm contracts`, `pnpm check`, `pnpm test`, `pnpm bench:smoke`, and `pnpm package`; real-surface smoke runners are documented in [development.md](docs/quality/development.md). Keep commands consistent with tools/run.mjs and report only commands actually exercised. Native runtime/toolchain pins and dependency lockfiles are repository contracts.
 
 Finish a change only when affected callers and contracts agree, relevant behavior is exercised, and the canonical rules and vision still describe the current system. Report observed results and remaining support limits plainly.
