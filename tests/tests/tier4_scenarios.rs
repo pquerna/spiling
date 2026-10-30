@@ -160,8 +160,8 @@ fn test_cam_06_spline_nurbs_surface_3d_milling() {
     let bytes = fixture_bytes("independent-exporters/occt-spline-housing-mm.step");
     let def = import_test_step(&bytes).expect("spline housing");
     let mesh = tessellate_display(&def).expect("fine mesh");
-    assert!(mesh.vertex_positions.len() >= 300, "spline mesh density");
-    assert!(mesh.indices.len() >= 300);
+    assert!(mesh_positions(&mesh).len() >= 300, "spline mesh density");
+    assert!(mesh_indices(&mesh).len() >= 300);
 }
 
 // =========================================================================
@@ -329,7 +329,7 @@ fn test_cam_16_scallop_height_and_display_mesh_inspection() {
     let bytes = fixture_bytes("independent-exporters/occt-rounded-housing-mm.step");
     let def = import_test_step(&bytes).expect("housing");
     let mesh = tessellate_display(&def).expect("mesh");
-    assert!(!mesh.vertex_positions.is_empty());
+    assert!(!mesh_positions(&mesh).is_empty());
 }
 
 // =========================================================================
@@ -454,7 +454,15 @@ fn test_cam_23_work_budget_governor_on_batch_nests() {
             origin_mm: [0.0, 0.0, z],
             normal: [0.0, 0.0, 1.0],
         };
-        let res = section_with_budget(&def, plane, &mut budget, &cancel);
+        let res = prepare_section_source(
+            &def,
+            spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &cancel,
+            &mut budget,
+        )
+        .and_then(|source| {
+            source.section_with_byte_limit(plane, &cancel, MAX_SECTION_BYTES, &mut budget)
+        });
         assert!(res.is_ok());
     }
 }
@@ -510,7 +518,7 @@ fn test_cam_26_end_to_end_full_cam_lifecycle_production() {
 
     // Phase 1: Import & Provenance
     let def = import_test_step(&bytes).expect("import");
-    assert_eq!(def.provenance().source_unit, "millimetre");
+    assert_eq!(def.provenance().source_unit, SourceUnit::Millimetre);
 
     // Phase 2: Stock sizing
     let b = def.bounds_mm();
@@ -528,7 +536,7 @@ fn test_cam_26_end_to_end_full_cam_lifecycle_production() {
 
     // Phase 5: Display mesh rendering
     let mesh = tessellate_display(&def).expect("mesh generation");
-    assert!(mesh.indices.len() >= 60);
+    assert!(mesh_indices(&mesh).len() >= 60);
 
     // Phase 6: Proof retention verification
     let proof_bytes = def.retained_query_proof_bytes();

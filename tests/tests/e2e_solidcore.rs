@@ -34,10 +34,13 @@ fn test_e2e_occt_reference_corpus_integrity() {
         let mesh = tessellate_display(&def)
             .unwrap_or_else(|e| panic!("failed tessellation on {fixture_path}: {e:?}"));
         assert!(
-            !mesh.vertex_positions.is_empty(),
+            !mesh_positions(&mesh).is_empty(),
             "mesh vertices for {fixture_path}"
         );
-        assert!(!mesh.indices.is_empty(), "mesh indices for {fixture_path}");
+        assert!(
+            !mesh_indices(&mesh).is_empty(),
+            "mesh indices for {fixture_path}"
+        );
     }
 }
 
@@ -54,7 +57,7 @@ fn test_e2e_adversarial_corpus_rejection_integrity() {
 }
 
 #[test]
-fn test_e2e_work_budget_governor_pipeline() {
+fn test_e2e_query_work_and_mesh_byte_governors_pipeline() {
     let bytes = fixture_bytes("independent-exporters/occt-box-mm.step");
     let def = import_test_step(&bytes).expect("box import");
 
@@ -66,19 +69,29 @@ fn test_e2e_work_budget_governor_pipeline() {
         origin_mm: [0.0, 0.0, 4.0],
         normal: [0.0, 0.0, 1.0],
     };
-    let _sec = section_with_budget(&def, plane, &mut budget, &cancel).expect("budgeted section");
+    let _sec = prepare_section_source(
+        &def,
+        spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &cancel,
+        &mut budget,
+    )
+    .and_then(|source| {
+        source.section_with_byte_limit(plane, &cancel, MAX_SECTION_BYTES, &mut budget)
+    })
+    .expect("budgeted section");
     assert!(
         budget.consumed() > initial_consumed,
         "consumed budget must increase monotonically"
     );
 
-    let _mesh = tessellate_with_budget(
+    let mesh = tessellate_with_budget(
         &def,
         DisplayProfile::MeshTrimmedMm005V2,
-        &mut budget,
         &cancel,
+        spiling_contracts::display::MeshBudget::FROZEN,
     )
     .expect("budgeted tessellation");
+    assert!(mesh.total_bytes <= spiling_contracts::display::MeshBudget::FROZEN.bytes);
     assert!(
         budget.consumed() <= 50_000,
         "must stay within allocated budget"

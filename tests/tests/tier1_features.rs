@@ -1666,9 +1666,11 @@ fn test_f36_height_domain_analysis() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel);
     assert!(h.is_ok());
@@ -1683,9 +1685,11 @@ fn test_f36_height_domain_retained_bytes() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
@@ -1700,9 +1704,11 @@ fn test_f36_height_domain_cylinder() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
@@ -1717,9 +1723,11 @@ fn test_f36_height_domain_through_hole() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
@@ -1737,9 +1745,11 @@ fn test_f36_height_domain_housing() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 10.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
@@ -1811,9 +1821,11 @@ fn test_f38_height_stratum_box() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
@@ -1831,9 +1843,11 @@ fn test_f38_height_stratum_pocket_floor() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 10.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
@@ -1851,9 +1865,11 @@ fn test_f38_height_stratum_narrow_pocket() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 6.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
@@ -1871,9 +1887,11 @@ fn test_f38_height_stratum_bracket() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 7.6], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
@@ -1888,9 +1906,11 @@ fn test_f38_height_stratum_closure_check() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     let _ = h.requires_closed_material_capture([2.0, 6.0]);

@@ -114,17 +114,15 @@ fn test_f02_corner_proof_bytes_positive() {
 #[test]
 fn test_f03_corner_unknown_face_id() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let bad_id = FaceId::from_step_entity_id(StepEntityId(999999));
+    let bad_id = FaceId::from_step_entity_id(StepEntityId(999999)).unwrap();
     let err = inspect_face(&def, &bad_id).unwrap_err();
     assert_eq!(err.code, GeometryErrorCode::UnknownHandle);
 }
 
 #[test]
 fn test_f03_corner_empty_handle() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let bad_id = FaceId::from_step_entity_id(StepEntityId(0));
-    let err = inspect_face(&def, &bad_id).unwrap_err();
-    assert_eq!(err.code, GeometryErrorCode::UnknownHandle);
+    let err = FaceId::from_step_entity_id(StepEntityId(0)).unwrap_err();
+    assert_eq!(err.code, GeometryErrorCode::InvalidGeometry);
 }
 
 #[test]
@@ -1649,9 +1647,11 @@ fn test_f36_corner_height_domain_box() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel);
     assert!(h.is_ok());
@@ -1666,9 +1666,11 @@ fn test_f36_corner_height_domain_cancelled() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let err =
         analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap_err();
@@ -1684,9 +1686,11 @@ fn test_f36_corner_height_domain_zero_work() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let _ = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel);
 }
@@ -1700,9 +1704,11 @@ fn test_f36_corner_height_domain_narrow_interval() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [2.0, 4.0], policy, &mut work, &cancel);
     assert!(h.is_ok());
@@ -1717,9 +1723,11 @@ fn test_f36_corner_height_domain_outside_interval() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [10.0, 15.0], policy, &mut work, &cancel);
     assert!(h.is_ok());
@@ -1784,9 +1792,11 @@ fn test_f38_corner_strata_box() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
@@ -1801,9 +1811,11 @@ fn test_f38_corner_strata_cylinder() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
@@ -1821,9 +1833,11 @@ fn test_f38_corner_strata_pocket() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 6.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
@@ -1841,9 +1855,11 @@ fn test_f38_corner_strata_housing() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 10.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
@@ -1861,9 +1877,11 @@ fn test_f38_corner_strata_bracket() {
         origin_mm: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
     };
     let policy = AnalysisPolicy {
-        maximum_endpoint_uncertainty_mm: 1e-6,
+        maximum_height_uncertainty_mm: 1e-6,
+        maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 7.6], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
@@ -2397,7 +2415,7 @@ fn test_f50_adversary_assembly() {
 fn test_f50_adversary_cancellation_during_import() {
     let bytes = fixture_bytes("box-mm.step");
     let cancel = AtomicBool::new(true);
-    let err = import_step(&bytes, &cancel).unwrap_err();
+    let err = from_step_bytes_with_cancel(&bytes, &cancel).unwrap_err();
     assert_eq!(err.code, GeometryErrorCode::Cancelled);
 }
 

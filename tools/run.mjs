@@ -427,7 +427,8 @@ Terminal=false
 
 async function check() {
   await contracts(true);
-  await run("cargo", ["fmt", "--all", "--", "--check"]);
+  // Format workspace-owned targets; --all also traverses excluded upstream path dependencies.
+  await run("cargo", ["fmt", "--", "--check"]);
   await run("cargo", [
     "clippy",
     "--locked",

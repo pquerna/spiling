@@ -34,8 +34,8 @@ fn test_comb_01_cylinder_import_section_tessellation() {
     assert_close(area, expected_area, 0.5, "cylinder section area");
 
     let mesh = tessellate_display(&def).expect("cylinder tessellation");
-    assert!(mesh.vertex_positions.len() >= 24, "cylinder mesh vertices");
-    assert!(mesh.indices.len() >= 36, "cylinder mesh triangles");
+    assert!(mesh_positions(&mesh).len() >= 24, "cylinder mesh vertices");
+    assert!(mesh_indices(&mesh).len() >= 36, "cylinder mesh triangles");
 }
 
 // =========================================================================
@@ -72,7 +72,7 @@ fn test_comb_02_through_hole_section_loops_and_net_area() {
     assert_close(net_area, 400.0 - 9.0 * PI, 1.5, "net material area");
 
     let mesh = tessellate_display(&def).expect("through hole tessellation");
-    assert!(!mesh.vertex_positions.is_empty());
+    assert!(!mesh_positions(&mesh).is_empty());
 }
 
 // =========================================================================
@@ -234,7 +234,7 @@ fn test_comb_10_ribbed_bracket_t_junction_section() {
         "ribbed bracket mid section has loops"
     );
     let mesh = tessellate_display(&def).expect("ribbed bracket mesh");
-    assert!(mesh.vertex_positions.len() >= 100);
+    assert!(mesh_positions(&mesh).len() >= 100);
 }
 
 // =========================================================================
@@ -408,13 +408,18 @@ fn test_comb_19_determinism_step_import_and_tessellation() {
     let m2 = tessellate_display(&def2).expect("m2");
 
     assert_eq!(
-        m1.vertex_positions.len(),
-        m2.vertex_positions.len(),
+        mesh_positions(&m1).len(),
+        mesh_positions(&m2).len(),
         "vertex count"
     );
-    assert_eq!(m1.indices.len(), m2.indices.len(), "index count");
     assert_eq!(
-        m1.vertex_positions, m2.vertex_positions,
+        mesh_indices(&m1).len(),
+        mesh_indices(&m2).len(),
+        "index count"
+    );
+    assert_eq!(
+        mesh_positions(&m1),
+        mesh_positions(&m2),
         "vertex positions bitwise identical"
     );
 }
@@ -435,7 +440,16 @@ fn test_comb_20_work_budget_monotony_import_and_section() {
         origin_mm: [0.0, 0.0, 4.0],
         normal: [0.0, 0.0, 1.0],
     };
-    let _sec = section_with_budget(&def, plane, &mut budget, &cancel).expect("sec");
+    let _sec = prepare_section_source(
+        &def,
+        spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &cancel,
+        &mut budget,
+    )
+    .and_then(|source| {
+        source.section_with_byte_limit(plane, &cancel, MAX_SECTION_BYTES, &mut budget)
+    })
+    .expect("sec");
     assert!(budget.consumed() > initial, "budget consumed must increase");
 }
 
@@ -449,7 +463,15 @@ fn test_comb_21_work_budget_exhaustion_graceful_error() {
         origin_mm: [0.0, 0.0, 4.0],
         normal: [0.0, 0.0, 1.0],
     };
-    let res = section_with_budget(&def, plane, &mut budget, &cancel);
+    let res = prepare_section_source(
+        &def,
+        spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &cancel,
+        &mut budget,
+    )
+    .and_then(|source| {
+        source.section_with_byte_limit(plane, &cancel, MAX_SECTION_BYTES, &mut budget)
+    });
     assert!(res.is_err(), "must fail on zero budget");
 }
 
@@ -480,10 +502,10 @@ fn test_comb_23_provenance_preservation_across_pipeline() {
     let def = import_test_step(&bytes).expect("cyl");
     let prov = def.provenance();
     assert!(
-        !prov.source_hash.is_empty(),
+        !prov.source_hash.as_str().is_empty(),
         "source hash must be populated"
     );
-    assert_eq!(prov.source_unit, "millimetre");
+    assert_eq!(prov.source_unit, SourceUnit::Millimetre);
 }
 
 #[test]
@@ -629,16 +651,21 @@ fn test_comb_31_empty_slice_below_model() {
 // =========================================================================
 
 #[test]
-fn test_comb_32_tessellate_profile_resolution_scaling() {
-    let bytes = fixture_bytes("cylinder.step");
-    let def = import_test_step(&bytes).expect("cyl");
-    let cancel = AtomicBool::new(false);
-    let m_coarse = tessellate(&def, DisplayProfile::MeshTrimmedMm05V2, &cancel).expect("coarse");
-    let m_fine = tessellate(&def, DisplayProfile::MeshTrimmedMm005V2, &cancel).expect("fine");
-    assert!(
-        m_fine.vertex_positions.len() >= m_coarse.vertex_positions.len(),
-        "fine mesh has >= vertices"
-    );
+fn test_comb_32_tessellate_declared_profile_bounds() {
+    let def = import_test_step(&fixture_bytes("cylinder.step")).expect("cylinder");
+    let mesh = tessellate_display(&def).expect("declared profile");
+    assert!(!mesh_chunks(&mesh).is_empty());
+    for chunk in &mesh.chunks {
+        assert_eq!(
+            chunk.descriptor.mesh_profile,
+            DisplayProfile::MeshTrimmedMm005V2
+        );
+        assert!(chunk.descriptor.carrier_deviation_mm <= MESH_SURFACE_TOLERANCE_MM);
+        assert!(
+            chunk.descriptor.carrier_deviation_mm + chunk.descriptor.trim_deviation_mm
+                <= MESH_CARRIER_TOLERANCE_MM
+        );
+    }
 }
 
 #[test]
@@ -646,8 +673,8 @@ fn test_comb_33_mesh_index_validity() {
     let bytes = fixture_bytes("independent-exporters/occt-through-hole-mm.step");
     let def = import_test_step(&bytes).expect("through-hole");
     let mesh = tessellate_display(&def).expect("mesh");
-    let v_count = (mesh.vertex_positions.len() / 3) as u32;
-    for &idx in &mesh.indices {
+    let v_count = (mesh_positions(&mesh).len() / 3) as u32;
+    for &idx in &mesh_indices(&mesh) {
         assert!(idx < v_count, "triangle index {idx} out of range {v_count}");
     }
 }
@@ -657,7 +684,7 @@ fn test_comb_34_mesh_normals_are_unit_vectors() {
     let bytes = fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step");
     let def = import_test_step(&bytes).expect("tapered");
     let mesh = tessellate_display(&def).expect("mesh");
-    for chunk in mesh.vertex_normals.chunks(3) {
+    for chunk in mesh_normals(&mesh).chunks(3) {
         if chunk.len() == 3 {
             let len = (chunk[0] * chunk[0] + chunk[1] * chunk[1] + chunk[2] * chunk[2]).sqrt();
             assert_close(len, 1.0, 1e-2, "normal unit length");
@@ -773,7 +800,7 @@ fn test_comb_42_mesh_bounds_containment() {
     let def = import_test_step(&bytes).expect("housing");
     let bounds = def.bounds_mm();
     let mesh = tessellate_display(&def).expect("mesh");
-    for chunk in mesh.vertex_positions.chunks(3) {
+    for chunk in mesh_positions(&mesh).chunks(3) {
         if chunk.len() == 3 {
             let (x, y, z) = (chunk[0], chunk[1], chunk[2]);
             assert!(x >= bounds.min[0] - 0.1 && x <= bounds.max[0] + 0.1);
@@ -821,7 +848,7 @@ fn test_comb_44_thread_safe_concurrent_tessellation() {
             let def_clone = Arc::clone(&def);
             thread::spawn(move || {
                 let mesh = tessellate_display(&def_clone).expect("tessellate");
-                assert!(!mesh.vertex_positions.is_empty());
+                assert!(!mesh_positions(&mesh).is_empty());
             })
         })
         .collect();
@@ -894,25 +921,25 @@ fn test_comb_50_display_mesh_triangle_area_positivity() {
     let def = import_test_step(&bytes).expect("box");
     let mesh = tessellate_display(&def).expect("mesh");
 
-    for tri in mesh.indices.chunks(3) {
+    for tri in mesh_indices(&mesh).chunks(3) {
         if tri.len() == 3 {
             let i0 = tri[0] as usize * 3;
             let i1 = tri[1] as usize * 3;
             let i2 = tri[2] as usize * 3;
             let v0 = [
-                mesh.vertex_positions[i0],
-                mesh.vertex_positions[i0 + 1],
-                mesh.vertex_positions[i0 + 2],
+                mesh_positions(&mesh)[i0],
+                mesh_positions(&mesh)[i0 + 1],
+                mesh_positions(&mesh)[i0 + 2],
             ];
             let v1 = [
-                mesh.vertex_positions[i1],
-                mesh.vertex_positions[i1 + 1],
-                mesh.vertex_positions[i1 + 2],
+                mesh_positions(&mesh)[i1],
+                mesh_positions(&mesh)[i1 + 1],
+                mesh_positions(&mesh)[i1 + 2],
             ];
             let v2 = [
-                mesh.vertex_positions[i2],
-                mesh.vertex_positions[i2 + 1],
-                mesh.vertex_positions[i2 + 2],
+                mesh_positions(&mesh)[i2],
+                mesh_positions(&mesh)[i2 + 1],
+                mesh_positions(&mesh)[i2 + 2],
             ];
 
             let e1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
@@ -959,9 +986,10 @@ fn test_comb_53_section_span_entity_tracing() {
     let bytes = fixture_bytes("box-mm.step");
     let def = import_test_step(&bytes).expect("box");
     let sec = section_at_z(&def, 4.0).expect("sec");
-    for lp in sec.loops() {
-        for span in &lp.spans {
-            assert!(span.source_face.0 < def.faces().len() as u32);
+    for loop_index in 0..sec.loops().len() {
+        for span in sec.spans(loop_index).expect("native span provenance") {
+            assert!(span.source_face_ordinal < def.faces().len());
+            assert_eq!(def.face_ordinal(span.face), Some(span.source_face_ordinal));
         }
     }
 }
@@ -972,25 +1000,25 @@ fn test_comb_54_total_surface_area_estimation() {
     let def = import_test_step(&bytes).expect("box");
     let mesh = tessellate_display(&def).expect("mesh");
     let mut total_area = 0.0f64;
-    for tri in mesh.indices.chunks(3) {
+    for tri in mesh_indices(&mesh).chunks(3) {
         if tri.len() == 3 {
             let i0 = tri[0] as usize * 3;
             let i1 = tri[1] as usize * 3;
             let i2 = tri[2] as usize * 3;
             let v0 = [
-                mesh.vertex_positions[i0],
-                mesh.vertex_positions[i0 + 1],
-                mesh.vertex_positions[i0 + 2],
+                mesh_positions(&mesh)[i0],
+                mesh_positions(&mesh)[i0 + 1],
+                mesh_positions(&mesh)[i0 + 2],
             ];
             let v1 = [
-                mesh.vertex_positions[i1],
-                mesh.vertex_positions[i1 + 1],
-                mesh.vertex_positions[i1 + 2],
+                mesh_positions(&mesh)[i1],
+                mesh_positions(&mesh)[i1 + 1],
+                mesh_positions(&mesh)[i1 + 2],
             ];
             let v2 = [
-                mesh.vertex_positions[i2],
-                mesh.vertex_positions[i2 + 1],
-                mesh.vertex_positions[i2 + 2],
+                mesh_positions(&mesh)[i2],
+                mesh_positions(&mesh)[i2 + 1],
+                mesh_positions(&mesh)[i2 + 2],
             ];
             let e1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
             let e2 = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
@@ -1021,7 +1049,7 @@ fn test_comb_55_full_pipeline_audit_ribbed_bracket() {
 
     // Tessellation
     let mesh = tessellate_display(&def).expect("mesh");
-    assert!(mesh.indices.len() >= 60);
+    assert!(mesh_indices(&mesh).len() >= 60);
 
     // Audit zero leak
     let proof_bytes = def.retained_query_proof_bytes();
