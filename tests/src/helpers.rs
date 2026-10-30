@@ -4,7 +4,8 @@
 
 use spiling_contracts::geometry::{DisplayProfile, GeometryError, PlaneMm};
 use spiling_geometry::{
-    Definition, MeshArtifact, NativeSection, SectionLoopMm, import_step, section, tessellate,
+    Definition, MeshArtifact, NativeSection, SectionLoopMm, from_step_bytes_with_cancel, section,
+    tessellate,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -17,7 +18,7 @@ pub fn assert_close(actual: f64, expected: f64, tolerance: f64, context: &str) {
 }
 
 pub fn import_test_step(bytes: &[u8]) -> Result<Definition, GeometryError> {
-    import_step(bytes, &AtomicBool::new(false))
+    from_step_bytes_with_cancel(bytes, &AtomicBool::new(false))
 }
 
 pub fn section_at_z(def: &Definition, z_mm: f64) -> Result<NativeSection, GeometryError> {
