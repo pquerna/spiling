@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Tooling rules
 
-- Native egui commands build engine/workbench together without CEF staging; installed-relative engine lookup uses those adjacent outputs. `test:native` runs actual-child host checks sequentially. Keep `dev` on the legacy frontend until ADR006's N3 acceptance gate.
+- Native egui commands build engine/workbench together without CEF staging; installed-relative engine lookup uses those adjacent outputs. `test:native` runs actual-child host checks sequentially. `dev` and `dev:native` run native; `dev:legacy` is temporary until ADR006's N5 retirement gate.
 - Root commands are implemented in `run.mjs`; keep command failures fatal and preserve child exit status.
 - Use Node 24 and pnpm 10.32.1, Rust 1.99.0 and committed lockfiles. Never silently substitute runtime/kernel/toolchain backends.
 - Stage native sidecars using the Rust target triple and ship license/source/provenance notices. Regenerate the release notice directory without stale dependencies. Retain the native CEF archive's original LICENSE.txt and CREDITS.html as well as crate/npm license texts; the flattened upstream cache omits LICENSE.txt. Extract it once, stopping after the member with GNU tar `--occurrence=1` or Windows/macOS BSD tar `--fast-read`. Tool-managed artifacts stay ignored.

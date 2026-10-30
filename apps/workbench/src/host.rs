@@ -3,7 +3,9 @@
 // Licensed under the Open Software License version 3.0
 
 //! Native admission and the sole frontend owner of EngineClient. No engine domain logic lives here.
+use crate::manufacture;
 use crate::scene::{Scene, Section};
+use spiling_contracts::manufacturing::{ManufacturingCommand, ManufacturingResponse};
 use spiling_contracts::{
     Hello, NativeOperationView,
     geometry::{
@@ -70,6 +72,8 @@ pub struct Snapshot {
     pub display_loading: bool,
     pub display_paused: bool,
     pub inspection: Option<Arc<spiling_contracts::geometry::FaceInspection>>,
+    pub manufacturing: Arc<manufacture::State>,
+    pub bed_proposal: Option<Arc<spiling_contracts::geometry::BedPosePreparation>>,
     pub busy: bool,
     pub active_operation: bool,
     pub picker_open: bool,
@@ -93,6 +97,8 @@ impl Default for Snapshot {
             display_loading: false,
             display_paused: false,
             inspection: None,
+            manufacturing: Arc::default(),
+            bed_proposal: None,
             busy: true,
             active_operation: false,
             picker_open: false,
@@ -155,6 +161,7 @@ pub enum Command {
     PauseDisplay,
     ResumeDisplay,
     CancelSection,
+    CancelReview,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Picker {
@@ -163,6 +170,8 @@ pub enum Picker {
     Recover,
     Save,
     Import,
+    Intent,
+    Export,
 }
 impl Picker {
     fn title(self) -> &'static str {
@@ -172,6 +181,8 @@ impl Picker {
             Self::Recover => "Recover previous committed checkpoint",
             Self::Save => "Choose a new project directory name",
             Self::Import => "Import a native STEP part",
+            Self::Intent => "Load inert manufacturing intent JSON",
+            Self::Export => "Choose a new manufacturing export directory name",
         }
     }
 }
@@ -189,6 +200,8 @@ enum Action {
         target: Option<NativePath>,
     },
     Import(NativePath),
+    LoadIntent(NativePath),
+    Export(NativePath),
     Undo,
     Redo,
     Close,
@@ -201,6 +214,8 @@ impl Action {
             Self::Open { .. } => "Open another project",
             Self::Save { .. } => "Save project",
             Self::Import(_) => "Import part",
+            Self::LoadIntent(_) => "Load manufacturing intent",
+            Self::Export(_) => "Export verified program",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
             Self::Close => "Close Spiling",
@@ -216,6 +231,8 @@ impl Action {
 }
 enum Request {
     Geometry(Box<GeometryCommand>),
+    Manufacturing(Box<ManufacturingCommand>),
+    Project(Box<ProjectCommand>),
     Command(Command),
     #[cfg(test)]
     Action(Action),
@@ -267,6 +284,8 @@ impl Host {
             executing: false,
             section_task: None,
             section_cancel: Arc::new(AtomicBool::new(false)),
+            review_task: None,
+            export_task: None,
             display_task: None,
             display_cancel: Arc::new(AtomicBool::new(false)),
         };
@@ -290,6 +309,29 @@ impl Host {
     }
     pub fn geometry(&self, command: GeometryCommand) -> Result<(), String> {
         self.send(Request::Geometry(Box::new(command)))
+    }
+    pub fn manufacturing(&self, command: ManufacturingCommand) -> Result<(), String> {
+        // The existing client checks the strict encoded intent limit before RPC admission.
+        if let ManufacturingCommand::SetIntent { intent, .. } = &command {
+            intent.validate().map_err(|e| e.to_string())?;
+            if serde_json::to_vec(intent).map_err(|e| e.to_string())?.len()
+                > spiling_contracts::manufacturing::MAX_PROFILE_JSON_BYTES as usize
+            {
+                return Err("Manufacturing intent exceeds the control limit".into());
+            }
+        }
+        self.send(Request::Manufacturing(Box::new(command)))
+    }
+    pub fn project(&self, command: ProjectCommand) -> Result<(), String> {
+        // Control slots have an additional byte bound; domain validity remains native authority.
+        if serde_json::to_vec(&command)
+            .map_err(|e| e.to_string())?
+            .len()
+            > 65536
+        {
+            return Err("Project edit exceeds the control limit".into());
+        }
+        self.send(Request::Project(Box::new(command)))
     }
     pub fn command(&self, command: Command) -> Result<(), String> {
         self.send(Request::Command(command))
@@ -316,18 +358,37 @@ impl Host {
         let wake = ctx.clone();
         let future: std::pin::Pin<
             Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>,
-        > = if picker == Picker::Import {
+        > = if matches!(picker, Picker::Import | Picker::Intent) {
             // Both branches return different opaque future types, so erase only this OS boundary.
             Box::pin(
                 dialog
-                    .add_filter("STEP", &["step", "stp", "STEP", "STP"])
+                    .add_filter(
+                        if picker == Picker::Import {
+                            "STEP"
+                        } else {
+                            "Manufacturing intent JSON"
+                        },
+                        if picker == Picker::Import {
+                            &["step", "stp", "STEP", "STP"][..]
+                        } else {
+                            &["json"][..]
+                        },
+                    )
                     .pick_file(),
             )
                 as std::pin::Pin<
                     Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>,
                 >
-        } else if picker == Picker::Save {
-            Box::pin(dialog.set_file_name("Spiling Project").save_file())
+        } else if matches!(picker, Picker::Save | Picker::Export) {
+            Box::pin(
+                dialog
+                    .set_file_name(if picker == Picker::Export {
+                        "Spiling Export"
+                    } else {
+                        "Spiling Project"
+                    })
+                    .save_file(),
+            )
         } else {
             Box::pin(dialog.pick_folder())
         };
@@ -370,6 +431,8 @@ fn selected_action(picker: Picker, path: &std::path::Path) -> Result<Action, Str
     Ok(match picker {
         Picker::Save => Action::Save { target: Some(path) },
         Picker::Import => Action::Import(path),
+        Picker::Intent => Action::LoadIntent(path),
+        Picker::Export => Action::Export(path),
         _ => Action::Open {
             path,
             read_only: picker == Picker::OpenReadOnly,
@@ -388,6 +451,8 @@ enum Receipt {
     Save(Option<Route>),
     Import,
     Geometry,
+    Manufacturing,
+    Project,
 }
 struct Pending {
     name: String,
@@ -414,6 +479,8 @@ struct Actor {
     dialog: Option<u64>,
     nonce: u64,
     executing: bool,
+    review_task: Option<JoinHandle<Result<Arc<manufacture::Review>, ClientError>>>,
+    export_task: Option<JoinHandle<Result<manufacture::StagedExport, String>>>,
     section_task: Option<JoinHandle<Result<Arc<Section>, ClientError>>>,
     section_cancel: Arc<AtomicBool>,
     display_task: Option<JoinHandle<Result<Arc<Scene>, ClientError>>>,
@@ -421,14 +488,16 @@ struct Actor {
 }
 impl Actor {
     fn publish(&mut self) {
-        self.state.serial += 1;
         self.state.section_loading = self.section_task.is_some();
         self.state.display_loading = self.display_task.is_some();
+        Arc::make_mut(&mut self.state.manufacturing).loading = self.review_task.is_some();
+        Arc::make_mut(&mut self.state.manufacturing).export_busy = self.export_task.is_some();
         self.state.active_operation = self.pending.is_some();
         self.state.busy = self.executing
             || self.pending.is_some()
             || self.state.phase == Phase::Starting
-            || self.deferred.is_some();
+            || self.deferred.is_some()
+            || self.export_task.is_some();
         self.state.picker_open = self.dialog.is_some();
         self.updates.send_replace(self.state.clone());
         (self.wake)();
@@ -463,7 +532,7 @@ impl Actor {
                 biased;
                 _ = &mut stop => break,
                 request = requests.recv() => match request {
-                    Some(request) => { self.executing = true; self.publish(); self.request(request).await; self.executing = false; },
+                    Some(request) => { self.executing = true; self.publish(); self.request(request).await; self.state.serial += 1; self.executing = false; },
                     None => break,
                 },
                 result = async { match &mut observation { Some(task) => task.await, None => std::future::pending().await } } => {
@@ -473,6 +542,28 @@ impl Actor {
                         Ok(Err(error)) => { if let Some(pending) = &mut self.pending { pending.paused = true; } self.failure(error).await; }
                         Err(error) => self.problem(format!("Operation observer failed: {error}")),
                     }
+                },
+                result = async {match &mut self.review_task {Some(task)=>task.await,None=>std::future::pending().await}} => {
+                    self.review_task=None;
+                    match result {
+                        Ok(Ok(review)) if self.capture_current(&review.capture) => {Arc::make_mut(&mut self.state.manufacturing).review=Some(review);},
+                        Ok(Ok(_))=>{},Ok(Err(error))=>self.failure(error).await,Err(error)=>self.problem(format!("Review transfer failed: {error}")),
+                    }
+                },
+                result = async {match &mut self.export_task {Some(task)=>task.await,None=>std::future::pending().await}} => {
+                    self.export_task=None;
+                    match result {
+                        Ok(Ok(mut staged)) if self.capture_current(&staged.capture) => {
+                            if let Some(client)=&self.client {
+                                match manufacture::check_current(&client.rpc(),&staged.capture).await {
+                                    Ok(())=>{staged.output.commit();Arc::make_mut(&mut self.state.manufacturing).last_export=Some(staged.label);self.state.message="Exported plan.json, program.gcode, verification.json and provenance.json".into();},
+                                    Err(error)=>self.failure(error).await,
+                                }
+                            }
+                        },
+                        Ok(Ok(_))=>self.problem("Discarded stale export before commit"),Ok(Err(error))=>self.problem(error),Err(error)=>self.problem(format!("Export worker failed: {error}")),
+                    }
+                    if let Some(action)=self.deferred.take(){self.admit(action).await;}
                 },
                 result = async { match &mut self.display_task { Some(task)=> task.await,None=>std::future::pending().await } } => {
                     self.display_task=None;
@@ -543,6 +634,7 @@ impl Actor {
                 .section
                 .as_ref()
                 .map_or(0, |s| s.summary.total_bytes as usize * 6)
+                + self.state.manufacturing.display_bytes()
                 + if self.section_task.is_some() {
                     spiling_contracts::geometry::MAX_SECTION_BYTES as usize * 6
                 } else {
@@ -557,6 +649,9 @@ impl Actor {
         self.state.display = None;
         self.state.inspection = None;
         self.state.display_paused = false;
+        self.clear_review();
+        self.state.manufacturing = Arc::default();
+        self.state.bed_proposal = None;
         self.state.phase = Phase::Starting;
         self.state.generation += 1;
         self.state.hello = None;
@@ -606,6 +701,12 @@ impl Actor {
         }
     }
     async fn cleanup(&mut self) {
+        self.clear_review();
+        // A staged transaction must finish and drop before the engine/session is released.
+        if let Some(task) = self.export_task.take() {
+            let _ = task.await;
+        }
+
         if let Some(mut client) = self.client.take() {
             let pid = client.hello().pid;
             if let Err(error) = client.shutdown().await {
@@ -620,6 +721,8 @@ impl Actor {
     }
     async fn disconnect(&mut self, reason: String) {
         self.cancel_display();
+        self.clear_review();
+        self.state.bed_proposal = None;
         if let Some(mut client) = self.client.take() {
             let _ = client.terminate().await;
         }
@@ -645,7 +748,8 @@ impl Actor {
             .as_ref()
             .ok_or_else(|| ClientError::InvalidRequest("Engine is not connected".into()))?;
         let session_id = client.hello().session_id.clone();
-        let project = match client
+        let rpc = client.rpc();
+        let project = match rpc
             .project(ProjectCommand::Get {
                 session_id: session_id.clone(),
             })
@@ -658,8 +762,10 @@ impl Actor {
                 ));
             }
         };
-        let scene = match client
-            .geometry(GeometryCommand::GetScene { session_id })
+        let scene = match rpc
+            .geometry(GeometryCommand::GetScene {
+                session_id: session_id.clone(),
+            })
             .await?
         {
             GeometryResponse::Scene { summary } => summary,
@@ -676,6 +782,49 @@ impl Actor {
             self.state.inspection = None;
             self.state.display_paused = false;
         }
+        let status = rpc
+            .manufacturing(ManufacturingCommand::Get { session_id })
+            .await?;
+        let ManufacturingResponse::Status {
+            info,
+            intent,
+            artifact,
+            resource,
+        } = status
+        else {
+            return Err(ClientError::Protocol(
+                "Unexpected manufacturing status".into(),
+            ));
+        };
+        if info.project_id != project.project_id || info.revision != project.revision {
+            return Err(ClientError::InvalidRequest(
+                "Project changed during status retrieval".into(),
+            ));
+        }
+        let changed = self
+            .state
+            .manufacturing
+            .revision
+            .as_ref()
+            .is_none_or(|(id, r)| *id != project.project_id || *r != project.revision)
+            || self.state.manufacturing.artifact != artifact
+            || self.state.manufacturing.resource != resource;
+        if changed {
+            self.clear_review();
+            self.state.bed_proposal = None;
+            Arc::make_mut(&mut self.state.manufacturing).preflight = None;
+        }
+        let m = Arc::make_mut(&mut self.state.manufacturing);
+        if m.revision
+            .as_ref()
+            .is_some_and(|(id, _)| *id != project.project_id)
+        {
+            m.loaded = None;
+        }
+        m.revision = Some((project.project_id.clone(), project.revision));
+        m.intent = intent;
+        m.artifact = artifact;
+        m.resource = resource;
         self.state.project = Some(Arc::new(project));
         self.state.scene = Some(scene);
         self.schedule_display();
@@ -683,6 +832,8 @@ impl Actor {
     }
     async fn request(&mut self, request: Request) {
         match request {
+            Request::Manufacturing(command) => self.manufacturing(*command).await,
+            Request::Project(command) => self.project_edit(*command).await,
             Request::Geometry(command) => {
                 if matches!(*command, GeometryCommand::StartSection { .. })
                     && self.section_task.is_some()
@@ -690,7 +841,11 @@ impl Actor {
                     self.problem("Finish or cancel the current section transfer");
                     return;
                 }
-                if self.pending.is_some() || self.dialog.is_some() || self.confirmation.is_some() {
+                if self.pending.is_some()
+                    || self.export_task.is_some()
+                    || self.dialog.is_some()
+                    || self.confirmation.is_some()
+                {
                     self.problem("Finish the active native action first");
                     return;
                 }
@@ -712,6 +867,10 @@ impl Actor {
                     Ok(_) => self.problem("Unexpected geometry control reply"),
                     Err(error) => self.failure(error).await,
                 }
+            }
+            Request::Command(Command::CancelReview) => {
+                self.clear_review();
+                self.state.message = "Review transfer cancelled; verify again to reload".into();
             }
             Request::Command(Command::CancelSection) => {
                 self.section_cancel.store(true, Ordering::Relaxed);
@@ -771,7 +930,11 @@ impl Actor {
                 }
             }
             Request::PickerStarted(id) => {
-                if self.pending.is_none() && self.dialog.is_none() && self.confirmation.is_none() {
+                if self.pending.is_none()
+                    && self.export_task.is_none()
+                    && self.dialog.is_none()
+                    && self.confirmation.is_none()
+                {
                     self.dialog = Some(id);
                 } else {
                     self.problem("Cannot open a picker while native work is active");
@@ -817,7 +980,7 @@ impl Actor {
         }
     }
     async fn admit(&mut self, action: Action) {
-        if self.pending.is_some() || self.dialog.is_some() {
+        if self.pending.is_some() || self.export_task.is_some() || self.dialog.is_some() {
             if matches!(action, Action::Close | Action::Restart) {
                 self.deferred = Some(action);
                 self.cancel().await;
@@ -867,6 +1030,10 @@ impl Actor {
         self.execute(action, false).await;
     }
     async fn execute(&mut self, action: Action, discard: bool) {
+        if matches!(action, Action::LoadIntent(_) | Action::Export(_)) {
+            self.file_action(action).await;
+            return;
+        }
         if matches!(action, Action::Close | Action::Restart) {
             self.cleanup().await;
             if matches!(action, Action::Close) {
@@ -958,16 +1125,17 @@ impl Actor {
                 }
                 return;
             }
-            Action::Close | Action::Restart => unreachable!(),
+            Action::Close | Action::Restart | Action::LoadIntent(_) | Action::Export(_) => {
+                unreachable!()
+            }
         };
         let new = matches!(command, ProjectCommand::New { .. });
         match client.project(command).await {
-            Ok(ProjectResponse::SceneChanged { info, summary }) => {
+            Ok(ProjectResponse::SceneChanged { info, .. } | ProjectResponse::Status { info }) => {
                 if new {
                     self.route = None;
                 }
                 self.state.project = Some(Arc::new(info));
-                let _ = summary;
                 self.state.message = format!("{label} completed");
                 self.refresh_after_failure().await;
             }
@@ -983,7 +1151,6 @@ impl Actor {
                 self.problem(error.to_string());
                 self.refresh_after_failure().await;
             }
-            Ok(_) => self.problem("Project mutation returned an unexpected native reply"),
             Err(error) => {
                 self.failure(error).await;
                 self.refresh_after_failure().await;
@@ -1075,6 +1242,37 @@ impl Actor {
                 }
                 self.state.project = Some(Arc::new(info.clone()));
             }
+            (Receipt::Manufacturing, Some(JobResult::ManufacturingPreflight { report }))
+                if completed =>
+            {
+                Arc::make_mut(&mut self.state.manufacturing).preflight =
+                    Some(Arc::new(report.clone()));
+            }
+            (Receipt::Manufacturing, Some(JobResult::ManufacturingCompiled { .. }))
+                if completed => {}
+            (
+                Receipt::Manufacturing,
+                Some(JobResult::ManufacturingVerified {
+                    record,
+                    report,
+                    resource,
+                    provenance,
+                    replay_display,
+                }),
+            ) if completed => {
+                self.verified(
+                    record.clone(),
+                    report.clone(),
+                    resource.clone(),
+                    provenance.clone(),
+                    replay_display.clone(),
+                )
+                .await;
+            }
+            (Receipt::Geometry, Some(JobResult::BedPosePrepared { preparation })) if completed => {
+                self.state.bed_proposal = Some(Arc::new(preparation.clone()));
+            }
+            (Receipt::Project, Some(JobResult::Scene { .. })) if completed => {}
             (Receipt::Geometry, Some(JobResult::Section { artifact_id })) if completed => {
                 if self.section_task.is_some() {
                     self.problem("Finish the current section transfer first");
@@ -1085,6 +1283,18 @@ impl Actor {
                         scene.clone(),
                         *artifact_id,
                         self.section_cancel.clone(),
+                        self.state.display.as_ref().map_or(0, |s| s.raw_bytes * 2)
+                            + self.state.manufacturing.display_bytes()
+                            + self
+                                .state
+                                .section
+                                .as_ref()
+                                .map_or(0, |s| s.summary.total_bytes as usize * 6)
+                            + if self.review_task.is_some() {
+                                80 * 1024 * 1024
+                            } else {
+                                0
+                            },
                     )));
                 }
             }
@@ -1121,3 +1331,5 @@ impl Actor {
 
 #[cfg(test)]
 mod tests;
+
+mod services;

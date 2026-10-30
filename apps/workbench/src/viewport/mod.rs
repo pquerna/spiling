@@ -34,6 +34,9 @@ struct LineVertex {
     color: [f32; 3],
 }
 struct Resources {
+    replay: Option<Arc<crate::manufacture::Review>>,
+    replay_buffers: Vec<wgpu::Buffer>,
+    point_pipeline: wgpu::RenderPipeline,
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
@@ -47,6 +50,14 @@ struct Resources {
     section: Option<Arc<Section>>,
 }
 
+pub struct Input<'a> {
+    pub scene: Option<Arc<Scene>>,
+    pub section: Option<Arc<Section>>,
+    pub review: Option<Arc<crate::manufacture::Review>>,
+    pub view: crate::replay::View,
+    pub selected: Option<&'a FaceRef>,
+    pub interactive: bool,
+}
 pub struct Viewport {
     yaw: f64,
     pitch: f64,
@@ -207,6 +218,40 @@ impl Viewport {
             multiview_mask: None,
             cache: None,
         });
+        let point_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("stationary actual-program events"),
+            layout: Some(&line_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &line_shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: 24,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &line_shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(state.target_format.into())],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::PointList,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: egui_wgpu::depth_format_from_bits(24, 0).expect("depth format"),
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let line_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("overlay camera"),
             layout: &line_layout,
@@ -216,6 +261,9 @@ impl Viewport {
             }],
         });
         state.renderer.write().callback_resources.insert(Resources {
+            replay: None,
+            replay_buffers: Vec::new(),
+            point_pipeline,
             pipeline,
             layout,
             uniform,
@@ -251,16 +299,26 @@ impl Viewport {
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        scene: Option<Arc<Scene>>,
-        section: Option<Arc<Section>>,
-        selected: Option<&FaceRef>,
-        interactive: bool,
+        input: Input<'_>,
         frame: &eframe::Frame,
     ) -> Option<FaceRef> {
+        let Input {
+            scene,
+            section,
+            review,
+            view,
+            selected,
+            interactive,
+        } = input;
         let mut hit = None;
-        ui.horizontal(|ui| {
+        let mut fit_source = false;
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Fit").clicked() {
                 self.fit = true;
+            }
+            if ui.button("Fit source").clicked() {
+                self.fit = true;
+                fit_source = true;
             }
             if ui.button("Isometric").clicked() {
                 self.yaw = -0.8;
@@ -279,21 +337,46 @@ impl Viewport {
             egui::Sense::click_and_drag(),
         );
         let bounds = scene.as_ref().and_then(|s| s.summary.bounds_mm);
-        let center = bounds.map_or(DVec3::ZERO, |b| {
-            (DVec3::from_array(b.min) + DVec3::from_array(b.max)) * 0.5
-        });
-        let radius = bounds
+        let center = bounds.map_or_else(
+            || {
+                review
+                    .as_ref()
+                    .and_then(|r| r.display.as_ref())
+                    .map_or(DVec3::ZERO, |r| r.origin)
+            },
+            |b| (DVec3::from_array(b.min) + DVec3::from_array(b.max)) * 0.5,
+        );
+        let mut radius = bounds
             .map_or(1.0, |b| {
                 (DVec3::from_array(b.max) - DVec3::from_array(b.min)).length() * 0.5
             })
             .max(0.01);
+        let replay_bounds = review
+            .as_ref()
+            .filter(|_| view.visible)
+            .and_then(|r| r.capture.replay.as_ref())
+            .map(|r| r.info.bounds_mm);
+        let mut fit_pan = DVec3::ZERO;
+        if let Some(b) = replay_bounds
+            && !fit_source
+        {
+            let replay_center = (DVec3::from_array(b.min) + DVec3::from_array(b.max)) * 0.5;
+            let replay_radius =
+                (DVec3::from_array(b.max) - DVec3::from_array(b.min)).length() * 0.5;
+            if view.source {
+                radius = radius.max((replay_center - center).length() + replay_radius);
+            } else {
+                radius = replay_radius.max(0.01);
+                fit_pan = replay_center - center;
+            }
+        }
         if bounds.is_some() && !self.had_source {
             self.fit = true;
         }
         self.had_source = bounds.is_some();
         if self.fit && bounds.is_some() {
             self.distance = radius * 3.2;
-            self.pan = DVec3::ZERO;
+            self.pan = fit_pan;
             self.fit = false;
         }
         if response.dragged_by(egui::PointerButton::Primary) {
@@ -319,6 +402,7 @@ impl Viewport {
         }
         let matrix = self.matrix(f64::from(rect.width() / rect.height()), radius);
         if interactive
+            && view.source
             && response.clicked()
             && let (Some(scene), Some(pointer)) = (&scene, response.interact_pointer_pos())
         {
@@ -352,6 +436,8 @@ impl Viewport {
             Callback {
                 scene,
                 section,
+                review,
+                view,
                 uniform: Uniform {
                     matrix: matrix.as_mat4().to_cols_array_2d(),
                     selected: selection,
@@ -362,6 +448,7 @@ impl Viewport {
             && let Some(resources) = state.renderer.read().callback_resources.get::<Resources>()
             && let Some(error) = &resources.failure
         {
+            hit = None;
             ui.painter().text(
                 rect.left_top() + egui::vec2(12.0, 12.0),
                 egui::Align2::LEFT_TOP,
@@ -376,6 +463,8 @@ impl Viewport {
 struct Callback {
     scene: Option<Arc<Scene>>,
     section: Option<Arc<Section>>,
+    review: Option<Arc<crate::manufacture::Review>>,
+    view: crate::replay::View,
     uniform: Uniform,
 }
 impl egui_wgpu::CallbackTrait for Callback {
@@ -428,6 +517,26 @@ impl egui_wgpu::CallbackTrait for Callback {
                 }
             }
         }
+        let replay_changed = match (&r.replay, &self.review) {
+            (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
+            (None, None) => false,
+            _ => true,
+        };
+        if replay_changed {
+            r.replay_buffers.clear();
+            if let Some(display) = self.review.as_ref().and_then(|r| r.display.as_ref()) {
+                for batch in &display.batches {
+                    r.replay_buffers.push(device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("checked SPLR6 actual events"),
+                            contents: bytemuck::cast_slice(&batch.vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        },
+                    ));
+                }
+            }
+            r.replay = self.review.clone();
+        }
         queue.write_buffer(&r.uniform, 0, bytemuck::bytes_of(&self.uniform));
         vec![]
     }
@@ -441,7 +550,7 @@ impl egui_wgpu::CallbackTrait for Callback {
             return;
         };
         pass.set_pipeline(&r.pipeline);
-        for draw in &r.draws {
+        for draw in r.draws.iter().filter(|_| self.view.source) {
             pass.set_bind_group(0, &draw.group, &[]);
             pass.draw(0..draw.indices, 0..draw.instances);
         }
@@ -450,6 +559,22 @@ impl egui_wgpu::CallbackTrait for Callback {
             pass.set_bind_group(0, &r.line_group, &[]);
             pass.set_vertex_buffer(0, lines.slice(..));
             pass.draw(0..r.line_count, 0..1);
+        }
+        if let Some(display) = r.replay.as_ref().and_then(|r| r.display.as_ref()) {
+            for (batch, buffer) in display.batches.iter().zip(&r.replay_buffers) {
+                let range = batch.range(self.view);
+                if range.is_empty() {
+                    continue;
+                }
+                pass.set_pipeline(if batch.points {
+                    &r.point_pipeline
+                } else {
+                    &r.line_pipeline
+                });
+                pass.set_bind_group(0, &r.line_group, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(range, 0..1);
+            }
         }
     }
 }

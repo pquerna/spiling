@@ -51,12 +51,16 @@ crates are optimized independently of the desktop stack.
 [ADR006](../adr/006-native-egui-workbench.md) selects the permanent
 `apps/workbench` application. The current increment manages projects through the
 existing supervised engine and displays admitted native sources, shared occurrences,
-source-face inspection/picking and sections. Manufacturing controls migrate separately. The CEF workbench remains usable until the migration gates
-are met. `pnpm dev` switches at the complete native manufacturing-flow gate.
+source-face inspection/picking and sections. Prepare loads a complete inert intent,
+commits scalar recipe/occurrence sparse edits, reviews native bed placement and
+runs engine Preflight/Compile. Review performs fresh independent verification,
+retrieves checked actual SPLR6 motion and exclusively exports four files. `pnpm dev`
+is native. `pnpm dev:legacy` preserves the temporary baseline while box/interface,
+finish/image, complete policy and appearance parity migrate before retirement.
 
 ```sh
 pnpm build:native     # locked matching engine and window, no CEF or frontend build
-pnpm dev:native       # build, then run the native window
+pnpm dev              # build, then run the native window (dev:native is identical)
 pnpm gallery:native   # production theme/components, illustrative data, no engine
 pnpm test:native      # matching binaries, host checks, sequential actual-child checks
 ```
@@ -104,6 +108,27 @@ retain native face-list inspection without invented display. A source projection
 exceeding the additional 0.001 mm display budget refuses publication and retains
 the previous scene; native queries remain authoritative. This is not exact display
 measurement or general STEP qualification.
+
+For the manufacturing journey, import an unchanged admitted housing from an owned
+copy and load a full intent JSON through its native file picker. Apply a consumed
+sparse value, select the occurrence, prepare and review native placement, explicitly
+Apply, then Preflight and Compile. Review requires **Fresh Verify and load motion**;
+stored verification alone cannot enable Export. Exercise source-hidden replay,
+true layer intervals, event/travel controls and the independent report's coverage
+and limitations. Export selects a **new directory name**, writing plan.json,
+program.gcode, verification.json and provenance.json without overwriting. Reusing
+a destination must fail and preserve it. Undo/Redo invalidates captured review;
+save, close/reap, delete only the owned external STEP copy, reopen read-only in a
+fresh engine, then freshly Verify/replay/export again. Compare program bytes and
+captured identities. This is software workflow evidence, never machine readiness.
+
+The host separates request acknowledgements from background display publications.
+Review/export workers retain captured identities and recheck the active record;
+close waits for staged output cleanup and child exit. Input revision is immutable
+artifact provenance and can precede compilation's project publication revision.
+A current capture binds the observed project revision separately. Display memory
+accounts active/staged source, section and motion together; prior replay GPU charge
+is conservatively retained until the engine session ends.
 
 The `inspection` Cargo feature enables upstream development inspection tooling;
 it is off by default and must stay off in distributions. It is not a second

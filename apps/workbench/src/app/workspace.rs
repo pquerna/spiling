@@ -16,6 +16,9 @@ impl Workbench {
             })
     }
     pub(super) fn select_face(&mut self, reference: FaceRef) {
+        if self.occurrence != Some(reference.occurrence_id) {
+            self.pose_revision = None;
+        }
         self.occurrence = Some(reference.occurrence_id);
         self.selected = Some(reference.clone());
         self.queued_geometry = Some(GeometryCommand::InspectFace { reference });

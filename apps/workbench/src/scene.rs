@@ -347,6 +347,7 @@ pub async fn load_section(
     scene: SceneSummary,
     id: ArtifactId,
     cancel: Arc<AtomicBool>,
+    reserved: usize,
 ) -> Result<Arc<Section>, ClientError> {
     let result = async {
         let mut chunks = Vec::new();
@@ -379,6 +380,14 @@ pub async fn load_section(
                     || captured.as_ref().is_some_and(|s| s != &summary)
                 {
                     return Err(invalid("Stale or inconsistent section manifest"));
+                }
+                if reserved
+                    .checked_add(summary.total_bytes as usize * 6)
+                    .is_none_or(|n| n > MAX_DISPLAY_BUFFER_BYTES as usize)
+                {
+                    return Err(ClientError::InvalidRequest(
+                        "Section exceeds the combined active/staged display budget".into(),
+                    ));
                 }
                 captured = Some(summary.clone());
                 loops.extend(page);

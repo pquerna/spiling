@@ -50,6 +50,10 @@ pub struct Workbench {
     section_z: f64,
     queued_geometry: Option<GeometryCommand>,
     queued_host: Option<Command>,
+    queued_picker: Option<Picker>,
+    queued_manufacturing: Option<spiling_contracts::manufacturing::ManufacturingCommand>,
+    queued_project: Option<spiling_contracts::project::ProjectCommand>,
+    manufacturing: manufacturing::ManufacturingUi,
 }
 impl Workbench {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -92,6 +96,10 @@ impl Workbench {
             section_z: 1.0,
             queued_geometry: None,
             queued_host: None,
+            queued_picker: None,
+            queued_manufacturing: None,
+            queued_project: None,
+            manufacturing: manufacturing::ManufacturingUi::default(),
         }
     }
     fn start(&mut self, ctx: &egui::Context) {
@@ -300,6 +308,7 @@ impl Workbench {
         });
     }
 }
+mod manufacturing;
 mod workspace;
 
 impl eframe::App for Workbench {
@@ -335,6 +344,30 @@ impl eframe::App for Workbench {
             && let Some(host) = &self.host
         {
             match host.geometry(command) {
+                Ok(()) => self.awaiting_serial = Some(self.state.serial),
+                Err(error) => self.local_problem = Some(error),
+            }
+        }
+        if let Some(picker) = self.queued_picker.take()
+            && let Some(host) = &mut self.host
+        {
+            match host.choose(frame, ctx, picker) {
+                Ok(()) => self.awaiting_serial = Some(self.state.serial),
+                Err(error) => self.local_problem = Some(error),
+            }
+        }
+        if let Some(command) = self.queued_manufacturing.take()
+            && let Some(host) = &self.host
+        {
+            match host.manufacturing(command) {
+                Ok(()) => self.awaiting_serial = Some(self.state.serial),
+                Err(error) => self.local_problem = Some(error),
+            }
+        }
+        if let Some(command) = self.queued_project.take()
+            && let Some(host) = &self.host
+        {
+            match host.project(command) {
                 Ok(()) => self.awaiting_serial = Some(self.state.serial),
                 Err(error) => self.local_problem = Some(error),
             }
@@ -410,7 +443,7 @@ impl eframe::App for Workbench {
         }
         egui::Panel::top("commands").show(ui, |ui| {
             let wide = ui.available_width() >= 900.0;
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.heading("Spiling");
                 if wide {
                     ui.weak("Native workbench · development");
@@ -444,6 +477,10 @@ impl eframe::App for Workbench {
                     self.button(ui, Action::Gallery);
                 });
                 ui.separator();
+                for (index, label) in ["Inspect", "Prepare", "Review"].into_iter().enumerate() {
+                    ui.selectable_value(&mut self.manufacturing.panel, index, label);
+                }
+                ui.separator();
                 self.button(ui, Action::Open);
                 self.button(ui, Action::Save);
                 self.button(ui, Action::Import);
@@ -464,12 +501,16 @@ impl eframe::App for Workbench {
             .show(ui, |ui| self.feedback(ui));
         egui::Panel::right("project")
             .resizable(true)
-            .default_size(280.0)
+            .default_size(340.0)
             .min_size(210.0)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.selection_ui(ui);
-                    self.project(ui);
+                    if self.manufacturing.panel == 0 {
+                        self.selection_ui(ui);
+                        self.project(ui);
+                    } else {
+                        self.manufacturing_ui(ui);
+                    }
                 });
             });
         egui::Panel::left("model-tree")
@@ -477,8 +518,8 @@ impl eframe::App for Workbench {
             .default_size(210.0)
             .min_size(140.0)
             .show(ui, |ui| self.tree_ui(ui));
-        egui::Frame::central_panel(ui.style())
-            .fill(self.prefs.theme.tokens().canvas)
+        egui::CentralPanel::default_margins()
+            .frame(egui::Frame::central_panel(ui.style()).fill(self.prefs.theme.tokens().canvas))
             .show(ui, |ui| {
                 if self.state.display_loading {
                     ui.label("Updating source display · previous revision retained");
@@ -495,6 +536,7 @@ impl eframe::App for Workbench {
                         self.queued_host = Some(Command::ResumeDisplay);
                     }
                 }
+                self.replay_controls(ui);
                 let current = self.display_current();
                 if !current && self.state.display.is_some() {
                     ui.colored_label(
@@ -512,12 +554,34 @@ impl eframe::App for Workbench {
                         "Import STEP or open a saved project to inspect native source geometry.",
                     );
                 }
+                let review = if self.manufacturing_current() {
+                    self.state.manufacturing.review.clone()
+                } else {
+                    None
+                };
+                let view = if review.is_some() {
+                    self.manufacturing.replay
+                } else {
+                    crate::replay::View {
+                        source: true,
+                        visible: false,
+                        ..Default::default()
+                    }
+                };
                 if let Some(reference) = self.viewport.show(
                     ui,
-                    self.state.display.clone(),
-                    self.state.section.clone(),
-                    self.selected.as_ref(),
-                    current,
+                    crate::viewport::Input {
+                        scene: if review.is_some() && !current {
+                            None
+                        } else {
+                            self.state.display.clone()
+                        },
+                        section: self.state.section.clone(),
+                        review,
+                        view,
+                        selected: self.selected.as_ref(),
+                        interactive: current,
+                    },
                     frame,
                 ) {
                     self.select_face(reference);

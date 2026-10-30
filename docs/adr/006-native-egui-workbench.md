@@ -6,8 +6,9 @@ Licensed under the Open Software License version 3.0
 
 # Native egui workbench
 
-Status: adopted. Native project and source-display increments are implemented in
-`apps/workbench`; manufacturing UI migration follows separately.
+Status: adopted. Native project, source display and recoverable manufacturing
+through fresh actual-program replay/export are implemented in `apps/workbench`.
+The native development command is the default; legacy retirement follows parity.
 
 ## Decision
 
@@ -36,7 +37,7 @@ checkpoint; it does not recover unsaved edits.
 Use native OS decorations and parented dialogs. Graphite and Paper share typography,
 spacing and semantic controls in an application-owned component layer. The gallery
 uses that production layer. Add complex controls only with a production consumer.
-Future source/replay rendering belongs in a dedicated wgpu renderer with checked
+Source/replay rendering belongs in a dedicated wgpu renderer with checked
 binary input, revision-aware selection and explicit GPU resource lifetimes. Layout,
 camera and drafts are UI state; project requirements are engine transactions.
 

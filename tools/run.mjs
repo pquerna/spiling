@@ -369,6 +369,7 @@ async function main() {
     case "build:native":
       await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-workbench"]);
       break;
+    case "dev":
     case "dev:native":
       await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-workbench"]);
       await run(join(cargoTarget, "debug", `spiling-workbench${binSuffix}`), []);
@@ -396,7 +397,7 @@ async function main() {
         },
       );
       break;
-    case "dev": {
+    case "dev:legacy": {
       const engine = await prepare();
       await run("pnpm", ["exec", "tauri", "dev"], {
         cwd: desktop,
@@ -430,7 +431,9 @@ async function main() {
       await cliSmoke();
       await run("pnpm", ["--filter", "@spiling/protocol", "test"]);
       await run("node", [
-        "--import", "tsx", "--test",
+        "--import",
+        "tsx",
+        "--test",
         "apps/desktop/test/manufacturing-state.test.mjs",
         "packages/viewport/test/replay-materials.test.mjs",
       ]);

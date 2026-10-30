@@ -5,6 +5,8 @@
 pub mod app;
 pub mod commands;
 pub mod host;
+pub mod manufacture;
+pub mod replay;
 pub mod scene;
 pub mod ui;
 pub mod viewport;

@@ -10,6 +10,7 @@
   "scripts": {
     "bootstrap": "node tools/run.mjs bootstrap",
     "dev": "node tools/run.mjs dev",
+    "dev:legacy": "node tools/run.mjs dev:legacy",
     "check": "node tools/run.mjs check",
     "test": "node tools/run.mjs test",
     "bench:smoke": "node tools/run.mjs bench:smoke",

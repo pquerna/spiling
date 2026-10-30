@@ -8,9 +8,22 @@ use std::time::Instant;
 fn wait(host: &Host, predicate: impl Fn(&Snapshot) -> bool) -> Snapshot {
     let mut receiver = host.receiver.clone();
     host.runtime.as_ref().unwrap().block_on(async {
-        tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::time::timeout(Duration::from_secs(180), async {
+            let mut previous = String::new();
             loop {
                 let snapshot = receiver.borrow_and_update().clone();
+                if std::env::var_os("SPILING_HOST_TRACE").is_some() && previous != snapshot.message
+                {
+                    eprintln!(
+                        "host: {} busy={} loading={} review={} problems={:?}",
+                        snapshot.message,
+                        snapshot.busy,
+                        snapshot.manufacturing.loading,
+                        snapshot.manufacturing.review.is_some(),
+                        snapshot.problems
+                    );
+                    previous = snapshot.message.clone();
+                }
                 if predicate(&snapshot) {
                     return snapshot;
                 }
@@ -21,7 +34,13 @@ fn wait(host: &Host, predicate: impl Fn(&Snapshot) -> bool) -> Snapshot {
             }
         })
         .await
-        .expect("native host deadline")
+        .unwrap_or_else(|_| {
+            let s = host.snapshot();
+            panic!(
+                "native host deadline: {} busy={} loading={} problems={:?}",
+                s.message, s.busy, s.manufacturing.loading, s.problems
+            )
+        })
     })
 }
 fn idle_after(host: &Host, serial: u64) -> Snapshot {
@@ -193,6 +212,8 @@ fn native_path_limit_and_problem_history_are_bounded() {
         dialog: None,
         nonce: 0,
         executing: false,
+        review_task: None,
+        export_task: None,
         section_task: None,
         section_cancel: Arc::new(AtomicBool::new(false)),
         display_task: None,
@@ -419,4 +440,229 @@ fn checked_scene_picking_shared_occurrences_sections_and_large_origin() {
     let close = send(&host, Action::Close);
     host.confirm(close.confirmation.unwrap().id, true).unwrap();
     wait(&host, |s| s.phase == Phase::Closed);
+}
+
+#[test]
+#[ignore = "actual supervised manufacturing engine; requires SPILING_TEST_ENGINE"]
+fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
+    use spiling_contracts::{manufacturing::*, process::ProcessEdit, surface::SurfaceScope};
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&host, |s| s.phase == Phase::Running);
+    let source = root.path().join("occt-rounded-housing-mm.step");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"),
+        &source,
+    )
+    .unwrap();
+    send(&host, Action::Import(native(&source)));
+    let s = wait(&host, |s| {
+        s.display
+            .as_ref()
+            .is_some_and(|d| d.same_revision(s.scene.as_ref().unwrap()))
+    });
+    let intent_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/manufacturing/complete-sparse.intent.json");
+    let loaded = send(&host, Action::LoadIntent(native(&intent_path)));
+    let intent = loaded.manufacturing.loaded.as_ref().unwrap().intent.clone();
+    let h = s.hello.as_ref().unwrap();
+    let serial = host.snapshot().serial;
+    host.manufacturing(ManufacturingCommand::SetIntent {
+        session_id: h.session_id.clone(),
+        base_revision: s.project.as_ref().unwrap().revision,
+        intent: intent.clone(),
+    })
+    .unwrap();
+    let s = idle_after(&host, serial);
+    assert_eq!(
+        s.manufacturing.intent.as_deref(),
+        Some(intent.as_ref()),
+        "{:?}",
+        s.problems
+    );
+    let d = s.display.as_ref().unwrap();
+    let o = &d.occurrences[0];
+    let scene = s.scene.as_ref().unwrap();
+    let serial = s.serial;
+    host.geometry(GeometryCommand::PrepareBedPose {
+        session_id: h.session_id.clone(),
+        base_revision: scene.revision,
+        project_revision: s.project.as_ref().unwrap().revision,
+        occurrence_id: o.occurrence_id,
+        expected_definition_id: o.definition_id.clone(),
+        expected_pose: o.pose,
+        envelope_mm: intent.printer.build_envelope,
+        center_xy: true,
+        contact_tolerance_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
+    })
+    .unwrap();
+    let s = idle_after(&host, serial);
+    let p = s.bed_proposal.as_ref().expect("native placement proposal");
+    let serial = s.serial;
+    host.geometry(GeometryCommand::SetInstancePose {
+        session_id: p.session_id.clone(),
+        base_revision: p.scene_revision,
+        project_revision: p.project_revision,
+        occurrence_id: p.occurrence_id,
+        pose: p.pose,
+    })
+    .unwrap();
+    let s = idle_after(&host, serial);
+    let captured = s.project.as_ref().unwrap().revision;
+    let sparse = ProjectCommand::EditProcess {
+        session_id: h.session_id.clone(),
+        base_revision: captured,
+        edit: ProcessEdit::SetSparseFraction {
+            scope: SurfaceScope::Occurrence {
+                occurrence_id: o.occurrence_id,
+                expected_definition_id: o.definition_id.clone(),
+            },
+            fraction: 0.3,
+        },
+    };
+    let serial = s.serial;
+    host.project(sparse.clone()).unwrap();
+    let s = idle_after(&host, serial);
+    assert!(
+        s.project.as_ref().unwrap().revision > captured,
+        "{:?}",
+        s.problems
+    );
+    let revision = s.project.as_ref().unwrap().revision;
+    // Reusing the same stale edit cannot overwrite the accepted process mutation.
+    let serial = s.serial;
+    host.project(sparse).unwrap();
+    let s = idle_after(&host, serial);
+    assert_eq!(s.project.as_ref().unwrap().revision, revision);
+    assert!(!s.problems.is_empty());
+    let serial = s.serial;
+    host.manufacturing(ManufacturingCommand::Preflight {
+        session_id: h.session_id.clone(),
+        base_revision: revision,
+    })
+    .unwrap();
+    let s = idle_after(&host, serial);
+    assert_eq!(
+        s.manufacturing
+            .preflight
+            .as_ref()
+            .expect("preflight")
+            .disposition,
+        PreflightDisposition::Admitted,
+        "{:?}",
+        s.manufacturing.preflight
+    );
+    let serial = s.serial;
+    host.manufacturing(ManufacturingCommand::Compile {
+        session_id: h.session_id.clone(),
+        base_revision: revision,
+    })
+    .unwrap();
+    let s = idle_after(&host, serial);
+    assert!(s.manufacturing.artifact.is_some(), "{:?}", s.problems);
+    fn inspect(host: &Host) -> Snapshot {
+        let s = host.snapshot();
+        let serial = s.serial;
+        host.manufacturing(ManufacturingCommand::Inspect {
+            session_id: s.hello.as_ref().unwrap().session_id.clone(),
+            base_revision: s.project.as_ref().unwrap().revision,
+            output: VerificationOutput::ReportAndMotion,
+        })
+        .unwrap();
+        wait(host, |s| {
+            s.serial > serial
+                && !s.busy
+                && !s.manufacturing.loading
+                && s.manufacturing.review.is_some()
+        })
+    }
+    let s = inspect(&host);
+    let r = s.manufacturing.review.as_ref().unwrap();
+    assert!(r.capture.report.verified);
+    assert!(r.motion.is_some());
+    let replay = r.display.as_ref().unwrap();
+    assert!(!replay.batches.is_empty());
+    assert!(
+        replay
+            .batches
+            .iter()
+            .filter(|b| b.kind == 11 || b.kind == 12)
+            .all(|b| b.points)
+    );
+    assert!(replay.batches.iter().all(|b| b.kind != 14));
+    let destination = root.path().join("output");
+    let s = send(&host, Action::Export(native(&destination)));
+    assert!(s.manufacturing.last_export.is_some(), "{:?}", s.problems);
+    let program = std::fs::read(destination.join("program.gcode")).unwrap();
+    send(&host, Action::Export(native(&destination)));
+    assert_eq!(
+        std::fs::read(destination.join("program.gcode")).unwrap(),
+        program
+    );
+    let serial = host.snapshot().serial;
+    host.command(Command::Undo).unwrap();
+    let s = idle_after(&host, serial);
+    assert!(s.manufacturing.capture.is_none());
+    let serial = s.serial;
+    host.command(Command::Redo).unwrap();
+    idle_after(&host, serial);
+    let project = root.path().join("saved");
+    let s = send(
+        &host,
+        Action::Save {
+            target: Some(native(&project)),
+        },
+    );
+    assert!(!s.project.as_ref().unwrap().dirty, "{:?}", s.problems);
+    let project_id = s.project.as_ref().unwrap().project_id.clone();
+    send(&host, Action::Close);
+    drop(host);
+    std::fs::remove_file(source).unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("reopened-operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&host, |s| s.phase == Phase::Running);
+    let s = send(
+        &host,
+        Action::Open {
+            path: native(&project),
+            read_only: true,
+            recover_previous: false,
+        },
+    );
+    assert_eq!(s.project.as_ref().unwrap().project_id, project_id);
+    assert!(s.project.as_ref().unwrap().read_only);
+    let s = inspect(&host);
+    assert!(
+        s.manufacturing
+            .review
+            .as_ref()
+            .unwrap()
+            .capture
+            .report
+            .verified
+    );
+    let s = send(
+        &host,
+        Action::Export(native(&root.path().join("reopened-output"))),
+    );
+    assert!(s.manufacturing.last_export.is_some(), "{:?}", s.problems);
+    assert_eq!(
+        std::fs::read(root.path().join("reopened-output/program.gcode")).unwrap(),
+        program
+    );
+    assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
 }
