@@ -81,34 +81,34 @@ hide it by skipping the test or weaken its PCurve assertion.
 
 The integration owner refreshes upstream at the start of each active UTC workday
 and before a new fork change or consumer pin. `origin` is
-`tangency-labs/solidcore`; `fork` is `pquerna/solidcore`. Fork `main` is an upstream
-mirror, not the Spiling product branch.
+`tangency-labs/solidcore`; `fork` is `pquerna/solidcore`. Upstream `origin/main`
+is the baseline; fork `main` publishes the tested Spiling integration, including
+its maintained overlays.
 
 ```mermaid
 flowchart LR
-  upstream["upstream main"] --> mirror["fork main"]
-  mirror --> mesh["pquerna/brep-tessellator"]
+  upstream["upstream origin/main"] --> mesh["pquerna/brep-tessellator"]
   mesh --> budget["pquerna/mesh-query-budget"]
-  mirror --> step["pquerna/step-surface-owned-copy"]
+  upstream --> step["pquerna/step-surface-owned-copy"]
   budget --> tracking["pquerna/integration-spiling-tracking"]
   step --> tracking
-  tracking --> pin["Cargo exact rev + lockfile + KERNEL_REVISION"]
+  tracking --> main["fork main"]
+  main --> pin["qualified Cargo exact rev + lockfile + KERNEL_REVISION"]
 ```
 
-Each logical change has one long-lived `pquerna/*` branch and draft PR **in our
-fork**. The budget PR is based on the mesher branch; the other two PRs are based
-on fork `main`. Keep scope, rationale, SMLib relationship, evidence and removal
-criteria in the [patch registry](solidcore-upstream-review.md). Branch publication
-is not PR creation. Never create a PR against `tangency-labs/solidcore` or file an
-upstream issue without explicit approval.
+Each logical change has one long-lived `pquerna/*` branch in our fork. The budget
+lane builds on the mesher; the independent mesher and STEP-copy lanes merge
+upstream `origin/main`, not the composed fork `main`. Publish the tested
+integration directly to fork `main`; GitHub issues, PRs and API authentication
+are not prerequisites. Keep scope, rationale, SMLib relationship, evidence and
+removal criteria in the [patch registry](solidcore-upstream-review.md). Never
+create an upstream issue or PR without explicit approval.
 
 ### Daily synchronization and promotion
 
 ```sh
 git fetch origin
 git fetch fork
-git merge-base --is-ancestor fork/main origin/main
-git push fork origin/main:refs/heads/main
 ```
 
 Divergence requires inspection, not reset or force. In clean owning worktrees,
@@ -117,11 +117,11 @@ the updated mesher lane into the budget lane. Then merge the current budget and
 STEP-copy lanes into `pquerna/integration-spiling-tracking`. Follow SolidCore's
 commit-attribution rules for new synchronization commits.
 
-Published PR branches and the integration branch advance by normal merges.
+Published patch branches and the integration branch advance by normal merges.
 Rebase only new, unpublished work when first preparing or reorganizing a change;
 never rewrite a branch or commit already used by a consumer. This follows the
-kernel's published-branch policy while keeping review URLs stable and old exact
-pins reachable. Do not merge Spiling overlays into the fork's upstream mirror.
+kernel's published-branch policy while keeping branch URLs stable and old exact
+pins reachable. Do not replace the composed fork `main` with an upstream mirror.
 
 Run the owning resource/backend controls and actual native consumer on the
 combined integration tree. Prefer producer-specific Cargo targets when comparing
@@ -137,9 +137,19 @@ pair for the run and retain its identity with ignored evidence. Record exact
 producer, commands and outcomes in evidence or commit/PR notes, not append-only
 Markdown logs.
 
-Push updated lanes and integration with normal pushes. Integration is the only
-source for new Spiling pins, but its moving tip is not itself a reproducible
-dependency: use an exact published `rev`. Promote a consumer pin only after its
+Push updated lanes and integration with normal pushes, then publish that same
+tested integration directly to fork `main`:
+
+```sh
+git merge-base --is-ancestor fork/main pquerna/integration-spiling-tracking
+git push fork pquerna/integration-spiling-tracking:refs/heads/main
+```
+
+Use the local integration branch that owns the tested tree. If fork `main` has
+advanced independently, incorporate it into integration and requalify the result;
+never force-push or discard another publisher's work. New Spiling pins come from
+this tested, published main/integration history, not an unqualified moving tip:
+use an exact published `rev`. Promote a consumer pin only after its
 relevant real engine/CLI controls, updating both SolidCore package revisions,
 `Cargo.lock` and `geometry::KERNEL_REVISION` together. Keep operation refusals and
 unqualified journeys explicit; unit checks and branch freshness do not establish
@@ -147,8 +157,9 @@ full geometry/manufacturing parity.
 
 ### Upstreaming and retirement
 
-Every fork PR states the real consumer requirement, why the change belongs in
-the library rather than host-only policy, whether it is an SMLib parity repair
+The patch registry and publication commit notes state the real consumer
+requirement, why the change belongs in the library rather than host-only policy,
+whether it is an SMLib parity repair
 or an extension, dependencies, exercised evidence, known limits, intended
 upstream contract and the condition for removing the lane. Preserve inherited
 authors and licences. Seek explicit approval before moving a fork proposal
@@ -156,9 +167,9 @@ upstream; do not present local Spiling proof failures as kernel bugs.
 
 When upstream supplies a lane's contract, remove the redundant overlay from the
 current integration tree, rebase only unpublished preparatory work if necessary,
-and qualify the smaller combined tree. Retarget dependent fork PRs when their
-base lands upstream. Do not keep compatibility shims or reapply already upstreamed
-changes. Preserve old published pins and review history.
+and qualify the smaller combined tree. Adjust dependent lanes when their base
+lands upstream. Do not keep compatibility shims or reapply already upstreamed
+changes. Preserve old published pins and branch history.
 
 This cadence is an integration-owner duty, not an installed unattended timer.
 Fork maintenance does not re-enable Spiling's disabled remote CI.

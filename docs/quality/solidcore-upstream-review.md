@@ -6,9 +6,10 @@ Licensed under the Open Software License version 3.0
 
 # SolidCore fork: upstream issue assessment
 
-Maintain one long-lived `pquerna/*` branch and draft PR per logical change, **in
-`pquerna/solidcore` only**, and compose them on
-`pquerna/integration-spiling-tracking`. The long-term goal is to retire every
+Maintain one long-lived `pquerna/*` branch per logical change in
+`pquerna/solidcore`, compose them on `pquerna/integration-spiling-tracking`, and
+publish the tested integration directly to fork `main`, without requiring
+GitHub issues or PRs. The long-term goal is to retire every
 local overlay through upstream adoption or elimination of its consumer need.
 An upstreaming recommendation is not authorization to open an upstream PR or
 issue. Current Spiling manufacturing refusals need a standalone kernel contract
@@ -18,8 +19,8 @@ violation before they become upstream bug candidates.
 
 | Role | Exact identity |
 | --- | --- |
-| Upstream and fast-forwarded fork `main` | [`7fc08a98c0e814f40908b45a6f3cf06b9ec390d7`](https://github.com/tangency-labs/solidcore/commit/7fc08a98c0e814f40908b45a6f3cf06b9ec390d7) |
-| Maintained integration tip | [`5d85d5818b144a3a115abb1cff21c23bf08de17e`](https://github.com/pquerna/solidcore/commit/5d85d5818b144a3a115abb1cff21c23bf08de17e), branch [`pquerna/integration-spiling-tracking`](https://github.com/pquerna/solidcore/tree/pquerna/integration-spiling-tracking) |
+| Upstream baseline | [`fcfe3531312d3109264851f56c5b7429401c630d`](https://github.com/tangency-labs/solidcore/commit/fcfe3531312d3109264851f56c5b7429401c630d) |
+| Published fork `main` and integration tip | [`88f5962d8f7fd0de2b4d41815b15df897bb64eee`](https://github.com/pquerna/solidcore/commit/88f5962d8f7fd0de2b4d41815b15df897bb64eee), branch [`pquerna/integration-spiling-tracking`](https://github.com/pquerna/solidcore/tree/pquerna/integration-spiling-tracking) |
 | Qualified Spiling consumer pin | [`5d85d5818b144a3a115abb1cff21c23bf08de17e`](https://github.com/pquerna/solidcore/commit/5d85d5818b144a3a115abb1cff21c23bf08de17e); both declarations in [`Cargo.toml`](../../Cargo.toml), their lockfile sources and `geometry::KERNEL_REVISION` agree |
 
 Refreshing the fork does not automatically promote its moving tip into Spiling.
@@ -50,11 +51,11 @@ budget and STEP-copy overlays. Preserve the tessellator's original authors and
 Apache-2.0 notices; it is not Spiling-authored. Old published candidates and
 consumer pins remain reachable, but are not the maintained queue tip.
 
-Fork `main` stays clean of overlays. Stable review lanes and their upstreaming
-criteria are below; the [maintenance procedure](development.md#solidcore-fork-freshness)
+Fork `main` publishes the tested composed integration. Stable patch lanes and
+their upstreaming criteria are below; the [maintenance procedure](development.md#solidcore-fork-freshness)
 owns synchronization, exact-pin promotion and published-history safety.
 
-## Fork review lanes
+## Fork patch lanes
 
 | Long-lived branch | Why the current consumer needs it | Upstream/removal criterion |
 | --- | --- | --- |
@@ -62,12 +63,13 @@ owns synchronization, exact-pin promotion and published-history safety.
 | [`pquerna/mesh-query-budget`](https://github.com/pquerna/solidcore/tree/pquerna/mesh-query-budget) | Cumulative caller work, cooperative cancellation and visible-storage admission across mesher and optional dense backend work. Host-only checks cannot interrupt internal loops or admit their owned buffers before growth. | Agree on a minimal upstream mesher control contract, not necessarily our exact API. Remove the overlay once that contract covers real callers, typed terminal refusal and retained ownership accounting, then migrate callers without shims. |
 | [`pquerna/step-surface-owned-copy`](https://github.com/pquerna/solidcore/tree/pquerna/step-surface-owned-copy) | The current importer places STEP wrappers in BREP input; topology construction copies those carriers while preserving their parameter law. This extends an inherited SMLib gap, not a proven Rust-port regression. | Obtain agreement on owned-wrapper copying or an explicit equivalent construction API. Retire when upstream provides it, or when a fully qualified native-chart importer removes the wrapper dependency. |
 
-Create draft PRs only against our fork: mesher and STEP-copy target `main`;
-budget targets `pquerna/brep-tessellator`. Each PR body carries the requirement,
-consumer call path, SMLib classification, dependency/base, exercised evidence,
-known limits, proposed upstream contract and lane-retirement condition. The
-published branches are reviewable now; fork PR creation requires an authenticated
-GitHub session and is not implied by their publication.
+The independent mesher and STEP-copy lanes merge upstream `origin/main`; budget
+builds on `pquerna/brep-tessellator`. Merge budget and STEP-copy into integration,
+exercise the combined tree, and normally fast-forward it directly to fork `main`.
+No issue, PR or GitHub API authentication is required. Keep the requirement,
+consumer call path, SMLib classification, dependency/base, known limits, proposed
+upstream contract and lane-retirement condition in this registry; publication
+commit notes and ignored evidence retain run-specific verification.
 
 ## Submission decisions
 
