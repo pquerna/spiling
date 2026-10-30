@@ -407,14 +407,15 @@ fn inspect_lifecycle(
                 let area =
                     std::f64::consts::PI * (intent.recipe.filament_diameter_mm / 2.0).powi(2);
                 let flow = delta * area * feed / 60.0 / length;
-                let slack = (intent.printer.max_volumetric_flow_mm3_s
+                let slack = (intent.effective_max_volumetric_flow_mm3_s()
                     * 2.0
                     * 3.0_f64.sqrt()
                     * XYZ_HALF_STEP
                     + E_HALF_STEP * area * feed / 60.0)
                     / length
                     + arithmetic_slack(flow);
-                if !flow.is_finite() || flow > intent.printer.max_volumetric_flow_mm3_s + slack {
+                if !flow.is_finite() || flow > intent.effective_max_volumetric_flow_mm3_s() + slack
+                {
                     return Err(failed("decoded priming exceeds volumetric flow limit"));
                 }
                 state.extrusion = e;
@@ -1033,14 +1034,15 @@ pub(crate) fn verify_actual(
             // differs from its ideal by at most two XYZ rounding-vector norms.
             let position_delta_bound =
                 2.0 * 3.0_f64.sqrt() * XYZ_HALF_STEP + arithmetic_slack(nominal_length);
-            let rounding_flow_slack = (printer.max_volumetric_flow_mm3_s * position_delta_bound
+            let rounding_flow_slack = (intent.effective_max_volumetric_flow_mm3_s()
+                * position_delta_bound
                 + 2.0 * E_HALF_STEP * filament_area * speed)
                 / length
                 + volume_per_mm * F_HALF_STEP / 60.0;
             if !flow.is_finite()
                 || !rounding_flow_slack.is_finite()
                 || flow
-                    > printer.max_volumetric_flow_mm3_s
+                    > intent.effective_max_volumetric_flow_mm3_s()
                         + rounding_flow_slack
                         + arithmetic_slack(flow)
             {

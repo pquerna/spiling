@@ -93,6 +93,7 @@ fn intent(supports: bool) -> ManufacturingIntent {
         SupportPolicy::Disabled
     };
     ManufacturingIntent {
+        material_profile: None,
         recipe,
         printer: PrinterSpecification {
             schema_version: MANUFACTURING_SCHEMA_VERSION,
@@ -4027,4 +4028,52 @@ fn hollow_native_box_preserves_walls_skins_void_accounting_and_fresh_replay() {
         }
     }
     assert!(interior_layers > 0);
+}
+
+#[test]
+fn material_profile_native_compile_replay_and_thermal_process_mutations() {
+    let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let mut current = decode_intent(include_bytes!(
+        "../../../../fixtures/manufacturing/complete-sparse.intent.json"
+    ))
+    .unwrap();
+    current.recipe.supports = SupportPolicy::Disabled;
+    let mut selection: MaterialProfileSelection = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/manufacturing/material-profile-a.json"
+    ))
+    .unwrap();
+    selection.overrides.nozzle_temperature_c = Some(210.0);
+    selection.profile.deposition_limits.max_bead_width_mm = 0.46;
+    selection.profile.process.max_bridge_span_mm = 25.0;
+    let resolved = crate::resolve_material_profile(&current, selection).unwrap();
+    let cancel = AtomicBool::new(false);
+    let bundle = compile(scene.input(&resolved), &cancel).unwrap();
+    assert!(crate::verify_bundle(&bundle, &cancel).unwrap().verified);
+    let saved = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+    assert!(crate::verify_bundle(&saved, &cancel).unwrap().verified);
+    assert_eq!(resolved.printer.deposition_limits.max_bead_width_mm, 0.75);
+    assert!(!resolved.admits_deposition(0.5, 0.2));
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.paths)
+            .all(|path| path
+                .checked_edges()
+                .unwrap()
+                .all(|edge| edge.width_mm <= 0.46))
+    );
+    assert!(bundle.program.contains("M109 R210.000000"));
+    assert!(bundle.program.contains("M106 S255"));
+    for tampered in [
+        bundle
+            .program
+            .replacen("M109 R210.000000", "M109 R190.000000", 1),
+        bundle.program.replacen("M106 S255", "M106 S128", 1),
+        bundle.program.replacen("F1260.000000", "F2100.000000", 1),
+    ] {
+        assert_ne!(tampered, bundle.program);
+        assert!(crate::verifier::verify(&tampered, &bundle.plan, &resolved, &cancel).is_err());
+    }
 }

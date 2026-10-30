@@ -405,6 +405,7 @@ fn retained_raw_byte_limit_counts_history_not_only_active_sources() {
 
 pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
     ManufacturingIntent {
+        material_profile: None,
         printer: PrinterSpecification {
             schema_version: MANUFACTURING_SCHEMA_VERSION,
             id: "storage-cartesian".into(),

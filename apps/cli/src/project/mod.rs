@@ -112,6 +112,7 @@ enum Operation {
     ProcessEdit(ProcessEdit),
     ProcessResolve(OccurrenceId),
     Intent(Arc<ManufacturingIntent>),
+    MaterialProfile(MaterialProfileSelection),
     Preflight,
     Compile,
     Verify,
@@ -449,6 +450,22 @@ pub fn parse(
                 OccurrenceId::new(text(&mut args, "--process-resolve occurrence")?.parse()?)?,
             )),
             Some("--intent") => operations.push(Operation::Intent(intent(&mut args)?.into())),
+            Some("--material-profile") => {
+                let file = args
+                    .next()
+                    .ok_or("--material-profile requires a native JSON path")?;
+                NativePath::from_os_str(&file)?;
+                let mut bytes = Vec::new();
+                File::open(PathBuf::from(file))?
+                    .take(MAX_PROFILE_JSON_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() > MAX_PROFILE_JSON_BYTES as usize {
+                    return Err("material profile exceeds profile JSON byte limit".into());
+                }
+                let selection: MaterialProfileSelection = serde_json::from_slice(&bytes)?;
+                selection.validate()?;
+                operations.push(Operation::MaterialProfile(selection));
+            }
             Some("--preflight") => operations.push(Operation::Preflight),
             Some("--place-on-bed" | "--center-on-bed") => {
                 let center = arg == "--center-on-bed";
@@ -1390,6 +1407,24 @@ async fn execute(
                         return Err(spiling_engine_client::ClientError::Manufacturing(error).into());
                     }
                     _ => return Err("unexpected set manufacturing intent response".into()),
+                }
+            }
+            Operation::MaterialProfile(selection) => {
+                label = "material_profile";
+                let base_revision = info(client).await?.revision;
+                match client
+                    .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+                        session_id: session.clone(),
+                        base_revision,
+                        selection,
+                    })
+                    .await?
+                {
+                    ManufacturingResponse::Status { .. } => {}
+                    ManufacturingResponse::Error { error } => {
+                        return Err(spiling_engine_client::ClientError::Manufacturing(error).into());
+                    }
+                    _ => return Err("unexpected material profile response".into()),
                 }
             }
             Operation::Preflight => {

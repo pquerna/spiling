@@ -100,6 +100,7 @@ fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan)
 }
 fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     let intent = ManufacturingIntent {
+        material_profile: None,
         printer: PrinterSpecification {
             schema_version: MANUFACTURING_SCHEMA_VERSION,
             id: "software-fixture".into(),

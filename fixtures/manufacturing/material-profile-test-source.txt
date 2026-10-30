@@ -1,0 +1,1 @@
+Synthetic material-profile regression declarations, revision 1. These values test resolution and are not material recommendations or physical calibration.

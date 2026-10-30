@@ -19,7 +19,9 @@ mod replay;
 pub use replay::*;
 mod job;
 pub use job::*;
+mod material;
 mod process;
+pub use material::*;
 pub mod program_coordinates;
 pub use process::*;
 mod resolution;
@@ -1012,20 +1014,46 @@ pub(crate) fn validate_global_infill_fraction(fraction: f64) -> Result<(), Manuf
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ManufacturingIntent {
+    #[serde(deserialize_with = "material::captured_material_profile")]
+    pub material_profile: Option<ResolvedMaterialProfile>,
     pub printer: PrinterSpecification,
     pub recipe: PlanarPrintRecipe,
 }
 impl ManufacturingIntent {
+    pub fn effective_max_volumetric_flow_mm3_s(&self) -> f64 {
+        self.material_profile
+            .as_ref()
+            .map_or(self.printer.max_volumetric_flow_mm3_s, |p| {
+                self.printer
+                    .max_volumetric_flow_mm3_s
+                    .min(p.selection.profile.max_volumetric_flow_mm3_s)
+            })
+    }
+    pub fn effective_deposition_limits(&self) -> DepositionLimits {
+        let mut limits = self.printer.deposition_limits;
+        if let Some(profile) = &self.material_profile {
+            let material = profile.selection.profile.deposition_limits;
+            limits.min_bead_width_mm = limits.min_bead_width_mm.max(material.min_bead_width_mm);
+            limits.max_bead_width_mm = limits.max_bead_width_mm.min(material.max_bead_width_mm);
+            limits.min_bead_height_mm = limits.min_bead_height_mm.max(material.min_bead_height_mm);
+            limits.max_bead_height_mm = limits.max_bead_height_mm.min(material.max_bead_height_mm);
+        }
+        limits
+    }
+    pub fn admits_deposition(&self, width_mm: f64, height_mm: f64) -> bool {
+        self.effective_deposition_limits()
+            .admits(width_mm, height_mm)
+    }
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         self.printer.validate()?;
         self.recipe.validate()?;
+        if let Some(profile) = &self.material_profile {
+            profile.validate_for(self)?;
+        }
         let p = &self.printer;
         let r = &self.recipe;
         r.process.validate_printer(p)?;
-        if !p
-            .deposition_limits
-            .admits(r.bead_width_mm, r.layer_height_mm)
-        {
+        if !self.admits_deposition(r.bead_width_mm, r.layer_height_mm) {
             return Err(invalid(
                 "nominal recipe deposition exceeds printer envelope",
             ));
@@ -1047,7 +1075,7 @@ impl ManufacturingIntent {
             || filament_area <= 0.0
             || !flow.is_finite()
             || flow <= 0.0
-            || flow > p.max_volumetric_flow_mm3_s
+            || flow > self.effective_max_volumetric_flow_mm3_s()
             || !extrusion_per_mm.is_finite()
             || extrusion_per_mm <= 0.0
             || r.print_speed_mm_s > p.max_feed_mm_s
@@ -1082,7 +1110,7 @@ impl ManufacturingIntent {
                 || process_extrusion <= 0.0
                 || !process_flow.is_finite()
                 || process_flow <= 0.0
-                || process_flow > p.max_volumetric_flow_mm3_s
+                || process_flow > self.effective_max_volumetric_flow_mm3_s()
             {
                 return Err(invalid(
                     "process override exceeds printer feed/flow or serialized precision",
@@ -1101,7 +1129,7 @@ impl ManufacturingIntent {
                     "priming feed exceeds printer limit at serialized precision",
                 ));
             }
-            if !prime_flow.is_finite() || prime_flow > p.max_volumetric_flow_mm3_s {
+            if !prime_flow.is_finite() || prime_flow > self.effective_max_volumetric_flow_mm3_s() {
                 return Err(invalid("priming exceeds declared volumetric flow limit"));
             }
         }
@@ -2917,7 +2945,7 @@ impl NormalizedPrintPlan {
                 let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
                 for edge in path.checked_edges()? {
                     let width = edge.width_mm;
-                    if !intent.printer.deposition_limits.admits(width, path_height) {
+                    if !intent.admits_deposition(width, path_height) {
                         return Err(invalid(&format!(
                             "path dimensions exceed local deposition limits or owning layer: width={width}, physical_z={physical:?}, height={path_height}, layer_z={}, limits={:?}",
                             layer.z_mm, intent.printer.deposition_limits
@@ -2932,7 +2960,7 @@ impl NormalizedPrintPlan {
                         || area <= 0.0
                         || !feed.is_finite()
                         || feed < 0.000001
-                        || area * feed / 60.0 > intent.printer.max_volumetric_flow_mm3_s
+                        || area * feed / 60.0 > intent.effective_max_volumetric_flow_mm3_s()
                     {
                         return Err(invalid(
                             "path dimensions exceed emitted-feed volumetric flow limit",
@@ -3998,6 +4026,11 @@ pub enum ManufacturingCommand {
         session_id: SessionId,
         base_revision: ProjectRevision,
         intent: Arc<ManufacturingIntent>,
+    },
+    ApplyMaterialProfile {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        selection: MaterialProfileSelection,
     },
     Compile {
         session_id: SessionId,

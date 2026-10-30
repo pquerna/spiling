@@ -453,7 +453,27 @@ export type PreflightCheck = { code: string, severity: PreflightSeverity, eviden
 
 export type PreflightReport = { input_revision: ProjectRevision, disposition: PreflightDisposition, software_only: boolean, checks: Array<PreflightCheck>, };
 
-export type ManufacturingIntent = { printer: PrinterSpecification, recipe: PlanarPrintRecipe, };
+export type MaterialFillerKind = "carbon_fiber" | "glass_fiber";
+
+export type MaterialProfileSourceKind = "synthetic_test" | "imported_recommendation" | "operator_declaration";
+
+export type MaterialDefinition = { id: string, revision: string, manufacturer: string, product: string, polymer_family: string, filler: MaterialFiller | null, filament_diameter_mm: number, requires_abrasion_resistant_nozzle: boolean, };
+
+export type MaterialFiller = { kind: MaterialFillerKind, mass_fraction: number | null, };
+
+export type MaterialToolSetup = { hotend_id: string, nozzle_material: string, abrasion_resistant_nozzle: boolean, cooling_configuration_id: string, };
+
+export type MaterialProfileSource = { kind: MaterialProfileSourceKind, source_id: string, source_revision: string, source_hash: SourceHash, };
+
+export type MaterialProcessProfile = { id: string, revision: string, material: MaterialDefinition, printer_id: string, printer_revision: string, nozzle_diameter_mm: number, hotend_id: string, nozzle_material: string, cooling_configuration_id: string, deposition_limits: DepositionLimits, nozzle_temperature_c: number, bed_temperature_c: number, print_speed_mm_s: number, flow_multiplier: number, max_volumetric_flow_mm3_s: number, process: ProcessPolicy, source: MaterialProfileSource, };
+
+export type MaterialProfileOverrides = { nozzle_temperature_c: number | null, bed_temperature_c: number | null, print_speed_mm_s: number | null, flow_multiplier: number | null, process: ProcessPolicy | null, };
+
+export type MaterialProfileSelection = { profile: MaterialProcessProfile, setup: MaterialToolSetup, overrides: MaterialProfileOverrides, };
+
+export type ResolvedMaterialProfile = { resolver_version: number, selection: MaterialProfileSelection, };
+
+export type ManufacturingIntent = { material_profile: ResolvedMaterialProfile | null, printer: PrinterSpecification, recipe: PlanarPrintRecipe, };
 
 export type DepositionKind = "perimeter" | "solid_fill" | "bottom_skin" | "top_skin" | "sparse_fill" | "bridge" | "support" | "support_interface" | "separator_wall";
 
@@ -536,7 +556,7 @@ export type ManufacturingBundle = { schema_version: number, provenance: Manufact
 
 export type ManufacturingArtifactRecord = { hash: SourceHash, input_hash: SourceHash, byte_count: number, summary: ManufacturingSummary, };
 
-export type ManufacturingCommand = { "op": "get", session_id: SessionId, } | { "op": "set_intent", session_id: SessionId, base_revision: ProjectRevision, intent: ManufacturingIntent, } | { "op": "compile", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "preflight", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "inspect", session_id: SessionId, base_revision: ProjectRevision, output: VerificationOutput, };
+export type ManufacturingCommand = { "op": "get", session_id: SessionId, } | { "op": "set_intent", session_id: SessionId, base_revision: ProjectRevision, intent: ManufacturingIntent, } | { "op": "apply_material_profile", session_id: SessionId, base_revision: ProjectRevision, selection: MaterialProfileSelection, } | { "op": "compile", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "preflight", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "inspect", session_id: SessionId, base_revision: ProjectRevision, output: VerificationOutput, };
 
 export type ManufacturingResponse = { "type": "status", info: ProjectInfo, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, } | { "type": "preflight", report: PreflightReport, } | { "type": "error", error: ManufacturingError, };
 

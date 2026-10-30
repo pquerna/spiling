@@ -580,7 +580,7 @@ impl<'a> RouteState<'a> {
                         > E_HALF_STEP + arithmetic_slack(self.expected_e)
                     || (feed - speed * 60.0).abs() > F_HALF_STEP + arithmetic_slack(feed)
                     || feed / 60.0 > intent.printer.max_feed_mm_s
-                    || area * speed > intent.printer.max_volumetric_flow_mm3_s
+                    || area * speed > intent.effective_max_volumetric_flow_mm3_s()
                 {
                     return Err(failed(
                         "waste quantity, E8 volume, flow or speed differs from declared supported strip",

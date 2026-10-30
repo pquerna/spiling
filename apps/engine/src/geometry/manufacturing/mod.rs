@@ -119,6 +119,25 @@ impl Runtime {
                 // compiler sees its captured ProjectRevision become stale at staging.
                 Ok(self.manufacturing_status())
             }
+            ManufacturingCommand::ApplyMaterialProfile {
+                session_id,
+                base_revision,
+                selection,
+            } => {
+                self.manufacturing_base(&session_id, base_revision)?;
+                let current = self.project.snapshot().manufacturing_intent.clone().ok_or_else(||
+                    ManufacturingError::new(ManufacturingErrorCode::NoIntent,"an explicit printer/recipe intent is required before material selection"))?;
+                let intent = Arc::new(spiling_manufacturing::resolve_material_profile(
+                    &current, selection,
+                )?);
+                let edit = self
+                    .project
+                    .prepare(Edit::SetManufacturingIntent { intent })
+                    .map_err(project_error)?;
+                self.project.commit(edit).map_err(project_error)?;
+                self.synchronize_native_pins();
+                Ok(self.manufacturing_status())
+            }
             ManufacturingCommand::Preflight {
                 session_id,
                 base_revision,

@@ -51,7 +51,58 @@ Required `seam_policy` is `{kind:"nearest"}` or `{kind:"preferred_build_directio
 
 Required `rectilinear_axis` and independent `top_skin_axis` each use `"x"`, `"y"`, `"alternating_xy"` or `"alternating_yx"` in the build frame. Alternation starts with its named first axis at actual scheduled layer zero. Ordinary TopSkin uses `top_skin_axis`; bottom/solid/sparse use `rectilinear_axis`. An explicit top-skin direction does not rotate source-bound regional sparse lattices or SeparatorWall. Orthogonal recovery selects only independently certified genuine Bridge strokes from the same borrowed classified role owner/density, rooted in actual original XY anchor demand. Existing nearest-direct-anchor construction reserves the merged bead-width corridor inside that owner and clips original authored strokes to its complement rather than recentering them. A supported one-ended alternative may propose a minimum extension to a real second lower anchor, but only fresh genuine Bridge proof can authorize its selection. Reprove all final Bridge rows and the complete mixed candidate, including after lower/contact changes; a fully supported row never inherits a Bridge exception. Support retains its separately admitted policy. Camera/source rotation does not rotate job-wide intent. Policy edits use Core history, invalidate artifacts and enter fingerprints.
 
-`ManufacturingIntent {printer:PrinterSpecification,recipe:PlanarPrintRecipe}` validates both declarations and their cross-constraints. `decode_intent(bytes)` bounds input before decoding; direct DTO consumers must call `validate()`.
+`ManufacturingIntent {printer:PrinterSpecification,recipe:PlanarPrintRecipe,material_profile:ResolvedMaterialProfile|null}` validates both declarations and their cross-constraints. `decode_intent(bytes)` bounds input before decoding; direct DTO consumers must call `validate()`.
+
+### Captured single-tool material profiles
+
+`MaterialProfileSelection` is bounded inert data: an exact `MaterialProcessProfile`,
+installed `MaterialToolSetup` declarations and explicit `MaterialProfileOverrides`.
+Material definitions identify manufacturer/product/revision, polymer family,
+optional CF/GF filler/loading, filament diameter and an explicit abrasion-resistant
+nozzle requirement. Family names never select algorithms. A source kind identifies
+synthetic test data, an imported recommendation or an operator declaration, with
+source identity/revision/hash; none is a measured-process qualification.
+
+`Manufacturing.Execute` accepts typed `ApplyMaterialProfile` with session and
+persistent base revision. Rust manufacturing resolution validates the exact
+printer ID/revision/nozzle diameter, hotend/nozzle-material/cooling configuration and declared nozzle
+compatibility; only the complete single-extruder Marlin workflow is supported.
+The operation resolves supported explicit overrides over profile values, updates
+recipe material/diameter/speed/flow/process and job thermal targets, then commits
+one existing Core intent transaction. It captures the complete selection and
+resolver identity in required-nullable `intent.material_profile`. No catalog path,
+network lookup or executable profile enters compilation. Values remain declared;
+actual installed hardware, cooling effectiveness and dry filament are not sensed.
+
+Resolved snapshots are checked for agreement with the recipe and thermal job on
+both native wire and persistence admission. Direct edits to bound values must
+update the explicit profile overrides, or explicitly detach the binding with
+`material_profile:null`; they cannot retain stale profile provenance. Current
+unreleased intent files missing this required nullable field need recreation.
+Library updates never reinterpret saved snapshots. Profile changes use ordinary
+Core Undo/Redo, invalidate active output, enter the complete input fingerprint and
+retain captured-revision stale-publication checks without changing SceneRevision.
+
+The effective volumetric ceiling is the minimum of the unchanged machine ceiling
+and selected material/hotend profile ceiling. Recipe, first-layer/bridge, prime,
+combined-path, backend and fresh decoded-byte flow checks consume it. Actual path
+widths/physical heights must satisfy both machine and selected profile envelopes.
+No silent speed/temperature clamp or inferred support permission is supplied.
+`ProcessPolicy.max_bridge_span_mm` remains the sole geometric span authority;
+profiles do not create anchors, physical grip, measured bridge limits or permission
+for new support/interface construction. A whole-process override is explicit and
+captured; it does not preserve an empirical claim (no measured-profile source kind
+is currently admitted).
+
+The CLI accepts ordered `--intent BASE.json --material-profile SELECTION.json`;
+ordinary manufacturing status and exported provenance expose the captured
+selection, profile values and overrides. `pnpm test:materials` builds a matching
+engine/CLI and exercises synthetic paired profiles, thermal/cooling/feed/flow
+commands, Undo/Redo, rejected edits and fresh source/catalog-absent replay/export.
+The runner uses the independent parity byte decoder. Test declarations are not
+PLA/PCTG/filled-material printing recommendations; fixed-dual per-tool process
+profiles, mixed diameters, measured envelopes and material-library UI are not
+claimed by this single-tool path.
 
 ### Fixed-dual software route
 
@@ -119,7 +170,7 @@ process-height, waste/reprime, native/void/contact and command gates still apply
 
 The normalized plan, captured route and actual SPLR6 tool/XYZ/E events expose the
 realized construction for inspection/reassessment. Routing does not promote a
-stored optical estimate. A separately applied captured origin permits explicit reassessment of the realized finite patch from actual intervals/material mapping and original conditions/evidence. Backing optics, arbitrary regional paint, Local-Z/sublayer parity, measured bond and physical color accuracy remain outside support. Planner30 binds mandatory physical material events and waste-only groups; emitter11/verifier16
+stored optical estimate. A separately applied captured origin permits explicit reassessment of the realized finite patch from actual intervals/material mapping and original conditions/evidence. Backing optics, arbitrary regional paint, Local-Z/sublayer parity, measured bond and physical color accuracy remain outside support. Planner30 binds mandatory physical material events and waste-only groups; emitter11/verifier17
 bind preselection waste-lane staging. SPLR6 retains its command/binary interpretation.
 
 ## Normalized plan
@@ -128,7 +179,7 @@ bind preselection waste-lane staging. SPLR6 retains its command/binary interpret
 
 Native sampling and offset construction bounds are each 0.005 mm; finish XY construction has a separate 0.001 mm bound. The explicit recipe `native_shape_error_mm` bounds source-target approximation independently of those construction tolerances. Each mapped image additionally declares its own vertical displacement-error bound.
 
-Surface documents remain schema3. Emitter11/verifier16 consume constant/per-edge widths, immutable Wall ownership, permanent plate ownership, mixed regional/mandatory-skin Bridge portions and fresh interval-aware anchors/interface proofs. SPLR6 keeps those nominal associations separate from actual XYZ/E/feed, and retains distinct tool epochs/transition waste. Preselection staging changes the command lifecycle, not the packed layout; document counters and existing kind meanings do not change.
+Surface documents remain schema3. Emitter11/verifier17 consume constant/per-edge widths, immutable Wall ownership, permanent plate ownership, mixed regional/mandatory-skin Bridge portions and fresh interval-aware anchors/interface proofs. SPLR6 keeps those nominal associations separate from actual XYZ/E/feed, and retains distinct tool epochs/transition waste. Preselection staging changes the command lifecycle, not the packed layout; document counters and existing kind meanings do not change.
 
 Required `native_geometry.source_feature_coverage` is a bounded count summary, not a global invariance enum: `disjoint_source_layer_count + invariant_source_union_layer_count + native_interface_complex_layer_count == certified_layer_count`, using checked arithmetic. It partitions actual accepted scheduled layers into disjoint source, closed-slab invariant-union and native interface-complex evidence. The interface-complex category requires the actual continuing-core/critical-contribution proof and complete leaf ledger; its name never establishes that capability. Mixed jobs cannot claim global source-union invariance. `slab_count` counts accepted original-occurrence/slab evidence captures, including inactive sources and owned critical contributions. An invariant accepted slab may cover several scheduled layers without creating additional captures, so `height_analysis_count <= slab_count <= height_analysis_count * certified_layer_count`; there is no per-layer lower bound on captures. `owned_critical_slab_count` counts unique original-occurrence/slab captures with any owned endpoint stratum or nonzero transition collar, not faces, and cannot exceed `slab_count`. Missing source contributions cannot be disguised as empty height domains. Reused native evidence remains bound to each accepted capture; failed/refined candidates affect only cumulative `geometry_work`. All count fields are explicitly required on checked JSON/native admission and bounded by existing layer/occurrence caps. Summary admission neither reconstructs private native receipts nor certifies the emitted physical union boundary.
 
@@ -319,7 +370,7 @@ An independent verifier decodes command state from emitted bytes, not emitter he
 
 Current Cartesian XYZ admission binds independently parsed coordinates to the checked XYZ6 projection of each captured expected point. Raw-plan half-step tolerance cannot authorize an alternate neighboring lattice point. The explicit `contracts::manufacturing::program_coordinates` module owns this fixed output precision, coordinate-conditioning range and outward decimal/height enclosures; backend serialization and verifier command parsing remain independent. Projection multiplies the binary64 input by `1_000_000`, rounds ties away from zero, divides by `1_000_000` and normalizes signed zero; it is not exact-real decimal rounding of the original input. Accepted absolute coordinates are at most `2^52 / 1_000_000` mm, preserving distinct adjacent parsed micrometre lattice points. Compensated gap subtraction checks every intermediate and its outward result for finiteness. Unrepresentable arithmetic refuses with `program_coordinate_conditioning_failure`, not a widened clearance tolerance.
 
-Current inspection/reopen requires planner32, binding native-first material authority, wall/finish/hatch construction and mandatory physical per-occurrence material events. Input fingerprints bind complete ordered authoring documents, source/pose and printer/recipe/routing policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, ownership, permanent plate extent/attachment and lower anchors; fixed-dual replay additionally reconstructs source/material and staged tool/frame/thermal/debt/waste state. It does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3 remain stable. Emitter11/verifier16 invalidate superseded transition programs; SPLR6 keeps its existing binary interpretation. Older development assignment shapes refuse without aliases or missing-policy defaults.
+Current inspection/reopen requires planner32, binding native-first material authority, wall/finish/hatch construction and mandatory physical per-occurrence material events. Input fingerprints bind complete ordered authoring documents, source/pose and printer/recipe/routing policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, ownership, permanent plate extent/attachment and lower anchors; fixed-dual replay additionally reconstructs source/material and staged tool/frame/thermal/debt/waste state. It does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3 remain stable. Emitter11/verifier17 invalidate superseded transition programs; SPLR6 keeps its existing binary interpretation. Older development assignment shapes refuse without aliases or missing-policy defaults.
 
 Final normalized-plan admission checks ordinary projected axes during its existing coordinate pass. Independent fresh verification separately checks preferred perimeter seam dot/distance/coordinate ordering before matching actual emitted commands. A mutually matching program and plan that ignore either consumed policy do not earn semantic success; stored `verified` metadata remains descriptive.
 

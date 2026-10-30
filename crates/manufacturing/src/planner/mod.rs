@@ -1019,8 +1019,8 @@ fn admit_schedule<'model>(
                 drop(classified.take());
                 templates = [None, None];
                 let actual_height = z - elevation.lower_z;
-                let limits = &input.intent.printer.deposition_limits;
-                let envelope = walls::width_envelope(limits, actual_height)?;
+                let limits = input.intent.effective_deposition_limits();
+                let envelope = walls::width_envelope(&limits, actual_height)?;
                 // Retain the exact unguarded stadium floor as well: adding the
                 // guard must not merge adjacent height-dominated f64 floors.
                 let envelope_key = [
@@ -1066,7 +1066,7 @@ fn admit_schedule<'model>(
                             material: &sections[current].material,
                             required: &required_material,
                             recipe,
-                            limits: &input.intent.printer.deposition_limits,
+                            limits: &limits,
                             nozzle_diameter_mm: input.intent.printer.nozzle_diameter_mm,
                             lower_z: elevation.lower_z,
                             upper_z: z,
@@ -2647,9 +2647,7 @@ fn refine_deposition_pair(
                 height > 2.0 * spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM
                     && input
                         .intent
-                        .printer
-                        .deposition_limits
-                        .admits(input.intent.recipe.bead_width_mm, height)
+                        .admits_deposition(input.intent.recipe.bead_width_mm, height)
             })
     };
     let lower = eligible(&schedule[index - 1]);
@@ -2852,9 +2850,7 @@ fn scheduled_layers(
             if schedule.iter().any(|layer| {
                 !input
                     .intent
-                    .printer
-                    .deposition_limits
-                    .admits(recipe.bead_width_mm, layer.z - layer.lower_z)
+                    .admits_deposition(recipe.bead_width_mm, layer.z - layer.lower_z)
             }) {
                 return Err(error(
                     ManufacturingErrorCode::UnsupportedGeometry,

@@ -29,7 +29,7 @@ pub(super) fn combine(
         return Ok(());
     };
     let recipe = &intent.recipe;
-    let ceiling = max_height_mm.min(intent.printer.deposition_limits.max_bead_height_mm);
+    let ceiling = max_height_mm.min(intent.effective_deposition_limits().max_bead_height_mm);
     // This first envelope makes no new support-clearance claim after changing
     // sparse pitch. Jobs with actual breakaway strokes retain their already
     // admitted fine alternative and its complete native clearance proof.
@@ -223,7 +223,7 @@ pub(super) fn combine(
             let height = z - lower_z;
             let area = (recipe.bead_width_mm - height) * height
                 + std::f64::consts::PI * (height * 0.5).powi(2);
-            if height < intent.printer.deposition_limits.min_bead_height_mm
+            if height < intent.effective_deposition_limits().min_bead_height_mm
                 || height > recipe.bead_width_mm
             {
                 record(
@@ -238,7 +238,7 @@ pub(super) fn combine(
                 continue;
             }
             if area * recipe.flow_multiplier * recipe.print_speed_mm_s
-                > intent.printer.max_volumetric_flow_mm3_s
+                > intent.effective_max_volumetric_flow_mm3_s()
             {
                 record(
                     plan,
@@ -434,7 +434,7 @@ pub(super) fn combine(
                         1.0
                     };
                 let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
-                area * flow * feed / 60.0 > intent.printer.max_volumetric_flow_mm3_s
+                area * flow * feed / 60.0 > intent.effective_max_volumetric_flow_mm3_s()
             }) {
                 record(
                     plan,

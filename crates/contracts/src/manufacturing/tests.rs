@@ -6,6 +6,7 @@ use super::*;
 
 fn intent() -> ManufacturingIntent {
     ManufacturingIntent {
+        material_profile: None,
         printer: PrinterSpecification {
             schema_version: MANUFACTURING_SCHEMA_VERSION,
             id: "software-cartesian".into(),
@@ -3366,4 +3367,36 @@ fn global_zero_infill_retains_the_whole_interior_as_intentional_void() {
     coverage.intentional_void_area_mm2 = 40.0;
     coverage.process_regions[0].fraction = -0.01;
     assert!(coverage.validate(&recipe).is_err());
+}
+
+#[test]
+fn material_capture_is_required_nullable_and_typed_profile_adapters_reject_unknowns() {
+    let original = intent();
+    let mut json = serde_json::to_value(&original).unwrap();
+    assert_eq!(json["material_profile"], serde_json::Value::Null);
+    json.as_object_mut().unwrap().remove("material_profile");
+    assert!(serde_json::from_value::<ManufacturingIntent>(json).is_err());
+    let selection: MaterialProfileSelection = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/manufacturing/material-profile-a.json"
+    ))
+    .unwrap();
+    selection.validate().unwrap();
+    let wire = crate::rpc::MaterialProfileSelection::try_from(selection.clone()).unwrap();
+    assert_eq!(
+        MaterialProfileSelection::try_from(wire.clone()).unwrap(),
+        selection
+    );
+    let mut bad = wire.clone();
+    bad.profile.as_mut().unwrap().source.as_mut().unwrap().kind = 0;
+    assert!(MaterialProfileSelection::try_from(bad).is_err());
+    let mut bad = wire;
+    bad.setup.as_mut().unwrap().abrasion_resistant_nozzle = None;
+    assert!(MaterialProfileSelection::try_from(bad).is_err());
+    let command = ManufacturingCommand::ApplyMaterialProfile {
+        session_id: SessionId::new(),
+        base_revision: crate::project::ProjectRevision(5),
+        selection,
+    };
+    let wire = crate::rpc::ManufacturingRequest::try_from(command.clone()).unwrap();
+    assert_eq!(ManufacturingCommand::try_from(wire).unwrap(), command);
 }
