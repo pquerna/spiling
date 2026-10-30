@@ -4,55 +4,47 @@ SPDX-License-Identifier: OSL-3.0
 Licensed under the Open Software License version 3.0
 -->
 
-# Desktop runtime: admission and failure boundaries
+# Native workbench: admission and failure boundaries
 
 ## Read the implementation
 
-| Question                                                      | Owner                                                                                                                                          |
-| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| How is CEF started and configured?                            | [`runtime.rs`](../../apps/desktop/src-tauri/src/runtime.rs), [`build.rs`](../../apps/desktop/src-tauri/build.rs)                               |
-| Who owns the child and rejects mismatched instances/builds?   | [`engine-client`](../../crates/engine-client/src/), shell [`engine`](../../apps/desktop/src-tauri/src/engine/)                                 |
-| How do UI operations settle and stale results lose authority? | [`useWorkbench.ts`](../../apps/desktop/src/useWorkbench.ts), [`useManufacturing.ts`](../../apps/desktop/src/manufacturing/useManufacturing.ts) |
-| Who owns render-device buffers and picking?                   | [`viewport`](../../packages/viewport/src/)                                                                                                     |
-| How are native assets staged and packages assembled?          | [`tools/run.mjs`](../../tools/run.mjs), shell [`build.rs`](../../apps/desktop/src-tauri/build.rs)                                              |
+| Question                                                            | Owner                                                                                                |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Who creates the native window and wgpu device?                      | [workbench](../../apps/workbench/src/lib.rs), [main](../../apps/workbench/src/main.rs)               |
+| Who owns the child and rejects mismatched builds?                   | [engine-client](../../crates/engine-client/src/), [host](../../apps/workbench/src/host.rs)           |
+| How do accepted operations settle and stale results lose authority? | [host actor](../../apps/workbench/src/host/), [manufacture](../../apps/workbench/src/manufacture.rs) |
+| Who owns display buffers and picking?                               | [scene](../../apps/workbench/src/scene.rs), [viewport](../../apps/workbench/src/viewport/)           |
+| How are native packages assembled?                                  | [tools/run.mjs](../../tools/run.mjs)                                                                 |
 
-Normal startup requires offline license assent, a working WebGPU device and a
-matching supervised engine. Browser-only preview must report desktop-required;
-GPU refusal must not silently start a native session or substitute WebGL.
-Imported native geometry never falls back to the synthetic diagnostic triangle.
+Startup requires offline license assent, a working native wgpu device and a
+matching supervised engine. Imported geometry never falls back to the separate
+unitless diagnostic triangle. The application has no embedded browser runtime.
 
 ## Failure map
 
-| Symptom                               | Inspect first                                           | Invariant                                                                                          |
-| ------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Child build/instance mismatch         | Shared client handshake and staged sidecar              | No cross-generation compatibility or arbitrary executable search                                   |
-| Engine interruption                   | Shared child owner, operations ledger, UI epoch         | Old session handles and active results cannot regain authority after restart                       |
-| Empty/oversized canvas                | Viewport drawing-buffer resize and CSS panel bounds     | Atomically bound physical size by the actual device limit; page/report height is not canvas height |
-| Native geometry but no mesh           | `DefinitionDisplay::Unavailable`, not transport retry   | Preserve source/native queries; no phantom artifact or GPU picking claim                           |
-| Replay replaced during project switch | Workbench project-replacement cleanup                   | One awaited GPU owner; stale inspection cannot race a second clear                                 |
-| Linux Vulkan initialization mismatch  | Executable loader link and shipped CEF resources        | GTK's transitive dependency does not inherit executable RUNPATH                                    |
-| Close leaves a child                  | Shell close admission, discard decision and client reap | Native shutdown/owner EOF completes before process ownership is released                           |
+| Symptom                        | Inspect first                                                        | Invariant                                                          |
+| ------------------------------ | -------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Build/instance mismatch        | Shared client handshake and adjacent binary                          | Exact identity/capabilities; no arbitrary executable search        |
+| Engine interruption            | Host phase, child owner and operation ledger                         | Old session handles/results never regain authority after restart   |
+| Native geometry without mesh   | DefinitionDisplay::Unavailable                                       | Retain native queries/face list; no invented picking geometry      |
+| Stale source/review after edit | Captured revision/session, scene publication and manufacture capture | No stale picking, mutation or export authority                     |
+| Slow/paused transfer           | Bounded scene/review workers and explicit cancellation               | Keep prior labelled display; release staging before close          |
+| Native picker unavailable      | OS portal/backend and parent handle                                  | Cancellation preserves state; no browser or shell-command fallback |
+| Close leaves a child           | Dirty confirmation, staged cleanup and EngineClient reap             | Await orderly shutdown/exit before releasing ownership             |
 
-Linux hardware startup enables native Vulkan compositing while retaining normal
-ANGLE selection and driver/adapter safety blocks. The executable directly links
-the shipped Vulkan loader so its RUNPATH selects one loader for GTK and Dawn;
-do not solve this with replacement libraries or a development preload.
+## Trust and qualification
 
-## Desktop trust and qualification
+Files, RPCs and packed display data retain bounded malformed-input validation.
+The engine is isolated in a supervised process; the Rust UI owns transient drafts
+and disposable GPU resources, never project/kernel/planner authority.
 
-The packaged UI is trusted local content, not arbitrary websites. Normal CEF
-renderer isolation is defense in depth; imported files still require malformed
-input validation and bounded work. Chromium's existing local GPU sandbox fallback
-is accepted without a global sandbox-disable flag. Do not present that as full
-GPU sandbox or packaged-platform qualification.
+Linux X11/Vulkan local window and extracted-package workflows are separate from
+Wayland, Windows/macOS installation, signing, assistive input, arbitrary GPUs and
+physical-machine acceptance. Inspection is development-only and off in packaged
+binaries. Default fonts do not cover every script. Do not infer platform support
+from compilation, AccessKit enablement or software rendering.
 
-Debugging is opt-in through `SPILING_CEF_DEBUG_PORT`. Unsandboxed/software-GPU
-switches are explicit diagnostics, never production hardware evidence. Local
-hardware workflows exercise visible geometry/picking and operator manufacturing;
-Windows/macOS/Linux installed-reference coverage, native dialogs, GPU replacement
-and physical-machine behavior require their own acceptance.
-
-[Development commands](development.md) exercise the actual surface.
-[Build boundaries](B0-plan.md#build-boundaries), [control protocol](../protocol/control.md)
-and [source distribution](SOURCE.md) own the corresponding contracts. Detailed
-run identities, screenshots and timings stay in artifacts and commit/PR notes.
+[Development](development.md) owns actual-child/window/package procedures;
+[build boundaries](B0-plan.md#build-boundaries), [control](../protocol/control.md)
+and [source distribution](SOURCE.md) own corresponding contracts. Detailed run
+identities, screenshots and timings stay in artifacts and commit/PR notes.

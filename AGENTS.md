@@ -12,7 +12,7 @@ This file defines repository-wide working rules and architectural boundaries. Re
 
 ## 1. Status and scope
 
-The engine, CLI and CEF workbench implement source-backed authoring and a software-only operator slicer through shared native services. Current formats are project10/manufacturing11/process3/surface3 with source6/planner32, emitter11/verifier16 and SPLR6; superseded development documents/artifacts refuse without compatibility aliases. Automatic walls consume constant/per-edge widths and physical intervals, with independent source/void/occupancy/command qualification. One nozzle/material can combine eligible sparse-interior bands while protected construction remains fine. Core-owned source-bound density layers, finishes and authorized separators/physical-thickness plates retain distinct native/core/actual-anchor/attachment obligations. A bounded fixed-dual Marlin route binds one or two upright occurrences and loaded materials through exclusive reservations, physical uniform-slot cycles, preselection waste-lane staging and independent tool/frame/E/debt/thermal replay. One or two disjoint full-height planar regions, including compatible adjoining orthogonal faces, on one native part construct independently phased physical skins over shared solid white backing and retained core, with separate material-domain ownership and fresh complete-bead verification. Different phases resolve independently at common Z; native partial intervals do not advance phase by layer index. This does not inherit single-tool finish/support/coarse eligibility or confer physical printer/color qualification. Owning contracts/evidence distinguish exercised workflows, refusals and unqualified operations.
+The engine, CLI and native egui workbench implement source-backed authoring and a software-only operator slicer through shared native services. Current formats are project10/manufacturing11/process3/surface3 with source6/planner32, emitter11/verifier16 and SPLR6; superseded development documents/artifacts refuse without compatibility aliases. Automatic walls consume constant/per-edge widths and physical intervals, with independent source/void/occupancy/command qualification. One nozzle/material can combine eligible sparse-interior bands while protected construction remains fine. Core-owned source-bound density layers, finishes and authorized separators/physical-thickness plates retain distinct native/core/actual-anchor/attachment obligations. A bounded fixed-dual Marlin route binds one or two upright occurrences and loaded materials through exclusive reservations, physical uniform-slot cycles, preselection waste-lane staging and independent tool/frame/E/debt/thermal replay. One or two disjoint full-height planar regions, including compatible adjoining orthogonal faces, on one native part construct independently phased physical skins over shared solid white backing and retained core, with separate material-domain ownership and fresh complete-bead verification. Different phases resolve independently at common Z; native partial intervals do not advance phase by layer index. This does not inherit single-tool finish/support/coarse eligibility or confer physical printer/color qualification. Owning contracts/evidence distinguish exercised workflows, refusals and unqualified operations.
 
 Programs are **NOT MACHINE READY**: physical printability/grip, swept-tool collision, cross-platform durability and packaging remain unqualified. Local hardware evidence is not universal GPU or platform qualification. General STEP documents/assemblies, branching/fin supports, dedicated fuzzy/helical/crossed controls, arbitrary material/color painting, multi-axis deposition and execution remain outside support. Synthetic Triangle is an explicit diagnostic, never an import fallback. [Native interfaces](docs/adr/ADR005-native-first-development-geometry.md), [image interfaces](docs/adr/003-spatial-image-relief.md), [geometry evidence](docs/quality/geometry-evidence.md), [operation evidence](docs/quality/engine-operations.md), [manufacturing evidence](docs/quality/manufacturing-evidence.md) and [B0 evidence](docs/quality/B0-evidence.md) govern claims.
 
@@ -28,16 +28,16 @@ Selected implementation direction ([ADR006](docs/adr/006-native-egui-workbench.m
 
 - One Cargo workspace and one pnpm workspace.
 - A supervised Rust engine process, independent of the desktop runtime.
-- Rust eframe/egui/wgpu workbench in `apps/workbench`, using the supervised engine through engine-client. N1–N3 manage real projects, native source display/picking/sections and recoverable manufacturing through fresh actual-program replay and exclusive export. Keep the existing Tauri/CEF/React/Three frontend usable only during the bounded migration. The development default is native after N3 operator-flow acceptance; retain `dev:legacy` temporarily and remove the legacy frontend at N5 parity/packaging acceptance. Pin tested versions; platform packaging remains an evidence gate.
+- Rust eframe/egui/wgpu workbench in `apps/workbench`, using the supervised engine through engine-client. Native projects, source display/picking/sections, scoped process/finish/image authoring and recoverable manufacturing through fresh actual-program replay/export share one application. Native development and packaging replace the retired browser frontend. Pin tested versions; platform packaging/input/GPU claims remain evidence gates.
 - [SolidCore](https://github.com/pquerna/solidcore) is the runtime CAD/BREP kernel behind the geometry adapter; [upstream](https://github.com/tangency-labs/solidcore) and the public fork retain native ownership. Pin SolidCore and solidcore-mesh to the same exact published fork commit, never a moving branch. Only SolidCraft's geometry/STEP companion libraries are vendored; preserve their upstream licensing and `vendor/solidcraft/UPSTREAM.toml` provenance, not a second application fork. The native-first route uses the imported BREP as its single material authority; original STEP preserves identity/provenance and finish inputs, not a second reconstructed solid. Qualification is producer- and operator-specific. Historical Monstertruck-authored fixture bytes retain their original identity, not current runtime authority.
-- Protobuf-defined gRPC services, standard Google Operations/ByteStream, Rust-derived TypeScript shell views, and separately specified packed binary payloads.
+- Protobuf-defined gRPC services, standard Google Operations/ByteStream, Rust-derived TypeScript data views, and separately specified packed binary payloads.
 - Printer specifications are TypeScript-authored data against generated Rust-defined domain contracts: configuration, capabilities, coordinate frames, component shapes and process limits. Rust validates inert data and owns planning, backend execution and mandatory verification. Ordinary printer additions should be data; genuinely new behavior requires a reviewed Rust backend extension. Arbitrary TypeScript profile execution does not belong in the engine, and a declared capability does not establish machine support.
 
 The first printable product imports a declared STEP subset, preserves face identity, supports editing and recovery, compiles a constrained planar print, previews the emitted program, and exports for one tested machine configuration. A viewer or attractive toolpath preview does not meet that scope.
 
 The longer-term vision includes large assemblies, incremental compilation, supervised TypeScript extensions, execution connectors, load-informed planning, indexed reorientation, and experimental optical or foam processes. Continuous multi-axis deposition requires its own later evidence gate. Representing a capability in a schema does not make it supported.
 
-Do not expand the initial product into cloud services, collaboration, a general CAD editor, a plugin marketplace, continuous robot control, or a full structural solver. Do not maintain a parallel Electron implementation or silently substitute a system webview for CEF.
+Do not expand the initial product into cloud services, collaboration, a general CAD editor, a plugin marketplace, continuous robot control, or a full structural solver. Do not introduce a parallel browser frontend, embedded webview or alternate application runtime.
 
 ## 2. Canonical local documentation
 
@@ -70,7 +70,7 @@ When touching an area, question whether its local files still earn their place. 
 
 Keep durable design rationale in `docs/adr/`. `docs/quality/` is a compact current reference: code ownership and entry points, non-obvious invariants/failure paths, support limits and reproduction procedures. It is not a diary of builds, test counts, fixture hashes, timings or individual machines. Put change-specific verification in commit/PR notes and detailed run output in CI or ignored artifacts; git retains superseded documentation. Replace stale facts rather than append checkpoints or move them into another Markdown archive. A reader must not need a session paste or private conversation to understand current binding rules. Avoid nested `AGENTS.md` files that duplicate this guidance.
 
-Private research, planning, ideas, Markdown, and agent knowledge live in the separate `/root/spiling-brain` checkout (`pquerna/spiling-brain`), not this repository's `docs/reserach/`. Read its own agent guide before changing it; every brain change must be committed and safely pushed to main, fetching/rebasing concurrent updates without force-pushing. Brain proposals do not override implementation contracts. Adopt accepted constraints into the relevant public canonical documents without exposing private material or requiring private-repository access to understand the code.
+Private research, planning, ideas, Markdown, and agent knowledge live in the separate private `pquerna/spiling-brain` checkout, not this repository's `docs/reserach/`. Read its own agent guide before changing it; every brain change must be committed and safely pushed to main, fetching/rebasing concurrent updates without force-pushing. Brain proposals do not override implementation contracts. Adopt accepted constraints into the relevant public canonical documents without exposing private material or requiring private-repository access to understand the code.
 
 ## 3. Repository shape and dependency boundaries
 
@@ -78,36 +78,33 @@ Use directories to express ownership first. Create a separate crate only for jus
 
 B0 establishes contracts and a shared `crates/engine-client` used by the CLI and shell; that second crate is justified by two consumers. The domain areas below describe ownership as they are introduced, not a requirement to create empty future crates.
 
-| Planned area                                   | Ownership                                                                            |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `apps/workbench/`                              | Native egui window, transient interaction, asynchronous host and future wgpu display |
-| `apps/desktop/src/`                            | Temporary legacy workbench features and transient UI state                           |
-| `apps/desktop/src-tauri/`                      | Shell, engine supervision, native dialogs, binary bridge, packaging                  |
-| `apps/engine/`                                 | Sidecar entry point and composition of native services                               |
-| `apps/cli/`                                    | Client commands using the same protocol and services; no alternate planner           |
-| `crates/contracts/`                            | IDs, revisions, commands, events, errors, manifest schemas                           |
-| `crates/engine-client/`                        | Shared protocol client, child-process lifecycle, request deadlines                   |
-| `crates/core/`                                 | Project transactions, undo, persistence/recovery, artifacts, jobs                    |
-| `crates/geometry/`                             | Kernel adapter, import, tessellation, sections, capability contract                  |
-| `crates/surface-fields/`                       | Bounded image normalization and shared source-frame scalar-grid evaluation           |
-| `crates/appearance/`                           | D65 colorimetry, bounded palette matching and optical reference construction studies |
-| `crates/manufacturing/`                        | Planning, operations/resources, backend, packaging, emitted-program verification     |
-| `packages/protocol/`                           | Generated TypeScript contracts and binary decoder; no UI dependencies                |
-| `packages/viewport/`                           | Scene, picking, GPU resources, mesh/toolpath rendering                               |
-| `fixtures/`, `bench/`                          | Redistributable correctness corpus and reproducible workloads                        |
-| `docs/adr/`, `docs/protocol/`, `docs/quality/` | Decisions, wire specifications, support and evidence                                 |
-| `tools/`                                       | Bootstrap, generation, and release tooling                                           |
+| Planned area                                   | Ownership                                                                                |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `apps/workbench/`                              | Native window, transient forms, asynchronous host and checked wgpu source/replay display |
+| `apps/engine/`                                 | Sidecar entry point and composition of native services                                   |
+| `apps/cli/`                                    | Client commands using the same protocol and services; no alternate planner               |
+| `crates/contracts/`                            | IDs, revisions, commands, events, errors, manifest schemas                               |
+| `crates/engine-client/`                        | Shared protocol client, child-process lifecycle, request deadlines                       |
+| `crates/core/`                                 | Project transactions, undo, persistence/recovery, artifacts, jobs                        |
+| `crates/geometry/`                             | Kernel adapter, import, tessellation, sections, capability contract                      |
+| `crates/surface-fields/`                       | Bounded image normalization and shared source-frame scalar-grid evaluation               |
+| `crates/appearance/`                           | D65 colorimetry, bounded palette matching and optical reference construction studies     |
+| `crates/manufacturing/`                        | Planning, operations/resources, backend, packaging, emitted-program verification         |
+| `packages/protocol/`                           | Generated TypeScript contracts and binary decoder; no UI dependencies                    |
+| `fixtures/`, `bench/`                          | Redistributable correctness corpus and reproducible workloads                            |
+| `docs/adr/`, `docs/protocol/`, `docs/quality/` | Decisions, wire specifications, support and evidence                                     |
+| `tools/`                                       | Bootstrap, generation, and release tooling                                               |
 
 Dependencies flow inward:
 
-- Contracts have no Tauri, React, kernel, or renderer dependencies.
+- Contracts have no desktop runtime, kernel or renderer dependencies.
 - Core depends on contracts; geometry depends on contracts and SolidCore through its kernel adapter.
 - Surface-fields depends on contracts, not Core, geometry, renderer or planner. Core owns canonical immutable image storage; engine enables the optional image codec; manufacturing consumes borrowed scalar fields and geometry services. Engine composes these services with Core.
 - Appearance depends only on contracts: no Core, kernel, manufacturing, UI or GPU dependency. Core owns immutable original/canonical palettes, prepared identity caches and Arc-owned studies/reports; engine composes typed Projects/Operations/ByteStream for engine-client and CLI. Named reference-model math stays separate from unclipped target colorimetry and does not confer calibration or routing authority. See [appearance contracts](docs/protocol/project.md#optical-reference-construction-studies).
 - Shell and CLI are protocol clients, not owners of geometry or planning logic.
-- Viewport uses display contracts and rendering libraries, never Tauri directly.
+- The workbench viewport uses checked display contracts and rendering libraries, never project or engine authority.
 
-Keep backend, packager, connector interfaces, and verifier as distinct logical modules within manufacturing initially. Separate contracts do not require separate crates. Tauri-specific dependencies stay in the temporary legacy shell; egui/wgpu application dependencies stay in the native workbench. Generated TypeScript must not become a second hand-maintained domain model.
+Keep backend, packager, connector interfaces, and verifier as distinct logical modules within manufacturing initially. Separate contracts do not require separate crates. egui/wgpu application dependencies stay in the native workbench. Generated TypeScript must not become a second hand-maintained domain model.
 
 ## 4. Architectural invariants
 
@@ -156,7 +153,7 @@ At the initial `0.1.0` release gate, decide the supported on-disk compatibility 
 
 ## 5. Rust and implementation patterns
 
-- Prefer explicit types, small modules, ordinary functions, and narrow traits at real service or adapter boundaries. Keep domain logic usable without Tauri.
+- Prefer explicit types, small modules, ordinary functions, and narrow traits at real service or adapter boundaries. Keep domain logic usable without a desktop runtime.
 - Newtypes should distinguish IDs, revisions, units, and frames wherever confusion could invalidate geometry or manufacturing behavior. Keep approximation and tolerance policy explicit.
 - Make ownership, cancellation, and cleanup visible. Keep kernel-specific unsafe code or FFI isolated behind reviewed adapters with documented safety invariants.
 - Avoid avoidable allocations, copies, per-point IPC, and unbounded work in native hot paths. Optimize from measured workloads without weakening correctness.
@@ -177,7 +174,7 @@ Distinguish deterministic normalized-plan comparisons from semantic equivalence 
 
 Progress through evidence gates:
 
-1. **Packaged bootstrap:** reproducible workspaces, contracts, handshake, CLI, diagnostics, CEF packaging, and WebGPU detection on declared platforms.
+1. **Packaged bootstrap:** reproducible workspaces, contracts, handshake, CLI, diagnostics, native packaging, and wgpu admission on declared platforms.
 2. **Geometry and transfer:** frozen valid/adversarial corpus, import/tessellation/section invariants, face picking, bounded transfer, and measured validation of SolidCore's capabilities and limits.
 3. **Recoverable authoring:** editing, save/open, undo/redo, jobs, stale-result rejection, cancellation, and fault-injected recovery.
 4. **Printable MVP:** planar compiler, one backend, independent replay, equivalent UI/CLI plans, and repeated supervised physical prints.

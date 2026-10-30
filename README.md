@@ -25,14 +25,12 @@ A saved job keeps its own copy of the imported CAD model and any relief image, s
 
 Spiling is software-only. Programs are **not machine ready** or physically qualified: printability, grip, collisions, packaged desktop support, and printer execution remain unverified. Windows, macOS, and Linux are intended targets, not certified support claims.
 
-Only some STEP models are supported; general STEP documents and assemblies are not. Tool or material switching and printer execution are not supported today. Some CAD models, and jobs that combine several complex parts, fail current compute or support limits. See [measured manufacturing status and limits](docs/quality/manufacturing-evidence.md) for the exercised envelope.
+Only some STEP models are supported; general STEP documents and assemblies are not. A bounded fixed-dual Marlin software route is available; general tool/material switching and printer execution are not supported. Some CAD models, and jobs that combine several complex parts, fail current compute or support limits. See [measured manufacturing status and limits](docs/quality/manufacturing-evidence.md) for the exercised envelope.
 
-The [native-first DEVELOPMENT geometry decision](docs/adr/ADR005-native-first-development-geometry.md)
-is adopted, not yet activated or operator-qualified. It will rely on the imported
-SolidCore BREP while preserving original STEP identity and finish inputs, without
-independent original-STEP topology/embedding certification. Existing workflows and
-their recorded producer remain the current baseline, not qualification of this
-new material authority.
+The [native-first DEVELOPMENT geometry route](docs/adr/ADR005-native-first-development-geometry.md)
+uses one imported SolidCore BREP with exact producer/tolerance binding and retained
+original STEP identity/provenance/finish inputs. Its qualification is operator-specific;
+read the owning evidence for supported positives and explicit refusals.
 
 ## Experimental installation from source
 
@@ -47,9 +45,16 @@ npm install --global pnpm@10.32.1
 pnpm bootstrap
 ```
 
-The selected frontend is a native Rust egui/wgpu workbench. `pnpm dev:native` builds and opens its project-management increment; 3D display and manufacturing UI are still being ported. `pnpm dev` retains the working CEF frontend until native operator-flow acceptance. See [ADR006](docs/adr/006-native-egui-workbench.md) for the bounded migration.
+`pnpm dev` builds and opens the native Rust egui/wgpu workbench. It includes source
+inspection/picking/sections, process and finish/image authoring, engine Preflight/
+Compile, fresh actual-program replay and exclusive export. `pnpm gallery:native`
+shows the shared Graphite/Paper controls. The browser frontend has been retired.
 
-The repository pins the Rust toolchain and dependencies. The first native build downloads a substantial CEF distribution. See the [development and packaging guide](docs/quality/development.md) for launching the development shell, checks, and experimental packages.
+`pnpm package` builds matching release binaries with source, license and dependency
+notices into a portable archive (plus Debian on Linux). See the [development and
+packaging guide](docs/quality/development.md) for prerequisites, checks and current
+platform/input limits. Windows/macOS packaging and physical-machine qualification
+remain separate gates.
 
 ## Technical documentation
 

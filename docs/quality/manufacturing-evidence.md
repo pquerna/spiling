@@ -65,19 +65,9 @@ separate from the native verifier and physical qualification.
   eligibility and bounded native preparation. Preflight returns a revision-bound
   report without artifact/history mutation. `Admitted` is not native layer, wall,
   bridge or support success; required Compile evidence remains not evaluated.
-- Workbench [`useManufacturing`](../../apps/desktop/src/manufacturing/useManufacturing.ts)
-  owns transient drafts, scoped operation failures and current inspection;
-  [`workflow.ts`](../../apps/desktop/src/manufacturing/workflow.ts) derives the next
-  explicit action without another authority/state machine. Status must match the
-  current project/revision; bundle freshness remains selected-content/session bound,
-  so stale Preflight after Compile does not invalidate fresh bytes. Required input
-  failures stay separate from optional Compile analysis. Read-only snapshots allow
-  Preflight/fresh inspection/export, never Apply or Compile.
-- Desktop [`styles.css`](../../apps/desktop/src/styles.css) bounds the accepted
-  workspace and independently scrolling control panes around one visible native
-  canvas, including narrow native windows. The existing
-  [viewport resize owner](../../packages/viewport/src/index.ts) retains device-bounded
-  drawing-buffer sizing; layout changes do not request geometry or replay again.
+- Native [manufacturing forms](../../apps/workbench/src/app/manufacturing.rs) own transient drafts; [host](../../apps/workbench/src/host/) admits typed engine operations. Project/revision ownership and immutable artifact-input provenance remain distinct. Read-only permits Preflight/fresh inspection/export, never Apply or Compile.
+- [Manufacture](../../apps/workbench/src/manufacture.rs) retrieves checked bundles and fresh independent motion/report capture. Export rechecks session, observed revision, active record/resource and capture before the shared exclusive output transaction commits. History never restores fresh verification authority.
+- Native panels scroll independently around one [wgpu viewport](../../apps/workbench/src/viewport/). Layout/camera/filter changes do not request or regenerate source geometry/replay.
 
 Native geometry work has one fixed, whole-job cumulative 512-million-unit CPU
 envelope, including native coefficient, correspondence and closed-capture work.
@@ -404,7 +394,7 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 Source-bound planar surface color is exercised through the real CLI on the committed box and protected-hole source: one full-height planar face or one/two finite horizontal windows, physical colored skins, shared solid white backing and sparse white core. Two regions retain opposite physical phases at common Z on both native inputs; overlapping backed requests refuse. Compatible adjoining orthogonal faces also construct their shared corner once on both sources, preserve the protected hole, consume equal physical-depth edits and refuse conflicting depths. Shell physical cycles retain white backing/core and produce waste-only tool groups on all-white model layers; both lanes remain supported every layer. A completely white model also retains zero model accounting for the other feeder. Depth/window/phase edits change actual emitted operations; undo/redo and source-absent fresh read-only verification/export retain the captured program and motion. `tools/smoke-surface-color.mjs` resolves returned native face identities, checks region attribution and protected voids, and exercises source/depth/core refusals. The [construction contract](../protocol/manufacturing.md#source-bound-planar-surface-color) owns the finite envelope. This is software construction evidence, not physical color, adhesion or printer qualification.
 
-Retained optical studies apply through typed Core/engine/client/CLI transactions with complete accepted report/selection and explicit two-material evidence/declaration bindings. Queued cancellation and stale revisions preserve the committed project; ACK commits one revision without changing SceneRevision or publishing scene artifacts. Both native source workflows exercise application, physical depth/history edits, changed-pose reassessment and source/palette/study-deleted fresh verification/export. Inspection distinguishes the small requested patch from complete realized side exposure and reuses the existing model with captured evidence; it does not reuse the requested prediction as a printed outcome. Unknown evidence/conditions remain unassessed and backing optics remain unmodelled. The legacy CEF panel supports source-hidden actual replay and catalog metadata tint by decoded tool, plus requested/realized inspection and fresh four-file export. The `surface-color` desktop smoke consumes a CLI-produced recovered project; local hardware evidence does not qualify other GPUs/platforms or physical color.
+Retained optical studies apply through typed Core/engine/client/CLI transactions with complete accepted report/selection and explicit two-material evidence/declaration bindings. Queued cancellation and stale revisions preserve the committed project; ACK commits one revision without changing SceneRevision or publishing scene artifacts. Both native source workflows exercise application, physical depth/history edits, changed-pose reassessment and source/palette/study-deleted fresh verification/export. Inspection distinguishes the small requested patch from complete realized side exposure and reuses the existing model with captured evidence; it does not reuse the requested prediction as a printed outcome. Unknown evidence/conditions remain unassessed and backing optics remain unmodelled. The native Review panel supports source-hidden actual replay and catalog metadata tint by decoded tool, plus requested/realized inspection and fresh four-file export. The native window can consume a CLI-produced recovered project; local hardware evidence does not qualify other GPUs/platforms or physical color.
 
 Current identities are project10/manufacturing11/process3/surface3, source6/planner32,
 emitter11/verifier16 and SPLR6; executable constants and exact native pins remain authoritative.
@@ -479,7 +469,7 @@ root-cause claim. The accepted ordinary/physical-plate reference retains
 alternating XY; authoring another axis does not establish manufacturing support.
 Keep fixed-Y diagnostics visible without expanding this native landing.
 
-The default native box exercises the actual local AMD/CEF production panel:
+The native operator acceptance uses the actual local Vulkan workbench:
 physical native-face picking, Compile, fresh actual-program report/preview,
 export/save and source-deleted fresh read-only reopen. The accepted alternating-XY
 housing/physical-plate operator also exercises consumed maximum-width

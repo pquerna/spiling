@@ -118,9 +118,21 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
     );
     notice(
         ui,
-        "No 3D display in this increment",
-        "Native source rendering and source-face picking are the next workbench increment. Project and engine information remain inspectable.",
+        "Fresh verification required",
+        "Project edits invalidate the captured review. Verify the current emitted program before exporting.",
         tokens,
+    );
+    let id = ui.make_persistent_id("gallery-dimension");
+    let mut value = ui.data_mut(|d| d.get_temp::<f64>(id).unwrap_or(0.25));
+    number(ui, "Layer height (mm)", &mut value, 0.01);
+    ui.data_mut(|d| d.insert_temp(id, value));
+    ui.add_enabled_ui(false, |ui| {
+        number(ui, "Inherited (mm)", &mut 0.4, 0.01);
+    });
+    ui.label("Inherited from definition · occurrence override · mixed values");
+    ui.colored_label(
+        tokens.warning,
+        "Draft conflict — reload current values before Apply",
     );
     ui.colored_label(
         tokens.warning,
@@ -131,7 +143,8 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
 /// A local draft field; project mutation occurs only on its form's explicit Apply.
 pub fn number(ui: &mut Ui, label: &str, value: &mut f64, speed: f64) {
     ui.horizontal_wrapped(|ui| {
-        ui.label(label);
-        ui.add(egui::DragValue::new(value).speed(speed));
+        let label = ui.label(label);
+        ui.add(egui::DragValue::new(value).speed(speed))
+            .labelled_by(label.id);
     });
 }

@@ -4,7 +4,16 @@
  * Licensed under the Open Software License version 3.0
  */
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+  chmod,
+  symlink,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve, delimiter } from "node:path";
@@ -12,13 +21,11 @@ import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const desktop = join(root, "apps", "desktop");
 const binSuffix = process.platform === "win32" ? ".exe" : "";
 const cargoTarget = resolve(root, process.env.CARGO_TARGET_DIR ?? "target");
 const environment = {
   ...process.env,
   PATH: `${join(homedir(), ".cargo", "bin")}${delimiter}${process.env.PATH}`,
-  CEF_PATH: process.env.CEF_PATH ?? join(root, ".cache", "cef"),
   CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS ?? "1",
   RUST_TEST_THREADS: process.env.RUST_TEST_THREADS ?? "1",
   RAYON_NUM_THREADS: process.env.RAYON_NUM_THREADS ?? "1",
@@ -93,17 +100,7 @@ async function stageEngine(release = false) {
     "spiling-cli",
     ...(release ? ["--release"] : []),
   ]);
-  const triple = await hostTriple();
-  const source = join(cargoTarget, release ? "release" : "debug", `spiling-engine${binSuffix}`);
-  const destination = join(
-    desktop,
-    "src-tauri",
-    "binaries",
-    `spiling-engine-${triple}${binSuffix}`,
-  );
-  await mkdir(dirname(destination), { recursive: true });
-  await copyFile(source, destination);
-  return source;
+  return join(cargoTarget, release ? "release" : "debug", `spiling-engine${binSuffix}`);
 }
 
 async function copyNotices(packageRoot, output) {
@@ -111,7 +108,10 @@ async function copyNotices(packageRoot, output) {
   // License texts are copied from the resolved dependency, never relabeled.
   const entries = await readdir(packageRoot, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.isFile() && /^(licen[sc]e|copying|notice|authors)([._-].*)?$/i.test(entry.name)) {
+    if (
+      entry.isFile() &&
+      /^(licen[sc]e|copying|notice|authors|attribution)([._-].*)?$/i.test(entry.name)
+    ) {
       await copyFile(join(packageRoot, entry.name), join(output, entry.name));
     }
     if (entry.isDirectory() && /^(licenses?|notices?)$/i.test(entry.name)) {
@@ -142,38 +142,6 @@ async function copyNoticeDirectory(source, destination) {
   }
 }
 
-async function cefArchiveRecords(directory = environment.CEF_PATH, depth = 0) {
-  if (!existsSync(directory) || depth > 4) return [];
-  const records = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) records.push(...(await cefArchiveRecords(path, depth + 1)));
-    else if (entry.isFile() && entry.name === "archive.json") {
-      const record = JSON.parse(await readFile(path, "utf8"));
-      const license = join(directory, "LICENSE.txt");
-      if (!existsSync(license)) {
-        // Stop after the requested member instead of decompressing the entire
-        // CEF distribution. Linux uses GNU tar; Windows/macOS use BSD tar.
-        await run("tar", [
-          "-xf",
-          join(dirname(directory), record.name),
-          process.platform === "linux" ? "--occurrence=1" : "--fast-read",
-          "--strip-components=1",
-          "-C",
-          directory,
-          `${record.name.replace(/\.tar\.bz2$/, "")}/LICENSE.txt`,
-        ]);
-      }
-      const notices = join(root, ".cache", "release", "third-party", "cef", record.name);
-      await mkdir(notices, { recursive: true });
-      await copyFile(license, join(notices, "LICENSE.txt"));
-      await copyFile(join(directory, "CREDITS.html"), join(notices, "CREDITS.html"));
-      records.push(record);
-    }
-  }
-  return records;
-}
-
 async function provenance() {
   const directory = join(root, ".cache", "release");
   await rm(directory, { recursive: true, force: true });
@@ -182,8 +150,20 @@ async function provenance() {
     await run("cargo", ["metadata", "--locked", "--format-version", "1"], { capture: true }),
   );
   const workspacePackages = new Set(metadata.workspace_members);
+  // Collect the installed binaries' normal/build closure, including target-specific
+  // dependencies. Development-only dependencies are not shipped.
+  const nodes = new Map(metadata.resolve.nodes.map((node) => [node.id, node]));
+  const closure = new Set();
+  function visit(id) {
+    if (closure.has(id)) return;
+    closure.add(id);
+    for (const dep of nodes.get(id)?.deps ?? [])
+      if (dep.dep_kinds.some((kind) => kind.kind !== "dev")) visit(dep.pkg);
+  }
+  for (const pkg of metadata.packages)
+    if (["spiling-engine", "spiling-workbench", "spiling-cli"].includes(pkg.name)) visit(pkg.id);
   const rustPackages = metadata.packages.filter(
-    (item) => item.source !== null || !workspacePackages.has(item.id),
+    (item) => closure.has(item.id) && (item.source !== null || !workspacePackages.has(item.id)),
   );
   const nodeLicenses = JSON.parse(
     await run("pnpm", ["licenses", "list", "--json"], { capture: true }),
@@ -236,6 +216,12 @@ async function provenance() {
     join(root, "apps", "workbench", "licenses", "egui"),
     join(directory, "third-party", "source", "egui-0.37.0"),
   );
+  const vendorNotices = join(directory, "third-party", "source", "solidcraft-geometry-step");
+  await copyNotices(join(root, "vendor", "solidcraft"), vendorNotices);
+  await copyFile(
+    join(root, "vendor", "solidcraft", "UPSTREAM.toml"),
+    join(vendorNotices, "UPSTREAM.toml"),
+  );
   const commit = await run("git", ["rev-parse", "HEAD"], { capture: true });
   const dirty = (await run("git", ["status", "--porcelain"], { capture: true })).length > 0;
   const lockHashes = {};
@@ -270,7 +256,6 @@ async function provenance() {
       license,
       repository,
     })),
-    cefDistributions: await cefArchiveRecords(),
     sourceComponents,
   };
   await writeFile(join(directory, "provenance.json"), JSON.stringify(record, null, 2) + "\n");
@@ -279,30 +264,165 @@ async function provenance() {
   console.error(`Collected dependency notices in ${directory}`);
 }
 
-async function prepare(release = false) {
-  await contracts();
-  const enginePath = await stageEngine(release);
-  await provenance();
-  return enginePath;
+async function nativeBuild(release = false) {
+  await run("cargo", [
+    "build",
+    "--locked",
+    "-p",
+    "spiling-engine",
+    "-p",
+    "spiling-workbench",
+    "-p",
+    "spiling-cli",
+    ...(release ? ["--release"] : []),
+  ]);
 }
 
 async function bootstrap() {
   if (Number(process.versions.node.split(".")[0]) !== 24)
     throw new Error("Spiling requires Node 24.x");
-  const pnpmVersion = await run("pnpm", ["--version"], { capture: true });
-  if (pnpmVersion !== "10.32.1")
+  if ((await run("pnpm", ["--version"], { capture: true })) !== "10.32.1")
     throw new Error("Install pnpm 10.32.1: npm install --global pnpm@10.32.1");
   await run("rustup", ["show", "active-toolchain"]);
-  if (process.platform === "linux") await run("pkg-config", ["--atleast-version=4.6", "gtk4"]);
   await run("pnpm", ["install", "--frozen-lockfile"]);
   await run("cargo", ["fetch", "--locked"]);
-  await prepare();
-  // Compile the actual native runtime here: its pinned CEF build utility obtains
-  // the matching native distribution. A successful Rust-only bootstrap is not
-  // enough to establish that CEF can be linked on the host.
-  await run("pnpm", ["--filter", "@spiling/desktop", "build"]);
-  await run("cargo", ["build", "--locked", "-p", "spiling-desktop"]);
+  await contracts(true);
+  await nativeBuild();
+}
+
+async function packageNative() {
+  // A package always has an exactly recoverable source tree. Never silently
+  // attribute dirty binaries to HEAD or archive private/untracked workspace data.
+  if (await run("git", ["status", "--porcelain"], { capture: true }))
+    throw new Error("Commit the package source first; packaging requires a clean worktree");
+  await contracts(true);
+  await nativeBuild(true);
   await provenance();
+  const triple = await hostTriple();
+  const name = `spiling-0.1.0-${triple}`;
+  const output = join(cargoTarget, "release", "bundle");
+  const stage = join(output, name);
+  await rm(stage, { recursive: true, force: true });
+  await mkdir(stage, { recursive: true });
+  const app = process.platform === "darwin" ? join(stage, "Spiling.app", "Contents") : stage;
+  const binaries = process.platform === "darwin" ? join(app, "MacOS") : app;
+  await mkdir(binaries, { recursive: true });
+  for (const bin of ["spiling-workbench", "spiling-engine", "spiling-cli"]) {
+    const target = join(binaries, `${bin}${binSuffix}`);
+    await copyFile(join(cargoTarget, "release", `${bin}${binSuffix}`), target);
+    if (process.platform !== "win32") await chmod(target, 0o755);
+  }
+  const resources = process.platform === "darwin" ? join(app, "Resources") : app;
+  await copyNoticeDirectory(join(root, ".cache", "release"), join(resources, "notices"));
+  await copyNoticeDirectory(join(root, "apps", "workbench", "icons"), join(resources, "icons"));
+  await copyFile(
+    join(root, "docs", "quality", "SOURCE.md"),
+    join(resources, "notices", "SOURCE.md"),
+  );
+  await run("git", [
+    "archive",
+    "--format=tar.gz",
+    "--prefix=spiling-source/",
+    `--output=${join(resources, "notices", "source.tar.gz")}`,
+    "HEAD",
+  ]);
+  if (process.platform === "darwin") {
+    await writeFile(
+      join(app, "Info.plist"),
+      `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>CFBundleExecutable</key><string>spiling-workbench</string><key>CFBundleIdentifier</key><string>org.spiling.workbench</string><key>CFBundleName</key><string>Spiling</string><key>CFBundleVersion</key><string>0.1.0</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIconFile</key><string>icon.icns</string><key>NSHighResolutionCapable</key><true/></dict></plist>
+`,
+    );
+    await copyFile(join(resources, "icons", "icon.icns"), join(resources, "icon.icns"));
+  }
+  await run("tar", ["-czf", join(output, `${name}.tar.gz`), "-C", output, name]);
+  if (process.platform === "linux") {
+    const deb = join(output, `${name}-deb`);
+    await rm(deb, { recursive: true, force: true });
+    await copyNoticeDirectory(stage, join(deb, "opt", "spiling"));
+    for (const bin of ["spiling-workbench", "spiling-engine", "spiling-cli"])
+      await chmod(join(deb, "opt", "spiling", bin), 0o755);
+    await mkdir(join(deb, "DEBIAN"), { recursive: true });
+    const arch = await run("dpkg", ["--print-architecture"], { capture: true });
+    const depsRoot = join(output, `${name}-dependencies`);
+    await mkdir(join(depsRoot, "debian"), { recursive: true });
+    await writeFile(
+      join(depsRoot, "debian", "control"),
+      `Source: spiling
+Section: graphics
+Priority: optional
+Maintainer: Spiling contributors <spiling@pquerna.com>
+
+Package: spiling
+Architecture: any
+Description: Experimental native workbench
+`,
+    );
+    const linked = await run(
+      "dpkg-shlibdeps",
+      [
+        "-O",
+        ...["spiling-workbench", "spiling-engine", "spiling-cli"].map(
+          (bin) => `-e${join(deb, "opt", "spiling", bin)}`,
+        ),
+      ],
+      { cwd: depsRoot, capture: true },
+    );
+    const linkedDependencies = /^shlibs:Depends=(.+)$/m.exec(linked)?.[1];
+    if (!linkedDependencies)
+      throw new Error("dpkg-shlibdeps did not return native ABI dependencies");
+    const dependencies = linkedDependencies.split(",").map((value) => value.trim());
+    for (const library of [
+      "libwayland-client0",
+      "libx11-6",
+      "libxkbcommon0",
+      "libvulkan1",
+      "xdg-desktop-portal",
+    ])
+      if (!dependencies.some((value) => value.split(/[ (]/)[0] === library))
+        dependencies.push(library);
+    await rm(depsRoot, { recursive: true, force: true });
+    await writeFile(
+      join(deb, "DEBIAN", "control"),
+      `Package: spiling
+Version: 0.1.0
+Architecture: ${arch}
+Maintainer: Spiling contributors <spiling@pquerna.com>
+Section: graphics
+Priority: optional
+Depends: ${dependencies.join(", ")}
+Recommends: xdg-desktop-portal-gtk
+Description: Native BREP manufacturing workbench (experimental, not machine ready)
+License: OSL-3.0
+`,
+    );
+    await mkdir(join(deb, "usr", "bin"), { recursive: true });
+    await symlink("/opt/spiling/spiling-workbench", join(deb, "usr", "bin", "spiling"));
+    const applications = join(deb, "usr", "share", "applications");
+    await mkdir(applications, { recursive: true });
+    await writeFile(
+      join(applications, "org.spiling.Workbench.desktop"),
+      `[Desktop Entry]
+Type=Application
+Name=Spiling
+Comment=Experimental native BREP manufacturing workbench
+Exec=/opt/spiling/spiling-workbench
+Icon=/opt/spiling/icons/icon.png
+Categories=Graphics;Engineering;
+Terminal=false
+`,
+    );
+    await run("desktop-file-validate", [join(applications, "org.spiling.Workbench.desktop")]);
+    await run("dpkg-deb", [
+      "--root-owner-group",
+      "--threads-max=1",
+      "--build",
+      deb,
+      join(output, `${name}.deb`),
+    ]);
+  }
+  console.error(`Native distribution: ${output}`);
 }
 
 async function check() {
@@ -367,18 +487,18 @@ async function main() {
       await provenance();
       break;
     case "build:native":
-      await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-workbench"]);
+      await nativeBuild();
       break;
     case "dev":
     case "dev:native":
-      await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-workbench"]);
-      await run(join(cargoTarget, "debug", `spiling-workbench${binSuffix}`), []);
+      await nativeBuild();
+      await run(join(cargoTarget, "debug", `spiling-workbench${binSuffix}`), process.argv.slice(3));
       break;
     case "gallery:native":
       await run("cargo", ["run", "--locked", "-p", "spiling-workbench", "--bin", "gallery"]);
       break;
     case "test:native":
-      await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-workbench"]);
+      await nativeBuild();
       await run("cargo", ["test", "--locked", "-p", "spiling-workbench", "--lib"]);
       await run(
         "cargo",
@@ -397,31 +517,13 @@ async function main() {
         },
       );
       break;
-    case "dev:legacy": {
-      const engine = await prepare();
-      await run("pnpm", ["exec", "tauri", "dev"], {
-        cwd: desktop,
-        env: { SPILING_ENGINE_PATH: engine },
-      });
+    case "build":
+      await contracts(true);
+      await nativeBuild();
       break;
-    }
-    case "build": {
-      await prepare();
-      await run("pnpm", ["--filter", "@spiling/desktop", "build"]);
-      await run("cargo", ["build", "--locked", "-p", "spiling-desktop"]);
+    case "package":
+      await packageNative();
       break;
-    }
-    case "package": {
-      await prepare(true);
-      const bundles =
-        process.platform === "linux" ? "deb" : process.platform === "darwin" ? "app" : "nsis";
-      await run("pnpm", ["exec", "tauri", "build", "--no-bundle"], { cwd: desktop });
-      // The first native build downloads CEF. Collect its notices before bundling,
-      // without a second debug/release compilation solely to warm the cache.
-      await provenance();
-      await run("pnpm", ["exec", "tauri", "bundle", "--bundles", bundles], { cwd: desktop });
-      break;
-    }
     case "check":
       await check();
       break;
@@ -437,23 +539,13 @@ async function main() {
       await run("cargo", ["test", "--locked", "--workspace"]);
       await cliSmoke();
       await run("pnpm", ["--filter", "@spiling/protocol", "test"]);
-      await run("node", [
-        "--import",
-        "tsx",
-        "--test",
-        "apps/desktop/test/manufacturing-state.test.mjs",
-        "packages/viewport/test/replay-materials.test.mjs",
-        "tools/gcode-parity/test.mjs",
-      ]);
+      await run("node", ["--import", "tsx", "--test", "tools/gcode-parity/test.mjs"]);
       break;
     case "smoke:cli":
       await cliSmoke();
       break;
     case "bench:smoke":
       await benchmark();
-      break;
-    case "smoke:desktop":
-      await run("node", ["tools/smoke-desktop.mjs", ...process.argv.slice(3)]);
       break;
     default:
       throw new Error(`Unknown command ${command ?? "(missing)"}`);

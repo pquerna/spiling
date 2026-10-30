@@ -13,15 +13,6 @@ pub struct KernelIdentity {
     pub revision: String,
 }
 
-/// Opaque shell-selected source; actual native paths remain private to the shell.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SelectedSource {
-    pub token: String,
-    pub session_id: SessionId,
-    pub label: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GeometryCommand {

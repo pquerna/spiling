@@ -9,44 +9,46 @@ Licensed under the Open Software License version 3.0
 ## Prerequisites
 
 - Node24.x, pnpm10.32.1, and the Rust toolchain/components in `rust-toolchain.toml`.
-- Native C/C++ tools: MSVC on Windows, Xcode command-line tools on macOS, GTK4/CEF dependencies on Linux.
-- Matching pinned CEF distribution in `.cache/cef` or an explicit `CEF_PATH`. Cargo/pnpm lockfiles and shell manifests own versions; do not substitute a system webview or arbitrary CEF archive.
+- Native C/C++ tools: MSVC on Windows, Xcode command-line tools on macOS, GCC/Clang and pkg-config on Linux.
+- Vulkan/Metal/DX12 graphics, an OS window session and native dialog services.
 
 Typical Ubuntu native dependencies:
 
 ```sh
-sudo apt-get install build-essential pkg-config cmake ninja-build libgtk-4-dev \
-  libx11-dev libxrandr-dev libxcomposite-dev libxdamage-dev libnss3-dev \
-  libasound2-dev libgbm-dev libsecret-1-dev libssl-dev patchelf desktop-file-utils
+sudo apt-get install build-essential pkg-config cmake ninja-build libssl-dev \
+  libx11-dev libxkbcommon-dev libwayland-dev libvulkan1 \
+  xdg-desktop-portal xdg-desktop-portal-gtk desktop-file-utils
 pnpm bootstrap
 pnpm dev
 ```
 
-Legacy macOS CEF development must use the Tauri CLI so CEF's application bundle/helpers
-launch correctly; a bare Rust executable is not equivalent.
+Linux needs a working XDG desktop portal/file chooser backend. The workbench uses
+X11 or Wayland directly and wgpu; no browser runtime, web server or GTK widget
+build is required. A suitable Vulkan driver must be installed separately.
 
 [`tools/run.mjs`](../../tools/run.mjs) owns root commands:
 
-| Command                         | Purpose                                                                  |
-| ------------------------------- | ------------------------------------------------------------------------ |
-| `pnpm bootstrap`                | Locked install, generation and integrated native/frontend build          |
-| `pnpm dev`                      | Native CEF development workbench                                         |
-| `pnpm build`                    | Generate contracts → build/stage engine and CLI → frontend → desktop     |
-| `pnpm contracts`                | Rust-owned TypeScript generation; `--check` rejects drift                |
-| `pnpm check`                    | Formatting, Clippy, TypeScript and generated-contract checks             |
-| `pnpm test`                     | Workspace behavior and real CLI/binary interoperability                  |
-| `pnpm smoke:cli`                | Actual child startup, operations, transfer and reap                      |
-| `pnpm bench:smoke`              | Diagnostic process/transfer benchmark, not geometry performance          |
-| `pnpm compare:slicers`          | Native/reference commanded G-code comparison; see [contract](gcode-parity.md) |
-| `pnpm test:parity`              | Independent observer fault and accounting tests                         |
-| `pnpm package`                  | Current-platform package with sidecar, CEF and notices                   |
-| `node tools/run.mjs provenance` | Collect dependency provenance/notices without rebuilding the application |
+| Command                           | Purpose                                                                                  |
+| --------------------------------- | ---------------------------------------------------------------------------------------- |
+| `pnpm bootstrap`                  | Locked install/fetch, contract drift check and matching native build                     |
+| `pnpm dev`, `pnpm dev:native`     | Build and launch the native workbench                                                    |
+| `pnpm build`, `pnpm build:native` | Build engine, workbench and CLI together                                                 |
+| `pnpm gallery:native`             | Production controls/themes without an engine                                             |
+| `pnpm test:native`                | Host checks and sequential actual-child operator regressions                             |
+| `pnpm contracts --check`          | Reject Rust-derived TypeScript and packed-golden drift                                   |
+| `pnpm check`                      | Formatting, Clippy, TypeScript and contract checks                                       |
+| `pnpm test`                       | Workspace behavior, real CLI and packed interoperability                                 |
+| `pnpm smoke:cli`                  | Actual child startup, operations, transfer and reap                                      |
+| `pnpm bench:smoke`                | Diagnostic process/transfer benchmark, not geometry performance                          |
+| `pnpm compare:slicers`            | Independent commanded G-code comparison; see [contract](gcode-parity.md)                 |
+| `pnpm test:parity`                | Independent observer fault/accounting tests                                              |
+| `pnpm package`                    | Clean-source release binaries, source/notices, portable archive and Linux Debian package |
+| `node tools/run.mjs provenance`   | Collect native dependency and data-tool provenance/notices                               |
 
-**Build before running real surfaces.** Direct desktop Cargo builds can overwrite
-a fresh engine with a stale staged sidecar. Do not build while a desktop smoke
-is live. Reuse one disk-backed Cargo target/profile; development/test profiles
-already disable debug information and incremental compilation. Selected numerical
-crates are optimized independently of the desktop stack.
+Build the matching engine and workbench before real-surface acceptance. Do not
+replace binaries while their window/engine is live. Reuse one disk-backed target
+and honor `CARGO_TARGET_DIR`; development/test profiles disable debug information
+and incremental compilation. Selected numerical crates are optimized separately.
 
 ## Native egui workbench
 
@@ -63,10 +65,10 @@ H1 decisions, physical plate/region accounting, native coverage, surface exposur
 optical reassessment and declared tool tints. Study loads retained complete optical
 reports and explicitly binds accepted selections to existing loaded declarations
 and source constructions. Palette/study authoring remains available through CLI.
-`pnpm dev:legacy` remains only until the native packaging/retirement cut.
+The legacy browser frontend and its build/runtime paths have been removed.
 
 ```sh
-pnpm build:native     # locked matching engine and window, no CEF or frontend build
+pnpm build:native     # locked matching engine, CLI and window
 pnpm dev              # build, then run the native window (dev:native is identical)
 pnpm gallery:native   # production theme/components, illustrative data, no engine
 pnpm test:native      # matching binaries, host checks, sequential actual-child checks
@@ -74,8 +76,7 @@ pnpm test:native      # matching binaries, host checks, sequential actual-child 
 
 The native route needs Rust/native build tools, Vulkan/Metal/DX12 graphics and
 OS window/dialog services. On Linux, X11 or Wayland and a working XDG desktop
-portal/file chooser are required. GTK4/CEF prerequisites above belong to the
-legacy route. These commands honor `CARGO_TARGET_DIR` and resource overrides.
+portal/file chooser are required. These commands honor `CARGO_TARGET_DIR` and resource overrides.
 Use a separate target when concurrent engine work would replace workspace
 artifacts; do not build into another live smoke's target. The installed lookup
 expects `spiling-engine` beside `spiling-workbench`. Debug builds alone allow an
@@ -144,8 +145,7 @@ is conservatively retained until the engine session ends.
 
 The `inspection` Cargo feature enables upstream development inspection tooling;
 it is off by default and must stay off in distributions. It is not a second
-mutation API or qualification of native dialogs. Upstream default fonts do not cover all CJK labels. Native packaging and additional
-font/input/assistive combinations remain separately unqualified.
+mutation API or qualification of native dialogs. Upstream default fonts do not cover all CJK labels. Additional font/input/assistive combinations remain separately unqualified.
 
 ## Material authority and qualification
 
@@ -330,7 +330,7 @@ paths. Read-only inspection forbids mutation but permits native queries and fres
 bundle verification. Recovery explicitly selects a previous committed checkpoint;
 never blindly retry `save_uncertain`.
 
-Geometry-free palette and optical studies use the same engine/CLI. [Project appearance contracts](../protocol/project.md#optical-reference-construction-studies) own the strict JSON example and source-absent reopen procedure. Build engine/CLI, then run the selected real-child gates without starting CEF or compiling geometry:
+Geometry-free palette and optical studies use the same engine/CLI. [Project appearance contracts](../protocol/project.md#optical-reference-construction-studies) own the strict JSON example and source-absent reopen procedure. Build engine/CLI, then run the selected real-child gates without starting the native window or compiling geometry:
 
 ```sh
 SPILING_TEST_ENGINE="$ENGINE" cargo test --locked -p spiling-cli --test project optical_study_source_deleted_reopen_and_revision_owned_acceptance -- --ignored --exact --test-threads=1
@@ -394,7 +394,7 @@ that external copy, then repeat fresh read-only inspection/export to new names.
 Use `project edit --intent CHANGED_INTENT --undo --redo --undo --verify --save` for
 source/material route history; the restored input must restore its original
 manufacturing identity. `--replay-out` belongs to create/inspect, not edit. The
-existing CEF full-intent/replay consumer uses the same saved job and decoded bytes;
+native full-intent/replay consumer uses the same saved job and decoded bytes;
 it does not recolor source meshes or simulate physical filament appearance.
 
 For executable whole-occurrence physical cycles, substitute
@@ -420,16 +420,16 @@ The runner honors `CARGO_TARGET_DIR`, uses fresh owned project/source copies and
 
 The `study` cases retain and reopen an accepted optical selection, refuse an incorrect evidence binding, apply through the typed native operation, and compare the requested 0.15 mm exposure with the actual 8 mm construction. Captured evidence and fresh reassessment survive depth/history/pose edits and deletion of external STEP/palette/study files. Synthetic `fixtures/appearance/surface-color.palette.json` is declared catalog data, not measured filament. `provenance.json.inspection.surface_color` retains the fresh geometry/optical result.
 
-For local WebGPU inspection, consume the saved project produced by that CLI runner:
-
-```sh
-SPILING_ENGINE_PATH="$ENGINE" node tools/smoke-desktop.mjs \
-  --executable "$DESKTOP" --scenario surface-color \
-  --surface-color-project "$CLI_OUTPUT/box-mm-study.spiling" \
-  --require-hardware-gpu --evidence-directory "$NEW_EVIDENCE_DIRECTORY"
-```
-
-The scenario opens the project read-only, verifies actual motion, hides source/travel, switches catalog-material/role views without changing geometry, checks requested/realized exposure, exports fresh provenance and closes the engine. Its display/session prerequisites match the actual desktop surface procedure below. Study application is a CLI/native service; the new egui project workbench does not yet provide manufacturing controls.
+For native GPU inspection, launch `spiling-workbench --read-only --open
+CLI_OUTPUT/box-mm-study.spiling` in the real graphical session. Review → Fresh
+Verify and load motion retrieves the independent program. Hide Source/Travel,
+inspect tool/role and requested/realized exposure, then exclusively export and
+close/reap. Study → Load retained reference report exposes retained selection and
+explicit declaration bindings. Changing a retained selection requires Recompare
+current study in the current engine session before Accept; loading a retained
+report alone does not admit a new selection. Already accepted selections can be
+applied with explicit current material/construction bindings. Palette/study creation remains CLI; native Study
+application is a typed Core transaction, never a local optical model.
 
 `apps/engine/src/geometry/bed_pose.rs` prepares one immutable native source for
 the three directional material-support queries. Retained native domains and
@@ -459,82 +459,52 @@ Gray8 data, not displacement. Compile and fresh replay show manufactured paths. 
 contracts live in [manufacturing protocol](../protocol/manufacturing.md),
 [rib ADR](../adr/002-cylindrical-grip-ribs.md) and [image ADR](../adr/003-spatial-image-relief.md).
 
-## Actual desktop surface
+## Input and actual-window review
 
-Use a real graphical session with its display, authorization and session bus.
-Normal startup requires offline license assent and WebGPU before spawning the
-engine. For a fresh debug build:
+The native procedures above use the production window and parented OS pickers.
+`Ctrl/Cmd+K` opens searchable commands; Project/Edit/Manufacturing menus and the
+palette share the same typed dispatcher and disabled reasons. Text fields retain
+text undo and IME ownership. Tab reaches controls and the canvas; with the canvas
+focused, arrows orbit, Shift+arrows pan, plus/minus zoom, F fits, 1 selects Top and
+0 Isometric. The model tree's native face list is the keyboard picking alternative.
+Narrow windows show either Models or the inspector beside the canvas; the Models
+toggle switches panes. UI layout/camera changes never fetch or mutate geometry.
 
-```sh
-SPILING_ENGINE_PATH="$ENGINE" node tools/smoke-desktop.mjs \
-  --executable "$PWD/target/debug/spiling-desktop" --scenario manufacturing \
-  --require-hardware-gpu --port 9222
-SPILING_ENGINE_PATH="$ENGINE" node tools/smoke-desktop.mjs \
-  --executable "$PWD/target/debug/spiling-desktop" --scenario geometry \
-  --scene fixtures/geometry/scenes/realistic-native.scene.json --port 9222
-```
-
-The manufacturing runner exercises intent/placement/history, Compile, actual-byte
-report/motion, cancellation, export, source-independent reopen and child cleanup.
-Terminal Compile refusal fails the runner immediately with the native diagnostic;
-the observation deadline bounds pending work, not a wait after a known failure.
-Geometry clicks target visible viewport interiors from the captured rendered
-surface, then require a real native face inspection from physical pointer events.
-A missed sparse coordinate grid is not evidence that production picking failed.
-`--evidence-directory NEW_DIRECTORY` retains screenshots and failure state;
-native section/query refusal remains independent of a successful pick.
-
-`--manufacturing-source RELATIVE_STEP` selects `housing-ordinary.intent.json`
-for the rounded-housing and ribbed-bracket references; other sources retain the
-runner's explicit complete intent. Refused geometry never becomes success.
-The ordinary reference uses the same0.10 mm physical schedule/process with fill
-and top skin both AlternatingXY. For the housing zone/plate journey, compile the
-uniform0.25 job before authoring whole-owned0.60 and lower source box
-`[-1,-1,-1]..[25,19,5.03]` at0.20. The final `--process-set-box` token
-`horizontal-diaphragm:0.23` explicitly permits the centered0.23 mm permanent
-plate. Source-Z5.03 is not world height; the captured pose determines its actual
-slab. `--process-diaphragm` with the named-source hardware smoke uses this ordinary
-profile and exercises lower-density edit/history/recompile, source-hidden actual
-skin joints/annular plate, slab/material inspection and unrepresentable-thickness
-refusal, then pose/history/save/source-delete/fresh read-only replay/export.
-
-`housing-h1-fine.intent.json` and `housing-h1-combined.intent.json` remain separate
-fixed-X XY-separator controls; alternating XY separator construction is explicitly
-unsupported. Their genuine coarse positive control is not the ordinary default.
-The fixed-X whole-width plate control can truthfully retain every band fine under
-CombineEligible because its actual parallel gap exceeds the10 mm bridge limit.
-Do not compare different axes as an optimization or force coarse deposition.
-The ordinary Fine housing/plate makes no coarse-success claim. Any changed axis or
-CombineEligible request still has its own native/actual-support obligations.
-Plate Compile requires captured full-height strong native inner-material authority;
-invariant metadata alone is not admission, and unsupported plate/upper attachment
-cannot silently acquire temporary scaffolding.
-Geometry exercises shared definitions, native picking/sections and transfer lifetime.
-`surface-finish`, `cylindrical-finish`, `image-relief` and `image-relief-planar` exercise
-their corresponding authoring/Compile/replay flows. `project-bridge` bypasses GPU
-admission to exercise native storage/bridge behavior, not visible/pickable acceptance.
-
-Headless-only diagnostic attachment is explicit, not hardware qualification:
-
-```sh
-SPILING_ENGINE_PATH="$ENGINE" SPILING_CEF_UNSANDBOXED=1 xvfb-run -a \
-  node tools/smoke-desktop.mjs --executable "$PWD/target/debug/spiling-desktop" \
-  --scenario manufacturing --diagnostic-no-gpu --port 9222
-```
-
-Never ship diagnostic overrides as defaults. `SPILING_CEF_DEBUG_PORT` enables a
-privileged local debugging endpoint; it is normally off. Debug fixture admission
-uses confined native tokens, not renderer filesystem access. [Runtime boundaries](B0-evidence.md)
-cover CEF loader, trusted desktop isolation and GPU fallback. Linux native dialogs
-require a working xdg-desktop-portal backend; bridge tests do not exercise dialogs.
+Choose Graphite/Paper in Help. Exercise narrow/wide windows, pane resize, clipboard, keyboard
+commands and numeric edits. Cancel native pickers and dirty replacement, then
+verify focus and unchanged project identity. Verify save/open/export under owned
+Unicode paths and a fresh user preference root. Native X11, Wayland, Windows and
+macOS input/assistive stacks require separate evidence. Default fonts do not cover
+all CJK glyphs. AccessKit support is enabled, but full IME, mixed-direction text,
+screen-reader and mixed-DPI behavior remain unqualified.
 
 ## Packaging, CI and recording results
 
-`pnpm package` selects Debian, macOS `.app` or Windows NSIS. It builds release once,
-collects native notices, then bundles existing binaries under `target/release/bundle/`.
-Installed CEF Debian layout resolves the sidecar from the installation-prefix `bin`;
-other packages resolve it adjacent to the actual executable. A debug engine override
-is not an installed-path fallback.
+`pnpm package` refuses a dirty worktree, checks contract drift, builds release
+engine/workbench/CLI once with default features (inspection off), and collects
+notices. `CARGO_TARGET_DIR/release/bundle/` contains a target-named portable
+`.tar.gz`; Linux additionally gets a `.deb`. macOS uses a `.app` inside the archive;
+Windows gets adjacent `.exe` files. Windows/macOS builds, signing, notarization,
+installers, associations and upgrade behavior are not qualified by Linux evidence.
+
+Portable Linux/Windows binaries are adjacent; macOS binaries share `Contents/MacOS`.
+The engine is resolved relative to the actual workbench executable, never cwd/PATH.
+Linux Debian installs the same layout in `/opt/spiling`, with a `spiling` launcher
+and desktop entry. The package does not modify user projects/preferences on removal.
+Do not infer ABI portability from a successful build: the Debian dependency floor
+and supported host/driver must be checked against the actual build environment.
+
+Every layout carries original icon/font/dependency notices, provenance, the full
+OSL license and an exact tracked-source archive. Native offline license assent
+precedes engine startup. Source archives contain the committed public tree only;
+private/untracked data are excluded. Publish the recorded commit before distributing.
+
+For package acceptance, extract into an owned directory, use fresh XDG app-data/
+config roots (or the platform equivalent), launch the packaged executable from
+another cwd without an engine override, accept the license, open a saved project,
+freshly verify/load replay and export. Close and observe the adjacent child exit.
+Inspect archive and Debian contents/permissions/dependencies, install/launch/remove
+on a disposable supported host before claiming system-install or upgrade coverage.
 
 Automatic remote CI is disabled for pushes and pull requests. Native platform
 packaging remains available only through explicit workflow dispatch. Run affected

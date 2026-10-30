@@ -29,18 +29,18 @@ Non-goals: a general CAD editor/healer; arbitrary nonmanifold mesh repair; alter
 
 Current runtime dependency identity is owned by the SolidCore/solidcore-mesh and SolidCraft declarations in [Cargo.toml](../../Cargo.toml), their lockfile Git sources and `crates/geometry::KERNEL_REVISION`. Both SolidCore packages must share that exact published revision. The Monstertruck family table and links below describe the historical `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e` design baseline, not current SolidCore admission or a runtime fallback. Pins establish provenance, not operation acceptance. [Geometry evidence](../quality/geometry-evidence.md) separates exercised producers and remaining limits.
 
-| Family | Kernel path at the design baseline, from source inspection | Pre-cutover Spiling restriction | Work identified by the design |
-| --- | --- | --- | --- |
-| Plane and circular cylinder | Native plane / posed line revolution, STEP conversion | Admitted with bounded line/circle trim profile | Migrate without regression; keep exact fast paths |
-| Cone | STEP cone becomes posed line revolution | Rejected carrier/entity | Cone metadata, apex handling, bounds, intersection and approximation coverage |
-| Sphere | Analytic posed sphere and STEP conversion | Rejected carrier/entity | Pole charts, closed seams, critical heights, sections and display certification |
-| Ring/horn torus | Analytic torus and STEP conversion | Rejected carrier/entity | Periodic charts, inner/outer rings, critical sets and singular horn qualification |
-| B-spline, Bezier and NURBS | Native polynomial/rational surfaces and STEP variants | Rejected, even for geometrically planar surfaces | Knot-span bounds, denominator conditioning, arbitrary trims and native intersection coverage |
-| Linear extrusion / general revolution | STEP paths exist; modeling conversion may lower to homogeneous surfaces | Explicit STEP entities rejected | Profile conversion, composed parameterization and the same generic query path |
-| Ellipse / spline trims | Kernel conversion exists, commonly to rational curves | Witness store only supports line/circle | Oriented parameter intervals, pcurves, trim topology and conservative curve approximation |
-| Hyperbola / parabola / polyline curves | STEP geometry exists, but 3D modeling bridge has conversion gaps | Not admitted | Bounded exact conversion in kernel before facade acceptance |
-| T-spline | Modeling enum exists; STEP route / extraction bridge absent | Not admitted | Separate kernel extraction/import project; not a pretend STEP capability |
-| Offset / replica / trimmed-surface wrappers | Some useful STEP wrapper routes absent | Not admitted | Reachable-entity conversion and topology/provenance support before acceptance |
+| Family                                      | Kernel path at the design baseline, from source inspection              | Pre-cutover Spiling restriction                  | Work identified by the design                                                                |
+| ------------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| Plane and circular cylinder                 | Native plane / posed line revolution, STEP conversion                   | Admitted with bounded line/circle trim profile   | Migrate without regression; keep exact fast paths                                            |
+| Cone                                        | STEP cone becomes posed line revolution                                 | Rejected carrier/entity                          | Cone metadata, apex handling, bounds, intersection and approximation coverage                |
+| Sphere                                      | Analytic posed sphere and STEP conversion                               | Rejected carrier/entity                          | Pole charts, closed seams, critical heights, sections and display certification              |
+| Ring/horn torus                             | Analytic torus and STEP conversion                                      | Rejected carrier/entity                          | Periodic charts, inner/outer rings, critical sets and singular horn qualification            |
+| B-spline, Bezier and NURBS                  | Native polynomial/rational surfaces and STEP variants                   | Rejected, even for geometrically planar surfaces | Knot-span bounds, denominator conditioning, arbitrary trims and native intersection coverage |
+| Linear extrusion / general revolution       | STEP paths exist; modeling conversion may lower to homogeneous surfaces | Explicit STEP entities rejected                  | Profile conversion, composed parameterization and the same generic query path                |
+| Ellipse / spline trims                      | Kernel conversion exists, commonly to rational curves                   | Witness store only supports line/circle          | Oriented parameter intervals, pcurves, trim topology and conservative curve approximation    |
+| Hyperbola / parabola / polyline curves      | STEP geometry exists, but 3D modeling bridge has conversion gaps        | Not admitted                                     | Bounded exact conversion in kernel before facade acceptance                                  |
+| T-spline                                    | Modeling enum exists; STEP route / extraction bridge absent             | Not admitted                                     | Separate kernel extraction/import project; not a pretend STEP capability                     |
+| Offset / replica / trimmed-surface wrappers | Some useful STEP wrapper routes absent                                  | Not admitted                                     | Reachable-entity conversion and topology/provenance support before acceptance                |
 
 “Cone” and “cylinder” need not be separate kernel surface variants. Preserve exact geometry regardless of internal lowering. Conversely, a NURBS label does not imply a difficult freeform shape: representation-equivalent planar/cylindrical sources must use the generic path without requiring approximate analytic recognition.
 
@@ -66,19 +66,19 @@ The baseline CLI investigation imported/sectioned the box and refused the ration
 
 No new crate is justified by primitive families. Introduce private modules only for distinct invariants, not one module or trait implementation per STEP entity.
 
-| Owner | Target responsibility | Must not own |
-| --- | --- | --- |
-| `contracts::geometry` | Checked IDs/frames, bounded geometry descriptions, operation reports, policy/error DTOs | Kernel enums, control nets, intersection implementations |
-| `geometry::import` | Reachability, units, topology/provenance binding, lossless conversion report | Filesystem paths, project transactions, print eligibility |
-| `geometry::kernel` | Immutable native objects, trim/edge-use correspondence, kernel adaptation | RPC/session identity or printer policy |
-| Private `geometry::parametric` | Patch/curve domains, chart transitions, interval evaluation, span subdivision, conservative derivative bounds | Planner roles, storage, alternate solids |
-| Private `geometry::analysis` | Tight directional support bounds, section events, slab fidelity and invariance certificates | Layer recipe selection or manufacturing mutation |
-| `geometry::section` | Direct bounded native surface/plane intersections, exact span/root identity, oriented closed loops and independent approximation bounds | Polygonized-display slicing or source-face remapping guesses |
-| `geometry::tessellation` | Trim-aware display approximation/certification and packed mesh preparation | Manufacturing accuracy authority |
-| `core` | Original immutable assets, authoring/undo, durable source/face references | Native caches or numerical capability truth |
-| `manufacturing` | Recipe scheduling, process admission, M/C/D realization, ordinary walls/fill/skin/support; narrow existing finish-certificate dispatch | General source-surface dispatch or kernel object ownership |
-| `engine` | Capture/composition, worker limits, artifact/RPC publication, revision checks | Independent source parsing or planning |
-| CLI / workbench / viewport | Intent/diagnostics, source-face picking, explicit Apply/Compile/export | Geometry classification heuristics, local slicing or repair |
+| Owner                          | Target responsibility                                                                                                                   | Must not own                                                 |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `contracts::geometry`          | Checked IDs/frames, bounded geometry descriptions, operation reports, policy/error DTOs                                                 | Kernel enums, control nets, intersection implementations     |
+| `geometry::import`             | Reachability, units, topology/provenance binding, lossless conversion report                                                            | Filesystem paths, project transactions, print eligibility    |
+| `geometry::kernel`             | Immutable native objects, trim/edge-use correspondence, kernel adaptation                                                               | RPC/session identity or printer policy                       |
+| Private `geometry::parametric` | Patch/curve domains, chart transitions, interval evaluation, span subdivision, conservative derivative bounds                           | Planner roles, storage, alternate solids                     |
+| Private `geometry::analysis`   | Tight directional support bounds, section events, slab fidelity and invariance certificates                                             | Layer recipe selection or manufacturing mutation             |
+| `geometry::section`            | Direct bounded native surface/plane intersections, exact span/root identity, oriented closed loops and independent approximation bounds | Polygonized-display slicing or source-face remapping guesses |
+| `geometry::tessellation`       | Trim-aware display approximation/certification and packed mesh preparation                                                              | Manufacturing accuracy authority                             |
+| `core`                         | Original immutable assets, authoring/undo, durable source/face references                                                               | Native caches or numerical capability truth                  |
+| `manufacturing`                | Recipe scheduling, process admission, M/C/D realization, ordinary walls/fill/skin/support; narrow existing finish-certificate dispatch  | General source-surface dispatch or kernel object ownership   |
+| `engine`                       | Capture/composition, worker limits, artifact/RPC publication, revision checks                                                           | Independent source parsing or planning                       |
+| CLI / workbench / viewport     | Intent/diagnostics, source-face picking, explicit Apply/Compile/export                                                                  | Geometry classification heuristics, local slicing or repair  |
 
 The parametric substrate is private. Shared evaluator interfaces distinguish actual original STEP operators from native chart laws; they are not plugins, another kernel or a serialized expression protocol. `PreparedSolid` owns borrowed source preparation once; raw inspection remains independent of material admission. Source preparation retains realization operands, while actual slab/leaf/union queries and the consumed ledger establish manufacturing authority. A stable facade method corresponds to a real consumer query.
 
@@ -111,13 +111,13 @@ Keep `face_id`, `surface_face_entity`, `source_entity_kind`, orientation and ori
 
 `AnalyticSurfaceDescription` has validated, definition-local mm parameters for plane, cylinder, cone, sphere and torus. Use complete right-handed frames where phase/chart inspection needs them, finite positive radii, explicit cone parameter convention and signed axis/orientation semantics. Normalize all angles from declared units before kernel construction; do not inherit angle-magnitude heuristics. Analytic recognition of a NURBS surface is optional optimization and cannot change its source identity or bypass generic proofs.
 
-| Analytic description | Parameter contract |
-| --- | --- |
-| Plane | Source-local origin, orthonormal tangent frame and normal; face-use orientation is separate |
-| Cylinder | Axis origin/right-handed frame, positive radius; bounded axial/angle domains come from trims, not an invented fixed height |
-| Cone | Axis frame, reference-plane radius and explicit signed semi-angle in radians; trim domain determines the physical branch/apex; reject inconsistent or singular parameter conventions rather than taking absolute values |
-| Sphere | Center, positive radius and chart frame; pole-normal availability is explicit |
-| Torus | Axis frame, positive major/minor radii, explicit regular-ring versus singular/other classification; no silent radius swapping |
+| Analytic description | Parameter contract                                                                                                                                                                                                      |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Plane                | Source-local origin, orthonormal tangent frame and normal; face-use orientation is separate                                                                                                                             |
+| Cylinder             | Axis origin/right-handed frame, positive radius; bounded axial/angle domains come from trims, not an invented fixed height                                                                                              |
+| Cone                 | Axis frame, reference-plane radius and explicit signed semi-angle in radians; trim domain determines the physical branch/apex; reject inconsistent or singular parameter conventions rather than taking absolute values |
+| Sphere               | Center, positive radius and chart frame; pole-normal availability is explicit                                                                                                                                           |
+| Torus                | Axis frame, positive major/minor radii, explicit regular-ring versus singular/other classification; no silent radius swapping                                                                                           |
 
 `FaceInfo.orientation` means material-side orientation relative to the regular carrier frame, not merely an unprocessed STEP boolean. At a singular point, an oriented limiting fan/neighboring chart replaces an undefined point normal. Spline/sweep descriptions expose bounded degree/span/profile summaries only where useful for inspection, not their control data.
 
@@ -676,7 +676,6 @@ Sharper enclosures do not guarantee monotone numerical root proposals or
 preconditioners. Qualify actual implicit-curve consumers as well as independent
 surface-jet oracles before changing the published kernel pin.
 
-
 ### 5.13 Reuse immutable source admission, not geometric assumptions
 
 A borrowed original-spline evaluator may admit the unchanged complete knot
@@ -954,7 +953,6 @@ range. Their quantified source uncertainty belongs to Native M's certificate
 and reuse identity; final realized D and support dependencies remain separate.
 No support or qualification claim follows from this design alone.
 
-
 ## 6. Generic geometry substrate and necessary specializations
 
 ### 6.1 Bounded domains and rational conditioning
@@ -1025,31 +1023,31 @@ If the true current minimum height lies in [l,u], translating by `bed-l` with an
 
 ### 6.3 Analytic paths: useful, contained, optional for correctness
 
-| Specialization | Why keep it | Shared result contract |
-| --- | --- | --- |
-| Line/circle/ellipse extrema and chord bounds | Exact/tight, common trims, low allocation | Same curve interval/witness certificates |
-| Plane/cylinder/cone support and intersections | Common mechanical faces, cheap exact cases | Same bounds and oriented section outcomes |
-| Sphere/torus chart-aware extrema and section seeds | Poles, periodicity, major performance win | Same event/slab/section certification |
-| Polynomial/rational Bezier spans | General reusable evaluation/bounds | Same private interval/trim substrate |
-| Extrusion/revolution composition | Avoid unnecessary dense conversion where native operations support it | Same bounded patch interface; validated exact lowering otherwise |
+| Specialization                                     | Why keep it                                                           | Shared result contract                                           |
+| -------------------------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Line/circle/ellipse extrema and chord bounds       | Exact/tight, common trims, low allocation                             | Same curve interval/witness certificates                         |
+| Plane/cylinder/cone support and intersections      | Common mechanical faces, cheap exact cases                            | Same bounds and oriented section outcomes                        |
+| Sphere/torus chart-aware extrema and section seeds | Poles, periodicity, major performance win                             | Same event/slab/section certification                            |
+| Polynomial/rational Bezier spans                   | General reusable evaluation/bounds                                    | Same private interval/trim substrate                             |
+| Extrusion/revolution composition                   | Avoid unnecessary dense conversion where native operations support it | Same bounded patch interface; validated exact lowering otherwise |
 
 A specialization may improve cost or conditioning; it must not weaken the certificate. Manufacturing never matches `Sphere` to a special sphere slicer. SIMD can later accelerate batches of span evaluations behind this seam; it does not change types, tolerance policy or topology decisions. No SIMD dependency or separate crate is required for parity.
 
 ### 6.4 Family-specific work that cannot disappear behind the facade
 
-| Family or construct | Required specialization / qualification |
-| --- | --- |
-| Cone | Identify true apex and branch in the trimmed domain; avoid normalizing a zero tangent cross-product; solve regular conic sections and classify apex contact |
-| Sphere | Cover the complete physical surface despite poles and longitude seam; include interior support extrema; certify circle sections without depending on trim-edge crossings |
-| Ring torus | Isolate all relevant critical circles/points for the queried direction; preserve inner/outer material and multiple section loops; bound native intersection candidates completely |
-| Horn/spindle/degenerate torus | Separate geometric representation from solid validity; qualify singular incidence or explicitly refuse manufacturing. Do not “repair” a self-intersecting carrier into a different solid |
-| B-spline/NURBS | Knot-span extraction, whole-domain denominator/derivative bounds, genuine trim membership, root isolation and shared-edge approximation; no analytic recognition prerequisite |
-| Extrusion/revolution | Retain bounded profile and sweep domains plus exact source/native parameter maps; profile corners, axis crossings and multiple turns are physical conditions, not an incidental builder range |
-| Pcurve/surface curve | Certify the composed surface image of the parameter curve and its agreement with the associated 3D edge over complete intervals; carry branch/chart ownership |
-| Implicit intersection curve | Validated implicit continuation tube with carrier/trim constraints; leader polyline is search data only |
-| Offset surface | General normal offsets are not exactly NURBS in general. Kernel needs native procedural evaluation/derivatives with a nonzero-normal bound and singular/self-intersection qualification; do not claim exact lowering from fitted patches |
-| Replica / rectangular or curve-bounded surface wrapper | Preserve underlying carrier/domain/trim restrictions and transform semantics in exact kernel conversion; reject unimplemented reachable wrappers, not unrelated metadata |
-| T-spline | Kernel must expose a validated basis/domain and bounded local Bezier extraction or equivalent interval evaluator over its T-mesh, including extraordinary/T-junction continuity. Require an actual admitted source/construction route; do not invent a STEP mapping or new serialization format just to check the enum |
+| Family or construct                                    | Required specialization / qualification                                                                                                                                                                                                                                                                                |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cone                                                   | Identify true apex and branch in the trimmed domain; avoid normalizing a zero tangent cross-product; solve regular conic sections and classify apex contact                                                                                                                                                            |
+| Sphere                                                 | Cover the complete physical surface despite poles and longitude seam; include interior support extrema; certify circle sections without depending on trim-edge crossings                                                                                                                                               |
+| Ring torus                                             | Isolate all relevant critical circles/points for the queried direction; preserve inner/outer material and multiple section loops; bound native intersection candidates completely                                                                                                                                      |
+| Horn/spindle/degenerate torus                          | Separate geometric representation from solid validity; qualify singular incidence or explicitly refuse manufacturing. Do not “repair” a self-intersecting carrier into a different solid                                                                                                                               |
+| B-spline/NURBS                                         | Knot-span extraction, whole-domain denominator/derivative bounds, genuine trim membership, root isolation and shared-edge approximation; no analytic recognition prerequisite                                                                                                                                          |
+| Extrusion/revolution                                   | Retain bounded profile and sweep domains plus exact source/native parameter maps; profile corners, axis crossings and multiple turns are physical conditions, not an incidental builder range                                                                                                                          |
+| Pcurve/surface curve                                   | Certify the composed surface image of the parameter curve and its agreement with the associated 3D edge over complete intervals; carry branch/chart ownership                                                                                                                                                          |
+| Implicit intersection curve                            | Validated implicit continuation tube with carrier/trim constraints; leader polyline is search data only                                                                                                                                                                                                                |
+| Offset surface                                         | General normal offsets are not exactly NURBS in general. Kernel needs native procedural evaluation/derivatives with a nonzero-normal bound and singular/self-intersection qualification; do not claim exact lowering from fitted patches                                                                               |
+| Replica / rectangular or curve-bounded surface wrapper | Preserve underlying carrier/domain/trim restrictions and transform semantics in exact kernel conversion; reject unimplemented reachable wrappers, not unrelated metadata                                                                                                                                               |
+| T-spline                                               | Kernel must expose a validated basis/domain and bounded local Bezier extraction or equivalent interval evaluator over its T-mesh, including extraordinary/T-junction continuity. Require an actual admitted source/construction route; do not invent a STEP mapping or new serialization format just to check the enum |
 
 Some rows require new upstream capability. They remain part of the parity inventory until an operation is accepted or explicitly excluded as invalid solid semantics; postponing a gate does not make the gap disappear. Programmatic kernel representation and STEP-import coverage are reported separately.
 
@@ -1715,7 +1713,6 @@ already charged to the connection, not permission to move an endpoint.
 Complete shared original vertex links, paired coedges, whole root-to-port
 regularity and source/coface material orientation remain mandatory.
 
-
 An opaque source-contributor leaf receipt binds an actual positive source-M candidate and its independent source-sample/forward-distance fact: original occurrence/definition, actual pose, closed interval, sample, actual candidate geometry hash, achieved error and numerical/source policy. A section receipt does not by itself prove reverse coverage of the source's closed slab or promise that an adjacent global union will succeed.
 
 One general construction makes the distinction explicit. Let T be the actual closed source material in interval I, S its exact filled native sample at height t, and M the actual polygon candidate with certified region error δ. The continuing core K = T ∩ (S × I) contains S at t. Its distance to the extrusion M × I is bounded by `hypot(δ, max(t - I.lower, I.upper - t))`; a tighter native continuation proof may improve that bound. Separately cover the remaining closed critical material with actual neighboring leaves. T is not the conservative occupied envelope C. Include plane, pose, native-curve and fixed-grid conversion errors in δ; a hash of raw section loops does not bind a subsequently snapped candidate.
@@ -1845,15 +1842,15 @@ flowchart TD
     W --> X[Revision-checked artifact publication and durable export]
 ```
 
-| Boundary | Change | Publication invariant |
-| --- | --- | --- |
-| Core source → geometry | Captured bytes and selected root when supported; import limits | Core retains exact bytes; no paths in native definitions |
-| Geometry → engine | Generic metadata, conservative bounds, operation results and mesh availability | Failed/cancelled native work cannot partially replace live scene |
-| Geometry → manufacturing | Tight support bounds, native sections, slab/event/invariance certificates | Policy/pose/source/producer identity must match the capture |
-| Core → manufacturing | Existing immutable intent/overlays/assets plus explicit native shape-error policy | No uncaptured source or image reads during compile |
-| Manufacturing → Core | Bundle containing policy/certification provenance and actual emitted replay | Base revision checked before one atomic artifact edit |
-| Engine → clients | Typed operation reports, geometry-only body state and existing artifact descriptors | Unknown/partial capability is explicit, no client-inferred success |
-| Saved project → fresh engine | Rebuild native definitions and re-evaluate operation-specific evidence | Saved descriptive capability flags cannot authorize new native work |
+| Boundary                     | Change                                                                              | Publication invariant                                               |
+| ---------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Core source → geometry       | Captured bytes and selected root when supported; import limits                      | Core retains exact bytes; no paths in native definitions            |
+| Geometry → engine            | Generic metadata, conservative bounds, operation results and mesh availability      | Failed/cancelled native work cannot partially replace live scene    |
+| Geometry → manufacturing     | Tight support bounds, native sections, slab/event/invariance certificates           | Policy/pose/source/producer identity must match the capture         |
+| Core → manufacturing         | Existing immutable intent/overlays/assets plus explicit native shape-error policy   | No uncaptured source or image reads during compile                  |
+| Manufacturing → Core         | Bundle containing policy/certification provenance and actual emitted replay         | Base revision checked before one atomic artifact edit               |
+| Engine → clients             | Typed operation reports, geometry-only body state and existing artifact descriptors | Unknown/partial capability is explicit, no client-inferred success  |
+| Saved project → fresh engine | Rebuild native definitions and re-evaluate operation-specific evidence              | Saved descriptive capability flags cannot authorize new native work |
 
 Do not add one RPC per surface family. Extend existing import/inspection/preflight/compile operations and typed protobuf responses; retain authenticated gRPC/Google Operations/ByteStream. High-volume native geometry stays in-process; packed display/replay remains artifact-backed. No JSON command tunnels or frontend domain model.
 
@@ -1865,20 +1862,20 @@ Preflight always attempts source/reference/intent/finish metadata and the tight 
 
 Concrete implementation migration map:
 
-| Current owner/file | Required change |
-| --- | --- |
-| `crates/contracts/proto/spiling/native_geometry.proto`, `src/native/geometry.rs` | Replace carrier-only inspection transport, add checked evidence/mesh-availability/contact query DTOs in both conversion directions |
-| `crates/contracts/src/manufacturing/process/mod.rs`, `proto/spiling/native_manufacturing.proto`, `src/native/manufacturing.rs` | Preflight disposition/check semantics, required native shape policy and typed stage/reason transport |
-| `crates/manufacturing/src/planner/preflight/mod.rs` | Remove carrier-derived universal admission/reuse; request bounds/events; preserve geometry error categories rather than collapsing them into unsupported geometry |
-| `crates/manufacturing/src/planner/mod.rs` | One shared event/schedule path, M/C/D identities, native slab/envelope validation and cumulative work/retention accounting |
-| `crates/manufacturing/src/planner/surface/mod.rs` | Explicitly match supported finish certificates; remove the current “non-Cylinder means planar” dispatch assumption |
-| `crates/manufacturing/src/planner/support/mod.rs` | All-lower-D envelope exclusion with actual deposited-stroke anchors; same domains for both regenerated hatch axes |
-| `apps/engine/src/geometry/worker.rs`, `geometry/manufacturing/mod.rs` | Capture native pins/policy/revision once; publish bounded operation reports/results through existing worker ACK path |
-| `crates/engine-client/src/lib.rs`, `apps/cli/src/project/mod.rs`, shell manufacturing bridge | Shared native-contact bed preparation; preserve old helper envelope until replacement; typed CLI diagnostics |
-| `apps/desktop/src/manufacturing/useManufacturing.ts`, `ManufacturingPanel.tsx`, `src/surface/SurfaceFinishPanel.tsx` | Captured-revision freshness, unresolved/pending presentation, explicit finish eligibility and non-rendered-body state |
-| `crates/core/src/lib.rs`, `crates/contracts/src/project/mod.rs` | Profile/definition validation cutover; later source-asset versus selected-body identity separation |
-| `packages/protocol`, `packages/viewport` and central generation tooling | Regenerate domain views, retain checked packed decoding/source-face picking and explicit mesh availability |
-| `apps/desktop/src/manufacturing/draft.ts`, recipe protobuf/native adapters and profile examples | Preserve/author the required native shape-error field through full intent edits, checked transport, fingerprints and fresh saved bundles |
+| Current owner/file                                                                                                             | Required change                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/contracts/proto/spiling/native_geometry.proto`, `src/native/geometry.rs`                                               | Replace carrier-only inspection transport, add checked evidence/mesh-availability/contact query DTOs in both conversion directions                                |
+| `crates/contracts/src/manufacturing/process/mod.rs`, `proto/spiling/native_manufacturing.proto`, `src/native/manufacturing.rs` | Preflight disposition/check semantics, required native shape policy and typed stage/reason transport                                                              |
+| `crates/manufacturing/src/planner/preflight/mod.rs`                                                                            | Remove carrier-derived universal admission/reuse; request bounds/events; preserve geometry error categories rather than collapsing them into unsupported geometry |
+| `crates/manufacturing/src/planner/mod.rs`                                                                                      | One shared event/schedule path, M/C/D identities, native slab/envelope validation and cumulative work/retention accounting                                        |
+| `crates/manufacturing/src/planner/surface/mod.rs`                                                                              | Explicitly match supported finish certificates; remove the current “non-Cylinder means planar” dispatch assumption                                                |
+| `crates/manufacturing/src/planner/support/mod.rs`                                                                              | All-lower-D envelope exclusion with actual deposited-stroke anchors; same domains for both regenerated hatch axes                                                 |
+| `apps/engine/src/geometry/worker.rs`, `geometry/manufacturing/mod.rs`                                                          | Capture native pins/policy/revision once; publish bounded operation reports/results through existing worker ACK path                                              |
+| `crates/engine-client/src/lib.rs`, `apps/cli/src/project/mod.rs`, shell manufacturing bridge                                   | Shared native-contact bed preparation; preserve old helper envelope until replacement; typed CLI diagnostics                                                      |
+| `apps/workbench/src/app/manufacturing.rs`, `src/app/surface.rs`, `src/manufacture.rs`                                          | Captured-revision freshness, unresolved/pending presentation, explicit finish eligibility and non-rendered-body state                                             |
+| `crates/core/src/lib.rs`, `crates/contracts/src/project/mod.rs`                                                                | Profile/definition validation cutover; later source-asset versus selected-body identity separation                                                                |
+| `packages/protocol`, `apps/workbench/src/viewport` and central generation tooling                                              | Regenerate domain views, retain checked packed decoding/source-face picking and explicit mesh availability                                                        |
+| `apps/workbench/src/app/policies.rs`, recipe protobuf/native adapters and profile examples                                     | Preserve/author the required native shape-error field through full intent edits, checked transport, fingerprints and fresh saved bundles                          |
 
 Paths abbreviated within a row share that row's owner directory unless fully qualified. No named current file is itself a new API authority: executable Rust/protobuf schemas and owning modules remain canonical at implementation.
 
@@ -1947,13 +1944,13 @@ This RFC does not reserve or require new schema numbers for implementation cutov
 
 The preserved delivery design below organized complete mechanical-part workflows around original-source proof gates. ADR005 supersedes G0–G3 as required gates for the adopted native-first route; these sections remain a reference for current source5 constraints and the earlier parity design, not permission to resume its proof R&D or claim unexercised support. The unchanged bracket and protected existing operators must instead qualify ADR005's coherent native-material cutover.
 
-| Priority | Integrated deliverable | Exit condition |
-| --- | --- | --- |
-| 1 | Reliable source admission and closed material proofs | Derive finite active trim branches from original STEP semantics; retain complete source/face identity. Prove filled material and actual critical contributions without boundary-pixel work explosions. Restore the frozen perforated-plate resource regression without raising limits. |
-| 2 | First complete mechanical-part slice | Carry the fitting and housing through native inspection, explicit bed placement, ordinary planning, actual G-code and independent replay. Keep geometry certificates behind one shared interface; no part-specific planners or successful fallbacks. |
-| 3 | Durable workbench workflow | Exercise explicit Prepare/Apply and undo/redo, truthful preflight, Compile, preview, save, source removal, fresh reopen, verification and export. CLI and workbench consume the same engine services and persisted provenance. |
-| 4 | Representation and critical-transition qualification | Complete the analytic/rational/spline/swept representation matrix and G3 birth/death, pocket, merge/split, near-tangent and projected-void cases. Each case establishes declared bounds or an explicit correct refusal; no unsupported positive-coverage claims. |
-| 5 | Coherent cutover and main delivery | Align generated contracts, identities, fixtures, canonical support limits and measured evidence; remove obsolete paths and scaffolds; integrate current main and publish only after the required gates pass. |
+| Priority | Integrated deliverable                               | Exit condition                                                                                                                                                                                                                                                                         |
+| -------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1        | Reliable source admission and closed material proofs | Derive finite active trim branches from original STEP semantics; retain complete source/face identity. Prove filled material and actual critical contributions without boundary-pixel work explosions. Restore the frozen perforated-plate resource regression without raising limits. |
+| 2        | First complete mechanical-part slice                 | Carry the fitting and housing through native inspection, explicit bed placement, ordinary planning, actual G-code and independent replay. Keep geometry certificates behind one shared interface; no part-specific planners or successful fallbacks.                                   |
+| 3        | Durable workbench workflow                           | Exercise explicit Prepare/Apply and undo/redo, truthful preflight, Compile, preview, save, source removal, fresh reopen, verification and export. CLI and workbench consume the same engine services and persisted provenance.                                                         |
+| 4        | Representation and critical-transition qualification | Complete the analytic/rational/spline/swept representation matrix and G3 birth/death, pocket, merge/split, near-tangent and projected-void cases. Each case establishes declared bounds or an explicit correct refusal; no unsupported positive-coverage claims.                       |
+| 5        | Coherent cutover and main delivery                   | Align generated contracts, identities, fixtures, canonical support limits and measured evidence; remove obsolete paths and scaffolds; integrate current main and publish only after the required gates pass.                                                                           |
 
 An algorithm change must unblock this workflow or a named correctness/resource gate. Start with a discriminating narrow reproduction; reuse compiled artifacts before repeating the integrated scenario. Do not rerun the entire corpus for every local hypothesis. Serialize native/compiler workloads, retain the 11 GiB target-directory ceiling, and keep existing work, storage, tolerance and deadline limits. A successful isolated section is not completion; the operator workflow and the representation/transition gates are.
 
@@ -2015,17 +2012,17 @@ Gate: shared-source multiple bodies, nested cavity orientation, repeated rigid a
 
 ### Focused acceptance properties across all gates
 
-| Property | High-value evidence |
-| --- | --- |
+| Property                    | High-value evidence                                                                                                                                                    |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Representation independence | Same intended shape encoded analytically and rationally has equivalent native sections within declared bounds, source identities/provenance remain distinct and honest |
-| Complete bounds | Trimmed interior extrema included; rotated occurrence cannot penetrate bed or escape envelope from an AABB shortcut |
-| Topology and trim fidelity | Holes, seams, poles and isolated components retained; intentionally close distinct boundaries are not merged |
-| Between-plane correctness | Aliasing adversary invisible at naive sample planes forces refinement/refusal; no silent disappearing feature |
-| Shared consumer contract | Same native M/final D enters skin, fill, anchors and both support regeneration alternatives |
-| Independence | Emitted replay catches program errors; separate geometry/oracle evidence checks source/section correctness—replay alone does not |
-| Durable identity | Save, remove original input file, fresh reopen, source-face inspect and export without external source paths |
-| Failure atomicity | Conditioning/resource/cancel/stale errors preserve project, scene and active artifact; geometry-only state is explicit |
-| Resource bounds | Increasing degree/knots/events/repeated instances hits bounded refusal, not unbounded allocation or a host crash |
+| Complete bounds             | Trimmed interior extrema included; rotated occurrence cannot penetrate bed or escape envelope from an AABB shortcut                                                    |
+| Topology and trim fidelity  | Holes, seams, poles and isolated components retained; intentionally close distinct boundaries are not merged                                                           |
+| Between-plane correctness   | Aliasing adversary invisible at naive sample planes forces refinement/refusal; no silent disappearing feature                                                          |
+| Shared consumer contract    | Same native M/final D enters skin, fill, anchors and both support regeneration alternatives                                                                            |
+| Independence                | Emitted replay catches program errors; separate geometry/oracle evidence checks source/section correctness—replay alone does not                                       |
+| Durable identity            | Save, remove original input file, fresh reopen, source-face inspect and export without external source paths                                                           |
+| Failure atomicity           | Conditioning/resource/cancel/stale errors preserve project, scene and active artifact; geometry-only state is explicit                                                 |
+| Resource bounds             | Increasing degree/knots/events/repeated instances hits bounded refusal, not unbounded allocation or a host crash                                                       |
 
 Keep permanent tests for these consumer-visible invariants and genuinely uncertain numerical edges. Do not add tests that only assert enum wiring/source text or duplicate the production evaluator as an independent oracle. Run focused changed-area checks once after integration and a small real engine/CLI/workbench scenario; record actual outcomes separately in quality evidence. Do not pre-run the full corpus for every intermediate edit.
 

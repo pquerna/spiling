@@ -439,20 +439,5 @@ pub enum ProjectResponse {
         error: ProjectError,
     },
 }
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectPathIntent {
-    Open,
-    Save,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SelectedProjectPath {
-    pub token: String,
-    pub session_id: SessionId,
-    pub label: String,
-    pub intent: ProjectPathIntent,
-}
-
 #[cfg(test)]
 mod tests;

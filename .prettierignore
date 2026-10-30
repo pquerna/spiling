@@ -10,8 +10,6 @@ node_modules/
 target/
 artifacts/
 .cache/
-apps/desktop/src-tauri/gen/
-apps/desktop/src-tauri/binaries/
 **/dist/
 packages/protocol/src/generated.ts
 fixtures/protocol/mesh.json

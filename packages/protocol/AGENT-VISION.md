@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Protocol package vision
 
-This dependency-free package gives TypeScript consumers Rust-generated engine/native operation and authoring views, inert printer specifications and independently validated packed display buffers. Protobuf remains the only native API; the shell receives adapters rather than an alternate wire protocol.
+This dependency-free package gives TypeScript consumers Rust-generated engine/native operation and authoring views, inert printer specifications and independently validated packed display buffers. Protobuf remains the only native API. Surviving TypeScript consumers author inert data and independently check packed interoperability; the Rust workbench uses checked adapters directly.
 
 The acceptance boundary is schema-v1 SPLT/SPLM/SPLS and schema-v6 SPLR independent byte admission before GPU upload. Actual replay carries distinguishable deposited roles including explicit route waste, non-motion tool-frame epochs, travel/lifecycle and stationary feeder events through bounded borrowed accessors. Nominal width/physical-Z/owner associations distinguish coarse sparse strokes from the unchanged fine schedule without claiming physical measurement. Native verifier owns support-contact-gap semantics and emitted-program correctness; decoded bytes confer no firmware, calibration, physical GPU or manufacturing qualification.
 

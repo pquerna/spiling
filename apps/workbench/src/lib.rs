@@ -17,6 +17,11 @@ pub mod viewport;
 pub fn native_options() -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_app_id("org.spiling.Workbench")
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../icons/icon.png"))
+                    .expect("checked application icon"),
+            )
             .with_inner_size([1120.0, 760.0])
             .with_min_inner_size([640.0, 480.0]),
         renderer: eframe::Renderer::Wgpu,

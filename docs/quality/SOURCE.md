@@ -8,7 +8,7 @@ Licensed under the Open Software License version 3.0
 
 Spiling source is maintained at https://github.com/pquerna/spiling under OSL-3.0. A distribution must identify its source commit and supply the corresponding preferred form for modification, including documentation, manifests, lockfiles, generated contracts and build scripts.
 
-`pnpm package` records the current commit, worktree modification status, toolchains and resolved dependencies in the bundled `notices/provenance.json`. A dirty development package is not a releasable artifact: its source cannot be recovered from the recorded commit alone. Before a public release, commit all included source and publish that commit, or provide an accompanying complete source archive that includes modifications.
+`pnpm package` records the current commit, worktree modification status, toolchains and resolved dependencies in the bundled `notices/provenance.json`. Packaging refuses dirty worktrees and includes `notices/source.tar.gz`, an exact archive of the tracked public source at that commit. Untracked/private data are excluded. Publish the recorded commit before distribution; an archive and accessible repository together make the corresponding source reviewable.
 
 Recipients can retrieve a clean release's source with:
 

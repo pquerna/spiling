@@ -353,12 +353,68 @@ impl Viewport {
                 self.yaw = -std::f64::consts::FRAC_PI_2;
                 self.fit = true;
             }
-            ui.weak("Drag: orbit · right-drag: pan · wheel: zoom · click: inspect face");
+            ui.weak("Drag: orbit · right-drag: pan · wheel: zoom");
         });
         let (rect, response) = ui.allocate_exact_size(
             ui.available_size().max(egui::vec2(1.0, 1.0)),
             egui::Sense::click_and_drag(),
         );
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, "3D viewport. Arrows orbit; Shift arrows pan; plus/minus zoom; F fits; 1 top; 0 isometric. Native faces are also available in the model tree."));
+        if response.clicked() {
+            response.request_focus();
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect.shrink(1.0),
+                0.0,
+                ui.visuals().selection.stroke,
+                egui::StrokeKind::Inside,
+            );
+            let (delta, shift, zoom, fit, top, iso) = ui.input_mut(|i| {
+                let delta = egui::vec2(
+                    f32::from(i.key_pressed(egui::Key::ArrowRight) as u8)
+                        - f32::from(i.key_pressed(egui::Key::ArrowLeft) as u8),
+                    f32::from(i.key_pressed(egui::Key::ArrowUp) as u8)
+                        - f32::from(i.key_pressed(egui::Key::ArrowDown) as u8),
+                );
+                (
+                    delta,
+                    i.modifiers.shift,
+                    f64::from(i.key_pressed(egui::Key::Minus) as u8)
+                        - f64::from(i.key_pressed(egui::Key::Plus) as u8),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::F),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Num1),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Num0),
+                )
+            });
+            if shift {
+                let right = DVec3::new(-self.yaw.sin(), self.yaw.cos(), 0.0);
+                let up = right.cross(DVec3::new(
+                    self.yaw.cos() * self.pitch.cos(),
+                    self.yaw.sin() * self.pitch.cos(),
+                    self.pitch.sin(),
+                ));
+                self.pan +=
+                    (right * f64::from(delta.x) + up * f64::from(delta.y)) * self.distance * 0.03;
+            } else {
+                self.yaw += f64::from(delta.x) * 0.1;
+                self.pitch = (self.pitch + f64::from(delta.y) * 0.1).clamp(-1.55, 1.55);
+            }
+            self.distance *= (zoom * 0.1).exp();
+            if fit {
+                self.fit = true;
+            }
+            if top {
+                self.pitch = 1.56;
+                self.yaw = -std::f64::consts::FRAC_PI_2;
+                self.fit = true;
+            }
+            if iso {
+                self.pitch = 0.7;
+                self.yaw = -0.8;
+                self.fit = true;
+            }
+        }
         let bounds = scene.as_ref().and_then(|s| s.summary.bounds_mm);
         let center = bounds.map_or_else(
             || {
@@ -423,6 +479,7 @@ impl Viewport {
             self.distance = (self.distance * (-f64::from(scroll) * 0.002).exp())
                 .clamp(radius * 0.02, radius * 1000.0);
         }
+        self.distance = self.distance.clamp(radius * 0.02, radius * 1000.0);
         let matrix = self.matrix(f64::from(rect.width() / rect.height()), radius);
         if interactive
             && view.source

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Protobuf engine authority and generated native-shell view types.
+//! Protobuf engine authority and Rust-derived data-tool view types.
 
 use prost::Message;
 use serde::{Deserialize, Serialize};

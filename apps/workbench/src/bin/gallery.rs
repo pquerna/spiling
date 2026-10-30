@@ -19,9 +19,11 @@ impl eframe::App for Gallery {
     }
 }
 fn main() -> eframe::Result {
+    let mut options = spiling_workbench::native_options();
+    options.viewport = options.viewport.with_app_id("org.spiling.Gallery");
     eframe::run_native(
         "Spiling component gallery",
-        spiling_workbench::native_options(),
+        options,
         Box::new(|cc| {
             let theme = spiling_workbench::ui::Theme::Graphite;
             theme.apply(&cc.egui_ctx);

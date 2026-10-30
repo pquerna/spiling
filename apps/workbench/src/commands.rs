@@ -13,6 +13,11 @@ pub enum Action {
     Save,
     SaveAs,
     Import,
+    LoadIntent,
+    Preflight,
+    Compile,
+    Verify,
+    Export,
     Undo,
     Redo,
     Restart,
@@ -23,6 +28,28 @@ pub enum Action {
     Gallery,
 }
 impl Action {
+    pub const ALL: &[Self] = &[
+        Self::New,
+        Self::Open,
+        Self::OpenReadOnly,
+        Self::Recover,
+        Self::Save,
+        Self::SaveAs,
+        Self::Import,
+        Self::Undo,
+        Self::Redo,
+        Self::LoadIntent,
+        Self::Preflight,
+        Self::Compile,
+        Self::Verify,
+        Self::Export,
+        Self::Cancel,
+        Self::Resume,
+        Self::Restart,
+        Self::License,
+        Self::Gallery,
+        Self::Close,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             Self::New => "New project",
@@ -32,6 +59,11 @@ impl Action {
             Self::Save => "Save",
             Self::SaveAs => "Save to new directory…",
             Self::Import => "Import STEP…",
+            Self::LoadIntent => "Load intent JSON…",
+            Self::Preflight => "Preflight current inputs",
+            Self::Compile => "Compile current inputs",
+            Self::Verify => "Fresh Verify and load motion",
+            Self::Export => "Export verified output…",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
             Self::Restart => "Restart engine",
@@ -72,12 +104,35 @@ impl Action {
         };
         if matches!(
             self,
-            Self::Save | Self::SaveAs | Self::Import | Self::Undo | Self::Redo
+            Self::Save | Self::SaveAs | Self::Import | Self::Undo | Self::Redo | Self::Compile
         ) && project.read_only
         {
             return Some("This project is read-only");
         }
+        let m = &state.manufacturing;
         match self {
+            Self::Preflight if m.intent.is_none() => {
+                Some("Apply a complete manufacturing intent first")
+            }
+            Self::Compile
+                if !m.preflight.as_ref().is_some_and(|p| {
+                    p.input_revision == project.revision
+                        && p.disposition
+                            == spiling_contracts::manufacturing::PreflightDisposition::Admitted
+                }) =>
+            {
+                Some("Preflight must admit the current revision first")
+            }
+            Self::Verify if m.artifact.is_none() => Some("Compile a manufacturing artifact first"),
+            Self::Export
+                if m.export_busy
+                    || !state.hello.as_ref().is_some_and(|h| {
+                        m.current_capture(project, &h.session_id)
+                            .is_some_and(|r| r.report.verified)
+                    }) =>
+            {
+                Some("Fresh passing verification is required for the current output")
+            }
             Self::Undo if !project.can_undo => Some("No project transaction to undo"),
             Self::Redo if !project.can_redo => Some("No project transaction to redo"),
             _ => None,

@@ -39,6 +39,10 @@ pub struct Workbench {
     local_problem: Option<String>,
     show_license: bool,
     show_gallery: bool,
+    show_commands: bool,
+    command_query: String,
+    command_focus: bool,
+    compact_tree: bool,
     start_requested: bool,
     close_requested: bool,
     gpu: String,
@@ -94,6 +98,10 @@ impl Workbench {
             local_problem: None,
             show_license: false,
             show_gallery: false,
+            show_commands: false,
+            command_query: String::new(),
+            command_focus: false,
+            compact_tree: false,
             close_requested: false,
             gpu,
             title: String::new(),
@@ -179,6 +187,39 @@ impl Workbench {
                 host.choose(frame, ctx, Picker::Save)
             }
             Action::Import => host.choose(frame, ctx, Picker::Import),
+            Action::LoadIntent => host.choose(frame, ctx, Picker::Intent),
+            Action::Export => host.choose(frame, ctx, Picker::Export),
+            Action::Preflight | Action::Compile | Action::Verify => {
+                use spiling_contracts::manufacturing::{ManufacturingCommand, VerificationOutput};
+                let session_id = self
+                    .state
+                    .hello
+                    .as_ref()
+                    .expect("running engine")
+                    .session_id
+                    .clone();
+                let base_revision = self
+                    .state
+                    .project
+                    .as_ref()
+                    .expect("checked project")
+                    .revision;
+                host.manufacturing(match action {
+                    Action::Preflight => ManufacturingCommand::Preflight {
+                        session_id,
+                        base_revision,
+                    },
+                    Action::Compile => ManufacturingCommand::Compile {
+                        session_id,
+                        base_revision,
+                    },
+                    _ => ManufacturingCommand::Inspect {
+                        session_id,
+                        base_revision,
+                        output: VerificationOutput::ReportAndMotion,
+                    },
+                })
+            }
             _ => host.command(match action {
                 Action::New => Command::New,
                 Action::Save => Command::Save,
@@ -198,7 +239,19 @@ impl Workbench {
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
         // Text/IME owns its own editing keys. Project undo never steals text undo.
-        if ctx.text_edit_focused() || self.state.confirmation.is_some() {
+        if ctx.text_edit_focused() && !self.show_commands {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::K)))
+            && self.state.confirmation.is_none()
+            && !self.state.picker_open
+        {
+            self.show_commands = !self.show_commands;
+            self.command_focus = self.show_commands;
+            self.command_query.clear();
+            ctx.request_repaint();
+        }
+        if ctx.text_edit_focused() || self.show_commands || self.state.confirmation.is_some() {
             return;
         }
         for (key, shift, action) in [
@@ -498,10 +551,14 @@ impl eframe::App for Workbench {
             }
             return;
         }
+        let compact = ui.available_width() < 900.0;
         egui::Panel::top("commands").show(ui, |ui| {
             let wide = ui.available_width() >= 900.0;
             ui.horizontal_wrapped(|ui| {
                 ui.heading("Spiling");
+                if compact {
+                    ui.toggle_value(&mut self.compact_tree, "Models");
+                }
                 if wide {
                     ui.weak("Native workbench · development");
                 }
@@ -524,6 +581,22 @@ impl eframe::App for Workbench {
                         self.button(ui, action);
                     }
                 });
+                ui.menu_button("Manufacturing", |ui| {
+                    for action in [
+                        Action::LoadIntent,
+                        Action::Preflight,
+                        Action::Compile,
+                        Action::Verify,
+                        Action::Export,
+                    ] {
+                        self.button(ui, action);
+                    }
+                });
+                if ui.button("Commands…").on_hover_text("Ctrl/Cmd+K").clicked() {
+                    self.show_commands = true;
+                    self.command_focus = true;
+                    self.command_query.clear();
+                }
                 ui.menu_button("Engine", |ui| {
                     self.button(ui, Action::Restart);
                     self.button(ui, Action::Cancel);
@@ -539,6 +612,9 @@ impl eframe::App for Workbench {
                     }
                 });
                 ui.menu_button("Help", |ui| {
+                    ui.label("Appearance");
+                    ui::theme_choice(ui, &mut self.prefs.theme);
+                    ui.separator();
                     self.button(ui, Action::License);
                     self.button(ui, Action::Gallery);
                 });
@@ -568,29 +644,33 @@ impl eframe::App for Workbench {
             .default_size(160.0)
             .min_size(72.0)
             .show(ui, |ui| self.feedback(ui));
-        egui::Panel::right("project")
-            .resizable(true)
-            .default_size(340.0)
-            .min_size(210.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    if self.manufacturing.panel == 0 {
-                        self.selection_ui(ui);
-                        self.project(ui);
-                    } else if self.manufacturing.panel == 3 {
-                        self.surface_ui(ui);
-                    } else if self.manufacturing.panel == 4 {
-                        self.study_ui(ui);
-                    } else {
-                        self.manufacturing_ui(ui);
-                    }
+        if !compact || !self.compact_tree {
+            egui::Panel::right("project")
+                .resizable(true)
+                .default_size(if compact { 250.0 } else { 340.0 })
+                .min_size(210.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if self.manufacturing.panel == 0 {
+                            self.selection_ui(ui);
+                            self.project(ui);
+                        } else if self.manufacturing.panel == 3 {
+                            self.surface_ui(ui);
+                        } else if self.manufacturing.panel == 4 {
+                            self.study_ui(ui);
+                        } else {
+                            self.manufacturing_ui(ui);
+                        }
+                    });
                 });
-            });
-        egui::Panel::left("model-tree")
-            .resizable(true)
-            .default_size(210.0)
-            .min_size(140.0)
-            .show(ui, |ui| self.tree_ui(ui));
+        }
+        if !compact || self.compact_tree {
+            egui::Panel::left("model-tree")
+                .resizable(true)
+                .default_size(210.0)
+                .min_size(140.0)
+                .show(ui, |ui| self.tree_ui(ui));
+        }
         egui::CentralPanel::default_margins()
             .frame(egui::Frame::central_panel(ui.style()).fill(self.prefs.theme.tokens().canvas))
             .show(ui, |ui| {
@@ -660,6 +740,45 @@ impl eframe::App for Workbench {
                     self.select_face(reference);
                 }
             });
+        if self.show_commands {
+            let modal = egui::Modal::new(egui::Id::unique("command-palette")).show(&ctx, |ui| {
+                ui.set_width(360.0);
+                ui.heading("Commands");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.command_query)
+                        .hint_text("Search commands · Enter runs first available")
+                        .char_limit(128),
+                );
+                if self.command_focus {
+                    response.request_focus();
+                    self.command_focus = false;
+                }
+                let query = self.command_query.to_lowercase();
+                let enter = ui.input(|i| i.key_pressed(Key::Enter));
+                let mut first = true;
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        for &action in Action::ALL {
+                            if !action.label().to_lowercase().contains(&query) {
+                                continue;
+                            }
+                            let disabled = self.disabled(action);
+                            let run = ui::action(ui, action.label(), disabled);
+                            if disabled.is_none() {
+                                if run || (enter && first) {
+                                    self.queued = Some(action);
+                                    self.show_commands = false;
+                                }
+                                first = false;
+                            }
+                        }
+                    });
+            });
+            if modal.should_close() {
+                self.show_commands = false;
+            }
+        }
         if let Some(confirmation) = &self.state.confirmation {
             let id = confirmation.id;
             let modal = egui::Modal::new(egui::Id::unique("discard-project")).show(&ctx,|ui| {

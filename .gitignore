@@ -9,6 +9,4 @@ node_modules/
 dist/
 /.cache/
 /artifacts/
-/apps/desktop/src-tauri/binaries/
-/apps/desktop/src-tauri/gen/
 *.log

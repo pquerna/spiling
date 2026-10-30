@@ -99,12 +99,12 @@ specified by the [RFC](../adr/004-native-geometry-parity.md) and
 
 ## Prepared owners and placed inspection
 
-| Owner / operation | Invariant and navigation |
-| --- | --- |
-| `PreparedSolid` / `prepare_solid` | [`analysis/material_source.rs`](../../crates/geometry/src/analysis/material_source.rs): one definition-borrowed owner for immutable native material domains, bounds, section operands and positional query maps. No duplicate BREP or original-material reconstruction. |
-| `PreparedSectionSource` | Definition-borrowed native intersection owner in [`section/mod.rs`](../../crates/geometry/src/section/mod.rs), retained by `PreparedSolid`; raw inspection does not require original STEP correspondence. |
-| Native face sections | [`section/atlas.rs`](../../crates/geometry/src/section/atlas.rs) exhausts local graph coverage; [`cuts.rs`](../../crates/geometry/src/section/cuts.rs) owns whole-line roots; [`continuation.rs`](../../crates/geometry/src/section/continuation.rs) assembles native trim/material incidence and checked spans. The single-graph case remains in `direct.rs`. |
-| Placed queries | [`analysis/placed.rs`](../../crates/geometry/src/analysis/placed.rs): actual accepted quaternion-polynomial transforms, not an assumed exactly orthogonal transpose. |
+| Owner / operation                 | Invariant and navigation                                                                                                                                                                                                                                                                                                                                       |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PreparedSolid` / `prepare_solid` | [`analysis/material_source.rs`](../../crates/geometry/src/analysis/material_source.rs): one definition-borrowed owner for immutable native material domains, bounds, section operands and positional query maps. No duplicate BREP or original-material reconstruction.                                                                                        |
+| `PreparedSectionSource`           | Definition-borrowed native intersection owner in [`section/mod.rs`](../../crates/geometry/src/section/mod.rs), retained by `PreparedSolid`; raw inspection does not require original STEP correspondence.                                                                                                                                                      |
+| Native face sections              | [`section/atlas.rs`](../../crates/geometry/src/section/atlas.rs) exhausts local graph coverage; [`cuts.rs`](../../crates/geometry/src/section/cuts.rs) owns whole-line roots; [`continuation.rs`](../../crates/geometry/src/section/continuation.rs) assembles native trim/material incidence and checked spans. The single-graph case remains in `direct.rs`. |
+| Placed queries                    | [`analysis/placed.rs`](../../crates/geometry/src/analysis/placed.rs): actual accepted quaternion-polynomial transforms, not an assumed exactly orthogonal transpose.                                                                                                                                                                                           |
 
 `NativeSection` carries plane/frame, face lineage, exact single/piecewise native
 surface-plane expressions and achieved chord/plane errors. Internal chart limits
@@ -488,16 +488,13 @@ section payloads; raw inspection does not qualify manufacturing.
 
 Use the fitting/housing scene to exercise shared definitions, actual rendered
 native-face picking, world section overlays, cancellation/resume and engine/window
-lifecycle on the local AMD/CEF surface. Raw section jobs prepare the existing
+lifecycle on the local native GPU surface. Raw section jobs prepare the existing
 `PreparedSectionSource` once per definition, not unused material-map owners.
 Native correspondence, fresh roots/loops and unchanged work/source/output caps
-remain independent gates; this command is a reproduction, not a performed result:
-
-```sh
-node tools/smoke-desktop.mjs --executable "$PWD/target/debug/spiling-desktop" \
-  --scenario geometry --scene fixtures/geometry/scenes/realistic-native.scene.json \
-  --port 9222
-```
+remain independent gates. Launch `pnpm dev`, import the unchanged fitting/housing
+sources, add the declared shared occurrence poses and use the native face list,
+viewport picks and world-Z section controls. The [native-window procedure](development.md#native-egui-workbench)
+distinguishes host tests from actual display/dialog evidence.
 
 A box CLI result does not qualify that scene, the desktop surface, physical
 printability or packaged platforms.

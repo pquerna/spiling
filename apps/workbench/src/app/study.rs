@@ -6,11 +6,12 @@ use super::*;
 use spiling_contracts::{
     manufacturing::*,
     optical::OpticalSelection,
-    project::{ProjectCommand, ProjectId},
+    project::{ProjectCommand, ProjectId, ProjectRevision},
 };
 #[derive(Default)]
 pub(super) struct StudyUi {
     project: Option<ProjectId>,
+    revision: Option<ProjectRevision>,
     selection: Option<OpticalSelection>,
     bindings: [Option<usize>; 2],
     construction: Option<usize>,
@@ -26,9 +27,12 @@ impl Workbench {
             && !self.state.picker_open
             && self.awaiting_serial.is_none();
         let writable = ready && !project.read_only;
-        if self.study.project.as_ref() != Some(&project.project_id) {
+        if self.study.project.as_ref() != Some(&project.project_id)
+            || self.study.revision != Some(project.revision)
+        {
             self.study = StudyUi {
                 project: Some(project.project_id.clone()),
+                revision: Some(project.revision),
                 ..Default::default()
             };
         }

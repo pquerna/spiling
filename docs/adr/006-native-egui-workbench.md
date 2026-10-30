@@ -9,7 +9,8 @@ Licensed under the Open Software License version 3.0
 Status: adopted. Native project, source display and recoverable manufacturing
 through fresh actual-program replay/export are implemented in `apps/workbench`.
 The native development command is the default. Existing source/process/finish/image
-and actual-program review workflows are ported; native packaging gates retirement.
+and actual-program review workflows are ported. Native packaging is the sole
+build/distribution route; the legacy frontend/runtime has been removed.
 
 ## Decision
 
@@ -44,8 +45,8 @@ camera and drafts are UI state; project requirements are engine transactions.
 
 ## Migration and alternatives
 
-Retain `apps/desktop` as a usable temporary baseline while porting complete operator
-flows. Its correctness fixes continue; this is not a second product roadmap.
+The migration used complete operator-flow gates. Its legacy baseline is now
+retired; it is not an alternate product or a supported build path.
 
 1. N1: real native project window, engine identity, Open/Save/history, bounded
    jobs/problems, dirty confirmation and child lifecycle. The central area explicitly

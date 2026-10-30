@@ -55,12 +55,7 @@ impl Workbench {
         if self.manufacturing.panel == 1 {
             ui.heading("Prepare");
             ui.label("Declared printer and process");
-            if ui
-                .add_enabled(ready, egui::Button::new("Load intent JSON…"))
-                .clicked()
-            {
-                self.queued_picker = Some(Picker::Intent);
-            }
+            self.button(ui, Action::LoadIntent);
             let (source, nonce) = if let Some(loaded) = &m.loaded {
                 (Some(loaded.intent.clone()), loaded.nonce)
             } else {
@@ -120,10 +115,7 @@ impl Workbench {
                         ("Travel speed (mm/s)", &mut d.value.recipe.travel_speed_mm_s),
                         ("Flow multiplier", &mut d.value.recipe.flow_multiplier),
                     ] {
-                        ui.horizontal(|ui| {
-                            ui.label(label);
-                            ui.add(egui::DragValue::new(value).speed(0.01));
-                        });
+                        ui::number(ui, label, value, 0.01);
                     }
                     ui.horizontal(|ui| {
                         ui.label("Perimeters");
@@ -231,18 +223,7 @@ impl Workbench {
                 }
             }
             ui.separator();
-            if ui
-                .add_enabled(
-                    ready && m.intent.is_some(),
-                    egui::Button::new("Preflight current inputs"),
-                )
-                .clicked()
-            {
-                self.queued_manufacturing = Some(ManufacturingCommand::Preflight {
-                    session_id: hello.session_id.clone(),
-                    base_revision: project.revision,
-                });
-            }
+            self.button(ui, Action::Preflight);
             if let Some(preflight) = &m.preflight {
                 ui.label(format!(
                     "Preflight: {:?} · revision {}",
@@ -257,39 +238,12 @@ impl Workbench {
                     }
                 });
             }
-            let admitted = m.preflight.as_ref().is_some_and(|p| {
-                p.input_revision == project.revision
-                    && p.disposition == PreflightDisposition::Admitted
-            });
-            if ui
-                .add_enabled(
-                    writable && admitted,
-                    egui::Button::new("Compile current inputs"),
-                )
-                .clicked()
-            {
-                self.queued_manufacturing = Some(ManufacturingCommand::Compile {
-                    session_id: hello.session_id.clone(),
-                    base_revision: project.revision,
-                });
-            }
+            self.button(ui, Action::Compile);
         } else if self.manufacturing.panel == 2 {
             ui.heading("Actual program review");
             ui.colored_label(self.prefs.theme.tokens().warning, "NOT MACHINE READY");
             ui.label("Independent replay is software evidence. Physical printability and machine execution remain unqualified.");
-            if ui
-                .add_enabled(
-                    ready && m.artifact.is_some(),
-                    egui::Button::new("Fresh Verify and load motion"),
-                )
-                .clicked()
-            {
-                self.queued_manufacturing = Some(ManufacturingCommand::Inspect {
-                    session_id: hello.session_id.clone(),
-                    base_revision: project.revision,
-                    output: VerificationOutput::ReportAndMotion,
-                });
-            }
+            self.button(ui, Action::Verify);
             if m.loading {
                 ui.spinner();
                 ui.label("Retrieving checked actual output…");
@@ -327,15 +281,7 @@ impl Workbench {
                 ui.collapsing("Captured inspection identity", |ui| {
                     ui.label(format!("{:#?}", review.capture.provenance));
                 });
-                if ui
-                    .add_enabled(
-                        ready && !m.export_busy,
-                        egui::Button::new("Export verified output…"),
-                    )
-                    .clicked()
-                {
-                    self.queued_picker = Some(Picker::Export);
-                }
+                self.button(ui, Action::Export);
                 if let Some(label) = &m.last_export {
                     ui.label(format!("Written to {label}: plan.json, program.gcode, verification.json, provenance.json"));
                 }

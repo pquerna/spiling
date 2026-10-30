@@ -14,7 +14,7 @@ The shared Rust client launches `spiling-engine --store PATH`. The parent sends 
 
 Readiness requires exact shared `ENGINE_BUILD_ID` (`PACKAGE_VERSION;project10;manufacturing11;surface3;planner29;emitter10;verifier13;splr6;fixed-dual2;optical-prusa-v7-007bb922-cycle1`) and declared format/feature capabilities, including `recoverable_projects_v10`, `manufacturing_schema11`, `fixed_dual_material_routing_v1`, `whole_occurrence_layer_cycles_v1`, `source_bound_surface_color_construction_v1`, `source_bound_process_v3`, `appearance_palette_study_c1a`, `optical_construction_reference_study_v1`, native trimmed-source/query/bed and existing finish/image capabilities. Executable client requirements are authoritative. These identify a coordinated semantic generation, not exact Git attestation, physical printer support or optical calibration.
 
-All RPCs require the capability in authorization metadata. This is local plaintext HTTP/2 under a trusted-host assumption, not remote access or protection against a privileged local observer. The native Rust client connects directly without HTTP proxy routing. Only the native shell/CLI connect; the webview uses narrow Tauri invokes. The parent never discovers engines by fixed port or adopts an unrelated process.
+All RPCs require the capability in authorization metadata. This is local plaintext HTTP/2 under a trusted-host assumption, not remote access or protection against a privileged local observer. The native Rust client connects directly without HTTP proxy routing. Only the native workbench/CLI connect. The parent never discovers engines by fixed port or adopts an unrelated process.
 
 Unary calls have five-second deadlines; watches are explicitly long-lived. Expiring/dropping an RPC or watcher does not kill the engine or cancel accepted work. Shutdown/owner EOF interrupt remaining work and bound server drain to two seconds. The process owner waits for observed exit, can explicitly terminate, and uses kill-on-drop. Logs go to stderr; stdout is not a custom frame transport.
 
@@ -77,7 +77,7 @@ Each available descriptor names complete immutable bytes as `artifacts/{sha256}`
 
 ByteStream Read uses its standard resource_name, read_offset and read_limit: zero limit reads to end; negative offsets/offsets beyond end fail OUT_OF_RANGE; negative limits fail INVALID_ARGUMENT. Stream messages carry byte fragments, not JSON/base64. Full client reads enforce the allocation bound, exact length and SHA-256. Partial-range callers must validate their range separately; a range does not redefine the artifact checksum.
 
-The shell returns bounded bytes as raw Tauri responses. React pulls and validates complete packed artifacts before GPU admission, with nonoverlapping observation and revision/session generation guards. Diagnostic SPLT, native SPLM meshes and SPLS sections have separate decoders. Cancellation can run independently of display transfer. Paged native metadata binds returned resource descriptors to expected packed chunk hashes, sizes and source mappings. Native artifact release frees session-derived memory; it is not operation cancellation or deletion of retained immutable output. Progressive geometric refinement/atomic replacement sets are not implemented.
+The native workbench retrieves and validates bounded complete packed artifacts before GPU admission, with nonoverlapping observation and revision/session guards. Diagnostic SPLT, native SPLM meshes and SPLS sections have separate decoders. Cancellation can run independently of display transfer. Paged native metadata binds returned resource descriptors to expected packed chunk hashes, sizes and source mappings. Native artifact release frees session-derived memory; it is not operation cancellation or deletion of retained immutable output. Progressive geometric refinement/atomic replacement sets are not implemented.
 
 ## SPLT synthetic triangle
 
@@ -105,4 +105,4 @@ spiling-cli job --engine /absolute/path/spiling-engine --chunks 4 --delay-ms 250
 spiling-cli job --engine /absolute/path/spiling-engine --store /absolute/path/store --request-id UUID
 ```
 
-CLI progress goes to stderr; final JSON follows child cleanup. The standard Operation terminal status is separate from RPC transport errors. Shell/CLI/native tests exercise the same generated API, not an alternate in-process engine. CEF presentation and physical GPU support require separate evidence.
+CLI progress goes to stderr; final JSON follows child cleanup. The standard Operation terminal status is separate from RPC transport errors. Shell/CLI/native tests exercise the same generated API, not an alternate in-process engine. Native-window presentation and physical GPU support require separate evidence.
