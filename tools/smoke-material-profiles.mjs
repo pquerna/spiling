@@ -6,7 +6,7 @@
 // this is not another planner, reference comparator or material calibration.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFile, writeFile, mkdir, mkdtemp, unlink } from "node:fs/promises";
+import { readFile, writeFile, mkdir, mkdtemp, unlink, stat } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { cubeSource, intentFor, cases, sha256 } from "./gcode-parity/corpus.mjs";
 import { decodeGcode } from "./gcode-parity/decode.mjs";
@@ -69,7 +69,7 @@ async function run(name, args, expectedError = null) {
     await save(`${name}.stdout.json`, stdout);
     await save(`${name}.stderr.txt`, stderr);
   });
-  if (expectedError) return;
+  if (expectedError) return JSON.parse(stderr.trim().split("\n").at(-1));
   const result = JSON.parse(stdout);
   assert.match(result.hello.engine_build, /;verifier17;/);
   manifest.engineBuild ??= result.hello.engine_build;
@@ -121,7 +121,7 @@ async function program(directory, selection) {
   for (const s of decoded.strokes)
     assert(((s.volumeMm3 / s.lengthMm) * s.feedMmMin) / 60 <= p.max_volumetric_flow_mm3_s + 0.0001);
   manifest.files[`${directory}/program.gcode`] = sha256(text);
-  return { text, volume: model.reduce((sum, s) => sum + s.volumeMm3, 0), provenance };
+  return { text, volume: model.reduce((sum, s) => sum + s.volumeMm3, 0), provenance, decoded };
 }
 try {
   for (const name of [
@@ -150,6 +150,14 @@ try {
   );
   await save("a.json", a);
   await save("b.json", b);
+  const commandSemantics = (decoded) => ({
+    strokes: decoded.strokes.map(({ line, roleHint, ...stroke }) => stroke),
+    travels: decoded.travels.map(({ line, roleHint, ...travel }) => travel),
+    controls: decoded.controls.map(({ line, ...control }) => control),
+    stationaryFilamentMm: decoded.stationaryFilamentMm,
+    retractedFilamentMm: decoded.retractedFilamentMm,
+    recoveredFilamentMm: decoded.recoveredFilamentMm,
+  });
   const project = join(output, "project.spiling");
   const first = await run("create-a", [
     "create",
@@ -171,6 +179,75 @@ try {
     pa.provenance.intent.printer.max_volumetric_flow_mm3_s,
     base.printer.max_volumetric_flow_mm3_s,
   );
+  // Hold geometry and explicit process values fixed while changing metadata.
+  const labelOnly = structuredClone(a);
+  labelOnly.profile.revision = "label-control";
+  labelOnly.profile.material.polymer_family = "SyntheticPCTGLabelOnly";
+  await save("label-only.json", labelOnly);
+  await run("label-only", [
+    "create",
+    join(output, "label-only.spiling"),
+    "--import",
+    join(output, "cube.step"),
+    "--intent",
+    join(output, "base.intent.json"),
+    "--material-profile",
+    join(output, "label-only.json"),
+    "--compile",
+    "--verify",
+    "--manufacturing-out",
+    join(output, "label-export"),
+  ]);
+  assert.deepEqual(
+    commandSemantics((await program("label-export", labelOnly)).decoded),
+    commandSemantics(pa.decoded),
+  );
+  const bridgeAccepted = structuredClone(a);
+  bridgeAccepted.profile.process.max_bridge_span_mm = 1.19;
+  await save("bridge-accepted.json", bridgeAccepted);
+  await run("bridge-accepted", [
+    "create",
+    join(output, "bridge-accepted.spiling"),
+    "--import",
+    join(output, "cube.step"),
+    "--intent",
+    join(output, "base.intent.json"),
+    "--material-profile",
+    join(output, "bridge-accepted.json"),
+    "--compile",
+    "--verify",
+    "--manufacturing-out",
+    join(output, "bridge-accepted-export"),
+  ]);
+  assert.deepEqual(
+    commandSemantics((await program("bridge-accepted-export", bridgeAccepted)).decoded),
+    commandSemantics(pa.decoded),
+  );
+  const bridgeRejected = structuredClone(bridgeAccepted);
+  bridgeRejected.profile.process.max_bridge_span_mm = 1.17;
+  await save("bridge-rejected.json", bridgeRejected);
+  const failure = await run(
+    "bridge-rejected",
+    [
+      "create",
+      join(output, "bridge-rejected.spiling"),
+      "--import",
+      join(output, "cube.step"),
+      "--intent",
+      join(output, "base.intent.json"),
+      "--material-profile",
+      join(output, "bridge-rejected.json"),
+      "--compile",
+      "--verify",
+      "--manufacturing-out",
+      join(output, "bridge-rejected-export"),
+    ],
+    "neither orthogonal native raster has bounded deposited anchors",
+  );
+  assert.equal(failure.error.code, "unsupported_geometry");
+  assert.equal(failure.manufacturing.artifact, null);
+  assert.equal(failure.manufacturing.intent.recipe.process.max_bridge_span_mm, 1.17);
+  await assert.rejects(stat(join(output, "bridge-rejected-export")), { code: "ENOENT" });
   const undo = await run("undo-to-a", [
     "edit",
     project,
@@ -225,6 +302,9 @@ try {
     "b.json",
     "bad.json",
     "low-flow.json",
+    "label-only.json",
+    "bridge-accepted.json",
+    "bridge-rejected.json",
   ])
     await unlink(join(output, file));
   const reopened = await run("fresh-reopen", [
@@ -238,6 +318,9 @@ try {
   assert.equal((await program("reopened-export", b)).text, pb.text);
   manifest.outcome = {
     capturedProfiles: 2,
+    labelDoesNotSelectBehavior: true,
+    declaredBridgeLimitEnforced: true,
+    unsupportedBridgePublishesNothing: true,
     undoRestoredProgram: true,
     redoAppliedProgram: true,
     rejectedEditsAtomic: true,
