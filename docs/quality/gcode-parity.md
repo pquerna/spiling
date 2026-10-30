@@ -203,3 +203,24 @@ length/count, rather than mistaking bridge fan/feed changes for extra extrusion.
 Whole-job material distribution, variable-width internal solids and physical
 roof footprint remain separate questions. A reconciled ledger alone never turns
 an unexplained policy or failed baseline audit green.
+
+The 100% cases additionally extend only top skin through the full cube height
+(50 reference layers / 10 mm native thickness). This probe preserves the already
+solid material request. The native program must remain byte-identical and pass
+fresh emitted replay. The reference's 42 ordinary interior intervals must change
+to its independently observed natural internal-skin template, with one additional
+long row, short connecting extrusion and bounded variable widths. The outermost
+layers and existing skins must retain their volume. The repeated-template
+prediction must match the observed whole-program reference delta within 0.01 mm³;
+that bound is confined to this causal diagnostic, never a baseline volume or
+coverage tolerance. Failed invariance, geometry or template checks cannot explain
+the difference.
+
+The reference [`Fill.cpp`](https://github.com/prusa3d/PrusaSlicer/blob/69c8e569410efe82259e706cd09a05ea82da9359/src/libslic3r/Fill/Fill.cpp)
+selects `ipEnsuring` for internal solids separately from perimeter generation;
+[`FillEnsuring.cpp`](https://github.com/prusa3d/PrusaSlicer/blob/69c8e569410efe82259e706cd09a05ea82da9359/src/libslic3r/Fill/FillEnsuring.cpp)
+uses straight fill and variable-width residual construction. Thus “classic
+perimeters” does not imply uniform-width internal skins. The diagnostic retains
+actual nominal width ranges inferred from E/length/height, row/link accounting,
+and the controlled programs. It identifies a specific material-volume contribution
+without adopting that filler or claiming the full remaining distribution resolved.

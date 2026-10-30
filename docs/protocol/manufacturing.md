@@ -99,6 +99,10 @@ ordinary manufacturing status and exported provenance expose the captured
 selection, profile values and overrides. `pnpm test:materials` builds a matching
 engine/CLI and exercises synthetic paired profiles, thermal/cooling/feed/flow
 commands, Undo/Redo, rejected edits and fresh source/catalog-absent replay/export.
+It holds geometry/process fixed while changing synthetic family metadata and
+requires unchanged decoded commands. Nearby declared bridge limits exercise
+positive native admission versus an explicit unsupported-gap refusal with no
+published artifact; these are software test limits, not measured material spans.
 The runner uses the independent parity byte decoder. Test declarations are not
 PLA/PCTG/filled-material printing recommendations; fixed-dual per-tool process
 profiles, mixed diameters, measured envelopes and material-library UI are not

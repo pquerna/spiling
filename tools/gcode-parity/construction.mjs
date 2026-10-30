@@ -83,7 +83,20 @@ export function observeCubeConstruction(decoded, specification) {
       upperMm: z,
       heightMm: height,
       walls: totals(wall),
-      longFill: { ...totals(rows), layout: parallelRows(rows) },
+      longFill: {
+        ...totals(rows),
+        layout: parallelRows(rows),
+        widthRangeMm: rows.length
+          ? [
+              Math.min(
+                ...rows.map((s) => s.volumeMm3 / s.lengthMm / height + height * (1 - Math.PI / 4)),
+              ),
+              Math.max(
+                ...rows.map((s) => s.volumeMm3 / s.lengthMm / height + height * (1 - Math.PI / 4)),
+              ),
+            ]
+          : null,
+      },
       linksAndShortFill: totals(links),
       nominalStadiumAreaMm2: nominalArea,
       allStadiumResidualMm3: sum(strokes, (s) => s.volumeMm3 - s.lengthMm * nominalArea),
@@ -105,15 +118,13 @@ export function observeCubeConstruction(decoded, specification) {
           circleArea === null
             ? null
             : sum(processRows, (s) => s.volumeMm3 - s.lengthMm * circleArea),
-        examples: processRows
-          .slice(0, 3)
-          .map((s) => ({
-            line: s.line,
-            from: s.from,
-            to: s.to,
-            lengthMm: s.lengthMm,
-            volumeMm3: s.volumeMm3,
-          })),
+        examples: processRows.slice(0, 3).map((s) => ({
+          line: s.line,
+          from: s.from,
+          to: s.to,
+          lengthMm: s.lengthMm,
+          volumeMm3: s.volumeMm3,
+        })),
       },
       reconciliationResidualMm3:
         sum(strokes, (s) => s.volumeMm3) - sum([...wall, ...rows, ...links], (s) => s.volumeMm3),

@@ -309,7 +309,7 @@ export function auditCube(decoded, specification) {
 export function compareAudits(
   spiling,
   reference,
-  { scheduleProbe = null, referenceProbeEvidence = null } = {},
+  { scheduleProbe = null, referenceProbeEvidence = null, solidProbeEvidence = null } = {},
 ) {
   const differences = [];
   const add = (id, status, explanation, evidence) =>
@@ -504,6 +504,13 @@ export function compareAudits(
       referenceProbeEvidence?.observations ?? null,
     );
   }
+  if (spiling.infillFraction === 1)
+    add(
+      "reference_internal_solid_policy",
+      solidProbeEvidence?.explained ? "explained" : "unresolved",
+      "Changing only top-skin thickness to the full cube height leaves native100% G-code byte-identical. Reference replaces 42 ordinary interior layers with the same variable-width/linked construction already observed in its natural internal skin; the repeated-template volume delta matches actual extrusion. Classic perimeter selection does not select the reference internal-solid filler. This isolates that contribution without claiming whole-job or physical equivalence.",
+      solidProbeEvidence ?? null,
+    );
   add(
     "material_distribution",
     Math.abs(spiling.modelVolumeMm3 - reference.modelVolumeMm3) < 1e-5 &&

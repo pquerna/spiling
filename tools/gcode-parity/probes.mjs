@@ -62,3 +62,73 @@ export function evaluateReferenceProbes(baseline, probes) {
       "Controlled reference perturbations and nominal geometry/E fits explain a construction policy; baseline audit violations are retained. This is not physical validation or proof that either slicer is superior.",
   };
 }
+
+export function evaluateSolidProbe(
+  native,
+  reference,
+  diagnosticNative,
+  diagnosticReference,
+  nativeBytesEqual,
+) {
+  const nativeInner = native.constructionObservations.layers.filter(
+    (l) => l.lowerMm >= 0.8 - 1e-6 && l.upperMm <= 9.2 + 1e-6,
+  );
+  const ordinary = reference.constructionObservations.layers.filter(
+    (l) => l.lowerMm >= 0.8 - 1e-6 && l.upperMm <= 9.2 + 1e-6,
+  );
+  const allSolid = diagnosticReference.constructionObservations.layers;
+  const naturalSolid = layer(reference.constructionObservations, 0.4);
+  const firstOrdinary = ordinary[0];
+  const totalDelta = diagnosticReference.modelVolumeMm3 - reference.modelVolumeMm3;
+  const invariant =
+    nativeBytesEqual === true &&
+    native.correctnessPassed &&
+    reference.correctnessPassed &&
+    diagnosticNative.correctnessPassed &&
+    diagnosticReference.correctnessPassed;
+  const expectedDelta =
+    firstOrdinary && naturalSolid
+      ? 42 *
+        (naturalSolid.walls.volumeMm3 +
+          naturalSolid.longFill.volumeMm3 +
+          naturalSolid.linksAndShortFill.volumeMm3 -
+          (firstOrdinary.walls.volumeMm3 +
+            firstOrdinary.longFill.volumeMm3 +
+            firstOrdinary.linksAndShortFill.volumeMm3))
+      : null;
+  const templateFits =
+    invariant &&
+    ordinary.length === 42 &&
+    nativeInner.length === 42 &&
+    naturalSolid !== undefined &&
+    ordinary.every((l) => {
+      const s = layer(diagnosticReference.constructionObservations, l.upperMm);
+      return (
+        s &&
+        s.longFill.layout?.count === l.longFill.layout?.count + 1 &&
+        s.linksAndShortFill.volumeMm3 > 0.5 &&
+        l.linksAndShortFill.volumeMm3 === 0 &&
+        s.longFill.widthRangeMm[0] < 0.4 &&
+        s.longFill.widthRangeMm[1] > 0.449 &&
+        close(s.longFill.volumeMm3, naturalSolid.longFill.volumeMm3) &&
+        close(s.linksAndShortFill.volumeMm3, naturalSolid.linksAndShortFill.volumeMm3)
+      );
+    }) &&
+    reference.layers
+      .filter((l) => l.upperMm <= 0.8 + 1e-6 || l.lowerMm >= 9.2 - 1e-6)
+      .every((l) => close(l.volumeMm3, layer(diagnosticReference, l.upperMm)?.volumeMm3)) &&
+    Math.abs(totalDelta - expectedDelta) < 0.01;
+  return {
+    explained: Boolean(templateFits),
+    nativeProgramUnchanged: nativeBytesEqual === true,
+    referenceVolumeDeltaMm3: totalDelta,
+    repeatedTemplatePredictionMm3: expectedDelta,
+    referenceNaturalSolid: naturalSolid,
+    referenceOrdinaryInterior: ordinary,
+    referenceSolidInterior: allSolid.filter(
+      (l) => l.lowerMm >= 0.8 - 1e-6 && l.upperMm <= 9.2 + 1e-6,
+    ),
+    limits:
+      "Only requested top-skin thickness changes on the already 100%-filled cube. Reference internal solids use its ensuring/variable-width filler even with classic perimeters. This explains the observed internal-solid contribution, not physical overfill or every whole-job material difference.",
+  };
+}

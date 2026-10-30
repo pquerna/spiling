@@ -70,7 +70,7 @@ export function referenceProfile(
   { topSolidLayers = 4, bridgeFlowRatio = 1, verticalShell = "enabled" } = {},
 ) {
   if (
-    ![3, 4].includes(topSolidLayers) ||
+    ![3, 4, 50].includes(topSolidLayers) ||
     ![0.5, 1].includes(bridgeFlowRatio) ||
     !["enabled", "disabled"].includes(verticalShell)
   )
@@ -159,4 +159,7 @@ export const referenceProbeSettings = [
   { id: "roof-shift", settings: { topSolidLayers: 3 } },
   { id: "half-bridge-flow", settings: { bridgeFlowRatio: 0.5 } },
   { id: "shell-disabled", settings: { verticalShell: "disabled" } },
+  { id: "solid-all", settings: { topSolidLayers: 50 } },
 ];
+export const referenceProbesFor = (c) =>
+  referenceProbeSettings.filter((p) => (p.id === "solid-all") === (c.infillFraction === 1));
