@@ -1006,6 +1006,12 @@ fn profiles_reject_nonfinite_ranges_capabilities_flow_and_duplicate_components()
     changed.recipe.infill_fraction = 0.5;
     changed.validate().unwrap();
     changed.recipe.infill_fraction = 0.0;
+    changed.validate().unwrap();
+    assert_eq!(
+        decode_intent(&serde_json::to_vec(&changed).unwrap()).unwrap(),
+        changed
+    );
+    changed.recipe.infill_fraction = -0.01;
     assert!(changed.validate().is_err());
     changed = valid.clone();
     changed.printer.capabilities.extruders = 2;
@@ -3338,4 +3344,26 @@ fn skin_witness_deserialization_shares_remaining_allowance_across_domains() {
         .unwrap_err();
     assert!(error.is_data());
     assert_eq!(budget.remaining_skin_fits, 0);
+}
+
+#[test]
+fn global_zero_infill_retains_the_whole_interior_as_intentional_void() {
+    let mut recipe = intent().recipe;
+    recipe.infill_fraction = 0.0;
+    let mut coverage = coverage();
+    coverage.wall_area_mm2 = 10.0;
+    coverage.sparse_interior_area_mm2 = 40.0;
+    coverage.intentional_void_area_mm2 = 40.0;
+    coverage.process_regions.push(ProcessRegionCoverage {
+        material_domain: None,
+        area_mm2: 40.0,
+        fraction: 0.0,
+        contributions: vec![],
+    });
+    coverage.validate(&recipe).unwrap();
+    coverage.intentional_void_area_mm2 = 0.0;
+    assert!(coverage.validate(&recipe).is_err());
+    coverage.intentional_void_area_mm2 = 40.0;
+    coverage.process_regions[0].fraction = -0.01;
+    assert!(coverage.validate(&recipe).is_err());
 }

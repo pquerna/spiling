@@ -1242,6 +1242,23 @@ mod public_state_tests {
         };
         let wire: crate::rpc::ProjectInfo = info.clone().try_into().unwrap();
         assert_eq!(ProjectInfo::try_from(wire.clone()).unwrap(), info);
+        let mut hollow = info.clone();
+        hollow.process_document.layers.clear();
+        let row = &mut hollow.resolved_process[0];
+        row.global_fraction = 0.0;
+        row.inherited = hollow
+            .process_document
+            .resolve_definition(&row.definition_id, 0.0);
+        row.value = hollow
+            .process_document
+            .resolve(&row.definition_id, row.occurrence_id, 0.0);
+        let hollow_wire: crate::rpc::ProjectInfo = hollow.clone().try_into().unwrap();
+        assert_eq!(ProjectInfo::try_from(hollow_wire).unwrap(), hollow);
+        hollow.resolved_process[0].global_fraction = -0.01;
+        assert!(crate::rpc::ProjectInfo::try_from(hollow).is_err());
+        let mut forged = wire.clone();
+        forged.resolved_process[0].value.as_mut().unwrap().fraction = 0.0;
+        assert!(ProjectInfo::try_from(forged).is_err());
         let mut missing = wire.clone();
         missing.process_document = None;
         assert!(ProjectInfo::try_from(missing).is_err());

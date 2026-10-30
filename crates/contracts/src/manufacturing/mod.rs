@@ -998,14 +998,16 @@ impl PlanarPrintRecipe {
                 "recipe requires 1..8 perimeters and layer height <= bead width",
             ));
         }
-        if !self.infill_fraction.is_finite()
-            || self.infill_fraction <= 0.0
-            || self.infill_fraction > 1.0
-        {
-            return Err(invalid("infill fraction must be finite and in (0,1]"));
-        }
+        validate_global_infill_fraction(self.infill_fraction)?;
         Ok(())
     }
+}
+
+pub(crate) fn validate_global_infill_fraction(fraction: f64) -> Result<(), ManufacturingError> {
+    if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+        return Err(invalid("infill fraction must be finite and in [0,1]"));
+    }
+    Ok(())
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -2022,7 +2024,7 @@ impl PlanarRegionCoverage {
             if !region.area_mm2.is_finite()
                 || region.area_mm2 <= 0.0
                 || !region.fraction.is_finite()
-                || region.fraction <= 0.0
+                || region.fraction < 0.0
                 || region.fraction > 1.0
                 || (region.contributions.is_empty()
                     && region.fraction != recipe.infill_fraction

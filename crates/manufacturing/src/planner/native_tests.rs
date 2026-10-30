@@ -3979,3 +3979,52 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
         .finalize(&mut admission.geometry_work, &cancel)
         .unwrap();
 }
+
+#[test]
+fn hollow_native_box_preserves_walls_skins_void_accounting_and_fresh_replay() {
+    let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let mut intent = intent(false);
+    intent.recipe.infill_fraction = 0.0;
+    intent.recipe.perimeter_count = 2;
+    // Explicit software span declaration for the original 20x10x8 source.
+    intent.recipe.process.max_bridge_span_mm = 25.0;
+    let cancel = AtomicBool::new(false);
+    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    assert!(bundle.verification.verified);
+    let bundle = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+    assert!(crate::verify_bundle(&bundle, &cancel).unwrap().verified);
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .any(|l| l.region_coverage.bottom_skin_area_mm2 > 0.0)
+    );
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .any(|l| l.region_coverage.top_skin_area_mm2 > 0.0)
+    );
+    let mut interior_layers = 0;
+    for layer in &bundle.plan.layers {
+        assert!(
+            !layer
+                .paths
+                .iter()
+                .any(|p| p.kind == DepositionKind::SparseFill)
+        );
+        if layer.lower_z_mm >= 2.0 && layer.z_mm <= 6.0 {
+            interior_layers += 1;
+            let c = &layer.region_coverage;
+            assert!(c.intentional_void_area_mm2 > 0.0);
+            assert!((c.intentional_void_area_mm2 - c.sparse_interior_area_mm2).abs() < 1e-8);
+            assert!(layer.paths.iter().all(|p| matches!(
+                p.owner,
+                Some(spiling_contracts::manufacturing::DepositionOwner::Wall)
+            )));
+        }
+    }
+    assert!(interior_layers > 0);
+}

@@ -195,14 +195,21 @@ impl TryFrom<ProcessDocument> for rpc::ProcessDocument {
         })
     }
 }
+// A global hollow base has no authored winner. Explicit overrides still use
+// the positive-only ProcessValue contract, in both conversion directions.
+fn validate_resolved_fraction(fraction: f64, authored: bool) -> Result<(), String> {
+    if authored {
+        ProcessValue::SparseFraction { fraction }
+            .validate()
+            .map_err(|e| e.to_string())
+    } else {
+        crate::manufacturing::validate_global_infill_fraction(fraction).map_err(|e| e.to_string())
+    }
+}
 impl TryFrom<rpc::ResolvedProcessValue> for ResolvedProcessValue {
     type Error = String;
     fn try_from(v: rpc::ResolvedProcessValue) -> Result<Self, String> {
-        ProcessValue::SparseFraction {
-            fraction: v.fraction,
-        }
-        .validate()
-        .map_err(|e| e.to_string())?;
+        validate_resolved_fraction(v.fraction, v.provenance.is_some())?;
         Ok(Self {
             fraction: v.fraction,
             provenance: v
@@ -221,11 +228,7 @@ impl TryFrom<rpc::ResolvedProcessValue> for ResolvedProcessValue {
 impl TryFrom<ResolvedProcessValue> for rpc::ResolvedProcessValue {
     type Error = String;
     fn try_from(v: ResolvedProcessValue) -> Result<Self, String> {
-        ProcessValue::SparseFraction {
-            fraction: v.fraction,
-        }
-        .validate()
-        .map_err(|e| e.to_string())?;
+        validate_resolved_fraction(v.fraction, v.provenance.is_some())?;
         Ok(Self {
             fraction: v.fraction,
             provenance: v.provenance.map(|p| rpc::ProcessProvenance {
@@ -238,11 +241,8 @@ impl TryFrom<ResolvedProcessValue> for rpc::ResolvedProcessValue {
 impl TryFrom<rpc::ResolvedOccurrenceProcess> for ResolvedOccurrenceProcess {
     type Error = String;
     fn try_from(v: rpc::ResolvedOccurrenceProcess) -> Result<Self, String> {
-        ProcessValue::SparseFraction {
-            fraction: v.global_fraction,
-        }
-        .validate()
-        .map_err(|e| e.to_string())?;
+        crate::manufacturing::validate_global_infill_fraction(v.global_fraction)
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             occurrence_id: OccurrenceId::new(v.occurrence_id).map_err(|e| e.to_string())?,
             definition_id: DefinitionId::parse(v.definition_id).map_err(|e| e.to_string())?,
@@ -255,11 +255,8 @@ impl TryFrom<rpc::ResolvedOccurrenceProcess> for ResolvedOccurrenceProcess {
 impl TryFrom<ResolvedOccurrenceProcess> for rpc::ResolvedOccurrenceProcess {
     type Error = String;
     fn try_from(v: ResolvedOccurrenceProcess) -> Result<Self, String> {
-        ProcessValue::SparseFraction {
-            fraction: v.global_fraction,
-        }
-        .validate()
-        .map_err(|e| e.to_string())?;
+        crate::manufacturing::validate_global_infill_fraction(v.global_fraction)
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             occurrence_id: v.occurrence_id.get(),
             definition_id: v.definition_id.into(),

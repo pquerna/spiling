@@ -857,11 +857,21 @@ impl HatchRows {
         } else {
             (rect.min().y, rect.max().y)
         };
-        let count = (((max - min) / solid_spacing) * fraction).ceil().max(1.0);
+        if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+            return Err(unsupported("hatch fraction must be finite and in [0,1]"));
+        }
+        // Zero means intentional void, not a forced centered sparse row.
+        // Keep the region for coverage/provenance while all lattice consumers
+        // (including retention and alternate/common phases) see zero rows.
+        let count = if fraction == 0.0 {
+            0.0
+        } else {
+            (((max - min) / solid_spacing) * fraction).ceil().max(1.0)
+        };
         if !count.is_finite() || count > MAX_DEPOSITION_SEGMENTS as f64 {
             return Err(resource("rectilinear hatch row limit exceeded"));
         }
-        let spacing = if count == 1.0 {
+        let spacing = if count <= 1.0 {
             0.0
         } else {
             solid_spacing / fraction
@@ -893,7 +903,7 @@ impl HatchRows {
         phase: OrdinaryHatchPhase,
     ) -> Result<Option<Self>, ManufacturingError> {
         let (mut rows, bounds, solid_spacing) = Self::prepare_centered(polygon, fraction, layer)?;
-        if phase == OrdinaryHatchPhase::Centered {
+        if rows.count == 0 || phase == OrdinaryHatchPhase::Centered {
             return Ok(Some(rows));
         }
         let spacing = if rows.count == 1 {
@@ -920,6 +930,9 @@ impl HatchRows {
         origin: [f64; 2],
     ) -> Result<Self, ManufacturingError> {
         let (mut rows, bounds, solid_spacing) = Self::prepare_centered(polygon, fraction, layer)?;
+        if rows.count == 0 {
+            return Ok(rows);
+        }
         let spacing = if rows.count == 1 {
             solid_spacing / fraction
         } else {
@@ -943,6 +956,9 @@ impl HatchRows {
     }
 
     pub(super) fn point_bound(&self) -> Result<usize, ManufacturingError> {
+        if self.count == 0 {
+            return Ok(0);
+        }
         // Row intersections stay live beside all emitted endpoints.
         self.count
             .checked_add(1)
@@ -963,6 +979,9 @@ pub(super) fn hatch_polygon(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
+    if rows.count == 0 {
+        return Ok(());
+    }
     if rows.count > MAX_DEPOSITION_SEGMENTS as usize - *segments {
         return Err(resource("rectilinear hatch row limit exceeded"));
     }
@@ -1503,4 +1522,80 @@ fn ordinary_quarter_hatch_preserves_each_polygon_cadence_and_authored_origins() 
         OrdinaryHatchPhase::Half,
     );
     assert_eq!(rows(&unrestricted_half, false).len(), 12);
+}
+
+#[cfg(test)]
+#[test]
+fn zero_fraction_has_no_rows_for_centered_alternate_or_transported_phases() {
+    let recipe = super::tests::recipe(0.0);
+    let cancel = AtomicBool::new(false);
+    let polygon = Polygon::new(
+        LineString::from(vec![
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+            (0.0, 0.0),
+        ]),
+        vec![],
+    );
+    for axis in [HatchAxis::X, HatchAxis::Y] {
+        let layer = HatchLayer {
+            z: 0.2,
+            lower_z: 0.0,
+            height: 0.2,
+            axis,
+            top_axis: axis,
+            recipe: &recipe,
+        };
+        for phase in OrdinaryHatchPhase::CANDIDATES {
+            let rows = HatchRows::centered_phase(&polygon, 0.0, &layer, phase)
+                .unwrap()
+                .unwrap();
+            assert_eq!(rows.point_bound().unwrap(), 0);
+            assert!(rows.start.is_finite() && rows.spacing.is_finite());
+            let mut paths = Vec::new();
+            let mut segments = 0;
+            hatch_polygon(
+                &polygon,
+                DepositionKind::SparseFill,
+                &rows,
+                &layer,
+                &mut paths,
+                &mut segments,
+                &cancel,
+            )
+            .unwrap();
+            assert!(paths.is_empty());
+            assert_eq!(segments, 0);
+        }
+        let rows = HatchRows::common(&polygon, 0.0, &layer, [5.125, -10.75]).unwrap();
+        assert_eq!(rows.point_bound().unwrap(), 0);
+        let mut paths = Vec::new();
+        let mut segments = 0;
+        hatch_polygon(
+            &polygon,
+            DepositionKind::SparseFill,
+            &rows,
+            &layer,
+            &mut paths,
+            &mut segments,
+            &cancel,
+        )
+        .unwrap();
+        assert!(paths.is_empty());
+        assert_eq!(segments, 0);
+        assert!(
+            hatch_polygon(
+                &polygon,
+                DepositionKind::SparseFill,
+                &rows,
+                &layer,
+                &mut paths,
+                &mut segments,
+                &AtomicBool::new(true)
+            )
+            .is_err()
+        );
+    }
 }

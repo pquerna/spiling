@@ -230,6 +230,7 @@ try {
           "--verify",
           "--manufacturing-out",
           join(directory, "spiling-export"),
+          "--save",
           "--engine",
           engine,
         ],
@@ -255,6 +256,30 @@ try {
       });
       overlays[c.id].spiling = overlayBands(decoded);
       await save(`${c.id}/spiling-audit.json`, record.spiling);
+      const reopenedStdout = await run(
+        cli,
+        [
+          "project",
+          "inspect",
+          join(directory, "project.spiling"),
+          "--verify",
+          "--manufacturing-out",
+          join(directory, "reopened-export"),
+          "--engine",
+          engine,
+        ],
+        `${c.id}/spiling-reopened`,
+      );
+      if (JSON.parse(reopenedStdout).hello?.engine_build !== manifest.engineBuild)
+        throw new Error("reopened engine identity changed");
+      const reopenedVerification = JSON.parse(
+        await boundedText(join(directory, "reopened-export/verification.json")),
+      );
+      const originalProgram = await boundedText(join(directory, "spiling-export/program.gcode"));
+      const reopenedProgram = await boundedText(join(directory, "reopened-export/program.gcode"));
+      if (reopenedVerification.verified !== true || originalProgram !== reopenedProgram)
+        throw new Error("fresh-process saved-project replay/export changed the program or failed");
+      record.recovery = { freshProcessVerified: true, programIdentical: true };
       let scheduleProbe = null;
       if (record.spiling.layerCount !== record.reference.layerCount) {
         const diagnostic = structuredClone(intent);
@@ -344,6 +369,10 @@ for (const c of report.cases)
     "spiling-export/plan.json",
     "spiling-export/verification.json",
     "spiling-export/provenance.json",
+    "reopened-export/plan.json",
+    "reopened-export/program.gcode",
+    "reopened-export/verification.json",
+    "reopened-export/provenance.json",
     "shape-bound-diagnostic.intent.json",
     "shape-bound-diagnostic-export/plan.json",
     "shape-bound-diagnostic-export/program.gcode",

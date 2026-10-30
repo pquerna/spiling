@@ -10,7 +10,8 @@ exported commands with an installed PrusaSlicer **2.9.4**. This is a bounded
 software comparison, not a printer qualification or an assertion that another
 slicer's decisions are correct. It exercises native STEP admission, intent,
 compilation, mandatory emitted-program replay and exclusive CLI export; no UI is
-involved. It does not exercise a fresh-process save/reopen journey.
+involved. Each native case checkpoints and opens in a new read-only engine,
+freshly replays, and exports byte-identical G-code.
 
 ```sh
 pnpm test:parity
@@ -38,8 +39,8 @@ independent audits and an interactive `report.html` with physical-band overlays.
 Exit **1** means a missing case, compilation/refusal, parser error or unmet audit
 obligation. Exit **2** means audits passed but differences remain unresolved.
 `--observe` permits exit zero for unresolved differences only; it never makes a
-refused case or failed audit pass. The complete matrix currently exposes genuine
-unsupported inputs, so a nonzero result is expected until those gaps are solved.
+refused case or failed audit pass. The complete matrix currently exposes unresolved hollow-reference audit
+obligations, so a nonzero result is expected until those differences are resolved.
 Do not exclude a failing case or turn a promised positive into an expected refusal.
 
 ## Comparison contract
@@ -125,10 +126,11 @@ controls, but does not by itself justify their extent or speed/cooling cost.
 Keep this and material-distribution differences unresolved until the deciding
 actual-command/anchor evidence is retained.
 
-Zero infill currently refuses the native recipe's `(0,1]` validation before
-planning. The hollow reference also exposes roof-adjacent material and nominal
-bridge-footprint audit differences. Neither is hidden by the supported cases.
-Enabling hollow parts requires coordinated recipe/region accounting, zero-row
-hatching, roof anchors and independent replay contracts; changing only validation
-would invent a successful fallback. Broader geometry, retraction, supports and
+Global zero infill retains source-bound interior/intentional-void accounting and
+emits zero centered/alternate/common-phase hatch rows. Required walls/skins,
+actual roof-anchor admission and independent replay still apply. Authored density
+overrides retain their positive-only contract. The hollow reference exposes
+roof-adjacent material and nominal bridge-footprint audit differences; retain
+these as unresolved model/intent questions rather than declaring reference
+correctness or weakening the analytic obligation. Broader geometry, retraction, supports and
 multi-tool comparisons belong in later explicitly scoped corpus cases.

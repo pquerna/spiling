@@ -1619,8 +1619,14 @@ mod tests {
         invalid.printer.as_mut().unwrap().components =
             vec![rpc::MachineComponent::default(); MAX_MACHINE_COMPONENTS as usize + 1];
         assert!(ManufacturingIntent::try_from(invalid).is_err());
+        let mut hollow = wire.clone();
+        hollow.recipe.as_mut().unwrap().infill_fraction = 0.0;
+        let hollow = ManufacturingIntent::try_from(hollow).unwrap();
+        assert_eq!(hollow.recipe.infill_fraction, 0.0);
+        let hollow_wire: rpc::ManufacturingIntent = hollow.clone().try_into().unwrap();
+        assert_eq!(ManufacturingIntent::try_from(hollow_wire).unwrap(), hollow);
         let mut invalid = wire;
-        invalid.recipe.as_mut().unwrap().infill_fraction = 0.0;
+        invalid.recipe.as_mut().unwrap().infill_fraction = -0.01;
         assert!(ManufacturingIntent::try_from(invalid).is_err());
     }
 

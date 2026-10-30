@@ -2157,7 +2157,7 @@ fn unsupported_thin_support_envelope_and_invalid_profiles_are_errors() {
             0 => data.recipe.print_speed_mm_s = 201.0,
             1 => data.printer.max_volumetric_flow_mm3_s = 0.01,
             2 => data.recipe.flow_multiplier = f64::NAN,
-            _ => data.recipe.infill_fraction = 0.0,
+            _ => data.recipe.infill_fraction = -0.01,
         }
         assert!(scene.compile(&data).is_err());
     }

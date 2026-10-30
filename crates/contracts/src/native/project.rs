@@ -512,11 +512,8 @@ pub fn validate_project_info(v: &ProjectInfo) -> Result<(), String> {
     }
     let mut previous = None;
     for row in &v.resolved_process {
-        ProcessValue::SparseFraction {
-            fraction: row.global_fraction,
-        }
-        .validate()
-        .map_err(|e| e.to_string())?;
+        crate::manufacturing::validate_global_infill_fraction(row.global_fraction)
+            .map_err(|e| e.to_string())?;
         if previous.is_some_and(|id| id >= row.occurrence_id)
             || row.value
                 != v.process_document.resolve(
