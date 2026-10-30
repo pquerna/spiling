@@ -147,7 +147,7 @@ target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project ins
   --optical-report "$work/reopened-report.json" --optical-compare
 ```
 
-The example's target is the pinned model's synthetic reference result, not a measured mixed coupon or a manufacturing-quality promise. Its finite0.15mm window over two0.10mm slots exercises unequal exposed fractions. `--optical-accept best` chooses a retained ranked candidate; an integer denotes the original grid index, not its rank. `--optical-accept-report` accepts a complete report without selecting an estimate. Export destinations must be new and use the shared owned-handle/reap/rollback transaction. This headless cut does not implement a workbench form, backed-patch optics, mixed-material G-code or physical color accuracy.
+The example's target is the pinned model's synthetic reference result, not a measured mixed coupon or a manufacturing-quality promise. Its finite0.15mm window over two0.10mm slots exercises unequal exposed fractions. `--optical-accept best` chooses a retained ranked candidate; an integer denotes the original grid index, not its rank. `--optical-accept-report` accepts a complete report without selecting an estimate. Export destinations must be new and use the shared owned-handle/reap/rollback transaction. Study authoring remains headless. The explicit application operation connects a retained selection to the bounded fixed-dual manufacturing route; fresh inspection reassesses its realized surface and the legacy viewport can tint actual tool strokes using captured catalog metadata. Backed-patch optics and physical color accuracy remain unqualified.
 
 ## Writer ownership and reader snapshots
 

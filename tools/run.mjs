@@ -429,6 +429,11 @@ async function main() {
       await run("cargo", ["test", "--locked", "--workspace"]);
       await cliSmoke();
       await run("pnpm", ["--filter", "@spiling/protocol", "test"]);
+      await run("node", [
+        "--import", "tsx", "--test",
+        "apps/desktop/test/manufacturing-state.test.mjs",
+        "packages/viewport/test/replay-materials.test.mjs",
+      ]);
       break;
     case "smoke:cli":
       await cliSmoke();

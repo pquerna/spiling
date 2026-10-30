@@ -810,3 +810,96 @@ fn retained_allocation_accounting_excludes_shared_request_and_report_storage() {
     assert_eq!(study.allocated_bytes(), study_charge);
     study.validate(&record(&doc)).unwrap();
 }
+
+#[test]
+fn captured_construction_reassesses_realized_exposure_and_preserves_unknowns() {
+    use spiling_appearance::optical::assess_construction;
+    use spiling_contracts::{geometry::RigidPoseMm, manufacturing::*};
+    let document = document(&[[26, 77, 230], [255, 255, 255]]);
+    let palette = prepared(&document);
+    let mut request = request(2);
+    request.recipe = LayerCycle {
+        slots: vec![
+            OpticalSlot {
+                material: 0,
+                height_mm: 0.2,
+            },
+            OpticalSlot {
+                material: 1,
+                height_mm: 0.2,
+            },
+        ],
+        phase_slot: 0,
+        origin_z_mm: 0.03,
+    };
+    request.patch = patch(0.0, 0.15);
+    let report = compare(&palette, Arc::new(request.clone()), &|| false).unwrap();
+    let mut origin = OpticalConstructionOrigin {
+        report: report.canonical_record().unwrap(),
+        palette_hash: palette.canonical_hash().clone(),
+        selection: OpticalSelection::Requested,
+        model: request.model,
+        observation: request.observation,
+        target: request.target,
+        requested_patch: request.patch,
+        recipe: request.recipe,
+        materials: std::array::from_fn(|i| AppliedOpticalMaterial {
+            evidence: document.rows[i].clone(),
+            evidence_hash: palette.evidence_hashes()[i].clone(),
+            loaded_material: LoadedMaterial {
+                id: format!("loaded-{i}"),
+                revision: "1".into(),
+                declaration_hash: SourceHash::from_bytes(&[i as u8]),
+                polymer_family: "PLA".into(),
+            },
+        }),
+        applied_pose: RigidPoseMm::IDENTITY,
+    };
+    let result = assess_construction(&origin, &patch(0.0, 8.0), [4.0, 4.0], false).unwrap();
+    assert_eq!(result.requested, report.requested);
+    assert!(!result.patch_matches_request && !result.pose_matches_application);
+    assert_eq!(result.backing_model, OpticalBackingModel::Unmodelled);
+    let OpticalAssessment::Estimate {
+        exposure: requested,
+        predicted_lab: before,
+        ..
+    } = result.requested
+    else {
+        panic!()
+    };
+    let OpticalAssessment::Estimate {
+        exposure: actual,
+        predicted_lab: after,
+        ..
+    } = result.realized
+    else {
+        panic!()
+    };
+    near(requested.fractions[0], 0.8, 1e-12);
+    assert_eq!(actual.fractions, [0.5, 0.5, 0.0]);
+    assert_ne!(before, after);
+    assert!(assess_construction(&origin, &patch(0.0, 8.0), [4.0, 3.0], true).is_err());
+    origin.observation.illuminant = AppearanceIlluminant::D50;
+    let unknown = assess_construction(&origin, &patch(0.0, 8.0), [4.0, 4.0], true).unwrap();
+    assert!(matches!(
+        unknown.realized,
+        OpticalAssessment::Unassessed {
+            reason: OpticalUnknownReason::UnsupportedConditions,
+            ..
+        }
+    ));
+    origin.observation.illuminant = AppearanceIlluminant::D65;
+    origin.materials[0].evidence.evidence = AppearanceEvidence::Unknown {
+        reason: "no acquisition".into(),
+    };
+    origin.materials[0].evidence_hash = origin.materials[0].evidence.evidence_hash().unwrap();
+    assert!(matches!(
+        assess_construction(&origin, &patch(0.0, 8.0), [4.0, 4.0], true)
+            .unwrap()
+            .realized,
+        OpticalAssessment::Unassessed {
+            reason: OpticalUnknownReason::MissingEvidence,
+            ..
+        }
+    ));
+}

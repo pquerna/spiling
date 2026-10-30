@@ -127,6 +127,7 @@ fn project_job_attaches(job: &NativeOperationView, replacing: bool) -> bool {
         | Some(JobResult::ManufacturingPreflight { .. })
         | Some(JobResult::SurfaceImageImported { .. })
         | Some(JobResult::SurfaceImagePrepared { .. })
+        | Some(JobResult::OpticalConstructionApplied { .. })
         | Some(JobResult::AppearancePaletteImported { .. })
         | Some(JobResult::AppearanceCompared { .. })
         | Some(JobResult::OpticalCompared { .. })
@@ -1331,6 +1332,7 @@ mod tests {
             },
             JobResult::ManufacturingVerified {
                 provenance: spiling_contracts::manufacturing::ManufacturingInspectionProvenance {
+                    surface_color: Vec::new(),
                     project_id: project_info(false).project_id,
                     input_revision: spiling_contracts::project::ProjectRevision::ZERO,
                     input_hash: record.input_hash.clone(),
@@ -1368,6 +1370,10 @@ mod tests {
                     retracted_filament_mm: 0.0,
                     routing: None,
                 },
+            },
+            JobResult::OpticalConstructionApplied {
+                info: project_info(false),
+                construction_index: 0,
             },
             JobResult::Section {
                 artifact_id: ArtifactId::new(1).unwrap(),

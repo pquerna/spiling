@@ -274,6 +274,63 @@ mod tests {
     }
 
     #[test]
+    fn retained_candidate_uses_its_selected_recipe_and_explicit_material_order() {
+        let (mut project, mut application) = prepared_project();
+        let report = project
+            .snapshot()
+            .appearance_study
+            .optical
+            .as_ref()
+            .unwrap()
+            .report
+            .as_ref()
+            .unwrap()
+            .clone();
+        let index = report.alternatives[0];
+        application.selection = OpticalSelection::Candidate { index };
+        commit_appearance(
+            &mut project,
+            Edit::AcceptOpticalReport {
+                report: report.clone(),
+                selection: Some(application.selection),
+            },
+        );
+        let expected = report.request.candidate(index).unwrap();
+        let candidate = prepare_optical_construction(
+            project.snapshot(),
+            project.info().revision,
+            application,
+            &|| false,
+        )
+        .unwrap();
+        let edit = project
+            .prepare(Edit::ApplyOpticalConstruction { candidate })
+            .unwrap();
+        project.commit(edit).unwrap();
+        let snapshot = project.snapshot();
+        let JobWorkflow::FixedDualMarlin { job } = &snapshot
+            .manufacturing_intent
+            .as_ref()
+            .unwrap()
+            .printer
+            .workflow
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            job.surface_constructions[0]
+                .optical_origin
+                .as_ref()
+                .unwrap()
+                .recipe,
+            expected
+        );
+        assert!(
+            matches!(&job.surface_constructions[0].shell,OccurrenceMaterial::LayerCycle {recipe,..} if recipe==&expected)
+        );
+    }
+
+    #[test]
     fn application_rejects_stale_even_after_identical_undo_and_preserves_state_on_cancellation_or_bad_bindings()
      {
         let (mut project, application) = prepared_project();

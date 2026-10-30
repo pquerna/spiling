@@ -20,11 +20,14 @@ export interface ReplayView {
   layer: number | null;
   eventCount: number;
   showTravel: boolean;
+  toolColors?: readonly [string, string] | null;
 }
 interface Batch {
   lines: LineSegments | Points;
   events: Uint32Array;
   kind: number;
+  tool: number;
+  roleColor: string;
 }
 export interface ReplayDisplay {
   readonly root: Group;
@@ -84,12 +87,13 @@ export function createReplayDisplay(
   const batchAt = (event: number): number => {
     const start = REPLAY_HEADER_BYTES + event * REPLAY_RECORD_BYTES;
     const kind = data.getUint8(start + 46);
-    if (kind !== 5) return kind;
+    const tool = replay.toolEpochCount > 0 ? replay.activeTool(event) : 0;
+    if (kind !== 5) return kind + tool * 32;
     const height = data.getFloat64(start + 64, true) - data.getFloat64(start + 56, true);
     const width = data.getFloat64(start + 48, true);
-    return 16 + Math.min(15, Math.floor(height / width * 16));
+    return 16 + Math.min(15, Math.floor((height / width) * 16)) + tool * 32;
   };
-  const counts = new Uint32Array(32);
+  const counts = new Uint32Array(64);
   for (let event = 1; event < replay.eventCount; event++) {
     if (replay.kind(event) === 14) continue;
     const batch = batchAt(event);
@@ -133,8 +137,9 @@ export function createReplayDisplay(
     ];
     for (let batch = 0; batch < counts.length; batch++) {
       if (!counts[batch]) continue;
-      const kind = batch >= 16 ? 5 : batch;
-      const color = batch >= 16 ? `hsl(${150 - (batch - 16) * 8}, 80%, 62%)` : colors[kind];
+      const role = batch % 32;
+      const kind = role >= 16 ? 5 : role;
+      const color = role >= 16 ? `hsl(${150 - (role - 16) * 8}, 80%, 62%)` : colors[kind]!;
       const stationary = kind === 11 || kind === 12;
       const vertices = stationary ? 1 : 2;
       const positions = new Float32Array(counts[batch]! * vertices * 3);
@@ -145,8 +150,10 @@ export function createReplayDisplay(
         events[cursor] = event;
         for (let endpoint = 0; endpoint < vertices; endpoint++)
           for (let axis = 0; axis < 3; axis++)
-            positions[cursor * vertices * 3 + endpoint * 3 + axis] =
-              project(stationary ? event : event - 1 + endpoint, axis);
+            positions[cursor * vertices * 3 + endpoint * 3 + axis] = project(
+              stationary ? event : event - 1 + endpoint,
+              axis,
+            );
         cursor++;
       }
       const geometry = new BufferGeometry();
@@ -162,7 +169,7 @@ export function createReplayDisplay(
       lines.frustumCulled = false;
       lines.renderOrder = 3;
       root.add(lines);
-      batches.push({ lines, events, kind });
+      batches.push({ lines, events, kind, tool: Math.floor(batch / 32), roleColor: color });
     }
     const geometry = new BufferGeometry();
     geometries.push(geometry);
@@ -198,11 +205,19 @@ export function createReplayDisplay(
         view.eventCount < 0 ||
         view.eventCount > replay.eventCount ||
         typeof view.showTravel !== "boolean" ||
+        (view.toolColors != null &&
+          (view.toolColors.length !== 2 ||
+            view.toolColors.some((color) => !/^#[0-9a-f]{6}$/i.test(color)))) ||
         (view.layer !== null &&
           (!Number.isInteger(view.layer) || view.layer < 0 || view.layer >= replay.layerCount))
       )
         reject("invalid draw state");
       for (const batch of batches) {
+        const deposition = [1, 2, 3, 4, 5, 8, 13, 15].includes(batch.kind);
+        const material = batch.lines.material as LineBasicMaterial | PointsMaterial;
+        material.color.set(
+          deposition && view.toolColors ? view.toolColors[batch.tool]! : batch.roleColor,
+        );
         const lifecycle = batch.kind === 6 || batch.kind === 7;
         const start =
           view.layer === null || lifecycle
@@ -221,7 +236,8 @@ export function createReplayDisplay(
           ((batch.kind !== 0 && batch.kind !== 6) || view.showTravel);
       }
       marker.visible =
-        replay.toolEpochCount === 0 && view.showTravel &&
+        replay.toolEpochCount === 0 &&
+        view.showTravel &&
         view.eventCount > 0 &&
         (view.layer === null || view.layer === layerAt(0));
     };

@@ -11,6 +11,8 @@ use std::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
+    #[error("export inspection: {0}")]
+    InvalidInspection(String),
     #[error("export I/O: {0}")]
     Io(#[from] io::Error),
     #[error("export JSON: {0}")]
@@ -43,7 +45,27 @@ impl OutputDirectory {
         &mut self,
         bundle: &spiling_contracts::manufacturing::ManufacturingBundle,
         verification: &spiling_contracts::manufacturing::VerificationReport,
+        inspection: &spiling_contracts::manufacturing::ManufacturingInspectionProvenance,
     ) -> Result<(), ExportError> {
+        inspection
+            .validate()
+            .map_err(|e| ExportError::InvalidInspection(e.to_string()))?;
+        let mut expected =
+            spiling_contracts::manufacturing::ManufacturingInspectionProvenance::from(
+                &bundle.provenance,
+            );
+        expected.surface_color = inspection.surface_color.clone();
+        if &expected != inspection || !verification.verified {
+            return Err(ExportError::InvalidInspection(
+                "fresh inspection does not bind captured bundle".into(),
+            ));
+        }
+        #[derive(serde::Serialize)]
+        struct ExportProvenance<'a> {
+            #[serde(flatten)]
+            captured: &'a spiling_contracts::manufacturing::ManufacturingProvenance,
+            inspection: &'a spiling_contracts::manufacturing::ManufacturingInspectionProvenance,
+        }
         self.write("plan.json", &serde_json::to_vec_pretty(&bundle.plan)?)?;
         self.write("program.gcode", bundle.program.as_bytes())?;
         self.write(
@@ -52,7 +74,10 @@ impl OutputDirectory {
         )?;
         self.write(
             "provenance.json",
-            &serde_json::to_vec_pretty(&bundle.provenance)?,
+            &serde_json::to_vec_pretty(&ExportProvenance {
+                captured: &bundle.provenance,
+                inspection,
+            })?,
         )?;
         Ok(())
     }

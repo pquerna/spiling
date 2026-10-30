@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, sync::Arc};
 use ts_rs::TS;
 
+mod surface_inspection;
+pub use surface_inspection::*;
 mod replay;
 pub use replay::*;
 mod job;

@@ -69,6 +69,8 @@ export interface ManufacturingController extends ManufacturingReviewState {
   eventCount: number;
   showTravel: boolean;
   showSource: boolean;
+  colorByMaterial: boolean;
+  declaredToolColors: readonly [string, string] | null;
   selectIntent(relativePath?: string): Promise<void>;
   prepareBed(occurrenceId: number, center: boolean): Promise<void>;
   applyBed(): Promise<void>;
@@ -87,7 +89,7 @@ export interface ManufacturingController extends ManufacturingReviewState {
   compile(): Promise<void>;
   preflightIntent(): Promise<void>;
   inspect(output: VerificationOutput): Promise<void>;
-  updateView(layer: number | null, eventCount: number, showTravel: boolean, showSource: boolean): Promise<void>;
+  updateView(layer: number | null, eventCount: number, showTravel: boolean, showSource: boolean, colorByMaterial?: boolean): Promise<void>;
   exportBundle(relativePath?: string): Promise<void>;
   cancelPreview(): void;
 }
@@ -122,6 +124,35 @@ export function useManufacturing(host: ManufacturingHost): ManufacturingControll
   const [eventCount, setEventCount] = useState(0);
   const [showTravel, setShowTravel] = useState(true);
   const [showSource, setShowSource] = useState(true);
+  const [colorByMaterial, setColorByMaterial] = useState(false);
+  const declaredToolColors = ((): readonly [string, string] | null => {
+    const workflow = inspection?.result.provenance.workflow;
+    if (workflow?.kind !== "fixed_dual_marlin") return null;
+    const colors: [string | null, string | null] = [null, null];
+    for (const construction of workflow.job.surface_constructions) {
+      for (const capture of construction.optical_origin?.materials ?? []) {
+        const tool = workflow.job.tools.findIndex(
+          (tool) => tool.material.id === capture.loaded_material.id,
+        );
+        const evidence = capture.evidence.evidence;
+        // Catalog display metadata only; the reference mixture is never painted
+        // onto independently decoded tool strokes.
+        if (tool < 0 || tool > 1 || evidence.kind !== "catalog_estimate") continue;
+        const color =
+          "#" +
+          evidence.srgb
+            .map((channel) =>
+              Math.round(channel * 255)
+                .toString(16)
+                .padStart(2, "0"),
+            )
+            .join("");
+        if (colors[tool] !== null && colors[tool] !== color) return null;
+        colors[tool] = color;
+      }
+    }
+    return colors[0] && colors[1] ? [colors[0], colors[1]] : null;
+  })();
   const request = useRef(0),
     refreshSequence = useRef(0),
     mounted = useRef(true);
@@ -579,6 +610,7 @@ export function useManufacturing(host: ManufacturingHost): ManufacturingControll
         setEventCount(replay?.eventCount ?? 0);
         setShowTravel(true);
         setShowSource(true);
+        setColorByMaterial(false);
         setMessage(
           diagnostic && replay
             ? "Fresh actual-program report and validated replay bytes ready. Native diagnostic only: no GPU display, picking or hardware claim."
@@ -615,6 +647,7 @@ export function useManufacturing(host: ManufacturingHost): ManufacturingControll
     nextCount: number,
     nextTravel: boolean,
     nextSource: boolean,
+    nextMaterial: boolean = colorByMaterial,
   ) {
     if (!fresh || !inspection?.replay || working || changingView.current) return;
     const replay = inspection.replay;
@@ -637,6 +670,7 @@ export function useManufacturing(host: ManufacturingHost): ManufacturingControll
           eventCount: nextCount,
           showTravel: nextTravel,
           showSource: nextSource,
+          toolColors: nextMaterial ? declaredToolColors : null,
         });
       if (mounted.current && inspectionRef.current?.request === inspection.request && !inspectionRef.current.invalidated) {
         // Describe the admitted draw, not an optimistic request that the
@@ -645,6 +679,7 @@ export function useManufacturing(host: ManufacturingHost): ManufacturingControll
         setEventCount(nextCount);
         setShowTravel(nextTravel);
         setShowSource(nextSource);
+        setColorByMaterial(nextMaterial && declaredToolColors !== null);
       }
     } catch (error) {
       if (mounted.current) setMessage(String(error));
@@ -729,6 +764,8 @@ export function useManufacturing(host: ManufacturingHost): ManufacturingControll
     eventCount,
     showTravel,
     showSource,
+    colorByMaterial,
+    declaredToolColors,
     selectSoftwareIntent,
     editScalar,
     editPolicyScalar,

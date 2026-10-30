@@ -34,7 +34,7 @@ async function invoke(args, failure = false, domain = "manufacturing") {
   }
   assert.equal(result.status, 0, `${receipt}: ${result.stderr}`);
   const report = JSON.parse(result.stdout);
-  assert.match(report.hello.engine_build, /planner32;emitter11;verifier15/);
+  assert.match(report.hello.engine_build, /planner32;emitter11;verifier16/);
   return report;
 }
 const json = async (path) => JSON.parse(await readFile(path, "utf8"));
@@ -179,6 +179,30 @@ for (const [sourceName, mode] of cases) {
       assert.notDeepEqual(tools[0], tools[1]);
     }
   }
+  const provenance = await json(join(exported, "provenance.json"));
+  assert.equal(provenance.inspection.surface_color.length, plan.material_frames.length);
+  for (const face of provenance.inspection.surface_color) {
+    assert.equal(face.interval_count, plan.layers.length);
+    assert.ok(
+      Math.abs(
+        face.exposed_height_by_tool_mm.reduce((a, b) => a + b, 0) - face.realized_patch.height_mm,
+      ) < 1e-10,
+    );
+    if (mode === "study") {
+      const reference = face.reference;
+      assert.equal(reference.backing_model, "unmodelled");
+      assert.equal(reference.patch_matches_request, false);
+      assert.equal(reference.pose_matches_application, true);
+      assert.equal(reference.requested.kind, "estimate");
+      assert.equal(reference.realized.kind, "estimate");
+      assert.ok(Math.abs(reference.requested.exposure.fractions[0] - 0.8) < 1e-10);
+      assert.ok(Math.abs(reference.realized.exposure.fractions[0] - 0.5) < 1e-10);
+      assert.notDeepEqual(reference.realized.predicted_lab, reference.requested.predicted_lab);
+      assert.ok(
+        Math.abs(face.fractions_by_tool[0] - reference.realized.exposure.fractions[0]) < 1e-10,
+      );
+    } else assert.equal(face.reference, null);
+  }
   const baseline = await readFile(join(exported, "program.gcode"));
   const changed = structuredClone(intent);
   if (mode === "corner") {
@@ -198,12 +222,50 @@ for (const [sourceName, mode] of cases) {
   const restoredExport = join(output, `${name}-restored`);
   await invoke(["project", "edit", project, "--intent", intentFile, "--compile", "--verify", "--save", "--manufacturing-out", restoredExport]);
   assert.deepEqual(await readFile(join(restoredExport, "program.gcode")), baseline);
+  if (mode === "study") {
+    const movedExport = join(output, `${name}-moved`);
+    await invoke([
+      "project",
+      "edit",
+      project,
+      "--pose",
+      "1",
+      JSON.stringify({ translation_mm: [21, 20, 0], rotation_xyzw: [0, 0, 0, 1] }),
+      "--compile",
+      "--verify",
+      "--manufacturing-out",
+      movedExport,
+    ]);
+    const moved = (await json(join(movedExport, "provenance.json"))).inspection.surface_color[0];
+    assert.equal(moved.reference.pose_matches_application, false);
+    assert.equal(moved.realized_patch.origin_mm[0], 25);
+    assert.deepEqual(
+      moved.reference.requested,
+      provenance.inspection.surface_color[0].reference.requested,
+    );
+    await invoke([
+      "project",
+      "edit",
+      project,
+      "--pose",
+      "1",
+      JSON.stringify({ translation_mm: [20, 20, 0], rotation_xyzw: [0, 0, 0, 1] }),
+      "--compile",
+      "--verify",
+      "--save",
+    ]);
+  }
   await invoke(["project", "edit", project, "--intent", changedFile, "--undo", "--redo", "--undo", "--verify", "--save"]);
   await unlink(source); // Never remove repository fixtures or Core-owned assets.
   if (mode === "study") { await unlink(paletteFile); await unlink(studyFile); }
   const recoveredExport = join(output, `${name}-source-absent`);
   const replay = join(output, `${name}.splr`);
   const recovered = await invoke(["project", "inspect", project, "--verify", "--manufacturing-out", recoveredExport, "--replay-out", replay]);
+  assert.deepEqual(
+    (await json(join(recoveredExport, "provenance.json"))).inspection.surface_color,
+    provenance.inspection.surface_color,
+    "source-independent fresh reassessment changed",
+  );
   const bytes = Uint8Array.from(await readFile(replay)).buffer;
   const decoded = await decodeReplayDisplay(bytes, recovered.manufacturing_replay.replay_display);
   let wasteOnly = 0;

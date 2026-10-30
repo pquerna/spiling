@@ -148,6 +148,9 @@ const option = (name, fallback) => {
 const executable = option("--executable");
 const port = Number(option("--port", "9222"));
 const scenario = option("--scenario", "normal");
+const surfaceColorProject = option("--surface-color-project");
+if (scenario === "surface-color" && !surfaceColorProject)
+  throw new Error("surface-color requires --surface-color-project from the completed CLI study workflow");
 const manufacturingDiagnostic = args.includes("--diagnostic-no-gpu");
 const customManufacturingSource = option("--manufacturing-source");
 const requireHardwareGpu = args.includes("--require-hardware-gpu");
@@ -171,7 +174,7 @@ if (
 if (evidenceDirectory) await mkdir(resolve(evidenceDirectory), { recursive: false });
 if (
   requireHardwareGpu &&
-  (scenario !== "manufacturing" ||
+  (!["manufacturing", "surface-color"].includes(scenario) ||
     manufacturingDiagnostic ||
     process.env.SPILING_CEF_SOFTWARE_GPU === "1" ||
     process.env.SPILING_CEF_UNSANDBOXED === "1")
@@ -205,10 +208,10 @@ const manufacturingSource = customManufacturingSource
 const ordinaryMechanicalReference =
   manufacturingSource === "occt-rounded-housing-mm.step" ||
   manufacturingSource === "occt-ribbed-bracket-mm.step";
-const manufacturingScenario = scenario === "manufacturing" || surfaceFinishScenario;
+const manufacturingScenario = scenario === "manufacturing" || scenario === "surface-color" || surfaceFinishScenario;
 if (!executable)
   throw new Error(
-    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|cylindrical-finish|image-relief|image-relief-planar|gpu-unavailable|engine-operations] [--diagnostic-no-gpu] [--require-hardware-gpu (normal sandboxed manufacturing only)] [--manufacturing-source RELATIVE_STEP (plain manufacturing only, relative to cwd)] [--process-overrides | --process-zones | --process-diaphragm (actual hardware named-source manufacturing)] [--combine-sparse (requires hardware manufacturing named source and process zones; preserves fine schedule)] [--evidence-directory NEW_DIRECTORY]; provide DISPLAY on Linux or launch under xvfb-run",
+    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-color|surface-finish|cylindrical-finish|image-relief|image-relief-planar|gpu-unavailable|engine-operations] [--diagnostic-no-gpu] [--require-hardware-gpu (normal sandboxed manufacturing only)] [--manufacturing-source RELATIVE_STEP (plain manufacturing only, relative to cwd)] [--process-overrides | --process-zones | --process-diaphragm (actual hardware named-source manufacturing)] [--combine-sparse (requires hardware manufacturing named source and process zones; preserves fine schedule)] [--evidence-directory NEW_DIRECTORY]; provide DISPLAY on Linux or launch under xvfb-run",
   );
 if (
   ![
@@ -216,6 +219,7 @@ if (
     "geometry",
     "project-bridge",
     "manufacturing",
+    "surface-color",
     "surface-finish",
     "cylindrical-finish",
     "image-relief",
@@ -262,6 +266,7 @@ if (manufacturingScenario) {
   );
   await writeFile(resolve(fixtureRoot, "invalid.intent.json"), "{");
 }
+if (surfaceColorProject) await cp(resolve(surfaceColorProject), resolve(fixtureRoot, "surface-color-project"), {recursive:true,errorOnExist:true,force:false});
 if (imageReliefScenario) {
   await writeFile(resolve(fixtureRoot, "operator-relief.png"), grayPng(imagePattern));
 }
@@ -1395,6 +1400,124 @@ async function expectManufacturingStep(id) {
       ),
     `operator next step ${id}`,
   );
+}
+
+async function inspectSurfaceColor() {
+  await until(
+    async () => /running|unsupported|error/.test(await text("engine-status")),
+    "GPU admission settled",
+  );
+  assert.equal(
+    await text("engine-status"),
+    "running",
+    "Surface-color preview requires normal WebGPU admission",
+  );
+  enginePid = (await invoke("engine_status")).hello.pid;
+  const adapter = await evaluate(
+    "[...document.querySelectorAll('dt')].find(node => node.textContent === 'WebGPU')?.nextElementSibling?.textContent",
+  );
+  assert.ok(adapter && adapter !== "No active device");
+  if (requireHardwareGpu)
+    assert.doesNotMatch(
+      adapter,
+      /swiftshader|lavapipe|llvmpipe|software|fallback|unknown|identity not disclosed/i,
+    );
+  await input('[data-testid="project-debug-path"]', "surface-color-project");
+  await click("project-read-only");
+  await click("project-debug-open");
+  let state = await until(
+    async () => {
+      const state = await manufacturingState();
+      return state.read_only && state.selected_artifact && !state.working ? state : false;
+    },
+    "source-independent color project open",
+    nativeJobObservationMs,
+  );
+  assert.equal(state.fresh, false);
+  const before = await geometryState();
+  await click("manufacturing-verify-motion");
+  state = await until(
+    async () => {
+      const state = await manufacturingState();
+      return state.fresh && state.replay?.display_ready && !state.working ? state : false;
+    },
+    "fresh actual color replay",
+    nativeJobObservationMs,
+  );
+  assert.deepEqual(state.declared_tool_colors, ["#1a4de6", "#ffffff"]);
+  assert.equal(state.provenance.surface_color.length, 1);
+  const face = state.provenance.surface_color[0];
+  assert.equal(face.reference.patch_matches_request, false);
+  assert.equal(face.reference.backing_model, "unmodelled");
+  assert.ok(Math.abs(face.reference.requested.exposure.fractions[0] - 0.8) < 1e-10);
+  assert.ok(Math.abs(face.reference.realized.exposure.fractions[0] - 0.5) < 1e-10);
+  const comparison = await evaluate(
+    "document.querySelector('[aria-label=\"Requested and realized optical reference estimates\"]').textContent",
+  );
+  assert.match(comparison, /Requested.*80\.00%/s);
+  assert.match(comparison, /Realized.*50\.00%/s);
+  assert.match(comparison, /ΔE00/);
+  await click("manufacturing-source-bodies");
+  await until(async () => {
+    const state = await manufacturingState();
+    return !state.working && !state.show_source;
+  }, "source-hidden replay admitted");
+  await click("manufacturing-travel");
+  await until(async () => {
+    const state = await manufacturingState();
+    return !state.working && !state.show_travel;
+  }, "travel-hidden replay admitted");
+  await click("manufacturing-material-colors");
+  await until(async () => {
+    const state = await manufacturingState();
+    return !state.working && state.color_by_material && !state.show_source;
+  }, "source-hidden declared-material replay");
+  async function showLayer(layer) {
+    await input('[data-testid="manufacturing-layer"]', layer ?? "");
+    await until(async () => {
+      const state = await manufacturingState();
+      return !state.working && state.layer === layer;
+    }, `admitted replay layer ${layer ?? "all"}`);
+  }
+  await showLayer(0);
+  await evaluate(
+    "document.querySelector('[data-testid=viewport]').scrollIntoView({block:'center'})",
+  );
+  await screenshot("surface-color-actual-partial-white-layer");
+  await showLayer(1);
+  await screenshot("surface-color-actual-blue-layer");
+  await showLayer(null);
+  await screenshot("surface-color-source-hidden-materials");
+  await click("manufacturing-material-colors");
+  await until(async () => !(await manufacturingState()).color_by_material, "role colors restored");
+  const after = await geometryState();
+  assert.deepEqual(after.scene, before.scene, "View controls preserve native scene");
+  assert.doesNotMatch(await evaluate("document.body.innerText"), /Synchronization failed:/);
+  await input('[data-testid="manufacturing-export-path"]', "surface-color-export");
+  await click("manufacturing-debug-export");
+  await until(async () => {
+    try {
+      return (
+        (await readFile(resolve(fixtureRoot, "surface-color-export/provenance.json"), "utf8"))
+          .length > 0
+      );
+    } catch {
+      return false;
+    }
+  }, "fresh color export");
+  const exported = JSON.parse(
+    await readFile(resolve(fixtureRoot, "surface-color-export/provenance.json"), "utf8"),
+  );
+  assert.deepEqual(exported.inspection.surface_color, state.provenance.surface_color);
+  await preserveManufacturingExport("surface-color-export");
+  return {
+    adapter,
+    hardwareRequired: requireHardwareGpu,
+    record: state.selected_artifact,
+    surfaceColor: face,
+    qualification:
+      "Local actual WebGPU replay and metadata tint; no physical color or machine qualification",
+  };
 }
 
 async function inspectManufacturing() {
@@ -3165,6 +3288,9 @@ try {
   }
   if (scenario === "project-bridge") {
     const proof = await inspectProjectBridge();
+    console.log(JSON.stringify({ result: "pass", scenario, ...proof }, null, 2));
+  } else if (scenario === "surface-color") {
+    const proof = await inspectSurfaceColor();
     console.log(JSON.stringify({ result: "pass", scenario, ...proof }, null, 2));
   } else if (manufacturingScenario) {
     const proof = await inspectManufacturing();

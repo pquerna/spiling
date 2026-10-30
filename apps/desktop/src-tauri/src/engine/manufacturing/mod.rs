@@ -62,6 +62,7 @@ struct CapturedVerification {
     session: SessionId,
     record: ManufacturingArtifactRecord,
     report: VerificationReport,
+    provenance: spiling_contracts::manufacturing::ManufacturingInspectionProvenance,
     resource: ArtifactView,
     replay: Option<ReplayDisplayDescriptor>,
 }
@@ -371,6 +372,7 @@ pub(super) fn observe(supervisor: &mut Supervisor, operation: &NativeOperationVi
         && let Some(JobResult::ManufacturingVerified {
             record,
             report,
+            provenance,
             resource,
             replay_display,
             ..
@@ -381,6 +383,7 @@ pub(super) fn observe(supervisor: &mut Supervisor, operation: &NativeOperationVi
             session: operation.session_id.clone(),
             record: record.clone(),
             report: report.clone(),
+            provenance: provenance.clone(),
             resource: resource.clone(),
             replay: replay_display.clone(),
         });
@@ -434,6 +437,7 @@ pub async fn manufacturing_control(
             && let ManufacturingResponse::Verified {
                 record,
                 report,
+                provenance,
                 resource,
                 replay_display,
                 ..
@@ -444,6 +448,7 @@ pub async fn manufacturing_control(
                 session,
                 record: record.clone(),
                 report: report.clone(),
+                provenance: provenance.clone(),
                 resource: resource.clone(),
                 replay: replay_display.clone(),
             });
@@ -757,11 +762,12 @@ pub async fn manufacturing_export(
         .await
         .map_err(|error| error.to_string())?;
     let report = capture.report;
+    let provenance = capture.provenance;
     let path = selection.path;
     let mut output = tauri::async_runtime::spawn_blocking(move || {
         let mut output = OutputDirectory::create(&path).map_err(|error| error.to_string())?;
         output
-            .write_manufacturing_bundle(&bundle, &report)
+            .write_manufacturing_bundle(&bundle, &report, &provenance)
             .map_err(|error| error.to_string())?;
         Ok::<_, String>(output)
     })

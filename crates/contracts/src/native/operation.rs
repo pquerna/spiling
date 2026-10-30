@@ -122,6 +122,17 @@ fn validate_verified(
         (JobWorkflow::CompleteMarlin { .. }, None) if report.lifecycle_motion_count == 4 => {}
         _ => return Err("inspection workflow/routing mismatch".into()),
     }
+    if let JobWorkflow::FixedDualMarlin { job } = &provenance.workflow {
+        for face in &provenance.surface_color {
+            if job.surface_constructions[usize::from(face.construction_index)]
+                .optical_origin
+                .is_some()
+                && face.reference.is_none()
+            {
+                return Err("engine inspection omitted captured optical reassessment".into());
+            }
+        }
+    }
     if let Some(display) = replay_display {
         display
             .validate_for_record(record)

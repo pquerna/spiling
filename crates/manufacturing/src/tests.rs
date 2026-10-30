@@ -304,6 +304,22 @@ fn native_face_color_cycle_keeps_waste_only_groups_and_physical_partial_interval
     };
     let mut empty_groups = 0;
     let motion = actual_motion(&bundle);
+    let faces = crate::surface_inspection::inspect(&bundle, &AtomicBool::new(false)).unwrap();
+    assert_eq!(faces.len(), 1);
+    assert_eq!(faces[0].interval_count as usize, bundle.plan.layers.len());
+    assert!((faces[0].fractions_by_tool[0] - 0.5).abs() < 1e-12);
+    let mut missing = bundle.clone();
+    missing.plan.layers[1].paths.retain(|path| {
+        path.material_domain
+            .is_none_or(|owner| owner.role != MaterialConstructionRole::Shell)
+    });
+    assert!(
+        crate::surface_inspection::inspect(&missing, &AtomicBool::new(false))
+            .unwrap_err()
+            .message
+            .contains("missing or overlapping")
+    );
+
     for layer in &bundle.plan.layers {
         let active = layer
             .paths

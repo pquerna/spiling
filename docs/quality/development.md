@@ -369,6 +369,19 @@ node tools/smoke-surface-color.mjs
 
 The runner honors `CARGO_TARGET_DIR`, uses fresh owned project/source copies and exclusive export destinations, and retains receipts under ignored `.cache/surface-color-*`. It selects actual returned upright planar face identities on the committed box and through-hole input, then exercises full-face and finite horizontal-window construction, inspectable native source frames, physical skin/backing depth, sparse core, shell physical cycles with native partial intervals, all-white model jobs with a waste-only feeder, actual tool operations, revision/history and source-deleted fresh replay/export. Two independent finite windows additionally exercise opposite same-Z regional phases and positive-volume overlap refusal. The `corner` cases select both returned adjoining faces, union compatible bands once, edit physical depths and refuse intersecting incompatible depths while retaining source holes. The independent TypeScript decoder checks actual regional tool operations and every tool/layer epoch/supported waste stroke. Optional positional mode names (for example `regional`) select a focused subset; no arguments runs every case. Unsupported source identity, thin skin and consumed core must fail. Native material assets in saved projects are retained. The [surface-color contract](../protocol/manufacturing.md#source-bound-planar-surface-color) defines software scope; no physical print, calibrated white/color or desktop authoring claim follows.
 
+The `study` cases retain and reopen an accepted optical selection, refuse an incorrect evidence binding, apply through the typed native operation, and compare the requested 0.15 mm exposure with the actual 8 mm construction. Captured evidence and fresh reassessment survive depth/history/pose edits and deletion of external STEP/palette/study files. Synthetic `fixtures/appearance/surface-color.palette.json` is declared catalog data, not measured filament. `provenance.json.inspection.surface_color` retains the fresh geometry/optical result.
+
+For local WebGPU inspection, consume the saved project produced by that CLI runner:
+
+```sh
+SPILING_ENGINE_PATH="$ENGINE" node tools/smoke-desktop.mjs \
+  --executable "$DESKTOP" --scenario surface-color \
+  --surface-color-project "$CLI_OUTPUT/box-mm-study.spiling" \
+  --require-hardware-gpu --evidence-directory "$NEW_EVIDENCE_DIRECTORY"
+```
+
+The scenario opens the project read-only, verifies actual motion, hides source/travel, switches catalog-material/role views without changing geometry, checks requested/realized exposure, exports fresh provenance and closes the engine. Its display/session prerequisites match the actual desktop surface procedure below. Study application is a CLI/native service; the new egui project workbench does not yet provide manufacturing controls.
+
 `apps/engine/src/geometry/bed_pose.rs` prepares one immutable native source for
 the three directional material-support queries. Retained native domains and
 correspondence-map capacity are charged once; each query uses only the remaining

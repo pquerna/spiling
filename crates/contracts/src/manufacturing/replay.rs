@@ -32,6 +32,8 @@ pub struct ManufacturingInspectionProvenance {
     pub emitter_version: String,
     pub verifier_version: String,
     pub workflow: JobWorkflow,
+    #[serde(deserialize_with = "surface_inspections")]
+    pub surface_color: Vec<SurfaceColorInspection>,
 }
 impl ManufacturingInspectionProvenance {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
@@ -40,6 +42,7 @@ impl ManufacturingInspectionProvenance {
             JobWorkflow::CompleteMarlin { job } => job.validate_declaration()?,
             JobWorkflow::FixedDualMarlin { job } => job.validate_declaration()?,
         }
+        validate_surface_inspections(&self.surface_color, &self.workflow)?;
         self.surface_overlays
             .validate()
             .map_err(|e| invalid(&e.message))?;
@@ -97,6 +100,7 @@ impl From<&ManufacturingProvenance> for ManufacturingInspectionProvenance {
             emitter_version: p.emitter_version.clone(),
             verifier_version: p.verifier_version.clone(),
             workflow: p.intent.printer.workflow.clone(),
+            surface_color: Vec::new(),
         }
     }
 }

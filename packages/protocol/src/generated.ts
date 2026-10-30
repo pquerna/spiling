@@ -506,7 +506,17 @@ export type VerificationReport = { verified: boolean, coverage: Array<string>, l
 
 export type VerificationOutput = "report_only" | "report_and_motion";
 
-export type ManufacturingInspectionProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, workflow: JobWorkflow, };
+export type ManufacturingInspectionProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, workflow: JobWorkflow, surface_color: Array<SurfaceColorInspection>, };
+
+export type SurfaceColorInspection = { construction_index: number, face_id: FaceId, realized_patch: OpticalPatch,
+/**
+ * One complete physical interval per actual model layer, never per stroke.
+ */
+interval_count: number, exposed_height_by_tool_mm: [number, number], fractions_by_tool: [number, number], reference: OpticalInspectionAssessment | null, };
+
+export type OpticalInspectionAssessment = { producer: string, backing_model: OpticalBackingModel, patch_matches_request: boolean, pose_matches_application: boolean, requested: OpticalAssessment, realized: OpticalAssessment, };
+
+export type OpticalBackingModel = "unmodelled";
 
 export type ReplayDisplayInfo = { schema_version: number, bundle_hash: SourceHash, input_hash: SourceHash, program_hash: SourceHash, verifier_version: string, frame: PrinterCoordinateFrame, event_count: number, deposition_count: number, travel_count: number, layer_count: number, lifecycle_count: number, process_count: number, tool_epoch_count: number, waste_count: number, bounds_mm: AabbMm, };
 

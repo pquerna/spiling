@@ -1445,7 +1445,7 @@ async fn execute(
                     manufacturing_output
                         .as_deref_mut()
                         .ok_or("manufacturing export directory was not admitted")?
-                        .write_manufacturing_bundle(&bundle, &report)?;
+                        .write_manufacturing_bundle(&bundle, &report, &provenance)?;
                     export_evidence = Some(serde_json::json!({
                         "artifact": record, "verification": report,
                         "software_only": true, "not_machine_ready": true

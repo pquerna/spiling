@@ -34,6 +34,14 @@ impl TryFrom<rpc::ManufacturingInspectionProvenance> for ManufacturingInspection
         let value = Self {
             project_id: ProjectId::parse(v.project_id).map_err(|e| e.to_string())?,
             workflow: required(v.workflow, "inspection workflow")?.try_into()?,
+            surface_color: if v.surface_color.len() > MAX_SURFACE_COLOR_FACES {
+                return Err("surface inspection table exceeds bound".into());
+            } else {
+                v.surface_color
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<_, String>>()?
+            },
             input_revision: ProjectRevision(v.input_revision),
             input_hash: SourceHash::parse(v.input_hash).map_err(|e| e.to_string())?,
             surface_overlays: required(v.surface_overlays, "inspection surface overlays")?
@@ -56,6 +64,11 @@ impl TryFrom<ManufacturingInspectionProvenance> for rpc::ManufacturingInspection
         Ok(Self {
             project_id: v.project_id.as_str().into(),
             workflow: Some(v.workflow.try_into()?),
+            surface_color: v
+                .surface_color
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, String>>()?,
             input_revision: v.input_revision.get(),
             input_hash: v.input_hash.into(),
             surface_overlays: Some(v.surface_overlays.try_into()?),
@@ -269,6 +282,7 @@ mod tests {
         let provenance = ManufacturingInspectionProvenance {
             project_id: ProjectId::new(),
             workflow: JobWorkflow::DiagnosticBodyOnly,
+            surface_color: Vec::new(),
             input_revision: ProjectRevision(9),
             input_hash: record.input_hash.clone(),
             surface_overlays: crate::surface::SurfaceOverlays::empty(),

@@ -1036,8 +1036,47 @@ fn inspect_asset(
     cancel: &AtomicBool,
 ) -> Result<spiling_manufacturing::ManufacturingInspection, JobError> {
     let bundle = decode_bundle(asset.bytes.as_slice()).map_err(JobError::from)?;
-    spiling_manufacturing::inspect_bundle(&bundle, &asset.record.hash, output, cancel)
-        .map_err(JobError::from)
+    let mut inspection =
+        spiling_manufacturing::inspect_bundle(&bundle, &asset.record.hash, output, cancel)
+            .map_err(JobError::from)?;
+    if let JobWorkflow::FixedDualMarlin { job } = &inspection.provenance.workflow {
+        for face in &mut inspection.provenance.surface_color {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(ManufacturingError::new(
+                    ManufacturingErrorCode::Cancelled,
+                    "surface reassessment cancelled",
+                )
+                .into());
+            }
+            let construction = &job.surface_constructions[usize::from(face.construction_index)];
+            if let Some(origin) = &construction.optical_origin {
+                let mut exposure = [0.0; 2];
+                for (i, material) in origin.materials.iter().enumerate() {
+                    exposure[i] = face.exposed_height_by_tool_mm[usize::from(
+                        job.tool_for_material(&material.loaded_material.id)
+                            .map_err(JobError::from)?,
+                    )];
+                }
+                let pose_matches = bundle
+                    .provenance
+                    .occurrences
+                    .iter()
+                    .find(|o| o.occurrence_id == construction.occurrence_id)
+                    .is_some_and(|o| o.pose == origin.applied_pose);
+                face.reference = Some(
+                    spiling_appearance::optical::assess_construction(
+                        origin,
+                        &face.realized_patch,
+                        exposure,
+                        pose_matches,
+                    )
+                    .map_err(JobError::from)?,
+                );
+            }
+        }
+    }
+    inspection.provenance.validate().map_err(JobError::from)?;
+    Ok(inspection)
 }
 
 struct BundleWriter {

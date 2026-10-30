@@ -1759,7 +1759,7 @@ async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fr
         let destination = work.0.join(phase);
         let mut output = OutputDirectory::create(&destination).unwrap();
         output
-            .write_manufacturing_bundle(&fetched, &report)
+            .write_manufacturing_bundle(&fetched, &report, &provenance)
             .unwrap();
         output.write("motion.splr", &motion).unwrap();
         assert_eq!(status(&mut client).await, before);

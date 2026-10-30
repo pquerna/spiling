@@ -41,7 +41,6 @@ Enabled finishes/process constructions, supports, coarse bands and fixtures refu
 first route. Original single-tool operator evidence retains its producer/input identity;
 the routing increment does not requalify every historical geometry journey.
 
-
 ## Entry points and immutable capture
 
 - [`CompilerInput`, `compile`, `inspect_bundle`](../../crates/manufacturing/src/lib.rs)
@@ -369,7 +368,6 @@ checks actual XYZ6 portions against captured classified domains/holes and the
 complete continuous stroke against actual lower capsules after byte association.
 Ambiguous/multiple crossings, another regional owner or a separator still refuse.
 
-
 ## Program, fresh replay and publication
 
 [`realization::canonicalize`](../../crates/manufacturing/src/realization/mod.rs) fixes
@@ -401,8 +399,10 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 Source-bound planar surface color is exercised through the real CLI on the committed box and protected-hole source: one full-height planar face or one/two finite horizontal windows, physical colored skins, shared solid white backing and sparse white core. Two regions retain opposite physical phases at common Z on both native inputs; overlapping backed requests refuse. Compatible adjoining orthogonal faces also construct their shared corner once on both sources, preserve the protected hole, consume equal physical-depth edits and refuse conflicting depths. Shell physical cycles retain white backing/core and produce waste-only tool groups on all-white model layers; both lanes remain supported every layer. A completely white model also retains zero model accounting for the other feeder. Depth/window/phase edits change actual emitted operations; undo/redo and source-absent fresh read-only verification/export retain the captured program and motion. `tools/smoke-surface-color.mjs` resolves returned native face identities, checks region attribution and protected voids, and exercises source/depth/core refusals. The [construction contract](../protocol/manufacturing.md#source-bound-planar-surface-color) owns the finite envelope. This is software construction evidence, not physical color, adhesion or printer qualification.
 
+Retained optical studies apply through typed Core/engine/client/CLI transactions with complete accepted report/selection and explicit two-material evidence/declaration bindings. Queued cancellation and stale revisions preserve the committed project; ACK commits one revision without changing SceneRevision or publishing scene artifacts. Both native source workflows exercise application, physical depth/history edits, changed-pose reassessment and source/palette/study-deleted fresh verification/export. Inspection distinguishes the small requested patch from complete realized side exposure and reuses the existing model with captured evidence; it does not reuse the requested prediction as a printed outcome. Unknown evidence/conditions remain unassessed and backing optics remain unmodelled. The legacy CEF panel supports source-hidden actual replay and catalog metadata tint by decoded tool, plus requested/realized inspection and fresh four-file export. The `surface-color` desktop smoke consumes a CLI-produced recovered project; local hardware evidence does not qualify other GPUs/platforms or physical color.
+
 Current identities are project10/manufacturing11/process3/surface3, source6/planner32,
-emitter11/verifier15 and SPLR6; executable constants and exact native pins remain authoritative.
+emitter11/verifier16 and SPLR6; executable constants and exact native pins remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
 Raw inspection, an older producer's successful job or historical hardware

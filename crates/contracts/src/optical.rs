@@ -502,12 +502,14 @@ pub fn optical_input_hash(
     .0)
 }
 
-fn validate_assessment(
+pub(crate) fn validate_assessment(
     assessment: &OpticalAssessment,
     slots: &[OpticalSlot],
     phase: usize,
     origin: f64,
-    request: &OpticalRequest,
+    patch: &OpticalPatch,
+    observation: &OpticalObservation,
+    target: &OpticalTarget,
 ) -> Result<(), ProjectError> {
     if phase >= slots.len() {
         return if matches!(assessment, OpticalAssessment::FilteredPhase) {
@@ -531,17 +533,16 @@ fn validate_assessment(
             within_tolerance,
             ..
         } => {
-            if request.observation.illuminant != AppearanceIlluminant::D65
-                || request.observation.observer != AppearanceObserver::Cie1931TwoDegree
+            if observation.illuminant != AppearanceIlluminant::D65
+                || observation.observer != AppearanceObserver::Cie1931TwoDegree
                 || predicted_lab.iter().any(|v| !v.is_finite())
                 || !delta_e00.is_finite()
                 || *delta_e00 < 0.0
                 || !delta_lightness.is_finite()
                 || *delta_lightness < 0.0
                 || *within_tolerance
-                    != (*delta_e00 <= request.target.delta_e00_tolerance
-                        && request
-                            .target
+                    != (*delta_e00 <= target.delta_e00_tolerance
+                        && target
                             .lightness_tolerance
                             .is_none_or(|max| *delta_lightness <= max))
             {
@@ -559,9 +560,9 @@ fn validate_assessment(
         period += slot.height_mm;
         present[slot.material as usize] = true;
     }
-    let expected_phase = (request.patch.origin_mm[2] - origin).rem_euclid(period);
-    let remainder = request.patch.height_mm % period;
-    let complete = ((request.patch.height_mm - remainder) / period).round() as u64;
+    let expected_phase = (patch.origin_mm[2] - origin).rem_euclid(period);
+    let remainder = patch.height_mm % period;
+    let complete = ((patch.height_mm - remainder) / period).round() as u64;
     if !positive(exposure.period_mm)
         || !close(exposure.period_mm, period)
         || !exposure.phase_at_patch_mm.is_finite()
@@ -574,17 +575,14 @@ fn validate_assessment(
             .iter()
             .chain(exposure.fractions.iter())
             .any(|v| !v.is_finite() || *v < 0.0)
-        || !close(
-            exposure.exposed_height_mm.iter().sum(),
-            request.patch.height_mm,
-        )
+        || !close(exposure.exposed_height_mm.iter().sum(), patch.height_mm)
         || !close(exposure.fractions.iter().sum(), 1.0)
         || (0..3).any(|i| {
             (!present[i] && (exposure.exposed_height_mm[i] != 0.0 || exposure.fractions[i] != 0.0))
                 || exposure.fractions[i] > 1.0
                 || !close(
                     exposure.fractions[i],
-                    exposure.exposed_height_mm[i] / request.patch.height_mm,
+                    exposure.exposed_height_mm[i] / patch.height_mm,
                 )
         })
     {
@@ -636,7 +634,9 @@ impl OpticalReport {
             &self.request.recipe.slots,
             self.request.recipe.phase_slot as usize,
             self.request.recipe.origin_z_mm,
-            &self.request,
+            &self.request.patch,
+            &self.request.observation,
+            &self.request.target,
         )?;
         let mut ranked = [(0.0, 0u32); MAX_OPTICAL_CANDIDATES];
         let mut assessed_count = 0;
@@ -668,7 +668,9 @@ impl OpticalReport {
                 &slots[..pattern.len()],
                 phase,
                 self.request.search.origin_z_mm,
-                &self.request,
+                &self.request.patch,
+                &self.request.observation,
+                &self.request.target,
             )?;
             match visit.assessment {
                 OpticalAssessment::Estimate {

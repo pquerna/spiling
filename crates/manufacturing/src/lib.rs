@@ -7,6 +7,7 @@ pub mod backend;
 pub mod planner;
 mod realization;
 mod routing;
+mod surface_inspection;
 pub mod verifier;
 pub use planner::preflight;
 
@@ -23,7 +24,7 @@ use std::sync::{
 /// Binds native material authority and physical per-occurrence material events.
 pub const PLANNER_VERSION: &str = "32";
 pub const EMITTER_VERSION: &str = "11";
-pub const VERIFIER_VERSION: &str = "15";
+pub const VERIFIER_VERSION: &str = "16";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,
@@ -194,9 +195,12 @@ pub fn inspect_bundle(
         None
     };
     check_cancel(cancel)?;
+    let mut provenance: ManufacturingInspectionProvenance = (&bundle.provenance).into();
+    provenance.surface_color = surface_inspection::inspect(bundle, cancel)?;
+    provenance.validate()?;
     Ok(ManufacturingInspection {
         report,
-        provenance: (&bundle.provenance).into(),
+        provenance,
         replay,
     })
 }

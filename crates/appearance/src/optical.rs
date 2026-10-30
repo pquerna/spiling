@@ -138,11 +138,12 @@ fn base(evidence: &AppearanceEvidence) -> Result<BaseColor, OpticalUnknownReason
 fn assess(
     exposure: CycleExposure,
     bases: &[Result<BaseColor, OpticalUnknownReason>; 3],
-    request: &OpticalRequest,
+    observation: &OpticalObservation,
+    target: &OpticalTarget,
     target_lab: [f64; 3],
 ) -> Result<OpticalAssessment, ProjectError> {
-    if request.observation.illuminant != AppearanceIlluminant::D65
-        || request.observation.observer != AppearanceObserver::Cie1931TwoDegree
+    if observation.illuminant != AppearanceIlluminant::D65
+        || observation.observer != AppearanceObserver::Cie1931TwoDegree
     {
         return Ok(OpticalAssessment::Unassessed {
             reason: OpticalUnknownReason::UnsupportedConditions,
@@ -195,11 +196,65 @@ fn assess(
         display_srgb8: prediction.rgb,
         delta_e00,
         delta_lightness,
-        within_tolerance: delta_e00 <= request.target.delta_e00_tolerance
-            && request
-                .target
+        within_tolerance: delta_e00 <= target.delta_e00_tolerance
+            && target
                 .lightness_tolerance
                 .is_none_or(|max| delta_lightness <= max),
+    })
+}
+
+/// Evaluate a captured two-material construction with the existing reference
+/// model. Realized exposure is supplied only after independent program replay;
+/// no palette filesystem, search, routing or backing transport is performed.
+pub fn assess_construction(
+    origin: &spiling_contracts::manufacturing::OpticalConstructionOrigin,
+    realized_patch: &OpticalPatch,
+    exposed_height_mm: [f64; 2],
+    pose_matches_application: bool,
+) -> Result<spiling_contracts::manufacturing::OpticalInspectionAssessment, ProjectError> {
+    use spiling_contracts::manufacturing::{OpticalBackingModel, OpticalInspectionAssessment};
+    origin.validate_capture().map_err(|e| invalid(&e.message))?;
+    realized_patch.validate()?;
+    if exposed_height_mm.iter().any(|v| !v.is_finite() || *v < 0.0)
+        || (exposed_height_mm.iter().sum::<f64>() - realized_patch.height_mm).abs()
+            > 1e-10 * realized_patch.height_mm.max(1.0)
+    {
+        return Err(invalid(
+            "realized optical exposure must cover its finite physical patch",
+        ));
+    }
+    let bases = [
+        base(&origin.materials[0].evidence.evidence),
+        base(&origin.materials[1].evidence.evidence),
+        Err(OpticalUnknownReason::MissingEvidence),
+    ];
+    let target_lab = color_to_d65_lab(origin.target.color)?;
+    let requested = assess(
+        resolve_cycle(&origin.recipe, &origin.requested_patch)?,
+        &bases,
+        &origin.observation,
+        &origin.target,
+        target_lab,
+    )?;
+    let mut exposure = resolve_cycle(&origin.recipe, realized_patch)?;
+    exposure.exposed_height_mm = [exposed_height_mm[0], exposed_height_mm[1], 0.0];
+    exposure.fractions = exposure
+        .exposed_height_mm
+        .map(|height| height / realized_patch.height_mm);
+    let realized = assess(
+        exposure,
+        &bases,
+        &origin.observation,
+        &origin.target,
+        target_lab,
+    )?;
+    Ok(OpticalInspectionAssessment {
+        producer: OPTICAL_PRODUCER.into(),
+        backing_model: OpticalBackingModel::Unmodelled,
+        patch_matches_request: *realized_patch == origin.requested_patch,
+        pose_matches_application,
+        requested,
+        realized,
     })
 }
 
@@ -226,7 +281,8 @@ pub fn compare(
     let requested = assess(
         resolve_cycle(&request.recipe, &request.patch)?,
         &bases,
-        &request,
+        &request.observation,
+        &request.target,
         target_lab,
     )?;
     let total = request.candidate_count()?;
@@ -286,7 +342,8 @@ pub fn compare(
                     &report.request.patch,
                 )?,
                 &bases,
-                &report.request,
+                &report.request.observation,
+                &report.request.target,
                 target_lab,
             )?
         };

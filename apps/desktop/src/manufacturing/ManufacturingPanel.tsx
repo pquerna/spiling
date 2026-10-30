@@ -12,6 +12,7 @@ import {
   REPLAY_KIND_LABELS,
   REPLAY_LIFECYCLE_LAYER,
   type PreflightCheck,
+  type OpticalAssessment,
 } from "@spiling/protocol";
 import type { RectilinearAxisPolicy, SeamPolicy } from "@spiling/protocol";
 import type { ManufacturingHost } from "../useWorkbench.ts";
@@ -19,6 +20,71 @@ import { scalarFields, policyScalarFields } from "./draft.ts";
 import type { ManufacturingController } from "./useManufacturing.ts";
 import { nextManufacturingStep } from "./workflow.ts";
 import "./manufacturing.css";
+
+function OpticalComparison({
+  requested,
+  realized,
+}: {
+  requested: OpticalAssessment;
+  realized: OpticalAssessment;
+}) {
+  const reasons = {
+    missing_evidence: "Material evidence is missing",
+    unsupported_conditions: "Observation conditions are unsupported",
+    unsupported_color_domain: "Material color domain is unsupported",
+  };
+  return (
+    <table aria-label="Requested and realized optical reference estimates">
+      <thead>
+        <tr>
+          <th>Patch</th>
+          <th>Material exposure</th>
+          <th>Reference estimate</th>
+          <th>Target difference</th>
+        </tr>
+      </thead>
+      <tbody>
+        {([
+          ["Requested", requested],
+          ["Realized", realized],
+        ] as const).map(([label, assessment]) => (
+          <tr key={label}>
+            <th scope="row">{label}</th>
+            <td>
+              {assessment.kind === "filtered_phase"
+                ? "Unavailable"
+                : assessment.exposure.fractions.slice(0, 2)
+                    .map((fraction) => `${(100 * fraction).toFixed(2)}%`).join(" / ")}
+            </td>
+            <td>
+              {assessment.kind === "estimate" ? (
+                <>
+                  <span
+                    aria-label={`Estimated sRGB ${assessment.display_srgb8.join(", ")}`}
+                    style={{
+                      display: "inline-block",
+                      width: "1.5em",
+                      height: "1em",
+                      marginRight: "0.5em",
+                      border: "1px solid currentColor",
+                      backgroundColor: `rgb(${assessment.display_srgb8.join(" ")})`,
+                    }}
+                  />
+                  Reference sRGB estimate
+                </>
+              ) : assessment.kind === "unassessed" ? reasons[assessment.reason] : "Unavailable"}
+            </td>
+            <td>
+              {assessment.kind === "estimate"
+                ? `ΔE00 ${assessment.delta_e00.toFixed(2)} · ${assessment.within_tolerance ? "Within target" : "Outside target"}`
+                : "Unassessed"}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
 
 export function ManufacturingPanel({
   host,
@@ -863,6 +929,38 @@ export function ManufacturingPanel({
               </tbody>
             </table>
           </details>
+          {result.provenance.surface_color.length > 0 && (
+            <details open data-testid="manufacturing-surface-exposure">
+              <summary>Constructed surface exposure</summary>
+              {result.provenance.surface_color.map((face) => (
+                <div key={`${face.construction_index}:${face.face_id}`}>
+                  <p>
+                    Construction {face.construction_index}, face {face.face_id}:{" "}
+                    {face.realized_patch.width_mm} × {face.realized_patch.height_mm} mm;{" "}
+                    {face.interval_count} replay-qualified physical intervals. Tool 0:{" "}
+                    {(100 * face.fractions_by_tool[0]).toFixed(2)}%; tool 1:{" "}
+                    {(100 * face.fractions_by_tool[1]).toFixed(2)}% nominal side exposure.
+                  </p>
+                  {face.reference && (
+                    <>
+                      <p>
+                        Reference estimate from captured evidence; backing optics unmodelled.{" "}
+                        {face.reference.patch_matches_request
+                          ? "Patch matches the requested study."
+                          : "Realized patch differs; estimate reassessed using actual construction exposure."}{" "}
+                        {!face.reference.pose_matches_application &&
+                          "Occurrence pose changed since application."}
+                      </p>
+                      <OpticalComparison
+                        requested={face.reference.requested}
+                        realized={face.reference.realized}
+                      />
+                    </>
+                  )}
+                </div>
+              ))}
+            </details>
+          )}
           <details>
             <summary>Captured provenance</summary>
             <pre data-testid="manufacturing-provenance">
@@ -999,6 +1097,25 @@ export function ManufacturingPanel({
                 />
                 Show source bodies (hide to inspect interior deposition)
               </label>
+              {manufacturing.declaredToolColors && (
+                <label>
+                  <input
+                    type="checkbox"
+                    data-testid="manufacturing-material-colors"
+                    checked={manufacturing.colorByMaterial}
+                    onChange={(event) => {
+                      void manufacturing.updateView(
+                        manufacturing.layer,
+                        manufacturing.eventCount,
+                        manufacturing.showTravel,
+                        manufacturing.showSource,
+                        event.target.checked,
+                      );
+                    }}
+                  />
+                  Declared material colors by decoded active tool (catalog estimates)
+                </label>
+              )}
               {event !== null && (
                 <pre data-testid="manufacturing-event">
                   {JSON.stringify(
@@ -1097,6 +1214,11 @@ export function ManufacturingPanel({
               report: result?.report ?? null,
               provenance: result?.provenance ?? null,
               diagnostic_no_gpu: host.state.diagnosticSession,
+              layer: manufacturing.layer,
+              show_travel: manufacturing.showTravel,
+              color_by_material: manufacturing.colorByMaterial,
+              declared_tool_colors: manufacturing.declaredToolColors,
+              show_source: manufacturing.showSource,
             },
             null,
             2,

@@ -137,6 +137,7 @@ message ManufacturingInspectionProvenance {
   SurfaceOverlays surface_overlays = 8;
   ProcessDocument process_document = 9;
   JobWorkflow workflow = 10;
+  repeated SurfaceColorInspection surface_color = 11;
 }
 message ReplayDisplayInfo {
   uint32 schema_version = 1;
@@ -555,4 +556,54 @@ message OpticalConstructionOrigin {
  OpticalLayerCycle recipe = 8;
  repeated AppliedOpticalMaterial materials = 9;
  RigidPoseMm applied_pose = 10;
+}
+
+// Actual replay qualifies nominal layer/owner associations; no measured optics.
+message OpticalCycleExposure {
+ double period_mm = 1;
+ double phase_at_patch_mm = 2;
+ uint64 complete_periods = 3;
+ AppearanceChannels exposed_height_mm = 4;
+ AppearanceChannels fractions = 5;
+}
+message OpticalUnassessedExposure { OpticalUnknownReason reason = 1; OpticalCycleExposure exposure = 2; }
+enum OpticalUnknownReason {
+ OPTICAL_UNKNOWN_REASON_UNSPECIFIED = 0;
+ OPTICAL_UNKNOWN_REASON_MISSING_EVIDENCE = 1;
+ OPTICAL_UNKNOWN_REASON_UNSUPPORTED_CONDITIONS = 2;
+ OPTICAL_UNKNOWN_REASON_UNSUPPORTED_COLOR_DOMAIN = 3;
+}
+message OpticalReferenceEstimate {
+ OpticalCycleExposure exposure = 1;
+ AppearanceChannels predicted_lab = 2;
+ repeated uint32 display_srgb8 = 3;
+ double delta_e00 = 4;
+ double delta_lightness = 5;
+ bool within_tolerance = 6;
+}
+message OpticalInspectionAssessmentValue {
+ oneof kind { OpticalUnassessedExposure unassessed = 1; OpticalReferenceEstimate estimate = 2; }
+}
+enum OpticalBackingModel {
+ OPTICAL_BACKING_MODEL_UNSPECIFIED = 0;
+ OPTICAL_BACKING_MODEL_UNMODELLED = 1;
+}
+message OpticalInspectionAssessment {
+ string producer = 1;
+ OpticalBackingModel backing_model = 2;
+ bool patch_matches_request = 3;
+ bool pose_matches_application = 4;
+ OpticalInspectionAssessmentValue requested = 5;
+ OpticalInspectionAssessmentValue realized = 6;
+}
+message SurfaceColorInspection {
+ uint32 construction_index = 1;
+ string face_id = 2;
+ OpticalPatch realized_patch = 3;
+ uint32 interval_count = 4;
+ double tool_zero_exposed_height_mm = 5;
+ double tool_one_exposed_height_mm = 6;
+ double tool_zero_fraction = 7;
+ double tool_one_fraction = 8;
+ OpticalInspectionAssessment reference = 9;
 }
