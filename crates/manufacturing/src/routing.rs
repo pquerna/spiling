@@ -157,9 +157,9 @@ pub(crate) fn validate_plan(
                 .checked_add((path.points_mm.len() - 1) as u32)
                 .ok_or_else(|| invalid("fixed-dual segment count overflow"))?;
         }
-        if present != [true, true] {
+        if present == [false, false] {
             return Err(invalid(
-                "both loaded tools must own model on every actual layer",
+                "every actual layer must retain model work; both loaded tools own supported waste",
             ));
         }
         for (index, tool) in job.tools.iter().enumerate() {

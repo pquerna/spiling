@@ -641,3 +641,28 @@ test("native fixed-dual recovery rejects one E8 tick of unpaid or excess debt", 
     await assert.rejects(decodeReplayDisplay(changed, await rehash(changed, native.descriptor)), ReplayDecodeError);
   }
 });
+
+
+test("native waste-only epochs retain support, exact feeder debt and zero model work", async () => {
+  const native = JSON.parse(readFileSync(new URL("../../../fixtures/protocol/replay-waste-only.json", import.meta.url), "utf8"));
+  const bytes = Uint8Array.from(Buffer.from(native.data, "hex")).buffer;
+  const replay = await decodeReplayDisplay(bytes, native.descriptor);
+  let waste = 0, epochs = 0, model = 0;
+  for (let event = 0; event < replay.eventCount; event++) {
+    assert.deepEqual(replay.position(event), native.actual_positions[event]);
+    const kind = replay.kind(event);
+    if (kind === 15) waste++;
+    else if (kind === 14) epochs++;
+    else if ([1, 2, 3, 4, 5, 8].includes(kind)) {
+      model++;
+      assert.equal(replay.activeTool(event), 1);
+    }
+  }
+  assert.equal(waste, 4);
+  assert.equal(epochs, 4);
+  assert.equal(model, 12);
+  const recovery = Array.from({ length: replay.eventCount }, (_, event) => event).find(event => replay.kind(event) === 12)!;
+  const changed = bytes.slice(0), data = new DataView(changed);
+  data.setFloat64(96 + recovery * 80 + 24, replay.extrusion(recovery) + 0.00000001, true);
+  await assert.rejects(decodeReplayDisplay(changed, await rehash(changed, native.descriptor)), ReplayDecodeError);
+});

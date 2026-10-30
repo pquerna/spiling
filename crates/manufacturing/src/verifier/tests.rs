@@ -2995,7 +2995,29 @@ fn fixed_dual_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
 
 #[test]
 fn fixed_dual_actual_epochs_repay_feeders_and_separate_waste_from_model() {
-    let (intent, plan) = fixed_dual_fixture();
+    fixed_dual_golden(None);
+}
+
+#[test]
+fn fixed_dual_waste_only_groups_keep_exact_debt_and_zero_model_accounting() {
+    for tool in [0, 1] {
+        fixed_dual_golden(Some(tool));
+    }
+}
+
+fn fixed_dual_golden(model_tool: Option<usize>) {
+    let (mut intent, mut plan) = fixed_dual_fixture();
+    if let Some(model_tool) = model_tool {
+        let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+            unreachable!()
+        };
+        for assignment in &mut job.assignments {
+            assignment.material = OccurrenceMaterial::Uniform {
+                material_id: job.tools[model_tool].material.id.clone(),
+            };
+        }
+        crate::realization::canonicalize(&mut plan, &intent, &AtomicBool::new(false)).unwrap();
+    }
     let cancel = AtomicBool::new(false);
     let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
@@ -3006,9 +3028,16 @@ fn fixed_dual_actual_epochs_repay_feeders_and_separate_waste_from_model() {
     assert_eq!(report.deposition_segments, 12);
     assert_eq!(report.retraction_count, 4);
     for tool in &routing.tools {
-        assert_eq!(tool.model_deposition_segments, 6);
+        let model = model_tool.map_or(6, |active| {
+            if usize::from(tool.tool) == active {
+                12
+            } else {
+                0
+            }
+        });
+        assert_eq!(tool.model_deposition_segments, model);
         assert_eq!(tool.waste_deposition_segments, 2);
-        assert!((tool.model_filament_length_mm - 6.0).abs() < 1e-8);
+        assert!((tool.model_filament_length_mm - f64::from(model)).abs() < 1e-8);
         assert!((tool.waste_filament_length_mm - 10.0).abs() < 1e-8);
         assert_eq!(tool.outstanding_retraction_mm, 0.6);
     }
@@ -3046,12 +3075,16 @@ fn fixed_dual_actual_epochs_repay_feeders_and_separate_waste_from_model() {
         .collect();
     let golden = serde_json::json!({"encoding":"hex", "descriptor":descriptor,
         "data":hex, "actual_positions":positions, "program":program});
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/protocol/replay-fixed-dual.json"
-    );
+    if model_tool == Some(0) {
+        return;
+    }
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if model_tool.is_some() {
+        "../../fixtures/protocol/replay-waste-only.json"
+    } else {
+        "../../fixtures/protocol/replay-fixed-dual.json"
+    });
     if std::env::var_os("SPILING_UPDATE_REPLAY_FIXTURE").is_some() {
-        std::fs::write(path, serde_json::to_vec_pretty(&golden).unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec_pretty(&golden).unwrap()).unwrap();
     } else {
         let committed: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();

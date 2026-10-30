@@ -218,200 +218,145 @@ pub(crate) fn stream(
     let mut travels = 0u32;
     let mut process = 0u32;
     for layer in &plan.layers {
-        let mut previous_tool = None;
         check_cancel(cancel)?;
-        for path in &layer.paths {
-            check_cancel(cancel)?;
+        for group in 0..if routed.is_some() { 2 } else { 1 } {
             if let Some(job) = routed {
-                let tool = job.tool_for_path(path)?;
-                if (previous_tool.is_none() && tool != 0)
-                    || previous_tool.is_some_and(|previous| previous > tool)
-                {
-                    return Err(error(
-                        ManufacturingErrorCode::InvalidSpecification,
-                        "fixed-dual paths must be canonically grouped tool zero then one on every layer",
-                    ));
-                }
-                if previous_tool != Some(tool) {
-                    let [start, end] = crate::routing::waste_points(job, tool, layer.z_mm)?;
-                    if group_started {
-                        let old = &job.tools[usize::from(active_tool)];
-                        emit(Event::Barrier)?;
-                        let before = (extrusion * 100_000_000.0).round();
-                        extrusion -= old.retract_filament_mm;
-                        let after = (extrusion * 100_000_000.0).round();
-                        debt[usize::from(active_tool)] += (before - after) / 100_000_000.0;
-                        emit(Event::Extrusion(extrusion, old.retract_speed_mm_s))?;
-                        let from = position.unwrap();
-                        let lifted = [from[0], from[1], safe_z.unwrap()];
-                        emit(Event::Travel(lifted, recipe.travel_speed_mm_s))?;
-                        let incoming = job.tools[usize::from(tool)].offset_xy_mm;
-                        // Stage the same carriage at the incoming waste lane
-                        // while coordinates still name the outgoing hotend.
-                        emit(Event::Travel(
-                            [
-                                start[0] + old.offset_xy_mm[0] - incoming[0],
-                                start[1] + old.offset_xy_mm[1] - incoming[1],
-                                safe_z.unwrap(),
-                            ],
-                            recipe.travel_speed_mm_s,
-                        ))?;
-                        emit(Event::Barrier)?;
-                        emit(Event::HotendTarget(active_tool, old.standby_temperature_c))?;
-                        emit(Event::SelectTool(tool))?;
-                        emit(Event::ResetExtrusion)?;
-                        extrusion = 0.0;
-                    } else {
-                        let from = position.unwrap();
-                        emit(Event::HotendWait(
-                            tool,
-                            job.tools[usize::from(tool)].nozzle_temperature_c,
-                        ))?;
-                        emit(Event::Travel(
-                            [from[0], from[1], safe_z.unwrap()],
-                            recipe.travel_speed_mm_s,
-                        ))?;
-                    }
-                    active_tool = tool;
-                    let loaded = &job.tools[usize::from(tool)];
-                    if group_started {
-                        emit(Event::HotendWait(tool, loaded.nozzle_temperature_c))?;
-                    }
-                    let owed = debt[usize::from(tool)];
-                    if owed > 0.0 {
-                        extrusion += owed;
-                        emit(Event::Extrusion(extrusion, loaded.retract_speed_mm_s))?;
-                        debt[usize::from(tool)] = 0.0;
-                    }
-                    if !group_started {
-                        emit(Event::Travel(
-                            [start[0], start[1], safe_z.unwrap()],
-                            recipe.travel_speed_mm_s,
-                        ))?;
-                    }
-                    emit(Event::Travel(start, recipe.travel_speed_mm_s))?;
-                    let height = layer.z_mm - layer.lower_z_mm;
-                    let flow = recipe.flow_multiplier
-                        * if layer.index == 0 {
-                            recipe.process.first_layer_flow_factor
-                        } else {
-                            1.0
-                        };
-                    let speed = recipe.print_speed_mm_s
-                        * if layer.index == 0 {
-                            recipe.process.first_layer_speed_factor
-                        } else {
-                            1.0
-                        };
-                    let length = distance(start, end);
-                    let area = ((recipe.bead_width_mm - height) * height
-                        + std::f64::consts::PI * (height * 0.5).powi(2))
-                        * flow;
-                    let loaded_area =
-                        std::f64::consts::PI * (loaded.filament_diameter_mm * 0.5).powi(2);
-                    extrusion += length * area / loaded_area;
-                    emit(Event::Waste(end, extrusion, speed))?;
-                    position = Some(end);
-                    previous_tool = Some(tool);
-                    group_started = true;
-                }
-            }
-            let target = path.points_mm[0];
-            let pwm = if path.kind == DepositionKind::Bridge {
-                recipe.process.bridge_fan_pwm
-            } else if layer.index == 0 {
-                recipe.process.fan_first_layers
-            } else {
-                recipe.process.fan_after_first_layers
-            };
-            if fan != Some(pwm) {
-                emit(Event::Fan(pwm))?;
-                fan = Some(pwm);
-            }
-            if let Some(safe) = safe_z {
-                let from = position.unwrap();
-                for point in [
-                    [from[0], from[1], safe],
-                    [target[0], target[1], safe],
-                    target,
-                ] {
-                    travels = travels.checked_add(1).ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "routed travel count overflow",
-                        )
-                    })?;
-                    if travels > MAX_DEPOSITION_SEGMENTS {
-                        return Err(error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "routed travel budget exceeded",
-                        ));
-                    }
-                    emit(Event::Travel(point, recipe.travel_speed_mm_s))?;
-                }
-            }
-            let retract = match (position, &recipe.process.retraction) {
-                (
-                    Some(from),
-                    RetractionPolicy::Enabled {
-                        minimum_travel_mm, ..
-                    },
-                ) => distance(from, target) >= *minimum_travel_mm,
-                _ => false,
-            };
-            if routed.is_some() {
-                // The route above owns the lifted entry; body retraction is
-                // explicitly disabled and feeder debt belongs to selections.
-            } else if !retract {
-                if travels == MAX_DEPOSITION_SEGMENTS {
-                    return Err(error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "realized travel budget exceeded",
-                    ));
-                }
-                travels += 1;
-                emit(Event::Travel(target, recipe.travel_speed_mm_s))?;
-            } else {
-                let RetractionPolicy::Enabled {
-                    distance_mm,
-                    speed_mm_s,
-                    z_hop_mm,
-                    ..
-                } = recipe.process.retraction
-                else {
-                    unreachable!()
-                };
-                if process > 100_000 - 2 {
-                    return Err(error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "process event budget exceeded",
-                    ));
-                }
-                process += 2;
-                emit(Event::Extrusion(extrusion - distance_mm, speed_mm_s))?;
-                let from = position.unwrap();
-                let base_z = from[2].max(target[2]);
-                let hop_z = base_z + z_hop_mm;
-                if z_hop_mm > 0.0
-                    && (!hop_z.is_finite()
-                        || project_xyz6_coordinate_mm(hop_z)?
-                            <= project_xyz6_coordinate_mm(base_z)?)
-                {
-                    return Err(error(
-                        ManufacturingErrorCode::InvalidSpecification,
-                        "Z hop collapses at emitted precision",
-                    ));
-                }
-                let targets = if z_hop_mm > 0.0 {
-                    [
-                        Some([from[0], from[1], hop_z]),
-                        Some([target[0], target[1], hop_z]),
-                        Some(target),
-                    ]
+                let tool = group as u8;
+                let [start, end] = crate::routing::waste_points(job, tool, layer.z_mm)?;
+                if group_started {
+                    let old = &job.tools[usize::from(active_tool)];
+                    emit(Event::Barrier)?;
+                    let before = (extrusion * 100_000_000.0).round();
+                    extrusion -= old.retract_filament_mm;
+                    let after = (extrusion * 100_000_000.0).round();
+                    debt[usize::from(active_tool)] += (before - after) / 100_000_000.0;
+                    emit(Event::Extrusion(extrusion, old.retract_speed_mm_s))?;
+                    let from = position.unwrap();
+                    let lifted = [from[0], from[1], safe_z.unwrap()];
+                    emit(Event::Travel(lifted, recipe.travel_speed_mm_s))?;
+                    let incoming = job.tools[usize::from(tool)].offset_xy_mm;
+                    // Stage the same carriage at the incoming waste lane
+                    // while coordinates still name the outgoing hotend.
+                    emit(Event::Travel(
+                        [
+                            start[0] + old.offset_xy_mm[0] - incoming[0],
+                            start[1] + old.offset_xy_mm[1] - incoming[1],
+                            safe_z.unwrap(),
+                        ],
+                        recipe.travel_speed_mm_s,
+                    ))?;
+                    emit(Event::Barrier)?;
+                    emit(Event::HotendTarget(active_tool, old.standby_temperature_c))?;
+                    emit(Event::SelectTool(tool))?;
+                    emit(Event::ResetExtrusion)?;
+                    extrusion = 0.0;
                 } else {
-                    [Some(target), None, None]
+                    let from = position.unwrap();
+                    emit(Event::HotendWait(
+                        tool,
+                        job.tools[usize::from(tool)].nozzle_temperature_c,
+                    ))?;
+                    emit(Event::Travel(
+                        [from[0], from[1], safe_z.unwrap()],
+                        recipe.travel_speed_mm_s,
+                    ))?;
+                }
+                active_tool = tool;
+                let loaded = &job.tools[usize::from(tool)];
+                if group_started {
+                    emit(Event::HotendWait(tool, loaded.nozzle_temperature_c))?;
+                }
+                let owed = debt[usize::from(tool)];
+                if owed > 0.0 {
+                    extrusion += owed;
+                    emit(Event::Extrusion(extrusion, loaded.retract_speed_mm_s))?;
+                    debt[usize::from(tool)] = 0.0;
+                }
+                if !group_started {
+                    emit(Event::Travel(
+                        [start[0], start[1], safe_z.unwrap()],
+                        recipe.travel_speed_mm_s,
+                    ))?;
+                }
+                emit(Event::Travel(start, recipe.travel_speed_mm_s))?;
+                let height = layer.z_mm - layer.lower_z_mm;
+                let flow = recipe.flow_multiplier
+                    * if layer.index == 0 {
+                        recipe.process.first_layer_flow_factor
+                    } else {
+                        1.0
+                    };
+                let speed = recipe.print_speed_mm_s
+                    * if layer.index == 0 {
+                        recipe.process.first_layer_speed_factor
+                    } else {
+                        1.0
+                    };
+                let length = distance(start, end);
+                let area = ((recipe.bead_width_mm - height) * height
+                    + std::f64::consts::PI * (height * 0.5).powi(2))
+                    * flow;
+                let loaded_area =
+                    std::f64::consts::PI * (loaded.filament_diameter_mm * 0.5).powi(2);
+                extrusion += length * area / loaded_area;
+                emit(Event::Waste(end, extrusion, speed))?;
+                position = Some(end);
+                group_started = true;
+            }
+            for path in &layer.paths {
+                check_cancel(cancel)?;
+                if let Some(job) = routed {
+                    if usize::from(job.tool_for_path(path)?) != group {
+                        continue;
+                    }
+                }
+                let target = path.points_mm[0];
+                let pwm = if path.kind == DepositionKind::Bridge {
+                    recipe.process.bridge_fan_pwm
+                } else if layer.index == 0 {
+                    recipe.process.fan_first_layers
+                } else {
+                    recipe.process.fan_after_first_layers
                 };
-                for p in targets.into_iter().flatten() {
+                if fan != Some(pwm) {
+                    emit(Event::Fan(pwm))?;
+                    fan = Some(pwm);
+                }
+                if let Some(safe) = safe_z {
+                    let from = position.unwrap();
+                    for point in [
+                        [from[0], from[1], safe],
+                        [target[0], target[1], safe],
+                        target,
+                    ] {
+                        travels = travels.checked_add(1).ok_or_else(|| {
+                            error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "routed travel count overflow",
+                            )
+                        })?;
+                        if travels > MAX_DEPOSITION_SEGMENTS {
+                            return Err(error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "routed travel budget exceeded",
+                            ));
+                        }
+                        emit(Event::Travel(point, recipe.travel_speed_mm_s))?;
+                    }
+                }
+                let retract = match (position, &recipe.process.retraction) {
+                    (
+                        Some(from),
+                        RetractionPolicy::Enabled {
+                            minimum_travel_mm, ..
+                        },
+                    ) => distance(from, target) >= *minimum_travel_mm,
+                    _ => false,
+                };
+                if routed.is_some() {
+                    // The route above owns the lifted entry; body retraction is
+                    // explicitly disabled and feeder debt belongs to selections.
+                } else if !retract {
                     if travels == MAX_DEPOSITION_SEGMENTS {
                         return Err(error(
                             ManufacturingErrorCode::ResourceLimit,
@@ -419,52 +364,103 @@ pub(crate) fn stream(
                         ));
                     }
                     travels += 1;
-                    emit(Event::Travel(p, recipe.travel_speed_mm_s))?;
+                    emit(Event::Travel(target, recipe.travel_speed_mm_s))?;
+                } else {
+                    let RetractionPolicy::Enabled {
+                        distance_mm,
+                        speed_mm_s,
+                        z_hop_mm,
+                        ..
+                    } = recipe.process.retraction
+                    else {
+                        unreachable!()
+                    };
+                    if process > 100_000 - 2 {
+                        return Err(error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "process event budget exceeded",
+                        ));
+                    }
+                    process += 2;
+                    emit(Event::Extrusion(extrusion - distance_mm, speed_mm_s))?;
+                    let from = position.unwrap();
+                    let base_z = from[2].max(target[2]);
+                    let hop_z = base_z + z_hop_mm;
+                    if z_hop_mm > 0.0
+                        && (!hop_z.is_finite()
+                            || project_xyz6_coordinate_mm(hop_z)?
+                                <= project_xyz6_coordinate_mm(base_z)?)
+                    {
+                        return Err(error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "Z hop collapses at emitted precision",
+                        ));
+                    }
+                    let targets = if z_hop_mm > 0.0 {
+                        [
+                            Some([from[0], from[1], hop_z]),
+                            Some([target[0], target[1], hop_z]),
+                            Some(target),
+                        ]
+                    } else {
+                        [Some(target), None, None]
+                    };
+                    for p in targets.into_iter().flatten() {
+                        if travels == MAX_DEPOSITION_SEGMENTS {
+                            return Err(error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "realized travel budget exceeded",
+                            ));
+                        }
+                        travels += 1;
+                        emit(Event::Travel(p, recipe.travel_speed_mm_s))?;
+                    }
+                    emit(Event::Extrusion(extrusion, speed_mm_s))?;
                 }
-                emit(Event::Extrusion(extrusion, speed_mm_s))?;
-            }
-            let mut speed = recipe.print_speed_mm_s;
-            let mut flow = recipe.flow_multiplier;
-            if layer.index == 0 {
-                speed *= recipe.process.first_layer_speed_factor;
-                flow *= recipe.process.first_layer_flow_factor;
-            }
-            if path.kind == DepositionKind::Bridge {
-                speed *= recipe.process.bridge_speed_factor;
-                flow *= recipe.process.bridge_flow_factor;
-            }
-            let height = path.height_mm();
-            for edge in path.checked_edges()? {
-                check_cancel(cancel)?;
-                let from = project_xyz6_point_mm(edge.points_mm[0])?;
-                let to = project_xyz6_point_mm(edge.points_mm[1])?;
-                let command_length = distance(from, to);
-                if command_length < program_coordinates::MIN_DEPOSITION_COMMAND_MM {
-                    return Err(error(
-                        ManufacturingErrorCode::UnsupportedGeometry,
-                        &format!(
-                            "deposition edge is below the declared software minimum command length: layer={} kind={:?} source={:?} xyz6={from:?}->{to:?} length_mm={command_length:.17e} minimum_mm={:.17e}",
-                            layer.index,
-                            path.kind,
-                            edge.points_mm,
-                            program_coordinates::MIN_DEPOSITION_COMMAND_MM,
-                        ),
-                    ));
+                let mut speed = recipe.print_speed_mm_s;
+                let mut flow = recipe.flow_multiplier;
+                if layer.index == 0 {
+                    speed *= recipe.process.first_layer_speed_factor;
+                    flow *= recipe.process.first_layer_flow_factor;
                 }
-                let area = ((edge.width_mm - height) * height
-                    + std::f64::consts::PI * (height * 0.5).powi(2))
-                    * flow;
-                // Constant-section G1 deposits along the actual XYZ6 chord,
-                // not its unrounded source proposal. Otherwise a circular bead
-                // can become wholly sub-circular merely through XY rounding.
-                let filament_area = routed.map_or(filament_area, |job| {
-                    std::f64::consts::PI
-                        * (job.tools[usize::from(active_tool)].filament_diameter_mm * 0.5).powi(2)
-                });
-                extrusion += command_length * area / filament_area;
-                emit(Event::Deposit(edge.points_mm[1], extrusion, speed))?;
+                if path.kind == DepositionKind::Bridge {
+                    speed *= recipe.process.bridge_speed_factor;
+                    flow *= recipe.process.bridge_flow_factor;
+                }
+                let height = path.height_mm();
+                for edge in path.checked_edges()? {
+                    check_cancel(cancel)?;
+                    let from = project_xyz6_point_mm(edge.points_mm[0])?;
+                    let to = project_xyz6_point_mm(edge.points_mm[1])?;
+                    let command_length = distance(from, to);
+                    if command_length < program_coordinates::MIN_DEPOSITION_COMMAND_MM {
+                        return Err(error(
+                            ManufacturingErrorCode::UnsupportedGeometry,
+                            &format!(
+                                "deposition edge is below the declared software minimum command length: layer={} kind={:?} source={:?} xyz6={from:?}->{to:?} length_mm={command_length:.17e} minimum_mm={:.17e}",
+                                layer.index,
+                                path.kind,
+                                edge.points_mm,
+                                program_coordinates::MIN_DEPOSITION_COMMAND_MM,
+                            ),
+                        ));
+                    }
+                    let area = ((edge.width_mm - height) * height
+                        + std::f64::consts::PI * (height * 0.5).powi(2))
+                        * flow;
+                    // Constant-section G1 deposits along the actual XYZ6 chord,
+                    // not its unrounded source proposal. Otherwise a circular bead
+                    // can become wholly sub-circular merely through XY rounding.
+                    let filament_area = routed.map_or(filament_area, |job| {
+                        std::f64::consts::PI
+                            * (job.tools[usize::from(active_tool)].filament_diameter_mm * 0.5)
+                                .powi(2)
+                    });
+                    extrusion += command_length * area / filament_area;
+                    emit(Event::Deposit(edge.points_mm[1], extrusion, speed))?;
+                }
+                position = path.points_mm.last().copied();
             }
-            position = path.points_mm.last().copied();
         }
     }
     Ok((position, extrusion))

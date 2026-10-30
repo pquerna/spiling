@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: OSL-3.0
  */
 import assert from "node:assert/strict";
+import { decodeReplayDisplay } from "../packages/protocol/src/replay.ts";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
@@ -33,13 +34,15 @@ async function invoke(args, failure = false) {
   }
   assert.equal(result.status, 0, `${receipt}: ${result.stderr}`);
   const report = JSON.parse(result.stdout);
-  assert.match(report.hello.engine_build, /planner29;emitter10;verifier13/);
+  assert.match(report.hello.engine_build, /planner30;emitter11;verifier14/);
   return report;
 }
 const json = async (path) => JSON.parse(await readFile(path, "utf8"));
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const results = [];
-for (const [sourceName, mode] of ["box-mm.step", "through-hole.step"].flatMap((source) => [[source, "full"], [source, "window"]])) {
+const cases = ["box-mm.step", "through-hole.step"].flatMap((source) => [[source, "full"], [source, "window"]]);
+cases.push(["box-mm.step", "cycle"], ["box-mm.step", "all-white"]);
+for (const [sourceName, mode] of cases) {
   const name = sourceName.replace(/\.step$/, "") + "-" + mode;
   const source = join(output, sourceName);
   const project = join(output, `${name}.spiling`);
@@ -70,6 +73,14 @@ for (const [sourceName, mode] of ["box-mm.step", "through-hole.step"].flatMap((s
     shell: { kind: "uniform", material_id: job.tools[0].material.id },
     white_material_id: job.tools[1].material.id,
   }];
+  if (mode === "cycle") {
+    job.surface_constructions[0].shell = {
+      kind: "layer_cycle", material_ids: job.tools.map((tool) => tool.material.id),
+      recipe: { slots: [{ material: 0, height_mm: 0.2 }, { material: 1, height_mm: 0.2 }], phase_slot: 0, origin_z_mm: 0.03 },
+    };
+  } else if (mode === "all-white") {
+    job.surface_constructions[0].shell.material_id = job.tools[1].material.id;
+  }
   intent.recipe.infill_fraction = 0.25;
   const intentFile = join(output, `${name}.intent.json`);
   await writeFile(intentFile, JSON.stringify(intent, null, 2));
@@ -97,7 +108,9 @@ for (const [sourceName, mode] of ["box-mm.step", "through-hole.step"].flatMap((s
   }
   const baseline = await readFile(join(exported, "program.gcode"));
   const changed = structuredClone(intent);
-  if (mode === "window") {
+  if (mode === "cycle") {
+    changed.printer.workflow.job.surface_constructions[0].shell.recipe.phase_slot = 1;
+  } else if (mode === "window") {
     changed.printer.workflow.job.surface_constructions[0].faces[0].mask = { min_u_mm: 5, max_u_mm: 17 };
   } else {
     changed.printer.workflow.job.surface_constructions[0].faces[0].skin_depth_mm = 1.35;
@@ -106,7 +119,7 @@ for (const [sourceName, mode] of ["box-mm.step", "through-hole.step"].flatMap((s
   await writeFile(changedFile, JSON.stringify(changed, null, 2));
   const changedExport = join(output, `${name}-changed`);
   await invoke(["project", "edit", project, "--intent", changedFile, "--compile", "--verify", "--save", "--manufacturing-out", changedExport]);
-  assert.notEqual(hash(await readFile(join(changedExport, "program.gcode"))), hash(baseline), "physical depth edit did not change actual output");
+  assert.notEqual(hash(await readFile(join(changedExport, "program.gcode"))), hash(baseline), "construction edit did not change actual output");
   const restoredExport = join(output, `${name}-restored`);
   await invoke(["project", "edit", project, "--intent", intentFile, "--compile", "--verify", "--save", "--manufacturing-out", restoredExport]);
   assert.deepEqual(await readFile(join(restoredExport, "program.gcode")), baseline);
@@ -114,7 +127,29 @@ for (const [sourceName, mode] of ["box-mm.step", "through-hole.step"].flatMap((s
   await unlink(source); // Never remove repository fixtures or Core-owned assets.
   const recoveredExport = join(output, `${name}-source-absent`);
   const replay = join(output, `${name}.splr`);
-  await invoke(["project", "inspect", project, "--verify", "--manufacturing-out", recoveredExport, "--replay-out", replay]);
+  const recovered = await invoke(["project", "inspect", project, "--verify", "--manufacturing-out", recoveredExport, "--replay-out", replay]);
+  const bytes = Uint8Array.from(await readFile(replay)).buffer;
+  const decoded = await decodeReplayDisplay(bytes, recovered.manufacturing_replay.replay_display);
+  let wasteOnly = 0;
+  for (let layer = 0; layer < plan.layers.length; layer++) {
+    for (const tool of [0, 1]) {
+      let epochs = 0, waste = 0, model = 0;
+      for (let event = 0; event < decoded.eventCount; event++) {
+        if (decoded.layer(event) !== layer || decoded.activeTool(event) !== tool) continue;
+        const kind = decoded.kind(event);
+        if (kind === 14) epochs++;
+        else if (kind === 15) waste++;
+        else if ([1, 2, 3, 4, 5, 8].includes(kind)) model++;
+      }
+      assert.equal(epochs, 1);
+      assert.equal(waste, 1);
+      if (model === 0) wasteOnly++;
+    }
+  }
+  if (mode === "cycle" || mode === "all-white") assert.ok(wasteOnly > 0);
+  if (mode === "all-white") {
+    assert.equal(compiled.manufacturing.verification.routing.tools[0].model_deposition_segments, 0);
+  }
   assert.deepEqual(await readFile(join(recoveredExport, "program.gcode")), baseline);
   const replayAgain = join(output, `${name}-again.splr`);
   await invoke(["project", "inspect", project, "--verify", "--replay-out", replayAgain]);

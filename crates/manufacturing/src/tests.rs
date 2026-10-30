@@ -272,6 +272,99 @@ fn native_face_color_constructs_owned_skin_backing_core_and_replays_protected_ho
 }
 
 #[test]
+fn native_face_color_cycle_keeps_waste_only_groups_and_physical_partial_intervals() {
+    use spiling_contracts::optical::{LayerCycle, OpticalSlot};
+    let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+    let mut intent = surface_color_intent(&scene);
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    let material_ids = job.tools.each_ref().map(|tool| tool.material.id.clone());
+    job.surface_constructions[0].shell = OccurrenceMaterial::LayerCycle {
+        recipe: LayerCycle {
+            slots: vec![
+                OpticalSlot {
+                    material: 0,
+                    height_mm: 0.2,
+                },
+                OpticalSlot {
+                    material: 1,
+                    height_mm: 0.2,
+                },
+            ],
+            phase_slot: 0,
+            origin_z_mm: 0.03,
+        },
+        material_ids,
+    };
+    let bundle = scene.compile(&intent).unwrap();
+    let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow else {
+        unreachable!()
+    };
+    let mut empty_groups = 0;
+    let motion = actual_motion(&bundle);
+    for layer in &bundle.plan.layers {
+        let active = layer
+            .paths
+            .iter()
+            .map(|p| job.tool_for_path(p).unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        if !active.contains(&0) {
+            empty_groups += 1;
+        }
+        assert_eq!(
+            motion
+                .iter()
+                .filter(|(kind, index, _)| *kind == 14 && *index == layer.index)
+                .count(),
+            2
+        );
+        assert_eq!(
+            motion
+                .iter()
+                .filter(|(kind, index, _)| *kind == 15 && *index == layer.index)
+                .count(),
+            2
+        );
+        let expected = job.surface_constructions[0]
+            .shell
+            .material_id_for_interval([layer.lower_z_mm, layer.z_mm])
+            .unwrap();
+        for path in &layer.paths {
+            if path.material_domain.unwrap().role == MaterialConstructionRole::Shell {
+                assert_eq!(
+                    job.tools[usize::from(job.tool_for_path(path).unwrap())]
+                        .material
+                        .id,
+                    expected
+                );
+            } else {
+                assert_eq!(job.tool_for_path(path).unwrap(), 1);
+            }
+        }
+    }
+    assert!(empty_groups > 0);
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .any(|layer| layer.z_mm - layer.lower_z_mm < 0.19)
+    );
+    let routed = bundle.verification.routing.as_ref().unwrap();
+    assert_eq!(
+        routed.selection_count as usize,
+        bundle.plan.layers.len() * 2
+    );
+    for tool in &routed.tools {
+        assert_eq!(
+            tool.waste_deposition_segments as usize,
+            bundle.plan.layers.len()
+        );
+    }
+}
+
+#[test]
 fn native_face_color_rejects_lost_core_wrong_source_and_unprintable_skin() {
     let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
     for kind in 0..3 {
@@ -339,7 +432,6 @@ fn finite_surface_window_preserves_white_inheritance_hole_and_source_frame() {
         }
     }
 }
-
 
 fn pose(x: f64, y: f64, z: f64) -> RigidPoseMm {
     RigidPoseMm {

@@ -2303,16 +2303,17 @@ impl TryFrom<FixedDualJob> for rpc::FixedDualJob {
 fn validate_tool_accounting(value: &RoutedToolAccounting) -> Result<(), String> {
     routing_label(&value.material_id)?;
     if value.tool > 1
-        || value.model_deposition_segments == 0
         || value.waste_deposition_segments == 0
-        || [
-            value.model_filament_length_mm,
-            value.model_volume_mm3,
-            value.waste_filament_length_mm,
-            value.waste_volume_mm3,
-        ]
-        .iter()
-        .any(|v| !v.is_finite() || *v <= 0.0)
+        || [value.waste_filament_length_mm, value.waste_volume_mm3]
+            .iter()
+            .any(|v| !v.is_finite() || *v <= 0.0)
+        || !value.model_filament_length_mm.is_finite()
+        || !value.model_volume_mm3.is_finite()
+        || (if value.model_deposition_segments == 0 {
+            value.model_filament_length_mm != 0.0 || value.model_volume_mm3 != 0.0
+        } else {
+            value.model_filament_length_mm <= 0.0 || value.model_volume_mm3 <= 0.0
+        })
         || !value.outstanding_retraction_mm.is_finite()
         || value.outstanding_retraction_mm < 0.0
         || value
@@ -2642,6 +2643,26 @@ mod fixed_dual_wire_tests {
                 waste_volume_mm3: 1.0,
                 outstanding_retraction_mm: 1.0,
             }),
+        }
+    }
+
+    #[test]
+    fn waste_only_accounting_is_strict_in_both_wire_directions() {
+        let mut value = accounting().tools[0].clone();
+        value.model_deposition_segments = 0;
+        value.model_filament_length_mm = 0.0;
+        value.model_volume_mm3 = 0.0;
+        let wire = rpc::RoutedToolAccounting::try_from(value.clone()).unwrap();
+        assert_eq!(RoutedToolAccounting::try_from(wire).unwrap(), value);
+        for field in 0..4 {
+            let mut bad = value.clone();
+            match field {
+                0 => bad.model_volume_mm3 = 1.0,
+                1 => bad.model_filament_length_mm = 1.0,
+                2 => bad.model_deposition_segments = 1,
+                _ => bad.waste_deposition_segments = 0,
+            }
+            assert!(rpc::RoutedToolAccounting::try_from(bad).is_err());
         }
     }
 

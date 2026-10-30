@@ -229,7 +229,7 @@ export async function decodeReplayDisplay(
     }
     if (kind === 14) {
       if (!dual || e !== 0 || tool !== epochs % 2 || layer !== Math.floor(epochs / 2) ||
-          (epochs > 0 && (epochWaste !== 1 || epochModel === 0 || retractedE === undefined)))
+          (epochs > 0 && (epochWaste !== 1 || retractedE === undefined)))
         fail("invalid tool epoch");
       if (epochs > 0) debts[activeTool] = retractedE === undefined ? undefined : (e8Ticks(retractedE) - e8Ticks(lastE)) / 100_000_000;
       activeTool = tool;
@@ -305,7 +305,7 @@ export async function decodeReplayDisplay(
       } else if (kind === 11 || kind === 12) {
         if (index === 0 || moved) fail("process extrusion must be known and stationary");
         if (kind === 11) {
-          if (retractedE !== undefined || e >= lastE || (dual && epochModel === 0)) fail("invalid retraction");
+          if (retractedE !== undefined || e >= lastE || (dual && epochWaste !== 1)) fail("invalid retraction");
           retractedE = lastE;
         } else {
           if (e <= lastE || retractedE === undefined ||
@@ -340,7 +340,7 @@ export async function decodeReplayDisplay(
     process !== info.process_count ||
     epochs !== info.tool_epoch_count ||
     waste !== info.waste_count ||
-    (dual && (epochWaste !== 1 || epochModel === 0)) ||
+    (dual && epochWaste !== 1) ||
     (dual && (debts[0] === undefined || retractedE === undefined)) ||
     (info.tool_epoch_count === 0 && retractedE !== undefined) ||
     lastLayer + 1 !== info.layer_count ||

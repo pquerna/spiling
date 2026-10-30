@@ -2668,9 +2668,9 @@ impl NormalizedPrintPlan {
                     previous_tool = tool;
                     seen[usize::from(tool)] = true;
                 }
-                if seen != [true; 2] {
+                if seen == [false; 2] {
                     return Err(invalid(
-                        "both fixed-dual loaded tools must deposit model on every layer",
+                        "a fixed-dual layer must retain actual model deposition; both tools retain supported waste",
                     ));
                 }
                 if job.park_position_mm[2] <= layer.z_mm {
@@ -3207,10 +3207,11 @@ fn validate_routing_totals(
     routing.validate()?;
     if support_segments != 0
         || !routing.selection_count.is_multiple_of(2)
-        || routing.tools.iter().any(|tool| {
-            tool.waste_deposition_segments != routing.selection_count / 2
-                || tool.model_deposition_segments < routing.selection_count / 2
-        })
+        || model_segments < routing.selection_count / 2
+        || routing
+            .tools
+            .iter()
+            .any(|tool| tool.waste_deposition_segments != routing.selection_count / 2)
         || routing
             .tools
             .iter()

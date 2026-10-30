@@ -37,7 +37,7 @@ Schema6 is an incompatible interpretation change: reserved fields now carry acti
 | 88 | 4 | u32 stationary retract/recover count |
 | 92 | 4 | u32 tool epoch count |
 
-Counts and bounds match metadata exactly. `event_count=deposition_count+travel_count+lifecycle_count+process_count+tool_epoch_count`; waste is already included in deposition count. Lifecycle count is0 for diagnostic,4 for single-tool complete, or2 for fixed-dual final lift/park. Scheduled layers are1..4096. Fixed-dual epochs alternate tool0/tool1 on every actual layer, with one explicit waste stroke followed by model deposition in each epoch. No trailing bytes or unknown reserved bits are admitted.
+Counts and bounds match metadata exactly. `event_count=deposition_count+travel_count+lifecycle_count+process_count+tool_epoch_count`; waste is already included in deposition count. Lifecycle count is0 for diagnostic,4 for single-tool complete, or2 for fixed-dual final lift/park. Scheduled layers are1..4096. Fixed-dual epochs alternate tool0/tool1 on every actual layer, with one explicit waste stroke followed by zero or more model strokes in each epoch. A waste-only epoch retains the same transition, exact feeder-debt and supported-waste obligations. No trailing bytes or unknown reserved bits are admitted.
 
 ## Event record (80 bytes)
 
@@ -77,5 +77,6 @@ Cross-language fixtures are produced by real Rust emission and independent byte 
 - `fixtures/protocol/replay.json`: command rounding and coincident travel.
 - `replay-sparse.json`: genuinely combined nominal dimensions and the fine/lower-anchor obligations.
 - `replay-fixed-dual.json`: actual tool epochs, per-feeder debt, source-associated model deposition and distinct supported waste.
+- `replay-waste-only.json`: the same supported tool epochs/debt with no model work from tool zero.
 
-Regenerate only explicitly with `SPILING_UPDATE_REPLAY_FIXTURE=1 cargo test --locked -p spiling-manufacturing --lib FILTER`, using filters `actual_motion_inspection_rounding_coincident_travel_and_fixture`, `coarse_sparse_dimensions_are_verified_and_packed`, and `fixed_dual_actual_epochs_repay_feeders_and_separate_waste_from_model`. Ordinary tests check drift without writing. These fixed logical fixture identities are interoperability evidence, not a native geometry, GPU or physical printer qualification.
+Regenerate only explicitly with `SPILING_UPDATE_REPLAY_FIXTURE=1 cargo test --locked -p spiling-manufacturing --lib FILTER`, using filters `actual_motion_inspection_rounding_coincident_travel_and_fixture`, `coarse_sparse_dimensions_are_verified_and_packed`, `fixed_dual_actual_epochs_repay_feeders_and_separate_waste_from_model`, and `fixed_dual_waste_only_groups_keep_exact_debt_and_zero_model_accounting`. Ordinary tests check drift without writing. These fixed logical fixture identities are interoperability evidence, not a native geometry, GPU or physical printer qualification.

@@ -607,16 +607,17 @@ impl FixedDualVerification {
         for (index, tool) in self.tools.iter().enumerate() {
             label(&tool.material_id)?;
             if tool.tool != index as u8
-                || tool.model_deposition_segments == 0
                 || tool.waste_deposition_segments == 0
-                || [
-                    tool.model_filament_length_mm,
-                    tool.model_volume_mm3,
-                    tool.waste_filament_length_mm,
-                    tool.waste_volume_mm3,
-                ]
-                .iter()
-                .any(|value| !value.is_finite() || *value <= 0.0)
+                || [tool.waste_filament_length_mm, tool.waste_volume_mm3]
+                    .iter()
+                    .any(|value| !value.is_finite() || *value <= 0.0)
+                || !tool.model_filament_length_mm.is_finite()
+                || !tool.model_volume_mm3.is_finite()
+                || (if tool.model_deposition_segments == 0 {
+                    tool.model_filament_length_mm != 0.0 || tool.model_volume_mm3 != 0.0
+                } else {
+                    tool.model_filament_length_mm <= 0.0 || tool.model_volume_mm3 <= 0.0
+                })
                 || !tool.outstanding_retraction_mm.is_finite()
                 || tool.outstanding_retraction_mm < 0.0
             {

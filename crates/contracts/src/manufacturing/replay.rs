@@ -374,7 +374,7 @@ pub fn validate_replay_display(
                     || tool != epochs % 2
                     || next_layer != epochs / 2
                     || e != 0.0
-                    || (epochs != 0 && (!epoch_waste || !epoch_model || debt[active_tool] <= 0))
+                    || (epochs != 0 && (!epoch_waste || debt[active_tool] <= 0))
                 {
                     return Err(corrupt("invalid fixed-dual tool epoch"));
                 }
@@ -391,7 +391,6 @@ pub fn validate_replay_display(
                     || travels != info.travel_count
                     || epochs != info.tool_epoch_count
                     || !epoch_waste
-                    || !epoch_model
                     || debt.iter().any(|value| *value <= 0)
                     || e != previous_e
                     || (lifecycle == 0
@@ -410,7 +409,7 @@ pub fn validate_replay_display(
                     || next_layer < layer
                     || next_layer > layer + 1
                     || (next_layer != layer
-                        && !(tool == 1 && epoch_model && matches!(kind, 0 | 11)))
+                        && !(tool == 1 && epoch_waste && matches!(kind, 0 | 11)))
                 {
                     return Err(corrupt("motion outside fixed-dual tool epoch"));
                 }
@@ -425,7 +424,7 @@ pub fn validate_replay_display(
                         if position != previous
                             || e >= previous_e
                             || debt[active_tool] != 0
-                            || !epoch_model
+                            || !epoch_waste
                         {
                             return Err(corrupt("invalid fixed-dual retraction"));
                         }
@@ -574,7 +573,6 @@ pub fn validate_replay_display(
                 || waste != info.waste_count
                 || process != info.layer_count * 4 - 2
                 || !epoch_waste
-                || !epoch_model
                 || debt.iter().any(|value| *value <= 0)))
         || min != info.bounds_mm.min
         || max != info.bounds_mm.max
