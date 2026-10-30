@@ -222,7 +222,10 @@ coordinates from different programs never merge into one passing program.
 Per-case `roof-policy-prediction.json` and `roof-policy-observation.json` retain
 all expected/observed geometry and E. The middle case additionally retains the
 rotation prediction, coverage forecast, complete `roof-policy-witness.json` and
-raw fault programs. No-op controls, unrelated resolved-setting changes, fixed
+raw fault programs. Complete independent reference audits must preserve the
+declared physical intervals and reject every unrelated geometry failure; only
+the retained nominal-coverage flags are admitted to this explanation gate.
+No-op controls, unrelated resolved-setting changes, fixed
 nominal dose on fitted paths, balanced E defects and removed links with conserved
 terminal material must reject. `selectedPolicyExplained` requires this deciding
 control, every frozen reference roof observation, complete accounting and all

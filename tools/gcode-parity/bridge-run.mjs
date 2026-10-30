@@ -9,7 +9,11 @@ import { cases, intentFor, referenceProfile, sha256 } from "./corpus.mjs";
 import { decodeGcode } from "./decode.mjs";
 import { auditBridge } from "./bridges.mjs";
 import { bridgeMaterialLedger, bridgeLedgerDelta } from "./bridge-ledger.mjs";
-import { predictExternalRoof, observeExternalRoof } from "./bridge-policy.mjs";
+import {
+  predictExternalRoof,
+  observeExternalRoof,
+  externalRoofAuditScope,
+} from "./bridge-policy.mjs";
 import { referenceValues, runBridgeProbes } from "./bridge-probes.mjs";
 const EPS = 0.002;
 
@@ -375,7 +379,9 @@ export async function runBridgeComparisons({
     report.cases.length === scenarios.length &&
     report.cases.every(
       (c) =>
-        c.roofPolicyObservation?.accepted === true && c.roofPolicyObservation.everyCommandAccounted,
+        c.roofPolicyObservation?.accepted === true &&
+        c.roofPolicyObservation.everyCommandAccounted &&
+        externalRoofAuditScope(c.reference),
     );
   report.selectedPolicyScope =
     "Frozen external terminal rectilinear roof: integer row fit, links/free ends and fitted dose, decided by a one-setting 90-degree reference control. This does not change strict nominal coverage or claim every comparison/physical difference explained.";

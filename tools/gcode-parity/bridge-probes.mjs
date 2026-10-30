@@ -426,6 +426,8 @@ export async function runBridgeProbes({ record, output, cli, engine, reference, 
   const rotation = observations["rotate-roof"];
   const policyQuery = {
     prediction: record.roofPolicyPrediction,
+    baselineAudit: record.reference,
+    controlAudit: rotation.audit,
     controlPrediction: rotationPrediction,
     baseline: record.roofPolicyObservation,
     control: observeExternalRoof(rotation.decoded, rotationPrediction),
@@ -503,6 +505,19 @@ export async function runBridgeProbes({ record, output, cli, engine, reference, 
         !missingLink.accepted &&
         Math.abs(missingLink.observedVolumeMm3 - policyQuery.baseline.observedVolumeMm3) < 1e-6 &&
         missingLink.violations.some((v) => v.code === "missing_predicted_geometry"),
+    },
+    {
+      name: "unrelated reference geometry failure",
+      rejected: !evaluateExternalRoofControl({
+        ...policyQuery,
+        controlAudit: {
+          ...rotation.audit,
+          violations: [
+            ...rotation.audit.violations,
+            { code: "outside_source_bounds", witness: "injected unrelated geometry failure" },
+          ],
+        },
+      }).accepted,
     },
     {
       name: "unrelated resolved setting changed",

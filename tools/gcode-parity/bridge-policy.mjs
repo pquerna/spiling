@@ -200,6 +200,8 @@ export function evaluateExternalRoofControl({
   baseline,
   control,
   resolvedSettingsChanges,
+  baselineAudit,
+  controlAudit,
 }) {
   const sameSource =
     prediction.source.id === controlPrediction.source.id &&
@@ -209,6 +211,8 @@ export function evaluateExternalRoofControl({
     .every((m) => control.matches.some((c) => c.bucket === "perimeter" && edgeError(m, c) < 1e-6));
   const perimeterAllowance = 4 * filamentArea * 1e-5 * prediction.flowMultiplier;
   const checks = {
+    referenceAuditsHaveOnlyRetainedNominalFlags:
+      externalRoofAuditScope(baselineAudit) && externalRoofAuditScope(controlAudit),
     unchangedSourceAndOnlySelectedControl:
       sameSource &&
       prediction.angleDeg === 0 &&
@@ -321,4 +325,16 @@ export function forecastTerminalMisses(
     scope:
       "Forecast for existing terminal baseline misses only, using the unchanged fixed nominal capsule radius and command allowance. Both rotated seam alternatives must cover the same coordinate; no physical footprint or whole-program coverage pass follows.",
   };
+}
+
+export function externalRoofAuditScope(audit) {
+  return (
+    audit?.layerCount === 20 &&
+    audit.layers?.length === 20 &&
+    audit.layers.every(
+      (l, i) => Math.abs(l.lowerMm - i / 5) < 1e-6 && Math.abs(l.upperMm - (i + 1) / 5) < 1e-6,
+    ) &&
+    Array.isArray(audit.violations) &&
+    audit.violations.every((v) => v.code === "mandatory_nominal_coverage")
+  );
 }

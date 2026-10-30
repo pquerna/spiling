@@ -578,11 +578,35 @@ test("external roof control requires complete resolved configuration with exactl
   const query = {
     prediction,
     controlPrediction,
+    baselineAudit: {
+      layerCount: 20,
+      layers: Array.from({ length: 20 }, (_, i) => ({ lowerMm: i / 5, upperMm: (i + 1) / 5 })),
+      violations: [],
+    },
+    controlAudit: {
+      layerCount: 20,
+      layers: Array.from({ length: 20 }, (_, i) => ({ lowerMm: i / 5, upperMm: (i + 1) / 5 })),
+      violations: [],
+    },
     baseline: observed,
     control,
     resolvedSettingsChanges: [{ key: "fill_angle", baseline: "0", control: "90" }],
   };
   assert.equal(evaluateExternalRoofControl(query).accepted, true);
+  assert.equal(
+    evaluateExternalRoofControl({
+      ...query,
+      controlAudit: { ...query.controlAudit, violations: [{ code: "outside_source_bounds" }] },
+    }).accepted,
+    false,
+  );
+  assert.equal(
+    evaluateExternalRoofControl({
+      ...query,
+      controlAudit: { ...query.controlAudit, layerCount: 19 },
+    }).accepted,
+    false,
+  );
   assert.equal(
     evaluateExternalRoofControl({ ...query, resolvedSettingsChanges: [] }).accepted,
     false,
