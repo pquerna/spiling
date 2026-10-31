@@ -80,25 +80,31 @@ pub(super) fn native_fiber_misses_vertex_supports(
 
 /// Actual native vertex tolerance zones. They are not added material, changed
 /// source support, or an original-STEP displacement law. Calibration fibers
-/// must miss these ambiguous zero-dimensional coincidence zones.
-pub(in crate::analysis::critical) struct ClosedRadialLinks<'d> {
+/// must miss these ambiguous zero-dimensional coincidence zones. The borrowed
+/// prism/request are the actual proof owners; a normalized section-projection axis
+/// is not the literal captured height functional or its ownership identity.
+pub(in crate::analysis::critical) struct ClosedRadialLinks<'d, 'p> {
     definition: &'d Definition,
+    prism: &'p SamplePrism,
+    request: &'p SlabRequest,
     supports: Vec<[Interval; 3]>,
     pub effective_tolerance_mm: f64,
     all_vertices_outside: bool,
 }
-impl<'d> ClosedRadialLinks<'d> {
+impl<'d, 'p> ClosedRadialLinks<'d, 'p> {
     pub fn new(
         source: MaterialSourceView<'_, 'd>,
         incidence: &SourceEdgeIncidence<'_>,
-        prism: &SamplePrism,
-        request: &SlabRequest,
+        prism: &'p SamplePrism,
+        request: &'p SlabRequest,
         remaining: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
         let mut result = Self {
             definition: source.definition(),
+            prism,
+            request,
             supports: Vec::new(),
             effective_tolerance_mm: source.trim_source().effective_tolerance_mm(),
             all_vertices_outside: true,
@@ -215,7 +221,8 @@ impl<'d> ClosedRadialLinks<'d> {
         cancel: &AtomicBool,
     ) -> Result<(), GeometryError> {
         if !std::ptr::eq(self.definition, source.definition())
-            || prism.frame.z_axis != request.frame.z_axis
+            || !std::ptr::eq(self.prism, prism)
+            || !std::ptr::eq(self.request, request)
         {
             return Err(GeometryError::new(
                 GeometryErrorCode::InvalidGeometry,
@@ -366,6 +373,97 @@ pub(super) fn projection_rows(radial: [Interval; 3]) -> Result<[[Interval; 3]; 2
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn radial_calibration_retains_exact_prism_and_request_owners() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../../../fixtures/geometry/box-mm.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(30_000_000);
+        let prepared = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let source = prepared.source_view().unwrap();
+        let plane = crate::PlaneMm {
+            origin_mm: [0.0, 0.0, 4.0],
+            normal: [0.0, 0.0, 1.0],
+        };
+        let section = prepared
+            .section_for_query(
+                &crate::section::SectionQuery {
+                    plane,
+                    maximum_chord_error_mm:
+                        spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
+                    maximum_plane_error_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
+                },
+                &cancel,
+                (crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes()) as u32,
+                &mut work,
+            )
+            .unwrap();
+        let request = SlabRequest {
+            frame: PlaneFrameMm {
+                origin_mm: [0.0; 3],
+                ..PlaneFrameMm::from_plane(plane).unwrap()
+            },
+            height_interval_mm: [3.9, 4.1],
+            sample_height_mm: 4.0,
+            native_shape_error_mm: 0.1,
+        };
+        let height = HeightFunctional::from_frame(request.frame);
+        let band = super::super::super::super::slab::native_sample_height_band(
+            &definition,
+            request.frame,
+            &section,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let prism = SamplePrism::new(&section, &request, height, band, &mut work, &cancel).unwrap();
+        let other_prism =
+            SamplePrism::new(&section, &request, height, band, &mut work, &cancel).unwrap();
+        let other_request = SlabRequest { ..request };
+        let mut edges =
+            SourceEdgeIncidence::new(&definition, MAX_EDGE_BYTES, &mut work, &cancel).unwrap();
+        edges
+            .prepare_vertices(MAX_EDGE_BYTES, &mut work, &cancel)
+            .unwrap();
+        let remaining = crate::MAX_PREPARED_SECTION_BYTES
+            - prepared.retained_bytes()
+            - section.retained_bytes()
+            - prism.heap_bytes()
+            - other_prism.heap_bytes()
+            - edges.owned_bytes();
+        let links = ClosedRadialLinks::new(
+            source, &edges, &prism, &request, remaining, &mut work, &cancel,
+        )
+        .unwrap();
+        for (candidate_prism, candidate_request) in
+            [(&other_prism, &request), (&prism, &other_request)]
+        {
+            assert_eq!(
+                links
+                    .degree_one(
+                        source,
+                        candidate_prism,
+                        candidate_request,
+                        remaining - links.allocated_bytes(),
+                        &mut work,
+                        &cancel
+                    )
+                    .unwrap_err()
+                    .code,
+                GeometryErrorCode::InvalidGeometry
+            );
+        }
+    }
 
     fn calibration_fiber() -> fiber::NativeFiber {
         let rows = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|row| row.map(Interval::point));

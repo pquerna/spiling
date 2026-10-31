@@ -56,7 +56,7 @@ Definition bounds conservatively enclose native geometry; they are not required 
 | 44..48      | u32 first artifact-wide loop ordinal |
 | 48..64      | zero reserved bytes                  |
 
-Body: u32 loop offsets `[loop_count+1]`; zero padding to an eight-byte boundary; then f64 XYZ `[3*point_count]` relative to plane origin. Offsets start at zero and end at point count. Each offset difference is at least four and at most 40,000 points, including the closing point. Coordinates are finite; loops are closed and on the normalized metadata plane within 1e-4 mm. A loop is never split across chunks. Oversized loops are rejected rather than truncated.
+Body: u32 loop offsets `[loop_count+1]`; zero padding to an eight-byte boundary; then f64 XYZ `[3*point_count]` relative to plane origin. Offsets start at zero and end at point count. Each offset difference is at least four and at most 40,000 points, including the closing point. Coordinates are finite; loops are closed and on the normalized metadata plane within 1e-4 mm. The engine summary plane equals one normalization of the original requested plane; query and encoder inputs derive from that same raw request, since repeated f64 normalization can change coefficients. A loop is never split across chunks. Oversized loops are rejected rather than truncated.
 
 Outer/hole winding is measured in the declared canonical frame. Accumulate signed area relative to the first encoded loop vertex, not a potentially distant plane origin. Representable tangential origin shifts preserve loop admission and physical coordinates; reject an origin that collapses the actual plane-relative encoded loop rather than publishing bytes that consumers cannot validate.
 

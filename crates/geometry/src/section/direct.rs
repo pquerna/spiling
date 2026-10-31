@@ -331,6 +331,35 @@ pub(super) fn intersect(
                 ));
             }
         }
+        // A whole-face nonzero partial proves uniqueness, not existence
+        // over a boundary root's uncertain independent coordinate. Admit the
+        // direct chart only when every original endpoint has its full bracket;
+        // otherwise the existing atlas supplies overlapping local graphs.
+        let graph = if let Some((axis, dependent_sign, root_domain)) = graph {
+            let candidate = Graph {
+                surface,
+                domain: root_domain,
+                axis,
+                scale,
+                plane,
+                dependent_sign,
+            };
+            let mut endpoints_qualified = true;
+            for event in &events {
+                let x = event.uv[1 - axis];
+                match candidate.enclose([x.lo, x.hi], work, cancel) {
+                    Ok(_) => {}
+                    Err(error) if error.code == GeometryErrorCode::AnalysisIndeterminate => {
+                        endpoints_qualified = false;
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            endpoints_qualified.then_some((axis, dependent_sign, root_domain))
+        } else {
+            None
+        };
         let Some((axis, dependent_sign, root_domain)) = graph else {
             super::continuation::intersect_face(
                 surface,
@@ -1204,9 +1233,10 @@ impl Graph<'_> {
             nonnegative(fa) && nonpositive(fb)
         };
         if !bracketed {
-            return Err(indeterminate(
-                "native graph lacks a whole-interval root existence bracket",
-            ));
+            return Err(indeterminate(format!(
+                "native graph lacks a whole-interval root existence bracket: axis={} sign={} x={x:?} domain={:?} fa={fa:?} fb={fb:?} plane={:?}",
+                self.axis, self.dependent_sign, self.domain, self.plane,
+            )));
         }
         for _ in 0..64 {
             let jet = surface_jet(self.surface, self.box_uv(x, y), self.scale, work, cancel)?;

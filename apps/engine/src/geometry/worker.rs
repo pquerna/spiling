@@ -915,8 +915,11 @@ fn section(
     definitions: &BTreeMap<DefinitionId, Resident>,
     cancel: &AtomicBool,
 ) -> Result<EncodedSection, GeometryError> {
-    let plane = plane.normalized()?;
+    // Derive publication metadata and native-query input from the same raw
+    // request. Re-normalizing the first result can change its f64 coefficients
+    // and break the consumer's exact normalized-request identity.
     let mut builder = SectionChunkBuilder::new(session, artifact, revision, plane)?;
+    let plane = plane.normalized()?;
     let mut work = GeometryWorkBudget::new(50_000_000);
     let source_limit = MAX_PREPARED_SECTION_SOURCE_BYTES;
     let mut sources = BTreeMap::<DefinitionId, (usize, Option<PreparedSectionSource<'_>>)>::new();

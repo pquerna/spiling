@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source15 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source16 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -237,6 +237,26 @@ inventories, original face lineage, ordered closure, Jordan and achieved
 chord/plane checks remain independent requirements; unresolved tangencies or
 branch ambiguities refuse rather than synthesize a closed loop. There is no
 SolidCore Boolean-clipping or old-kernel fallback.
+
+Direct section graph selection additionally requires the complete original
+endpoint UV intervals to have whole-interval existence brackets. A nonzero
+carrier partial alone proves uniqueness. If endpoint geometry cannot supply the
+bracket, the same native pipeline uses its bounded atlas and exact root catalog;
+resource/cancellation remain terminal, and no active chart is extended.
+
+Critical radial calibration borrows the actual immutable prism and request beside
+the native definition. Reuse binds those owners directly. The section's normalized
+projection frame and the literal captured height functional can have distinct
+floating-point coefficients; axis-coefficient equality is not ownership authority.
+Actual dual/covector, complete fiber degree, vertex zones and cap clearance remain
+independent obligations.
+
+Trim winding may prove closed-boundary contact from a continuous curve whose
+whole image fits one query-coordinate strip and whose endpoint enclosures span
+the other. The intermediate-value theorem supplies actual contact even when no
+isolated floating-point point enclosure fits a boundary equality. Complete C0
+and both coordinate conditions are mandatory. This returns Boundary, never
+Inside/Outside or an isolated-root receipt, under the existing scratch/work caps.
 
 Native scalar roots may retain one continuous parent across an uncertain
 subdivision-point value. Strict opposite outer endpoint signs prove existence;

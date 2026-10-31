@@ -1142,7 +1142,7 @@ impl Runtime {
                 plane,
             } => {
                 self.base(&session_id, base_revision)?;
-                let plane = plane.normalized()?;
+                plane.validate()?;
                 if self.active.is_some() {
                     return Err(busy());
                 }

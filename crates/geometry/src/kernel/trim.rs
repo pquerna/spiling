@@ -1914,6 +1914,9 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                     }) {
                         return Ok(BoundaryWinding::Contact);
                     }
+                    if continuous_boundary_crosses_box(&curve, part, image, uv_box, work, cancel)? {
+                        return Ok(BoundaryWinding::Contact);
+                    }
                     let middle = part[0] * 0.5 + part[1] * 0.5;
                     let midpoint =
                         parametric::curve2d_piecewise_jet(&curve, [middle; 2], work, cancel)?
@@ -2424,6 +2427,33 @@ impl<'d> PreparedFaceTrimDomain<'d> {
 // A closed curve leaf and its endpoint chord are homotopic in their common
 // enclosing rectangle. Once that rectangle misses the WHOLE query box, replacing
 // the leaf by this chord preserves winding at every point of the query box.
+/// A closed-strip contact proof, never an Inside/Outside or root receipt.
+/// No isolated point needs to be representable at the boundary equality.
+fn continuous_boundary_crosses_box(
+    curve: &(impl parametric::CurveEvaluator + ?Sized),
+    range: [f64; 2],
+    image: [Interval; 2],
+    query: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    for axis in 0..2 {
+        let other = 1 - axis;
+        if query[other][0] <= image[other].lo && image[other].hi <= query[other][1] {
+            let a = parametric::curve2d_piecewise_jet(curve, [range[0]; 2], work, cancel)?.position;
+            let b = parametric::curve2d_piecewise_jet(curve, [range[1]; 2], work, cancel)?.position;
+            let spans = (a[axis].hi <= query[axis][0] && b[axis].lo >= query[axis][1])
+                || (b[axis].hi <= query[axis][0] && a[axis].lo >= query[axis][1]);
+            // The complete continuous path stays in one query-coordinate
+            // strip; its endpoints straddle the other. IVT supplies contact.
+            if spans && parametric::curve_parameter_span_continuous(curve, range, work, cancel)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn chord_winding(a: [Interval; 2], b: [Interval; 2], p: [f64; 2], shear: f64) -> Option<i64> {
     let relative = |q: [Interval; 2]| {
         [
@@ -9605,6 +9635,128 @@ mod tests {
                     ([[-0.2, -0.1], [3.0, 4.0]], Outside),
                     ([[3.4, 3.5], [3.0, 4.0]], Outside),
                 ],
+            );
+        }
+    }
+
+    #[test]
+    fn closed_strip_contact_requires_continuity_and_both_coordinate_obligations() {
+        use solidcore::{
+            curve::curve::Curve,
+            nurbs::{
+                b_spline_curve::BSplineCurve,
+                crv_basic,
+                math::{CPoint, NOW, NOZ},
+            },
+        };
+        let make = |xs: &[f64], knots| -> Curve {
+            BSplineCurve::from_nurb(
+                crv_basic::Curve::new(
+                    xs.iter().map(|x| CPoint::new(*x, 0.0, NOZ, NOW)).collect(),
+                    1,
+                    knots,
+                )
+                .unwrap(),
+                2,
+                true,
+            )
+            .into()
+        };
+        let continuous = make(&[-1.0, 1.0], vec![0.0, 0.0, 1.0, 1.0]);
+        let jump = make(&[-1.0, -0.5, 0.5, 1.0], vec![0.0, 0.0, 0.5, 0.5, 1.0, 1.0]);
+        let image = [Interval::new(-1.0, 1.0).unwrap(), Interval::point(0.0)];
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        assert!(
+            continuous_boundary_crosses_box(
+                &continuous,
+                [0.0, 1.0],
+                image,
+                [[0.0; 2]; 2],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        assert!(
+            !continuous_boundary_crosses_box(
+                &jump,
+                [0.0, 1.0],
+                image,
+                [[0.0; 2]; 2],
+                &mut work,
+                &cancel
+            )
+            .unwrap(),
+            "straddling endpoints cannot fill a genuine position jump"
+        );
+        assert!(
+            !continuous_boundary_crosses_box(
+                &continuous,
+                [0.0, 1.0],
+                image,
+                [[0.0; 2], [f64::from_bits(1), 1.0]],
+                &mut work,
+                &cancel
+            )
+            .unwrap(),
+            "a separated transverse strip has no contact"
+        );
+        assert!(
+            !continuous_boundary_crosses_box(
+                &continuous,
+                [0.0, 1.0],
+                image,
+                [[2.0, 3.0], [0.0; 2]],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            continuous_boundary_crosses_box(
+                &continuous,
+                [0.0, 1.0],
+                image,
+                [[0.0; 2]; 2],
+                &mut work,
+                &AtomicBool::new(true)
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::Cancelled
+        );
+    }
+
+    #[test]
+    fn native_box_boundary_contact_does_not_require_an_isolated_equality_witness() {
+        let definition = crate::analysis::test_source::recipe("native-parity-bspline-box.step");
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(30_000_000);
+        let prepared = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let remaining = crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes();
+        let source = prepared.source_view().unwrap();
+        let domain = source
+            .face_domain(3, remaining, &mut work, &cancel)
+            .unwrap();
+        let mut query_work = GeometryWorkBudget::new(100_000);
+        for (query, expected) in [
+            ([[0.5, 0.625], [0.0, 0.25]], Boundary),
+            ([[0.5; 2], [0.0; 2]], Boundary),
+            ([[0.5, 0.625], [0.125, 0.25]], Inside),
+            ([[0.5, 0.625], [-0.25, -0.125]], Outside),
+        ] {
+            assert_eq!(
+                domain
+                    .classify_with_byte_limit(query, remaining, &mut query_work, &cancel)
+                    .unwrap(),
+                expected
             );
         }
     }
