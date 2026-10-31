@@ -286,7 +286,37 @@ mod tests {
                 .count(),
             1
         );
-        let actual = &analysis.section.loops;
+        // Manufacturing consumes a planar XY candidate, not rewritten native
+        // geometry. Preserve the actual source sample and its separate plane
+        // residual while copying its XY exactly onto the common candidate Z.
+        assert!(
+            analysis
+                .section
+                .loops
+                .iter()
+                .flat_map(|boundary| &boundary.points_mm)
+                .all(
+                    |point| (point[2] - sample).abs() <= analysis.section.achieved_plane_error_mm()
+                )
+        );
+        assert!(
+            analysis.section.achieved_plane_error_mm()
+                <= spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM
+        );
+        let actual: Vec<_> = analysis
+            .section
+            .loops
+            .iter()
+            .map(|boundary| SectionLoopMm {
+                is_hole: boundary.is_hole,
+                points_mm: boundary
+                    .points_mm
+                    .iter()
+                    .map(|point| [point[0], point[1], sample])
+                    .collect(),
+            })
+            .collect();
+        let actual = &actual;
         let leaf = certify_native_source_leaf(
             &SourceLeafRequest {
                 source: &prepared,
