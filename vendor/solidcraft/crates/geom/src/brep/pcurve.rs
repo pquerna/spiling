@@ -630,6 +630,11 @@ fn least_squares(knots: &[f64], data: &[(f64, [f64; 2])]) -> Option<Vec<[f64; 2]
     const P: usize = 3;
     let n = knots.len().checked_sub(P + 1)?;
     let (first, last) = (data.first()?.1, data.last()?.1);
+    // Solve displacement from the first point. Subtracting weighted absolute
+    // endpoints from absolute samples loses partition-of-unity cancellation:
+    // even an exactly constant chart coordinate can acquire exterior controls.
+    // Keep the literal endpoints and restore the origin only after the solve.
+    let end = [last[0] - first[0], last[1] - first[1]];
     let m = n.checked_sub(2)?;
     // Normal equations, upper band: ata[j][k] = A(j, j + k) over the free points 1..n−1.
     let mut ata = vec![[0.0f64; P + 1]; m];
@@ -638,13 +643,13 @@ fn least_squares(knots: &[f64], data: &[(f64, [f64; 2])]) -> Option<Vec<[f64; 2]
         let span = crate::bspline::find_span(knots, P, n, t)?;
         let nb = crate::tess::basis_ders(knots, span, P, t)?;
         let nb = nb.first()?.get(..=P)?;
-        let mut r = q;
+        let mut r = [q[0] - first[0], q[1] - first[1]];
         for (j, w) in nb.iter().enumerate() {
             let i = span + j - P;
             let fixed = if i == 0 {
-                Some(first)
+                Some([0.0; 2])
             } else if i + 1 == n {
-                Some(last)
+                Some(end)
             } else {
                 None
             };
@@ -709,7 +714,10 @@ fn least_squares(knots: &[f64], data: &[(f64, [f64; 2])]) -> Option<Vec<[f64; 2]
         let d = at(&r, j, 0);
         *x.get_mut(j)? = [v[0] / d, v[1] / d];
     }
-    let out: Vec<[f64; 2]> = std::iter::once(first).chain(x).chain(std::iter::once(last)).collect();
+    let out: Vec<[f64; 2]> = std::iter::once(first)
+        .chain(x.into_iter().map(|q| [q[0] + first[0], q[1] + first[1]]))
+        .chain(std::iter::once(last))
+        .collect();
     out.iter().flatten().all(|v| v.is_finite()).then_some(out)
 }
 

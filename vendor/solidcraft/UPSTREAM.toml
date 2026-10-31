@@ -26,3 +26,7 @@ reason = "Retain unmodified upstream notices alongside each crate for release co
 [[changes]]
 paths = ["crates/step/src/topology.rs", "crates/step/src/topology/charts.rs", "crates/step/src/topology/seams.rs"]
 reason = "Propose a unique source-associated spline PCURVE only on its identical retained carrier and gauge. Construct rounding-close native chart boundaries and common original-vertex endpoints before completed BREP geometry validation; preserve genuine exterior controls and distinct pole/seam branches. Original STEP operands remain unchanged and native consumers retain independent whole-curve/containment checks."
+
+[[changes]]
+paths = ["crates/geom/src/brep/pcurve.rs", "crates/geom/src/brep/pcurve_tests.rs"]
+reason = "Solve generated cubic PCURVE least squares in displacement coordinates with literal fixed endpoints. Preserve exactly constant nonzero chart coordinates without absolute-coordinate cancellation; retain existing lifting checks, real variation and unchanged supplied PCURVEs."

@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source16 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source17 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -64,6 +64,17 @@ branches remain separate. Completed BREP geometry validation and independent
 whole-curve native correspondence/containment still decide each query. Literal
 original STEP operands are preserved. The evaluator's active knot domain bounds
 queries even when native trim metadata has a larger conservative rectangle.
+Generated cubic PCURVE least squares solves offsets from the first sample and
+retains both literal endpoints. This preserves exactly constant nonzero chart
+coordinates without tolerance snapping or a query-side domain exception; real
+variation and supplied PCURVEs remain distinct. The existing lift-error checks
+still admit each constructed curve, and complete native coefficient containment
+still admits each query. The native bore cap regression exercises both endpoint
+slabs through source-leaf/union binding, missing-incidence refusal and protected
+hole retention. The combined box/bore/cone reference retains its separate cone
+transition-material assertion; that whole reference remains unqualified.
+Complete bore-job compilation also remains unqualified: native directional
+support can exhaust cumulative work on trim-boundary contacts.
 
 Native periodic-seam qualification uses the literal stored carrier and chart
 coefficients, opposed uses of the same native edge, and exact periodic G1

@@ -4381,8 +4381,8 @@ fn recover_critical_slab(
             GeometryError::new(
                 failure.code,
                 format!(
-                    "regular source proof refused: {}; critical recovery refused: {}",
-                    unresolved.message, failure.message,
+                    "critical recovery refused: {}; regular source proof refused: {}",
+                    failure.message, unresolved.message,
                 ),
             )
         }

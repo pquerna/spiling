@@ -642,3 +642,39 @@ fn an_edge_is_fitted_to_its_own_tolerance() {
     let pc = &pcurves(&plane, &own, 1e-5).unwrap()[0][0];
     assert!(lift_error(&plane, &off, [0., 1.], pc) <= 2e-4);
 }
+
+#[test]
+fn fitted_pcurves_preserve_constant_chart_coordinates_and_real_variation() {
+    let knots = [vec![0.0; 4], vec![0.25, 0.5, 0.75], vec![1.0; 4]].concat();
+    for axis in 0..2 {
+        for constant in [1.0, -7.0, 1_048_576.0] {
+            let data: Vec<_> = (0..=16).map(|i| {
+                let t = i as f64 / 16.0;
+                let mut q = [t, t];
+                q[axis] = constant;
+                (t, q)
+            }).collect();
+            let points = least_squares(&knots, &data).unwrap();
+            assert!(points.iter().all(|q| q[axis] == constant), "a constant chart coordinate must not acquire an exterior control");
+            assert_eq!(points.first().copied(), data.first().map(|(_, q)| *q));
+            assert_eq!(points.last().copied(), data.last().map(|(_, q)| *q));
+            let fitted = Curve2::Spline { knots: knots.clone(), points };
+            for &(t, q) in &data {
+                let actual = fitted.eval(t).unwrap();
+                assert!((actual[1 - axis] - q[1 - axis]).abs() < 1e-13);
+            }
+        }
+    }
+    // Small real motion is retained rather than declared constant by a threshold.
+    let data: Vec<_> = (0..=16).map(|i| {
+        let t = i as f64 / 16.0;
+        (t, [1.0 + t / 1024.0, t])
+    }).collect();
+    let points = least_squares(&knots, &data).unwrap();
+    assert!(points.iter().any(|q| q[0] > 1.0));
+    let fitted = Curve2::Spline { knots, points };
+    for &(t, q) in &data {
+        let actual = fitted.eval(t).unwrap();
+        assert!((actual[0] - q[0]).abs() < 1e-13);
+    }
+}

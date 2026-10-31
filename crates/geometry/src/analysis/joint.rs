@@ -10105,6 +10105,19 @@ mod tests {
 
     #[test]
     fn incoming_original_caps_close_first_and_last_actual_m_without_convexity() {
+        assert_incoming_original_caps(&[
+            ("box-mm.step", 0),
+            ("native-parity-bezier-extrusion-bore.step", 1),
+            ("native-parity-cone-frustum.step", 0),
+        ]);
+    }
+
+    #[test]
+    fn incoming_native_bore_caps_preserve_hole_and_endpoint_bindings() {
+        assert_incoming_original_caps(&[("native-parity-bezier-extrusion-bore.step", 1)]);
+    }
+
+    fn assert_incoming_original_caps(cases: &[(&str, usize)]) {
         let cancel = AtomicBool::new(false);
         // A non-axis XY pose deliberately cannot use the orthogonal rectangle
         // specialization. Source Z is unchanged, not tolerance-snapped.
@@ -10112,11 +10125,7 @@ mod tests {
             translation_mm: [100.0, 105.0, 0.0],
             rotation_xyzw: [0.0, 0.0, 0.6, 0.8],
         };
-        for (name, holes) in [
-            ("box-mm.step", 0),
-            ("native-parity-bezier-extrusion-bore.step", 1),
-            ("native-parity-cone-frustum.step", 0),
-        ] {
+        for &(name, holes) in cases {
             let definition = original(name);
             let mut work = GeometryWorkBudget::new(100_000_000);
             let source = crate::prepare_solid(
