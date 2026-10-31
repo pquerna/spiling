@@ -38,6 +38,8 @@ pub(super) struct BoundaryEdge {
 pub(super) struct Junction {
     pub(super) center: [f64; 2],
     pub(super) radius_mm: f64,
+    /// Source-declared local dose ceiling, bounded by the process maximum.
+    pub(super) max_width_mm: f64,
     pub(super) valence: usize,
     pub(super) ports: Vec<[[f64; 2]; 2]>,
     pub(super) transition: Option<TransitionCorridor>,

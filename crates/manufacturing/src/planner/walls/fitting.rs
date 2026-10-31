@@ -1943,6 +1943,7 @@ mod tests {
         let permissions = [Junction {
             center: [radius, radius],
             radius_mm: 0.4,
+            max_width_mm: 0.75,
             valence: 3,
             ports: Vec::new(),
             transition: None,
@@ -2075,6 +2076,7 @@ mod tests {
         let permissions = [Junction {
             center: [1.0, 1.0],
             radius_mm: 0.4,
+            max_width_mm: 0.75,
             valence: 3,
             ports: Vec::new(),
             transition: None,
@@ -2195,6 +2197,7 @@ mod tests {
         let permissions = [Junction {
             center: [0.0, 0.0],
             radius_mm: 0.4,
+            max_width_mm: 0.75,
             valence: 3,
             ports: Vec::new(),
             transition: None,

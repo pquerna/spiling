@@ -289,6 +289,14 @@ pub(super) fn qualify(
         let mut allowance = 0.0f64;
         for permission in permissions {
             check_cancel(cancel)?;
+            if !permission.max_width_mm.is_finite()
+                || permission.max_width_mm <= 0.0
+                || permission.max_width_mm > request.limits.max_bead_width_mm
+            {
+                return Err(unsupported(
+                    "source permission exceeds the process dose width envelope",
+                ));
+            }
             let prefix_bytes = permission_prefix_bytes(&seen, seen_bytes)?;
             let local = staged_request(
                 request,
@@ -367,7 +375,7 @@ pub(super) fn qualify(
                 };
                 let limit = 0.5
                     * permission.valence.saturating_sub(1) as f64
-                    * request.limits.max_bead_width_mm.powi(2);
+                    * permission.max_width_mm.powi(2);
                 qualify_local_dose(
                     paths,
                     &nominal,
@@ -2235,6 +2243,7 @@ mod tests {
         let permission = Junction {
             center: [0., 0.],
             radius_mm: 0.75,
+            max_width_mm: 0.75,
             valence: 1,
             ports: Vec::new(),
             transition: None,
@@ -2460,6 +2469,7 @@ mod tests {
             permissions.extend(corners.map(|center| Junction {
                 center,
                 radius_mm: 0.75,
+                max_width_mm: 0.75,
                 valence: 2,
                 ports: Vec::new(),
                 transition: None,
@@ -2468,6 +2478,25 @@ mod tests {
         let cancel = AtomicBool::new(false);
         qualify(&request, &walls, &permissions, &core, &mut 0, &cancel)
             .expect("ordinary closed rectangle, including cyclic seams, covers independent R");
+        let maximum = permissions[0].max_width_mm;
+        for invalid in [
+            0.0,
+            f64::NAN,
+            f64::INFINITY,
+            limits.max_bead_width_mm.next_up(),
+        ] {
+            permissions[0].max_width_mm = invalid;
+            let failure = qualify(&request, &walls, &permissions, &core, &mut 0, &cancel)
+                .expect_err(
+                    "a source declaration cannot exceed the physical process dose envelope",
+                );
+            assert_eq!(failure.code, ManufacturingErrorCode::UnsupportedGeometry);
+            assert!(
+                failure.message.contains("dose width envelope"),
+                "{failure:?}"
+            );
+        }
+        permissions[0].max_width_mm = maximum;
         let crossing = [[4.98, 4.98], [5.02, 5.02], [4.98, 5.02], [5.02, 4.98]];
         let mut stitched = walls.clone();
         stitched.push(bead(&crossing));

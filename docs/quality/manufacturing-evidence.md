@@ -397,7 +397,7 @@ Source-bound planar surface color is exercised through the real CLI on the commi
 
 Retained optical studies apply through typed Core/engine/client/CLI transactions with complete accepted report/selection and explicit two-material evidence/declaration bindings. Queued cancellation and stale revisions preserve the committed project; ACK commits one revision without changing SceneRevision or publishing scene artifacts. Both native source workflows exercise application, physical depth/history edits, changed-pose reassessment and source/palette/study-deleted fresh verification/export. Inspection distinguishes the small requested patch from complete realized side exposure and reuses the existing model with captured evidence; it does not reuse the requested prediction as a printed outcome. Unknown evidence/conditions remain unassessed and backing optics remain unmodelled. The native Review panel supports source-hidden actual replay and catalog metadata tint by decoded tool, plus requested/realized inspection and fresh four-file export. The native window can consume a CLI-produced recovered project; local hardware evidence does not qualify other GPUs/platforms or physical color.
 
-Current identities are project10/manufacturing11/process3/surface3, source19/planner50,
+Current identities are project10/manufacturing11/process3/surface3, source19/planner51,
 emitter11/verifier17 and SPLR6; executable constants and exact native pins remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
@@ -465,8 +465,14 @@ source deletion and read-only recovery with its asymmetric PNG and unchanged
 parameters. Source-corner permissions are declared from sharper literal turns
 before shallow neighboring events; graph enumeration cannot give a shallow turn
 first credit for a tiny fragment around a sharper one. Declaration precedes
-commands; regions, fractional freshness, local/aggregate dose limits and all
-coverage, void, crossing, retrace and command gates remain independent. This
+commands. Turn footprints follow the original width field through its nearest
+corner-width recovery and stay inside the process-maximum cap; unused width
+capacity cannot associate a remote continuing wall with that turn or grant it
+extra local dose. The same source field bounds the turn's dose width within the
+process maximum. Completion, fitting and qualification consume one declaration.
+Fractional freshness,
+local/aggregate dose formulas and all coverage, void, crossing, retrace and
+command gates remain independent. This
 bounded workflow does not qualify arbitrary images, depths or carriers.
 
 The additional8×8/depth0.35 cylindrical-image workbench Compile also remains

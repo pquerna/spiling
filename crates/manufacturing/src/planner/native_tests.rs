@@ -3202,13 +3202,15 @@ fn independent_mechanical_sources_preserve_native_pocket_events_and_replay() {
         let mut intent = intent(false);
         intent.recipe.layer_height_mm = 0.2;
         intent.recipe.native_shape_error_mm = 0.1;
-        let metadata = preflight(&scene.input(&intent), &cancel).unwrap();
+        let metadata = preflight(&scene.input(&intent), &cancel)
+            .unwrap_or_else(|failure| panic!("{name}: {failure:?}"));
         assert_eq!(
             metadata.disposition,
             PreflightDisposition::Admitted,
             "{name}: {metadata:?}"
         );
-        let bundle = compile(scene.input(&intent), &cancel).unwrap();
+        let bundle = compile(scene.input(&intent), &cancel)
+            .unwrap_or_else(|failure| panic!("{name}: {failure:?}"));
         assert!(
             bundle.plan.native_geometry.achieved_shape_error_mm <= 0.1,
             "{name}"

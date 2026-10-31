@@ -186,6 +186,9 @@ struct CornerEvent {
     parameter: f64,
     ordinal: usize,
     position_error_mm: f64,
+    /// One source-cell bead-width envelope, with the birth enclosure removed.
+    permission_radius_mm: f64,
+    max_width_mm: f64,
     residual_bound_mm: f64,
     cap_radius_mm: f64,
     /// Nominal-width turn owned by this birth and its literal source corner.
@@ -265,6 +268,7 @@ pub(super) fn construct(
             permissions.push(Junction {
                 center: graph.junctions[vertex].point,
                 radius_mm: request.limits.max_bead_width_mm,
+                max_width_mm: request.limits.max_bead_width_mm,
                 valence,
                 ports: Vec::new(),
                 transition: None,
@@ -711,7 +715,6 @@ fn bevel_corner(
     curve: &MedialEdge,
     widths: [f64; 2],
     event: &mut CornerEvent,
-    request: &WallRequest<'_>,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
@@ -792,8 +795,7 @@ fn bevel_corner(
     if endpoint_error > FIT_ERROR_MM * 0.5 {
         return Ok(());
     }
-    let permission_radius =
-        (request.limits.max_bead_width_mm - event.position_error_mm).next_down();
+    let permission_radius = event.permission_radius_mm;
     if !qualification::junction_contains_capsule(
         birth,
         targets,
@@ -952,24 +954,56 @@ fn corner_birth(
             curve.endpoints, curve.supports
         )));
     }
-    let cap_radius_mm = ((range
+    let source_width_mm = range
         .map(|t| widths.at(t))
         .into_iter()
-        .fold(f64::INFINITY, f64::min)
-        * 0.5
-        - position_error_mm)
-        .next_down()
-        - arithmetic)
-        .next_down();
-    if !cap_radius_mm.is_finite() || cap_radius_mm <= 0.0 {
+        .fold(f64::INFINITY, f64::min);
+    // This permission belongs to one contour birth, not every wall within the
+    // machine's widest possible bead. Its footprint is fixed from the original
+    // cell's complete piecewise-affine width envelope before commands, including
+    // recovery from a narrower corner seed, with the same location/arithmetic reserve.
+    // In particular, a remote continuing hole wall cannot inherit this turn's
+    // fractional local-dose domain merely because the process permits wide beads.
+    boolean::charge(work, 24)?;
+    let source_max_width_mm = widths
+        .knots()
+        .map(|t| widths.at(t))
+        .into_iter()
+        .fold(0.0, f64::max);
+    // A narrowed corner seed must recover its original width before the local
+    // turn is over. Include the nearest original field maximum, not an unrelated
+    // distant cell endpoint or an emitted-path-dependent grant.
+    let recovery_mm = if widths.at(parameter) == source_max_width_mm {
+        0.0
+    } else {
+        widths
+            .knots()
+            .into_iter()
+            .filter(|t| widths.at(*t) == source_max_width_mm)
+            .map(|t| norm(sub(curve.at(t), center)))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let permission_radius_mm =
+        (((source_max_width_mm + recovery_mm).next_down() - position_error_mm).next_down()
+            - arithmetic)
+            .next_down();
+    let cap_radius_mm =
+        ((source_width_mm * 0.5 - position_error_mm).next_down() - arithmetic).next_down();
+    if !cap_radius_mm.is_finite()
+        || cap_radius_mm <= 0.0
+        || !permission_radius_mm.is_finite()
+        || permission_radius_mm <= 0.0
+    {
         return Err(unsupported(
-            "source contour birth has no bounded positive cap",
+            "source contour birth has no bounded positive cap/permission",
         ));
     }
     Ok(CornerEvent {
         parameter,
         ordinal,
         position_error_mm,
+        permission_radius_mm,
+        max_width_mm: source_max_width_mm,
         residual_bound_mm,
         cap_radius_mm,
         bevel: None,
@@ -1059,8 +1093,12 @@ fn emit_corners(
                     continue;
                 }
                 prior_parameter = Some(event.parameter);
+                event.permission_radius_mm = event
+                    .permission_radius_mm
+                    .min((request.limits.max_bead_width_mm - event.position_error_mm).next_down());
+                event.max_width_mm = event.max_width_mm.min(request.limits.max_bead_width_mm);
                 if bevel_corners {
-                    bevel_corner(incidence, curve, widths, &mut event, request, work, cancel)?;
+                    bevel_corner(incidence, curve, widths, &mut event, work, cancel)?;
                 }
                 contour_events.push(event);
             }
@@ -1100,7 +1138,8 @@ fn emit_corners(
             boolean::charge(work, 1)?;
             permissions.push(Junction {
                 center: curve.at(event.parameter),
-                radius_mm: (request.limits.max_bead_width_mm - event.position_error_mm).next_down(),
+                radius_mm: event.permission_radius_mm,
+                max_width_mm: event.max_width_mm,
                 valence: 2,
                 ports: Vec::new(),
                 transition: None,
@@ -1677,8 +1716,7 @@ fn corner_completion(
                     check_cancel(cancel)?;
                     boolean::charge(work, 8)?;
                     let center = source.at(event.parameter);
-                    let limit =
-                        (request.limits.max_bead_width_mm - event.position_error_mm).next_down();
+                    let limit = event.permission_radius_mm;
                     if cap_may_meet_interval(center, limit, points, radius)
                         && qualification::junction_contains_capsule(center, points, radius, limit)
                     {
@@ -1762,8 +1800,7 @@ fn corner_completion(
                                     center,
                                     points,
                                     radius,
-                                    (request.limits.max_bead_width_mm - event.position_error_mm)
-                                        .next_down(),
+                                    event.permission_radius_mm,
                                 ),
                                 event.residual_bound_mm,
                             ));
@@ -2445,6 +2482,7 @@ fn plan_events(
                     .0
                     .at(locate(graph, arm, event_s).1),
                 radius_mm: request.limits.max_bead_width_mm,
+                max_width_mm: request.limits.max_bead_width_mm,
                 valence: 3,
                 ports: Vec::new(),
                 transition: Some(TransitionCorridor {
@@ -3399,6 +3437,111 @@ mod corner_width_tests {
                 assert!(
                     Euclidean.distance(&line(&a), &line(&b)) >= (a.width_mm + b.width_mm) * 0.5
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn contour_permission_footprints_follow_source_width_not_unused_machine_capacity() {
+        let material = MultiPolygon(vec![polygon![
+            (x: 0.0, y: 0.0), (x: 20.0, y: 0.0),
+            (x: 20.0, y: 12.0), (x: 0.0, y: 12.0),
+        ]]);
+        let required = region::RequiredMaterial::from_section(&material);
+        let mut recipe = crate::planner::tests::recipe(0.25);
+        recipe.bead_width_mm = 0.45;
+        recipe.perimeter_count = 2;
+        let cancel = AtomicBool::new(false);
+        let mut work = 0;
+        let graph = skeleton::construct(
+            &material,
+            region::point_count(&material),
+            0,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let fill = region::offset(&material, -0.9, &cancel).unwrap();
+        let mut first = None;
+        for maximum in [0.75, 2.0] {
+            let limits = DepositionLimits {
+                min_bead_width_mm: 0.30,
+                max_bead_width_mm: maximum,
+                min_bead_height_mm: 0.000001,
+                max_bead_height_mm: 0.30,
+            };
+            let request = WallRequest {
+                material: &material,
+                required: &required,
+                recipe: &recipe,
+                limits: &limits,
+                nozzle_diameter_mm: 0.4,
+                lower_z: 0.0,
+                upper_z: 0.2,
+                retained_points: region::point_count(&material),
+                owned_bytes: 0,
+            };
+            let mut permissions = Vec::new();
+            let source = construct(
+                &graph,
+                &fill,
+                &request,
+                &mut permissions,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            let mut output = Vec::new();
+            emit(
+                &source,
+                &graph,
+                &fill,
+                &request,
+                &mut output,
+                &mut permissions,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            let turns = permissions
+                .iter()
+                .filter(|p| p.valence == 2)
+                .collect::<Vec<_>>();
+            assert_eq!(turns.len(), 8, "two source births at each literal corner");
+            for turn in &turns {
+                assert!(turn.radius_mm > 0.44 && turn.radius_mm < recipe.bead_width_mm);
+                assert_eq!(
+                    turn.max_width_mm, recipe.bead_width_mm,
+                    "unused capacity grants neither a wider footprint nor extra local dose"
+                );
+                assert!(
+                    qualification::permission_contains_capsule(
+                        turn,
+                        [turn.center, add(turn.center, [0.02, 0.0])],
+                        0.225,
+                    ),
+                    "the local commanded turn remains enclosed"
+                );
+                assert!(
+                    !qualification::permission_contains_capsule(
+                        turn,
+                        [add(turn.center, [1.0, 0.0]), add(turn.center, [1.02, 0.0])],
+                        0.225,
+                    ),
+                    "unused machine capacity cannot authorize a remote continuing wall"
+                );
+            }
+            let footprints = turns
+                .iter()
+                .map(|p| (p.center, p.radius_mm, p.max_width_mm))
+                .collect::<Vec<_>>();
+            if let Some(original) = &first {
+                assert_eq!(
+                    &footprints, original,
+                    "unchanged source events keep identical local domains"
+                );
+            } else {
+                first = Some(footprints);
             }
         }
     }

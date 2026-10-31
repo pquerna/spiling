@@ -395,6 +395,7 @@ mod tests {
         let permission = Junction {
             center: [110.0, 118.084972],
             radius_mm: 0.75,
+            max_width_mm: 0.75,
             valence: 3,
             ports: Vec::new(),
             transition: None,
