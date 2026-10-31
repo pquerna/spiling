@@ -29,6 +29,13 @@ prerequisites. No geometry result establishes physical printability or machine r
   admission and physical unit conversion. SolidCraft decodes the admitted
   single-solid subset; [`brep_data_bridge.rs`](../../crates/geometry/src/import/brep_data_bridge.rs)
   constructs native carriers. Unsupported conversion is not malformed source.
+  Rational surface weights outside the native canonical constructor's envelope
+  may use one exactly reversible power-of-two homogeneous gauge. Every weight
+  and weighted control coordinate must retain its exact value under the inverse
+  gauge; individual weight clamping, lossy scaling and incompatible weight ratios
+  refuse. Original STEP operands and in-envelope native representations remain
+  unchanged. This representation admission does not qualify sections, display,
+  critical topology or manufacturing for the newly admitted source.
   Both SolidCraft libraries are checked-in third-party source under
   `vendor/solidcraft/`; its `UPSTREAM.toml` identifies the exact snapshot,
   homogeneous-boundary closure correction, native spline-chart construction and retained licensing. They are

@@ -1257,6 +1257,69 @@ fn build_plane(
     Ok((Surface::from(pl), dom, false))
 }
 
+/// The canonical IGES constructor limits the *representation's* weights, not
+/// rational geometry. Admit only a common, exactly reversible binary gauge;
+/// retain every Euclidean control point and every relative weight. Never clamp
+/// individual weights or round a homogeneous coefficient into the envelope.
+fn canonical_surface_weights<'a>(cps: &[Point3], weights: &'a [f64]) -> R<Cow<'a, [f64]>> {
+    use solidcore::nurbs::srf_basic::{WEIGHT_MAX, WEIGHT_MIN};
+
+    if weights.len() != cps.len() || weights.iter().any(|w| !w.is_finite() || *w <= 0.0) {
+        return Err(BridgeError::Invalid("invalid rational surface weights"));
+    }
+    if weights
+        .iter()
+        .all(|w| (WEIGHT_MIN..=WEIGHT_MAX).contains(w))
+    {
+        return Ok(Cow::Borrowed(weights));
+    }
+    let minimum = weights.iter().copied().fold(f64::INFINITY, f64::min);
+    let maximum = weights.iter().copied().fold(0.0, f64::max);
+    let mut scale = 1.0;
+    // A finite binary64 scale has at most 1074 downward or 1023 upward
+    // exponent steps. The bounds also refuse an incompatible weight ratio.
+    for _ in 0..=1074 {
+        let below = minimum * scale < WEIGHT_MIN;
+        let above = maximum * scale > WEIGHT_MAX;
+        if below && above {
+            break;
+        }
+        if !below && !above {
+            let mut normalized = Vec::with_capacity(weights.len());
+            for (point, &weight) in cps.iter().zip(weights) {
+                let scaled = weight * scale;
+                if !(WEIGHT_MIN..=WEIGHT_MAX).contains(&scaled) || scaled / scale != weight {
+                    return Err(BridgeError::Invalid(
+                        "inexact rational surface weight gauge",
+                    ));
+                }
+                for coordinate in [point.x, point.y, point.z] {
+                    let original = coordinate * weight;
+                    let mapped = coordinate * scaled;
+                    if !original.is_finite()
+                        || !mapped.is_finite()
+                        || original * scale != mapped
+                        || mapped / scale != original
+                    {
+                        return Err(BridgeError::Invalid(
+                            "inexact rational surface coefficient gauge",
+                        ));
+                    }
+                }
+                normalized.push(scaled);
+            }
+            return Ok(Cow::Owned(normalized));
+        }
+        scale *= if above { 0.5 } else { 2.0 };
+        if !scale.is_finite() || scale == 0.0 {
+            break;
+        }
+    }
+    Err(BridgeError::Invalid(
+        "rational surface has no exact common binary gauge in the native weight envelope",
+    ))
+}
+
 fn build_bspline_surface(
     u_knots_flat: &[f64],
     v_knots_flat: &[f64],
@@ -1265,6 +1328,10 @@ fn build_bspline_surface(
     cps: &[Point3],
     weights: Option<&[f64]>,
 ) -> R<BSplineSurface> {
+    let weights = weights
+        .map(|weights| canonical_surface_weights(cps, weights))
+        .transpose()?;
+    let weights = weights.as_deref();
     let u_order = u_knots_flat
         .len()
         .checked_sub(nu)
@@ -2250,6 +2317,84 @@ pub(crate) mod analytic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rational_surface_weight_gauge_preserves_refusals_and_borrowed_inputs() {
+        let points = [p3([1.0, 2.0, 3.0]); 2];
+        let ordinary = [1.0, 2.0];
+        assert!(matches!(
+            canonical_surface_weights(&points, &ordinary).unwrap(),
+            Cow::Borrowed(_)
+        ));
+        let tiny = [1.0 / 4096.0, 2.0 / 4096.0];
+        let scaled = canonical_surface_weights(&points, &tiny).unwrap();
+        assert_eq!(&*scaled, &[1.0 / 512.0, 1.0 / 256.0]);
+        for weights in [
+            [0.0, 256.0],
+            [-1.0, 256.0],
+            [f64::NAN, 256.0],
+            [f64::INFINITY, 256.0],
+            [1e-6, 256.0],
+            // A nonbinary common scale could fit, but no exact binary gauge
+            // does. Preserve the refusal rather than round the control net.
+            [0.0015, 120.0],
+        ] {
+            assert!(canonical_surface_weights(&points, &weights).is_err());
+        }
+        assert!(canonical_surface_weights(&points, &[256.0]).is_err());
+        let lossy = [p3([f64::from_bits(1), 0.0, 0.0]), points[1]];
+        assert!(canonical_surface_weights(&lossy, &[1.0, 256.0]).is_err());
+        let overflow = [p3([f64::MAX, 0.0, 0.0]); 2];
+        assert!(canonical_surface_weights(&overflow, &[256.0; 2]).is_err());
+    }
+
+    #[test]
+    fn rational_surface_common_binary_gauge_preserves_the_complete_native_net() {
+        let knots = [0.0, 0.0, 1.0, 1.0];
+        let points = [
+            p3([0.0, 0.0, 0.0]),
+            p3([0.0, 2.0, 0.0]),
+            p3([2.0, 0.0, 0.0]),
+            p3([2.0, 2.0, 2.0]),
+        ];
+        let weights = [1.0, 2.0, 4.0, 256.0];
+        let mut surface = build_bspline_surface(&knots, &knots, 2, 2, &points, Some(&weights))
+            .expect("a common homogeneous gauge must not change rational surface eligibility");
+        let native = surface.get_or_create_gw_nurb().unwrap();
+        assert!(native.is_rational());
+        assert_eq!(native.degrees(), (1, 1));
+        assert_eq!(native.u_knots(), knots);
+        assert_eq!(native.v_knots(), knots);
+        for (index, (&point, &weight)) in points.iter().zip(&weights).enumerate() {
+            let coefficient = native.cpt(index / 2, index % 2).unwrap();
+            assert_eq!(coefficient.w, weight * 0.25);
+            assert_eq!(coefficient.x, point.x * weight * 0.25);
+            assert_eq!(coefficient.y, point.y * weight * 0.25);
+            assert_eq!(coefficient.z, point.z * weight * 0.25);
+        }
+        // At the center, the four bilinear basis values are equal. The
+        // independent rational numerator/denominator uses the authored weights.
+        let surface = Surface::from(surface);
+        use crate::parametric::SurfaceEvaluator;
+        let mut work = crate::GeometryWorkBudget::new(100_000);
+        let jet = surface
+            .tensor(
+                [[0.5; 2]; 2],
+                0,
+                &mut work,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .unwrap();
+        for (coordinate, expected) in
+            jet[0][0]
+                .iter()
+                .zip([520.0 / 263.0, 516.0 / 263.0, 512.0 / 263.0])
+        {
+            assert!(coordinate.lo <= expected && expected <= coordinate.hi);
+            assert!(coordinate.hi - coordinate.lo < 1e-12);
+        }
+        assert_eq!(weights, [1.0, 2.0, 4.0, 256.0]);
+    }
     use solidcore_mesh::{TessellateOptions, tessellate};
 
     #[test]
