@@ -7886,7 +7886,9 @@ mod tests {
             &definition,
             &crate::section::SectionQuery {
                 plane: PlaneMm {
-                    origin_mm: [0.0; 3],
+                    // A regular sample supplies the captured native section;
+                    // equatorial source-vertex isolation is a separate gate.
+                    origin_mm: [0.0, 0.0, 1.0],
                     normal: [0.0, 0.0, 1.0],
                 },
                 maximum_chord_error_mm: spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,

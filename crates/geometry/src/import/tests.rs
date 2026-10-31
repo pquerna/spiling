@@ -1498,19 +1498,45 @@ fn negative_axis_circular_extrusion_does_not_acquire_positive_gauge_authority() 
     let definition = test_source::original_definition(source);
     let cancel = cancelled();
     let mut work = GeometryWorkBudget::new(50_000_000);
-    let prepared = crate::prepare_solid(
-        &definition,
-        crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-        &mut work,
-        &cancel,
-    )
-    .unwrap();
-    let error = match prepared.source_view() {
-        Ok(_) => panic!("negative-axis source has no admitted circular-extrusion gauge"),
-        Err(error) => error,
-    };
+    let mut checked = 0;
+    for original in &definition.original_source().faces {
+        let Surface::Extrusion {
+            profile, direction, ..
+        } = original.carrier.as_ref()
+        else {
+            continue;
+        };
+        if !matches!(profile.as_ref(), Curve::Circle { .. }) {
+            continue;
+        }
+        assert_eq!(*direction, [0.0, 0.0, -1.0]);
+        let native = definition
+            .brep()
+            .face(original.native_face)
+            .unwrap()
+            .surface
+            .as_ref()
+            .unwrap();
+        // Native material admission is independent of this original parameter
+        // gauge. Exercise the coefficient association that owns that authority.
+        let error =
+            match crate::analysis::source_restriction::carrier::SourceCarrierAssociation::new(
+                &original.carrier,
+                native,
+                &mut work,
+                &cancel,
+            ) {
+                Ok(_) => panic!("negative-axis source has no admitted circular-extrusion gauge"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            error.code,
+            GeometryErrorCode::ParameterCorrespondenceUnavailable
+        );
+        checked += 1;
+    }
     assert_eq!(
-        error.code,
-        GeometryErrorCode::ParameterCorrespondenceUnavailable
+        checked, changed,
+        "every changed original bore retains its gauge refusal"
     );
 }
