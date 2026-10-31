@@ -692,6 +692,113 @@ fn scalar_functionals_keep_actual_coefficient_cancellation_before_division() {
 }
 
 #[test]
+fn scalar_control_hulls_preserve_signed_weights_and_query_denominators() {
+    let surface = |heights: [f64; 2], weights: [f64; 2]| {
+        srf_basic::Surface::new(
+            (0..2)
+                .map(|i| {
+                    (0..2)
+                        .map(|j| {
+                            CPoint::new(
+                                i as f64 * weights[i],
+                                j as f64 * weights[i],
+                                heights[i],
+                                weights[i],
+                            )
+                        })
+                        .collect()
+                })
+                .collect(),
+            1,
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+        )
+        .unwrap()
+    };
+    let scalar = |offset| {
+        [SurfaceFunctional {
+            direction: [0.0, 0.0, 1.0].map(Interval::point),
+            origin: [Interval::point(0.0); 3],
+            offset: Interval::point(offset),
+        }]
+    };
+    let mut work = GeometryWorkBudget::new(100_000);
+    let cancel = AtomicBool::new(false);
+    for sign in [1.0, -1.0] {
+        let raw = surface([sign; 2], [3.0 * sign; 2]);
+        let [bound] = super::nurbs_eval::evaluate_nurbs_surface_functionals(
+            &raw,
+            [[0.0, 1.0]; 2],
+            &scalar(0.1),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let actual = 1.0 / 3.0 + 0.1;
+        assert!(bound.position.contains(actual));
+        assert!(
+            bound.position.lo < bound.position.hi,
+            "the nonrepresentable translated ratio is an interval"
+        );
+        assert!(bound.position.width() < 1e-12);
+        assert!(bound.position.hi < 0.6);
+    }
+    // On u=[.2,.25], Z=-2u/(1-2u) is negative despite Cartesian
+    // control values 0 and 2. A same-sign denominator is insufficient.
+    let mixed = surface([0.0, -2.0], [1.0, -1.0]);
+    let [bound] = super::nurbs_eval::evaluate_nurbs_surface_functionals(
+        &mixed,
+        [[0.2, 0.25], [0.5; 2]],
+        &scalar(0.0),
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    assert!(bound.position.contains(-1.0));
+    assert!(bound.position.hi < 0.0);
+
+    // A zero-weight control has no Cartesian quotient, but the selected
+    // query has W=u>0 and Z=u/u=1. Preserve its original denominator proof.
+    let zero = surface([0.0, 1.0], [0.0, 1.0]);
+    let [bound] = super::nurbs_eval::evaluate_nurbs_surface_functionals(
+        &zero,
+        [[0.5, 0.75], [0.5; 2]],
+        &scalar(0.0),
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    assert!(bound.position.contains(1.0));
+    for raw in [&mixed, &zero] {
+        assert_eq!(
+            super::nurbs_eval::evaluate_nurbs_surface_functionals(
+                raw,
+                [[0.0, 1.0], [0.5; 2]],
+                &scalar(0.0),
+                &mut work,
+                &cancel,
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ConditioningFailure,
+        );
+    }
+    // An unrepresentable control quotient must not reject a finite endpoint
+    // query whose inactive control has exactly zero basis weight.
+    let unconditioned = surface([1e300, 1.0], [1e-300, 1.0]);
+    let [bound] = super::nurbs_eval::evaluate_nurbs_surface_functionals(
+        &unconditioned,
+        [[1.0; 2], [0.5; 2]],
+        &scalar(0.0),
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    assert!(bound.position.contains(1.0));
+}
+
+#[test]
 fn nan_parameter_cannot_be_normalized_into_an_admitted_endpoint() {
     let c = rational_line();
     let mut work = GeometryWorkBudget::new(100_000);

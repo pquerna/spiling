@@ -62,6 +62,7 @@ pub(crate) const fn surface_functional_scratch_bytes<const N: usize>() -> usize 
         + continuity::SCRATCH_BYTES
         + std::mem::size_of::<[SurfaceFunctional; N]>()
         + 3 * std::mem::size_of::<[SurfaceFunctionalEnclosure; N]>()
+        + std::mem::size_of::<([Option<Interval>; N], bool)>()
 }
 pub(crate) const SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES: usize =
     surface_functional_scratch_bytes::<3>() + std::mem::size_of::<SurfaceFirstEnclosure>();

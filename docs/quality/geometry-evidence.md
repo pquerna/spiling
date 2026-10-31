@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source11 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source12 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -91,6 +91,14 @@ invariance removes unnecessary basis sums along an unchanged axis. Directed
 rounding, cumulative work/cancellation and scratch coexistence remain charged.
 Closed queries retain both incident one-sided spans. These bounds do not confer
 closed-C1 stationary authority or change rational quotient/denominator obligations.
+
+Batched scalar functionals intersect their quotient positions with Cartesian
+control hulls only when all active weights have the same nonzero sign. Mixed
+signs retain the actual query-denominator proof; zero weights or nonfinite
+control quotients decline this optional enclosure. Literal projection,
+translation, directed rounding, derivative quotient, C0/C1 and denominator
+obligations remain independent. Hull scratch and work coexist with the original
+basis/quotient evaluation; no control dehomogenization becomes global admission.
 
 Native vertical-product reuse consumes continuous, closed one-sided first jets,
 including parameter-speed joins. Exact zero vertical normal and a nonzero whole

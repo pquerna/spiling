@@ -616,6 +616,8 @@ pub(super) fn evaluate_nurbs_surface_functionals<const N: usize>(
             let mut numerators = [[ZERO; 3]; N];
             let mut weights = [ZERO; 3];
             let mut hull: Option<Interval> = None;
+            let mut control_positions = [None; N];
+            let mut control_positions_valid = true;
             #[expect(
                 clippy::needless_range_loop,
                 reason = "Functional coefficient sums share the original u/v basis indices and fixed accumulation order"
@@ -652,6 +654,21 @@ pub(super) fn evaluate_nurbs_surface_functionals<const N: usize>(
                         let coefficient = (0..3).fold(f.offset.mul(w), |sum, k| {
                             sum.add(f.direction[k].mul(coordinates[k].sub(f.origin[k].mul(w))))
                         });
+                        if control_positions_valid {
+                            work.charge(1, cancel)?;
+                            match coefficient.div(w) {
+                                Ok(value) if value.lo.is_finite() && value.hi.is_finite() => {
+                                    control_positions[row] = Some(
+                                        control_positions[row]
+                                            .map_or(value, |old: Interval| old.hull(value)),
+                                    );
+                                }
+                                // This is an optional tighter enclosure. Zero or
+                                // unconditioned control weights must not replace
+                                // the query's actual denominator obligation.
+                                _ => control_positions_valid = false,
+                            }
+                        }
                         for d in 0..3 {
                             numerators[row][d] = numerators[row][d].add(basis[d].mul(coefficient));
                         }
@@ -661,8 +678,8 @@ pub(super) fn evaluate_nurbs_surface_functionals<const N: usize>(
             if !surface.is_rational() {
                 weights = [Interval::point(1.0), ZERO, ZERO];
             }
-            weights[0] = weights[0]
-                .intersect(hull.ok_or_else(|| conditioning("empty functional control net"))?)?;
+            let weight_hull = hull.ok_or_else(|| conditioning("empty functional control net"))?;
+            weights[0] = weights[0].intersect(weight_hull)?;
             if weights[0].contains_zero() {
                 return Err(conditioning(
                     "functional rational denominator not excluded from zero",
@@ -674,7 +691,15 @@ pub(super) fn evaluate_nurbs_surface_functionals<const N: usize>(
                 dv: ZERO,
             }; N];
             for row in 0..N {
-                let position = numerators[row][0].div(weights[0])?;
+                let mut position = numerators[row][0].div(weights[0])?;
+                // Same-sign weights make the Cartesian scalar a convex
+                // combination of these control values. Mixed-sign controls
+                // retain the actual quotient even if its denominator is nonzero.
+                if control_positions_valid && !weight_hull.contains_zero() {
+                    position = position.intersect(control_positions[row].ok_or_else(|| {
+                        conditioning("empty Cartesian functional control hull")
+                    })?)?;
+                }
                 let du = numerators[row][1]
                     .sub(position.mul(weights[1]))
                     .div(weights[0])?;
