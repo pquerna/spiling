@@ -1436,13 +1436,29 @@ fn test_f29_pocket_floor_section_transition() {
 }
 
 #[test]
-fn test_f29_base_top_section_transition() {
+fn test_f29_bracket_base_preserves_functional_bore() {
     let def = import_test_step(&fixture_bytes(
         "independent-exporters/occt-ribbed-bracket-mm.step",
     ))
     .unwrap();
     let sec = section_at_z(&def, 0.6).unwrap();
-    assert_eq!(sec.loops().len(), 1);
+    // The independent recipe cuts the functional bore through the entire base.
+    // Its outline is 30x22 mm with a 5x2 mm notch, before the radius-1.3 bore.
+    assert_eq!(sec.loops().len(), 2);
+    let holes: Vec<_> = sec
+        .loops()
+        .iter()
+        .filter(|boundary| boundary.is_hole)
+        .collect();
+    assert_eq!(holes.len(), 1);
+    let bore_area = std::f64::consts::PI * 1.3_f64.powi(2);
+    assert_close(loop_area(&sec, holes[0]).abs(), bore_area, 0.5, "base bore");
+    let material_area: f64 = sec
+        .loops()
+        .iter()
+        .map(|boundary| loop_area(&sec, boundary))
+        .sum();
+    assert_close(material_area, 650.0 - bore_area, 0.5, "base material");
 }
 
 // =========================================================================

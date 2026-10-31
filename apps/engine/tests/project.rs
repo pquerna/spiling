@@ -933,36 +933,22 @@ async fn writer_lock_read_only_snapshot_and_killed_writer_have_actual_process_li
 
 fn copy_project(source: &Path, destination: &Path) {
     std::fs::create_dir(destination).unwrap();
-    std::fs::copy(
-        source.join("manifest.json"),
-        destination.join("manifest.json"),
-    )
-    .unwrap();
-    std::fs::copy(source.join("writer.lock"), destination.join("writer.lock")).unwrap();
-    if source.join("previous.json").exists() {
-        std::fs::copy(
-            source.join("previous.json"),
-            destination.join("previous.json"),
-        )
-        .unwrap();
-    }
-    std::fs::create_dir(destination.join("sources")).unwrap();
-    for entry in std::fs::read_dir(source.join("sources")).unwrap() {
+    // Copy the complete engine-created checkpoint, including empty image and
+    // palette directories. An incomplete copy diagnoses missing layout before
+    // the deliberately corrupted manifest/source under test can be inspected.
+    for entry in std::fs::read_dir(source).unwrap() {
         let entry = entry.unwrap();
-        std::fs::copy(
-            entry.path(),
-            destination.join("sources").join(entry.file_name()),
-        )
-        .unwrap();
-    }
-    std::fs::create_dir(destination.join("manufacturing")).unwrap();
-    for entry in std::fs::read_dir(source.join("manufacturing")).unwrap() {
-        let entry = entry.unwrap();
-        std::fs::copy(
-            entry.path(),
-            destination.join("manufacturing").join(entry.file_name()),
-        )
-        .unwrap();
+        let target = destination.join(entry.file_name());
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            copy_project(&entry.path(), &target);
+        } else {
+            assert!(
+                kind.is_file(),
+                "test checkpoints contain only regular files and directories"
+            );
+            std::fs::copy(entry.path(), target).unwrap();
+        }
     }
 }
 fn manifest(path: &Path) -> ProjectManifest {

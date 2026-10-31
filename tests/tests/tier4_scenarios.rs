@@ -106,11 +106,11 @@ fn test_geometry_03_waterline_roughing_tapered_fitting() {
 }
 
 // =========================================================================
-// Scenario 4: Finish Contouring Narrow Pocket
+// Scenario 4: Narrow pocket section
 // =========================================================================
 
 #[test]
-fn test_geometry_04_finish_contouring_narrow_pocket() {
+fn test_geometry_04_narrow_pocket_section_area() {
     let bytes = fixture_bytes("independent-exporters/occt-narrow-pocket-mm.step");
     let def = import_test_step(&bytes).expect("import narrow pocket");
 
@@ -126,29 +126,41 @@ fn test_geometry_04_finish_contouring_narrow_pocket() {
     let pocket_area = areas[1];
     // Slot width 0.6 mm * slot length 8.0 mm = 4.8 mm2
     assert_close(pocket_area, 4.8, 0.5, "narrow pocket area");
-
-    // CAM tool verification: 0.5mm endmill leaves 0.05mm radial clearance on each side
-    let tool_diam = 0.5;
-    let slot_width = 0.6;
-    let clearance = (slot_width - tool_diam) * 0.5;
-    assert_close(clearance, 0.05, 1e-4, "tool radial clearance");
 }
 
 // =========================================================================
-// Scenario 5: Multi-Cavity Pocketing
+// Scenario 5: Housing base and cavity sections
 // =========================================================================
 
 #[test]
-fn test_geometry_05_multi_cavity_pocketing_rounded_housing() {
-    let bytes = fixture_bytes("independent-exporters/occt-rounded-housing-mm.step");
+fn test_geometry_05_housing_base_and_cavity_oracles() {
+    let fixture = "independent-exporters/occt-rounded-housing-mm.step";
+    let bytes = fixture_bytes(fixture);
     let def = import_test_step(&bytes).expect("rounded housing");
-
-    // Slicing solid base (z=2.0) vs cavity level (z=6.0)
-    let s_base = section_at_z(&def, 2.0).expect("base");
-    assert_eq!(s_base.loops().len(), 1, "solid base is 1 loop");
-
-    let s_pocket = section_at_z(&def, 6.0).expect("pocket");
-    assert_eq!(s_pocket.loops().len(), 2, "pocket cavity creates 2 loops");
+    // The previous z=2 cut coincided with the fillet transition's vertices.
+    // The frozen independent oracle supplies regular base/cavity cuts and areas.
+    for row in fixture_record(fixture)["analytic_oracle"]["sections"]
+        .as_array()
+        .unwrap()
+    {
+        let z = row["z_mm"].as_f64().unwrap();
+        let section = section_at_z(&def, z).unwrap_or_else(|error| panic!("z={z}: {error:?}"));
+        assert_eq!(
+            section.loops().len() as u64,
+            row["loop_count"].as_u64().unwrap()
+        );
+        let area: f64 = section
+            .loops()
+            .iter()
+            .map(|boundary| loop_area(&section, boundary))
+            .sum();
+        assert_close(
+            area,
+            row["material_area_mm2"].as_f64().unwrap(),
+            0.5,
+            "housing material area",
+        );
+    }
 }
 
 // =========================================================================

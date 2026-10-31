@@ -431,7 +431,7 @@ fn test_comb_19_determinism_step_import_and_tessellation() {
 fn test_comb_20_work_budget_monotony_import_and_section() {
     let bytes = fixture_bytes("cylinder.step");
     let def = import_test_step(&bytes).expect("cylinder");
-    let mut budget = GeometryWorkBudget::new(100_000);
+    let mut budget = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let initial = budget.consumed();
 
@@ -450,6 +450,7 @@ fn test_comb_20_work_budget_monotony_import_and_section() {
     })
     .expect("sec");
     assert!(budget.consumed() > initial, "budget consumed must increase");
+    assert_eq!(budget.consumed() + budget.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
