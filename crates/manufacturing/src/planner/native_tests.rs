@@ -2757,31 +2757,74 @@ fn image_capture_disabled_references_metadata_and_event_budgets_are_not_bypassed
     );
 }
 
-fn parity_source(name: &str) -> Vec<u8> {
-    std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-            "../../fixtures/geometry/retained-sources/native-parity-{name}.step"
-        )),
-    )
-    .expect("frozen native parity source must be present in fixtures/geometry/retained-sources")
+// Frozen authored native operands and retained historical pockets have distinct
+// provenance. Resolve the finite test inventory at compile time, never through
+// absent generated artifacts or a runtime source-generation fallback.
+fn native_test_source(name: &str) -> Vec<u8> {
+    let bytes: &[u8] = match name {
+        "cone-frustum" => {
+            include_bytes!("../../../../fixtures/manufacturing/native/source-cone-frustum.step")
+        }
+        "sphere-belt" => {
+            include_bytes!("../../../../fixtures/manufacturing/native/source-sphere-belt.step")
+        }
+        "full-sphere" => {
+            include_bytes!("../../../../fixtures/manufacturing/native/source-full-sphere.step")
+        }
+        "ring-torus" => {
+            include_bytes!("../../../../fixtures/manufacturing/native/source-ring-torus.step")
+        }
+        "nurbs-box" => {
+            include_bytes!("../../../../fixtures/manufacturing/native/source-nurbs-box.step")
+        }
+        "bspline-box" => {
+            include_bytes!("../../../../fixtures/manufacturing/native/source-bspline-box.step")
+        }
+        "nurbs-cylinder" => {
+            include_bytes!("../../../../fixtures/manufacturing/native/source-nurbs-cylinder.step")
+        }
+        "nurbs-torus" => {
+            include_bytes!("../../../../fixtures/manufacturing/native/source-nurbs-torus.step")
+        }
+        "nurbs-torus-independent-parameters" => include_bytes!(
+            "../../../../fixtures/manufacturing/native/source-nurbs-torus-independent-parameters.step"
+        ),
+        "bezier-extrusion-bore" => {
+            include_bytes!("../../../../fixtures/manufacturing/native/bezier-extrusion-bore.step")
+        }
+        "blind-pocket" => include_bytes!(
+            "../../../../fixtures/geometry/retained-sources/native-parity-blind-pocket.step"
+        ),
+        "blind-pocket-nurbs-floor" => include_bytes!(
+            "../../../../fixtures/geometry/retained-sources/native-parity-blind-pocket-nurbs-floor.step"
+        ),
+        _ => panic!("unknown frozen native test source: {name}"),
+    };
+    bytes.to_vec()
 }
 
 #[test]
 fn equivalent_analytic_and_rational_sources_preserve_sections_material_and_fresh_replay() {
     let cancel = AtomicBool::new(false);
     for (name, analytic, rational, perimeter, hole_radius) in [
-        ("box", BOX.to_vec(), parity_source("nurbs-box"), 60.0, 0.0),
+        (
+            "box",
+            BOX.to_vec(),
+            native_test_source("nurbs-box"),
+            60.0,
+            0.0,
+        ),
         (
             "cylinder",
             FULL_CYLINDER.to_vec(),
-            parity_source("nurbs-cylinder"),
+            native_test_source("nurbs-cylinder"),
             10.0 * std::f64::consts::PI,
             0.0,
         ),
         (
             "pocket",
-            parity_source("blind-pocket"),
-            parity_source("blind-pocket-nurbs-floor"),
+            native_test_source("blind-pocket"),
+            native_test_source("blind-pocket-nurbs-floor"),
             80.0 + 6.0 * std::f64::consts::PI,
             3.0,
         ),
@@ -2922,7 +2965,7 @@ fn new_native_families_use_one_material_planner_and_independent_replay() {
         ),
         ("bspline-box", SurfaceFamily::BSpline, 0.0, 8.0),
     ] {
-        let source = parity_source(name);
+        let source = native_test_source(name);
         let scene = NativeScene::new(&source, &[translated(0.0, 0.0, bed_translation)]);
         let native = &scene.definitions[&scene.occurrences[0].definition_id];
         assert!(
@@ -3026,7 +3069,7 @@ fn new_native_families_use_one_material_planner_and_independent_replay() {
 fn sphere_source_does_not_broaden_finish_certificates_and_smooth_keeps_precedence() {
     use spiling_contracts::geometry::SurfaceFamily;
     use spiling_contracts::surface::{SurfaceFinish, SurfaceLayer, SurfaceLayerId, SurfaceScope};
-    let source = parity_source("sphere-belt");
+    let source = native_test_source("sphere-belt");
     let mut scene = NativeScene::new(&source, &[translated(0.0, 0.0, 3.0)]);
     let native = &scene.definitions[&scene.occurrences[0].definition_id];
     let face = native
@@ -3079,7 +3122,7 @@ fn sphere_source_does_not_broaden_finish_certificates_and_smooth_keeps_precedenc
 
 #[test]
 fn spline_extrusion_bore_keeps_native_holes_through_ordinary_paths_and_reopen_replay() {
-    let source = parity_source("bezier-extrusion-bore");
+    let source = native_test_source("bezier-extrusion-bore");
     let scene = NativeScene::new(&source, &[RigidPoseMm::IDENTITY]);
     let mut intent = intent(false);
     intent.recipe.layer_height_mm = 0.2;
@@ -3196,7 +3239,7 @@ fn independent_mechanical_sources_preserve_native_pocket_events_and_replay() {
 fn blind_native_pocket_floor_remains_owned_while_ordinary_material_becomes_a_ring() {
     let cancel = AtomicBool::new(false);
     for name in ["blind-pocket", "blind-pocket-nurbs-floor"] {
-        let source = parity_source(name);
+        let source = native_test_source(name);
         let scene = NativeScene::new(&source, &[RigidPoseMm::IDENTITY]);
         let intent = intent(false);
         let bundle = compile(scene.input(&intent), &cancel).unwrap();
@@ -3267,7 +3310,7 @@ fn blind_native_pocket_floor_remains_owned_while_ordinary_material_becomes_a_rin
 fn floating_blind_native_pocket_does_not_project_its_closed_floor_down_to_bed() {
     let cancel = AtomicBool::new(false);
     for name in ["blind-pocket", "blind-pocket-nurbs-floor"] {
-        let source = parity_source(name);
+        let source = native_test_source(name);
         let scene = NativeScene::new(&source, &[translated(0.0, 0.0, 2.0)]);
         let bundle = compile(scene.input(&intent(true)), &cancel).unwrap();
         let inside_floor_projection = bundle
@@ -3341,7 +3384,7 @@ fn overlapping_native_boxes_and_separated_varying_cone_share_actual_union_and_fr
     intent.recipe.layer_height_mm = 0.2;
     intent.recipe.native_shape_error_mm = 0.1;
     let box_union_area = 400.0 - (20.0 - dx) * (10.0 - dy);
-    let cone_source = parity_source("cone-frustum");
+    let cone_source = native_test_source("cone-frustum");
     for (cone_first, [cone_x, cone_y]) in [
         (false, [60.0, 0.0]),
         (true, [60.0, 0.0]),

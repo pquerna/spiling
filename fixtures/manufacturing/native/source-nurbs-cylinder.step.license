@@ -1,0 +1,6 @@
+SPDX-FileCopyrightText: 2026 Spiling contributors
+SPDX-License-Identifier: OSL-3.0
+Licensed under the Open Software License version 3.0
+
+Original Spiling authored source serialized with the retained SolidCraft STEP
+writer. Recipe and immutable source commit are recorded in manifest.json.

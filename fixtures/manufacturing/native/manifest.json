@@ -157,6 +157,87 @@
         "hole_radius": 2
       },
       "section_area_expression_mm2": "221 - 4*pi"
+    },
+    {
+      "file": "source-cone-frustum.step",
+      "sha256": "3db51e7c6d8cd60594e255e59c1f9f7a6b076467b3709c5a6c77520037cfe6ee",
+      "byte_count": 2922,
+      "source_recipe": "crates/geometry/src/analysis/test_source.rs::cone_frustum() through original_step_bytes",
+      "source_commit": "701fa4bc4552cb14336388adf9b5bf4043659731",
+      "producer": "retained SolidCraft STEP writer; original Spiling authored geometry",
+      "analytic_gauge": "r(z) = 5 - z/4; z in [0,8]"
+    },
+    {
+      "file": "source-sphere-belt.step",
+      "sha256": "497c3153fef0926b7c0f475db6556659ba28a91167165f63cc5e3511c9b22b92",
+      "byte_count": 13726,
+      "source_recipe": "crates/geometry/src/analysis/test_source.rs::sphere_belt() through original_step_bytes",
+      "source_commit": "701fa4bc4552cb14336388adf9b5bf4043659731",
+      "producer": "retained SolidCraft STEP writer; original Spiling authored geometry",
+      "analytic_gauge": "radius 5; z in [-3,3]; cap radius 4"
+    },
+    {
+      "file": "source-full-sphere.step",
+      "sha256": "358d4f601c4997795b17c097b4a645e0f84635c858fb73a7ff6870d7e34eda8f",
+      "byte_count": 8528,
+      "source_recipe": "crates/geometry/src/analysis/test_source.rs::full_sphere() through original_step_bytes",
+      "source_commit": "701fa4bc4552cb14336388adf9b5bf4043659731",
+      "producer": "retained SolidCraft STEP writer; original Spiling authored geometry",
+      "analytic_gauge": "radius 5; center [0,0,0]"
+    },
+    {
+      "file": "source-ring-torus.step",
+      "sha256": "43eb2670f88789c3ef66a1852143a89080bd3801291f18f6dd8f80794cbb64c9",
+      "byte_count": 19518,
+      "source_recipe": "crates/geometry/src/analysis/test_source.rs::ring_torus() through original_step_bytes",
+      "source_commit": "701fa4bc4552cb14336388adf9b5bf4043659731",
+      "producer": "retained SolidCraft STEP writer; original Spiling authored geometry",
+      "analytic_gauge": "major radius 5; minor radius 2"
+    },
+    {
+      "file": "source-nurbs-box.step",
+      "sha256": "6a98f933ca6a9134f505cc5450463d47faaa579246bbffdb1312112a96253284",
+      "byte_count": 8246,
+      "source_recipe": "crates/geometry/src/analysis/test_source.rs::spline_box(true) through original_step_bytes",
+      "source_commit": "701fa4bc4552cb14336388adf9b5bf4043659731",
+      "producer": "retained SolidCraft STEP writer; original Spiling authored geometry",
+      "analytic_gauge": "20 x 10 x 8; rational planar carriers"
+    },
+    {
+      "file": "source-bspline-box.step",
+      "sha256": "bc71556cb4d7d021fb89a2fdbd77bf41d2b93fa0c5e332c8ed0a4385ac1c3eff",
+      "byte_count": 7382,
+      "source_recipe": "crates/geometry/src/analysis/test_source.rs::spline_box(false) through original_step_bytes",
+      "source_commit": "701fa4bc4552cb14336388adf9b5bf4043659731",
+      "producer": "retained SolidCraft STEP writer; original Spiling authored geometry",
+      "analytic_gauge": "20 x 10 x 8; nonrational planar carriers"
+    },
+    {
+      "file": "source-nurbs-cylinder.step",
+      "sha256": "e2106850bb967bc216a1124d75a7b684c07876736e823584601dcf84a2b8f1eb",
+      "byte_count": 6846,
+      "source_recipe": "crates/geometry/src/analysis/test_source.rs::nurbs_cylinder() through original_step_bytes",
+      "source_commit": "701fa4bc4552cb14336388adf9b5bf4043659731",
+      "producer": "retained SolidCraft STEP writer; original Spiling authored geometry",
+      "analytic_gauge": "radius 5; z in [0,8]; exact rational circle"
+    },
+    {
+      "file": "source-nurbs-torus.step",
+      "sha256": "6c1022ea3df9a9545690077d844cf723dfd459b8a692c8a183eac0667ada8608",
+      "byte_count": 7933,
+      "source_recipe": "crates/geometry/src/analysis/test_source.rs::nurbs_torus() through original_step_bytes",
+      "source_commit": "701fa4bc4552cb14336388adf9b5bf4043659731",
+      "producer": "retained SolidCraft STEP writer; original Spiling authored geometry",
+      "analytic_gauge": "major radius 6; minor radius 2; exact rational circles"
+    },
+    {
+      "file": "source-nurbs-torus-independent-parameters.step",
+      "sha256": "acdf7b4b595c2c526e69ac1b1f45dba9a4ff1dd7785b73fe8c9770f9353b7dbd",
+      "byte_count": 7928,
+      "source_recipe": "crates/geometry/src/analysis/test_source.rs::nurbs_torus_independent_parameters() through original_step_bytes",
+      "source_commit": "701fa4bc4552cb14336388adf9b5bf4043659731",
+      "producer": "retained SolidCraft STEP writer; original Spiling authored geometry",
+      "analytic_gauge": "major radius 6; minor radius 2; independent spatial edge parameters"
     }
   ],
   "schema_version": 1,

@@ -3,7 +3,7 @@
 
 # Native operator fixture rules
 
-Own frozen original STEP regression inputs with per-source construction provenance. Earlier planar sources retain their historical Monstertruck origin; the authored Bezier-extrusion bore uses the retained SolidCraft writer. Retired builder paths in manifests identify provenance, not runnable prerequisites. Preserve source geometry, hashes and OSL sidecars; never repair source or invert material orientation to obtain acceptance.
+Own frozen original STEP regression inputs with per-source construction provenance. Earlier planar sources retain their historical Monstertruck origin; the authored Bezier-extrusion bore and `source-*` native family operands use the retained SolidCraft writer. The latter freeze the existing geometry test recipes at the per-entry source commit; they are distinct from historical Monstertruck operands, not independent-exporter evidence. Retired builder paths in manifests identify provenance, not runnable prerequisites. Preserve source geometry, hashes and OSL sidecars; never repair source or invert material orientation to obtain acceptance.
 
 Run `node tools/verify-fixtures.mjs` before native regressions to verify immutable bytes and licensing without a legacy kernel. Nonintegral top is 7.85 mm; shrinking shelf is at 3.15 mm; inward ramp width shrinks from 20 to 16 mm across 7.85 mm. All depths are 10 mm. Geometry is original Spiling work under OSL-3.0, not customer CAD or independent-exporter evidence.
 
