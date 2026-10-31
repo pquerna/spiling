@@ -20,17 +20,7 @@ import {
   evaluateBridgeAccounting,
 } from "./bridge-ledger.mjs";
 
-export function referenceValues(ini, values) {
-  for (const [key, value] of Object.entries(values)) {
-    if (!/^[a-z_]+$/.test(key) || /[\r\n]/.test(String(value)))
-      throw Error("invalid reference setting");
-    const pattern = new RegExp(`^${key} = .*`, "gm");
-    if ([...ini.matchAll(pattern)].length !== 1)
-      throw Error(`reference setting ${key} is absent or ambiguous`);
-    ini = ini.replace(pattern, `${key} = ${value}`);
-  }
-  return ini;
-}
+import { referenceValues } from "./reference-settings.mjs";
 function bridgeRows(decoded, controls) {
   const strokes = decoded.strokes.filter(
     (s) =>

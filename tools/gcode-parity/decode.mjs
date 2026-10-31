@@ -53,12 +53,22 @@ const masks = {
   M205: "XYZESTBJ",
 };
 
-export function decodeGcode(program, { filamentDiameterMm = 1.75 } = {}) {
+export function decodeGcode(
+  program,
+  { filamentDiameterMm = 1.75, maximumTerminalRetractionMm = 0 } = {},
+) {
   if (Buffer.byteLength(program) > MAX_BYTES) throw new Error("G-code exceeds observer byte limit");
   const lines = program.split(/\r?\n/);
   if (lines.length > MAX_LINES) throw new Error("G-code exceeds observer line limit");
   if (!(filamentDiameterMm > 0 && filamentDiameterMm < 10))
     throw new Error("invalid filament diameter");
+  if (
+    !Number.isFinite(maximumTerminalRetractionMm) ||
+    maximumTerminalRetractionMm < 0 ||
+    maximumTerminalRetractionMm > 10
+  )
+    throw new Error("invalid terminal retraction allowance");
+  const terminalLimit = e8(maximumTerminalRetractionMm.toFixed(8));
   const filamentArea = Math.PI * (filamentDiameterMm / 2) ** 2;
   let xyz = [null, null, null],
     absolute = null,
@@ -171,7 +181,17 @@ export function decodeGcode(program, { filamentDiameterMm = 1.75 } = {}) {
         }
         const known = from.every((v) => v !== null) && xyz.every((v) => v !== null);
         const length = known ? Math.hypot(...xyz.map((v, axis) => v - from[axis])) : null;
-        const moving = length === null || length > 1e-12;
+        // Unknown absolute position does not turn an E-only command into
+        // XYZ motion. Retraction before the first positioning command is
+        // stationary; explicit motion from unknown coordinates stays unknown.
+        const moving =
+          length === null
+            ? "XYZ"
+                .split("")
+                .some(
+                  (key, axis) => key in fields && (from[axis] === null || xyz[axis] !== from[axis]),
+                )
+            : length > 1e-12;
         if (delta < 0n) {
           if (moving) throw new Error("moving retraction is outside observer scope");
           debt -= delta;
@@ -212,13 +232,14 @@ export function decodeGcode(program, { filamentDiameterMm = 1.75 } = {}) {
       throw new Error(`line ${index + 1}: ${error.message}`, { cause: error });
     }
   }
-  if (debt) throw new Error("program ends with unrecovered extrusion debt");
+  if (debt > terminalLimit) throw new Error("program ends with unrecovered extrusion debt");
   return {
     strokes,
     travels,
     controls,
     commands,
     stationaryFilamentMm: stationaryFilament,
+    terminalRetractedFilamentMm: Number(debt) / Number(E_SCALE),
     retractedFilamentMm: Number(totalRetracted) / Number(E_SCALE),
     recoveredFilamentMm: Number(totalRecovered) / Number(E_SCALE),
   };

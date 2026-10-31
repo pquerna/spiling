@@ -43,6 +43,54 @@ refused case or failed audit pass. The complete matrix currently exposes unresol
 obligations, so a nonzero result is expected until those differences are resolved.
 Do not exclude a failing case or turn a promised positive into an expected refusal.
 
+## Ordinary mechanical job and revision
+
+```sh
+pnpm compare:slicers --mechanical --reference /usr/bin/prusa-slicer
+```
+
+[`mechanical-run.mjs`](../../tools/gcode-parity/mechanical-run.mjs) consumes the
+unchanged independent-exporter rounded housing and ordinary housing intent, then
+changes only sparse fraction from 25% to 50% in the same saved project. The CLI
+centers the part on the bed, compiles, freshly verifies and exports. Undo must
+restore the baseline artifact and Redo invalidate it. Each saved job reopens in a
+new read-only engine after its owned external source/intent copies are removed;
+program, plan, verification and provenance exports must remain byte-identical.
+
+[`mechanical.mjs`](../../tools/gcode-parity/mechanical.mjs) independently specifies
+the original rounded-box/blind-pocket recipe. It observes decoded XYZ/E against
+analytic source material and pocket clearance, finite wall/pocket/skin/floor
+probes, commanded flow/feed limits and native per-stroke stadium dose bounds.
+It retains strict nominal-capsule misses separately from the predeclared 0.1 mm
+original-source-to-footprint distance test and 0.002 mm command allowance. These
+are finite software diagnostics, not exact coverage or physical filling proofs.
+Actual deposition intervals distribute all commanded material into common 0.2 mm
+physical bands. The same fixed interior box measures whether the density revision
+increases sparse dose; whole-job material need not double. Actual-command fault
+controls remove walls, skin and pocket floor, intrude into protected material,
+and corrupt local flow with and without conserving total material. Each must fail
+the owning observation.
+
+Canonical native breakaway support remains enabled; actual support output must
+be zero for this comparison. Reference support is disabled, an explicit policy
+difference. Native retraction is retained; the reference's configured terminal
+0.8 mm debt is bounded and reported independently of model extrusion. Disabling
+native support/retraction is a separate unqualified variant, outside this runner's
+acceptance. A passing canonical job does not qualify that variant.
+
+The report separates software acceptance, source-independent recovery and policy
+explanation. Native source-event schedules may differ from the reference's fixed
+0.1 mm layers. Material accounting does not establish the cause of a difference:
+unexplained material retains exit 2 even when both jobs and revisions pass.
+`--observe` permits that unresolved comparison only; failed audits still exit 1.
+Every supplied reference setting must survive in the complete resolved configuration.
+The material ledger separates nominal fixed-height path length, actual-interval
+adjustment and remaining commanded dose; reconciliation is not causal explanation.
+Raw/resolved settings, commands, elapsed times, executable/observer hashes and
+JSON/HTML overlays remain in the ignored evidence directory. Run native workloads
+sequentially under the external memory/task bounds described in
+[development](development.md); no speed, physical or platform qualification follows.
+
 ## Native bridge and captured-profile comparison
 
 ```sh

@@ -14,7 +14,8 @@ import {
   observeExternalRoof,
   externalRoofAuditScope,
 } from "./bridge-policy.mjs";
-import { referenceValues, runBridgeProbes } from "./bridge-probes.mjs";
+import { runBridgeProbes } from "./bridge-probes.mjs";
+import { referenceValues } from "./reference-settings.mjs";
 const EPS = 0.002;
 
 export async function runBridgeComparisons({

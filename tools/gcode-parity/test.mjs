@@ -102,6 +102,29 @@ test("decimal E resets do not erase physical retraction debt", () => {
   assert.throws(() => decodeGcode(preamble + "G1 E-0.8\nG92 E0\nG1 X1 E0.8"), /moving recovery/);
   assert.throws(() => decodeGcode(preamble + "G1 E-0.8\nG92 E0"), /unrecovered/);
 });
+test("stationary startup retraction retains debt before XYZ is initialized", () => {
+  const start =
+    "G21\nG90\nM82\nG92 E0\nG1 E-.8 F1500\nG92 E0\nG1 Z.3 F6000\nG1 X2 Y2\nG1 Z.1\nG1 E.8 F1500";
+  const decoded = decodeGcode(start + "\nG1 X3 E.9 F2100");
+  assert.equal(decoded.retractedFilamentMm, 0.8);
+  assert.equal(decoded.recoveredFilamentMm, 0.8);
+  assert.equal(decoded.stationaryFilamentMm, 0);
+  assert.equal(decoded.strokes.length, 1);
+  assert.equal(decoded.strokes[0].filamentMm, 0.1);
+  assert.throws(() => decodeGcode("G21\nG90\nM82\nG92 E0\nG1 X1 E-.8 F1500"), /moving retraction/);
+  assert.throws(() => decodeGcode("G21\nG90\nM82\nG92 E0\nG1 E-.8 F1500\nG92 E0"), /unrecovered/);
+});
+test("declared terminal retraction remains accounted and cannot authorize extra debt", () => {
+  const program = preamble + "G1 X1 E.1\nG1 E-.8";
+  assert.throws(() => decodeGcode(program), /unrecovered/);
+  const result = decodeGcode(program, { maximumTerminalRetractionMm: 0.8 });
+  assert.equal(result.strokes[0].filamentMm, 0.1);
+  assert.equal(result.terminalRetractedFilamentMm, 0.8);
+  assert.equal(result.retractedFilamentMm - result.recoveredFilamentMm, 0.8);
+  assert.throws(() => decodeGcode(program, { maximumTerminalRetractionMm: 0.79 }), /unrecovered/);
+  for (const value of [-1, Infinity, NaN, 11])
+    assert.throws(() => decodeGcode(program, { maximumTerminalRetractionMm: value }), /allowance/);
+});
 test("absolute extrusion resets, relative positioning and scale controls are decoded", () => {
   const d = decodeGcode(
     "G21\nG90\nM82\nG92 E100\nG1 X0 Y0 Z.2 F2100\nG1 X1 E100.1\nG92 E0\nM220 S50\nM221 S50\nG91\nM83\nG1 X1 E.2",
@@ -353,7 +376,7 @@ test("bridge anchor runs ignore straight command partitions but retain travel, t
 });
 
 test("reference probe settings refuse missing, duplicate and injected fields", async () => {
-  const { referenceValues } = await import("./bridge-probes.mjs");
+  const { referenceValues } = await import("./reference-settings.mjs");
   assert.equal(
     referenceValues("infill_overlap = 0\n", { infill_overlap: "15%" }),
     "infill_overlap = 15%\n",
@@ -658,4 +681,105 @@ test("terminal miss forecast preserves fixed nominal capsules and requires both 
       }),
     /complete terminal/,
   );
+});
+
+test("mechanical oracle preserves the frozen independent sections and solid volume", async () => {
+  const { housing, housingSectionArea, housingBandVolume, housingOuterDistance } =
+    await import("./mechanical.mjs");
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL("../../fixtures/geometry/independent-exporters/manifest.json", import.meta.url),
+    ),
+  );
+  const entry = manifest.fixtures.find((f) => f.path === "occt-rounded-housing-mm.step");
+  assert.equal(entry.sha256, housing.sha256);
+  for (const section of entry.analytic_oracle.sections)
+    assert(Math.abs(housingSectionArea(section.z_mm) - section.material_area_mm2) < 1e-10);
+  // Independent rounded-box Steiner volume, minus the blind cylindrical pocket.
+  const expected =
+    20 * 14 * 6 +
+    4 * (20 * 14 + 20 * 6 + 14 * 6) +
+    Math.PI * 4 * (20 + 14 + 6) +
+    (4 * Math.PI * 8) / 3 -
+    9 * Math.PI * (10 - 4.13);
+  assert(Math.abs(housingBandVolume(0, 10) - expected) < 1e-9);
+  let sum = 0;
+  for (let i = 0; i < 50; i++) sum += housingBandVolume(i / 5, (i + 1) / 5);
+  assert(Math.abs(sum - expected) < 1e-9);
+  assert.equal(housingSectionArea(-0.1), 0);
+  assert.equal(housingBandVolume(-1, 11), housingBandVolume(0, 10));
+  assert(Math.abs(housingSectionArea(4.13) - housingSectionArea(4.130001) - 9 * Math.PI) < 1e-10);
+  assert.equal(housingOuterDistance([12, 9, 5]), -5);
+  assert.equal(housingOuterDistance([24, 9, 5]), 0);
+  assert.throws(() => housingBandVolume(1, 0), /invalid source band/);
+  assert.throws(() => housingBandVolume(0, NaN), /invalid source band/);
+});
+
+test("mechanical physical-band accounting conserves dose across refined intervals and spatial cuts", async () => {
+  const { auditHousing, compareHousingRevision } = await import("./mechanical.mjs");
+  const strokes = Array.from({ length: 105 }, (_, i) => ({
+    from: [3.5, 9, ((i + 1) * 10) / 105],
+    to: [7.5, 9, ((i + 1) * 10) / 105],
+    lengthMm: 4,
+    volumeMm3:
+      (Math.round((((i + 1) * 10) / 105) * 1e6) - Math.round(((i * 10) / 105) * 1e6)) / 1e5,
+    filamentMm: 1,
+    feedMmMin: 60,
+    line: i + 1,
+  }));
+  const audit = auditHousing({ strokes, stationaryFilamentMm: 0 });
+  // These are diagnostic sparse strokes, deliberately lacking walls and skins.
+  assert.equal(audit.correctnessPassed, false);
+  assert(audit.violations.some((v) => v.code === "wall_coverage"));
+  assert(!audit.violations.some((v) => ["band_accounting", "layer_interval"].includes(v.code)));
+  assert(Math.abs(audit.modelVolumeMm3 - 100) < 1e-9);
+  const ledger = audit.materialAccounting;
+  assert(
+    Math.abs(
+      ledger.fixedNominalVolumeMm3 +
+        ledger.actualIntervalAdjustmentMm3 +
+        ledger.commandedDoseResidualMm3 -
+        100,
+    ) < 1e-9,
+  );
+  assert(Math.abs(audit.coreVolumeMm3 - 34.5) < 1e-9);
+  for (const band of audit.bands) assert(Math.abs(band.volumeMm3 - 2) < 1e-9);
+  assert(Math.abs(audit.bands.reduce((sum, b) => sum + b.coreVolumeMm3, 0) - 34.5) < 1e-9);
+  const before = { ...audit, correctnessPassed: true };
+  const after = {
+    ...before,
+    modelVolumeMm3: 150,
+    coreVolumeMm3: 69,
+    bands: before.bands.map((b) => ({
+      ...b,
+      volumeMm3: b.volumeMm3 * 1.5,
+      coreVolumeMm3: b.coreVolumeMm3 * 2,
+    })),
+  };
+  assert.equal(compareHousingRevision(before, after).passed, true);
+  assert.equal(compareHousingRevision(audit, after).passed, false);
+  assert.equal(compareHousingRevision(before, before).passed, false);
+  const shifted = structuredClone(after);
+  shifted.bands[0].upperMm += 0.01;
+  assert.equal(compareHousingRevision(before, shifted).passed, false);
+  assert.equal(compareHousingRevision(before, { ...after, bands: [] }).passed, false);
+});
+
+test("mechanical reference consumption rejects ignored, overridden and ambiguous settings", async () => {
+  const { verifyReferenceSettings } = await import("./reference-settings.mjs");
+  const requested = "layer_height = 0.1\nfill_density = 25%\n";
+  assert.equal(
+    verifyReferenceSettings(requested, "# resolved\n" + requested + "other = 1\n").matched,
+    true,
+  );
+  assert.throws(() => verifyReferenceSettings(requested, "layer_height = 0.1\n"), /not retained/);
+  assert.throws(
+    () => verifyReferenceSettings(requested, requested.replace("25%", "50%")),
+    /not retained/,
+  );
+  assert.throws(
+    () => verifyReferenceSettings(requested, requested + "fill_density = 25%\n"),
+    /duplicate/,
+  );
+  assert.throws(() => verifyReferenceSettings("", requested), /missing requested/);
 });

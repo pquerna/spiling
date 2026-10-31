@@ -21,6 +21,7 @@ import {
   sha256,
 } from "./gcode-parity/corpus.mjs";
 import { runBridgeComparisons } from "./gcode-parity/bridge-run.mjs";
+import { runMechanicalComparisons } from "./gcode-parity/mechanical-run.mjs";
 import { reportHtml, overlayBands } from "./gcode-parity/report.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const options = {};
@@ -28,6 +29,7 @@ for (let i = 2; i < process.argv.length; i++) {
   const key = process.argv[i];
   if (key === "--observe") options.observe = true;
   else if (key === "--bridges") options.bridges = true;
+  else if (key === "--mechanical") options.mechanical = true;
   else if (
     ["--cli", "--engine", "--reference", "--reference-sha256"].includes(key) &&
     process.argv[i + 1]
@@ -35,6 +37,7 @@ for (let i = 2; i < process.argv.length; i++) {
     options[key.slice(2)] = process.argv[++i];
   else throw new Error(`unsupported argument ${key}`);
 }
+if (options.mechanical && options.bridges) throw Error("select one comparison mode");
 const target = resolve(root, process.env.CARGO_TARGET_DIR ?? "target");
 const suffix = process.platform === "win32" ? ".exe" : "";
 const cli = resolve(options.cli ?? join(target, "debug", `spiling-cli${suffix}`));
@@ -88,6 +91,7 @@ function failureDetail(stderr) {
 }
 async function run(command, args, logName, { cwd = root } = {}) {
   const entry = { command, args, cwd };
+  const started = performance.now();
   manifest.commands.push(entry);
   let stdout = "",
     stderr = "",
@@ -134,6 +138,7 @@ async function run(command, args, logName, { cwd = root } = {}) {
       });
     });
   } finally {
+    entry.elapsedMs = performance.now() - started;
     await save(`${logName}.stdout.txt`, stdout);
     await save(`${logName}.stderr.txt`, stderr);
   }
@@ -164,6 +169,40 @@ try {
       "comparison contract requires PrusaSlicer 2.9.4; retain and review a separate contract for another version",
     );
   manifest.reference.version = help.split("\n").find((l) => l.startsWith("PrusaSlicer-"));
+  if (options.mechanical) {
+    let mechanicalReport;
+    try {
+      mechanicalReport = await runMechanicalComparisons({
+        root,
+        output,
+        cli,
+        engine,
+        reference,
+        manifest,
+        run,
+        save,
+      });
+    } catch (error) {
+      mechanicalReport = {
+        correctnessPassed: false,
+        nativeSoftwarePassed: false,
+        differencesExplained: false,
+        error: error.message,
+      };
+    }
+    await save("report.json", mechanicalReport);
+    await save("manifest.json", manifest);
+    console.error(
+      `Mechanical native workflows: ${mechanicalReport.nativeSoftwarePassed}; reference audits: ${mechanicalReport.referenceAuditsPassed}; differences explained: ${mechanicalReport.differencesExplained}. Report: ${join(output, "report.html")}`,
+    );
+    process.exit(
+      !mechanicalReport.correctnessPassed
+        ? 1
+        : !mechanicalReport.differencesExplained && !options.observe
+          ? 2
+          : 0,
+    );
+  }
   if (options.bridges) {
     let bridgeReport;
     try {
