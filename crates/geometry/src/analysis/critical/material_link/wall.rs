@@ -200,7 +200,13 @@ pub(crate) fn prove_source_wall_component(
         let b = source.face_domain(second.face, available, work, cancel)?;
         let range = a.coedges()[uses.first.coedge].native_range;
         let link = PairedMaterialLink::new(
-            definition, a, uses.first, b, second, range, available, work, cancel,
+            definition,
+            (a, uses.first),
+            (b, second),
+            range,
+            available,
+            work,
+            cancel,
         )?
         .ok_or_else(|| refusal("native wall edge has inconsistent material/chart ownership"))?;
         let cuts = native_coedge_parameter_cuts(

@@ -110,10 +110,8 @@ pub(in crate::analysis) struct PairedMaterialLink<'a, 'd> {
 impl<'a, 'd> PairedMaterialLink<'a, 'd> {
     pub fn new(
         definition: &Definition,
-        first_domain: &'a PreparedFaceTrimDomain<'d>,
-        first: CoedgeUse,
-        second_domain: &'a PreparedFaceTrimDomain<'d>,
-        second: CoedgeUse,
+        (first_domain, first): (&'a PreparedFaceTrimDomain<'d>, CoedgeUse),
+        (second_domain, second): (&'a PreparedFaceTrimDomain<'d>, CoedgeUse),
         range: [f64; 2],
         remaining: usize,
         work: &mut GeometryWorkBudget,

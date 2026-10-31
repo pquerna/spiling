@@ -215,10 +215,8 @@ fn visit_native_links(
         let range = a.coedges()[first.coedge].native_range;
         let Some(link) = PairedMaterialLink::new(
             source.definition(),
-            a,
-            first,
-            b,
-            second,
+            (a, first),
+            (b, second),
             range,
             remaining,
             work,

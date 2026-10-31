@@ -2038,10 +2038,8 @@ impl<'d> PreparedFaceTrimDomain<'d> {
 
     fn owned_joint_germs_separate(
         &self,
-        a: TrimSpan,
-        b: TrimSpan,
-        aj: &parametric::ChartCurveEnclosure,
-        bj: &parametric::ChartCurveEnclosure,
+        (a, aj): (TrimSpan, &parametric::ChartCurveEnclosure),
+        (b, bj): (TrimSpan, &parametric::ChartCurveEnclosure),
         mut overlap: [Interval; 2],
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
@@ -2071,10 +2069,8 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             }
         }
         if smooth_pair_in_joint(
-            &ac,
-            a.range,
-            &bc,
-            b.range,
+            (&ac, a.range),
+            (&bc, b.range),
             self.original_joints[joint].enclosure,
             overlap,
             work,
@@ -2180,7 +2176,7 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             ];
             if (0..2)
                 .all(|axis| cell[axis].lo <= overlap[axis].lo && overlap[axis].hi <= cell[axis].hi)
-                || smooth_pair_in_joint(&ac, ar, &bc, br, cell, overlap, work, cancel)?
+                || smooth_pair_in_joint((&ac, ar), (&bc, br), cell, overlap, work, cancel)?
             {
                 continue;
             }
@@ -2194,10 +2190,8 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                     newton: None,
                 };
                 if smooth_pair_in_joint_with_context(
-                    &ac,
-                    ar,
-                    &bc,
-                    br,
+                    (&ac, ar),
+                    (&bc, br),
                     cell,
                     overlap,
                     Some(&mut context),
@@ -2277,7 +2271,7 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             // wholly inside their own already-masked joint cell. This neither
             // welds endpoints nor supplies the later material vertex receipt.
             if self.owned_joint_overlap(a.boundary, b.boundary, overlap)
-                || self.owned_joint_germs_separate(a, b, &aj, &bj, overlap, work, cancel)?
+                || self.owned_joint_germs_separate((a, &aj), (b, &bj), overlap, work, cancel)?
             {
                 continue;
             }
@@ -2776,23 +2770,19 @@ struct SmoothPairContext {
 /// every root in the complete parameter rectangle. A strict determinant makes
 /// its interval inverse valid; no root existence or endpoint identity follows.
 fn smooth_pair_in_joint<C: parametric::CurveEvaluator + ?Sized>(
-    a: &C,
-    ar: [f64; 2],
-    b: &C,
-    br: [f64; 2],
+    (a, ar): (&C, [f64; 2]),
+    (b, br): (&C, [f64; 2]),
     cell: [Interval; 2],
     overlap: [Interval; 2],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    smooth_pair_in_joint_with_context(a, ar, b, br, cell, overlap, None, work, cancel)
+    smooth_pair_in_joint_with_context((a, ar), (b, br), cell, overlap, None, work, cancel)
 }
 
 fn smooth_pair_in_joint_with_context<C: parametric::CurveEvaluator + ?Sized>(
-    a: &C,
-    mut ar: [f64; 2],
-    b: &C,
-    mut br: [f64; 2],
+    (a, mut ar): (&C, [f64; 2]),
+    (b, mut br): (&C, [f64; 2]),
     cell: [Interval; 2],
     mut overlap: [Interval; 2],
     mut context: Option<&mut SmoothPairContext>,
@@ -9254,54 +9244,46 @@ mod tests {
         let cell = [p(0.0), Interval::new(0.25, 0.75).unwrap()];
         assert!(
             smooth_pair_in_joint(
-                &a,
-                [0.0, 1.0],
-                &b,
-                [0.0, 1.0],
+                (&a, [0.0, 1.0]),
+                (&b, [0.0, 1.0]),
                 cell,
                 overlap,
                 &mut work,
-                &cancel,
+                &cancel
             )
             .unwrap()
         );
         assert!(
             smooth_pair_in_joint(
-                &b,
-                [0.0, 1.0],
-                &a,
-                [0.0, 1.0],
+                (&b, [0.0, 1.0]),
+                (&a, [0.0, 1.0]),
                 cell,
                 overlap,
                 &mut work,
-                &cancel,
+                &cancel
             )
             .unwrap()
         );
         let too_small = [p(0.0), Interval::new(0.0, 0.25).unwrap()];
         assert!(
             !smooth_pair_in_joint(
-                &a,
-                [0.0, 1.0],
-                &b,
-                [0.0, 1.0],
+                (&a, [0.0, 1.0]),
+                (&b, [0.0, 1.0]),
                 too_small,
                 overlap,
                 &mut work,
-                &cancel,
+                &cancel
             )
             .unwrap()
         );
         assert!(
             !smooth_pair_in_joint(
-                &a,
-                [0.0, 1.0],
-                &a,
-                [0.0, 1.0],
+                (&a, [0.0, 1.0]),
+                (&a, [0.0, 1.0]),
                 cell,
                 overlap,
                 &mut work,
-                &cancel,
+                &cancel
             )
             .unwrap()
         );

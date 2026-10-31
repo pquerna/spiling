@@ -66,12 +66,20 @@ impl<'a> OriginalSpatialReference<'a> {
         let Some((curve, sense)) = selection::original_3d_reference(source, work, cancel)? else {
             return Ok(None);
         };
-        Self::prepare_curve(source, curve, sense, allowance, remaining, 0, work, cancel).map(Some)
+        Self::prepare_curve(
+            source,
+            (curve, sense),
+            allowance,
+            remaining,
+            0,
+            work,
+            cancel,
+        )
+        .map(Some)
     }
     fn prepare_curve(
         source: &'a OriginalCoedgeSource,
-        curve: &'a Curve,
-        sense: bool,
+        (curve, sense): (&'a Curve, bool),
         allowance: f64,
         remaining: usize,
         depth: usize,
@@ -104,8 +112,7 @@ impl<'a> OriginalSpatialReference<'a> {
                 .ok_or_else(source_capacity)?;
             Some(Self::prepare_curve(
                 source,
-                basis,
-                basis_sense,
+                (basis, basis_sense),
                 allowance,
                 budget,
                 depth + 1,
