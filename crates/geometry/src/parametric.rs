@@ -213,9 +213,10 @@ fn native_surface_functional_enclosures<const N: usize>(
     Ok(result)
 }
 
-/// Whole-carrier scalar enclosure from native rational control coefficients.
-/// Uniform-sign weights give a convex combination of Euclidean controls. This
-/// is an outer bound only; a control value is never a feasible curve witness.
+/// Scalar enclosure from a native line's endpoint hull or rational controls.
+/// Ordinary native line gauges are affine; uniform-sign NURBS weights give a
+/// convex combination of Euclidean controls. This is an outer bound only;
+/// neither a control value nor the bound supplies a feasible curve witness.
 pub(crate) fn native_curve_functional_control_bounds(
     curve: &dyn CurveEvaluator,
     range: [f64; 2],
@@ -227,6 +228,25 @@ pub(crate) fn native_curve_functional_control_bounds(
     let Some(native) = curve.native_curve() else {
         return Ok(None);
     };
+    if let solidcore::curve::curve::CurveKind::Line(line) = native.kind() {
+        // The native short-domain branch has a distinct parameter law. Keep
+        // its existing qualification path rather than assert the ordinary map.
+        if line.is_bounded() && solidcore::geom::tol::is_zero(native.natural_interval().length()) {
+            return Ok(None);
+        }
+        Interval::new(range[0], range[1])?;
+        let mut support: Option<Interval> = None;
+        for parameter in range {
+            work.charge(1, cancel)?;
+            let position = curve.tensor([parameter; 2], 0, work, cancel)?[0];
+            let height = (0..3).fold(offset, |sum, axis| {
+                sum.add(direction[axis].mul(position[axis]))
+            });
+            Interval::new(height.lo, height.hi)?;
+            support = Some(support.map_or(height, |old| old.hull(height)));
+        }
+        return Ok(support);
+    }
     let Some(nurbs) = native_curve_nurbs(curve)? else {
         return Ok(None);
     };

@@ -30,6 +30,49 @@ fn rational_line() -> Curve {
         3,
     )
 }
+
+#[test]
+fn native_line_support_retains_exact_caps_and_real_one_ulp_protrusions() {
+    use solidcore::{curve::line::Line, geom::vector3d::Point3};
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(100_000);
+    let direction = [0.0, 0.0, 1.0].map(Interval::point);
+    for top in [8.0, up(8.0)] {
+        for reversed in [false, true] {
+            let ends = [Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 0.0, top)];
+            let line: Curve =
+                Line::from_points(ends[usize::from(reversed)], ends[usize::from(!reversed)], 3)
+                    .into();
+            let bound = native_curve_functional_control_bounds(
+                &line,
+                [0.0, 1.0],
+                direction,
+                Interval::point(0.0),
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .expect("the complete native line lies in its endpoint hull");
+            assert_eq!(bound.lo, 0.0);
+            assert_eq!(bound.hi, top);
+        }
+    }
+    let short: Curve =
+        Line::from_points(Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 0.0, 1e-15), 3).into();
+    assert!(
+        native_curve_functional_control_bounds(
+            &short,
+            [0.0, 0.0],
+            direction,
+            Interval::point(0.0),
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .is_none(),
+        "the distinct native short-domain branch supplies no ordinary line-hull receipt"
+    );
+}
 #[test]
 fn rational_curve_uses_homogeneous_weights_and_third_quotient_derivative() {
     let c = rational_line();

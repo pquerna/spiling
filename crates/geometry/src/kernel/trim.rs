@@ -1419,6 +1419,25 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<[[f64; 2]; 2], GeometryError> {
+        self.uv_cover(false, work, cancel)
+    }
+
+    /// Tighter exclusion for a directional query, never the prepared chart
+    /// used by continuation/incidence or a replacement native carrier domain.
+    pub(crate) fn support_uv_cover(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[[f64; 2]; 2], GeometryError> {
+        self.uv_cover(true, work, cancel)
+    }
+
+    fn uv_cover(
+        &self,
+        use_control_hulls: bool,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[[f64; 2]; 2], GeometryError> {
         // Selected source domains already include every literal coedge,
         // correction joint and pole completion. Preserve that admitted cover.
         if self.original_surface.is_some() {
@@ -1440,6 +1459,10 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             return Ok(self.domain);
         }
         let mut boundary: Option<[Interval; 2]> = None;
+        // Only one inline entry: a complete owning coedge hull remains valid
+        // for all its subspans, without query-time heap growth or local proofs
+        // becoming prerequisites for other spans. A declined hull stays optional.
+        let mut control_hull: Option<(usize, Option<[Interval; 2]>)> = None;
         for span in &self.spans {
             // Native coedges already own the immutable complete-carrier
             // containment receipt. Reuse it before intersecting any outward
@@ -1447,9 +1470,40 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             // that an actual trim excursion stays in the active chart.
             let image = match span.boundary {
                 BoundaryCurve::Coedge(index) if self.native_tolerance_mm.is_some() => {
-                    self.coedges[index]
-                        .chart_jet(span.range, work, cancel)?
-                        .position
+                    let coedge = &self.coedges[index];
+                    let mut image = coedge.chart_jet(span.range, work, cancel)?.position;
+                    if use_control_hulls
+                        && control_hull
+                            .as_ref()
+                            .is_none_or(|(owner, _)| *owner != index)
+                    {
+                        let mut hull = [None; 2];
+                        for (axis, bound) in hull.iter_mut().enumerate() {
+                            *bound = parametric::native_curve_functional_control_bounds(
+                                coedge.curve,
+                                coedge.uv_range,
+                                std::array::from_fn(|k| Interval::point(f64::from(k == axis))),
+                                Interval::point(0.0),
+                                work,
+                                cancel,
+                            )?;
+                        }
+                        let [x, y] = hull;
+                        let hull = match (x, y) {
+                            (Some(x), Some(y)) => Some([x, y]),
+                            _ => None,
+                        };
+                        control_hull = Some((index, hull));
+                    }
+                    if use_control_hulls && let Some((_, Some(hull))) = control_hull {
+                        for (position, control) in image.iter_mut().zip(hull) {
+                            *position = Interval::new(
+                                position.lo.max(control.lo),
+                                position.hi.min(control.hi),
+                            )?;
+                        }
+                    }
+                    image
                 }
                 boundary => {
                     let curve = self.boundary_operand(boundary)?;

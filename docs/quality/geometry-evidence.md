@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source8 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source9 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -83,6 +83,19 @@ transversality cannot exclude an event; physical boundary strata are still
 inventoried. Piecewise first derivatives grant exclusion, while stationary-point
 contraction/existence retains its independent closed-C1 requirement. The torus
 equator census and oblique-height/cusp controls exercise this distinction.
+
+Endpoint ownership consumes native **material** support, with one prepared owner
+shared by its world-Z and XY queries. Authoring-only chart support cannot supply
+that material receipt. Ordinary native lines retain their complete endpoint hull;
+the kernel's distinct short-domain branch does not borrow that proof. Native trim
+covers in directional queries can intersect evaluated positions with independent
+whole-coedge control hulls, reused only within their owning immutable query.
+They do not redefine the prepared face chart used for continuation/incidence.
+These exclusion bounds
+never supply feasible points or attachment incidence. Exact caps remain distinct
+from real one-ULP protrusions, including pose transport. Reference design dimensions
+retain their declared physical accuracy; converted native endpoints need not put
+an ideal dimension inside an arbitrarily tight native support bracket.
 
 The frozen spline housing has physical section regressions below and above its
 blind-pocket floor at Z3/5/7, including reversed plane normals, pocket dimensions

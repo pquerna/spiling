@@ -15,7 +15,6 @@ use super::collar::{
 };
 use super::{
     BoundsPolicy, GeometryWorkBudget, NativeEndpointStratum, ProjectedBounds, SlabAnalysis,
-    placed_bounds,
 };
 use crate::parametric::{Interval, down, up};
 use crate::{Definition, GeometryError, SectionLoopMm};
@@ -5494,14 +5493,19 @@ pub fn certify_endpoint_ownership(
         maximum_endpoint_uncertainty_mm: native_shape_error_mm
             .min(spiling_contracts::geometry::SECTION_BOOLEAN_TOLERANCE_MM),
     };
-    let support = placed_bounds(
-        definition,
+    let prepared = super::material_source::prepare_solid(definition, MAX_SCRATCH, work, cancel)?;
+    let remaining = super::slab::remaining_scratch(prepared.retained_bytes())?;
+    let material = prepared.source_view()?;
+    let support = super::placed::placed_material_bounds_with_scratch_limit(
+        material,
         pose,
         [0.0, 0.0, 1.0],
         bounds_policy,
+        remaining,
         work,
         cancel,
-    )?;
+    )?
+    .bounds();
     let excluded = match endpoint {
         NativeOwnedEndpoint::Lower => support.maximum[1] <= interval[0],
         NativeOwnedEndpoint::Upper => support.minimum[0] >= interval[1],
@@ -5519,22 +5523,26 @@ pub fn certify_endpoint_ownership(
             ),
         ));
     }
-    let x = placed_bounds(
-        definition,
+    let x = super::placed::placed_material_bounds_with_scratch_limit(
+        material,
         pose,
         [1.0, 0.0, 0.0],
         bounds_policy,
+        remaining,
         work,
         cancel,
-    )?;
-    let y = placed_bounds(
-        definition,
+    )?
+    .bounds();
+    let y = super::placed::placed_material_bounds_with_scratch_limit(
+        material,
         pose,
         [0.0, 1.0, 0.0],
         bounds_policy,
+        remaining,
         work,
         cancel,
-    )?;
+    )?
+    .bounds();
     let mut source = adjacent.source.clone();
     source.native_shape_error_policy_mm = native_shape_error_mm;
     Ok(NativeEndpointOwnership {

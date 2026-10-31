@@ -304,7 +304,7 @@ fn native_projected_bounds(
             ));
         };
         let before = work.consumed();
-        let uv = trim.bounded_uv_cover(work, cancel)?;
+        let uv = trim.support_uv_cover(work, cancel)?;
         let boxes = parametric::surface_parameter_boxes(surface, uv, work, cancel)?;
         // Prior faces supply independently feasible points of this same source
         // under the same covector. The query needs global support, not tight

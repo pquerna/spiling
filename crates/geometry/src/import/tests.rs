@@ -1267,6 +1267,8 @@ fn original_implicit_carrier_edges_import_display_bound_and_section_without_bran
         let query_bytes = crate::MAX_PREPARED_SECTION_BYTES
             .checked_sub(prepared.retained_bytes())
             .unwrap();
+        let native_vertices =
+            solidcore::topology::brep::p1::vertices(definition.brep(), None).unwrap();
         for (axis, direction) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
             .into_iter()
             .enumerate()
@@ -1285,8 +1287,31 @@ fn original_implicit_carrier_edges_import_display_bound_and_section_without_bran
                     panic!("original implicit source {name} axis {axis}: {error}")
                 });
             let bounds = support.bounds();
-            assert!(bounds.minimum[0] <= minimum[axis] && minimum[axis] <= bounds.minimum[1]);
-            assert!(bounds.maximum[0] <= maximum[axis] && maximum[axis] <= bounds.maximum[1]);
+            // Unit conversion may put an exact native endpoint one ULP from
+            // the ideal design dimension. Retain the prior 1e-6 mm reference
+            // accuracy for BOTH bracket endpoints, without requiring the
+            // design value to lie inside an arbitrarily tight native bracket.
+            for (bracket, reference) in [
+                (bounds.minimum, minimum[axis]),
+                (bounds.maximum, maximum[axis]),
+            ] {
+                assert!(
+                    bracket
+                        .into_iter()
+                        .all(|end| (end - reference).abs() <= 1e-6),
+                    "{name} axis={axis} reference={reference} bounds={bounds:?}"
+                );
+            }
+            // Independently read actual native points: a tighter certificate
+            // must still enclose every source-owned native vertex exactly.
+            for &vertex in &native_vertices {
+                let p = definition.brep().vertex(vertex).unwrap().point;
+                let coordinate = [p.x, p.y, p.z][axis];
+                assert!(
+                    bounds.minimum[0] <= coordinate && coordinate <= bounds.maximum[1],
+                    "{name} axis={axis} native_vertex={coordinate} bounds={bounds:?}"
+                );
+            }
         }
         let interval = [sample - 0.01, sample + 0.01];
         let height = prepared

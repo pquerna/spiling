@@ -2208,6 +2208,27 @@ mod tests {
         // Direction is normalized: its magnitude does not scale millimetres.
         assert!(bounds.minimum[0] <= 4.0 && bounds.minimum[1] >= 4.0);
         assert!(bounds.maximum[0] <= 12.0 && bounds.maximum[1] >= 12.0);
+        assert_eq!(
+            bounds.maximum[1], 12.0,
+            "the exact native cap can prove strict open-slab exclusion"
+        );
+        let raised = placed_material_bounds(
+            &definition,
+            RigidPoseMm {
+                translation_mm: [2.0, -3.0, crate::parametric::up(4.0)],
+                ..pose
+            },
+            direction,
+            policy,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .bounds();
+        assert!(
+            raised.maximum[1] > 12.0,
+            "a genuine one-ULP pose displacement cannot borrow exact-cap exclusion"
+        );
         assert!(bounds.achieved_uncertainty_mm <= policy.maximum_endpoint_uncertainty_mm);
         assert!(material.retained_bytes() >= std::mem::size_of::<PlacedMaterialProjectedBounds>());
         assert_eq!(
