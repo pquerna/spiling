@@ -278,8 +278,8 @@ fn native_affine(
     }
     let mut points = [[[0.0; 3]; 2]; 2];
     let mut weight = None;
-    for i in 0..2 {
-        for j in 0..2 {
+    for (i, row) in points.iter_mut().enumerate() {
+        for (j, point) in row.iter_mut().enumerate() {
             work.charge(1, cancel)?;
             let p = n.cpt(i, j).map_err(|_| unavailable())?;
             if (p.w != solidcore::nurbs::math::NOW) != n.is_rational()
@@ -293,8 +293,8 @@ fn native_affine(
                 return Ok(None);
             }
             weight = Some(w);
-            points[i][j] = [p.x, p.y, p.z];
-            for c in points[i][j] {
+            *point = [p.x, p.y, p.z];
+            for c in *point {
                 Interval::new(c, c)?;
             }
         }
@@ -392,11 +392,11 @@ fn affine_source(
         return Ok(None);
     }
     let mut map = [[ZERO; 3]; 2];
-    for coefficient in 0..3 {
+    for (coefficient, native_coefficient) in native.coefficients[..3].iter().enumerate() {
         work.charge(1, cancel)?;
         let mut vector = [ZERO; 3];
         for k in 0..3 {
-            vector[k] = finite(enclose(&native.coefficients[coefficient][k])?.div(denominator)?)?;
+            vector[k] = finite(enclose(&native_coefficient[k])?.div(denominator)?)?;
             if coefficient == 0 {
                 vector[k] = vector[k].sub(enclose(&source[0][k])?);
             }

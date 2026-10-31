@@ -350,9 +350,8 @@ impl<'d> NativeTrimCoedge<'d> {
                     ),
                 ));
             }
-            for axis in 0..2 {
-                jet.position[axis] = jet.position[axis]
-                    .intersect(Interval::new(domain[axis][0], domain[axis][1])?)?;
+            for (position, bounds) in jet.position[..2].iter_mut().zip(domain) {
+                *position = position.intersect(Interval::new(bounds[0], bounds[1])?)?;
             }
         }
         Ok(jet)
@@ -413,9 +412,9 @@ fn native_trace_tensor(
 ) -> Result<[[Interval; 3]; 4], GeometryError> {
     let mut tensor = chart.tensor([parameter.lo, parameter.hi], order, work, cancel)?;
     let mut factor = Interval::point(1.0);
-    for derivative in 1..=order {
+    for derivative in tensor.iter_mut().take(order + 1).skip(1) {
         factor = factor.mul(scale);
-        tensor[derivative] = tensor[derivative].map(|value| value.mul(factor));
+        *derivative = derivative.map(|value| value.mul(factor));
     }
     Ok(tensor)
 }
@@ -1352,10 +1351,10 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         // may be exactly on the boundary while interval evaluation rounds past
         // it. Tighten only by exact homogeneous equality, never by an epsilon.
         let exact = exact_endpoint(coedge.curve, endpoint, work, cancel)?;
-        for axis in 0..2 {
+        for (axis, position_coordinate) in position[..2].iter_mut().enumerate() {
             for bound in self.domain[axis] {
-                if position[axis].lo >= self.domain[axis][0]
-                    && position[axis].hi <= self.domain[axis][1]
+                if position_coordinate.lo >= self.domain[axis][0]
+                    && position_coordinate.hi <= self.domain[axis][1]
                 {
                     break;
                 }
@@ -1370,10 +1369,11 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                     .subtract(&coordinate)
                     .ok_or_else(|| unavailable("native boundary equality exceeds exact scratch"))?;
                 if residual.sign() == 0 {
-                    position[axis] = Interval::point(bound);
+                    *position_coordinate = Interval::point(bound);
                 }
             }
-            if position[axis].lo < self.domain[axis][0] || position[axis].hi > self.domain[axis][1]
+            if position_coordinate.lo < self.domain[axis][0]
+                || position_coordinate.hi > self.domain[axis][1]
             {
                 return Err(unavailable(
                     "native trim endpoint leaves its carrier domain without exact boundary ownership",
@@ -1959,8 +1959,8 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         let br = self.boundary_restriction(b.boundary).0;
         let ac = self.boundary_operand(a.boundary)?;
         let bc = self.boundary_operand(b.boundary)?;
-        for ae in 0..2 {
-            for be in 0..2 {
+        for (ae, &a_endpoint) in ar.iter().enumerate() {
+            for (be, &b_endpoint) in br.iter().enumerate() {
                 if self.boundary_endpoint(a.boundary, ae) != self.boundary_endpoint(b.boundary, be)
                 {
                     continue;
@@ -1968,8 +1968,8 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                 // The exact C0 anchor belongs to the complete boundary, not
                 // necessarily this knot/cut leaf. Certify every derivative
                 // between the leaf and anchor before applying monotonicity.
-                let ah = [a.range[0].min(ar[ae]), a.range[1].max(ar[ae])];
-                let bh = [b.range[0].min(br[be]), b.range[1].max(br[be])];
+                let ah = [a.range[0].min(a_endpoint), a.range[1].max(a_endpoint)];
+                let bh = [b.range[0].min(b_endpoint), b.range[1].max(b_endpoint)];
                 let a_extension;
                 let aj = if ah == a.range {
                     current_a
@@ -2600,14 +2600,14 @@ fn exact_affine_pair_in_joint(
         }
     }
     let denominator = exact_product(&a.denominator, &determinant, work, cancel)?;
-    for axis in 0..2 {
+    for (axis, bound) in cell[..2].iter().enumerate() {
         let mut numerator = exact_product(&a.position[axis], &determinant, work, cancel)?;
         exact_accumulate(
             &mut numerator,
             &exact_product(&a.derivative[axis], &ta, work, cancel)?,
         )?;
-        if exact_ratio_compare(&numerator, &denominator, cell[axis].lo, work, cancel)? < 0
-            || exact_ratio_compare(&numerator, &denominator, cell[axis].hi, work, cancel)? > 0
+        if exact_ratio_compare(&numerator, &denominator, bound.lo, work, cancel)? < 0
+            || exact_ratio_compare(&numerator, &denominator, bound.hi, work, cancel)? > 0
         {
             return Ok(false);
         }
@@ -2645,16 +2645,16 @@ fn exact_affine_literal_circle_disjoint(
     }
     let x = position.ref_direction.map(ExactCoefficient::point);
     let mut y = std::array::from_fn::<_, 2, _>(|_| ExactCoefficient::point(0.0));
-    for axis in 0..2 {
+    for (axis, y_coordinate) in y.iter_mut().enumerate() {
         let j = (axis + 1) % 3;
         let k = (axis + 2) % 3;
-        y[axis] = exact_product(
+        *y_coordinate = exact_product(
             &ExactCoefficient::point(position.axis[j]),
             &x[k],
             work,
             cancel,
         )?;
-        y[axis]
+        y_coordinate
             .subtract(&exact_product(
                 &ExactCoefficient::point(position.axis[k]),
                 &x[j],
@@ -3095,7 +3095,7 @@ fn homogeneous_collinear(
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     let mut determinant = ExactCoefficient::point(0.0);
-    for axis in 0..3 {
+    for (axis, &coordinate) in a[..3].iter().enumerate() {
         let i = (axis + 1) % 3;
         let j = (axis + 2) % 3;
         let mut minor = exact_product(
@@ -3113,7 +3113,7 @@ fn homogeneous_collinear(
         minor
             .subtract(&other)
             .ok_or_else(|| unavailable("native straightness exceeds exact expansion capacity"))?;
-        let term = exact_product(&ExactCoefficient::point(a[axis]), &minor, work, cancel)?;
+        let term = exact_product(&ExactCoefficient::point(coordinate), &minor, work, cancel)?;
         for value in &term.terms[..term.len] {
             determinant.push(*value).ok_or_else(|| {
                 unavailable("native straightness exceeds exact expansion capacity")
@@ -3659,16 +3659,16 @@ fn original_plane_basis(
     }
     let x = position.ref_direction.map(ExactCoefficient::point);
     let mut y = std::array::from_fn(|_| ExactCoefficient::point(0.0));
-    for axis in 0..3 {
+    for (axis, y_coordinate) in y.iter_mut().enumerate() {
         let j = (axis + 1) % 3;
         let k = (axis + 2) % 3;
-        y[axis] = exact_product(
+        *y_coordinate = exact_product(
             &ExactCoefficient::point(position.axis[j]),
             &x[k],
             work,
             cancel,
         )?;
-        y[axis]
+        y_coordinate
             .subtract(&exact_product(
                 &ExactCoefficient::point(position.axis[k]),
                 &x[j],
@@ -3747,9 +3747,9 @@ impl<'d> SourcePlanePullback<'d> {
             .ok_or_else(|| unavailable("sealed original plane inverse changed carrier"))?;
         let (rows, determinant) = original_plane_inverse_coefficients(position, work, cancel)?;
         let mut delta = std::array::from_fn(|_| ExactCoefficient::point(0.0));
-        for axis in 0..3 {
-            exact_accumulate(&mut delta[axis], &source.position[axis])?;
-            delta[axis]
+        for (axis, delta_coordinate) in delta.iter_mut().enumerate() {
+            exact_accumulate(delta_coordinate, &source.position[axis])?;
+            delta_coordinate
                 .subtract(&exact_product(
                     &ExactCoefficient::point(position.origin[axis]),
                     &source.denominator,
@@ -3849,8 +3849,8 @@ impl parametric::CurveEvaluator for SourcePlanePullback<'_> {
         let source = self.spatial.tensor(range, order, work, cancel)?;
         let mut result = [[Interval::point(0.0); 3]; 4];
         for derivative in 0..=order {
-            for axis in 0..2 {
-                result[derivative][axis] = (0..3).fold(Interval::point(0.0), |sum, coordinate| {
+            for (axis, result_coordinate) in result[derivative][..2].iter_mut().enumerate() {
+                *result_coordinate = (0..3).fold(Interval::point(0.0), |sum, coordinate| {
                     let value = if derivative == 0 {
                         source[0][coordinate].sub(Interval::point(self.origin[coordinate]))
                     } else {
@@ -3954,11 +3954,11 @@ fn exact_cross(
     cancel: &AtomicBool,
 ) -> Result<[ExactCoefficient; 3], GeometryError> {
     let mut result = std::array::from_fn(|_| ExactCoefficient::point(0.0));
-    for axis in 0..3 {
+    for (axis, result_coordinate) in result.iter_mut().enumerate() {
         let j = (axis + 1) % 3;
         let k = (axis + 2) % 3;
-        result[axis] = exact_product(&a[j], &b[k], work, cancel)?;
-        result[axis]
+        *result_coordinate = exact_product(&a[j], &b[k], work, cancel)?;
+        result_coordinate
             .subtract(&exact_product(&a[k], &b[j], work, cancel)?)
             .ok_or_else(|| unavailable("original cylinder cofactor exceeds exact capacity"))?;
     }
@@ -4222,8 +4222,8 @@ impl parametric::CurveEvaluator for SourceCylinderPullback<'_> {
             Interval::point(0.0)
         };
         let mut result = [[Interval::point(0.0); 3]; 4];
-        for axis in 0..2 {
-            result[0][axis] = self.origin[axis].add(self.velocity[axis].mul(parameter));
+        for (axis, &origin) in self.origin[..2].iter().enumerate() {
+            result[0][axis] = origin.add(self.velocity[axis].mul(parameter));
             if order > 0 {
                 result[1][axis] = self.velocity[axis].mul(derivative);
             }
@@ -4317,10 +4317,10 @@ fn original_plane_line_coefficients(
         Interval::new(v, v)?;
     }
     let mut y: [ExactCoefficient; 3] = std::array::from_fn(|_| ExactCoefficient::point(0.0));
-    for i in 0..3 {
+    for (i, y_coordinate) in y.iter_mut().enumerate() {
         let j = (i + 1) % 3;
         let k = (i + 2) % 3;
-        y[i] = exact_product(
+        *y_coordinate = exact_product(
             &ExactCoefficient::point(position.axis[j]),
             &ExactCoefficient::point(position.ref_direction[k]),
             work,
@@ -4332,7 +4332,7 @@ fn original_plane_line_coefficients(
             work,
             cancel,
         )?;
-        y[i].subtract(&term).ok_or_else(|| {
+        y_coordinate.subtract(&term).ok_or_else(|| {
             unavailable("original plane basis cross product exceeds exact capacity")
         })?;
     }
@@ -4407,14 +4407,14 @@ impl parametric::CurveEvaluator for SourceEndpointConnector {
             ));
         }
         let mut result = [[Interval::point(0.0); 3]; 4];
-        for axis in 0..2 {
+        for (axis, &start) in self.endpoints[0][..2].iter().enumerate() {
             if self.collapsed {
                 // This intersection is licensed only by a completed exact
                 // endpoint-expression equality proof in the joint constructor.
-                result[0][axis] = self.endpoints[0][axis].intersect(self.endpoints[1][axis])?;
+                result[0][axis] = start.intersect(self.endpoints[1][axis])?;
             } else {
-                let delta = self.endpoints[1][axis].sub(self.endpoints[0][axis]);
-                result[0][axis] = self.endpoints[0][axis].add(delta.mul(t));
+                let delta = self.endpoints[1][axis].sub(start);
+                result[0][axis] = start.add(delta.mul(t));
                 if order > 0 {
                     result[1][axis] = delta;
                 }
@@ -6034,11 +6034,11 @@ fn exact_affine_tensor(
 ) -> Result<[[Interval; 3]; 4], GeometryError> {
     Interval::new(range[0], range[1])?;
     let mut result = [[Interval::point(0.0); 3]; 4];
-    for axis in 0..3 {
+    for (axis, derivative) in affine.derivative[..3].iter().enumerate() {
         let mut endpoints = [Interval::point(0.0); 2];
         for (index, parameter) in range.into_iter().enumerate() {
             let term = exact_product(
-                &affine.derivative[axis],
+                derivative,
                 &ExactCoefficient::point(parameter),
                 work,
                 cancel,
@@ -6050,8 +6050,7 @@ fn exact_affine_tensor(
         }
         result[0][axis] = endpoints[0].hull(endpoints[1]);
         if order > 0 {
-            result[1][axis] =
-                exact_ratio(&affine.derivative[axis], &affine.denominator, work, cancel)?;
+            result[1][axis] = exact_ratio(derivative, &affine.denominator, work, cancel)?;
         }
     }
     Ok(result)
@@ -6646,8 +6645,8 @@ impl<'d> PreparedNativeTrimSource<'d> {
         // Necessary endpoint condition only. This rejects impossible candidates;
         // it does not promote vertex proximity into a source binding.
         let twice = Interval::point(ceiling).mul(Interval::point(2.0)).hi;
-        for endpoint in 0..2 {
-            let point = native_curve.tensor([target_range[endpoint]; 2], 0, work, cancel)?[0];
+        for (endpoint, &parameter) in target_range.iter().enumerate() {
+            let point = native_curve.tensor([parameter; 2], 0, work, cancel)?[0];
             let gap = norm(std::array::from_fn(|axis| {
                 point[axis].sub(Interval::point(source.vertex_points_mm[endpoint][axis]))
             }))?;
@@ -7647,10 +7646,10 @@ fn literal_source_pole(
     };
     for (pole, sign) in [(SphericalPole::North, 1.0), (SphericalPole::South, -1.0)] {
         let mut equal = true;
-        for axis in 0..3 {
+        for (axis, &coordinate) in position.axis[..3].iter().enumerate() {
             let mut value = exact_product(
                 &ExactCoefficient::point(*radius),
-                &ExactCoefficient::point(position.axis[axis]),
+                &ExactCoefficient::point(coordinate),
                 work,
                 cancel,
             )?;
@@ -7992,8 +7991,8 @@ fn finish_original_face<'d>(
                 bbox.ok_or_else(|| unavailable("original face has no complete chart boundary"))?;
             let mut actual_error = measured;
             for joint in &joints {
-                for axis in 0..2 {
-                    bbox[axis] = bbox[axis].hull(joint.enclosure[axis]);
+                for (coordinate, extent) in bbox.iter_mut().zip(joint.enclosure) {
+                    *coordinate = coordinate.hull(extent);
                 }
                 actual_error = actual_error.max(joint.physical_error_mm);
             }

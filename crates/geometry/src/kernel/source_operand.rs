@@ -3014,12 +3014,12 @@ mod affine_spline_tests {
             // Both endpoint equalities hold in the original t gauge despite the
             // non-dyadic derivative and cancellation of large control ordinates.
             for (i, t) in [-2.0, 4.0].into_iter().enumerate() {
-                for k in 0..3 {
+                for (k, &coordinate) in points[i][..3].iter().enumerate() {
                     assert!(
-                        c.endpoint_coordinate_equal(t, k, points[i][k], &mut work, &cancel)
+                        c.endpoint_coordinate_equal(t, k, coordinate, &mut work, &cancel)
                             .unwrap()
                     );
-                    let nearby = f64::from_bits(points[i][k].to_bits() + 1);
+                    let nearby = f64::from_bits(coordinate.to_bits() + 1);
                     assert!(
                         !c.endpoint_coordinate_equal(t, k, nearby, &mut work, &cancel)
                             .unwrap()
@@ -3098,8 +3098,8 @@ mod preferred_master_tests {
                 PreparedOriginalCurve::new(&source, [0.0, 1.0], usize::MAX, &mut work, &cancel)
                     .unwrap();
             let jet = provider.jet([0.0; 2], &mut work, &cancel).unwrap();
-            for k in 0..3 {
-                assert!(jet.jet.position[k].contains(expected[k]));
+            for (k, &coordinate) in expected[..3].iter().enumerate() {
+                assert!(jet.jet.position[k].contains(coordinate));
             }
             assert!(
                 provider
@@ -3127,10 +3127,10 @@ mod preferred_master_tests {
                 assert!(affine.is_none());
             } else {
                 let affine = affine.unwrap();
-                for k in 0..3 {
+                for (k, &coordinate) in expected[..3].iter().enumerate() {
                     assert!(
                         affine
-                            .endpoint_coordinate_equal(0.0, k, expected[k], &mut work, &cancel)
+                            .endpoint_coordinate_equal(0.0, k, coordinate, &mut work, &cancel)
                             .unwrap()
                     );
                 }

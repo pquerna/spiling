@@ -292,9 +292,8 @@ impl<'a> PreparedFacePlaneRoots<'a> {
                                 // Both complete adjacent spans prove this same
                                 // literal source parameter is a root. Count the
                                 // intersection once, without losing either bound.
-                                for axis in 0..2 {
-                                    previous.uv_box[axis] =
-                                        previous.uv_box[axis].hull(uv_box[axis]);
+                                for (coordinate, extent) in previous.uv_box.iter_mut().zip(uv_box) {
+                                    *coordinate = coordinate.hull(extent);
                                 }
                                 for axis in 0..3 {
                                     previous.position[axis] =
