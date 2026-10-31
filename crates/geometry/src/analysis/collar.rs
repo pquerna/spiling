@@ -7843,13 +7843,10 @@ mod tests {
             &cancel,
         )
         .unwrap();
-        let bounds = definition.bounds_mm();
-        let pose = RigidPoseMm {
-            translation_mm: [0.0, 0.0, -bounds.min[2]],
-            ..RigidPoseMm::IDENTITY
-        };
-        let top = bounds.max[2] - bounds.min[2];
-        let interval = [top - 0.1, top];
+        // The independent exporter constructs a 24 x 18 x 10 mm housing
+        // (independent-exporters/manifest.json). Import bounds enclose native
+        // control geometry; their upper endpoint is not the physical cap.
+        let pose = RigidPoseMm::IDENTITY;
         let mut work = GeometryWorkBudget::new(100_000_000);
         let prepared = prepare_solid(
             &definition,
@@ -7858,6 +7855,26 @@ mod tests {
             &cancel,
         )
         .unwrap();
+        let support = prepared
+            .material_bounds(
+                [0.0, 0.0, 1.0],
+                super::super::BoundsPolicy {
+                    maximum_endpoint_uncertainty_mm: 1e-9,
+                },
+                crate::MAX_PREPARED_SECTION_BYTES.saturating_sub(prepared.retained_bytes()),
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .bounds();
+        assert!(support.minimum[0].abs() < 1e-8 && support.minimum[1].abs() < 1e-8);
+        assert!(
+            (support.maximum[0] - 10.0).abs() < 1e-8 && (support.maximum[1] - 10.0).abs() < 1e-8
+        );
+        // Cover the whole authoritative native cap, including its independently
+        // bounded spatial edges; a nominal 10.0 cut may bisect roundoff brackets.
+        let top = support.maximum[1];
+        let interval = [top - 0.1, top];
         let analysis = prepared
             .analyze_placed_slab(
                 &super::super::PlacedSlabRequest {
