@@ -123,8 +123,11 @@ fn intent(supports: bool) -> ManufacturingIntent {
     }
 }
 fn generated(name: &str) -> Vec<u8> {
-    std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../fixtures/manufacturing/native/{name}.step")))
-        .expect("parent must generate genuine native operator STEP fixtures before running native regressions")
+    std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../fixtures/manufacturing/native/{name}.step")),
+    )
+    .expect("frozen native operator source must be present in fixtures/manufacturing/native")
 }
 const BOX: &[u8] = include_bytes!("../../../../fixtures/geometry/box-mm.step");
 const HOLE: &[u8] = include_bytes!("../../../../fixtures/geometry/through-hole.step");
@@ -2728,10 +2731,11 @@ fn image_capture_disabled_references_metadata_and_event_budgets_are_not_bypassed
 
 fn parity_source(name: &str) -> Vec<u8> {
     std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(format!("../../fixtures/geometry/native-parity-{name}.step")),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../fixtures/geometry/retained-sources/native-parity-{name}.step"
+        )),
     )
-    .expect("parent must generate the genuine native parity corpus before integration regressions")
+    .expect("frozen native parity source must be present in fixtures/geometry/retained-sources")
 }
 
 #[test]
