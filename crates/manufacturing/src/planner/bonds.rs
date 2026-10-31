@@ -111,6 +111,10 @@ pub(super) fn path_bytes(paths: &Vec<DepositionPath>) -> usize {
             .sum::<usize>()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Interface construction borrows source domains and mutates paths under explicit interval and resource admission"
+)]
 pub(super) fn construct(
     interfaces: &mut Vec<ProcessInterfaceCoverage>,
     domains: &[ProcessDomain],
@@ -278,6 +282,10 @@ pub(super) fn construct(
     Ok(true)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Wall and skin candidate witnesses remain independent of the queried endpoint and nominal width"
+)]
 fn terminal(
     endpoint: [f64; 3],
     other: [f64; 3],

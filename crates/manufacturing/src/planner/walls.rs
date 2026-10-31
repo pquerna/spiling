@@ -540,6 +540,10 @@ fn fit_material_boundaries(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bounded curve refinement keeps physical parameter interval and recursion depth explicit beside output and work"
+)]
 fn refine(
     curve: &MedialEdge,
     lo: f64,
@@ -695,6 +699,10 @@ fn reserve_stage<T>(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Boundary edge admission exposes source support, side, ordinal and continuing widths before output growth"
+)]
 fn push_edge(
     output: &mut Vec<BoundaryEdge>,
     points: [[f64; 2]; 2],
@@ -744,12 +752,16 @@ fn key(p: [f64; 2]) -> Result<Key, ManufacturingError> {
 fn point(k: Key) -> [f64; 2] {
     k.map(|v| v as f64 / SITE_SCALE)
 }
+/// A boundary edge and its endpoint side, both local to one wall proposal.
+type SourceEndpoint = (usize, usize);
+type SourceMates = Vec<[Option<SourceEndpoint>; 2]>;
+
 /// Pair continuing source ordinals before walking or fitting actual commands.
 fn source_mates(
     edges: &[BoundaryEdge],
     work: &mut usize,
     cancel: &AtomicBool,
-) -> Result<Vec<[Option<(usize, usize)>; 2]>, ManufacturingError> {
+) -> Result<SourceMates, ManufacturingError> {
     let mut incidence = BTreeMap::<Key, Vec<(usize, usize)>>::new();
     for (index, edge) in edges.iter().enumerate() {
         for side in 0..2 {
@@ -762,7 +774,12 @@ fn source_mates(
     let mut mate = vec![[None::<(usize, usize)>; 2]; edges.len()];
     for (&node, incident) in &incidence {
         loop {
-            let mut best: Option<((usize, usize), (usize, usize), usize, f64)> = None;
+            struct MateCandidate {
+                ends: [SourceEndpoint; 2],
+                association: usize,
+                tangent: f64,
+            }
+            let mut best: Option<MateCandidate> = None;
             for (at, &(a, a_side)) in incident.iter().enumerate() {
                 if mate[a][a_side].is_some() {
                     continue;
@@ -805,14 +822,19 @@ fn source_mates(
                         usize::from(edges[a].facing_boundary != edges[b].facing_boundary);
                     let tangent = dot(da, db) / (lengths[0] * lengths[1]);
                     if best.as_ref().is_none_or(|candidate| {
-                        association < candidate.2
-                            || association == candidate.2 && tangent.total_cmp(&candidate.3).is_lt()
+                        association < candidate.association
+                            || association == candidate.association
+                                && tangent.total_cmp(&candidate.tangent).is_lt()
                     }) {
-                        best = Some(((a, a_side), (b, b_side), association, tangent));
+                        best = Some(MateCandidate {
+                            ends: [(a, a_side), (b, b_side)],
+                            association,
+                            tangent,
+                        });
                     }
                 }
             }
-            let Some((a, b, _, _)) = best else {
+            let Some(MateCandidate { ends: [a, b], .. }) = best else {
                 break;
             };
             mate[a.0][a.1] = Some(b);

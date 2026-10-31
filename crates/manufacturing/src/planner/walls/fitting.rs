@@ -170,6 +170,10 @@ fn source_point(
 /// A fractional view of the SAME immutable source walk. Full clipped source
 /// intervals, continuous endpoint widths and the new XYZ6 endpoint displacement
 /// all enter the existing fit enclosure; no source vertex or interval is lost.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "First and last source edge fractions remain explicit ordered endpoints of the original walk"
+)]
 fn fractional_run(
     original: &OriginalPath<'_>,
     owner: BoundaryCorrespondence,
@@ -398,7 +402,14 @@ fn fit_corner(
         return Ok(None);
     }
     // Interior projections propose ordered fractional cuts, not membership.
-    let mut cuts: [Option<(f64, usize, (usize, usize), f64)>; 2] = [None; 2];
+    #[derive(Clone, Copy)]
+    struct CornerProjection {
+        squared_error: f64,
+        order: usize,
+        edge: (usize, usize),
+        fraction: f64,
+    }
+    let mut cuts: [Option<CornerProjection>; 2] = [None; 2];
     let mut current = prior.first;
     for order in 0..original.edges.len() {
         check_cancel(cancel)?;
@@ -416,8 +427,13 @@ fn fit_corner(
                 {
                     let delta = sub(joins[index], add(p, mul(direction, fraction)));
                     let error = dot(delta, delta);
-                    if cuts[index].is_none_or(|best| error < best.0) {
-                        cuts[index] = Some((error, order, current, fraction));
+                    if cuts[index].is_none_or(|best| error < best.squared_error) {
+                        cuts[index] = Some(CornerProjection {
+                            squared_error: error,
+                            order,
+                            edge: current,
+                            fraction,
+                        });
                     }
                 }
             }
@@ -432,15 +448,21 @@ fn fit_corner(
     let [Some(first), Some(second)] = cuts else {
         return Ok(None);
     };
-    if first.1 > second.1 || first.1 == second.1 && first.3 >= second.3 {
+    if first.order > second.order
+        || first.order == second.order && first.fraction >= second.fraction
+    {
         return Ok(None);
     }
     let starts = [
         (prior.first, prior.first_fraction),
-        (first.2, first.3),
-        (second.2, second.3),
+        (first.edge, first.fraction),
+        (second.edge, second.fraction),
     ];
-    let ends = [(first.2, first.3), (second.2, second.3), (end, 1.0)];
+    let ends = [
+        (first.edge, first.fraction),
+        (second.edge, second.fraction),
+        (end, 1.0),
+    ];
     let mut fitted = [None; 3];
     for index in 0..3 {
         let Some(mut candidate) = fractional_run(
@@ -976,6 +998,10 @@ fn batch(
 /// runs, so a larger command cannot leave an unprintable remainder. Unproved
 /// batches are subdivided, not treated as monotone admission facts. Original
 /// ranges are disjoint at each balanced depth: full-chain work is O(N log N).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Command fitting binds mutable paths and correspondence to original runs and predeclared permissions"
+)]
 fn maximize(
     path: &mut DepositionPath,
     correspondence: &mut Vec<BoundaryCorrespondence>,
@@ -1311,8 +1337,8 @@ pub(super) fn coalesce(
                     work,
                     cancel,
                 )? {
-                    for index in start..legal.len() {
-                        write_run(path, correspondence, base, index, legal[index], count)?;
+                    for (index, &run) in legal.iter().enumerate().skip(start) {
+                        write_run(path, correspondence, base, index, run, count)?;
                     }
                     written = legal.len();
                     previous = legal.last().copied();
@@ -1732,7 +1758,7 @@ mod tests {
             "ordinary curved fitting must spend radius, not just report a centerline error tube"
         );
         assert_eq!(
-            path.checked_edges().unwrap().last().unwrap().width_mm,
+            path.checked_edges().unwrap().next_back().unwrap().width_mm,
             0.45,
             "materializing a variable output prefix must not replace unread source widths"
         );

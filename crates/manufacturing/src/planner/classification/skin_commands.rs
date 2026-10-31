@@ -55,6 +55,10 @@ impl Rows {
     fn bytes(&self) -> usize {
         capacity_bytes(&self.hits) + capacity_bytes(&self.intervals)
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Mask row geometry, projection policy and live allocation admission remain separate inputs"
+    )]
     fn read(
         &mut self,
         masks: &[DiaphragmPolygonMm],
@@ -400,6 +404,10 @@ fn consider_start(first: i64, last: i64, preferred: i64, selected: &mut Option<i
 
 /// Integer start constraints exhaust the finite XYZ6 lattice without sampling
 /// three arbitrary placements. Excluding a short remainder never deletes it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Fit selection independently borrows required geometry, emitted paths, forbidden intervals and admission scratch"
+)]
 fn choose(
     domain: &SkinCommandFitDomain,
     required: [[f64; 3]; 2],
@@ -669,6 +677,10 @@ fn choose(
 }
 
 /// Reserve actual Regional extrusion, not an unprintable raw-coordinate tail.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Regional ownership replacement must explicitly charge paths, segments and simultaneous fit scratch"
+)]
 fn reserve_regional_material(
     paths: &mut Vec<DepositionPath>,
     index: usize,

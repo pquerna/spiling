@@ -687,6 +687,10 @@ fn ring_compare(a: &LineString<f64>, b: &LineString<f64>) -> std::cmp::Ordering 
     a.0.len().cmp(&b.0.len())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Contour geometry, physical interval and support role stay explicit beside bounded output counters"
+)]
 pub(super) fn support_contour_paths(
     centers: &MultiPolygon<f64>,
     z: f64,
@@ -800,6 +804,10 @@ pub(super) fn hatch(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Authored common phase and ordinary recovery phase are distinct hatch policies"
+)]
 pub(super) fn hatch_with_phase(
     fill: &MultiPolygon<f64>,
     kind: DepositionKind,

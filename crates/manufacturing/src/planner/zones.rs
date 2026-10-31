@@ -275,9 +275,9 @@ pub(super) fn capture(
             .chain(occurrence.pose.translation_mm)
             .fold(1_f64, |s, v| s.max(v.abs()));
         let arithmetic = scale * 64. * f64::EPSILON;
-        for a in 0..3 {
-            local.min[a] = local.min[a].min((point[a] - arithmetic).next_down());
-            local.max[a] = local.max[a].max((point[a] + arithmetic).next_up());
+        for (a, coordinate) in point.into_iter().enumerate() {
+            local.min[a] = local.min[a].min((coordinate - arithmetic).next_down());
+            local.max[a] = local.max[a].max((coordinate + arithmetic).next_up());
         }
     }
     boxes.retain(|b| !(0..3).any(|a| b.max[a] <= local.min[a] || b.min[a] >= local.max[a]));

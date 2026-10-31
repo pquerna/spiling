@@ -442,7 +442,7 @@ fn physical_skin_horizon_tracks_shrinking_local_top_and_slab_transition() {
         )
         .unwrap();
         let coverage = &classified.coverage;
-        partition(&coverage);
+        partition(coverage);
         if index < 2 {
             assert!(coverage.bottom_skin_area_mm2 > 0.0);
         } else {
@@ -1521,7 +1521,7 @@ fn sliding_physical_skin_horizons_reuse_varying_annuli_and_protected_holes() {
             .unwrap();
             let actual_coverage = &actual.coverage;
             let expected_coverage = &expected.coverage;
-            partition(&actual_coverage);
+            partition(actual_coverage);
             for (actual_area, expected_area) in [
                 (
                     actual_coverage.bottom_skin_area_mm2,
@@ -1583,7 +1583,7 @@ fn sliding_physical_skin_horizons_reuse_varying_annuli_and_protected_holes() {
             )
             .unwrap();
             let coverage = &classified.coverage;
-            partition(&coverage);
+            partition(coverage);
             assert!((coverage.protected_hole_area_mm2 - 4.0).abs() < 0.0001);
             assert!(neighborhoods.retained_points() <= pool);
         }

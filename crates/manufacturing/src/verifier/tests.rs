@@ -1916,7 +1916,9 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     let descriptor = packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report);
     validate_replay_display(&bytes, &descriptor).unwrap();
     let sparse = bytes[REPLAY_HEADER_BYTES..]
-        .chunks_exact(REPLAY_RECORD_BYTES)
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+        .iter()
         .find(|record| record[46] == 5)
         .unwrap();
     assert_eq!(f64::from_le_bytes(sparse[48..56].try_into().unwrap()), 0.45);
@@ -1961,7 +1963,9 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
         write!(&mut hex, "{byte:02x}").unwrap();
     }
     let positions: Vec<[f64; 3]> = bytes[REPLAY_HEADER_BYTES..]
-        .chunks_exact(REPLAY_RECORD_BYTES)
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+        .iter()
         .map(|record| {
             std::array::from_fn(|axis| {
                 f64::from_le_bytes(record[axis * 8..axis * 8 + 8].try_into().unwrap())

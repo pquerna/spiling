@@ -594,6 +594,10 @@ impl Ord for Pending {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Contour transport keeps native adjacency, anchor fields and optional corner bounds independent"
+)]
 pub(super) fn transport(
     graph: &skeleton::Skeleton,
     cells: &[Option<f64>],

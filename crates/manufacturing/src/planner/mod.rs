@@ -294,6 +294,10 @@ fn native_retry_outside_bytes(
     })
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "One admission result transfers owned prefix or final buffers without a separate allocation"
+)]
 enum ScheduleAdmission {
     PrefixAdmitted(NativeScheduleCapture),
     RefineUnreachableLayer {
@@ -302,6 +306,13 @@ enum ScheduleAdmission {
         recycled: native::RecyclableSlabs,
     },
     Complete(NormalizedPrintPlan),
+}
+
+struct OrdinaryTemplate {
+    phase: region::OrdinaryHatchPhase,
+    paths: Vec<DepositionPath>,
+    coverage: PlanarRegionCoverage,
+    fits: Vec<SkinCommandFitDomain>,
 }
 
 // Successful tentative native/D owners move into final admission unchanged.
@@ -314,6 +325,10 @@ struct NativeScheduleCapture {
     stage: native::NativeStageState,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "One schedule switches native proof authority in place; the tentative owner is not replicated"
+)]
 enum ScheduleNativeAuthority {
     Tentative { stage: native::NativeStageState },
     Complete(native::CompletedCoverage),
@@ -371,12 +386,16 @@ impl ScheduleNativeAuthority {
 // Tentative and final admission use the same native/D/wall/skin/anchor pipeline.
 // Only the tentative physical terminal/output horizons differ. Nothing from a
 // discarded attempt can authorize the final native ledger or emitted program.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "One admission orchestrator borrows independent native, surface, support and recycled-prefix owners"
+)]
 fn admit_schedule<'model>(
     input: &CompilerInput<'model>,
     cancel: &AtomicBool,
     admission: &mut preflight::Admission,
     prepared_sources: &PreparedSources<'model>,
-    process_captures: &mut Vec<zones::Capture>,
+    process_captures: &mut [zones::Capture],
     schedule: &mut Vec<LayerElevation>,
     surface_work: &mut usize,
     support_work: &mut support::SupportWork,
@@ -955,12 +974,7 @@ fn admit_schedule<'model>(
             geometry_bytes(&[wall_static_base_bytes, retained_plan_bytes])?,
         )?;
         let mut phase_anchors = support::AnchorWorkspace::default();
-        let mut templates: [Option<(
-            region::OrdinaryHatchPhase,
-            Vec<DepositionPath>,
-            PlanarRegionCoverage,
-            Vec<SkinCommandFitDomain>,
-        )>; 2] = [None, None];
+        let mut templates: [Option<OrdinaryTemplate>; 2] = [None, None];
         let mut surface_resolution = Vec::new();
         let mut resolution_allocated_bytes = 0usize;
         let mut diagnostic_work = 0usize;
@@ -1376,7 +1390,7 @@ fn admit_schedule<'model>(
             phase_by_layer[index as usize] = phase;
             if templates[axis_slot]
                 .as_ref()
-                .is_some_and(|(saved, ..)| *saved != phase)
+                .is_some_and(|template| template.phase != phase)
             {
                 // The geometry/classification owner is unchanged. Only this axis's
                 // nominal path template depends on the chosen ordinary quarter.
@@ -1439,9 +1453,19 @@ fn admit_schedule<'model>(
                     bonds::coverage_owned_bytes(proposed),
                 )?;
                 let coverage = proposed.clone();
-                templates[axis_slot] = Some((phase, paths, coverage, fits));
+                templates[axis_slot] = Some(OrdinaryTemplate {
+                    phase,
+                    paths,
+                    coverage,
+                    fits,
+                });
             }
-            let (_, template, coverage, template_fits) = templates[axis_slot]
+            let OrdinaryTemplate {
+                paths: template,
+                coverage,
+                fits: template_fits,
+                ..
+            } = templates[axis_slot]
                 .as_ref()
                 .expect("current axis template initialized");
             let additional = template
@@ -1485,11 +1509,18 @@ fn admit_schedule<'model>(
             let template_bytes = templates
                 .iter()
                 .flatten()
-                .map(|(_, paths, coverage, fits)| {
-                    bonds::path_bytes(paths)
-                        + bonds::coverage_owned_bytes(coverage)
-                        + bonds::skin_command_fit_bytes(fits)
-                })
+                .map(
+                    |OrdinaryTemplate {
+                         paths,
+                         coverage,
+                         fits,
+                         ..
+                     }| {
+                        bonds::path_bytes(paths)
+                            + bonds::coverage_owned_bytes(coverage)
+                            + bonds::skin_command_fit_bytes(fits)
+                    },
+                )
                 .sum::<usize>();
             if retained_plan_bytes
                 .checked_add(template_bytes)
@@ -3195,12 +3226,7 @@ fn skin_external_owned_bytes(
     cache_len: usize,
     cache_entry_bytes: usize,
     resolution_bytes: usize,
-    templates: &[Option<(
-        region::OrdinaryHatchPhase,
-        Vec<DepositionPath>,
-        PlanarRegionCoverage,
-        Vec<SkinCommandFitDomain>,
-    )>; 2],
+    templates: &[Option<OrdinaryTemplate>; 2],
 ) -> Result<usize, ManufacturingError> {
     let index_bytes = cache_len.checked_mul(cache_entry_bytes).ok_or_else(|| {
         error(
@@ -3223,7 +3249,13 @@ fn skin_external_owned_bytes(
             "skin outside byte overflow",
         )
     })?;
-    for (_, paths, coverage, fits) in templates.iter().flatten() {
+    for OrdinaryTemplate {
+        paths,
+        coverage,
+        fits,
+        ..
+    } in templates.iter().flatten()
+    {
         bytes = bytes
             .checked_add(bonds::path_bytes(paths))
             .and_then(|b| b.checked_add(bonds::coverage_owned_bytes(coverage)))

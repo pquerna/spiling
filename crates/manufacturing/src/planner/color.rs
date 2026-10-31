@@ -34,6 +34,10 @@ fn unsupported(message: &str) -> ManufacturingError {
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Material construction binds captured input, native sections, physical schedule and independent resource counters"
+)]
 pub(super) fn capture(
     input: &CompilerInput<'_>,
     sections: &[super::SectionSpan],

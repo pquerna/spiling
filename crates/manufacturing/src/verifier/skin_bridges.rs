@@ -26,6 +26,10 @@ fn charge(work: &mut usize, n: usize) -> Result<(), ManufacturingError> {
 /// Reconstruct an ORIGINAL classified row, including holes, then project that
 /// interval's endpoints by the sole XYZ6 contract. Classification uses its raw
 /// authored row; physical source confinement separately uses the emitted row.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Raw and projected containment use explicit domain, row and actual endpoint operands"
+)]
 fn contains_portion(
     domain: &[DiaphragmPolygonMm],
     row: f64,

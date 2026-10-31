@@ -725,6 +725,10 @@ fn actual_wall_before(
     ))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Replay checks a typed endpoint bond against independent plan, separator and direct-anchor evidence"
+)]
 fn verify_terminal(
     plan: &NormalizedPrintPlan,
     layer_index: usize,
@@ -816,6 +820,10 @@ fn verify_terminal(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Actual lower support requires explicit width, recipe and genuine-gap policy beside anchor work"
+)]
 pub(super) fn verify_bridge_lower(
     plan: &NormalizedPrintPlan,
     index: usize,

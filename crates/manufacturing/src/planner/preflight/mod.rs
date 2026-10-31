@@ -821,6 +821,19 @@ fn scheduling_event_covers(
     })
 }
 
+fn native_check_code(code: GeometryErrorCode) -> &'static str {
+    match code {
+        GeometryErrorCode::ConditioningFailure => "native_conditioning_failure",
+        GeometryErrorCode::AnalysisIndeterminate
+        | GeometryErrorCode::ParameterCorrespondenceUnavailable => "native_analysis_indeterminate",
+        GeometryErrorCode::UnsupportedGeometry => "native_unsupported_geometry",
+        GeometryErrorCode::UnsupportedConversion => "native_unsupported_conversion",
+        GeometryErrorCode::KernelFailure => "native_kernel_failure",
+        GeometryErrorCode::SingularGeometry => "native_singular_geometry",
+        _ => "native_invalid_geometry",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::scheduling_event_covers;
@@ -846,18 +859,5 @@ mod tests {
             );
         }
         assert!(covers.iter().all(|cover| cover[1] - cover[0] <= 1.0));
-    }
-}
-
-fn native_check_code(code: GeometryErrorCode) -> &'static str {
-    match code {
-        GeometryErrorCode::ConditioningFailure => "native_conditioning_failure",
-        GeometryErrorCode::AnalysisIndeterminate
-        | GeometryErrorCode::ParameterCorrespondenceUnavailable => "native_analysis_indeterminate",
-        GeometryErrorCode::UnsupportedGeometry => "native_unsupported_geometry",
-        GeometryErrorCode::UnsupportedConversion => "native_unsupported_conversion",
-        GeometryErrorCode::KernelFailure => "native_kernel_failure",
-        GeometryErrorCode::SingularGeometry => "native_singular_geometry",
-        _ => "native_invalid_geometry",
     }
 }

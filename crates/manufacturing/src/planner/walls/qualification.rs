@@ -747,6 +747,10 @@ fn union_region_subtree(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Dose proof compares actual paths against independent nominal union and fresh local permission with bounded scratch"
+)]
 fn qualify_local_dose(
     paths: &[DepositionPath],
     nominal: &MultiPolygon<f64>,

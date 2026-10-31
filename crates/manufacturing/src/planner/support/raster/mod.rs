@@ -23,6 +23,10 @@ pub(super) struct Domains {
 }
 
 impl Domains {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Support and interface operands retain separate live and anchor byte inventories and cumulative work"
+    )]
     pub(super) fn new(
         support: &MultiPolygon<f64>,
         interface: &MultiPolygon<f64>,
@@ -117,6 +121,10 @@ impl Domains {
         self.anchor_owned_bytes = bytes;
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Raster emission binds captured interface geometry and density to the actual layer and existing segment count"
+    )]
     pub(super) fn paths(
         &self,
         interface: &MultiPolygon<f64>,
@@ -304,6 +312,10 @@ struct WallRing {
     first_path: usize,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Wall raster construction explicitly charges live geometry, output segments and foreign work"
+)]
 fn walls(
     contours: WallContours<'_>,
     layer: &region::HatchLayer<'_>,
@@ -430,6 +442,10 @@ fn walls(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "One wall piece borrows its ring authority while charging path, point and segment growth separately"
+)]
 fn wall_piece(
     edge: [Coord<f64>; 2],
     kind: DepositionKind,

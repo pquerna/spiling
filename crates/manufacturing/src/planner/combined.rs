@@ -11,6 +11,10 @@ use std::sync::{Arc, atomic::AtomicBool};
 const MAX_BAND_INTERVALS: usize = 3;
 const MAX_STAGE_BYTES: usize = 4 * 1024 * 1024;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Band combination retains separate native sources, fine layers, walls and skin horizons with their work owners"
+)]
 pub(super) fn combine(
     plan: &mut NormalizedPrintPlan,
     intent: &ManufacturingIntent,

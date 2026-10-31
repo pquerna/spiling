@@ -1010,6 +1010,10 @@ impl ReadyStage {
 /// Settle a bounded actual successor frontier before recording the current
 /// candidate. Real source leaves break the contact cycle; the final ordered
 /// ledger still requires their actual use in accepted final-M candidates.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Span collection separately mutates admission, schedule, native stage and reusable slab ownership"
+)]
 pub(super) fn collect_span(
     source: &NativeSourceInputs<'_, '_>,
     admission: &mut preflight::Admission,
@@ -1792,6 +1796,10 @@ pub(super) fn collect_span(
     Ok(ready.span)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Native base capture exposes sizing and recycled slab owners beside the source and requested interval"
+)]
 fn capture_base(
     source: &NativeSourceInputs<'_, '_>,
     admission: &mut preflight::Admission,
@@ -2448,6 +2456,10 @@ fn merge_root(
     Ok(index)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Native union retains independent coordinate error and both operand byte receipts"
+)]
 fn merge_shared(
     target: &mut Arc<MultiPolygon<f64>>,
     incoming: &Arc<MultiPolygon<f64>>,
@@ -3009,6 +3021,10 @@ fn admit_bytes(
 /// Project each relevant original-source void capture once, only after actual
 /// deposited strokes established demand. These are scoped exclusion masks,
 /// never material, anchor or approximate all-domain source certificates.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Void projection binds current sources and captures to explicit demand, lifetime and native work ownership"
+)]
 pub(super) fn project_protected_voids(
     input: &CompilerInput<'_>,
     sources: &BTreeMap<DefinitionId, spiling_geometry::PreparedSolid<'_>>,

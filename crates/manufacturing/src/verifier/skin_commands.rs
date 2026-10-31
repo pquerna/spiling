@@ -112,6 +112,10 @@ impl Rows {
     /// Same half-open ring sweep and sole XYZ6 endpoint projection as the mixed
     /// skin-bridge proof. Sorting/union permits adjacent components but never
     /// fills a hole or an intervening positive gap.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Independent mask scanning keeps projection, retained storage and cumulative work separate"
+    )]
     fn read(
         &mut self,
         domain: &[DiaphragmPolygonMm],
@@ -248,6 +252,10 @@ fn contains_interval(outer: [f64; 2], inner: [f64; 2]) -> bool {
     outer[0] <= inner[0] && inner[1] <= outer[1]
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Fit verification compares captured domain, fit metadata and actual path under the physical height"
+)]
 fn check_masks(
     domain: &SkinCommandFitDomain,
     fit: &SkinCommandFit,

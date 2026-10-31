@@ -375,8 +375,8 @@ impl<'a> RouteState<'a> {
                     return Err(failed("wrong or non-S1 routed tool selection"));
                 }
                 if let Some(point) = &mut motion.position {
-                    for axis in 0..2 {
-                        point[axis] += self.job.tools[target as usize].offset_xy_mm[axis]
+                    for (axis, coordinate) in point[..2].iter_mut().enumerate() {
+                        *coordinate += self.job.tools[target as usize].offset_xy_mm[axis]
                             - self.job.tools[tool].offset_xy_mm[axis];
                     }
                 }
@@ -535,13 +535,13 @@ impl<'a> RouteState<'a> {
                 }
                 self.check_motion(from, actual, intent)?;
                 for point in [from, actual] {
-                    for axis in 0..2 {
+                    for (axis, coordinate) in point[..2].iter().copied().enumerate() {
                         let radius = (self.recipe.bead_width_mm * 0.5
-                            + program_coordinates::xyz6_coordinate_error_mm(point[axis])?)
+                            + program_coordinates::xyz6_coordinate_error_mm(coordinate)?)
                         .next_up();
-                        if (point[axis] - radius).next_down()
+                        if (coordinate - radius).next_down()
                             < intent.printer.build_envelope.min[axis]
-                            || (point[axis] + radius).next_up()
+                            || (coordinate + radius).next_up()
                                 > intent.printer.build_envelope.max[axis]
                         {
                             return Err(failed(

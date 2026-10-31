@@ -527,8 +527,7 @@ fn polygon_graph<'a>(
             }
             chain[length] = (base + (local + 1) % count, Parameter::End);
             length += 1;
-            for plane in 0..2 {
-                let cut = cuts[plane];
+            for (plane, &cut) in cuts.iter().enumerate() {
                 if av == cut && bv == cut {
                     let increasing = component(a, 1 - axis) < component(b, 1 - axis);
                     // x-plane/up => material west; y-plane/right => material north.

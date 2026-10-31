@@ -157,7 +157,7 @@ fn ordinary_rectangle_is_closed_and_retains_actual_residual() {
         width_envelope(&limits, 0.2).unwrap(),
         "identical effective XY envelopes do not depend on physical-height bit patterns"
     );
-    let mut tighter = limits.clone();
+    let mut tighter = limits;
     tighter.max_bead_width_mm = 0.72;
     assert_ne!(
         width_envelope(&limits, 0.1).unwrap(),

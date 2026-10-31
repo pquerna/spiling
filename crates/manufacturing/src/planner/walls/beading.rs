@@ -482,6 +482,10 @@ pub(super) fn advance(plan: &mut SourcePlan) -> bool {
     false
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Beading emits paths and junction permissions separately from immutable source topology and nominal fill"
+)]
 pub(super) fn emit(
     plan: &SourcePlan,
     graph: &Skeleton,
@@ -1774,6 +1778,10 @@ fn corner_completion(
     Ok(spines)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Source walking borrows adjacency while mutating visited incidence and span output under one budget"
+)]
 fn walk(
     graph: &Skeleton,
     adjacency: &Adjacency,
@@ -2276,6 +2284,10 @@ fn whole_arm_counts(
     Ok(choices)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Count events and overlap permissions have separate output ownership from source arm geometry"
+)]
 fn plan_events(
     graph: &Skeleton,
     incidence: SourceIncidence<'_>,
@@ -2423,6 +2435,10 @@ fn plan_events(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Arm emission binds event and junction fields to independently supplied nominal fill and wall limits"
+)]
 fn emit_arm(
     graph: &Skeleton,
     incidence: SourceIncidence<'_>,
@@ -2465,6 +2481,10 @@ fn emit_arm(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Gap evaluation keeps exact arm position and optional event distinct from nominal fill and junction bounds"
+)]
 fn center_gap(
     graph: &Skeleton,
     incidence: SourceIncidence<'_>,
@@ -2526,6 +2546,10 @@ fn central(field: Field) -> bool {
     field.central && !field.split || field.newborn_width.is_some() && !field.split
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Junction spine emission retains original events and breakpoints beside independent cap and fill operands"
+)]
 fn emit_junction_spines(
     graph: &Skeleton,
     incidence: SourceIncidence<'_>,

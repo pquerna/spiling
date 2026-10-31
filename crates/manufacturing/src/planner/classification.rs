@@ -805,6 +805,10 @@ impl ClassifiedRegions {
 
     /// Propose one shared ordinary phase without granting final stroke support
     /// or changing any source-framed or mandatory-skin construction.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Phase selection borrows prior strokes and separately accounts classified, external and anchor ownership"
+    )]
     pub(super) fn choose_initial_ordinary_phase<'a>(
         &self,
         layer: &region::HatchLayer<'_>,
@@ -1011,6 +1015,10 @@ impl ClassifiedRegions {
         Ok(region::OrdinaryHatchPhase::Centered)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Physical interval, authored axes and source ownership are explicit path construction inputs"
+    )]
     pub(super) fn paths(
         &self,
         z: f64,
@@ -1107,6 +1115,10 @@ impl ClassifiedRegions {
         Ok((paths, &self.coverage, fits))
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Fitted paths retain separate direct anchors, constructed domains and command-fit output owners"
+    )]
     pub(super) fn paths_with_bridge_recovery(
         &self,
         layer: &region::HatchLayer<'_>,
@@ -1188,6 +1200,10 @@ impl ClassifiedRegions {
 
     /// Preserve authored role lattices outside demand-bound bridge cells and
     /// their actual anchor corridors. All ownership stays in this same fill.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Unfitted bridge recovery must not hide its source domains, direct anchors or construction outputs"
+    )]
     fn paths_with_bridge_recovery_unfitted(
         &self,
         layer: &region::HatchLayer<'_>,
@@ -2270,6 +2286,10 @@ impl ClassifiedRegions {
 
     /// Extend only genuinely demanded original skin rows, after the existing
     /// whole candidate has failed. The original rows and demand set stay intact.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Required strokes and actual demand remain independent of layer and anchor scratch admission"
+    )]
     fn demanded_skin_bridges(
         &self,
         required: &[DepositionPath],
@@ -2424,6 +2444,10 @@ impl ClassifiedRegions {
 
     /// Repartition already-required skin at a genuinely demanded regional
     /// terminal. The authored regional core/lattice never moves or grows.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Terminal repair must borrow original source, demand, bridge and patch owners without duplicating them"
+    )]
     fn repair_skin_terminals<'a>(
         &'a self,
         polygon: &'a Polygon<f64>,
@@ -3097,6 +3121,10 @@ impl ClassifiedRegions {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Admission inventories every simultaneously live split owner before growth"
+)]
 fn admit_split_inventory(
     admit: &mut impl FnMut(usize, usize) -> Result<(), ManufacturingError>,
     old_records: usize,
@@ -3696,6 +3724,10 @@ fn point_sum(a: usize, b: usize) -> Result<usize, ManufacturingError> {
 
 /// Bands partition the same borrowed role polygon by exact axis intervals.
 /// Every selected row is unchanged, wholly Bridge-certified and demand-bound.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Authored demand and alternative bridge demand remain separate coverage operands"
+)]
 fn bridge_bands(
     (polygon, axis): (&Polygon<f64>, region::HatchAxis),
     paths: &[DepositionPath],

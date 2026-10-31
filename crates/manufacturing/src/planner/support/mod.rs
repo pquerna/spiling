@@ -6,7 +6,10 @@ use crate::{check_cancel, error};
 use geo::algorithm::buffer::{BufferStyle, LineJoin};
 use geo::{Area, BooleanOps, BoundingRect, Buffer, MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::*;
-use std::sync::{Arc, Weak, atomic::AtomicBool};
+use std::{
+    rc::{Rc, Weak},
+    sync::atomic::AtomicBool,
+};
 mod anchors;
 pub(super) use anchors::inward_bond_endpoint;
 pub(crate) use anchors::{AnchorCandidate, AnchorWorkspace, endpoint_bond, projected_edges};
@@ -311,7 +314,8 @@ struct BridgeRowContext<'a> {
     recipe: &'a PlanarPrintRecipe,
 }
 
-/// Exact payload receipt captured before immutable sharing.
+/// Exact payload receipt captured before worker-local sharing.
+/// The Cell is temporary inventory state; these owners never cross threads.
 struct OwnedMaterial {
     material: MultiPolygon<f64>,
     bytes: usize,
@@ -333,9 +337,9 @@ impl OwnedMaterial {
         }
     }
 
-    fn into_shared(mut self) -> Arc<Self> {
+    fn into_shared(mut self) -> Rc<Self> {
         self.header_bytes = std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>();
-        Arc::new(self)
+        Rc::new(self)
     }
 }
 
@@ -350,15 +354,19 @@ impl std::ops::Deref for OwnedMaterial {
 /// The weak source key must not keep an old contour array alive.
 struct SharedUnion {
     source: Weak<OwnedMaterial>,
-    result: Arc<OwnedMaterial>,
+    result: Rc<OwnedMaterial>,
 }
 
 // Identical fixed-XY columns share immutable contours between layers. Reuse a
 // union for identical incoming owners; a weak key retains no old point arrays.
 // Each cache is scoped to one fixed immutable `other` column below.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Column union must account both shared owners, its weak cache and foreign work before replacement"
+)]
 fn merge_shared(
-    into: &mut Arc<OwnedMaterial>,
-    other: &Arc<OwnedMaterial>,
+    into: &mut Rc<OwnedMaterial>,
+    other: &Rc<OwnedMaterial>,
     cached: &mut Option<SharedUnion>,
     live_units: usize,
     live_bytes: usize,
@@ -371,13 +379,13 @@ fn merge_shared(
         return Ok(());
     }
     if into.0.is_empty() {
-        *into = Arc::clone(other);
+        *into = Rc::clone(other);
         return Ok(());
     }
     if let Some(cached) = cached
-        && cached.source.as_ptr() == Arc::as_ptr(into)
+        && cached.source.as_ptr() == Rc::as_ptr(into)
     {
-        *into = Arc::clone(&cached.result);
+        *into = Rc::clone(&cached.result);
         return Ok(());
     }
     charge_boolean(into, other, work, foreign_work, cancel)?;
@@ -387,7 +395,7 @@ fn merge_shared(
     check_cancel(cancel)?;
     let result = OwnedMaterial::new(result);
     // Stock overlay output is opaque until returned. Admit all known old/new
-    // owners before allocating its Arc header or publishing either reference.
+    // owners before allocating its Rc header or publishing either reference.
     super::remaining_geometry_units(
         live_units.saturating_add(result.units),
         live_bytes.saturating_add(result.bytes).saturating_add(
@@ -396,8 +404,8 @@ fn merge_shared(
     )?;
     let result = result.into_shared();
     *cached = Some(SharedUnion {
-        source: Arc::downgrade(into),
-        result: Arc::clone(&result),
+        source: Rc::downgrade(into),
+        result: Rc::clone(&result),
     });
     *into = result;
     Ok(())
@@ -482,6 +490,10 @@ pub(super) enum SupportAdmission {
 // Anchors come only from actual deposited capsules. Corridor exclusion consumes
 // every lower slab's continuous-target outer occupancy, separately from the
 // sampled/scheduled D used by walls and physical-distance skin classification.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Support orchestration keeps native void projection, raster generation and interface finalization as distinct callbacks"
+)]
 pub(super) fn realize(
     layers: &mut [PrintLayer],
     input: &SupportInput<'_>,
@@ -1005,7 +1017,7 @@ pub(super) fn realize(
         }
         region::check_size(&protected)?;
         let layer_metadata_bytes = layers.len().saturating_mul(
-            2 * std::mem::size_of::<Arc<OwnedMaterial>>()
+            2 * std::mem::size_of::<Rc<OwnedMaterial>>()
                 + std::mem::size_of::<usize>()
                 + std::mem::size_of::<Option<usize>>(),
         );
@@ -1020,7 +1032,7 @@ pub(super) fn realize(
                 ),
         )?;
         let empty = OwnedMaterial::new(MultiPolygon(Vec::new())).into_shared();
-        let mut support_regions = vec![Arc::clone(&empty); layers.len()];
+        let mut support_regions = vec![Rc::clone(&empty); layers.len()];
         let mut interfaces = vec![empty; layers.len()];
         let mut object_start = vec![0; layers.len()];
         let mut contact_tops = vec![None; layers.len()];
@@ -1368,7 +1380,7 @@ pub(super) fn realize(
             let mut shared_union = None;
             let mut next_nominal = 0;
             // A weak source can outlive its last strong geometry owner. Reserve
-            // old/new Arc header records across cache replacement, including offsets
+            // old/new Rc header records across cache replacement, including offsets
             // performed while the previous cache entry is still live.
             let weak_header_reservation =
                 2 * (std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>());
@@ -1493,7 +1505,7 @@ pub(super) fn realize(
             let mut domains = raster::Domains::new(
                 &support_regions[i],
                 interface,
-                Arc::ptr_eq(&support_regions[i], &interfaces[i]),
+                Rc::ptr_eq(&support_regions[i], &interfaces[i]),
                 width,
                 retained_domains,
                 owned_bytes.saturating_add(
@@ -2867,13 +2879,17 @@ fn reserve_owned<T>(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Offset admission inventories shared support, interfaces and temporary material without retaining them"
+)]
 fn offset_polygon_owned(
     polygon: &Polygon<f64>,
     distance: f64,
     retained: usize,
     owned_bytes: usize,
-    support: &[Arc<OwnedMaterial>],
-    interfaces: &[Arc<OwnedMaterial>],
+    support: &[Rc<OwnedMaterial>],
+    interfaces: &[Rc<OwnedMaterial>],
     temporary: &[&OwnedMaterial],
     cancel: &AtomicBool,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
@@ -2929,15 +2945,15 @@ fn layer_payload_bytes<'a>(layers: impl Iterator<Item = &'a PrintLayer>) -> usiz
 }
 
 fn geometry_receipt(
-    support: &[Arc<OwnedMaterial>],
-    interfaces: &[Arc<OwnedMaterial>],
+    support: &[Rc<OwnedMaterial>],
+    interfaces: &[Rc<OwnedMaterial>],
     temporary: &[&OwnedMaterial],
 ) -> (usize, usize) {
     // Owner-local marks avoid an allocating pointer set and all-pairs scans.
     for owner in support
         .iter()
         .chain(interfaces)
-        .map(Arc::as_ref)
+        .map(Rc::as_ref)
         .chain(temporary.iter().copied())
     {
         owner.counted.set(false);
@@ -2947,7 +2963,7 @@ fn geometry_receipt(
     for owner in support
         .iter()
         .chain(interfaces)
-        .map(Arc::as_ref)
+        .map(Rc::as_ref)
         .chain(temporary.iter().copied())
     {
         if owner.counted.replace(true) {
@@ -2964,8 +2980,8 @@ fn geometry_receipt(
 fn remaining_geometry_budget(
     native: usize,
     owned_bytes: usize,
-    support: &[Arc<OwnedMaterial>],
-    interfaces: &[Arc<OwnedMaterial>],
+    support: &[Rc<OwnedMaterial>],
+    interfaces: &[Rc<OwnedMaterial>],
     temporary: &[&OwnedMaterial],
 ) -> Result<usize, ManufacturingError> {
     let (units, bytes) = geometry_receipt(support, interfaces, temporary);
@@ -3102,8 +3118,8 @@ mod tests {
         };
         let a = owner();
         let b = owner();
-        let support = vec![Arc::clone(&a), Arc::clone(&a), Arc::clone(&b)];
-        let interfaces = vec![Arc::clone(&b), Arc::clone(&a)];
+        let support = vec![Rc::clone(&a), Rc::clone(&a), Rc::clone(&b)];
+        let interfaces = vec![Rc::clone(&b), Rc::clone(&a)];
         let (units, bytes) = geometry_receipt(&support, &interfaces, &[]);
         assert!(units > MAX_DEPOSITION_SEGMENTS as usize);
         assert_eq!(units, a.units + b.units);
@@ -3867,7 +3883,7 @@ mod tests {
             ]],
         )]);
         let layout = |material: &MultiPolygon<f64>| {
-            Arc::new(
+            std::sync::Arc::new(
                 crate::planner::tests::wall_plan(
                     material,
                     &region::RequiredMaterial::from_section(material),

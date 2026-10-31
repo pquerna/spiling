@@ -3917,7 +3917,7 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
     // Prepare genuine accepted lower material in the ordinary producer before
     // making the captured terminal request. A state starting only at that
     // terminal height lacks the production lower-leaf precondition.
-    let interval = [9.98333333474894857, 10.0000000924533996];
+    let interval = [9.983_333_334_748_949, 10.000_000_092_453_4];
     let mut schedule = scheduled_layers(&input, &admission, &captures, &cancel).unwrap();
     while schedule.last().unwrap().lower_z >= interval[0] {
         schedule.pop();
@@ -3943,7 +3943,7 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
             schedule.push(LayerElevation {
                 lower_z: interval[0],
                 z: interval[1],
-                sample: 9.99166671360117320,
+                sample: 9.991_666_713_601_173,
                 height: interval[1] - interval[0],
             });
             terminal_appended = true;
