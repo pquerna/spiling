@@ -110,6 +110,15 @@ paired boundary flow remain independent obligations. This path
 consumes no Hessian and grants no C1 authority to other queries; positional jumps,
 uncertain verticality and unresolved normals still refuse.
 
+Required native analytic-torus height/critical queries remain open. Their native
+STEP chart uses degrees, independently of original STEP radians; periodic phase
+ownership and selected boundary feasibility must respect that chart. Fitted
+native UV curves can also genuinely leave the active carrier sheet. Strict
+containment refusal remains binding: a periodic alias, wider numerical interval
+or nearby physical trace cannot repair the stored chart. Qualification requires
+a construction-owned chart correction and complete consumer acceptance; these
+required positives must not be relabeled as unsupported to clear the gate.
+
 Endpoint ownership consumes native **material** support, with one prepared owner
 shared by its world-Z and XY queries. Authoring-only chart support cannot supply
 that material receipt. Ordinary native lines retain their complete endpoint hull;
