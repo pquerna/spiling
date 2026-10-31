@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source10 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source11 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -91,6 +91,16 @@ invariance removes unnecessary basis sums along an unchanged axis. Directed
 rounding, cumulative work/cancellation and scratch coexistence remain charged.
 Closed queries retain both incident one-sided spans. These bounds do not confer
 closed-C1 stationary authority or change rational quotient/denominator obligations.
+
+Native vertical-product reuse consumes continuous, closed one-sided first jets,
+including parameter-speed joins. Exact zero vertical normal and a nonzero whole
+normal hull must hold on every retained closed cell. Once one non-outside regular
+side cell is witnessed, a complete carrier bound needs no further trim-membership
+work. Unresolved carrier cells retain trim exclusion before refusal or refinement;
+resource/cancellation remain terminal. Two exact native cap levels and complete
+paired boundary flow remain independent obligations. This path
+consumes no Hessian and grants no C1 authority to other queries; positional jumps,
+uncertain verticality and unresolved normals still refuse.
 
 Endpoint ownership consumes native **material** support, with one prepared owner
 shared by its world-Z and XY queries. Authoring-only chart support cannot supply

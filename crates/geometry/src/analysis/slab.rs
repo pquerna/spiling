@@ -3379,23 +3379,52 @@ pub(super) fn source_vertical_boundary_flow(
                 })?;
             while let Some((uv, depth)) = stack.pop().or_else(|| spans.next().map(|uv| (uv, 0u8))) {
                 work.charge(1, cancel)?;
+                // Vertical flow consumes continuous positions and closed one-sided
+                // first bounds. A parameter-speed jump is not a Hessian query;
+                // both incident normals must still share this nonzero hull.
+                let carrier =
+                    crate::parametric::surface_piecewise_first_enclosure(surface, uv, work, cancel)
+                        .and_then(|jet| {
+                            // Preserve structural zero factors in the vertical normal.
+                            let nz = tight_add(
+                                tight_mul(jet.du[0], jet.dv[1]),
+                                tight_mul(jet.du[1], jet.dv[0]).neg(),
+                            );
+                            Ok((
+                                nz.lo == 0.0 && nz.hi == 0.0,
+                                norm(cross(jet.du, jet.dv))?.lo > 0.0,
+                            ))
+                        });
+                let carrier = match carrier {
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled
+                        ) =>
+                    {
+                        return Err(error);
+                    }
+                    result => result,
+                };
+                // A whole-carrier property holds on every trimmed subset.
+                // Retain one actual non-outside regular side witness before
+                // omitting membership work for other qualified carrier cells.
+                if matches!(&carrier, Ok((true, true))) && side_cells > 0 {
+                    continue;
+                }
                 if matches!(
                     domain.classify(uv, work, cancel)?,
                     TrimClassification::Outside
                 ) {
                     continue;
                 }
-                let jet = surface_enclosure(surface, uv, work, cancel)?;
-                // Tight products preserve structural zero factors. Ordinary
-                // interval cross products would pad an exact 0-0 identity.
-                let nz = tight_add(
-                    tight_mul(jet.du[0], jet.dv[1]),
-                    tight_mul(jet.du[1], jet.dv[0]).neg(),
-                );
-                if nz.lo != 0.0 || nz.hi != 0.0 {
+                // A declined carrier bound is irrelevant only on a proved
+                // outside cell; it must not impose a global carrier prerequisite.
+                let (vertical, regular) = carrier?;
+                if !vertical {
                     return Ok(false);
                 }
-                if norm(cross(jet.du, jet.dv))?.lo > 0.0 {
+                if regular {
                     side_cells += 1;
                 } else {
                     if depth >= MAX_DEPTH {
@@ -7316,6 +7345,32 @@ mod tests {
                 .any(|bracket| bracket[0] <= 8.0 && bracket[1] >= 8.0)
         );
     }
+    #[test]
+    fn native_product_reuse_rejects_radial_change_and_sheared_walls() {
+        // The torus changes radius with height; the rod's section translates.
+        // Neither actual source is a vertical product, even on an interior band.
+        for authored in [
+            super::super::test_source::nurbs_torus(),
+            super::super::test_source::thin_sheared_rod(),
+        ] {
+            let definition = super::super::test_source::original_definition(authored);
+            let mut work = GeometryWorkBudget::new(30_000_000);
+            for range in [[-1.0, 9.0], [0.25, 0.75]] {
+                assert!(
+                    narrow_invariance(
+                        &definition,
+                        frame(),
+                        range,
+                        &mut work,
+                        &AtomicBool::new(false),
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+            }
+        }
+    }
+
     #[test]
     fn vertical_flow_does_not_snap_a_revolution_or_torus_into_exact_reuse() {
         for name in [
