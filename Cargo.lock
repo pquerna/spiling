@@ -2384,7 +2384,7 @@ dependencies = [
 [[package]]
 name = "nurbs-grid-mesh"
 version = "0.1.0"
-source = "git+https://github.com/pquerna/solidcore?rev=5d85d5818b144a3a115abb1cff21c23bf08de17e#5d85d5818b144a3a115abb1cff21c23bf08de17e"
+source = "git+https://github.com/pquerna/solidcore?rev=26f8104067bf34a27892ded2404836e05d6b721b#26f8104067bf34a27892ded2404836e05d6b721b"
 
 [[package]]
 name = "objc-sys"
@@ -3793,8 +3793,8 @@ dependencies = [
 
 [[package]]
 name = "solidcore"
-version = "0.0.1"
-source = "git+https://github.com/pquerna/solidcore?rev=5d85d5818b144a3a115abb1cff21c23bf08de17e#5d85d5818b144a3a115abb1cff21c23bf08de17e"
+version = "1.0.1"
+source = "git+https://github.com/pquerna/solidcore?rev=26f8104067bf34a27892ded2404836e05d6b721b#26f8104067bf34a27892ded2404836e05d6b721b"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -3802,7 +3802,7 @@ dependencies = [
 [[package]]
 name = "solidcore-mesh"
 version = "0.0.1"
-source = "git+https://github.com/pquerna/solidcore?rev=5d85d5818b144a3a115abb1cff21c23bf08de17e#5d85d5818b144a3a115abb1cff21c23bf08de17e"
+source = "git+https://github.com/pquerna/solidcore?rev=26f8104067bf34a27892ded2404836e05d6b721b#26f8104067bf34a27892ded2404836e05d6b721b"
 dependencies = [
  "nurbs-grid-mesh",
  "solidcore",

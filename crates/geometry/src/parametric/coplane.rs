@@ -56,7 +56,7 @@ pub fn classify_face_coplane(
     let SurfaceKind::Plane(p) = surface.kind() else {
         return Ok(CoplaneClassification::Unresolved);
     };
-    let domain = surface.natural_uv_domain();
+    let domain = surface.natural_uv_domain_if_built();
     let lo = domain.min();
     let hi = domain.max();
     let j = surface_order(surface, [[lo.x, hi.x], [lo.y, hi.y]], 1, work, cancel)?;

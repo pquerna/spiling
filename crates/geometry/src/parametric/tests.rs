@@ -949,7 +949,7 @@ fn explicit_step_sphere_has_a_coefficient_proved_pole_normal_not_a_nearby_sample
     let native = Surface::new(SurfaceKind::Sphere(Box::new(sphere)));
     let mut work = GeometryWorkBudget::new(1_000_000);
     let cancel = AtomicBool::new(false);
-    let domain = native.natural_uv_domain();
+    let domain = native.natural_uv_domain_if_built();
     let corner = domain.min();
     assert_eq!(
         surface_geometric_normal_enclosure(

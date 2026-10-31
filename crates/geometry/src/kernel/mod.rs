@@ -591,6 +591,9 @@ pub(crate) fn curve_owned_bytes(curve: &solidcore::curve::curve::Curve) -> usize
         CurveKind::CrvInVolume(_) => {
             std::mem::size_of::<solidcore::curve::crv_in_volume::CrvInVolume>()
         }
+        CurveKind::TangentField(_) => {
+            std::mem::size_of::<solidcore::curve::tangent_field::TangentFieldCurve>()
+        }
     };
     base + kind_bytes
 }

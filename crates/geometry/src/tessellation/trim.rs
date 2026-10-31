@@ -961,7 +961,7 @@ fn bounded_uv(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<[[f64; 2]; 2], GeometryError> {
-    let natural = surface.natural_uv_domain();
+    let natural = surface.natural_uv_domain_if_built();
     let domain = [
         [natural.u_min(), natural.u_max()],
         [natural.v_min(), natural.v_max()],

@@ -11,7 +11,7 @@
 #![allow(dead_code)]
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use solidcore::curve::curve::Curve;
@@ -43,6 +43,7 @@ use solidcore::topology::brep_data::{
     BrepData, DataSourceType, EdgeData, EuData, FaceData, FaceuseData, Keyed, LoopData, RegionData,
     ShellData, VertexData,
 };
+use solidcore::topology::topology::NotifyRecords;
 use solidcraft_geom::brep as b;
 use solidcraft_geom::brep::eval::{CurveEval, SurfaceEval};
 
@@ -157,7 +158,7 @@ pub fn from_schema4_brep(
     }
     let mut out = Brep::new_with_infinite_region()?;
     let mut store = AttributeStore::new();
-    let mut records = BTreeMap::new();
+    let mut records = NotifyRecords::new();
     let key_of = |e: EntityRef| -> ObjectRef {
         let (type_code, kind, i) = match e {
             EntityRef::Brep(x) => (16011, 0u64, x.index()),

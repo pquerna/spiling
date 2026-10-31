@@ -155,7 +155,7 @@ pub(super) fn inventory(
         locals: Vec::new(),
         carrier_error: 0.0,
     };
-    let natural = surface.natural_uv_domain();
+    let natural = surface.natural_uv_domain_if_built();
     let polar = parametric::analytic_eval::collapsed_step_sphere_position(
         surface,
         natural.v_min(),
@@ -261,7 +261,7 @@ pub(super) fn inventory(
             if aq[0].lo <= bq[0].hi && bq[0].lo <= aq[0].hi {
                 continue;
             }
-            let natural = surface.natural_uv_domain();
+            let natural = surface.natural_uv_domain_if_built();
             let mut selected = None;
             for v in [natural.v_min(), natural.v_max()] {
                 if parametric::analytic_eval::collapsed_step_sphere_position(

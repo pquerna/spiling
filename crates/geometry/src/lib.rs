@@ -68,9 +68,9 @@ pub use spiling_contracts::geometry::{
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Native adapter dependency version captured in persisted provenance.
-pub const KERNEL_VERSION: &str = "0.0.1";
+pub const KERNEL_VERSION: &str = "1.0.1";
 /// Exact published native dependency revision; changed with the workspace pin.
-pub const KERNEL_REVISION: &str = "5d85d5818b144a3a115abb1cff21c23bf08de17e";
+pub const KERNEL_REVISION: &str = "26f8104067bf34a27892ded2404836e05d6b721b";
 
 /// Immutable native certificate for one full-height rectangular vertical wall.
 /// Coordinates and phase direction are source-local millimetres; the outward

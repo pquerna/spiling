@@ -113,7 +113,7 @@ pub(super) fn surface_tensor(
     for range in uv {
         Interval::new(range[0], range[1])?;
     }
-    let domain = surface.natural_uv_domain();
+    let domain = surface.natural_uv_domain_if_built();
     let min = domain.min();
     let max = domain.max();
     if uv[0][0] < min.x || uv[0][1] > max.x || uv[1][0] < min.y || uv[1][1] > max.y {

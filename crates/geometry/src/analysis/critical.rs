@@ -678,7 +678,7 @@ fn prepared_carrier_c1_covers(domain: &PreparedFaceTrimDomain<'_>, uv: [[f64; 2]
     let Some(surface) = selected.native_surface() else {
         return false;
     };
-    let natural = surface.natural_uv_domain();
+    let natural = surface.natural_uv_domain_if_built();
     let lo = natural.min();
     let hi = natural.max();
     let bounds = [[lo.x, hi.x], [lo.y, hi.y]];

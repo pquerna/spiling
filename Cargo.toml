@@ -37,8 +37,8 @@ png = "=0.18.1"
 geo = "=0.32.0"
 boostvoronoi = { version = "=0.12.1", default-features = false }
 # Integration source: pquerna/integration-spiling-tracking; keep an exact tested revision.
-solidcore = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "5d85d5818b144a3a115abb1cff21c23bf08de17e" }
-solidcore-mesh = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "5d85d5818b144a3a115abb1cff21c23bf08de17e", features = ["nurbs-grid-mesh"] }
+solidcore = { version = "=1.0.1", git = "https://github.com/pquerna/solidcore", rev = "26f8104067bf34a27892ded2404836e05d6b721b" }
+solidcore-mesh = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "26f8104067bf34a27892ded2404836e05d6b721b", features = ["nurbs-grid-mesh"] }
 # Checked-in upstream snapshot and closure patch: vendor/solidcraft/UPSTREAM.toml.
 solidcraft-geom = { version = "=0.18.1", path = "vendor/solidcraft/crates/geom" }
 solidcraft-step = { version = "=0.18.1", path = "vendor/solidcraft/crates/step" }

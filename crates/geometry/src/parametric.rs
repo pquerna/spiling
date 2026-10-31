@@ -872,7 +872,7 @@ impl Iterator for SurfaceParameterBoxes<'_> {
 /// trim-control hulls outside the underlying NURBS knot domain; that rectangle
 /// is not permission to evaluate an extrapolated surface.
 pub(crate) fn surface_active_domain(surface: &Surface) -> Result<[[f64; 2]; 2], GeometryError> {
-    let metadata = surface.natural_uv_domain();
+    let metadata = surface.natural_uv_domain_if_built();
     let lo = metadata.min();
     let hi = metadata.max();
     let mut domain = [[lo.x, hi.x], [lo.y, hi.y]];
@@ -904,7 +904,7 @@ fn validate_surface_partition(
     for range in uv {
         Interval::new(range[0], range[1])?;
     }
-    let active = surface.natural_uv_domain();
+    let active = surface.natural_uv_domain_if_built();
     let lo = active.min();
     let hi = active.max();
     if uv[0][0] < lo.x || uv[0][1] > hi.x || uv[1][0] < lo.y || uv[1][1] > hi.y {

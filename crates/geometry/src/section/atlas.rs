@@ -100,7 +100,7 @@ pub(super) fn cover(
             "native graph atlas has an invalid spatial scale",
         ));
     }
-    let active = surface.natural_uv_domain();
+    let active = surface.natural_uv_domain_if_built();
     let lo = active.min();
     let hi = active.max();
     let native_domain = [[lo.x, hi.x], [lo.y, hi.y]];

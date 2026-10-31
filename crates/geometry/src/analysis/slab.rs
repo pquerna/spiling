@@ -817,7 +817,7 @@ fn constant_surface_height_inner(
             // STEP analytic operands and stored NURBS charts are distinct
             // laws. Prove constancy in the actual wrapper's full active chart,
             // never borrow a fitted control net from its analytic child.
-            let domain = surface.natural_uv_domain();
+            let domain = surface.natural_uv_domain_if_built();
             let lo = domain.min();
             let hi = domain.max();
             let [bound] = crate::parametric::surface_functional_enclosures(

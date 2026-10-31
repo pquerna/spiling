@@ -19,32 +19,31 @@ violation before they become upstream bug candidates.
 
 | Role                                      | Exact identity                                                                                                                                                                                                                                                      |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Upstream baseline                         | [`fcfe3531312d3109264851f56c5b7429401c630d`](https://github.com/tangency-labs/solidcore/commit/fcfe3531312d3109264851f56c5b7429401c630d)                                                                                                                            |
-| Published fork `main` and integration tip | [`88f5962d8f7fd0de2b4d41815b15df897bb64eee`](https://github.com/pquerna/solidcore/commit/88f5962d8f7fd0de2b4d41815b15df897bb64eee), branch [`pquerna/integration-spiling-tracking`](https://github.com/pquerna/solidcore/tree/pquerna/integration-spiling-tracking) |
-| Qualified Spiling consumer pin            | [`5d85d5818b144a3a115abb1cff21c23bf08de17e`](https://github.com/pquerna/solidcore/commit/5d85d5818b144a3a115abb1cff21c23bf08de17e); both declarations in [`Cargo.toml`](../../Cargo.toml), their lockfile sources and `geometry::KERNEL_REVISION` agree             |
+| Upstream baseline                         | [`53e66f649a4f7da81166695af39accacdf1649f2`](https://github.com/tangency-labs/solidcore/commit/53e66f649a4f7da81166695af39accacdf1649f2)                                                                                                                            |
+| Published fork `main` and integration tip | [`26f8104067bf34a27892ded2404836e05d6b721b`](https://github.com/pquerna/solidcore/commit/26f8104067bf34a27892ded2404836e05d6b721b), branch [`pquerna/integration-spiling-tracking`](https://github.com/pquerna/solidcore/tree/pquerna/integration-spiling-tracking) |
+| Qualified Spiling consumer pin            | [`26f8104067bf34a27892ded2404836e05d6b721b`](https://github.com/pquerna/solidcore/commit/26f8104067bf34a27892ded2404836e05d6b721b); both declarations in [`Cargo.toml`](../../Cargo.toml), their lockfile sources and `geometry::KERNEL_REVISION` agree             |
 
 Refreshing the fork does not automatically promote its moving tip into Spiling.
 Promotion requires native source/query controls and real engine/CLI consumer
-workflows, not merely a successful build. The current pin preserves fitting,
-ordinary housing, source-zoned physical plate and paired fine/genuine combined
-H1 compilation, independent verification, export and source-deleted recovery.
-Housing/fitting/bracket native import, display and discrete sections also remain exercised. These flows do not qualify original-bracket manufacturing, the native-first material cutover or the remaining closed-spline gates.
+workflows, not merely a successful build. Native import/display/sections, ordinary
+and source-zoned manufacturing, fine/genuine combined H1 controls, independent
+verification and source-deleted recovery retain separate acceptance obligations.
+The [geometry](geometry-evidence.md) and [manufacturing](manufacturing-evidence.md)
+runbooks own the current support envelope. Passing selected upgrade controls does
+not clear remaining development gates or qualify every native geometry family.
 
 Keep upstream `Kernel::fixes` at its default opt-out policy; new optional fixes
-require their own consumer qualification. Retain the pinned SolidCraft
-`kernel-smlib` companion: its current `main` removes the consumed STEP stack and
-is not an interchangeable version upgrade.
+require their own consumer qualification. SolidCraft's geometry/STEP companion
+libraries remain the coherent vendored snapshot recorded in
+[`UPSTREAM.toml`](../../vendor/solidcraft/UPSTREAM.toml); upstream application
+`main` is not an interchangeable version upgrade.
 
-Standalone native tight-box queries remain unqualified. Imported STEP-wrapped
-analytic faces also expose a concrete native point-classification limit:
-`BrepClassifier::point_3d_classify` refuses while constructing `BrepQuery`'s cache,
-through loose face bounds, with an unbound face-owned surface handle
-(`topology.face_p2`). Contextual face-cache preparation alone does not clear it.
-The current Spiling coefficient-enclosure import and source5 manufacturing paths
-do not consume this classifier. The upstream lazy-analytic query fixes do not
-establish that it works on these imports. Do not replace current paths with a
-vertex hull, ignored native error or failed tight-box fallback. A standalone
-valid-domain kernel reproducer is required before attributing an upstream defect.
+Standalone native tight-box and direct imported-STEP point-classification APIs
+are not qualified by a dependency refresh or successful adapter workflows.
+Upstream query fixes do not authorize replacing the adapter's admitted paths
+with a vertex hull, ignored native error or failed tight-box fallback. A
+standalone valid-domain kernel reproducer is required before attributing an
+upstream defect.
 
 The integration contains inherited tessellator work plus the separate Spiling
 budget and STEP-copy overlays. Preserve the tessellator's original authors and
@@ -196,25 +195,16 @@ the dependency returns. Cancellation is cooperative, not hard preemption or a
 wall-time guarantee. Process limits and independent geometry/display audits remain
 Spiling obligations. Do not advertise bounded total RAM from this interface.
 
-## Current source5 reconstruction is Spiling-owned
+## Spiling consumer authority
 
-The source-star construction, original trim/curve correspondence, comparison
-homotopy, admitted error and material-degree proof belong to the current
-source5/planner24 [`material_link.rs`](../../crates/geometry/src/analysis/critical/material_link.rs)
-and its owners, not the kernel mesher or STEP surface copy API. These remain
-current-producer operating limits, not requirements for the pending native-first
-material law adopted in [ADR005](../adr/ADR005-native-first-development-geometry.md).
-
-- [`uv_ownership.rs`](../../crates/geometry/src/analysis/critical/material_link/vertex_transport/uv_ownership.rs)
-  owns the complete reference-star Jacobian and boundary proof. Quadratic radial
-  reference ribbons preserve the original apex tangent and outer trace; the
-  source-only selector must admit their complete physical cost before freezing G.
-- [`atlas.rs`](../../crates/geometry/src/analysis/critical/material_link/atlas.rs)
-  and [`pole_comparison.rs`](../../crates/geometry/src/analysis/critical/material_link/vertex_transport/uv_ownership/pole_comparison.rs)
-  distinguish auxiliary position overcovers from actual selected-material queries.
-  Neither can widen literal coefficient support or acquire ownership from a box.
-- Rounded-housing spherical central/shared-exit exclusion remains unqualified.
-  A complete bore or box program does not discharge those independent obligations.
+[ADR005](../adr/ADR005-native-first-development-geometry.md) adopts the imported
+SolidCore BREP as the single DEVELOPMENT material authority. The
+[`geometry` adapter](../../crates/geometry/src/lib.rs) owns admission, original
+STEP identity/provenance, bounded source/query controls and display publication;
+kernel meshing and owned surface copies do not confer manufacturing eligibility.
+Preserve the independent incidence, metric, void, resource, cancellation and
+actual emitted-program replay obligations in their owning contracts. A complete
+bore, box or housing program does not discharge another geometry family's gates.
 
 Only a standalone, valid-domain kernel call with an independently established
 wrong result or a specified resource-contract violation should be promoted to a

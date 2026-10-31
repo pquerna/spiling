@@ -796,7 +796,7 @@ impl NativeChartCurve<'_> {
         let degrees = [surface.p(), surface.q()];
         let counts = [surface.n() + 1, surface.m() + 1];
         let knots = [surface.u_knots(), surface.v_knots()];
-        let domain = self.surface.natural_uv_domain();
+        let domain = self.surface.natural_uv_domain_if_built();
         let lo = domain.min();
         let hi = domain.max();
         for (i, interval) in [[lo.x, hi.x], [lo.y, hi.y]].into_iter().enumerate() {
