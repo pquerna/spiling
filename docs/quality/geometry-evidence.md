@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source7 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source8 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -72,6 +72,17 @@ independent spatial/chart trace tolerance remains in force. Original inspection
 charts retain their measured transport error. Unadmitted charts cannot borrow
 either premise. A smooth seam does not establish height transversality or
 authorize a section through a critical, coplanar or tangent stratum.
+
+Height-event discovery restricts continuous native carrier cells to the requested
+height band and retains direct scalar coefficient bounds for height and its
+first derivatives. Projecting an already broadened XYZ enclosure can lose an
+exact height cancellation and cannot replace that tighter certificate. Whole-face
+G1 and actual coedge/vertex incidence remain separate. Artificial crease cells
+require trim classification only after height/gradient or complete geometric
+transversality cannot exclude an event; physical boundary strata are still
+inventoried. Piecewise first derivatives grant exclusion, while stationary-point
+contraction/existence retains its independent closed-C1 requirement. The torus
+equator census and oblique-height/cusp controls exercise this distinction.
 
 The frozen spline housing has physical section regressions below and above its
 blind-pocket floor at Z3/5/7, including reversed plane normals, pocket dimensions

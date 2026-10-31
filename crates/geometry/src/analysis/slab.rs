@@ -577,6 +577,28 @@ impl HeightFunctional {
     pub(crate) fn vertex(self, position: [f64; 3]) -> Interval {
         self.height(position.map(Interval::point))
     }
+    /// Project native homogeneous coefficients before interval evaluation so
+    /// exact height cancellations survive a broad spatial control hull.
+    fn enclose_surface(
+        self,
+        surface: &(impl SurfaceEvaluator + ?Sized),
+        uv: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<crate::parametric::SurfaceFunctionalEnclosure, GeometryError> {
+        let [bound] = crate::parametric::surface_functional_enclosures(
+            surface,
+            uv,
+            &[crate::parametric::SurfaceFunctional {
+                direction: self.direction,
+                origin: [Interval::point(0.0); 3],
+                offset: self.offset,
+            }],
+            work,
+            cancel,
+        )?;
+        Ok(bound)
+    }
 }
 pub(super) const HEIGHT_CONTRACTION_SCRATCH_BYTES: usize =
     crate::parametric::surface_functional_scratch_bytes::<1>()
@@ -2192,11 +2214,13 @@ fn analyze_height_functional(
             stage = "source face interior";
             surface_window = uv;
             work.charge(1, cancel)?;
-            // Carrier height/gradient exclusion is independent of trim
-            // membership. Do not refine winding near a source boundary for a
-            // cell which cannot contain an interior height event.
-            let jet = match surface_enclosure(surface, uv, work, cancel) {
-                Ok(jet) => jet,
+            // Restrict the complete continuous carrier to the requested height
+            // band before trim or stationary analysis. Piecewise first jets
+            // suffice for exclusion; Newton/existence consumers independently
+            // require C1 before using a Hessian across a source knot.
+            let (uv, jet) = match clip_height_box(surface, uv, functional, height_interval_mm, work, cancel) {
+                Ok(Some(clipped)) => clipped,
+                Ok(None) => continue,
                 Err(error) => {
                     if !matches!(error.code, GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit) {
                         // An excluded trim cell need not have an evaluable
@@ -2209,10 +2233,11 @@ fn analyze_height_functional(
                     return Err(height_face_context(error, index, &format!("enclose carrier cell {uv:?}")));
                 }
             };
-            let h = functional.height(jet.position);
+            let scalar = functional.enclose_surface(surface, uv, work, cancel)?;
+            let h = scalar.position;
             if !overlaps(h, height_interval_mm) { continue; }
-            let projected_du = functional.dot(jet.du);
-            let projected_dv = functional.dot(jet.dv);
+            let projected_du = scalar.du;
+            let projected_dv = scalar.dv;
             if !projected_du.contains_zero() || !projected_dv.contains_zero() { continue; }
             let classification = domain.classify(uv, work, cancel).map_err(|error| {
                 height_face_context(error, index, &format!("classify original trim cell {uv:?}"))
@@ -2313,28 +2338,28 @@ fn analyze_height_functional(
             for endpoint in crease[moving_axis] {
                 let mut uv = crease;
                 uv[moving_axis] = [endpoint, endpoint];
-                if !matches!(domain.classify(uv, work, cancel)?, TrimClassification::Outside) {
-                    let jet = surface_enclosure(surface, uv, work, cancel)?;
-                    let height = functional.height(jet.position);
+                let height = functional.enclose_surface(surface, uv, work, cancel)?.position;
+                if overlaps(height, height_interval_mm) {
                     // This excludes only the artificial parameter-interface
                     // endpoint. Original physical coedges/vertices are still
                     // inventoried independently below, including true corners.
-                    if overlaps(height, height_interval_mm)
-                        && let Some(glued) = glued.as_ref()
+                    if let Some(glued) = glued.as_ref()
                         && source_height_transverse(glued, uv, functional, work, cancel)? {
                         continue;
                     }
-                    add_event(&mut events, height, height_interval_mm, policy.maximum_height_uncertainty_mm, work, cancel)?;
+                    if !matches!(domain.classify(uv, work, cancel)?, TrimClassification::Outside) {
+                        add_event(&mut events, height, height_interval_mm, policy.maximum_height_uncertainty_mm, work, cancel)?;
+                    }
                 }
             }
             let mut cells = vec![(crease, 0u8)];
             while let Some((uv, depth)) = cells.pop() {
                 work.charge(1, cancel)?;
-                if matches!(domain.classify(uv, work, cancel)?, TrimClassification::Outside) { continue; }
-                let jet = surface_enclosure(surface, uv, work, cancel)?;
-                let h = functional.height(jet.position);
-                let tangent = if moving_axis == 0 { jet.du } else { jet.dv };
-                if !overlaps(h, height_interval_mm) || !functional.dot(tangent).contains_zero() { continue; }
+                let Some(uv) = clip_height_parameter_box(surface, uv, functional, height_interval_mm, work, cancel)? else { continue; };
+                let scalar = functional.enclose_surface(surface, uv, work, cancel)?;
+                let h = scalar.position;
+                let tangent = if moving_axis == 0 { scalar.du } else { scalar.dv };
+                if !overlaps(h, height_interval_mm) || !tangent.contains_zero() { continue; }
                 if h.width() <= policy.maximum_height_uncertainty_mm {
                     // The whole original face is positively G1 here. A
                     // nonzero geometric height differential on this COMPLETE
@@ -2344,6 +2369,7 @@ fn analyze_height_functional(
                         && source_height_transverse(glued, uv, functional, work, cancel)? {
                         continue;
                     }
+                    if matches!(domain.classify(uv, work, cancel)?, TrimClassification::Outside) { continue; }
                     add_event(&mut events, h, height_interval_mm, policy.maximum_height_uncertainty_mm, work, cancel)?;
                 } else {
                     work.charge(2, cancel)?;
@@ -6804,6 +6830,43 @@ mod tests {
             work.consumed(),
         );
         assert!(!census.requires_closed_material_capture([-0.01, 0.01]));
+    }
+
+    #[test]
+    fn native_scalar_height_retains_complete_torus_rings_and_oblique_drift() {
+        let definition = parity_definition("native-parity-nurbs-torus.step");
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let prepared = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let source = prepared.source_view().unwrap();
+        let domain = source
+            .face_domain(0, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel)
+            .unwrap();
+        let surface = domain.surface_evaluator();
+        let height = HeightFunctional::from_frame(frame());
+        // The authored exact radius-2 meridian has zero-height equators at
+        // 0/2/4. Cover each complete major-radius ring, across every u knot.
+        for v in [0.0, 2.0, 4.0] {
+            let scalar = height
+                .enclose_surface(surface, [[0.0, 4.0], [v; 2]], &mut work, &cancel)
+                .unwrap();
+            assert!(scalar.position.contains_zero());
+            assert!(scalar.position.width() < 1e-12);
+        }
+        let oblique = HeightFunctional {
+            direction: [0.125, 0.0, 1.0].map(Interval::point),
+            offset: Interval::point(0.0),
+        };
+        let drift = oblique
+            .enclose_surface(surface, [[0.0, 4.0], [0.0; 2]], &mut work, &cancel)
+            .unwrap();
+        assert!(drift.position.lo <= -1.0 && drift.position.hi >= 1.0);
     }
 
     #[test]
