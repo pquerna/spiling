@@ -78,6 +78,25 @@ impl NativeScene {
         }
     }
 }
+// Provenance is canonical by immutable definition identity, independently of
+// import order. Compare every captured source field and reject missing/duplicate
+// records without turning a source hash's incidental sort order into the oracle.
+fn assert_definition_provenance(actual: &[StoredDefinition], expected: &[StoredDefinition]) {
+    assert_eq!(actual.len(), expected.len());
+    assert!(
+        actual
+            .windows(2)
+            .all(|pair| pair[0].definition_id < pair[1].definition_id)
+    );
+    let keyed = |values: &[StoredDefinition]| {
+        values
+            .iter()
+            .map(|record| (record.definition_id.clone(), record.provenance.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(keyed(actual), keyed(expected));
+}
+
 fn intent(supports: bool) -> ManufacturingIntent {
     let mut recipe = super::tests::recipe(1.0);
     recipe.top_skin_thickness_mm = 0.8;
@@ -296,7 +315,7 @@ fn disjoint_mixed_height_sources_bind_actual_birth_and_terminal_contributors() {
     let intent = intent(true);
     let bundle = compile(scene.input(&intent), &cancel).unwrap();
     assert!((bundle.plan.layers.last().unwrap().z_mm - 12.0).abs() < 1e-6);
-    assert_eq!(bundle.provenance.definitions, scene.stored);
+    assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
     assert_eq!(bundle.provenance.occurrences, scene.occurrences);
     for layer in &bundle.plan.layers {
         let box_area = if layer.section_z_mm < 8.0 { 200.0 } else { 0.0 };
@@ -386,7 +405,7 @@ fn native_nonintegral_top_and_non_grid_shelf_preserve_every_event() {
             assert!((after.region_coverage.section_area_mm2 - 120.0).abs() < 1e-6);
             assert!(after.height_mm > 0.0 && after.height_mm <= intent.recipe.layer_height_mm);
         }
-        assert_eq!(bundle.provenance.definitions, scene.stored);
+        assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
     }
 }
 
@@ -565,7 +584,7 @@ fn genuine_inward_sloped_planar_ramp_passes_native_compile_and_replay() {
     }
     assert!(bundle.verification.verified);
     assert_eq!(bundle.verification.support_deposited_volume_mm3, 0.0);
-    assert_eq!(bundle.provenance.definitions, scene.stored);
+    assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
 }
 
 #[test]
@@ -607,7 +626,7 @@ fn tilted_native_cylinder_uses_analytic_extrema_and_native_sections() {
         (bundle.plan.layers.last().unwrap().z_mm - (expected_max - extent[0])).abs() <= 0.000001
     );
     assert!(bundle.verification.verified);
-    assert_eq!(bundle.provenance.definitions, scene.stored);
+    assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
 }
 
 #[test]
@@ -694,7 +713,7 @@ fn native_cantilever_emits_bed_anchored_support_and_separate_volume() {
         .map(|layer| layer.region_coverage.nominal_deposition_volume_mm3)
         .sum();
     assert!((bundle.verification.deposited_volume_mm3 - object_nominal).abs() < 0.02);
-    assert_eq!(bundle.provenance.definitions, scene.stored);
+    assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
     let disabled = self::intent(false);
     assert_eq!(
         compile(scene.input(&disabled), &AtomicBool::new(false))
@@ -761,7 +780,7 @@ fn authored_sparse_cantilever_partial_skin_uses_actual_endpoint_footprints() {
         .map(|layer| layer.region_coverage.support_nominal_deposition_volume_mm3)
         .sum();
     assert!((bundle.verification.support_deposited_volume_mm3 - nominal).abs() < 0.02);
-    assert_eq!(bundle.provenance.definitions, scene.stored);
+    assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
     intent.recipe.supports = SupportPolicy::Disabled;
     assert_eq!(
         compile(scene.input(&intent), &AtomicBool::new(false))
@@ -1102,7 +1121,7 @@ fn affine_rational_native_source_is_admitted_and_replayed_without_family_fallbac
         PreflightDisposition::Admitted
     );
     let bundle = compile(scene.input(&intent), &cancel).unwrap();
-    assert_eq!(bundle.provenance.definitions, scene.stored);
+    assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
     assert!(!bundle.plan.layers.is_empty());
     assert!(
         bundle
@@ -2929,7 +2948,7 @@ fn new_native_families_use_one_material_planner_and_independent_replay() {
                 .any(|check| !check.required && check.evidence == PreflightEvidence::NotEvaluated)
         );
         let bundle = compile(scene.input(&intent), &cancel).unwrap();
-        assert_eq!(bundle.provenance.definitions, scene.stored, "{name}");
+        assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
         assert!(
             (bundle.plan.layers.last().unwrap().z_mm - top).abs() <= 0.000001,
             "{name}"
@@ -3072,7 +3091,7 @@ fn spline_extrusion_bore_keeps_native_holes_through_ordinary_paths_and_reopen_re
         "{report:?}"
     );
     let bundle = compile(scene.input(&intent), &cancel).unwrap();
-    assert_eq!(bundle.provenance.definitions, scene.stored);
+    assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
     assert!((bundle.plan.layers.last().unwrap().z_mm - 8.0).abs() <= 0.000001);
     assert!(
         bundle
@@ -3235,7 +3254,7 @@ fn blind_native_pocket_floor_remains_owned_while_ordinary_material_becomes_a_rin
             coverage.achieved_shape_error_mm <= coverage.requested_shape_error_mm,
             "{name}"
         );
-        assert_eq!(bundle.provenance.definitions, scene.stored, "{name}");
+        assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
         let reopened = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
         assert!(
             crate::verify_bundle(&reopened, &cancel).unwrap().verified,
@@ -3275,7 +3294,7 @@ fn floating_blind_native_pocket_does_not_project_its_closed_floor_down_to_bed() 
             inside_floor_projection,
             "{name}: a closed pocket floor is not a bottom-open through-hole"
         );
-        assert_eq!(bundle.provenance.definitions, scene.stored, "{name}");
+        assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
         assert_eq!(bundle.provenance.occurrences, scene.occurrences, "{name}");
         let reopened = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
         assert!(
@@ -3352,7 +3371,7 @@ fn overlapping_native_boxes_and_separated_varying_cone_share_actual_union_and_fr
         }));
         let bundle = compile(scene.input(&intent), &cancel).unwrap();
         assert_eq!(bundle.provenance.occurrences, scene.occurrences);
-        assert_eq!(bundle.provenance.definitions, scene.stored);
+        assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
         let coverage = &bundle.plan.native_geometry;
         assert_eq!(coverage.height_analysis_count, 3);
         let features = &coverage.source_feature_coverage;

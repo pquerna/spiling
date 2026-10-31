@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
+mod commands;
+
 use super::{
     AnchorCandidate, AnchorWorkspace, StrokeRuns, candidate_budget, charge_boolean, region, strokes,
 };
@@ -208,6 +210,16 @@ impl Domains {
                 cancel,
             )?;
         }
+        commands::fit(
+            &self.centers,
+            &mut paths,
+            &mut segments,
+            retained,
+            self.owned_bytes,
+            work,
+            foreign_work,
+            cancel,
+        )?;
         for (domain, kind, fraction) in [
             (ordinary, DepositionKind::Support, density),
             (interface_centers, DepositionKind::SupportInterface, 1.0),
