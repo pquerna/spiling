@@ -13,7 +13,7 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
 [native-first decision](../adr/ADR005-native-first-development-geometry.md) separate
 adopted authority from implementation and qualification.
 
-**This implementation uses source14 native-first DEVELOPMENT material authority.**
+**This implementation uses source15 native-first DEVELOPMENT material authority.**
 Current planner/emitter/verifier identities are defined by the executable contracts.
 The imported SolidCore BREP is the single M, with original STEP
 identity/provenance and original finish inputs preserved. Independent actual
@@ -397,7 +397,7 @@ Source-bound planar surface color is exercised through the real CLI on the commi
 
 Retained optical studies apply through typed Core/engine/client/CLI transactions with complete accepted report/selection and explicit two-material evidence/declaration bindings. Queued cancellation and stale revisions preserve the committed project; ACK commits one revision without changing SceneRevision or publishing scene artifacts. Both native source workflows exercise application, physical depth/history edits, changed-pose reassessment and source/palette/study-deleted fresh verification/export. Inspection distinguishes the small requested patch from complete realized side exposure and reuses the existing model with captured evidence; it does not reuse the requested prediction as a printed outcome. Unknown evidence/conditions remain unassessed and backing optics remain unmodelled. The native Review panel supports source-hidden actual replay and catalog metadata tint by decoded tool, plus requested/realized inspection and fresh four-file export. The native window can consume a CLI-produced recovered project; local hardware evidence does not qualify other GPUs/platforms or physical color.
 
-Current identities are project10/manufacturing11/process3/surface3, source14/planner42,
+Current identities are project10/manufacturing11/process3/surface3, source15/planner43,
 emitter11/verifier17 and SPLR6; executable constants and exact native pins remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.

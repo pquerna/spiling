@@ -1044,7 +1044,10 @@ fn record_world_accuracy(
     sigma: f64,
     plane_error: f64,
     arithmetic: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
+    section.validate_chord_errors(work, cancel)?;
     let chord_error = finite(add(
         mul(
             Interval::point(sigma),
@@ -1066,6 +1069,14 @@ fn record_world_accuracy(
     }
     section.certificate.maximum_chord_error_mm = chord_error;
     section.certificate.maximum_plane_error_mm = plane_error;
+    for error in section.loop_chord_errors_mm.iter_mut().flatten() {
+        work.charge(1, cancel)?;
+        *error = finite(add(
+            mul(Interval::point(sigma), Interval::point(*error)),
+            Interval::point(arithmetic),
+        ))?
+        .hi;
+    }
     for spans in &mut section.loop_spans {
         for span in spans {
             span.maximum_chord_error_mm = finite(add(
@@ -2100,6 +2111,8 @@ pub(crate) fn section_placed_with_work(
         sigma,
         requested_error.max(declared_error).max(point_plane_error),
         arithmetic,
+        work,
+        cancel,
     )?;
     section.plane = declared_plane;
     section.frame = declared_frame;
@@ -2517,6 +2530,7 @@ mod tests {
             }],
             loop_source_faces: vec![vec![0]],
             loop_spans: Vec::new(),
+            loop_chord_errors_mm: vec![vec![1e-5; 4]],
             sampling_tolerance_mm: SECTION_SAMPLING_TOLERANCE_MM,
             boolean_tolerance_mm: spiling_contracts::geometry::SECTION_BOOLEAN_TOLERANCE_MM,
             certificate: crate::NativeSectionCertificate {
@@ -2890,6 +2904,9 @@ mod tests {
             &cancel,
         )
         .unwrap();
+        first.validate_chord_errors(&mut work, &cancel).unwrap();
+        second.validate_chord_errors(&mut work, &cancel).unwrap();
+        assert_eq!(first.loop_chord_errors_mm, second.loop_chord_errors_mm);
         assert!(first.is_native_intersection());
         assert!(!first.loops.is_empty());
         assert!(first.achieved_chord_error_mm() <= SECTION_SAMPLING_TOLERANCE_MM);

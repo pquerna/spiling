@@ -460,6 +460,7 @@ pub(super) fn intersect_face(
         let mut current_node = start;
         let mut points = Vec::new();
         let mut tangents = Vec::new();
+        let mut chord_errors = Vec::new();
         let mut charts = Vec::new();
         let mut first_chart = None;
         let mut achieved = [0.0_f64; 2];
@@ -494,6 +495,7 @@ pub(super) fn intersect_face(
                 query,
                 &mut points,
                 &mut tangents,
+                &mut chord_errors,
                 &mut achieved,
                 &mut reverse,
                 admission,
@@ -543,6 +545,7 @@ pub(super) fn intersect_face(
         if reverse {
             points.reverse();
             tangents.reverse();
+            chord_errors.reverse();
             for tangent in &mut tangents {
                 for value in tangent {
                     *value = value.neg();
@@ -582,6 +585,7 @@ pub(super) fn intersect_face(
                 }),
                 points,
                 tangents,
+                chord_errors,
             },
         )?;
     }
@@ -688,6 +692,7 @@ fn sample_segment(
     query: &SectionQuery,
     points: &mut Vec<[f64; 3]>,
     tangents: &mut Vec<[Interval; 3]>,
+    chord_errors: &mut Vec<f64>,
     achieved: &mut [f64; 2],
     reverse: &mut Option<bool>,
     admission: &mut Admission,
@@ -725,6 +730,7 @@ fn sample_segment(
         0,
         points,
         tangents,
+        chord_errors,
         achieved,
         admission,
         work,
@@ -761,6 +767,7 @@ fn sample_segment(
         points[point_start..last].reverse();
         points[last] = positions[0];
         tangents[tangent_start..].reverse();
+        chord_errors[tangent_start..].reverse();
         for tangent in &mut tangents[tangent_start..] {
             for value in tangent {
                 *value = value.neg();

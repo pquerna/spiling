@@ -634,3 +634,96 @@ fn plane_covector_family_preserves_regular_box_cut_and_refuses_vertex_contact() 
     .unwrap_err();
     assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate);
 }
+
+#[test]
+fn local_chord_receipts_preserve_a_regular_native_torus_section() {
+    let definition = crate::analysis::test_source::recipe("native-parity-nurbs-torus.step");
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(100_000_000);
+    // Match the existing closed-prism consumer's prepared source and cumulative
+    // 100-million-work allowance; this does not enlarge a query's frozen caps.
+    let prepared = crate::prepare_solid(
+        &definition,
+        crate::MAX_PREPARED_SECTION_BYTES,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    let section = prepared
+        .section_for_query(
+            &SectionQuery {
+                plane: PlaneMm {
+                    origin_mm: [0.0, 0.0, 0.001],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                maximum_chord_error_mm: spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
+                maximum_plane_error_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
+            },
+            &cancel,
+            (crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes()) as u32,
+            &mut work,
+        )
+        .unwrap();
+    section.validate_chord_errors(&mut work, &cancel).unwrap();
+    assert_eq!(section.loops.len(), 2);
+    assert_eq!(
+        section
+            .loops
+            .iter()
+            .filter(|boundary| boundary.is_hole)
+            .count(),
+        1
+    );
+    // Each retained radius must cover its actual chord, independently of the
+    // sampler and after atlas reversal, loop sorting and canonical rotation.
+    let tube_radius = (4.0_f64 - 0.001_f64.powi(2)).sqrt();
+    for (boundary, errors) in section.loops.iter().zip(&section.loop_chord_errors_mm) {
+        let radius = if boundary.is_hole {
+            6.0 - tube_radius
+        } else {
+            6.0 + tube_radius
+        };
+        for (edge, error) in boundary.points_mm.windows(2).zip(errors) {
+            for point in edge {
+                assert!((point[0].hypot(point[1]) - radius).abs() < 1e-8);
+            }
+            let middle = [
+                (edge[0][0] + edge[1][0]) * 0.5,
+                (edge[0][1] + edge[1][1]) * 0.5,
+            ];
+            let sagitta = radius - middle[0].hypot(middle[1]);
+            assert!(
+                sagitta <= error + 1e-8,
+                "chord sagitta {sagitta} exceeds {error}"
+            );
+        }
+    }
+    let actual = section
+        .loops
+        .iter()
+        .map(|boundary| area(boundary, section.frame))
+        .sum::<f64>();
+    let expected = 4.0 * PI * 6.0 * (4.0_f64 - 0.001_f64.powi(2)).sqrt();
+    let perimeter = section
+        .loops
+        .iter()
+        .flat_map(|boundary| boundary.points_mm.windows(2))
+        .map(|p| {
+            (0..3)
+                .map(|k| (p[1][k] - p[0][k]).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        })
+        .sum::<f64>();
+    assert!(
+        (actual - expected).abs() <= 2.0 * perimeter * section.achieved_chord_error_mm() + 1e-6,
+        "independent annulus area: {actual} vs {expected}"
+    );
+    assert!(
+        section
+            .loop_chord_errors_mm
+            .iter()
+            .flatten()
+            .any(|error| *error < section.achieved_chord_error_mm() * 0.1)
+    );
+}

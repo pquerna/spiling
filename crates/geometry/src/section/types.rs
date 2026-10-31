@@ -97,6 +97,9 @@ pub struct NativeSection {
     pub(crate) loops: Vec<SectionLoopMm>,
     pub(crate) loop_source_faces: Vec<Vec<usize>>,
     pub(crate) loop_spans: Vec<Vec<SectionSpan>>,
+    /// One proved whole-curve error per consecutive output point pair.
+    /// Conservative envelopes have their own uniform polygon certificate.
+    pub(crate) loop_chord_errors_mm: Vec<Vec<f64>>,
     pub(crate) sampling_tolerance_mm: f64,
     pub(crate) boolean_tolerance_mm: f64,
     pub(crate) certificate: NativeSectionCertificate,
@@ -163,6 +166,45 @@ impl NativeSection {
             .filter(|faces| !faces.is_empty())
             .map(Vec::as_slice)
     }
+    pub(crate) fn validate_chord_errors(
+        &self,
+        work: &mut crate::GeometryWorkBudget,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), spiling_contracts::geometry::GeometryError> {
+        use spiling_contracts::geometry::{GeometryError, GeometryErrorCode};
+        let invalid = || {
+            GeometryError::new(
+                GeometryErrorCode::InvalidGeometry,
+                "native section chord-error receipts do not bind every actual chord",
+            )
+        };
+        work.charge(1, cancel)?;
+        if !self.is_native_intersection() {
+            return if self.loop_chord_errors_mm.is_empty() {
+                Ok(())
+            } else {
+                Err(invalid())
+            };
+        }
+        let maximum = self.achieved_chord_error_mm();
+        if !maximum.is_finite()
+            || maximum < 0.0
+            || self.loop_chord_errors_mm.len() != self.loops.len()
+        {
+            return Err(invalid());
+        }
+        for (boundary, errors) in self.loops.iter().zip(&self.loop_chord_errors_mm) {
+            work.charge(errors.len() as u64 + 1, cancel)?;
+            if errors.len().checked_add(1) != Some(boundary.points_mm.len())
+                || errors
+                    .iter()
+                    .any(|error| !error.is_finite() || *error < 0.0 || *error > maximum)
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.certificate.definition_id.allocated_bytes()
@@ -177,6 +219,12 @@ impl NativeSection {
                 .loop_source_faces
                 .iter()
                 .map(|f| f.capacity() * std::mem::size_of::<usize>())
+                .sum::<usize>()
+            + self.loop_chord_errors_mm.capacity() * std::mem::size_of::<Vec<f64>>()
+            + self
+                .loop_chord_errors_mm
+                .iter()
+                .map(|errors| errors.capacity() * std::mem::size_of::<f64>())
                 .sum::<usize>()
             + self.loop_spans.capacity() * std::mem::size_of::<Vec<SectionSpan>>()
             + self

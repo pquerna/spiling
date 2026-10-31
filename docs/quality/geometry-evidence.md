@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source14 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source15 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -211,9 +211,26 @@ specified by the [RFC](../adr/004-native-geometry-parity.md) and
 
 `NativeSection` carries plane/frame, face lineage, exact single/piecewise native
 surface-plane expressions and achieved chord/plane errors. Internal chart limits
-retain exact cut-root expressions, not invented BREP edges. Owned chart capacities
-are charged and moved through assembly. A raw intersection alone is not closed-slab
-occupancy; conservative envelopes cannot be promoted to manufactured layers.
+retain exact cut-root expressions, not invented BREP edges. Each output chord
+also retains its independently bounded native-curve error, including endpoint
+uncertainty. Reversal, point rotation, loop sorting and actual-pose transport
+preserve its point-pair association. Nonadjacent error tubes use the sum of the
+two local errors; missing, malformed or nonfinite native receipts refuse.
+Conservative slab envelopes retain their separate uniform polygon certificate.
+All owned capacities coexist under the native query budget; packed SPLS bytes
+and its existing layout are unchanged. A raw intersection alone is not
+closed-slab occupancy, and envelopes cannot be promoted to manufactured layers.
+
+Before choosing interpolation order, a continuous unique native graph may tighten
+its dependent-coordinate box using its existing midpoint root and whole-graph
+piecewise implicit-slope bound. All operations round outward. The resulting box
+must independently pass the same single-knot or closed-C1 check before using
+second-order interpolation; genuine corners retain the Lipschitz bound. This
+avoids treating an enclosure's artificial knot crossing as a curve corner.
+Regular native rational-torus sections exercise independent annulus/hole and
+per-chord sagitta checks. Coplanar, tangent, critical and periodic construction
+qualification remains separate; no section result establishes a complete torus
+manufacturing route.
 
 Sections intersect the retained native carriers directly. Complete root/span
 inventories, original face lineage, ordered closure, Jordan and achieved

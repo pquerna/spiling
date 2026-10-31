@@ -81,6 +81,7 @@ pub(super) struct Arc {
     pub(super) span: Option<SectionSpan>,
     pub(super) points: Vec<[f64; 3]>,
     pub(super) tangents: Vec<[Interval; 3]>,
+    pub(super) chord_errors: Vec<f64>,
 }
 
 pub(super) fn intersect(
@@ -399,6 +400,7 @@ pub(super) fn intersect(
             let roots = [edge_roots[a.root_index], edge_roots[b.root_index]];
             let mut points = Vec::new();
             let mut tangents = Vec::new();
+            let mut chord_errors = Vec::new();
             admission.push(&mut points, roots[0].point)?;
             let graph = Graph {
                 surface,
@@ -431,6 +433,7 @@ pub(super) fn intersect(
                 0,
                 &mut points,
                 &mut tangents,
+                &mut chord_errors,
                 &mut achieved,
                 &mut admission,
                 work,
@@ -460,6 +463,7 @@ pub(super) fn intersect(
             if reverse {
                 points.reverse();
                 tangents.reverse();
+                chord_errors.reverse();
                 for tangent in &mut tangents {
                     for value in tangent {
                         *value = value.neg();
@@ -500,6 +504,7 @@ pub(super) fn intersect(
                     }),
                     points,
                     tangents,
+                    chord_errors,
                 },
             )?;
         }
@@ -510,6 +515,7 @@ pub(super) fn intersect(
         loops: Vec::new(),
         loop_source_faces: Vec::new(),
         loop_spans: Vec::new(),
+        loop_chord_errors_mm: Vec::new(),
         sampling_tolerance_mm: SECTION_SAMPLING_TOLERANCE_MM,
         boolean_tolerance_mm: SECTION_BOOLEAN_TOLERANCE_MM,
         certificate: NativeSectionCertificate {
@@ -1322,6 +1328,7 @@ impl Graph<'_> {
         depth: u8,
         output: &mut Vec<[f64; 3]>,
         tangents: &mut Vec<[Interval; 3]>,
+        chord_errors: &mut Vec<f64>,
         achieved: &mut [f64; 2],
         admission: &mut Admission,
         work: &mut GeometryWorkBudget,
@@ -1334,12 +1341,34 @@ impl Graph<'_> {
             Err(_) => None,
         };
         let chord = match enclosure {
-            Ok((y, jet)) => {
+            Ok((mut y, mut jet)) => {
                 let length = Interval::point(x[1]).sub(Interval::point(x[0]));
-                let uv = self.box_uv(x, y);
-                let deviation = if self.single_knot_cell(uv, work, cancel)?
-                    || p::surface_parameter_span_smooth(self.surface, uv, work, cancel)?
-                {
+                let mut uv = self.box_uv(x, y);
+                let mut smooth = self.single_knot_cell(uv, work, cancel)?
+                    || p::surface_parameter_span_smooth(self.surface, uv, work, cancel)?;
+                if !smooth {
+                    // The existing whole-interval existence/uniqueness proof
+                    // owns this continuous graph. Its piecewise implicit slope
+                    // bounds transport from the root at the literal midpoint;
+                    // a broad surface box need not make the graph cross a knot.
+                    let mid = x[0] * 0.5 + x[1] * 0.5;
+                    let (at, _) = self.enclose([mid; 2], work, cancel)?;
+                    let (dx, dy) = if self.axis == 1 {
+                        (jet.du, jet.dv)
+                    } else {
+                        (jet.dv, jet.du)
+                    };
+                    let slope = dot(dx, self.plane.normal)
+                        .neg()
+                        .div(dot(dy, self.plane.normal))?;
+                    let displacement = Interval::new(x[0], x[1])?.sub(Interval::point(mid));
+                    y = y.intersect(at.add(slope.mul(displacement)))?;
+                    uv = self.box_uv(x, y);
+                    jet = surface_jet(self.surface, uv, self.scale, work, cancel)?;
+                    smooth = self.single_knot_cell(uv, work, cancel)?
+                        || p::surface_parameter_span_smooth(self.surface, uv, work, cancel)?;
+                }
+                let deviation = if smooth {
                     Interval::point(norm(self.second(jet)?))
                         .mul(length.square())
                         .mul(Interval::point(0.125))
@@ -1372,6 +1401,7 @@ impl Graph<'_> {
                 velocity
                     .ok_or_else(|| indeterminate("native graph segment lost its tangent proof"))?,
             )?;
+            admission.push(chord_errors, chord)?;
             return admission.push(output, b);
         }
         let mid = x[0] * 0.5 + x[1] * 0.5;
@@ -1391,6 +1421,7 @@ impl Graph<'_> {
             depth + 1,
             output,
             tangents,
+            chord_errors,
             achieved,
             admission,
             work,
@@ -1406,6 +1437,7 @@ impl Graph<'_> {
             depth + 1,
             output,
             tangents,
+            chord_errors,
             achieved,
             admission,
             work,
@@ -1492,6 +1524,7 @@ fn assemble(
         let first_point = arcs[start].points[0];
         let mut points = std::mem::take(&mut arcs[start].points);
         let mut tangents = std::mem::take(&mut arcs[start].tangents);
+        let mut chord_errors = std::mem::take(&mut arcs[start].chord_errors);
         let mut faces = Vec::new();
         let mut spans = Vec::new();
         let mut current = start;
@@ -1507,6 +1540,9 @@ fn assemble(
                 }
                 for &tangent in &arc.tangents {
                     admission.push(&mut tangents, tangent)?;
+                }
+                for &error in &arc.chord_errors {
+                    admission.push(&mut chord_errors, error)?;
                 }
             }
             admission.push(&mut faces, span.source_face_ordinal)?;
@@ -1547,7 +1583,14 @@ fn assemble(
             ));
         }
         certify_adjacent(&points, &tangents, work, cancel)?;
-        canonicalize_points(&mut points, result.frame, work, cancel)?;
+        if chord_errors.len().checked_add(1) != Some(points.len()) {
+            return Err(indeterminate(
+                "native section lost its chord-error inventory during assembly",
+            ));
+        }
+        let first = canonicalize_points(&mut points, result.frame, work, cancel)?;
+        work.charge(chord_errors.len() as u64, cancel)?;
+        chord_errors.rotate_left(first);
         admission.push(
             &mut result.loops,
             SectionLoopMm {
@@ -1557,6 +1600,7 @@ fn assemble(
         )?;
         admission.push(&mut result.loop_source_faces, faces)?;
         admission.push(&mut result.loop_spans, spans)?;
+        admission.push(&mut result.loop_chord_errors_mm, chord_errors)?;
     }
     canonicalize_loops(result, work, cancel)?;
     certify_polygons(result, work, cancel)
@@ -1603,7 +1647,7 @@ fn canonicalize_points(
     frame: PlaneFrameMm,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
+) -> Result<usize, GeometryError> {
     let count = points.len() - 1;
     let mut first = 0;
     for i in 1..count {
@@ -1616,7 +1660,7 @@ fn canonicalize_points(
     }
     points[..count].rotate_left(first);
     points[count] = points[0];
-    Ok(())
+    Ok(first)
 }
 fn canonicalize_loops(
     section: &mut NativeSection,
@@ -1642,6 +1686,9 @@ fn canonicalize_loops(
             section.loops.swap(j, j - 1);
             section.loop_source_faces.swap(j, j - 1);
             section.loop_spans.swap(j, j - 1);
+            if section.is_native_intersection() {
+                section.loop_chord_errors_mm.swap(j, j - 1);
+            }
             j -= 1;
         }
     }
@@ -1682,12 +1729,9 @@ fn certify_polygons(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
+    section.validate_chord_errors(work, cancel)?;
     let projection_scale = norm(section.frame.x_axis.map(Interval::point))
         .max(norm(section.frame.y_axis.map(Interval::point)));
-    let margin = Interval::point(section.achieved_chord_error_mm())
-        .mul(Interval::point(2.0))
-        .mul(Interval::point(projection_scale))
-        .hi;
     for (li, left) in section.loops.iter().enumerate() {
         for (ei, a) in left.points_mm.windows(2).enumerate() {
             let a = [project(a[0], section.frame), project(a[1], section.frame)];
@@ -1698,6 +1742,18 @@ fn certify_polygons(
                         continue;
                     }
                     let b = [project(b[0], section.frame), project(b[1], section.frame)];
+                    let errors = if section.is_native_intersection() {
+                        [
+                            section.loop_chord_errors_mm[li][ei],
+                            section.loop_chord_errors_mm[lj][ej],
+                        ]
+                    } else {
+                        [section.achieved_chord_error_mm(); 2]
+                    };
+                    let margin = Interval::point(errors[0])
+                        .add(Interval::point(errors[1]))
+                        .mul(Interval::point(projection_scale))
+                        .hi;
                     let separated = (0..2).any(|axis| {
                         Interval::point(a[0][axis].hi.max(a[1][axis].hi))
                             .add(Interval::point(margin))
@@ -1723,9 +1779,10 @@ fn certify_polygons(
                     if clear(d, a) || clear(e, b) {
                         continue;
                     }
-                    return Err(indeterminate(
-                        "nonadjacent native curve error tubes have an unresolved crossing/touch",
-                    ));
+                    return Err(indeterminate(format!(
+                        "nonadjacent native curve error tubes have an unresolved crossing/touch: loops={li},{lj} chords={ei},{ej} local_errors={errors:?} section_error={} margin={margin} a={a:?} b={b:?}",
+                        section.achieved_chord_error_mm()
+                    )));
                 }
             }
         }
@@ -1964,7 +2021,8 @@ pub(crate) fn canonicalize_section_in_place(
             "placed native section lost its paired original lineage",
         ));
     }
-    for boundary in &mut section.loops {
+    section.validate_chord_errors(work, cancel)?;
+    for (index, boundary) in section.loops.iter_mut().enumerate() {
         if boundary.points_mm.len() < 4 || boundary.points_mm.first() != boundary.points_mm.last() {
             return Err(indeterminate("placed native section is not exactly closed"));
         }
@@ -1974,7 +2032,11 @@ pub(crate) fn canonicalize_section_in_place(
                 "placed native section lost its material-left winding",
             ));
         }
-        canonicalize_points(&mut boundary.points_mm, section.frame, work, cancel)?;
+        let first = canonicalize_points(&mut boundary.points_mm, section.frame, work, cancel)?;
+        if let Some(errors) = section.loop_chord_errors_mm.get_mut(index) {
+            work.charge(errors.len() as u64, cancel)?;
+            errors.rotate_left(first);
+        }
     }
     canonicalize_loops(section, work, cancel)?;
     certify_polygons(section, work, cancel)
@@ -1995,6 +2057,88 @@ mod correspondence_tests {
         math::{CPoint, NOW, NOZ},
         srf_basic,
     };
+
+    #[test]
+    fn chord_metric_validation_preserves_crossing_and_uncertainty_refusals() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let mut section = crate::section::section(
+            &definition,
+            PlaneMm {
+                origin_mm: [0.0, 0.0, 4.0],
+                normal: [0.0, 0.0, 1.0],
+            },
+            &cancel,
+            MAX_SECTION_BYTES,
+            &mut work,
+        )
+        .unwrap();
+        let valid = section.loop_chord_errors_mm.clone();
+        for invalid in [
+            vec![],
+            vec![vec![]],
+            vec![vec![f64::NAN; 4]],
+            vec![vec![-1.0; 4]],
+            vec![vec![1.0; 4]],
+        ] {
+            section.loop_chord_errors_mm = invalid;
+            assert_eq!(
+                certify_polygons(&section, &mut work, &cancel)
+                    .unwrap_err()
+                    .code,
+                GeometryErrorCode::InvalidGeometry
+            );
+        }
+        section.loop_chord_errors_mm = valid;
+        certify_polygons(&section, &mut work, &cancel).unwrap();
+        section.loops[0].points_mm = vec![
+            [0.0, 0.0, 4.0],
+            [2.0, 2.0, 4.0],
+            [0.0, 2.0, 4.0],
+            [2.0, 0.0, 4.0],
+            [0.0, 0.0, 4.0],
+        ];
+        assert_eq!(
+            certify_polygons(&section, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::AnalysisIndeterminate
+        );
+        section.loops[0].points_mm = vec![
+            [0.0, 0.0, 4.0],
+            [2.0, 0.0, 4.0],
+            [2.0, 0.001, 4.0],
+            [0.0, 0.001, 4.0],
+            [0.0, 0.0, 4.0],
+        ];
+        section.certificate.maximum_chord_error_mm = 0.005;
+        section.loop_chord_errors_mm = vec![vec![0.005; 4]];
+        assert_eq!(
+            certify_polygons(&section, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::AnalysisIndeterminate
+        );
+        section.certificate.authority = SectionAuthority::ConservativeSlabEnvelope;
+        assert_eq!(
+            certify_polygons(&section, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry
+        );
+        section.loop_chord_errors_mm.clear();
+        assert_eq!(
+            certify_polygons(&section, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::AnalysisIndeterminate
+        );
+    }
 
     fn curve(points: Vec<CPoint>, degree: usize, knots: Vec<f64>, dim: u64) -> Curve {
         BSplineCurve::from_nurb(

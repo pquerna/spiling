@@ -143,7 +143,14 @@ impl WorldSampleCandidate {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<f64, GeometryError> {
-        record_world_accuracy(section, placement.sigma, self.plane_error, self.arithmetic)?;
+        record_world_accuracy(
+            section,
+            placement.sigma,
+            self.plane_error,
+            self.arithmetic,
+            work,
+            cancel,
+        )?;
         section.loops = self.loops;
         section.plane = PlaneMm {
             origin_mm: [0.0, 0.0, placement.sample],
