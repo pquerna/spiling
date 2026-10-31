@@ -325,8 +325,9 @@ Preflight admits exact native face metadata and process bounds, expands conserva
 `ManufacturingProvenance` contains `project_id`, captured `input_revision`, `input_hash`, `definitions:StoredDefinition[]`, `occurrences:OccurrenceRecord[]`, explicit `intent`, full ordered `surface_overlays` and `process_document`, `surface_images:SurfaceImageContent[]`, `kernel:{name,version,revision}`, and explicit planner/emitter/verifier versions. The bounded unique image content table contains canonical PGM bytes once per referenced image, including disabled layers, making exported provenance self-contained. Immutable capture shares canonical content. Inspection/status provenance contains metadata only. Captured source labels/units/uncertainty remain authoritative; native reimport labels must not replace them.
 
 The [native-first DEVELOPMENT route](../adr/ADR005-native-first-development-geometry.md)
-uses source6/planner25 and the imported SolidCore BREP as its single material
-authority M. Original STEP bytes, immutable definition/face/use identity, units,
+uses source6 and the imported SolidCore BREP as its single material authority M.
+The current planner identity is specified with the normalized plan above.
+Original STEP bytes, immutable definition/face/use identity, units,
 uncertainty and original finish operands remain captured inputs and provenance,
 not a second reconstructed solid. Query-private mutation, caches and derived
 trims cannot silently redefine M. Material realization identity binds the native

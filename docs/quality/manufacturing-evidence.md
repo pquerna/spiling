@@ -13,8 +13,9 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
 [native-first decision](../adr/ADR005-native-first-development-geometry.md) separate
 adopted authority from implementation and qualification.
 
-**This implementation uses source6/planner27 native-first DEVELOPMENT material
-authority.** The imported SolidCore BREP is the single M, with original STEP
+**This implementation uses source6 native-first DEVELOPMENT material authority.**
+Current planner/emitter/verifier identities are defined by the executable contracts.
+The imported SolidCore BREP is the single M, with original STEP
 identity/provenance and original finish inputs preserved. Independent actual
 program/process decoding remains mandatory and explicitly reports native-kernel
 reliance, not independent certification of original STEP topology/embedding.
