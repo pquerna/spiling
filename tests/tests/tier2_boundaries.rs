@@ -3,7 +3,6 @@
 // Licensed under the Open Software License version 3.0
 
 //! Tier 2: Boundary & Corner Cases (Features 1–50).
-//! Exactly 5 boundary/corner test cases per feature (250 tests total).
 //! Derived from fixtures/geometry/manifest.json adversaries, extreme aspect ratios,
 //! degenerate cuts, coordinate extremes, zero thickness, and resource limits.
 
@@ -623,7 +622,7 @@ fn test_f14_corner_small_coordinates_norm() {
 
 #[test]
 fn test_f15_corner_budget_zero_charge() {
-    let mut b = GeometryWorkBudget::new(100);
+    let b = GeometryWorkBudget::new(100);
     let cancel = AtomicBool::new(false);
     b.charge(0, &cancel).unwrap();
     assert_eq!(b.consumed(), 0);
@@ -631,7 +630,7 @@ fn test_f15_corner_budget_zero_charge() {
 
 #[test]
 fn test_f15_corner_budget_exact_depletion() {
-    let mut b = GeometryWorkBudget::new(100);
+    let b = GeometryWorkBudget::new(100);
     let cancel = AtomicBool::new(false);
     b.charge(100, &cancel).unwrap();
     assert_eq!(b.consumed(), 100);
@@ -640,7 +639,7 @@ fn test_f15_corner_budget_exact_depletion() {
 
 #[test]
 fn test_f15_corner_budget_cancelled_during_charge() {
-    let mut b = GeometryWorkBudget::new(100);
+    let b = GeometryWorkBudget::new(100);
     let cancel = AtomicBool::new(true);
     let err = b.charge(10, &cancel).unwrap_err();
     assert_eq!(err.code, GeometryErrorCode::Cancelled);
@@ -648,7 +647,7 @@ fn test_f15_corner_budget_cancelled_during_charge() {
 
 #[test]
 fn test_f15_corner_budget_overflow_request() {
-    let mut b = GeometryWorkBudget::new(100);
+    let b = GeometryWorkBudget::new(100);
     let cancel = AtomicBool::new(false);
     let err = b.charge(1000, &cancel).unwrap_err();
     assert_eq!(err.code, GeometryErrorCode::ResourceLimit);
@@ -656,7 +655,7 @@ fn test_f15_corner_budget_overflow_request() {
 
 #[test]
 fn test_f15_corner_budget_cumulative_tracking() {
-    let mut b = GeometryWorkBudget::new(1000);
+    let b = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
     for _ in 0..10 {
         b.charge(10, &cancel).unwrap();
@@ -717,7 +716,7 @@ fn test_f16_corner_spline_housing_tessellation() {
     ))
     .unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 80);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
@@ -766,7 +765,7 @@ fn test_f17_corner_rounded_housing_mesh_valid() {
     ))
     .unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.chunks.len() >= 8);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
@@ -1119,7 +1118,7 @@ fn test_f23_corner_nurbs_span_rational() {
         degree: 2,
         knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
         control_points_mm: vec![[0.0, 0.0], [1.0, 1.0], [2.0, 0.0]],
-        weights: Some(vec![1.0, 0.7071, 1.0]),
+        weights: Some(vec![1.0, std::f64::consts::FRAC_1_SQRT_2, 1.0]),
     };
     match nurbs {
         SectionCurve2d::NurbsSpan { weights, .. } => assert!(weights.is_some()),
@@ -1655,7 +1654,7 @@ fn test_f35_corner_direct_cylinder() {
 #[test]
 fn test_f36_corner_height_domain_box() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1668,7 +1667,9 @@ fn test_f36_corner_height_domain_box() {
         maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel);
-    assert!(h.is_ok());
+    assert!(h.is_ok(), "{:?}", h.as_ref().err());
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
@@ -1712,7 +1713,7 @@ fn test_f36_corner_height_domain_zero_work() {
 #[test]
 fn test_f36_corner_height_domain_narrow_interval() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1725,13 +1726,15 @@ fn test_f36_corner_height_domain_narrow_interval() {
         maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [2.0, 4.0], policy, &mut work, &cancel);
-    assert!(h.is_ok());
+    assert!(h.is_ok(), "{:?}", h.as_ref().err());
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
 fn test_f36_corner_height_domain_outside_interval() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1744,7 +1747,9 @@ fn test_f36_corner_height_domain_outside_interval() {
         maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [10.0, 15.0], policy, &mut work, &cancel);
-    assert!(h.is_ok());
+    assert!(h.is_ok(), "{:?}", h.as_ref().err());
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 // =========================================================================
@@ -1800,7 +1805,7 @@ fn test_f37_corner_bounds_plate() {
 #[test]
 fn test_f38_corner_strata_box() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1814,12 +1819,14 @@ fn test_f38_corner_strata_box() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
 fn test_f38_corner_strata_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1833,6 +1840,8 @@ fn test_f38_corner_strata_cylinder() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
@@ -1841,7 +1850,7 @@ fn test_f38_corner_strata_pocket() {
         "independent-exporters/occt-narrow-pocket-mm.step",
     ))
     .unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1855,6 +1864,8 @@ fn test_f38_corner_strata_pocket() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 6.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
@@ -1863,7 +1874,7 @@ fn test_f38_corner_strata_housing() {
         "independent-exporters/occt-rounded-housing-mm.step",
     ))
     .unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1877,6 +1888,8 @@ fn test_f38_corner_strata_housing() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 10.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
@@ -1885,7 +1898,7 @@ fn test_f38_corner_strata_bracket() {
         "independent-exporters/occt-ribbed-bracket-mm.step",
     ))
     .unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1899,6 +1912,8 @@ fn test_f38_corner_strata_bracket() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 7.6], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 // =========================================================================
@@ -1908,25 +1923,29 @@ fn test_f38_corner_strata_bracket() {
 #[test]
 fn test_f39_corner_projected_bounds_negative_dir() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let policy = BoundsPolicy {
         maximum_endpoint_uncertainty_mm: 1e-6,
     };
     let p = projected_bounds(&def, [-1.0, 0.0, 0.0], policy, &mut work, &cancel).unwrap();
     assert!(p.maximum[0].is_finite());
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
 fn test_f39_corner_projected_bounds_diagonal() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let policy = BoundsPolicy {
         maximum_endpoint_uncertainty_mm: 1e-6,
     };
     let p = projected_bounds(&def, [1.0, 1.0, 0.0], policy, &mut work, &cancel).unwrap();
     assert!(p.maximum[0].is_finite());
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
@@ -1944,25 +1963,29 @@ fn test_f39_corner_projected_bounds_cancelled() {
 #[test]
 fn test_f39_corner_material_projected_bounds_y() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let policy = BoundsPolicy {
         maximum_endpoint_uncertainty_mm: 1e-6,
     };
     let p = material_projected_bounds(&def, [0.0, 1.0, 0.0], policy, &mut work, &cancel).unwrap();
     assert_close(p.bounds().maximum[0], 10.0, 1e-4, "material Y");
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
 fn test_f39_corner_material_projected_bounds_z() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let policy = BoundsPolicy {
         maximum_endpoint_uncertainty_mm: 1e-6,
     };
     let p = material_projected_bounds(&def, [0.0, 0.0, 1.0], policy, &mut work, &cancel).unwrap();
     assert_close(p.bounds().maximum[0], 8.0, 1e-4, "material Z");
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 // =========================================================================
@@ -2058,21 +2081,21 @@ fn test_f41_corner_occt_cylinder_faces() {
 fn test_f42_corner_box_triangles() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert_eq!(mesh.triangle_count, 12);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
 fn test_f42_corner_cylinder_triangles() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 30);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
 fn test_f42_corner_through_hole_triangles() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 40);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
@@ -2082,7 +2105,7 @@ fn test_f42_corner_tapered_triangles() {
     ))
     .unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 40);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
@@ -2092,7 +2115,7 @@ fn test_f42_corner_bracket_triangles() {
     ))
     .unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 100);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 // =========================================================================
@@ -2103,21 +2126,21 @@ fn test_f42_corner_bracket_triangles() {
 fn test_f43_corner_box_vertices() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert_eq!(mesh.vertex_count, 24);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
 fn test_f43_corner_cylinder_vertices() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.vertex_count >= 30);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
 fn test_f43_corner_through_hole_vertices() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.vertex_count >= 40);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
@@ -2127,7 +2150,7 @@ fn test_f43_corner_housing_vertices() {
     ))
     .unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.vertex_count >= 50);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
@@ -2137,7 +2160,7 @@ fn test_f43_corner_bracket_vertices() {
     ))
     .unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.vertex_count >= 100);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 // =========================================================================

@@ -656,7 +656,7 @@ fn test_f15_work_budget_initialization() {
 
 #[test]
 fn test_f15_work_budget_charge_consumed() {
-    let mut budget = GeometryWorkBudget::new(1000);
+    let budget = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
     budget.charge(100, &cancel).unwrap();
     assert_eq!(budget.consumed(), 100);
@@ -664,7 +664,7 @@ fn test_f15_work_budget_charge_consumed() {
 
 #[test]
 fn test_f15_work_budget_exhaustion_error() {
-    let mut budget = GeometryWorkBudget::new(50);
+    let budget = GeometryWorkBudget::new(50);
     let cancel = AtomicBool::new(false);
     let err = budget.charge(100, &cancel).unwrap_err();
     assert_eq!(err.code, GeometryErrorCode::ResourceLimit);
@@ -672,7 +672,7 @@ fn test_f15_work_budget_exhaustion_error() {
 
 #[test]
 fn test_f15_work_budget_large_capacity() {
-    let mut budget = GeometryWorkBudget::new(50_000_000);
+    let budget = GeometryWorkBudget::new(50_000_000);
     let cancel = AtomicBool::new(false);
     assert!(budget.charge(1_000_000, &cancel).is_ok());
     assert_eq!(budget.consumed(), 1_000_000);
@@ -680,7 +680,7 @@ fn test_f15_work_budget_large_capacity() {
 
 #[test]
 fn test_f15_work_budget_multiple_charges() {
-    let mut budget = GeometryWorkBudget::new(500);
+    let budget = GeometryWorkBudget::new(500);
     let cancel = AtomicBool::new(false);
     budget.charge(100, &cancel).unwrap();
     budget.charge(200, &cancel).unwrap();
@@ -798,7 +798,7 @@ fn test_f17_bezier_tessellate_quality() {
     ))
     .unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 50);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 // =========================================================================
@@ -1687,7 +1687,7 @@ fn test_f35_direct_through_hole_without_g_transport() {
 #[test]
 fn test_f36_height_domain_analysis() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1700,13 +1700,15 @@ fn test_f36_height_domain_analysis() {
         maximum_shape_error_mm: 0.005,
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel);
-    assert!(h.is_ok());
+    assert!(h.is_ok(), "{:?}", h.as_ref().err());
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
 fn test_f36_height_domain_retained_bytes() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1720,12 +1722,14 @@ fn test_f36_height_domain_retained_bytes() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
 fn test_f36_height_domain_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1739,12 +1743,14 @@ fn test_f36_height_domain_cylinder() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
 fn test_f36_height_domain_through_hole() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1758,6 +1764,8 @@ fn test_f36_height_domain_through_hole() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
@@ -1766,7 +1774,7 @@ fn test_f36_height_domain_housing() {
         "independent-exporters/occt-rounded-housing-mm.step",
     ))
     .unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1780,6 +1788,8 @@ fn test_f36_height_domain_housing() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 10.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 // =========================================================================
@@ -1842,7 +1852,7 @@ fn test_f37_bounds_perforated_plate() {
 #[test]
 fn test_f38_height_stratum_box() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1856,6 +1866,8 @@ fn test_f38_height_stratum_box() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
@@ -1864,7 +1876,7 @@ fn test_f38_height_stratum_pocket_floor() {
         "independent-exporters/occt-rounded-housing-mm.step",
     ))
     .unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1878,6 +1890,8 @@ fn test_f38_height_stratum_pocket_floor() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 10.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
@@ -1886,7 +1900,7 @@ fn test_f38_height_stratum_narrow_pocket() {
         "independent-exporters/occt-narrow-pocket-mm.step",
     ))
     .unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1900,6 +1914,8 @@ fn test_f38_height_stratum_narrow_pocket() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 6.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
@@ -1908,7 +1924,7 @@ fn test_f38_height_stratum_bracket() {
         "independent-exporters/occt-ribbed-bracket-mm.step",
     ))
     .unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1922,12 +1938,14 @@ fn test_f38_height_stratum_bracket() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 7.6], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
 fn test_f38_height_stratum_closure_check() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let frame = PlaneFrameMm {
         origin_mm: [0.0, 0.0, 0.0],
@@ -1941,6 +1959,8 @@ fn test_f38_height_stratum_closure_check() {
     };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     let _ = h.requires_closed_material_capture([2.0, 6.0]);
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 // =========================================================================
@@ -1950,66 +1970,95 @@ fn test_f38_height_stratum_closure_check() {
 #[test]
 fn test_f39_projected_bounds_axis_x() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let policy = BoundsPolicy {
         maximum_endpoint_uncertainty_mm: 1e-6,
     };
     let p = projected_bounds(&def, [1.0, 0.0, 0.0], policy, &mut work, &cancel).unwrap();
     assert_close(p.maximum[0], 20.0, 1e-4, "projected X");
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
 fn test_f39_projected_bounds_axis_y() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let policy = BoundsPolicy {
         maximum_endpoint_uncertainty_mm: 1e-6,
     };
     let p = projected_bounds(&def, [0.0, 1.0, 0.0], policy, &mut work, &cancel).unwrap();
     assert_close(p.maximum[0], 10.0, 1e-4, "projected Y");
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
 fn test_f39_projected_bounds_axis_z() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let policy = BoundsPolicy {
         maximum_endpoint_uncertainty_mm: 1e-6,
     };
     let p = projected_bounds(&def, [0.0, 0.0, 1.0], policy, &mut work, &cancel).unwrap();
     assert_close(p.maximum[0], 8.0, 1e-4, "projected Z");
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
 fn test_f39_material_projected_bounds() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let policy = BoundsPolicy {
         maximum_endpoint_uncertainty_mm: 1e-6,
     };
     let p = material_projected_bounds(&def, [1.0, 0.0, 0.0], policy, &mut work, &cancel).unwrap();
     assert_close(p.bounds().maximum[0], 20.0, 1e-4, "material projected X");
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 #[test]
 fn test_f39_projected_bounds_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let mut work = GeometryWorkBudget::new(1000);
+    let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let policy = BoundsPolicy {
         maximum_endpoint_uncertainty_mm: 1e-6,
     };
     let p = projected_bounds(&def, [1.0, 0.0, 0.0], policy, &mut work, &cancel).unwrap();
     assert_close(p.maximum[0], 5.0, 1e-4, "cylinder projected X");
+    assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
+    assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }
 
 // =========================================================================
 // Feature 40: Void projection
 // =========================================================================
+
+#[test]
+fn test_f39_projected_bounds_honors_a_too_small_work_budget() {
+    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
+    let mut work = GeometryWorkBudget::new(10);
+    let error = projected_bounds(
+        &def,
+        [1.0, 0.0, 0.0],
+        BoundsPolicy {
+            maximum_endpoint_uncertainty_mm: 1e-6,
+        },
+        &mut work,
+        &AtomicBool::new(false),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
+    assert!(work.consumed() <= 10);
+    assert_eq!(work.consumed() + work.remaining(), 10);
+}
 
 #[test]
 fn test_f40_through_hole_void_presence() {
@@ -2119,11 +2168,11 @@ fn test_f41_wall_normal_orthogonality() {
 }
 
 // =========================================================================
-// Feature 42: Watertight shared edge division
+// Feature 42: Checked source display admission
 // =========================================================================
 
 #[test]
-fn test_f42_box_tessellation_watertight() {
+fn test_f42_box_display_output_admitted() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(mesh.vertex_count > 0);
@@ -2131,21 +2180,21 @@ fn test_f42_box_tessellation_watertight() {
 }
 
 #[test]
-fn test_f42_cylinder_tessellation_watertight() {
+fn test_f42_cylinder_display_output_admitted() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(mesh.vertex_count > 0);
 }
 
 #[test]
-fn test_f42_through_hole_tessellation_watertight() {
+fn test_f42_through_hole_display_output_admitted() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(mesh.vertex_count > 0);
 }
 
 #[test]
-fn test_f42_occt_housing_watertight() {
+fn test_f42_occt_housing_display_admitted() {
     let def = import_test_step(&fixture_bytes(
         "independent-exporters/occt-rounded-housing-mm.step",
     ))
@@ -2155,7 +2204,7 @@ fn test_f42_occt_housing_watertight() {
 }
 
 #[test]
-fn test_f42_occt_bracket_watertight() {
+fn test_f42_occt_bracket_display_admitted() {
     let def = import_test_step(&fixture_bytes(
         "independent-exporters/occt-ribbed-bracket-mm.step",
     ))
@@ -2165,56 +2214,57 @@ fn test_f42_occt_bracket_watertight() {
 }
 
 // =========================================================================
-// Feature 43: Adaptive CDT surface meshing
+// Feature 43: Checked display profile and source coverage
 // =========================================================================
 
 #[test]
-fn test_f43_box_cdt_triangle_count() {
+fn test_f43_box_mesh_surface_area() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert_eq!(mesh.triangle_count, 12);
+    assert_mesh_source_coverage(&def, &mesh);
+    assert_close(mesh_surface_area(&mesh), 880.0, 5.0, "box boundary area");
 }
 
 #[test]
-fn test_f43_box_cdt_vertex_count() {
+fn test_f43_box_mesh_profile() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert_eq!(mesh.vertex_count, 24);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
-fn test_f43_cylinder_cdt_density() {
+fn test_f43_cylinder_mesh_source_coverage() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 30);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
-fn test_f43_through_hole_cdt_density() {
+fn test_f43_through_hole_mesh_source_coverage() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 40);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
-fn test_f43_bracket_cdt_density() {
+fn test_f43_bracket_mesh_source_coverage() {
     let def = import_test_step(&fixture_bytes(
         "independent-exporters/occt-ribbed-bracket-mm.step",
     ))
     .unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 100);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 // =========================================================================
-// Feature 44: Boundary-split iterative refinement
+// Feature 44: Trimmed display output and independent planar area
 // =========================================================================
 
 #[test]
-fn test_f44_cylinder_boundary_split_smoothness() {
+fn test_f44_split_cylinder_mesh_admission() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 30);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
@@ -2224,17 +2274,47 @@ fn test_f44_occt_tapered_refinement() {
     ))
     .unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 40);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
-fn test_f44_occt_narrow_pocket_refinement() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-narrow-pocket-mm.step",
-    ))
-    .unwrap();
+fn test_f44_narrow_pocket_mesh_top_area_preserves_opening() {
+    let fixture = "independent-exporters/occt-narrow-pocket-mm.step";
+    let def = import_test_step(&fixture_bytes(fixture)).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 50);
+    assert_mesh_source_coverage(&def, &mesh);
+    let oracle = &fixture_record(fixture)["analytic_oracle"];
+    let bounds = fixture_physical_bounds(fixture);
+    let width = bounds.max[0] - bounds.min[0];
+    let depth = bounds.max[1] - bounds.min[1];
+    let expected = oracle["sections"].as_array().unwrap().last().unwrap()["material_area_mm2"]
+        .as_f64()
+        .unwrap();
+    let opening_area = width * depth - expected;
+    let opening_width = oracle["pocket_width_mm"].as_f64().unwrap();
+    let opening_length = opening_area / opening_width;
+    let boundary_length = 2.0 * (width + depth + opening_width + opening_length);
+    let error = mesh
+        .chunks
+        .iter()
+        .map(|chunk| {
+            chunk.descriptor.carrier_deviation_mm
+                + chunk.descriptor.trim_deviation_mm
+                + chunk.descriptor.quantization_error_mm
+        })
+        .fold(0.0, f64::max);
+    // Offset the outer and opening boundaries by the declared display error.
+    // Two planar loops contribute the conservative quadratic term. Even at the
+    // frozen 0.05 mm display maximum, filling the entire slot must fail.
+    let area_error = boundary_length * error + 2.0 * std::f64::consts::PI * error * error + 1e-7;
+    assert!(area_error < opening_area);
+    let actual = mesh_horizontal_area(&mesh, bounds.max[2], error + 1e-9);
+    assert_close(
+        actual,
+        expected,
+        area_error,
+        "top cap retains the original pocket opening",
+    );
 }
 
 #[test]
@@ -2244,7 +2324,7 @@ fn test_f44_occt_housing_refinement() {
     ))
     .unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 80);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
@@ -2254,7 +2334,7 @@ fn test_f44_occt_spline_refinement() {
     ))
     .unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.triangle_count >= 80);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 // =========================================================================
@@ -2356,7 +2436,7 @@ fn test_f46_mesh_artifact_through_hole_descriptors() {
 fn test_f46_mesh_artifact_vertices() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let artifact = tessellate_display(&def).unwrap();
-    assert_eq!(artifact.vertex_count, 24);
+    assert_mesh_source_coverage(&def, &artifact);
 }
 
 // =========================================================================

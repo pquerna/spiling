@@ -34,8 +34,7 @@ fn test_comb_01_cylinder_import_section_tessellation() {
     assert_close(area, expected_area, 0.5, "cylinder section area");
 
     let mesh = tessellate_display(&def).expect("cylinder tessellation");
-    assert!(mesh_positions(&mesh).len() >= 24, "cylinder mesh vertices");
-    assert!(mesh_indices(&mesh).len() >= 36, "cylinder mesh triangles");
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 // =========================================================================
@@ -234,7 +233,7 @@ fn test_comb_10_ribbed_bracket_t_junction_section() {
         "ribbed bracket mid section has loops"
     );
     let mesh = tessellate_display(&def).expect("ribbed bracket mesh");
-    assert!(mesh_positions(&mesh).len() >= 100);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 // =========================================================================
@@ -697,15 +696,24 @@ fn test_comb_34_mesh_normals_are_unit_vectors() {
 // =========================================================================
 
 #[test]
-fn test_comb_35_cylinder_bore_clearance_analysis() {
-    let bytes = fixture_bytes("through-hole.step");
-    let def = import_test_step(&bytes).expect("hole");
-    // Hole diameter is 6.0 mm (radius 3.0 mm)
-    let hole_diam = 6.0;
-    let tool_diam_pass = 4.0;
-    let tool_diam_fail = 8.0;
-    assert!(tool_diam_pass < hole_diam, "4mm tool fits in 6mm bore");
-    assert!(tool_diam_fail > hole_diam, "8mm tool exceeds 6mm bore");
+fn test_comb_35_bore_section_matches_frozen_radius() {
+    let fixture = "through-hole.step";
+    let def = import_test_step(&fixture_bytes(fixture)).expect("hole");
+    let radius = fixture_record(fixture)["expectation"]["hole_radius_mm"]
+        .as_f64()
+        .unwrap();
+    let section = section_midplane(&def, fixture).expect("bore section");
+    let hole = section
+        .loops()
+        .iter()
+        .find(|boundary| boundary.is_hole)
+        .expect("original bore remains a void");
+    assert_close(
+        loop_area(&section, hole).abs(),
+        PI * radius * radius,
+        0.5,
+        "bore section area",
+    );
 }
 
 #[test]
@@ -1049,7 +1057,7 @@ fn test_comb_55_full_pipeline_audit_ribbed_bracket() {
 
     // Tessellation
     let mesh = tessellate_display(&def).expect("mesh");
-    assert!(mesh_indices(&mesh).len() >= 60);
+    assert_mesh_source_coverage(&def, &mesh);
 
     // Audit zero leak
     let proof_bytes = def.retained_query_proof_bytes();

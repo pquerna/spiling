@@ -215,6 +215,8 @@ pub fn assert_mesh_source_coverage(definition: &Definition, mesh: &MeshArtifact)
 
 /// Standalone precision tests use the native contact-query 20M work envelope.
 /// No production limit is changed; aggregate bounds charge all axes together.
+pub const POSITIVE_QUERY_WORK: u64 = 20_000_000;
+
 pub fn precision_axis(
     def: &Definition,
     axis: usize,
@@ -224,7 +226,7 @@ pub fn precision_axis(
         def,
         axis,
         tolerance_mm,
-        &mut spiling_geometry::GeometryWorkBudget::new(20_000_000),
+        &mut spiling_geometry::GeometryWorkBudget::new(POSITIVE_QUERY_WORK),
     )
 }
 
@@ -260,7 +262,7 @@ pub fn precision_bounds(
     def: &Definition,
     tolerance_mm: f64,
 ) -> Result<spiling_contracts::geometry::AabbMm, GeometryError> {
-    let mut work = spiling_geometry::GeometryWorkBudget::new(20_000_000);
+    let mut work = spiling_geometry::GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let mut result = spiling_contracts::geometry::AabbMm {
         min: [0.0; 3],
         max: [0.0; 3],
@@ -288,4 +290,45 @@ pub fn assert_fixture_enclosure(def: &Definition, fixture: &str) {
             "import enclosure max axis {axis}: {fixture}"
         );
     }
+}
+
+/// Physical triangle coordinates after checked packed admission and f64 rebasing.
+pub fn mesh_triangles(mesh: &MeshArtifact) -> impl Iterator<Item = [[f64; 3]; 3]> + '_ {
+    mesh_chunks(mesh).into_iter().flat_map(|chunk| {
+        (0..chunk.indices.len() / 3).map(move |triangle| {
+            std::array::from_fn(|corner| {
+                let index = chunk.indices.get(3 * triangle + corner).unwrap() as usize;
+                let point = chunk.positions.get(index).unwrap();
+                std::array::from_fn(|axis| chunk.local_origin_mm[axis] + f64::from(point[axis]))
+            })
+        })
+    })
+}
+
+pub fn mesh_surface_area(mesh: &MeshArtifact) -> f64 {
+    mesh_triangles(mesh)
+        .map(|[a, b, c]| {
+            let u: [f64; 3] = std::array::from_fn(|i| b[i] - a[i]);
+            let v: [f64; 3] = std::array::from_fn(|i| c[i] - a[i]);
+            let cross = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            0.5 * cross.into_iter().map(|x| x * x).sum::<f64>().sqrt()
+        })
+        .sum()
+}
+
+pub fn mesh_horizontal_area(mesh: &MeshArtifact, z_mm: f64, plane_error_mm: f64) -> f64 {
+    mesh_triangles(mesh)
+        .filter(|triangle| {
+            triangle
+                .iter()
+                .all(|p| (p[2] - z_mm).abs() <= plane_error_mm)
+        })
+        .map(|[a, b, c]| {
+            ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5
+        })
+        .sum()
 }

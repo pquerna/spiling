@@ -152,7 +152,7 @@ fn test_geometry_05_multi_cavity_pocketing_rounded_housing() {
 }
 
 // =========================================================================
-// Scenario 6: Spline NURBS Surface 3D Milling
+// Scenario 6: Spline display output
 // =========================================================================
 
 #[test]
@@ -160,8 +160,7 @@ fn test_geometry_06_spline_display_mesh() {
     let bytes = fixture_bytes("independent-exporters/occt-spline-housing-mm.step");
     let def = import_test_step(&bytes).expect("spline housing");
     let mesh = tessellate_display(&def).expect("fine mesh");
-    assert!(mesh_positions(&mesh).len() >= 300, "spline mesh density");
-    assert!(mesh_indices(&mesh).len() >= 300);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 // =========================================================================
@@ -185,16 +184,11 @@ fn test_geometry_07_thin_wall_machining_ribbed_bracket() {
 // =========================================================================
 
 #[test]
-fn test_geometry_08_high_speed_drilling_perforated_plate_512_holes() {
+fn test_geometry_08_perforated_plate_material_section_hole_count() {
     let bytes = fixture_bytes("perforated-plate.step");
     let def = import_test_step(&bytes).expect("perforated plate");
     let sec = section_at_z(&def, 10.0).expect("midplane");
     assert_eq!(sec.loops().len(), 513, "512 holes + 1 perimeter");
-
-    // Calculate cycle time: 512 holes * 0.5 sec/hole = 256 seconds
-    let hole_count = sec.loops().len() - 1;
-    let cycle_time_sec = (hole_count as f64) * 0.5;
-    assert_close(cycle_time_sec, 256.0, 1e-3, "cycle time estimate");
 }
 
 // =========================================================================
@@ -509,7 +503,7 @@ fn test_geometry_25_unsupported_geometry_pre_flight_check() {
 }
 
 // =========================================================================
-// Scenario 26: End-to-End Full CAM Lifecycle Production
+// Scenario 26: Housing geometry integration
 // =========================================================================
 
 #[test]
@@ -536,7 +530,7 @@ fn test_geometry_26_housing_import_dimensions_sections_and_display() {
 
     // Phase 5: Display mesh rendering
     let mesh = tessellate_display(&def).expect("mesh generation");
-    assert!(mesh_indices(&mesh).len() >= 60);
+    assert_mesh_source_coverage(&def, &mesh);
 
     // Phase 6: Proof retention verification
     let proof_bytes = def.retained_query_proof_bytes();

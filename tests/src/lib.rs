@@ -4,6 +4,5 @@
 
 //! Shared E2E test harness, fixture loaders, oracle values, and assertion utilities.
 
-pub mod contracts;
 pub mod fixtures;
 pub mod helpers;
