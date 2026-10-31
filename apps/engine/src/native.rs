@@ -19,15 +19,23 @@ use tokio::sync::oneshot;
 use tonic::Status;
 
 type Capture = (SessionId, SceneRevision, ProjectRevision);
+#[cfg(test)]
+pub(crate) struct StartGateForTest {
+    pub entered: oneshot::Sender<()>,
+    pub resume: mpsc::Receiver<()>,
+}
+
 enum Command {
     Capture(Option<Control>, oneshot::Sender<Result<Capture, Status>>),
     Execute(Control, oneshot::Sender<Result<Reply, Status>>),
-    Start(
-        String,
-        Control,
-        ProjectRevision,
-        oneshot::Sender<Result<geometry::JobId, Status>>,
-    ),
+    Start {
+        name: String,
+        command: Control,
+        captured_project: ProjectRevision,
+        reply: oneshot::Sender<Result<geometry::JobId, Status>>,
+        #[cfg(test)]
+        gate: Option<StartGateForTest>,
+    },
     Refresh(
         String,
         geometry::JobId,
@@ -88,7 +96,7 @@ impl NativeHost {
                         let result=decorate(&mut reply,&resources).map(|_|reply);
                         let _=tx.send(result);
                     }
-                    Command::Start(name,command,captured_project,tx) => {
+                    Command::Start { name, command, captured_project, reply: tx, #[cfg(test)] gate } => {
                         let initially_cancelled = jobs.with_sync(|s| {
                             Ok(spiling_contracts::native_metadata(&s.get(&name)?)
                                 .map_err(crate::jobs::internal)?.state
@@ -123,6 +131,13 @@ impl NativeHost {
                             let _=jobs.native_finish(&name,Err(status),vec![]);
                         }
                         let _=tx.send(result);
+                        #[cfg(test)]
+                        if let Some(gate) = gate {
+                            // Hold only the dispatcher after startup, before its next
+                            // ledger read/publication. Dropping the test releases it.
+                            let _ = gate.entered.send(());
+                            let _ = gate.resume.recv_timeout(Duration::from_secs(60));
+                        }
                     }
                     Command::Refresh(name,id,cancel,tx) => {
                         if cancel { runtime.cancel(id); }
@@ -200,7 +215,32 @@ impl NativeHost {
         captured_project: ProjectRevision,
     ) -> Result<geometry::JobId, Status> {
         let (tx, rx) = oneshot::channel();
-        self.send(Command::Start(name, command, captured_project, tx))?;
+        self.send(Command::Start {
+            name,
+            command,
+            captured_project,
+            reply: tx,
+            #[cfg(test)]
+            gate: None,
+        })?;
+        rx.await.map_err(crate::jobs::internal)?
+    }
+    #[cfg(test)]
+    pub(crate) async fn start_gated_for_test(
+        &self,
+        name: String,
+        command: Control,
+        captured_project: ProjectRevision,
+        gate: StartGateForTest,
+    ) -> Result<geometry::JobId, Status> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Command::Start {
+            name,
+            command,
+            captured_project,
+            reply: tx,
+            gate: Some(gate),
+        })?;
         rx.await.map_err(crate::jobs::internal)?
     }
     pub async fn refresh(

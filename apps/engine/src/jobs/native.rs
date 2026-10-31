@@ -599,6 +599,12 @@ mod tests {
 
     #[tokio::test]
     async fn saturated_control_queue_retains_execution_until_native_ack_and_outputs() {
+        tokio::time::timeout(Duration::from_secs(60), saturated_control_queue())
+            .await
+            .expect("queue saturation and publication must finish within the test deadline");
+    }
+
+    async fn saturated_control_queue() {
         use spiling_contracts::geometry::{GeometryCommand, NativePath, RigidPoseMm};
         let directory = tempfile::tempdir().unwrap();
         let jobs = Jobs::open(directory.path()).unwrap();
@@ -608,23 +614,13 @@ mod tests {
         let held_permit = jobs.worker.clone().acquire_owned().await.unwrap();
         let (ready, entered) = tokio::sync::oneshot::channel();
         let (release, resume) = std::sync::mpsc::channel();
-        let store = jobs.clone();
-        let blocker = tokio::task::spawn_blocking(move || {
-            store
-                .with_sync(|_| {
-                    ready.send(()).unwrap();
-                    resume.recv().unwrap();
-                    Ok(())
-                })
-                .unwrap();
-        });
-        entered.await.unwrap();
-        // The real dispatcher starts real native work, then blocks at the next
-        // ledger read. This deterministically holds all eight control slots full.
+        // Pause the real dispatcher after startup reads cancellation intent and
+        // replies, before it polls/promotes/publishes. Holding the ledger before
+        // Start would deadlock that initial read instead of exercising pressure.
         let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/geometry/box-mm.step");
         let id = host
-            .start(
+            .start_gated_for_test(
                 op.name.clone(),
                 Control::Geometry(GeometryCommand::ImportPart {
                     session_id: session,
@@ -633,9 +629,20 @@ mod tests {
                     initial_pose: RigidPoseMm::IDENTITY,
                 }),
                 project,
+                crate::native::StartGateForTest {
+                    entered: ready,
+                    resume,
+                },
             )
             .await
             .unwrap();
+        entered.await.unwrap();
+        let unpublished = jobs.get(op.name.clone()).await.unwrap();
+        assert!(
+            !unpublished.done,
+            "the pause precedes native ACK publication"
+        );
+        assert!(native_metadata(&unpublished).unwrap().outputs.is_empty());
         let queued = (0..8)
             .map(|_| host.enqueue_capture_for_test().unwrap())
             .collect::<Vec<_>>();
@@ -645,8 +652,10 @@ mod tests {
         );
         let active = host.clone();
         let name = op.name.clone();
+        let (observing, observed) = tokio::sync::oneshot::channel();
         let execution = tokio::spawn(async move {
             let _permit = held_permit;
+            observing.send(()).unwrap();
             loop {
                 if active.refresh(name.clone(), id, false).await.unwrap() {
                     break;
@@ -654,7 +663,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }
         });
-        tokio::task::yield_now().await;
+        observed.await.unwrap();
         assert!(!execution.is_finished());
         assert_eq!(
             jobs.worker.available_permits(),
@@ -662,7 +671,6 @@ mod tests {
             "backpressure must retain execution ownership"
         );
         release.send(()).unwrap();
-        blocker.await.unwrap();
         for capture in queued {
             capture.await.unwrap().unwrap();
         }
