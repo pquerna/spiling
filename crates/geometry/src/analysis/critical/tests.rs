@@ -1580,8 +1580,11 @@ fn closed_caps_enclose_the_whole_native_core_not_only_its_center() {
         &cancel,
     )
     .unwrap();
-    let request = horizontal_request([-0.01, 0.01], 0.0);
-    let section = horizontal_section(&prepared, 0.0, &mut work, &cancel);
+    // This is a whole-prism containment property, whose input is a regular
+    // native section. Z=0 contains original coplanar edge strata; keep the same
+    // closed slab while selecting a regular interior section instead.
+    let request = horizontal_request([-0.01, 0.01], 0.001);
+    let section = horizontal_section(&prepared, request.sample_height_mm, &mut work, &cancel);
     let band = super::super::slab::native_sample_height_band(
         &definition,
         request.frame,
