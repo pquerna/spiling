@@ -191,7 +191,7 @@ mutation API or qualification of native dialogs. Upstream default fonts do not c
 ## Material authority and qualification
 
 [ADR005](../adr/ADR005-native-first-development-geometry.md) adopts the implemented
-source13/planner41 DEVELOPMENT route: one imported SolidCore BREP, exact
+source14/planner42 DEVELOPMENT route: one imported SolidCore BREP, exact
 kernel/tolerance binding, original STEP identity/provenance and original finish
 inputs. Qualify preserved operators with the actual coherent producer; do not
 relabel source5/planner24 reports or transfer older runtime evidence.

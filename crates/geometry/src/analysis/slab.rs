@@ -2236,8 +2236,13 @@ fn analyze_height_functional(
             let scalar = functional.enclose_surface(surface, uv, work, cancel)?;
             let h = scalar.position;
             if !overlaps(h, height_interval_mm) { continue; }
-            let projected_du = scalar.du;
-            let projected_dv = scalar.dv;
+            // Both receipts enclose this same cell and literal functional.
+            // Scalar coefficient projection retains affine cancellation;
+            // Cartesian control differences retain constant derivatives that
+            // independent scalar basis sums can lose. Use their intersection
+            // before classifying a cell with no possible stationary point.
+            let projected_du = scalar.du.intersect(functional.dot(jet.du))?;
+            let projected_dv = scalar.dv.intersect(functional.dot(jet.dv))?;
             if !projected_du.contains_zero() || !projected_dv.contains_zero() { continue; }
             let classification = domain.classify(uv, work, cancel).map_err(|error| {
                 height_face_context(error, index, &format!("classify original trim cell {uv:?}"))

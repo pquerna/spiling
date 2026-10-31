@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source13 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source14 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -84,9 +84,13 @@ shared scratch exhaustion remain terminal under unchanged limits.
 
 Height-event discovery restricts continuous native carrier cells to the requested
 height band and retains direct scalar coefficient bounds for height and its
-first derivatives. Projecting an already broadened XYZ enclosure can lose an
-exact height cancellation and cannot replace that tighter certificate. Whole-face
-G1 and actual coedge/vertex incidence remain separate. Artificial crease cells
+first derivatives. Intersect the scalar gradient with the already-computed
+same-cell Cartesian first jet under the identical literal height functional:
+scalar coefficient projection retains affine cancellation, while Cartesian
+control differences can retain a constant derivative lost in scalar basis sums.
+Neither enclosure replaces the other. Nonzero derivative exclusion precedes
+trim/stationary search; genuine stationary sets, whole-face G1 and actual
+coedge/vertex incidence remain separate. Artificial crease cells
 require trim classification only after height/gradient or complete geometric
 transversality cannot exclude an event; physical boundary strata are still
 inventoried. Piecewise first derivatives grant exclusion, while stationary-point
