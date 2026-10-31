@@ -20,8 +20,96 @@ pub const SURFACE_EVALUATION_SCRATCH_BYTES: usize = 3 * BASIS_SCRATCH_BYTES
     + std::mem::size_of::<[[[Interval; 4]; 4]; 4]>()
     + 3 * std::mem::size_of::<SurfaceTensor>()
     + std::mem::size_of::<([f64; 3], [f64; 4], Option<Interval>, [usize; 8])>()
-    + std::mem::size_of::<([[f64; 4]; 3], [u8; 2])>();
+    + std::mem::size_of::<([[f64; 4]; 3], [u8; 2])>()
+    + std::mem::size_of::<(
+        DerivativeControls,
+        Option<[Interval; 3]>,
+        [Interval; 3],
+        [Interval; 2],
+        [usize; 8],
+    )>();
 const ZERO: Interval = Interval::point(0.0);
+type DerivativeControls = [[[Interval; 3]; 4]; 4];
+
+/// Convex enclosure of one polynomial derivative on one original knot cell.
+/// Differentiate literal coefficients before evaluating basis intervals: a
+/// constant derivative must not inherit an independent partition-of-unity sum.
+/// The reduced-degree basis is nonnegative and sums to one on this cell.
+fn polynomial_derivative_hull(
+    surface: &Surface,
+    span: [usize; 2],
+    derivative: [usize; 2],
+    controls: &mut DerivativeControls,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[Interval; 3], GeometryError> {
+    let (p, q) = surface.degrees();
+    let [a, b] = derivative;
+    if a > 3 || b > 3 {
+        return Err(conditioning(
+            "polynomial derivative stencil exceeds order three",
+        ));
+    }
+    if a > p || b > q {
+        return Ok([ZERO; 3]);
+    }
+    let (uk, vk) = (surface.u_knots(), surface.v_knots());
+    let mut hull: Option<[Interval; 3]> = None;
+    for i in span[0] - p..=span[0] - a {
+        for j in span[1] - q..=span[1] - b {
+            for (x, row) in controls.iter_mut().enumerate().take(a + 1) {
+                for (y, point) in row.iter_mut().enumerate().take(b + 1) {
+                    work.charge(1, cancel)?;
+                    let c = surface
+                        .cpt(i + x, j + y)
+                        .map_err(|_| conditioning("missing polynomial derivative coefficient"))?;
+                    *point = [c.x, c.y, c.z].map(Interval::point);
+                }
+            }
+            // Left-to-right updates read the next, not-yet-updated coefficient
+            // in each pass. Reduced knot vectors remove one slot at each end.
+            for order in 1..=a {
+                for x in 0..=a - order {
+                    let denominator =
+                        Interval::point(uk[i + x + p + 1]).sub(Interval::point(uk[i + x + order]));
+                    if denominator.lo <= 0.0 {
+                        return Err(conditioning(
+                            "polynomial u derivative has no positive knot support",
+                        ));
+                    }
+                    let factor = Interval::point((p - order + 1) as f64).div(denominator)?;
+                    let (left, right) = controls.split_at_mut(x + 1);
+                    for (current, next) in left[x].iter_mut().zip(&right[0]).take(b + 1) {
+                        work.charge(1, cancel)?;
+                        *current = std::array::from_fn(|k| next[k].sub(current[k]).mul(factor));
+                    }
+                }
+            }
+            for order in 1..=b {
+                for y in 0..=b - order {
+                    work.charge(1, cancel)?;
+                    let denominator =
+                        Interval::point(vk[j + y + q + 1]).sub(Interval::point(vk[j + y + order]));
+                    if denominator.lo <= 0.0 {
+                        return Err(conditioning(
+                            "polynomial v derivative has no positive knot support",
+                        ));
+                    }
+                    let factor = Interval::point((q - order + 1) as f64).div(denominator)?;
+                    controls[0][y] = std::array::from_fn(|k| {
+                        controls[0][y + 1][k].sub(controls[0][y][k]).mul(factor)
+                    });
+                }
+            }
+            let value = controls[0][0];
+            for coordinate in value {
+                Interval::new(coordinate.lo, coordinate.hi)?;
+            }
+            hull = Some(hull.map_or(value, |old| std::array::from_fn(|k| old[k].hull(value[k]))));
+        }
+    }
+    hull.ok_or_else(|| conditioning("polynomial derivative has no active control stencil"))
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct SurfaceEnclosure {
@@ -205,6 +293,7 @@ pub(super) fn evaluate_nurbs_surface_tensor(
     validate_knots(uk, p, nu, uv[0], work, cancel)?;
     validate_knots(vk, q, nv, uv[1], work, cancel)?;
     let mut result: Option<SurfaceTensor> = None;
+    let mut derivative_controls = [[[ZERO; 3]; 4]; 4];
     for us in p..nu {
         work.charge(1, cancel)?;
         if uk[us] == uk[us + 1] || uk[us] > uv[0][1] || uk[us + 1] < uv[0][0] {
@@ -317,6 +406,53 @@ pub(super) fn evaluate_nurbs_surface_tensor(
                 }
             }
             if !rational {
+                // Exact coefficient invariance also removes the zero-order
+                // basis sum on that axis. Keeping a fictitious independent sum
+                // would broaden every other derivative and even constant-height
+                // positions on an unchanged extrusion.
+                for k in 0..3 {
+                    let fixed = [invariant[0] & (1 << k) != 0, invariant[1] & (1 << k) != 0];
+                    match fixed {
+                        [true, true] => h[0][0][k] = ZERO,
+                        [false, true] => {
+                            for a in 0..=order {
+                                let mut sum = ZERO;
+                                for (i, basis) in ub.iter().enumerate().take(p + 1) {
+                                    work.charge(1, cancel)?;
+                                    let c = surface.cpt(us - p + i, vs - q).map_err(|_| {
+                                        conditioning(
+                                            "missing axis-invariant polynomial coefficient",
+                                        )
+                                    })?;
+                                    let value = [c.x, c.y, c.z][k];
+                                    sum = sum.add(basis[a].mul(
+                                        Interval::point(value).sub(Interval::point(origin[k])),
+                                    ));
+                                }
+                                h[a][0][k] = sum;
+                            }
+                        }
+                        [true, false] => {
+                            for b in 0..=order {
+                                let mut sum = ZERO;
+                                for (j, basis) in vb.iter().enumerate().take(q + 1) {
+                                    work.charge(1, cancel)?;
+                                    let c = surface.cpt(us - p, vs - q + j).map_err(|_| {
+                                        conditioning(
+                                            "missing axis-invariant polynomial coefficient",
+                                        )
+                                    })?;
+                                    let value = [c.x, c.y, c.z][k];
+                                    sum = sum.add(basis[b].mul(
+                                        Interval::point(value).sub(Interval::point(origin[k])),
+                                    ));
+                                }
+                                h[0][b][k] = sum;
+                            }
+                        }
+                        [false, false] => {}
+                    }
+                }
                 #[expect(
                     clippy::needless_range_loop,
                     reason = "Only the triangular mixed-derivative catalog is initialized in the homogeneous weight component"
@@ -382,6 +518,26 @@ pub(super) fn evaluate_nurbs_surface_tensor(
             }
             for k in 0..3 {
                 jet[0][0][k] = jet[0][0][k].add(Interval::point(origin[k]));
+            }
+            if !rational {
+                for (a, row) in jet.iter_mut().enumerate().take(order + 1) {
+                    for (b, derivative) in row.iter_mut().enumerate().take(order - a + 1) {
+                        if a + b == 0 {
+                            continue;
+                        }
+                        let hull = polynomial_derivative_hull(
+                            surface,
+                            [us, vs],
+                            [a, b],
+                            &mut derivative_controls,
+                            work,
+                            cancel,
+                        )?;
+                        for (value, bound) in derivative.iter_mut().zip(hull) {
+                            *value = value.intersect(bound)?;
+                        }
+                    }
+                }
             }
             result = Some(result.map_or(jet, |old| {
                 std::array::from_fn(|a| {

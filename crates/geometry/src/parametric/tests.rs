@@ -73,6 +73,83 @@ fn native_line_support_retains_exact_caps_and_real_one_ulp_protrusions() {
         "the distinct native short-domain branch supplies no ordinary line-hull receipt"
     );
 }
+
+#[test]
+fn polynomial_derivative_controls_keep_mixed_signs_and_both_closed_knot_sides() {
+    let knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+    // z=u²-2uv+3v² has the exact constant Hessian [[2,-2],[-2,6]].
+    let square = [0.0, 0.0, 1.0];
+    let points = (0..3)
+        .map(|i| {
+            (0..3)
+                .map(|j| {
+                    let u = i as f64 * 0.5;
+                    let v = j as f64 * 0.5;
+                    CPoint::new(u, v, square[i] - 2.0 * u * v + 3.0 * square[j], NOW)
+                })
+                .collect()
+        })
+        .collect();
+    let surface = srf_basic::Surface::new(points, 2, 2, knots.clone(), knots).unwrap();
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(1_000_000);
+    let jet = super::nurbs_eval::evaluate_nurbs_surface_tensor(
+        &surface,
+        [[0.125, 0.875]; 2],
+        3,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    for (a, b, expected) in [
+        (2, 0, 2.0),
+        (1, 1, -2.0),
+        (0, 2, 6.0),
+        (3, 0, 0.0),
+        (2, 1, 0.0),
+        (1, 2, 0.0),
+        (0, 3, 0.0),
+    ] {
+        let bound = jet[a][b][2];
+        assert!(
+            bound.lo <= expected && expected <= bound.hi,
+            "derivative {a}/{b}: {bound:?}"
+        );
+        assert!(
+            bound.width() < 1e-10,
+            "constant derivative {a}/{b} lost coefficient cancellation: {bound:?}"
+        );
+    }
+    // A continuous degree-one height has slopes 1 and 2 at the same
+    // literal internal knot. Piecewise jets retain both incident limits.
+    let points = [(0.0, 0.0), (0.5, 0.5), (1.0, 1.5)]
+        .into_iter()
+        .map(|(x, z)| {
+            [0.0, 1.0]
+                .into_iter()
+                .map(|y| CPoint::new(x, y, z, NOW))
+                .collect()
+        })
+        .collect();
+    let kink = srf_basic::Surface::new(
+        points,
+        1,
+        1,
+        vec![0.0, 0.0, 0.5, 1.0, 1.0],
+        vec![0.0, 0.0, 1.0, 1.0],
+    )
+    .unwrap();
+    let closed = super::nurbs_eval::evaluate_nurbs_surface_tensor(
+        &kink,
+        [[0.5; 2], [0.25, 0.75]],
+        2,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    assert!(closed[1][0][2].lo <= 1.0 && closed[1][0][2].hi >= 2.0);
+    assert!(closed[2][0][2].contains_zero());
+}
 #[test]
 fn rational_curve_uses_homogeneous_weights_and_third_quotient_derivative() {
     let c = rational_line();
