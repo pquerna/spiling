@@ -1802,16 +1802,6 @@ fn native_step_operand(mut surface: &Surface) -> Option<&Surface> {
     }
     None
 }
-fn tight_cross_points(a: [f64; 3], b: [f64; 3]) -> [Interval; 3] {
-    std::array::from_fn(|k| {
-        let i = (k + 1) % 3;
-        let j = (k + 2) % 3;
-        tight_add(
-            tight_mul(Interval::point(a[i]), Interval::point(b[j])),
-            tight_mul(Interval::point(a[j]), Interval::point(b[i])).neg(),
-        )
-    })
-}
 fn cross(a: [Interval; 3], b: [Interval; 3]) -> [Interval; 3] {
     [
         a[1].mul(b[2]).sub(a[2].mul(b[1])),

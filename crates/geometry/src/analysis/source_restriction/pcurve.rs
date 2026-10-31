@@ -1381,59 +1381,6 @@ impl<'d> SourcePcurveRestriction<'d> {
         self.cover_cuts.dedup();
         Ok(())
     }
-    pub(crate) fn original_knot_jet(
-        &self,
-        index: usize,
-        order: usize,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<[[Interval; 3]; 4], GeometryError> {
-        let &knot = self.original_knots.get(index).ok_or_else(|| {
-            unavailable("original PCurve knot index is outside its retained raw census")
-        })?;
-        let a = self.parameter_image([0.0; 2], work, cancel)?;
-        let b = self.parameter_image([1.0; 2], work, cancel)?;
-        let active = if a.hi < b.lo {
-            a.hi <= knot && knot <= b.lo
-        } else if b.hi < a.lo {
-            b.hi <= knot && knot <= a.lo
-        } else {
-            false
-        };
-        if !active {
-            return Err(unavailable(
-                "raw PCurve knot inverse band alone does not prove an active original knot",
-            ));
-        }
-        self.chart.evaluate_order([knot; 2], order, work, cancel)
-    }
-    pub(crate) fn same_operator(
-        &self,
-        other: &Self,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<bool, GeometryError> {
-        work.charge(1, cancel)?;
-        if std::ptr::eq(self, other) {
-            return Ok(true);
-        }
-        if !std::ptr::eq(self.face, other.face)
-            || !std::ptr::eq(self.coedge, other.coedge)
-            || !Arc::ptr_eq(&self.source.operands.curve, &other.source.operands.curve)
-            || !Arc::ptr_eq(
-                &self.source.operands.surface,
-                &other.source.operands.surface,
-            )
-        {
-            return Ok(false);
-        }
-        match (&self.recipe, &other.recipe) {
-            (ParameterRecipe::Shared(a), ParameterRecipe::Shared(b)) => Ok(Arc::ptr_eq(a, b)),
-            // Independent cubic calibrations are not expression aliases merely
-            // because their endpoint ranges or residual tubes overlap.
-            _ => Ok(false),
-        }
-    }
 }
 impl CurveEvaluator for SourcePcurveRestriction<'_> {
     fn active_range(&self) -> [f64; 2] {

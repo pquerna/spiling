@@ -265,9 +265,6 @@ impl<'d> NativeTrimCoedge<'d> {
             edgeuse: self.edgeuse,
         }
     }
-    pub(crate) fn oriented_range(&self) -> [f64; 2] {
-        self.oriented_uv_range()
-    }
     pub(crate) fn oriented_uv_range(&self) -> [f64; 2] {
         if self.forward {
             self.uv_range
@@ -410,18 +407,6 @@ impl<'d> NativeTrimCoedge<'d> {
         jet.derivative = jet.derivative.map(|v| v.mul(scale));
         jet.second_derivative = jet.second_derivative.map(|v| v.mul(scale.square()));
         Ok(jet)
-    }
-
-    /// Independent strict tangent qualification on the requested native chart
-    /// restriction. Piecewise first bounds must not be mistaken for C1.
-    pub(crate) fn chart_c1_jet(
-        &self,
-        range: [f64; 2],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<Option<parametric::ChartCurveEnclosure>, GeometryError> {
-        self.chart_jet(range, work, cancel)?;
-        parametric::curve2d_c1_jet(self.curve, range, work, cancel)
     }
 }
 
@@ -903,22 +888,6 @@ impl<'d> PreparedNativeTrimSource<'d> {
     }
     pub(crate) fn face_domain(&self, ordinal: usize) -> Option<&PreparedFaceTrimDomain<'d>> {
         self.faces.get(ordinal)
-    }
-
-    /// Captured original vertex, never the healed/native BREP vertex point.
-    pub(crate) fn source_vertex_point(
-        &self,
-        vertex: VertexId,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<[f64; 3], GeometryError> {
-        work.charge(
-            usize::BITS.saturating_sub(self.source_vertices.len().leading_zeros()) as u64 + 1,
-            cancel,
-        )?;
-        self.source_vertices.binary_search_by_key(&vertex,|record|record.native)
-            .map(|index|self.source_vertices[index].point)
-            .map_err(|_|unavailable("native vertex has no complete, source-identity-consistent authored vertex star"))
     }
 
     /// Read-only validation of an actual completed source/coedge receipt. This
@@ -1526,10 +1495,6 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         self.original_orientation
             .unwrap_or(self.material_orientation)
     }
-    /// Native combinatorial shell sense, independent of the selected source gauge.
-    pub(crate) fn native_orientation(&self) -> bool {
-        self.material_orientation
-    }
     pub(crate) fn definition(&self) -> &'d Definition {
         self.definition
     }
@@ -1582,52 +1547,6 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                     .expect("prepared immutable native carrier"),
             ),
         }
-    }
-
-    /// Position-only coefficient-sheet bounds for exclusion overcovers. This
-    /// does not grant selected-domain membership, continuity or material.
-    pub(crate) fn original_carrier_position_bounds(
-        &self,
-        uv: [[f64; 2]; 2],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<[Interval; 3], GeometryError> {
-        self.original_surface
-            .as_ref()
-            .ok_or_else(|| {
-                unavailable("source carrier evaluation requires captured original coefficients")
-            })?
-            .carrier_position_bounds(uv, work, cancel)
-    }
-
-    /// Original coefficient-sheet bounds only. The trim and source-material
-    /// domains remain unchanged and require their independent qualifications.
-    pub(crate) fn original_carrier_jet(
-        &self,
-        uv: [[f64; 2]; 2],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<parametric::SurfaceEnclosure, GeometryError> {
-        self.original_surface
-            .as_ref()
-            .ok_or_else(|| {
-                unavailable("source carrier evaluation requires captured original coefficients")
-            })?
-            .carrier_jet(uv, work, cancel)
-    }
-
-    pub(crate) fn original_carrier_piecewise_first(
-        &self,
-        uv: [[f64; 2]; 2],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<parametric::SurfaceFirstEnclosure, GeometryError> {
-        self.original_surface
-            .as_ref()
-            .ok_or_else(|| {
-                unavailable("source carrier evaluation requires captured original coefficients")
-            })?
-            .carrier_piecewise_first(uv, work, cancel)
     }
 
     /// All actual native knot restrictions, borrowed from the admitted bounded
@@ -1688,21 +1607,6 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             .map(|v| [v.lo, v.hi]))
     }
 
-    pub(crate) fn boundary_first_enclosure(
-        &self,
-        coedge: usize,
-        range: [f64; 2],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<parametric::ChartCurveEnclosure, GeometryError> {
-        let curve = self.coedge_operand(coedge)?;
-        if !curve.smooth(range, work, cancel)? {
-            return Err(unavailable(
-                "selected boundary closed restriction lacks independent C1 qualification",
-            ));
-        }
-        parametric::curve2d_piecewise_jet(&curve, range, work, cancel)
-    }
     pub(crate) fn retained_bytes(&self) -> usize {
         size_of::<Self>() + self.owned_bytes()
     }
@@ -3268,13 +3172,6 @@ pub(crate) struct OriginalCoedgeBinding {
     pub(crate) source_vertex_ids: [spiling_contracts::geometry::StepEntityId; 2],
 }
 impl OriginalCoedgeBinding {
-    pub(crate) fn spatial_endpoints(&self) -> [VertexId; 2] {
-        if self.spatial_forward {
-            self.endpoints
-        } else {
-            [self.endpoints[1], self.endpoints[0]]
-        }
-    }
     pub(crate) fn native_endpoint_index(&self, spatial_high: bool) -> usize {
         usize::from(spatial_high ^ !self.spatial_forward)
     }
@@ -5832,102 +5729,6 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             .map(|coedge| coedge.curve.spatial.operator.as_ref())
             .ok_or_else(|| unavailable("actual original spatial restriction is unavailable"))
     }
-    pub(crate) fn with_original_spatial_curve<R>(
-        &self,
-        index: usize,
-        allowance: usize,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-        callback: impl FnOnce(
-            &dyn parametric::CurveEvaluator,
-            &mut GeometryWorkBudget,
-            &AtomicBool,
-        ) -> Result<R, GeometryError>,
-    ) -> Result<R, GeometryError> {
-        work.charge(1, cancel)?;
-        memory(
-            super::source_operand::SOURCE_OPERAND_SCRATCH_BYTES,
-            allowance,
-        )?;
-        callback(self.original_spatial_restriction(index)?, work, cancel)
-    }
-    pub(crate) fn original_coedge_uv_piecewise_jet(
-        &self,
-        index: usize,
-        range: [f64; 2],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<parametric::ChartCurveEnclosure, GeometryError> {
-        let receipt = self.original_coedge_correspondence(index)?;
-        let parameter = receipt.uv_parameter_image(range)?;
-        let curve = self.coedge_operand(index)?;
-        if !curve.continuous([parameter.lo, parameter.hi], work, cancel)? {
-            return Err(unavailable(
-                "original UV query lacks literal C0 coefficient continuity",
-            ));
-        }
-        let mut raw =
-            parametric::curve2d_piecewise_jet(&curve, [parameter.lo, parameter.hi], work, cancel)?;
-        let full = self.original_coedges[index].full_uv_image;
-        for axis in 0..2 {
-            raw.position[axis] = raw.position[axis].intersect(full[axis])?;
-        }
-        let scale = receipt.uv_parameter_derivative();
-        Ok(parametric::ChartCurveEnclosure {
-            position: raw.position,
-            derivative: raw.derivative.map(|v| v.mul(scale)),
-            second_derivative: raw.second_derivative.map(|v| v.mul(scale.square())),
-        })
-    }
-    pub(crate) fn original_coedge_uv_c1_jet(
-        &self,
-        index: usize,
-        range: [f64; 2],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<Option<parametric::ChartCurveEnclosure>, GeometryError> {
-        let parameter = self
-            .original_coedge_correspondence(index)?
-            .uv_parameter_image(range)?;
-        if !self
-            .coedge_operand(index)?
-            .smooth([parameter.lo, parameter.hi], work, cancel)?
-        {
-            return Ok(None);
-        }
-        self.original_coedge_uv_piecewise_jet(index, range, work, cancel)
-            .map(Some)
-    }
-    pub(crate) fn original_coedge_uv_jet(
-        &self,
-        index: usize,
-        range: [f64; 2],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<parametric::ChartCurveEnclosure, GeometryError> {
-        self.original_coedge_uv_c1_jet(index, range, work, cancel)?
-            .ok_or_else(|| {
-                unavailable(
-                    "selected original UV restriction lacks independent closed C1 qualification",
-                )
-            })
-    }
-    pub(crate) fn original_coedge_jets(
-        &self,
-        index: usize,
-        range: [f64; 2],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<(parametric::CurveEnclosure, parametric::ChartCurveEnclosure), GeometryError> {
-        let spatial = parametric::curve_enclosure(
-            self.original_spatial_restriction(index)?,
-            (range[0], range[1]),
-            work,
-            cancel,
-        )?;
-        let chart = self.original_coedge_uv_piecewise_jet(index, range, work, cancel)?;
-        Ok((spatial, chart))
-    }
 
     /// The callback uses the actual spatial edge gauge, not UV trim parameters.
     pub(crate) fn with_native_spatial_curve<R>(
@@ -6264,67 +6065,7 @@ struct SourceJointEndpointBinding {
     spatial_high: bool,
     source_vertex: spiling_contracts::geometry::StepEntityId,
 }
-impl PreparedTrimJoint {
-    /// Exact ownership and expression association, not numerical endpoint
-    /// equality. Slot zero is the material incoming endpoint, slot one outgoing.
-    pub(crate) fn connector_endpoint_is_bound(
-        &self,
-        domain: &PreparedFaceTrimDomain<'_>,
-        endpoint: usize,
-        coedge_index: usize,
-        spatial_high: bool,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<bool, GeometryError> {
-        work.charge(1, cancel)?;
-        let Some(key) = self.endpoint_bindings.get(endpoint) else {
-            return Ok(false);
-        };
-        let mut owned = false;
-        for saved in domain.original_joints()? {
-            work.charge(1, cancel)?;
-            if std::ptr::eq(self, saved) {
-                owned = true;
-                break;
-            }
-        }
-        if !owned {
-            return Ok(false);
-        }
-        let Some(native) = domain.coedges.get(coedge_index) else {
-            return Ok(false);
-        };
-        let receipt = domain.original_coedge_correspondence(coedge_index)?;
-        let binding = &receipt.binding;
-        let canonical = binding.native_endpoint_index(spatial_high);
-        let expected_identity = if endpoint == 0 {
-            self.incoming
-        } else {
-            self.outgoing
-        };
-        let expected_high = if endpoint == 0 {
-            binding.material_forward
-        } else {
-            !binding.material_forward
-        };
-        Ok(key.identity == native.identity()
-            && key.identity == expected_identity
-            && key.source_index == receipt.source_index()
-            && key.spatial_high == spatial_high
-            && spatial_high == expected_high
-            && key.uv_parameter == receipt.uv_endpoint(spatial_high)
-            && key.source_vertex == binding.source_vertex_ids[canonical]
-            && self.source_vertex_id == key.source_vertex
-            && self.vertex_id == binding.endpoints[canonical]
-            && self.vertex_point == binding.source_vertex_points_mm[canonical])
-    }
-}
 impl PreparedFaceTrimDomain<'_> {
-    pub(crate) fn original_uv_margin(&self) -> Result<[f64; 2], GeometryError> {
-        self.original_margin_uv.ok_or_else(|| {
-            unavailable("selected original UV policy is unavailable in a native-only chart")
-        })
-    }
     /// Measured selected-original chart error; never the admissible ceiling.
     pub(crate) fn source_chart_error_mm(&self) -> f64 {
         self.original_chart_error_mm
@@ -7283,71 +7024,9 @@ fn norm(value: [Interval; 3]) -> Result<Interval, GeometryError> {
     }
     .norm()
 }
-impl PreparedFaceTrimDomain<'_> {
-    /// Declaration provenance of the actual retained basis, not an inverse or
-    /// endpoint-equality theorem.
-    pub(crate) fn original_coedge_is_declared(&self, index: usize) -> Result<bool, GeometryError> {
-        self.original_coedges
-            .get(index)
-            .map(|coedge| coedge.source_pcurve.is_some())
-            .ok_or_else(|| unavailable("selected original coedge declaration scope is unavailable"))
-    }
-    /// True only for a retained selected expression with a proved
-    /// nondegenerate original-plane inverse or an owned analytic cylindrical
-    /// branch. Declaration or a native UV proposal cannot establish this.
-    pub(crate) fn original_coedge_has_regular_inverse(
-        &self,
-        index: usize,
-    ) -> Result<bool, GeometryError> {
-        self.original_coedges
-            .get(index)
-            .map(|coedge| {
-                matches!(
-                    &coedge.curve.curve,
-                    OriginalUvCurve::DerivedPlane(_) | OriginalUvCurve::DerivedCylinder(_)
-                )
-            })
-            .ok_or_else(|| unavailable("selected original inverse scope is unavailable"))
-    }
-}
+impl PreparedFaceTrimDomain<'_> {}
 
-impl PreparedFaceTrimDomain<'_> {
-    /// Complete coefficient-piece coverage in the actual selected spatial query
-    /// gauge. A band is coverage/ordering data, never a feasible knot incidence.
-    pub(crate) fn visit_original_coedge_span_boundaries(
-        &self,
-        index: usize,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-        callback: &mut impl FnMut(Interval) -> Result<(), GeometryError>,
-    ) -> Result<(), GeometryError> {
-        let original = self
-            .original_coedges
-            .get(index)
-            .ok_or_else(|| unavailable("original span owner is unavailable"))?;
-        let range = original.correspondence.spatial_range();
-        work.charge(2, cancel)?;
-        callback(Interval::point(range[0]))?;
-        callback(Interval::point(range[1]))?;
-        for &band in original.curve.spatial.operator.knot_bands() {
-            work.charge(1, cancel)?;
-            callback(band)?;
-        }
-        if let OriginalUvCurve::Pcurve(curve) = &original.curve.curve {
-            for &band in curve.knot_bands() {
-                work.charge(1, cancel)?;
-                callback(band)?;
-            }
-            if let Some(map) = curve.calibration() {
-                for &cut in map.parameter_cuts() {
-                    work.charge(1, cancel)?;
-                    callback(Interval::point(cut))?;
-                }
-            }
-        }
-        Ok(())
-    }
-}
+impl PreparedFaceTrimDomain<'_> {}
 
 struct OriginalCoedgeProposal<'d> {
     curve: PreparedOriginalUvCurve<'d>,

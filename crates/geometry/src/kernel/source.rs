@@ -93,20 +93,6 @@ impl OriginalSourceTopology {
             })
     }
 
-    /// All original coedge candidates of this exact source-bound native face.
-    /// Geometric/gauge and shared-endpoint correspondence must still be proved.
-    pub(crate) fn candidates(
-        &self,
-        native_face: FaceId,
-    ) -> impl Iterator<Item = (usize, &OriginalCoedgeSource)> {
-        self.faces
-            .iter()
-            .filter(move |face| face.native_face == native_face)
-            .flat_map(|face| &face.wires)
-            .flat_map(|wire| &wire.coedges)
-            .filter_map(|&index| self.coedges.get(index).map(|coedge| (index, coedge)))
-    }
-
     pub(crate) fn coedge(&self, index: usize) -> Result<&OriginalCoedgeSource, GeometryError> {
         self.coedges.get(index).ok_or_else(|| {
             GeometryError::new(

@@ -112,13 +112,6 @@ impl NativeVoidContinuation {
             _ => None,
         }
     }
-    #[cfg(test)]
-    fn critical_events(&self) -> &[(Option<usize>, [f64; 2], bool)] {
-        match self {
-            Self::Critical { events, .. } => events,
-            _ => &[],
-        }
-    }
     fn retained_bytes(&self) -> usize {
         match self {
             Self::Critical { events, .. } => events
