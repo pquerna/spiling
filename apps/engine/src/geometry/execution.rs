@@ -5,6 +5,10 @@
 //! Native execution correlation only; durable public handles are Google Operations.
 use spiling_contracts::{geometry::*, manufacturing::*, project::*};
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The eight-slot native dispatcher retains typed controls inline without a per-command allocation"
+)]
 pub(crate) enum Control {
     Geometry(GeometryCommand),
     Project(ProjectCommand),

@@ -90,6 +90,10 @@ pub struct CompileRequest {
     pub byte_budget: u32,
     pub surface_images: BTreeMap<SourceHash, Arc<spiling_surface_fields::HeightImage>>,
 }
+#[expect(
+    clippy::large_enum_variant,
+    reason = "One bounded worker slot retains the captured save snapshot inline without per-job boxing"
+)]
 pub enum Work {
     ApplyOpticalConstruction {
         snapshot: Arc<spiling_core::Snapshot>,

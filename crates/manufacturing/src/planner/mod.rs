@@ -2118,7 +2118,7 @@ fn admit_schedule<'model>(
             }
             support::SupportAdmission::Complete => {}
         }
-        let ScheduleNativeAuthority::Complete(mut native_coverage) = native_coverage else {
+        let ScheduleNativeAuthority::Complete(native_coverage) = native_coverage else {
             unreachable!("complete admission finalizes its full native ledger")
         };
 
