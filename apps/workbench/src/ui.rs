@@ -141,10 +141,79 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
 }
 
 /// A local draft field; project mutation occurs only on its form's explicit Apply.
-pub fn number(ui: &mut Ui, label: &str, value: &mut f64, speed: f64) {
-    ui.horizontal_wrapped(|ui| {
-        let label = ui.label(label);
-        ui.add(egui::DragValue::new(value).speed(speed))
-            .labelled_by(label.id);
-    });
+pub fn number(ui: &mut Ui, label: &str, value: &mut f64, speed: f64) -> egui::Response {
+    // Draft warnings can insert siblings while the user is typing. DragValue's
+    // auto ID must start from this stable field scope, not its current position.
+    // Labels must be unique within the caller's form scope.
+    let scope = ui.make_persistent_id(("number", label));
+    ui.scope_builder(egui::UiBuilder::new().scope_id(scope), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let label = ui.label(label);
+            ui.add(egui::DragValue::new(value).speed(speed))
+                .labelled_by(label.id)
+        })
+        .inner
+    })
+    .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_typing_survives_a_draft_warning_inserted_above_the_field() {
+        let ctx = egui::Context::default();
+        let mut fraction = 0.25;
+        let mut skin = 0.8;
+        let mut frame = |events| {
+            let mut field = None;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(480.0, 320.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        if fraction != 0.25 {
+                            ui.weak("Apply or reload the full intent draft before applying a material profile.");
+                        }
+                        field = Some(number(ui, "Sparse fraction", &mut fraction, 0.01).id);
+                        number(ui, "Top skin (mm)", &mut skin, 0.01);
+                    });
+                },
+            );
+            output.drop_without_applying_deltas();
+            field.unwrap()
+        };
+        let field = frame(Vec::new());
+        ctx.memory_mut(|memory| memory.request_focus(field));
+        frame(Vec::new());
+        frame(vec![
+            egui::Event::Key {
+                key: egui::Key::A,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    ctrl: true,
+                    command: true,
+                    ..Default::default()
+                },
+            },
+            egui::Event::Text("0".into()),
+        ]);
+        frame(vec![egui::Event::Text(".".into())]);
+        frame(vec![egui::Event::Text("3".into())]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(field));
+        assert_eq!(fraction, 0.3);
+        assert_eq!(
+            skin, 0.8,
+            "typing must not spill into the neighboring field"
+        );
+    }
 }
