@@ -20,6 +20,8 @@ pub use replay::*;
 mod job;
 pub use job::*;
 mod material;
+mod material_review;
+pub use material_review::*;
 mod process;
 pub use material::*;
 pub mod program_coordinates;
@@ -4029,6 +4031,11 @@ pub enum ManufacturingCommand {
         base_revision: ProjectRevision,
         intent: Arc<ManufacturingIntent>,
     },
+    ReviewMaterials {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        request: MaterialReviewRequest,
+    },
     ApplyMaterialProfile {
         session_id: SessionId,
         base_revision: ProjectRevision,
@@ -4055,6 +4062,9 @@ pub enum ManufacturingCommand {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ManufacturingResponse {
+    MaterialReview {
+        report: MaterialReviewReport,
+    },
     Status {
         info: ProjectInfo,
         intent: Option<Arc<ManufacturingIntent>>,

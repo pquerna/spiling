@@ -112,6 +112,67 @@ PLA/PCTG/filled-material printing recommendations; fixed-dual per-tool process
 profiles, mixed diameters, measured envelopes and material-library UI are not
 claimed by this single-tool path.
 
+### Material discovery and process review
+
+`Manufacturing.Execute` accepts read-only `ReviewMaterials` with the current
+session and persistent base revision. A bounded inert `MaterialCatalog` carries
+one declared installed setup and 1–16 exact process profiles, with unique
+profile ID/revision pairs. The complete request retains the 32 KiB profile JSON
+budget; search is at most 128 UTF-8 bytes without control characters. There is no
+filesystem access, catalog service, script execution or network lookup in review.
+
+Search matches all whitespace-separated terms, case-insensitively, against
+profile/material identity, manufacturer, product, polymer family and CF/GF
+attributes. Results sort by exact profile ID/revision. Pages contain at most four
+candidates; explicit offset, catalog count and matching count distinguish an empty
+search, end of results and a partial page. The checked report is capped at 48 KiB
+and uses the existing bounded native control channel. A missing catalog inspects
+the currently captured selection, retaining its explicit overrides; it requires
+an existing material binding.
+
+Each candidate exposes its complete selection and structured incompatibility
+reasons for printer/nozzle/setup/abrasion requirements or resolved process
+constraints. Incompatible candidates have no proposed settings or input-change
+claim. Successful declaration resolution uses the **same** material resolver as
+ApplyMaterialProfile, without mutating intent, history, artifacts or scene state.
+It does not run native geometry, prove bridge anchors or establish physical
+qualification. A library's shared setup is explicit; changing a candidate never
+silently infers installed hardware.
+
+Compatible candidates expose current/proposed values for 22 typed process fields,
+including temperatures, filament diameter, speed, flow, first-layer/bridge
+controls, cooling, retraction and the intersected bead/flow envelopes. Origins
+distinguish current intent, selected profile, explicit override, machine limit,
+material limit and equal shared limits. Null retraction values mean disabled.
+Whole-process overrides retain their override attribution. `input_changed`
+compares the complete resolved intent, so a capture/metadata change can invalidate
+output while every effective numeric value remains equal; neither status alone
+predicts different commands. Catalog candidates use profile values without new
+overrides, while current-selection inspection preserves captured overrides.
+
+Review reports bind the persistent input revision, query and offset; the shared
+client validates that reply binding. Apply still uses the existing undoable
+ApplyMaterialProfile transaction. Applying a reviewed selection with an older
+base revision rejects rather than refreshing that approval against newer input.
+Library review cannot make an incompatible profile applicable.
+
+CLI operations remain ordered: `--material-catalog CATALOG.json` reviews the first
+page; `--material-search QUERY` searches the retained catalog (or current captured
+selection) and resets the offset; `--material-page OFFSET` reviews another page;
+`--material-inspect` reviews the captured selection; `--material-select ID REVISION`
+applies an issue-free candidate from the latest reviewed page using that report's
+revision. Selection requires writable mode. Other review operations allow
+read-only inspection and retain revision/preview freshness in the JSON report.
+A saved selection can be inspected after source/catalog deletion. Foreign slicer
+preset translation, bundled production libraries and native library browsing are
+not supplied by this typed catalog format.
+
+`pnpm test:materials` exercises declaration discovery, search/pagination,
+nonmutation, effective-value origins, rejected incompatible/stale selections,
+selection/history and catalog-independent inspection alongside independent
+actual-program checks. It uses explicit synthetic declarations, not material
+printing recommendations.
+
 ### Fixed-dual software route
 
 [`FixedDualJob`](../../crates/contracts/src/manufacturing/routing.rs) selects the reviewed `marlin2125_native_fixed_hotends` contract at exact Marlin2.1.2.5 source revision `e5a167aaa0a671ea6d9b9d98dc0518c88d5caed7`. This is an explicit **software reference**, not a supported physical printer, firmware build/flash attestation or measured configuration. The adjacent `software-fixed-dual.configuration.json` and calibration/material declarations identify exact inert reference bytes and source-branch assumptions; no deployable firmware or physical calibration is supplied.

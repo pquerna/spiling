@@ -38,9 +38,14 @@ message ManufacturingRequest {
     GetManufacturingRequest get = 2;
     SetManufacturingIntentRequest set_intent = 3;
     ApplyMaterialProfileRequest apply_material_profile = 4;
+    ReviewMaterialsRequest review_materials = 5;
   }
 }
 message GetManufacturingRequest {}
+message ReviewMaterialsRequest {
+  uint32 base_revision = 1;
+  MaterialReviewRequest request = 2;
+}
 message ApplyMaterialProfileRequest {
   uint32 base_revision = 1;
   MaterialProfileSelection selection = 2;
@@ -105,7 +110,10 @@ message VerifyManufacturingRequest {
 }
 // Domain failures use canonical Google Status, never a success reply arm.
 message ManufacturingReply {
-  ManufacturingStatus status = 1;
+  oneof result {
+    ManufacturingStatus status = 1;
+    MaterialReviewReport material_review = 2;
+  }
 }
 message ManufacturingStatus {
   ProjectInfo info = 1;
@@ -694,4 +702,86 @@ message MaterialProfileSelection {
 message ResolvedMaterialProfile {
   uint32 resolver_version = 1;
   MaterialProfileSelection selection = 2;
+}
+
+enum MaterialSettingField {
+  MATERIAL_SETTING_FIELD_UNSPECIFIED = 0;
+  MATERIAL_SETTING_FIELD_NOZZLE_TEMPERATURE_C = 1;
+  MATERIAL_SETTING_FIELD_BED_TEMPERATURE_C = 2;
+  MATERIAL_SETTING_FIELD_PRINT_SPEED_MM_S = 3;
+  MATERIAL_SETTING_FIELD_FILAMENT_DIAMETER_MM = 4;
+  MATERIAL_SETTING_FIELD_FLOW_MULTIPLIER = 5;
+  MATERIAL_SETTING_FIELD_MAX_VOLUMETRIC_FLOW_MM3_S = 6;
+  MATERIAL_SETTING_FIELD_FIRST_LAYER_SPEED_FACTOR = 7;
+  MATERIAL_SETTING_FIELD_FIRST_LAYER_FLOW_FACTOR = 8;
+  MATERIAL_SETTING_FIELD_FAN_FIRST_LAYERS = 9;
+  MATERIAL_SETTING_FIELD_FAN_AFTER_FIRST_LAYERS = 10;
+  MATERIAL_SETTING_FIELD_BRIDGE_SPEED_FACTOR = 11;
+  MATERIAL_SETTING_FIELD_BRIDGE_FLOW_FACTOR = 12;
+  MATERIAL_SETTING_FIELD_BRIDGE_FAN_PWM = 13;
+  MATERIAL_SETTING_FIELD_MAX_BRIDGE_SPAN_MM = 14;
+  MATERIAL_SETTING_FIELD_RETRACTION_DISTANCE_MM = 15;
+  MATERIAL_SETTING_FIELD_RETRACTION_SPEED_MM_S = 16;
+  MATERIAL_SETTING_FIELD_RETRACTION_MINIMUM_TRAVEL_MM = 17;
+  MATERIAL_SETTING_FIELD_RETRACTION_Z_HOP_MM = 18;
+  MATERIAL_SETTING_FIELD_MIN_BEAD_WIDTH_MM = 19;
+  MATERIAL_SETTING_FIELD_MAX_BEAD_WIDTH_MM = 20;
+  MATERIAL_SETTING_FIELD_MIN_BEAD_HEIGHT_MM = 21;
+  MATERIAL_SETTING_FIELD_MAX_BEAD_HEIGHT_MM = 22;
+}
+
+enum MaterialValueOrigin {
+  MATERIAL_VALUE_ORIGIN_UNSPECIFIED = 0;
+  MATERIAL_VALUE_ORIGIN_CURRENT_INTENT = 1;
+  MATERIAL_VALUE_ORIGIN_SELECTED_PROFILE = 2;
+  MATERIAL_VALUE_ORIGIN_EXPLICIT_OVERRIDE = 3;
+  MATERIAL_VALUE_ORIGIN_MACHINE_LIMIT = 4;
+  MATERIAL_VALUE_ORIGIN_MATERIAL_LIMIT = 5;
+  MATERIAL_VALUE_ORIGIN_SHARED_LIMIT = 6;
+}
+
+enum MaterialCompatibilityCode {
+  MATERIAL_COMPATIBILITY_CODE_UNSPECIFIED = 0;
+  MATERIAL_COMPATIBILITY_CODE_PRINTER_MISMATCH = 1;
+  MATERIAL_COMPATIBILITY_CODE_NOZZLE_MISMATCH = 2;
+  MATERIAL_COMPATIBILITY_CODE_SETUP_MISMATCH = 3;
+  MATERIAL_COMPATIBILITY_CODE_ABRASION_REQUIREMENT = 4;
+  MATERIAL_COMPATIBILITY_CODE_PROCESS_CONSTRAINTS = 5;
+}
+
+message MaterialCatalog {
+  MaterialToolSetup setup = 1;
+  repeated MaterialProcessProfile profiles = 2;
+}
+message MaterialReviewRequest {
+  MaterialCatalog catalog = 1;
+  string query = 2;
+  uint32 offset = 3;
+}
+message MaterialCompatibilityIssue {
+  MaterialCompatibilityCode code = 1;
+  string message = 2;
+}
+message MaterialSettingReview {
+  MaterialSettingField field = 1;
+  optional double current = 2;
+  optional double proposed = 3;
+  MaterialValueOrigin current_origin = 4;
+  MaterialValueOrigin proposed_origin = 5;
+}
+message MaterialCandidateReview {
+  MaterialProcessProfile profile = 1;
+  MaterialToolSetup setup = 2;
+  MaterialProfileOverrides overrides = 3;
+  repeated MaterialCompatibilityIssue issues = 4;
+  optional bool input_changed = 5;
+  repeated MaterialSettingReview settings = 6;
+}
+message MaterialReviewReport {
+  uint32 input_revision = 1;
+  string query = 2;
+  uint32 offset = 3;
+  uint32 catalog_profiles = 4;
+  uint32 matching_profiles = 5;
+  repeated MaterialCandidateReview candidates = 6;
 }

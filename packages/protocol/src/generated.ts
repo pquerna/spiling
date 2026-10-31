@@ -467,6 +467,36 @@ export type MaterialProfileSelection = { profile: MaterialProcessProfile, setup:
 
 export type ResolvedMaterialProfile = { resolver_version: number, selection: MaterialProfileSelection, };
 
+export type MaterialCatalog = { setup: MaterialToolSetup, profiles: Array<MaterialProcessProfile>, };
+
+export type MaterialReviewRequest = {
+/**
+ * None inspects the currently captured selection, including its overrides.
+ */
+catalog: MaterialCatalog | null, query: string, offset: number, };
+
+export type MaterialCompatibilityCode = "printer_mismatch" | "nozzle_mismatch" | "setup_mismatch" | "abrasion_requirement" | "process_constraints";
+
+export type MaterialCompatibilityIssue = { code: MaterialCompatibilityCode, message: string, };
+
+export type MaterialSettingField = "nozzle_temperature_c" | "bed_temperature_c" | "print_speed_mm_s" | "filament_diameter_mm" | "flow_multiplier" | "max_volumetric_flow_mm3_s" | "first_layer_speed_factor" | "first_layer_flow_factor" | "fan_first_layers" | "fan_after_first_layers" | "bridge_speed_factor" | "bridge_flow_factor" | "bridge_fan_pwm" | "max_bridge_span_mm" | "retraction_distance_mm" | "retraction_speed_mm_s" | "retraction_minimum_travel_mm" | "retraction_z_hop_mm" | "min_bead_width_mm" | "max_bead_width_mm" | "min_bead_height_mm" | "max_bead_height_mm";
+
+export type MaterialValueOrigin = "current_intent" | "selected_profile" | "explicit_override" | "machine_limit" | "material_limit" | "shared_limit";
+
+export type MaterialSettingReview = { field: MaterialSettingField, current: number | null, proposed: number | null, current_origin: MaterialValueOrigin, proposed_origin: MaterialValueOrigin, };
+
+export type MaterialCandidateReview = {
+/**
+ * Incompatible selections are inspectable but cannot be applied unchanged.
+ */
+selection: MaterialProfileSelection, issues: Array<MaterialCompatibilityIssue>,
+/**
+ * None for incompatible declarations; otherwise includes metadata/capture changes.
+ */
+input_changed: boolean | null, settings: Array<MaterialSettingReview>, };
+
+export type MaterialReviewReport = { input_revision: ProjectRevision, query: string, offset: number, catalog_profiles: number, matching_profiles: number, candidates: Array<MaterialCandidateReview>, };
+
 export type ManufacturingIntent = { material_profile: ResolvedMaterialProfile | null, printer: PrinterSpecification, recipe: PlanarPrintRecipe, };
 
 export type DepositionKind = "perimeter" | "solid_fill" | "bottom_skin" | "top_skin" | "sparse_fill" | "bridge" | "support" | "support_interface" | "separator_wall";
@@ -550,9 +580,9 @@ export type ManufacturingBundle = { schema_version: number, provenance: Manufact
 
 export type ManufacturingArtifactRecord = { hash: SourceHash, input_hash: SourceHash, byte_count: number, summary: ManufacturingSummary, };
 
-export type ManufacturingCommand = { "op": "get", session_id: SessionId, } | { "op": "set_intent", session_id: SessionId, base_revision: ProjectRevision, intent: ManufacturingIntent, } | { "op": "apply_material_profile", session_id: SessionId, base_revision: ProjectRevision, selection: MaterialProfileSelection, } | { "op": "compile", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "preflight", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "inspect", session_id: SessionId, base_revision: ProjectRevision, output: VerificationOutput, };
+export type ManufacturingCommand = { "op": "get", session_id: SessionId, } | { "op": "set_intent", session_id: SessionId, base_revision: ProjectRevision, intent: ManufacturingIntent, } | { "op": "review_materials", session_id: SessionId, base_revision: ProjectRevision, request: MaterialReviewRequest, } | { "op": "apply_material_profile", session_id: SessionId, base_revision: ProjectRevision, selection: MaterialProfileSelection, } | { "op": "compile", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "preflight", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "inspect", session_id: SessionId, base_revision: ProjectRevision, output: VerificationOutput, };
 
-export type ManufacturingResponse = { "type": "status", info: ProjectInfo, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, } | { "type": "preflight", report: PreflightReport, } | { "type": "error", error: ManufacturingError, };
+export type ManufacturingResponse = { "type": "material_review", report: MaterialReviewReport, } | { "type": "status", info: ProjectInfo, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, } | { "type": "preflight", report: PreflightReport, } | { "type": "error", error: ManufacturingError, };
 
 export const MAX_MATERIAL_DOMAINS = 24 as const;
 export const MAX_MATERIAL_DOMAIN_POLYGONS = 2 as const;

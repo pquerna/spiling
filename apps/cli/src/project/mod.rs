@@ -113,6 +113,10 @@ enum Operation {
     ProcessResolve(OccurrenceId),
     Intent(Arc<ManufacturingIntent>),
     MaterialProfile(Box<MaterialProfileSelection>),
+    MaterialReview(Box<MaterialReviewRequest>),
+    MaterialSearch(String),
+    MaterialPage(u32),
+    MaterialSelect(String, String),
     Preflight,
     Compile,
     Verify,
@@ -450,6 +454,57 @@ pub fn parse(
                 OccurrenceId::new(text(&mut args, "--process-resolve occurrence")?.parse()?)?,
             )),
             Some("--intent") => operations.push(Operation::Intent(intent(&mut args)?.into())),
+            Some("--material-catalog") => {
+                let file = args
+                    .next()
+                    .ok_or("--material-catalog requires a native JSON path")?;
+                NativePath::from_os_str(&file)?;
+                let mut bytes = Vec::new();
+                File::open(PathBuf::from(file))?
+                    .take(MAX_PROFILE_JSON_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() > MAX_PROFILE_JSON_BYTES as usize {
+                    return Err("material catalog exceeds profile JSON byte limit".into());
+                }
+                let catalog: MaterialCatalog = serde_json::from_slice(&bytes)?;
+                catalog.validate()?;
+                operations.push(Operation::MaterialReview(Box::new(MaterialReviewRequest {
+                    catalog: Some(catalog),
+                    query: String::new(),
+                    offset: 0,
+                })));
+            }
+            Some("--material-inspect") => {
+                operations.push(Operation::MaterialReview(Box::new(MaterialReviewRequest {
+                    catalog: None,
+                    query: String::new(),
+                    offset: 0,
+                })))
+            }
+            Some("--material-search") => {
+                let query = text(&mut args, "--material-search")?;
+                MaterialReviewRequest {
+                    catalog: None,
+                    query: query.clone(),
+                    offset: 0,
+                }
+                .validate()?;
+                operations.push(Operation::MaterialSearch(query));
+            }
+            Some("--material-page") => {
+                let offset = text(&mut args, "--material-page")?.parse()?;
+                MaterialReviewRequest {
+                    catalog: None,
+                    query: String::new(),
+                    offset,
+                }
+                .validate()?;
+                operations.push(Operation::MaterialPage(offset));
+            }
+            Some("--material-select") => operations.push(Operation::MaterialSelect(
+                text(&mut args, "--material-select profile ID")?,
+                text(&mut args, "--material-select profile revision")?,
+            )),
             Some("--material-profile") => {
                 let file = args
                     .next()
@@ -529,7 +584,10 @@ pub fn parse(
             || operations.iter().any(|operation| {
                 !matches!(
                     operation,
-                    Operation::Preflight
+                    Operation::MaterialReview(_)
+                        | Operation::MaterialSearch(_)
+                        | Operation::MaterialPage(_)
+                        | Operation::Preflight
                         | Operation::Verify
                         | Operation::ExportManufacturing
                         | Operation::ExportReplay
@@ -841,6 +899,8 @@ async fn execute(
     let mut image_evidence = None;
     let mut process_inspections = Vec::new();
     let mut preflight_report = None;
+    let mut material_review: Option<MaterialReviewReport> = None;
+    let mut material_request: Option<MaterialReviewRequest> = None;
     let mut appearance_comparison: Option<(
         ProjectRevision,
         AppearanceReportRecord,
@@ -1404,6 +1464,79 @@ async fn execute(
                     _ => return Err("unexpected set manufacturing intent response".into()),
                 }
             }
+            operation @ (Operation::MaterialReview(_)
+            | Operation::MaterialSearch(_)
+            | Operation::MaterialPage(_)) => {
+                label = "material_review";
+                let request = match operation {
+                    Operation::MaterialReview(request) => *request,
+                    Operation::MaterialSearch(query) => {
+                        let mut request =
+                            material_request.clone().unwrap_or(MaterialReviewRequest {
+                                catalog: None,
+                                query: String::new(),
+                                offset: 0,
+                            });
+                        request.query = query;
+                        request.offset = 0;
+                        request
+                    }
+                    Operation::MaterialPage(offset) => {
+                        let mut request = material_request
+                            .clone()
+                            .ok_or("review materials before requesting another page")?;
+                        request.offset = offset;
+                        request
+                    }
+                    _ => unreachable!(),
+                };
+                let base_revision = info(client).await?.revision;
+                match client
+                    .manufacturing(ManufacturingCommand::ReviewMaterials {
+                        session_id: session.clone(),
+                        base_revision,
+                        request: request.clone(),
+                    })
+                    .await?
+                {
+                    ManufacturingResponse::MaterialReview { report } => {
+                        material_review = Some(report);
+                        material_request = Some(request);
+                    }
+                    _ => return Err("unexpected material review response".into()),
+                }
+            }
+            Operation::MaterialSelect(id, revision) => {
+                label = "material_select";
+                let review = material_review
+                    .as_ref()
+                    .ok_or("review a material catalog before selecting a profile")?;
+                let candidate = review.candidates.iter().find(|c| c.selection.profile.id == id && c.selection.profile.revision == revision)
+                    .ok_or("profile ID/revision is not in the reviewed page; search or change page first")?;
+                if !candidate.issues.is_empty() {
+                    return Err(format!(
+                        "selected material is incompatible: {}",
+                        candidate
+                            .issues
+                            .iter()
+                            .map(|i| i.message.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    )
+                    .into());
+                }
+                match client
+                    .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+                        session_id: session.clone(),
+                        base_revision: review.input_revision,
+                        selection: candidate.selection.clone(),
+                    })
+                    .await?
+                {
+                    ManufacturingResponse::Status { .. } => {}
+                    _ => return Err("unexpected material selection response".into()),
+                }
+            }
             Operation::MaterialProfile(selection) => {
                 label = "material_profile";
                 let base_revision = info(client).await?.revision;
@@ -1681,6 +1814,7 @@ async fn execute(
             "operation": label, "project": project, "manufacturing": manufacturing,
             "preflight": if label == "preflight" { preflight_report.as_ref() } else { None },
             "process_resolution": process_resolution,
+            "material_review": if label == "material_review" { material_review.as_ref() } else { None },
             "preflight_freshness": preflight_report.as_ref().map(|report|
                 if report.input_revision == project.revision { "current" } else { "stale" })
         }));
@@ -1736,6 +1870,15 @@ async fn execute(
     report["operations"] = serde_json::json!(history);
     report["process_inspections"] = serde_json::json!(process_inspections);
     report["manufacturing"] = manufacturing_status(client, true).await?;
+    if let Some(review) = material_review {
+        report["manufacturing"]["material_review_freshness"] =
+            serde_json::json!(if review.input_revision == project.revision {
+                "current"
+            } else {
+                "stale"
+            });
+        report["manufacturing"]["material_review"] = serde_json::to_value(review)?;
+    }
     if let Some(preflight) = preflight_report {
         report["manufacturing"]["preflight_freshness"] =
             serde_json::json!(if preflight.input_revision == project.revision {
@@ -2233,6 +2376,34 @@ mod tests {
             assert!(parse_args(&args).is_err());
         }
     }
+    #[test]
+    fn material_inspection_is_read_only_and_selection_remains_an_edit() {
+        let options = parse_args(&[
+            "inspect",
+            "project",
+            "--material-inspect",
+            "--material-search",
+            "pctg",
+            "--material-page",
+            "4",
+        ])
+        .unwrap()
+        .unwrap();
+        let Command::Project { workflow, .. } = options.command else {
+            panic!("project")
+        };
+        assert!(matches!(
+            workflow.operations.as_slice(),
+            [
+                Operation::MaterialReview(_),
+                Operation::MaterialSearch(_),
+                Operation::MaterialPage(4)
+            ]
+        ));
+        assert!(parse_args(&["inspect", "project", "--material-select", "profile", "1"]).is_err());
+        assert!(parse_args(&["inspect", "project", "--material-page", "17"]).is_err());
+    }
+
     #[test]
     fn manufacturing_flags_are_ordered_and_read_only_replay_is_allowed() {
         let options = parse_args(&[

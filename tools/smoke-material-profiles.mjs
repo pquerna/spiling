@@ -150,6 +150,23 @@ try {
   );
   await save("a.json", a);
   await save("b.json", b);
+  const wrongPrinter = structuredClone(a.profile);
+  wrongPrinter.id = "zz-wrong-printer";
+  wrongPrinter.printer_revision = "incompatible";
+  const wrongNozzle = structuredClone(a.profile);
+  wrongNozzle.id = "zz-wrong-nozzle";
+  wrongNozzle.nozzle_diameter_mm = 0.6;
+  const impossibleFlow = structuredClone(a.profile);
+  impossibleFlow.id = "zz-impossible-flow";
+  impossibleFlow.max_volumetric_flow_mm3_s = 0.001;
+  const catalogA = {
+    setup: a.setup,
+    profiles: [wrongPrinter, b.profile, wrongNozzle, a.profile, impossibleFlow],
+  };
+  const catalogB = { setup: b.setup, profiles: [a.profile, b.profile] };
+  await save("catalog-a.json", catalogA);
+  await save("catalog-b.json", catalogB);
+
   const commandSemantics = (decoded) => ({
     strokes: decoded.strokes.map(({ line, roleHint, ...stroke }) => stroke),
     travels: decoded.travels.map(({ line, roleHint, ...travel }) => travel),
@@ -166,8 +183,12 @@ try {
     join(output, "cube.step"),
     "--intent",
     join(output, "base.intent.json"),
-    "--material-profile",
-    join(output, "a.json"),
+    "--material-catalog",
+    join(output, "catalog-a.json"),
+    "--material-select",
+    a.profile.id,
+    a.profile.revision,
+    "--material-inspect",
     "--compile",
     "--verify",
     "--manufacturing-out",
@@ -175,6 +196,70 @@ try {
     "--save",
   ]);
   const pa = await program("a-export", a);
+  const firstReview = first.operations.find((op) => op.operation === "material_review");
+  assert.equal(firstReview.material_review.matching_profiles, 5);
+  assert.equal(firstReview.material_review.candidates.length, 4);
+  assert.equal(
+    firstReview.project.revision,
+    first.operations.find((op) => op.operation === "intent").project.revision,
+  );
+  assert.equal(first.manufacturing.material_review.candidates[0].input_changed, false);
+  const capturedReview = first.manufacturing.material_review.candidates[0];
+  assert(capturedReview.settings.every((s) => s.current === s.proposed));
+  const flowReview = capturedReview.settings.find((s) => s.field === "max_volumetric_flow_mm3_s");
+  assert.equal(flowReview.proposed, a.profile.max_volumetric_flow_mm3_s);
+  assert.equal(flowReview.proposed_origin, "material_limit");
+  const discovery = await run("read-only-discovery", [
+    "inspect",
+    project,
+    "--material-catalog",
+    join(output, "catalog-a.json"),
+    "--material-page",
+    "4",
+    "--material-search",
+    "pctg CF",
+  ]);
+  assert.equal(discovery.project.revision, first.project.revision);
+  assert.equal(discovery.manufacturing.artifact.hash, first.manufacturing.artifact.hash);
+  const pages = discovery.operations.filter((op) => op.operation === "material_review");
+  assert.equal(pages[1].material_review.candidates.length, 1);
+  assert.equal(pages[1].material_review.matching_profiles, 5);
+  const incompatible = discovery.manufacturing.material_review.candidates[0];
+  assert.equal(incompatible.selection.profile.id, b.profile.id);
+  assert(incompatible.issues.some((i) => i.code === "setup_mismatch"));
+  assert(incompatible.issues.some((i) => i.code === "abrasion_requirement"));
+  assert.equal(incompatible.settings.length, 0);
+  await run(
+    "reject-reviewed-incompatible",
+    [
+      "edit",
+      project,
+      "--material-catalog",
+      join(output, "catalog-a.json"),
+      "--material-search",
+      "pctg",
+      "--material-select",
+      b.profile.id,
+      b.profile.revision,
+    ],
+    "selected material is incompatible",
+  );
+  await run(
+    "reject-stale-review",
+    [
+      "edit",
+      project,
+      "--material-catalog",
+      join(output, "catalog-a.json"),
+      "--material-profile",
+      join(output, "b.json"),
+      "--material-select",
+      a.profile.id,
+      a.profile.revision,
+    ],
+    "project input revision is stale",
+  );
+
   assert.equal(
     pa.provenance.intent.printer.max_volumetric_flow_mm3_s,
     base.printer.max_volumetric_flow_mm3_s,
@@ -202,6 +287,9 @@ try {
     commandSemantics((await program("label-export", labelOnly)).decoded),
     commandSemantics(pa.decoded),
   );
+  const preserved = await run("after-rejected-review", ["inspect", project, "--material-inspect"]);
+  assert.equal(preserved.project.revision, first.project.revision);
+  assert.equal(preserved.manufacturing.artifact.hash, first.manufacturing.artifact.hash);
   const bridgeAccepted = structuredClone(a);
   bridgeAccepted.profile.process.max_bridge_span_mm = 1.19;
   await save("bridge-accepted.json", bridgeAccepted);
@@ -251,8 +339,11 @@ try {
   const undo = await run("undo-to-a", [
     "edit",
     project,
-    "--material-profile",
-    join(output, "b.json"),
+    "--material-catalog",
+    join(output, "catalog-b.json"),
+    "--material-select",
+    b.profile.id,
+    b.profile.revision,
     "--undo",
     "--compile",
     "--verify",
@@ -264,8 +355,11 @@ try {
   const second = await run("redo-to-b", [
     "edit",
     project,
-    "--material-profile",
-    join(output, "b.json"),
+    "--material-catalog",
+    join(output, "catalog-b.json"),
+    "--material-select",
+    b.profile.id,
+    b.profile.revision,
     "--undo",
     "--redo",
     "--compile",
@@ -275,6 +369,20 @@ try {
     "--save",
   ]);
   const pb = await program("b-export", b);
+  const beforeAfter = second.operations.find(
+    (op) => op.operation === "material_review",
+  ).material_review;
+  const proposedB = beforeAfter.candidates.find((c) => c.selection.profile.id === b.profile.id);
+  assert.equal(proposedB.input_changed, true);
+  assert(proposedB.settings.some((row) => row.current !== row.proposed));
+  for (const field of [
+    "nozzle_temperature_c",
+    "bed_temperature_c",
+    "flow_multiplier",
+    "max_bridge_span_mm",
+  ])
+    assert(proposedB.settings.some((row) => row.field === field));
+
   assert.notEqual(pa.text, pb.text);
   assert(Math.abs(pb.volume - pa.volume * 0.95) < 0.0001);
   assert.notEqual(pa.provenance.input_hash, pb.provenance.input_hash);
@@ -305,19 +413,30 @@ try {
     "label-only.json",
     "bridge-accepted.json",
     "bridge-rejected.json",
+    "catalog-a.json",
+    "catalog-b.json",
   ])
     await unlink(join(output, file));
   const reopened = await run("fresh-reopen", [
     "inspect",
     project,
+    "--material-inspect",
     "--verify",
     "--manufacturing-out",
     join(output, "reopened-export"),
   ]);
   assert.equal(reopened.project.revision, second.project.revision);
+  assert.equal(reopened.manufacturing.material_review_freshness, "current");
+  assert.equal(reopened.manufacturing.material_review.candidates[0].input_changed, false);
+  assert.deepEqual(reopened.manufacturing.material_review.candidates[0].selection, b);
   assert.equal((await program("reopened-export", b)).text, pb.text);
   manifest.outcome = {
     capturedProfiles: 2,
+    catalogDiscoveryAndPagination: true,
+    effectiveSettingsAndOrigins: true,
+    readOnlyReviewNonmutating: true,
+    incompatibleSelectionRejected: true,
+    staleReviewRejected: true,
     labelDoesNotSelectBehavior: true,
     declaredBridgeLimitEnforced: true,
     unsupportedBridgePublishesNothing: true,

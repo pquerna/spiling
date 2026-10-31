@@ -3,6 +3,8 @@
 
 //! Deterministic process resolution before native planning. Catalogs are inert.
 use spiling_contracts::manufacturing::*;
+mod review;
+pub use review::review_materials;
 
 pub fn resolve_material_profile(
     current: &ManufacturingIntent,

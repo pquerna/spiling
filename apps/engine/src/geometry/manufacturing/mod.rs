@@ -119,6 +119,29 @@ impl Runtime {
                 // compiler sees its captured ProjectRevision become stale at staging.
                 Ok(self.manufacturing_status())
             }
+            ManufacturingCommand::ReviewMaterials {
+                session_id,
+                base_revision,
+                request,
+            } => {
+                self.manufacturing_base(&session_id, base_revision)?;
+                let current = self
+                    .project
+                    .snapshot()
+                    .manufacturing_intent
+                    .clone()
+                    .ok_or_else(|| {
+                        ManufacturingError::new(
+                            ManufacturingErrorCode::NoIntent,
+                            "set an explicit manufacturing intent before reviewing materials",
+                        )
+                    })?;
+                let report =
+                    spiling_manufacturing::review_materials(&current, base_revision, request)?;
+                Ok(Reply::Manufacturing(
+                    ManufacturingResponse::MaterialReview { report },
+                ))
+            }
             ManufacturingCommand::ApplyMaterialProfile {
                 session_id,
                 base_revision,

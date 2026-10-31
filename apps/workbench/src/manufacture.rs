@@ -57,6 +57,7 @@ pub struct State {
     pub loaded: Option<Arc<LoadedIntent>>,
     pub loaded_material: Option<Arc<LoadedMaterial>>,
     pub preflight: Option<Arc<PreflightReport>>,
+    pub material_review: Option<Arc<MaterialReviewReport>>,
     pub capture: Option<Arc<Capture>>,
     pub review: Option<Arc<Review>>,
     pub retired_display_bytes: usize,
@@ -89,6 +90,7 @@ impl State {
     pub fn invalidate(&mut self) {
         // Conservatively retain the prior GPU charge until this engine session ends.
         self.retired_display_bytes = self.display_bytes();
+        self.material_review = None;
         self.capture = None;
         self.review = None;
         self.last_export = None;

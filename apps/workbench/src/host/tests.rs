@@ -1352,7 +1352,36 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     let resolved = s.manufacturing.intent.as_ref().unwrap();
     assert_eq!(resolved.recipe.print_speed_mm_s, 28.0);
     let accepted_revision = s.project.as_ref().unwrap().revision;
+    let reviewed = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::ReviewMaterials {
+            session_id,
+            base_revision,
+            request: MaterialReviewRequest {
+                catalog: None,
+                query: String::new(),
+                offset: 0,
+            },
+        }
+    });
+    let report = reviewed.manufacturing.material_review.as_ref().unwrap();
+    assert_eq!(report.input_revision, accepted_revision);
+    assert_eq!(
+        reviewed.project.as_ref().unwrap().revision,
+        accepted_revision
+    );
+    assert_eq!(report.candidates[0].input_changed, Some(false));
+    let temperature = report.candidates[0]
+        .settings
+        .iter()
+        .find(|row| row.field == MaterialSettingField::NozzleTemperatureC)
+        .unwrap();
+    assert_eq!(temperature.proposed, Some(210.0));
+    assert_eq!(
+        temperature.proposed_origin,
+        MaterialValueOrigin::ExplicitOverride
+    );
     let undo = send(&host, Action::Undo);
+    assert!(undo.manufacturing.material_review.is_none());
     assert!(
         undo.manufacturing
             .intent

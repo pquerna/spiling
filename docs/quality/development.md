@@ -66,6 +66,23 @@ optical reassessment and declared tool tints. Study loads retained complete opti
 reports and explicitly binds accepted selections to existing loaded declarations
 and source constructions. Palette/study authoring remains available through CLI.
 
+Engine material discovery is available through ordered CLI operations. Construct
+an inert catalog with one declared `setup` and a `profiles` array, then use:
+
+```sh
+spiling-cli project inspect PROJECT --material-catalog CATALOG.json --material-search pctg --engine ENGINE
+spiling-cli project edit PROJECT --material-catalog CATALOG.json --material-select PROFILE_ID REVISION --material-inspect --compile --verify --save --engine ENGINE
+spiling-cli project inspect PROJECT --material-inspect --verify --engine ENGINE
+```
+
+Review is nonmutating; selection uses the reviewed revision and ordinary history.
+`--material-page OFFSET` exposes further four-candidate pages. Inspect the typed
+issues and current/proposed settings before selection. Catalog applicability is a
+declared-process check, not geometry or physical qualification. Captured inspection
+needs no original catalog. `pnpm test:materials` exercises the real engine/CLI,
+independent commands, rejected/stale choices and recovery; it honors
+`CARGO_TARGET_DIR`. See the [material review contract](../protocol/manufacturing.md#material-discovery-and-process-review).
+
 Prepare selects bounded inert material/setup profile JSON through a parented native
 picker. Loading is transient; **Apply material profile** uses the existing engine
 transaction. Explicit temperature, speed, flow and whole-process overrides retain

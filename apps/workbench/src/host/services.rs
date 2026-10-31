@@ -56,6 +56,7 @@ impl Actor {
             return;
         }
         let label = match &command {
+            ManufacturingCommand::ReviewMaterials { .. } => "Review material profiles",
             ManufacturingCommand::SetIntent { .. } => "Apply full manufacturing intent",
             ManufacturingCommand::ApplyMaterialProfile { .. } => "Apply captured material profile",
             ManufacturingCommand::Preflight { .. } => "Manufacturing preflight",
@@ -88,6 +89,10 @@ impl Actor {
                     self.state.message = format!("{label} completed");
                 }
                 self.refresh_after_failure().await;
+            }
+            Ok(ManufacturingResponse::MaterialReview { report }) => {
+                Arc::make_mut(&mut self.state.manufacturing).material_review =
+                    Some(Arc::new(report))
             }
             Ok(ManufacturingResponse::Preflight { report }) => {
                 Arc::make_mut(&mut self.state.manufacturing).preflight = Some(Arc::new(report))

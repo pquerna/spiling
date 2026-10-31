@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for oneof in [
         ".spiling.engine.ArtifactSummary.kind",
         ".spiling.engine.ManufacturingRequest.command",
+        ".spiling.engine.ManufacturingReply.result",
         ".spiling.engine.AppearancePaletteRow.evidence",
     ] {
         prost.type_attribute(

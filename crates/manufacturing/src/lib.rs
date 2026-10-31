@@ -5,7 +5,7 @@
 //! Software-only native-section manufacturing, with mandatory independent replay.
 pub mod backend;
 mod material;
-pub use material::resolve_material_profile;
+pub use material::{resolve_material_profile, review_materials};
 pub mod planner;
 mod realization;
 mod routing;

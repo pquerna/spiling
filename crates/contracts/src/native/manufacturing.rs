@@ -78,6 +78,17 @@ impl TryFrom<ManufacturingCommand> for rpc::ManufacturingRequest {
                     intent: Some(Arc::unwrap_or_clone(intent).try_into()?),
                 }),
             ),
+            ManufacturingCommand::ReviewMaterials {
+                session_id,
+                base_revision,
+                request,
+            } => (
+                session_id,
+                Command::ReviewMaterials(rpc::ReviewMaterialsRequest {
+                    base_revision: base_revision.get(),
+                    request: Some(request.try_into()?),
+                }),
+            ),
             ManufacturingCommand::ApplyMaterialProfile {
                 session_id,
                 base_revision,
@@ -106,6 +117,11 @@ impl TryFrom<rpc::ManufacturingRequest> for ManufacturingCommand {
         let session_id = super::session_parent(&value.parent)?;
         match required(value.command, "manufacturing command")? {
             Command::Get(_) => Ok(Self::Get { session_id }),
+            Command::ReviewMaterials(request) => Ok(Self::ReviewMaterials {
+                session_id,
+                base_revision: ProjectRevision(request.base_revision),
+                request: required(request.request, "material review request")?.try_into()?,
+            }),
             Command::ApplyMaterialProfile(request) => Ok(Self::ApplyMaterialProfile {
                 session_id,
                 base_revision: ProjectRevision(request.base_revision),
@@ -1311,6 +1327,13 @@ pub fn validate_resource(
 impl TryFrom<ManufacturingResponse> for rpc::ManufacturingReply {
     type Error = String;
     fn try_from(value: ManufacturingResponse) -> Result<Self, String> {
+        if let ManufacturingResponse::MaterialReview { report } = value {
+            return Ok(Self {
+                result: Some(rpc::manufacturing_reply::Result::MaterialReview(
+                    report.try_into()?,
+                )),
+            });
+        }
         let ManufacturingResponse::Status {
             info,
             intent,
@@ -1319,7 +1342,7 @@ impl TryFrom<ManufacturingResponse> for rpc::ManufacturingReply {
         } = value
         else {
             return Err(
-                "only manufacturing Status is a short success reply; failures use canonical Status"
+                "short manufacturing replies require Status or MaterialReview; failures use canonical Status"
                     .into(),
             );
         };
@@ -1336,21 +1359,30 @@ impl TryFrom<ManufacturingResponse> for rpc::ManufacturingReply {
             }
         }
         Ok(Self {
-            status: Some(rpc::ManufacturingStatus {
-                info: Some(info.try_into()?),
-                intent: intent
-                    .map(|v| rpc::ManufacturingIntent::try_from(Arc::unwrap_or_clone(v)))
-                    .transpose()?,
-                artifact: artifact.map(TryInto::try_into).transpose()?,
-                resource,
-            }),
+            result: Some(rpc::manufacturing_reply::Result::Status(
+                rpc::ManufacturingStatus {
+                    info: Some(info.try_into()?),
+                    intent: intent
+                        .map(|v| rpc::ManufacturingIntent::try_from(Arc::unwrap_or_clone(v)))
+                        .transpose()?,
+                    artifact: artifact.map(TryInto::try_into).transpose()?,
+                    resource,
+                },
+            )),
         })
     }
 }
 impl TryFrom<rpc::ManufacturingReply> for ManufacturingResponse {
     type Error = String;
     fn try_from(value: rpc::ManufacturingReply) -> Result<Self, String> {
-        let status = required(value.status, "manufacturing status")?;
+        let status = match required(value.result, "manufacturing result")? {
+            rpc::manufacturing_reply::Result::MaterialReview(report) => {
+                return Ok(Self::MaterialReview {
+                    report: report.try_into()?,
+                });
+            }
+            rpc::manufacturing_reply::Result::Status(status) => status,
+        };
         let artifact: Option<ManufacturingArtifactRecord> =
             status.artifact.map(TryInto::try_into).transpose()?;
         match (&artifact, &status.resource) {
@@ -3182,6 +3214,301 @@ impl TryFrom<ResolvedMaterialProfile> for rpc::ResolvedMaterialProfile {
         Ok(Self {
             resolver_version: value.resolver_version,
             selection: Some(value.selection.try_into()?),
+        })
+    }
+}
+
+impl TryFrom<i32> for MaterialSettingField {
+    type Error = String;
+    fn try_from(value: i32) -> Result<Self, String> {
+        match value {
+            1 => Ok(Self::NozzleTemperatureC),
+            2 => Ok(Self::BedTemperatureC),
+            3 => Ok(Self::PrintSpeedMmS),
+            4 => Ok(Self::FilamentDiameterMm),
+            5 => Ok(Self::FlowMultiplier),
+            6 => Ok(Self::MaxVolumetricFlowMm3S),
+            7 => Ok(Self::FirstLayerSpeedFactor),
+            8 => Ok(Self::FirstLayerFlowFactor),
+            9 => Ok(Self::FanFirstLayers),
+            10 => Ok(Self::FanAfterFirstLayers),
+            11 => Ok(Self::BridgeSpeedFactor),
+            12 => Ok(Self::BridgeFlowFactor),
+            13 => Ok(Self::BridgeFanPwm),
+            14 => Ok(Self::MaxBridgeSpanMm),
+            15 => Ok(Self::RetractionDistanceMm),
+            16 => Ok(Self::RetractionSpeedMmS),
+            17 => Ok(Self::RetractionMinimumTravelMm),
+            18 => Ok(Self::RetractionZHopMm),
+            19 => Ok(Self::MinBeadWidthMm),
+            20 => Ok(Self::MaxBeadWidthMm),
+            21 => Ok(Self::MinBeadHeightMm),
+            22 => Ok(Self::MaxBeadHeightMm),
+            _ => Err("unknown MaterialSettingField".into()),
+        }
+    }
+}
+impl From<MaterialSettingField> for i32 {
+    fn from(value: MaterialSettingField) -> Self {
+        match value {
+            MaterialSettingField::NozzleTemperatureC => 1,
+            MaterialSettingField::BedTemperatureC => 2,
+            MaterialSettingField::PrintSpeedMmS => 3,
+            MaterialSettingField::FilamentDiameterMm => 4,
+            MaterialSettingField::FlowMultiplier => 5,
+            MaterialSettingField::MaxVolumetricFlowMm3S => 6,
+            MaterialSettingField::FirstLayerSpeedFactor => 7,
+            MaterialSettingField::FirstLayerFlowFactor => 8,
+            MaterialSettingField::FanFirstLayers => 9,
+            MaterialSettingField::FanAfterFirstLayers => 10,
+            MaterialSettingField::BridgeSpeedFactor => 11,
+            MaterialSettingField::BridgeFlowFactor => 12,
+            MaterialSettingField::BridgeFanPwm => 13,
+            MaterialSettingField::MaxBridgeSpanMm => 14,
+            MaterialSettingField::RetractionDistanceMm => 15,
+            MaterialSettingField::RetractionSpeedMmS => 16,
+            MaterialSettingField::RetractionMinimumTravelMm => 17,
+            MaterialSettingField::RetractionZHopMm => 18,
+            MaterialSettingField::MinBeadWidthMm => 19,
+            MaterialSettingField::MaxBeadWidthMm => 20,
+            MaterialSettingField::MinBeadHeightMm => 21,
+            MaterialSettingField::MaxBeadHeightMm => 22,
+        }
+    }
+}
+
+impl TryFrom<i32> for MaterialValueOrigin {
+    type Error = String;
+    fn try_from(value: i32) -> Result<Self, String> {
+        match value {
+            1 => Ok(Self::CurrentIntent),
+            2 => Ok(Self::SelectedProfile),
+            3 => Ok(Self::ExplicitOverride),
+            4 => Ok(Self::MachineLimit),
+            5 => Ok(Self::MaterialLimit),
+            6 => Ok(Self::SharedLimit),
+            _ => Err("unknown MaterialValueOrigin".into()),
+        }
+    }
+}
+impl From<MaterialValueOrigin> for i32 {
+    fn from(value: MaterialValueOrigin) -> Self {
+        match value {
+            MaterialValueOrigin::CurrentIntent => 1,
+            MaterialValueOrigin::SelectedProfile => 2,
+            MaterialValueOrigin::ExplicitOverride => 3,
+            MaterialValueOrigin::MachineLimit => 4,
+            MaterialValueOrigin::MaterialLimit => 5,
+            MaterialValueOrigin::SharedLimit => 6,
+        }
+    }
+}
+
+impl TryFrom<i32> for MaterialCompatibilityCode {
+    type Error = String;
+    fn try_from(value: i32) -> Result<Self, String> {
+        match value {
+            1 => Ok(Self::PrinterMismatch),
+            2 => Ok(Self::NozzleMismatch),
+            3 => Ok(Self::SetupMismatch),
+            4 => Ok(Self::AbrasionRequirement),
+            5 => Ok(Self::ProcessConstraints),
+            _ => Err("unknown MaterialCompatibilityCode".into()),
+        }
+    }
+}
+impl From<MaterialCompatibilityCode> for i32 {
+    fn from(value: MaterialCompatibilityCode) -> Self {
+        match value {
+            MaterialCompatibilityCode::PrinterMismatch => 1,
+            MaterialCompatibilityCode::NozzleMismatch => 2,
+            MaterialCompatibilityCode::SetupMismatch => 3,
+            MaterialCompatibilityCode::AbrasionRequirement => 4,
+            MaterialCompatibilityCode::ProcessConstraints => 5,
+        }
+    }
+}
+
+impl TryFrom<rpc::MaterialCatalog> for MaterialCatalog {
+    type Error = String;
+    fn try_from(value: rpc::MaterialCatalog) -> Result<Self, String> {
+        valid(
+            Self {
+                setup: required(value.setup, "material catalog setup")?.try_into()?,
+                profiles: value
+                    .profiles
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<_, _>>()?,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<MaterialCatalog> for rpc::MaterialCatalog {
+    type Error = String;
+    fn try_from(value: MaterialCatalog) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            setup: Some(value.setup.try_into()?),
+            profiles: value
+                .profiles
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+impl TryFrom<rpc::MaterialReviewRequest> for MaterialReviewRequest {
+    type Error = String;
+    fn try_from(value: rpc::MaterialReviewRequest) -> Result<Self, String> {
+        valid(
+            Self {
+                catalog: value.catalog.map(TryInto::try_into).transpose()?,
+                query: value.query,
+                offset: value.offset,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<MaterialReviewRequest> for rpc::MaterialReviewRequest {
+    type Error = String;
+    fn try_from(value: MaterialReviewRequest) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            catalog: value.catalog.map(TryInto::try_into).transpose()?,
+            query: value.query,
+            offset: value.offset,
+        })
+    }
+}
+
+impl TryFrom<rpc::MaterialCompatibilityIssue> for MaterialCompatibilityIssue {
+    type Error = String;
+    fn try_from(value: rpc::MaterialCompatibilityIssue) -> Result<Self, String> {
+        Ok(Self {
+            code: value.code.try_into()?,
+            message: value.message,
+        })
+    }
+}
+impl TryFrom<MaterialCompatibilityIssue> for rpc::MaterialCompatibilityIssue {
+    type Error = String;
+    fn try_from(value: MaterialCompatibilityIssue) -> Result<Self, String> {
+        Ok(Self {
+            code: value.code.into(),
+            message: value.message,
+        })
+    }
+}
+
+impl TryFrom<rpc::MaterialSettingReview> for MaterialSettingReview {
+    type Error = String;
+    fn try_from(value: rpc::MaterialSettingReview) -> Result<Self, String> {
+        Ok(Self {
+            field: value.field.try_into()?,
+            current: value.current,
+            proposed: value.proposed,
+            current_origin: value.current_origin.try_into()?,
+            proposed_origin: value.proposed_origin.try_into()?,
+        })
+    }
+}
+impl TryFrom<MaterialSettingReview> for rpc::MaterialSettingReview {
+    type Error = String;
+    fn try_from(value: MaterialSettingReview) -> Result<Self, String> {
+        Ok(Self {
+            field: value.field.into(),
+            current: value.current,
+            proposed: value.proposed,
+            current_origin: value.current_origin.into(),
+            proposed_origin: value.proposed_origin.into(),
+        })
+    }
+}
+
+impl TryFrom<rpc::MaterialReviewReport> for MaterialReviewReport {
+    type Error = String;
+    fn try_from(value: rpc::MaterialReviewReport) -> Result<Self, String> {
+        valid(
+            Self {
+                input_revision: ProjectRevision(value.input_revision),
+                query: value.query,
+                offset: value.offset,
+                catalog_profiles: value.catalog_profiles,
+                matching_profiles: value.matching_profiles,
+                candidates: value
+                    .candidates
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<_, _>>()?,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<MaterialReviewReport> for rpc::MaterialReviewReport {
+    type Error = String;
+    fn try_from(value: MaterialReviewReport) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            input_revision: value.input_revision.get(),
+            query: value.query,
+            offset: value.offset,
+            catalog_profiles: value.catalog_profiles,
+            matching_profiles: value.matching_profiles,
+            candidates: value
+                .candidates
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+impl TryFrom<rpc::MaterialCandidateReview> for MaterialCandidateReview {
+    type Error = String;
+    fn try_from(value: rpc::MaterialCandidateReview) -> Result<Self, String> {
+        Ok(Self {
+            selection: MaterialProfileSelection {
+                profile: required(value.profile, "candidate profile")?.try_into()?,
+                setup: required(value.setup, "candidate setup")?.try_into()?,
+                overrides: required(value.overrides, "candidate overrides")?.try_into()?,
+            },
+            issues: value
+                .issues
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            input_changed: value.input_changed,
+            settings: value
+                .settings
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+impl TryFrom<MaterialCandidateReview> for rpc::MaterialCandidateReview {
+    type Error = String;
+    fn try_from(value: MaterialCandidateReview) -> Result<Self, String> {
+        Ok(Self {
+            profile: Some(value.selection.profile.try_into()?),
+            setup: Some(value.selection.setup.try_into()?),
+            overrides: Some(value.selection.overrides.try_into()?),
+            issues: value
+                .issues
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            input_changed: value.input_changed,
+            settings: value
+                .settings
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
         })
     }
 }

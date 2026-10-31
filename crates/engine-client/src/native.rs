@@ -402,6 +402,14 @@ impl EngineRpc {
         if let ManufacturingCommand::SetIntent { intent, .. } = &command {
             intent.validate()?;
         }
+        let expected_material_review = match &command {
+            ManufacturingCommand::ReviewMaterials {
+                base_revision,
+                request,
+                ..
+            } => Some((*base_revision, request.query.clone(), request.offset)),
+            _ => None,
+        };
         let call =
             native::manufacturing_call(command, request_id).map_err(ClientError::InvalidRequest)?;
         let mut client = rpc::manufacturing_client::ManufacturingClient::new(self.channel.clone())
@@ -414,7 +422,21 @@ impl EngineRpc {
                     .await
                     .map_err(rpc_error)?
                     .into_inner();
-                match ManufacturingResponse::try_from(reply).map_err(ClientError::Protocol)? {
+                let response =
+                    ManufacturingResponse::try_from(reply).map_err(ClientError::Protocol)?;
+                if let Some((revision, query, offset)) = expected_material_review {
+                    if !matches!(&response, ManufacturingResponse::MaterialReview { report } if report.input_revision == revision && report.query == query && report.offset == offset)
+                    {
+                        return Err(ClientError::Protocol(
+                            "material review does not match requested revision/query/page".into(),
+                        ));
+                    }
+                } else if matches!(&response, ManufacturingResponse::MaterialReview { .. }) {
+                    return Err(ClientError::Protocol(
+                        "unexpected material review reply".into(),
+                    ));
+                }
+                match response {
                     ManufacturingResponse::Error { error } => Err(error.into()),
                     response => Ok(response),
                 }

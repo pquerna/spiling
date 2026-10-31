@@ -2171,3 +2171,58 @@ async fn queued_process_pose_and_source_changes_reject_stale_compile_and_preflig
     }
     client.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn material_review_is_nonmutating_and_stale_selection_cannot_commit() {
+    let mut client = spawn().await;
+    let base = decode_intent(include_bytes!(
+        "../../../fixtures/manufacturing/complete-sparse.intent.json"
+    ))
+    .unwrap();
+    set_intent(&mut client, base.clone()).await;
+    let selected: MaterialProfileSelection = serde_json::from_slice(include_bytes!(
+        "../../../fixtures/manufacturing/material-profile-a.json"
+    ))
+    .unwrap();
+    let before = status(&mut client).await;
+    let session_id = client.hello().session_id.clone();
+    let ManufacturingResponse::MaterialReview { report } = client
+        .manufacturing(ManufacturingCommand::ReviewMaterials {
+            session_id: session_id.clone(),
+            base_revision: before.0.revision,
+            request: MaterialReviewRequest {
+                catalog: Some(MaterialCatalog {
+                    setup: selected.setup,
+                    profiles: vec![selected.profile],
+                }),
+                query: String::new(),
+                offset: 0,
+            },
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("material review")
+    };
+    assert_eq!(status(&mut client).await, before);
+    assert_eq!(report.candidates.len(), 1);
+    assert!(report.candidates[0].issues.is_empty());
+    let mut edited = base;
+    edited.recipe.infill_fraction = 0.5;
+    set_intent(&mut client, edited).await;
+    let edited_state = status(&mut client).await;
+    assert_ne!(edited_state.0.revision, report.input_revision);
+    let error = client
+        .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+            session_id,
+            base_revision: report.input_revision,
+            selection: report.candidates[0].selection.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, ClientError::Manufacturing(e) if e.code == ManufacturingErrorCode::StaleRevision)
+    );
+    assert_eq!(status(&mut client).await, edited_state);
+    client.shutdown().await.unwrap();
+}
