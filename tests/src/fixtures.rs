@@ -29,6 +29,38 @@ pub fn fixture_record(rel_path: &str) -> &'static serde_json::Value {
         .unwrap_or_else(|| panic!("fixture has no frozen manifest entry: {rel_path}"))
 }
 
+/// Independent physical dimensions from the frozen manifests/export recipe.
+/// This is not the runtime importer's intentionally conservative fit box.
+pub fn fixture_physical_bounds(fixture: &str) -> spiling_contracts::geometry::AabbMm {
+    use spiling_contracts::geometry::AabbMm;
+    let record = fixture_record(fixture);
+    if !record["expectation"]["physical_bounds_mm"].is_null() {
+        return serde_json::from_value(record["expectation"]["physical_bounds_mm"].clone())
+            .unwrap();
+    }
+    if !record["analytic_oracle"]["nominal_bounds_mm"].is_null() {
+        let [min, max]: [[f64; 3]; 2] =
+            serde_json::from_value(record["analytic_oracle"]["nominal_bounds_mm"].clone()).unwrap();
+        return AabbMm { min, max };
+    }
+    // These three dimensions are specified by independent-exporters/generate.py.
+    match fixture {
+        "independent-exporters/occt-box-mm.step" => AabbMm {
+            min: [0.0; 3],
+            max: [20.0, 10.0, 8.0],
+        },
+        "independent-exporters/occt-cylinder-mm.step" => AabbMm {
+            min: [-5.0, -5.0, 0.0],
+            max: [5.0, 5.0, 8.0],
+        },
+        "independent-exporters/occt-through-hole-mm.step" => AabbMm {
+            min: [0.0; 3],
+            max: [20.0, 20.0, 8.0],
+        },
+        _ => panic!("fixture has no independent dimensions: {fixture}"),
+    }
+}
+
 pub fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

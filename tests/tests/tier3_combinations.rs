@@ -21,7 +21,7 @@ use std::thread;
 fn test_comb_01_cylinder_import_section_tessellation() {
     let bytes = fixture_bytes("cylinder.step");
     let def = import_test_step(&bytes).expect("cylinder import");
-    let bounds = def.bounds_mm();
+    let bounds = precision_bounds(&def, 0.001).expect("certified physical extents");
     assert_close(bounds.min[0], -5.0, 1e-3, "cyl min x");
     assert_close(bounds.max[0], 5.0, 1e-3, "cyl max x");
     assert_close(bounds.min[2], 0.0, 1e-3, "cyl min z");
@@ -46,9 +46,9 @@ fn test_comb_01_cylinder_import_section_tessellation() {
 fn test_comb_02_through_hole_section_loops_and_net_area() {
     let bytes = fixture_bytes("through-hole.step");
     let def = import_test_step(&bytes).expect("through-hole import");
-    let bounds = def.bounds_mm();
-    assert_close(bounds.min[0], 0.0, 1e-3, "min x");
-    assert_close(bounds.max[0], 20.0, 1e-3, "max x");
+    let bounds = precision_axis(&def, 0, 0.001).expect("certified physical extents");
+    assert_close(bounds.minimum[0], 0.0, 1e-3, "min x");
+    assert_close(bounds.maximum[1], 20.0, 1e-3, "max x");
 
     let sec = section_at_z(&def, 4.0).expect("through-hole midplane section");
     assert_eq!(
@@ -210,7 +210,7 @@ fn test_comb_08_narrow_pocket_slot_width_geometry() {
 fn test_comb_09_ribbed_bracket_bounds_and_base_roof() {
     let bytes = fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step");
     let def = import_test_step(&bytes).expect("ribbed bracket import");
-    let bounds = def.bounds_mm();
+    let bounds = precision_bounds(&def, 0.001).expect("certified physical extents");
     assert_close(bounds.min[0], 0.0, 1e-3, "min x");
     assert_close(bounds.max[0], 30.0, 1e-3, "max x");
     assert_close(bounds.min[1], 0.0, 1e-3, "min y");
@@ -326,7 +326,7 @@ fn test_comb_15_spline_housing_multi_strata_oracle() {
 fn test_comb_16_perforated_plate_bounds_and_metadata() {
     let bytes = fixture_bytes("perforated-plate.step");
     let def = import_test_step(&bytes).expect("perforated plate import");
-    let bounds = def.bounds_mm();
+    let bounds = precision_bounds(&def, 0.001).expect("certified physical extents");
     assert_close(bounds.min[0], 0.0, 1e-3, "min x");
     assert_close(bounds.max[0], 1640.0, 1e-3, "max x");
     assert_close(bounds.min[1], 0.0, 1e-3, "min y");
@@ -380,8 +380,8 @@ fn test_comb_18_box_mm_vs_box_inch_equivalence() {
     let def_mm = import_test_step(&b_mm).expect("box-mm import");
     let def_in = import_test_step(&b_in).expect("box-inch import");
 
-    let bounds_mm = def_mm.bounds_mm();
-    let bounds_in = def_in.bounds_mm();
+    let bounds_mm = precision_bounds(&def_mm, 0.01).expect("certified physical extents");
+    let bounds_in = precision_bounds(&def_in, 0.01).expect("certified physical extents");
     assert_close(bounds_mm.max[0], bounds_in.max[0], 1e-2, "max x match");
     assert_close(bounds_mm.max[1], bounds_in.max[1], 1e-2, "max y match");
     assert_close(bounds_mm.max[2], bounds_in.max[2], 1e-2, "max z match");
@@ -712,7 +712,7 @@ fn test_comb_35_cylinder_bore_clearance_analysis() {
 fn test_comb_36_box_stock_sizing_envelope() {
     let bytes = fixture_bytes("box-mm.step");
     let def = import_test_step(&bytes).expect("box");
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 0.001).expect("certified physical extents");
     let margin_xy = 5.0;
     let margin_z = 2.0;
     let stock_x = (b.max[0] - b.min[0]) + 2.0 * margin_xy;
@@ -1038,8 +1038,8 @@ fn test_comb_54_total_surface_area_estimation() {
 fn test_comb_55_full_pipeline_audit_ribbed_bracket() {
     let bytes = fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step");
     let def = import_test_step(&bytes).expect("ribbed bracket");
-    let b = def.bounds_mm();
-    assert_close(b.max[0], 30.0, 1e-3, "max x");
+    let b = precision_axis(&def, 0, 0.001).expect("certified physical extents");
+    assert_close(b.maximum[1], 30.0, 1e-3, "max x");
 
     // Slicing at multiple heights
     let s1 = section_at_z(&def, 0.5).expect("base");

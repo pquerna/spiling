@@ -71,8 +71,7 @@ fn test_f02_corner_bounds_non_cube() {
 #[test]
 fn test_f02_corner_bounds_large_plate() {
     let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    let b = def.bounds_mm();
-    assert_close(b.max[0], 1640.0, 1e-4, "plate X");
+    assert_fixture_enclosure(&def, "perforated-plate.step");
 }
 
 #[test]
@@ -344,7 +343,7 @@ fn test_f08_corner_unsupported_nurbs_accepted() {
 fn test_f08_corner_inch_conversion_accuracy() {
     let bytes = fixture_bytes("box-inch.step");
     let def = import_test_step(&bytes).unwrap();
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 1e-06).expect("certified physical extents");
     assert_close(b.max[0], 20.0, 1e-6, "inch X");
     assert_close(b.max[1], 10.0, 1e-6, "inch Y");
     assert_close(b.max[2], 8.0, 1e-6, "inch Z");
@@ -789,7 +788,14 @@ fn test_f17_corner_rounded_housing_bounds() {
         "independent-exporters/occt-rounded-housing-mm.step",
     ))
     .unwrap();
-    assert_close(def.bounds_mm().max[0], 24.0, 1e-4, "X");
+    assert_close(
+        precision_axis(&def, 0, 0.0001)
+            .expect("certified physical extent")
+            .maximum[1],
+        24.0,
+        1e-4,
+        "X",
+    );
 }
 
 // =========================================================================
@@ -850,8 +856,8 @@ fn test_f18_corner_through_hole_concentric() {
 fn test_f18_corner_box_inch_identical_geometry() {
     let def_mm = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let def_inch = import_test_step(&fixture_bytes("box-inch.step")).unwrap();
-    let sec_mm = section_midplane(&def_mm).unwrap();
-    let sec_inch = section_midplane(&def_inch).unwrap();
+    let sec_mm = section_midplane(&def_mm, "box-mm.step").unwrap();
+    let sec_inch = section_midplane(&def_inch, "box-inch.step").unwrap();
     let a_mm = loop_area(&sec_mm, &sec_mm.loops()[0]);
     let a_inch = loop_area(&sec_inch, &sec_inch.loops()[0]);
     assert_close(a_mm, a_inch, 1e-4, "unit conversion equivalence");
@@ -864,21 +870,21 @@ fn test_f18_corner_box_inch_identical_geometry() {
 #[test]
 fn test_f19_corner_box_polyline_density() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     assert!(sec.loops()[0].points_mm.len() >= 4);
 }
 
 #[test]
 fn test_f19_corner_cylinder_polyline_density() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "cylinder.step").unwrap();
     assert!(sec.loops()[0].points_mm.len() >= 16);
 }
 
 #[test]
 fn test_f19_corner_points_finite() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     for pt in &sec.loops()[0].points_mm {
         assert!(pt[0].is_finite());
         assert!(pt[1].is_finite());
@@ -889,7 +895,7 @@ fn test_f19_corner_points_finite() {
 #[test]
 fn test_f19_corner_cylinder_points_finite() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "cylinder.step").unwrap();
     for pt in &sec.loops()[0].points_mm {
         assert!(pt[0].is_finite());
         assert!(pt[1].is_finite());
@@ -900,7 +906,7 @@ fn test_f19_corner_cylinder_points_finite() {
 #[test]
 fn test_f19_corner_through_hole_points_finite() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "through-hole.step").unwrap();
     for l in sec.loops() {
         for pt in &l.points_mm {
             assert!(pt[0].is_finite());
@@ -1142,35 +1148,35 @@ fn test_f23_corner_section_span_zero_error() {
 #[test]
 fn test_f24_corner_box_outer_loop() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     assert!(!sec.loops()[0].is_hole);
 }
 
 #[test]
 fn test_f24_corner_through_hole_hole_loop() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert!(sec.loops()[1].is_hole);
 }
 
 #[test]
 fn test_f24_corner_loop_count_box() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     assert_eq!(sec.loops().len(), 1);
 }
 
 #[test]
 fn test_f24_corner_loop_count_hole() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert_eq!(sec.loops().len(), 2);
 }
 
 #[test]
 fn test_f24_corner_loop_count_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "cylinder.step").unwrap();
     assert_eq!(sec.loops().len(), 1);
 }
 
@@ -1605,7 +1611,7 @@ fn test_f34_corner_bracket_faces() {
 #[test]
 fn test_f35_corner_direct_section() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     assert!(sec.is_native_intersection());
 }
 
@@ -1619,7 +1625,14 @@ fn test_f35_corner_direct_tessellation() {
 #[test]
 fn test_f35_corner_direct_bounds() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_close(def.bounds_mm().max[0], 20.0, 1e-6, "bounds");
+    assert_close(
+        precision_axis(&def, 0, 1e-06)
+            .expect("certified physical extent")
+            .maximum[1],
+        20.0,
+        1e-6,
+        "bounds",
+    );
 }
 
 #[test]
@@ -1631,7 +1644,7 @@ fn test_f35_corner_direct_face_inspect() {
 #[test]
 fn test_f35_corner_direct_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "cylinder.step").unwrap();
     assert_eq!(sec.loops().len(), 1);
 }
 
@@ -1741,7 +1754,7 @@ fn test_f36_corner_height_domain_outside_interval() {
 #[test]
 fn test_f37_corner_bounds_box_mm() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 1e-06).expect("certified physical extents");
     assert_close(b.min[0], 0.0, 1e-6, "min X");
     assert_close(b.max[0], 20.0, 1e-6, "max X");
     assert_close(b.max[1], 10.0, 1e-6, "max Y");
@@ -1751,16 +1764,16 @@ fn test_f37_corner_bounds_box_mm() {
 #[test]
 fn test_f37_corner_bounds_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let b = def.bounds_mm();
-    assert_close(b.min[0], -5.0, 1e-6, "min X");
-    assert_close(b.max[0], 5.0, 1e-6, "max X");
+    let b = precision_axis(&def, 0, 1e-06).expect("certified physical extents");
+    assert_close(b.minimum[0], -5.0, 1e-6, "min X");
+    assert_close(b.maximum[1], 5.0, 1e-6, "max X");
 }
 
 #[test]
 fn test_f37_corner_bounds_through_hole() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let b = def.bounds_mm();
-    assert_close(b.max[0], 20.0, 1e-6, "max X");
+    let b = precision_axis(&def, 0, 1e-06).expect("certified physical extents");
+    assert_close(b.maximum[1], 20.0, 1e-6, "max X");
 }
 
 #[test]
@@ -1769,15 +1782,15 @@ fn test_f37_corner_bounds_bracket() {
         "independent-exporters/occt-ribbed-bracket-mm.step",
     ))
     .unwrap();
-    let b = def.bounds_mm();
-    assert_close(b.max[0], 30.0, 1e-4, "max X");
+    let b = precision_axis(&def, 0, 0.0001).expect("certified physical extents");
+    assert_close(b.maximum[1], 30.0, 1e-4, "max X");
 }
 
 #[test]
 fn test_f37_corner_bounds_plate() {
     let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    let b = def.bounds_mm();
-    assert_close(b.max[0], 1640.0, 1e-4, "max X");
+    let b = precision_axis(&def, 0, 0.0001).expect("certified physical extents");
+    assert_close(b.maximum[1], 1640.0, 1e-4, "max X");
 }
 
 // =========================================================================
@@ -1959,7 +1972,7 @@ fn test_f39_corner_material_projected_bounds_z() {
 #[test]
 fn test_f40_corner_no_voids_box() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     assert_eq!(sec.loops().len(), 1);
     assert!(!sec.loops()[0].is_hole);
 }
@@ -1967,7 +1980,7 @@ fn test_f40_corner_no_voids_box() {
 #[test]
 fn test_f40_corner_single_void_through_hole() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert_eq!(sec.loops().len(), 2);
     assert!(sec.loops()[1].is_hole);
 }
@@ -2284,21 +2297,21 @@ fn test_f46_corner_mesh_artifact_cylinder() {
 #[test]
 fn test_f47_corner_section_loops_box() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     assert_eq!(sec.loops().len(), 1);
 }
 
 #[test]
 fn test_f47_corner_section_loops_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "cylinder.step").unwrap();
     assert_eq!(sec.loops().len(), 1);
 }
 
 #[test]
 fn test_f47_corner_section_loops_hole() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert_eq!(sec.loops().len(), 2);
 }
 

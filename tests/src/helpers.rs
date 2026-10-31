@@ -32,8 +32,15 @@ pub fn section_at_z(def: &Definition, z_mm: f64) -> Result<NativeSection, Geomet
     )
 }
 
-pub fn section_midplane(def: &Definition) -> Result<NativeSection, GeometryError> {
-    let bounds = def.bounds_mm();
+pub fn section_midplane(def: &Definition, fixture: &str) -> Result<NativeSection, GeometryError> {
+    assert_eq!(
+        def.provenance().source_hash.as_str(),
+        crate::fixtures::fixture_record(fixture)["sha256"]
+            .as_str()
+            .unwrap(),
+        "section fixture identity"
+    );
+    let bounds = crate::fixtures::fixture_physical_bounds(fixture);
     let z_mid = (bounds.min[2] + bounds.max[2]) * 0.5;
     section_at_z(def, z_mid)
 }
@@ -204,4 +211,81 @@ pub fn assert_mesh_source_coverage(definition: &Definition, mesh: &MeshArtifact)
             .sum::<u64>(),
         u64::from(mesh.total_bytes)
     );
+}
+
+/// Standalone precision tests use the native contact-query 20M work envelope.
+/// No production limit is changed; aggregate bounds charge all axes together.
+pub fn precision_axis(
+    def: &Definition,
+    axis: usize,
+    tolerance_mm: f64,
+) -> Result<spiling_geometry::ProjectedBounds, GeometryError> {
+    precision_axis_with_work(
+        def,
+        axis,
+        tolerance_mm,
+        &mut spiling_geometry::GeometryWorkBudget::new(20_000_000),
+    )
+}
+
+fn precision_axis_with_work(
+    def: &Definition,
+    axis: usize,
+    tolerance_mm: f64,
+    work: &mut spiling_geometry::GeometryWorkBudget,
+) -> Result<spiling_geometry::ProjectedBounds, GeometryError> {
+    let mut direction = [0.0; 3];
+    direction[axis] = 1.0;
+    let policy = spiling_geometry::BoundsPolicy {
+        maximum_endpoint_uncertainty_mm: tolerance_mm * 0.5,
+    };
+    let bounds =
+        spiling_geometry::projected_bounds(def, direction, policy, work, &AtomicBool::new(false))?;
+    assert!(
+        bounds.achieved_uncertainty_mm.is_finite()
+            && bounds.achieved_uncertainty_mm <= policy.maximum_endpoint_uncertainty_mm
+    );
+    assert!(bounds.minimum[0] <= bounds.minimum[1] && bounds.maximum[0] <= bounds.maximum[1]);
+    assert!(
+        bounds
+            .minimum
+            .into_iter()
+            .chain(bounds.maximum)
+            .all(f64::is_finite)
+    );
+    Ok(bounds)
+}
+
+pub fn precision_bounds(
+    def: &Definition,
+    tolerance_mm: f64,
+) -> Result<spiling_contracts::geometry::AabbMm, GeometryError> {
+    let mut work = spiling_geometry::GeometryWorkBudget::new(20_000_000);
+    let mut result = spiling_contracts::geometry::AabbMm {
+        min: [0.0; 3],
+        max: [0.0; 3],
+    };
+    for axis in 0..3 {
+        let bounds = precision_axis_with_work(def, axis, tolerance_mm, &mut work)?;
+        result.min[axis] = bounds.minimum[0];
+        result.max[axis] = bounds.maximum[1];
+    }
+    result.validate()?;
+    Ok(result)
+}
+
+pub fn assert_fixture_enclosure(def: &Definition, fixture: &str) {
+    let bounds = def.bounds_mm();
+    bounds.validate().unwrap();
+    let physical = crate::fixtures::fixture_physical_bounds(fixture);
+    for axis in 0..3 {
+        assert!(
+            bounds.min[axis] <= physical.min[axis],
+            "import enclosure min axis {axis}: {fixture}"
+        );
+        assert!(
+            bounds.max[axis] >= physical.max[axis],
+            "import enclosure max axis {axis}: {fixture}"
+        );
+    }
 }

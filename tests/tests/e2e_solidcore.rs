@@ -26,7 +26,7 @@ fn test_e2e_occt_reference_corpus_integrity() {
         assert!(b.max[2] >= b.min[2], "valid z bounds for {fixture_path}");
 
         // 2. Midplane section must succeed
-        let sec = section_midplane(&def)
+        let sec = section_midplane(&def, fixture_path)
             .unwrap_or_else(|e| panic!("failed midplane section on {fixture_path}: {e:?}"));
         assert!(!sec.loops().is_empty(), "midplane loops for {fixture_path}");
 

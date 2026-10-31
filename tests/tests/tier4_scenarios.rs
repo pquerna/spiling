@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Tier 4: Realistic CAM Scenarios.
-//! 26 end-to-end operator journeys testing the full CAM pipeline on reference fixtures.
+//! Geometry integration scenarios: source dimensions, sections and display.
+//! These tests do not execute a CAM planner, machine program or operator journey.
 
 use spiling_contracts::geometry::*;
 use spiling_e2e_tests::fixtures::*;
@@ -17,10 +17,10 @@ use std::sync::atomic::AtomicBool;
 // =========================================================================
 
 #[test]
-fn test_cam_01_stock_selection_and_facing_setup_box_mm() {
+fn test_geometry_01_stock_selection_and_facing_setup_box_mm() {
     let bytes = fixture_bytes("box-mm.step");
     let def = import_test_step(&bytes).expect("import box-mm");
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 0.001).expect("certified physical extents");
 
     // CAM operator adds 5.0mm stock margin on XY and 2.0mm on Z
     let margin_xy = 5.0;
@@ -52,13 +52,13 @@ fn test_cam_01_stock_selection_and_facing_setup_box_mm() {
 // =========================================================================
 
 #[test]
-fn test_cam_02_hole_making_and_peck_drilling_through_hole() {
+fn test_geometry_02_hole_making_and_peck_drilling_through_hole() {
     let bytes = fixture_bytes("through-hole.step");
     let def = import_test_step(&bytes).expect("import through-hole");
-    let b = def.bounds_mm();
+    let b = precision_axis(&def, 2, 0.001).expect("certified physical extents");
 
     // Verify hole depth
-    let depth = b.max[2] - b.min[2];
+    let depth = b.maximum[1] - b.minimum[0];
     assert_close(depth, 8.0, 1e-3, "hole depth");
 
     // Check circular boundary at three strata: top (z=7.5), mid (z=4.0), bottom (z=0.5)
@@ -81,7 +81,7 @@ fn test_cam_02_hole_making_and_peck_drilling_through_hole() {
 // =========================================================================
 
 #[test]
-fn test_cam_03_waterline_roughing_tapered_fitting() {
+fn test_geometry_03_waterline_roughing_tapered_fitting() {
     let bytes = fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step");
     let def = import_test_step(&bytes).expect("import tapered fitting");
 
@@ -110,7 +110,7 @@ fn test_cam_03_waterline_roughing_tapered_fitting() {
 // =========================================================================
 
 #[test]
-fn test_cam_04_finish_contouring_narrow_pocket() {
+fn test_geometry_04_finish_contouring_narrow_pocket() {
     let bytes = fixture_bytes("independent-exporters/occt-narrow-pocket-mm.step");
     let def = import_test_step(&bytes).expect("import narrow pocket");
 
@@ -139,7 +139,7 @@ fn test_cam_04_finish_contouring_narrow_pocket() {
 // =========================================================================
 
 #[test]
-fn test_cam_05_multi_cavity_pocketing_rounded_housing() {
+fn test_geometry_05_multi_cavity_pocketing_rounded_housing() {
     let bytes = fixture_bytes("independent-exporters/occt-rounded-housing-mm.step");
     let def = import_test_step(&bytes).expect("rounded housing");
 
@@ -156,7 +156,7 @@ fn test_cam_05_multi_cavity_pocketing_rounded_housing() {
 // =========================================================================
 
 #[test]
-fn test_cam_06_spline_nurbs_surface_3d_milling() {
+fn test_geometry_06_spline_display_mesh() {
     let bytes = fixture_bytes("independent-exporters/occt-spline-housing-mm.step");
     let def = import_test_step(&bytes).expect("spline housing");
     let mesh = tessellate_display(&def).expect("fine mesh");
@@ -169,7 +169,7 @@ fn test_cam_06_spline_nurbs_surface_3d_milling() {
 // =========================================================================
 
 #[test]
-fn test_cam_07_thin_wall_machining_ribbed_bracket() {
+fn test_geometry_07_thin_wall_machining_ribbed_bracket() {
     let bytes = fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step");
     let def = import_test_step(&bytes).expect("ribbed bracket");
 
@@ -185,7 +185,7 @@ fn test_cam_07_thin_wall_machining_ribbed_bracket() {
 // =========================================================================
 
 #[test]
-fn test_cam_08_high_speed_drilling_perforated_plate_512_holes() {
+fn test_geometry_08_high_speed_drilling_perforated_plate_512_holes() {
     let bytes = fixture_bytes("perforated-plate.step");
     let def = import_test_step(&bytes).expect("perforated plate");
     let sec = section_at_z(&def, 10.0).expect("midplane");
@@ -202,10 +202,10 @@ fn test_cam_08_high_speed_drilling_perforated_plate_512_holes() {
 // =========================================================================
 
 #[test]
-fn test_cam_09_imperial_stock_and_metric_tooling() {
+fn test_geometry_09_imperial_stock_and_metric_tooling() {
     let bytes = fixture_bytes("box-inch.step");
     let def = import_test_step(&bytes).expect("box inch");
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 0.01).expect("certified physical extents");
     assert_close(b.max[0], 20.0, 1e-2, "converted max x");
     assert_close(b.max[1], 10.0, 1e-2, "converted max y");
     assert_close(b.max[2], 8.0, 1e-2, "converted max z");
@@ -227,10 +227,10 @@ fn test_cam_09_imperial_stock_and_metric_tooling() {
 // =========================================================================
 
 #[test]
-fn test_cam_10_lathe_turning_profile_cylinder() {
+fn test_geometry_10_lathe_turning_profile_cylinder() {
     let bytes = fixture_bytes("cylinder.step");
     let def = import_test_step(&bytes).expect("cyl");
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 0.001).expect("certified physical extents");
     let radius = (b.max[0] - b.min[0]) * 0.5;
     let length = b.max[2] - b.min[2];
     assert_close(radius, 5.0, 1e-3, "turning radius");
@@ -242,7 +242,7 @@ fn test_cam_10_lathe_turning_profile_cylinder() {
 // =========================================================================
 
 #[test]
-fn test_cam_11_rest_machining_corner_fillets_rounded_housing() {
+fn test_geometry_11_rest_machining_corner_fillets_rounded_housing() {
     let bytes = fixture_bytes("independent-exporters/occt-rounded-housing-mm.step");
     let def = import_test_step(&bytes).expect("housing");
     // Verify corner fillet geometry via mid-pocket section
@@ -255,10 +255,10 @@ fn test_cam_11_rest_machining_corner_fillets_rounded_housing() {
 // =========================================================================
 
 #[test]
-fn test_cam_12_chamfer_and_deburring_detection() {
+fn test_geometry_12_chamfer_and_deburring_detection() {
     let bytes = fixture_bytes("box-mm.step");
     let def = import_test_step(&bytes).expect("box");
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 0.001).expect("certified physical extents");
     let perimeter = 2.0 * ((b.max[0] - b.min[0]) + (b.max[1] - b.min[1]));
     assert_close(perimeter, 60.0, 1e-3, "top chamfer perimeter");
 }
@@ -268,7 +268,7 @@ fn test_cam_12_chamfer_and_deburring_detection() {
 // =========================================================================
 
 #[test]
-fn test_cam_13_deep_hole_bore_aspect_ratio() {
+fn test_geometry_13_deep_hole_bore_aspect_ratio() {
     let bytes = fixture_bytes("through-hole.step");
     let def = import_test_step(&bytes).expect("hole");
     let b = def.bounds_mm();
@@ -283,7 +283,7 @@ fn test_cam_13_deep_hole_bore_aspect_ratio() {
 // =========================================================================
 
 #[test]
-fn test_cam_14_fixture_clamping_clearance_envelope() {
+fn test_geometry_14_fixture_clamping_clearance_envelope() {
     let bytes = fixture_bytes("independent-exporters/occt-box-mm.step");
     let def = import_test_step(&bytes).expect("box");
     let b = def.bounds_mm();
@@ -300,7 +300,7 @@ fn test_cam_14_fixture_clamping_clearance_envelope() {
 // =========================================================================
 
 #[test]
-fn test_cam_15_taper_angle_verification_for_conical_cutter() {
+fn test_geometry_15_taper_angle_verification_for_conical_cutter() {
     let bytes = fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step");
     let def = import_test_step(&bytes).expect("tapered");
     let sec1 = section_at_z(&def, 1.0).expect("z=1");
@@ -325,7 +325,7 @@ fn test_cam_15_taper_angle_verification_for_conical_cutter() {
 // =========================================================================
 
 #[test]
-fn test_cam_16_scallop_height_and_display_mesh_inspection() {
+fn test_geometry_16_scallop_height_and_display_mesh_inspection() {
     let bytes = fixture_bytes("independent-exporters/occt-rounded-housing-mm.step");
     let def = import_test_step(&bytes).expect("housing");
     let mesh = tessellate_display(&def).expect("mesh");
@@ -337,7 +337,7 @@ fn test_cam_16_scallop_height_and_display_mesh_inspection() {
 // =========================================================================
 
 #[test]
-fn test_cam_17_adaptive_clearing_stepover_area() {
+fn test_geometry_17_adaptive_clearing_stepover_area() {
     let bytes = fixture_bytes("independent-exporters/occt-narrow-pocket-mm.step");
     let def = import_test_step(&bytes).expect("narrow pocket");
     let sec = section_at_z(&def, 2.0).expect("sec");
@@ -358,7 +358,7 @@ fn test_cam_17_adaptive_clearing_stepover_area() {
 // =========================================================================
 
 #[test]
-fn test_cam_18_multi_axis_5axis_swarf_surface_detection() {
+fn test_geometry_18_multi_axis_5axis_swarf_surface_detection() {
     let bytes = fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step");
     let def = import_test_step(&bytes).expect("tapered");
     assert!(!def.faces().is_empty());
@@ -369,7 +369,7 @@ fn test_cam_18_multi_axis_5axis_swarf_surface_detection() {
 // =========================================================================
 
 #[test]
-fn test_cam_19_under_cut_and_draft_angle_check() {
+fn test_geometry_19_under_cut_and_draft_angle_check() {
     let bytes = fixture_bytes("box-mm.step");
     let def = import_test_step(&bytes).expect("box");
     // Prismatic box has zero undercuts
@@ -381,12 +381,12 @@ fn test_cam_19_under_cut_and_draft_angle_check() {
 // =========================================================================
 
 #[test]
-fn test_cam_20_toolpath_linking_rapid_plane_height() {
+fn test_geometry_20_toolpath_linking_rapid_plane_height() {
     let bytes = fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step");
     let def = import_test_step(&bytes).expect("ribbed bracket");
-    let b = def.bounds_mm();
+    let b = precision_axis(&def, 2, 0.001).expect("certified physical extents");
     let clearance_margin = 5.0;
-    let rapid_plane_z = b.max[2] + clearance_margin;
+    let rapid_plane_z = b.maximum[1] + clearance_margin;
     assert_close(rapid_plane_z, 12.6, 1e-3, "rapid plane z");
 }
 
@@ -395,10 +395,10 @@ fn test_cam_20_toolpath_linking_rapid_plane_height() {
 // =========================================================================
 
 #[test]
-fn test_cam_21_workpiece_mass_and_stock_removal_ratio() {
+fn test_geometry_21_workpiece_mass_and_stock_removal_ratio() {
     let bytes = fixture_bytes("box-mm.step");
     let def = import_test_step(&bytes).expect("box");
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 0.01).expect("certified physical extents");
     let part_vol = (b.max[0] - b.min[0]) * (b.max[1] - b.min[1]) * (b.max[2] - b.min[2]);
     let stock_vol = 30.0 * 20.0 * 12.0;
     let removal_ratio = (stock_vol - part_vol) / stock_vol;
@@ -410,7 +410,7 @@ fn test_cam_21_workpiece_mass_and_stock_removal_ratio() {
 // =========================================================================
 
 #[test]
-fn test_cam_22_cancellation_during_long_toolpath_slicing() {
+fn test_geometry_22_cancellation_during_long_toolpath_slicing() {
     let bytes = fixture_bytes("perforated-plate.step");
     let def = import_test_step(&bytes).expect("plate");
     let cancel = AtomicBool::new(false);
@@ -444,7 +444,7 @@ fn test_cam_22_cancellation_during_long_toolpath_slicing() {
 // =========================================================================
 
 #[test]
-fn test_cam_23_work_budget_governor_on_batch_nests() {
+fn test_geometry_23_work_budget_governor_on_batch_nests() {
     let bytes = fixture_bytes("box-mm.step");
     let def = import_test_step(&bytes).expect("box");
     let mut budget = GeometryWorkBudget::new(50_000);
@@ -472,7 +472,7 @@ fn test_cam_23_work_budget_governor_on_batch_nests() {
 // =========================================================================
 
 #[test]
-fn test_cam_24_part_reorientation_coordinate_transform() {
+fn test_geometry_24_part_reorientation_coordinate_transform() {
     let bytes = fixture_bytes("box-mm.step");
     let def = import_test_step(&bytes).expect("box");
     // Setup 1: slicing top-down
@@ -495,7 +495,7 @@ fn test_cam_24_part_reorientation_coordinate_transform() {
 // =========================================================================
 
 #[test]
-fn test_cam_25_unsupported_geometry_pre_flight_check() {
+fn test_geometry_25_unsupported_geometry_pre_flight_check() {
     let bytes_unsupported = fixture_bytes("reachable-unsupported.step");
     let res = import_test_step(&bytes_unsupported);
     assert!(
@@ -513,7 +513,7 @@ fn test_cam_25_unsupported_geometry_pre_flight_check() {
 // =========================================================================
 
 #[test]
-fn test_cam_26_end_to_end_full_cam_lifecycle_production() {
+fn test_geometry_26_housing_import_dimensions_sections_and_display() {
     let bytes = fixture_bytes("independent-exporters/occt-rounded-housing-mm.step");
 
     // Phase 1: Import & Provenance
@@ -521,7 +521,7 @@ fn test_cam_26_end_to_end_full_cam_lifecycle_production() {
     assert_eq!(def.provenance().source_unit, SourceUnit::Millimetre);
 
     // Phase 2: Stock sizing
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 0.001).expect("certified physical extents");
     assert_close(b.max[0], 24.0, 1e-3, "max x");
     assert_close(b.max[1], 18.0, 1e-3, "max y");
     assert_close(b.max[2], 10.0, 1e-3, "max z");

@@ -70,11 +70,7 @@ fn test_f01_source_face_and_edge_ids() {
 #[test]
 fn test_f02_definition_bounds_accessor() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let bounds = def.bounds_mm();
-    assert_close(bounds.min[0], 0.0, 1e-6, "box bounds min X");
-    assert_close(bounds.max[0], 20.0, 1e-6, "box bounds max X");
-    assert_close(bounds.max[1], 10.0, 1e-6, "box bounds max Y");
-    assert_close(bounds.max[2], 8.0, 1e-6, "box bounds max Z");
+    assert_fixture_enclosure(&def, "box-mm.step");
 }
 
 #[test]
@@ -93,12 +89,16 @@ fn test_f02_definition_id_uniqueness() {
 #[test]
 fn test_f02_definition_send_sync_thread() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
+    let expected = def.bounds_mm();
     let handle = std::thread::spawn(move || {
         assert_source_face_identity(&def, "box-mm.step");
         def.bounds_mm()
     });
     let bounds = handle.join().unwrap();
-    assert_close(bounds.max[0], 20.0, 1e-6, "thread bounds");
+    assert_eq!(
+        bounds, expected,
+        "thread observes the same immutable enclosure"
+    );
 }
 
 #[test]
@@ -125,6 +125,7 @@ fn test_f03_inspect_face_without_locks() {
 fn test_f03_concurrent_reads_on_definition() {
     use std::sync::Arc;
     let def = Arc::new(import_test_step(&fixture_bytes("box-mm.step")).unwrap());
+    let expected_max_x = def.bounds_mm().max[0];
     let mut handles = Vec::new();
     for _ in 0..4 {
         let d = Arc::clone(&def);
@@ -134,7 +135,11 @@ fn test_f03_concurrent_reads_on_definition() {
         }));
     }
     for h in handles {
-        assert_close(h.join().unwrap(), 20.0, 1e-6, "concurrent read");
+        assert_eq!(
+            h.join().unwrap(),
+            expected_max_x,
+            "concurrent immutable read"
+        );
     }
 }
 
@@ -236,7 +241,7 @@ fn test_f05_complexity_increases_retained_bytes() {
 #[test]
 fn test_f05_section_retained_bytes() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     assert!(sec.retained_bytes() > 0);
 }
 
@@ -423,7 +428,7 @@ fn test_f09_occt_spline_housing_bounds() {
         "independent-exporters/occt-spline-housing-mm.step",
     ))
     .unwrap();
-    let bounds = def.bounds_mm();
+    let bounds = precision_bounds(&def, 0.0001).expect("certified physical extents");
     assert_close(bounds.min[0], 0.0, 1e-4, "spline housing min X");
     assert_close(bounds.max[0], 24.0, 1e-4, "spline housing max X");
     assert_close(bounds.max[1], 18.0, 1e-4, "spline housing max Y");
@@ -699,13 +704,13 @@ fn test_f16_nurbs_evaluation_occt_spline_housing() {
 }
 
 #[test]
-fn test_f16_nurbs_evaluation_translation_invariance() {
+fn test_f16_spline_precision_x_extent() {
     let def = import_test_step(&fixture_bytes(
         "independent-exporters/occt-spline-housing-mm.step",
     ))
     .unwrap();
-    let bounds = def.bounds_mm();
-    assert_close(bounds.max[0], 24.0, 1e-4, "spline X max");
+    let bounds = precision_axis(&def, 0, 0.0001).expect("certified physical extents");
+    assert_close(bounds.maximum[1], 24.0, 1e-4, "spline X max");
 }
 
 #[test]
@@ -777,13 +782,13 @@ fn test_f17_bezier_evaluation_domain() {
 }
 
 #[test]
-fn test_f17_bezier_patch_bounds() {
+fn test_f17_rounded_housing_precision_z_extent() {
     let def = import_test_step(&fixture_bytes(
         "independent-exporters/occt-rounded-housing-mm.step",
     ))
     .unwrap();
-    let bounds = def.bounds_mm();
-    assert_close(bounds.max[2], 10.0, 1e-4, "rounded housing max Z");
+    let bounds = precision_axis(&def, 2, 0.0001).expect("certified physical extents");
+    assert_close(bounds.maximum[1], 10.0, 1e-4, "rounded housing max Z");
 }
 
 #[test]
@@ -803,7 +808,7 @@ fn test_f17_bezier_tessellate_quality() {
 #[test]
 fn test_f18_plane_analytic_jet_enclosure() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     let a = loop_area(&sec, &sec.loops()[0]);
     assert_close(a, 200.0, 1e-6, "box midplane area");
 }
@@ -811,7 +816,7 @@ fn test_f18_plane_analytic_jet_enclosure() {
 #[test]
 fn test_f18_cylinder_analytic_jet_enclosure() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "cylinder.step").unwrap();
     let a = loop_area(&sec, &sec.loops()[0]);
     assert_close(a, 25.0 * PI, 0.2, "cylinder midplane area");
 }
@@ -829,7 +834,7 @@ fn test_f18_cone_analytic_jet_enclosure() {
 #[test]
 fn test_f18_analytic_jet_box_inch() {
     let def = import_test_step(&fixture_bytes("box-inch.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-inch.step").unwrap();
     let a = loop_area(&sec, &sec.loops()[0]);
     assert_close(a, 200.0, 1e-6, "box inch converted area");
 }
@@ -837,7 +842,7 @@ fn test_f18_analytic_jet_box_inch() {
 #[test]
 fn test_f18_through_hole_analytic_jet() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert_eq!(sec.loops().len(), 2);
     let a_outer = loop_area(&sec, &sec.loops()[0]);
     assert_close(a_outer, 400.0, 1e-6, "through hole outer area");
@@ -850,14 +855,14 @@ fn test_f18_through_hole_analytic_jet() {
 #[test]
 fn test_f19_curve_domain_box() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     assert!(sec.loops()[0].points_mm.len() >= 4);
 }
 
 #[test]
 fn test_f19_curve_domain_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "cylinder.step").unwrap();
     assert!(sec.loops()[0].points_mm.len() >= 16);
 }
 
@@ -865,7 +870,7 @@ fn test_f19_curve_domain_cylinder() {
 fn test_f19_curve_bounds_enclosure() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let bounds = def.bounds_mm();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     for pt in &sec.loops()[0].points_mm {
         assert!(pt[0] >= bounds.min[0] - 1e-6 && pt[0] <= bounds.max[0] + 1e-6);
         assert!(pt[1] >= bounds.min[1] - 1e-6 && pt[1] <= bounds.max[1] + 1e-6);
@@ -882,7 +887,7 @@ fn test_f19_curve_segment_count() {
 #[test]
 fn test_f19_curve_continuity() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     let pts = &sec.loops()[0].points_mm;
     assert_close(pts[0][0], pts[pts.len() - 1][0], 1e-4, "closure X");
 }
@@ -894,7 +899,7 @@ fn test_f19_curve_continuity() {
 #[test]
 fn test_f20_plane_roots_box_midplane() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     assert_eq!(sec.loops().len(), 1);
 }
 
@@ -908,14 +913,14 @@ fn test_f20_plane_roots_outside_bounds_empty() {
 #[test]
 fn test_f20_plane_roots_cylinder_midplane() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "cylinder.step").unwrap();
     assert_eq!(sec.loops().len(), 1);
 }
 
 #[test]
 fn test_f20_plane_roots_through_hole_two_loops() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert_eq!(sec.loops().len(), 2);
 }
 
@@ -1027,13 +1032,20 @@ fn test_f22_direct_native_surface_evaluation() {
 #[test]
 fn test_f22_direct_bounds_accessor() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_close(def.bounds_mm().max[0], 20.0, 1e-6, "bounds");
+    assert_close(
+        precision_bounds(&def, 1e-06)
+            .expect("certified physical extents")
+            .max[0],
+        20.0,
+        1e-6,
+        "bounds",
+    );
 }
 
 #[test]
 fn test_f22_zero_legacy_wrapper_panic() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let _ = section_midplane(&def).unwrap();
+    let _ = section_midplane(&def, "through-hole.step").unwrap();
 }
 
 #[test]
@@ -1143,7 +1155,7 @@ fn test_f23_section_curve2d_serde_roundtrip() {
 #[test]
 fn test_f24_loop_points_discretization_present() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     for l in sec.loops() {
         assert!(l.points_mm.len() >= 4);
     }
@@ -1152,7 +1164,7 @@ fn test_f24_loop_points_discretization_present() {
 #[test]
 fn test_f24_loop_is_hole_flag() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert!(!sec.loops()[0].is_hole);
     assert!(sec.loops()[1].is_hole);
 }
@@ -1160,7 +1172,7 @@ fn test_f24_loop_is_hole_flag() {
 #[test]
 fn test_f24_loop_points_closure() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     let pts = &sec.loops()[0].points_mm;
     let first = pts[0];
     let last = pts[pts.len() - 1];
@@ -1172,7 +1184,7 @@ fn test_f24_loop_points_closure() {
 #[test]
 fn test_f24_cylinder_loop_polyline_density() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "cylinder.step").unwrap();
     assert!(sec.loops()[0].points_mm.len() >= 16);
 }
 
@@ -1563,13 +1575,20 @@ fn test_f32_memory_efficiency() {
 #[test]
 fn test_f33_bounds_via_prepared_source() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_close(def.bounds_mm().max[0], 20.0, 1e-6, "bounds max X");
+    assert_close(
+        precision_bounds(&def, 1e-06)
+            .expect("certified physical extents")
+            .max[0],
+        20.0,
+        1e-6,
+        "bounds max X",
+    );
 }
 
 #[test]
 fn test_f33_section_via_prepared_source() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     assert_eq!(sec.loops().len(), 1);
 }
 
@@ -1623,7 +1642,7 @@ fn test_f34_toleranced_topology_occt_housing() {
 #[test]
 fn test_f35_direct_section_without_g_transport() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     assert!(sec.is_native_intersection());
 }
 
@@ -1644,13 +1663,20 @@ fn test_f35_direct_wall_without_g_transport() {
 #[test]
 fn test_f35_direct_bounds_without_g_transport() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    assert_close(def.bounds_mm().max[0], 5.0, 1e-6, "bounds max X");
+    assert_close(
+        precision_bounds(&def, 1e-06)
+            .expect("certified physical extents")
+            .max[0],
+        5.0,
+        1e-6,
+        "bounds max X",
+    );
 }
 
 #[test]
 fn test_f35_direct_through_hole_without_g_transport() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert_eq!(sec.loops().len(), 2);
 }
 
@@ -1763,7 +1789,7 @@ fn test_f36_height_domain_housing() {
 #[test]
 fn test_f37_bounds_box_mm() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 1e-06).expect("certified physical extents");
     assert_close(b.min[0], 0.0, 1e-6, "min X");
     assert_close(b.max[0], 20.0, 1e-6, "max X");
     assert_close(b.max[1], 10.0, 1e-6, "max Y");
@@ -1773,7 +1799,7 @@ fn test_f37_bounds_box_mm() {
 #[test]
 fn test_f37_bounds_box_inch() {
     let def = import_test_step(&fixture_bytes("box-inch.step")).unwrap();
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 1e-06).expect("certified physical extents");
     assert_close(b.min[0], 0.0, 1e-6, "min X");
     assert_close(b.max[0], 20.0, 1e-6, "max X");
     assert_close(b.max[1], 10.0, 1e-6, "max Y");
@@ -1783,7 +1809,7 @@ fn test_f37_bounds_box_inch() {
 #[test]
 fn test_f37_bounds_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 1e-06).expect("certified physical extents");
     assert_close(b.min[0], -5.0, 1e-6, "min X");
     assert_close(b.max[0], 5.0, 1e-6, "max X");
     assert_close(b.min[1], -5.0, 1e-6, "min Y");
@@ -1794,7 +1820,7 @@ fn test_f37_bounds_cylinder() {
 #[test]
 fn test_f37_bounds_through_hole() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 1e-06).expect("certified physical extents");
     assert_close(b.max[0], 20.0, 1e-6, "max X");
     assert_close(b.max[1], 20.0, 1e-6, "max Y");
     assert_close(b.max[2], 8.0, 1e-6, "max Z");
@@ -1803,7 +1829,7 @@ fn test_f37_bounds_through_hole() {
 #[test]
 fn test_f37_bounds_perforated_plate() {
     let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    let b = def.bounds_mm();
+    let b = precision_bounds(&def, 0.0001).expect("certified physical extents");
     assert_close(b.max[0], 1640.0, 1e-4, "plate X");
     assert_close(b.max[1], 840.0, 1e-4, "plate Y");
     assert_close(b.max[2], 20.0, 1e-4, "plate Z");
@@ -1988,7 +2014,7 @@ fn test_f39_projected_bounds_cylinder() {
 #[test]
 fn test_f40_through_hole_void_presence() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert_eq!(sec.loops().len(), 2);
     assert!(sec.loops()[1].is_hole);
 }
@@ -2340,14 +2366,14 @@ fn test_f46_mesh_artifact_vertices() {
 #[test]
 fn test_f47_manufacturing_consumes_native_section() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     assert_eq!(sec.loops().len(), 1);
 }
 
 #[test]
 fn test_f47_manufacturing_consumes_through_hole_section() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert_eq!(sec.loops().len(), 2);
 }
 
@@ -2454,7 +2480,7 @@ fn test_f49_definition_identity_digest() {
 fn test_f50_box_mm_regression() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     assert_source_face_identity(&def, "box-mm.step");
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-mm.step").unwrap();
     assert_close(
         loop_area(&sec, &sec.loops()[0]),
         200.0,
@@ -2467,7 +2493,7 @@ fn test_f50_box_mm_regression() {
 fn test_f50_cylinder_regression() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     assert_source_face_identity(&def, "cylinder.step");
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "cylinder.step").unwrap();
     assert_close(
         loop_area(&sec, &sec.loops()[0]),
         25.0 * PI,
@@ -2480,7 +2506,7 @@ fn test_f50_cylinder_regression() {
 fn test_f50_through_hole_regression() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
     assert_source_face_identity(&def, "through-hole.step");
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert_eq!(sec.loops().len(), 2);
 }
 
@@ -2488,7 +2514,7 @@ fn test_f50_through_hole_regression() {
 fn test_f50_box_inch_regression() {
     let def = import_test_step(&fixture_bytes("box-inch.step")).unwrap();
     assert_source_face_identity(&def, "box-inch.step");
-    let sec = section_midplane(&def).unwrap();
+    let sec = section_midplane(&def, "box-inch.step").unwrap();
     assert_close(
         loop_area(&sec, &sec.loops()[0]),
         200.0,
