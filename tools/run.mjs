@@ -30,6 +30,11 @@ const environment = {
   RUST_TEST_THREADS: process.env.RUST_TEST_THREADS ?? "1",
   RAYON_NUM_THREADS: process.env.RAYON_NUM_THREADS ?? "1",
 };
+// Debug typed RPC futures need the same bounded stack as the native host.
+// Apply only to test processes; development and packaged runtime keep their own stacks.
+const testEnvironment = {
+  RUST_MIN_STACK: process.env.RUST_MIN_STACK ?? String(8 * 1024 * 1024),
+};
 const children = new Set();
 let stopping = false;
 for (const signal of ["SIGINT", "SIGTERM"]) {
@@ -500,7 +505,9 @@ async function main() {
       break;
     case "test:native":
       await nativeBuild();
-      await run("cargo", ["test", "--locked", "-p", "spiling-workbench", "--lib"]);
+      await run("cargo", ["test", "--locked", "-p", "spiling-workbench", "--lib"], {
+        env: testEnvironment,
+      });
       await run(
         "cargo",
         [
@@ -514,7 +521,10 @@ async function main() {
           "--test-threads=1",
         ],
         {
-          env: { SPILING_TEST_ENGINE: join(cargoTarget, "debug", `spiling-engine${binSuffix}`) },
+          env: {
+            ...testEnvironment,
+            SPILING_TEST_ENGINE: join(cargoTarget, "debug", `spiling-engine${binSuffix}`),
+          },
         },
       );
       break;
@@ -541,7 +551,7 @@ async function main() {
       break;
     case "test":
       await stageEngine();
-      await run("cargo", ["test", "--locked", "--workspace"]);
+      await run("cargo", ["test", "--locked", "--workspace"], { env: testEnvironment });
       await cliSmoke();
       await run("pnpm", ["--filter", "@spiling/protocol", "test"]);
       await run("node", ["--import", "tsx", "--test", "tools/gcode-parity/test.mjs"]);

@@ -319,13 +319,17 @@ Fork maintenance does not re-enable Spiling's disabled remote CI.
 ## Resources and test inputs
 
 Root tools default to one Cargo job; raise `CARGO_BUILD_JOBS` explicitly for the
-host. Parallel compiler count is not a memory limit. Use a whole-process cgroup
+host. Root Rust test commands default `RUST_MIN_STACK` to 8 MiB for debug typed
+RPC futures, matching the native host runtime; explicit overrides are preserved.
+Direct Cargo integration-test runs need the same setting. This test-harness
+stack does not change native geometry work, depth, byte or tolerance policies.
+Parallel compiler count is not a memory limit. Use a whole-process cgroup
 when bounds matter, and distinguish host RAM/disk allowances from geometry
 work/depth/tolerance, protocol and watchdog limits. `/tmp` may be RAM-backed.
 
 ```sh
 export CARGO_TARGET_DIR="$PWD/target" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=16
-export RAYON_NUM_THREADS=1 RUST_TEST_THREADS=1
+export RAYON_NUM_THREADS=1 RUST_TEST_THREADS=1 RUST_MIN_STACK=8388608
 systemd-run --wait --pipe --collect --property=WorkingDirectory="$PWD" \
   --property=MemoryMax=16G --property=MemorySwapMax=2G --property=TasksMax=1024 \
   /usr/bin/env PATH="$PATH" CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
