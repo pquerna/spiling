@@ -307,7 +307,7 @@ impl std::fmt::Debug for PreparedValidatedCurve<'_> {
     }
 }
 impl<'a> PreparedValidatedCurve<'a> {
-    pub fn new(
+    pub(crate) fn new(
         curve: &'a dyn super::CurveEvaluator,
         range: [f64; 2],
         scale: f64,
@@ -514,7 +514,7 @@ impl<'a> PreparedValidatedCurve<'a> {
         let error = std::array::from_fn(|i| enclosure[i].sub(Interval::point(position[i])));
         Ok(ValidatedCurvePoint { position, error })
     }
-    pub fn parameter_intervals(&self) -> super::AxisSpans<'a> {
+    pub(crate) fn parameter_intervals(&self) -> super::AxisSpans<'a> {
         self.spans.clone()
     }
     /// Visit the complete sorted original explicit knot inventory, once each.
@@ -642,7 +642,7 @@ impl<'a> PreparedValidatedCurve<'a> {
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
     }
-    pub fn curve(&self) -> &'a dyn super::CurveEvaluator {
+    pub(crate) fn curve(&self) -> &'a dyn super::CurveEvaluator {
         self.curve
     }
     pub fn range(&self) -> [f64; 2] {

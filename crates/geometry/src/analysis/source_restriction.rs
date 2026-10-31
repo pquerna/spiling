@@ -396,6 +396,7 @@ impl<'a> SourceSpatialRestriction<'a> {
                 Self::Endpoint(operator) => operator.heap_bytes(),
             }
     }
+    #[cfg(test)]
     pub(crate) fn original_master_association(&self) -> Option<&SourceCurveCalibration> {
         match self {
             Self::Line { .. } => None,
@@ -450,6 +451,7 @@ impl<'a> SourceSpatialRestriction<'a> {
             Self::Endpoint(operator) => &operator.knot_bands,
         }
     }
+    #[cfg(test)]
     pub(crate) fn original_knot_is_active(
         &self,
         index: usize,
@@ -463,6 +465,7 @@ impl<'a> SourceSpatialRestriction<'a> {
         let [a, b] = self.endpoint_parameters()?;
         Ok((a.hi <= parameter && parameter <= b.lo) || (b.hi <= parameter && parameter <= a.lo))
     }
+    #[cfg(test)]
     pub(crate) fn original_knot_jet(
         &self,
         index: usize,
@@ -489,6 +492,7 @@ impl<'a> SourceSpatialRestriction<'a> {
             }
         }
     }
+    #[cfg(test)]
     pub(crate) fn same_operator(
         &self,
         other: &Self,

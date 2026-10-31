@@ -1111,6 +1111,7 @@ impl<'d> SourcePcurveRestriction<'d> {
         self.calibration()
             .map_or(0.0, SourceCurveCalibration::relative_derivative_error_bound)
     }
+    #[cfg(test)]
     pub(crate) fn exact_source_endpoints(&self) -> bool {
         self.exact_endpoints
     }

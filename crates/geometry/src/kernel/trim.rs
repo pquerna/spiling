@@ -5932,24 +5932,6 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         let chart = self.original_coedge_uv_piecewise_jet(index, range, work, cancel)?;
         Ok((spatial, chart))
     }
-    pub(crate) fn same_original_spatial_trace(
-        &self,
-        index: usize,
-        other: &PreparedFaceTrimDomain<'_>,
-        other_index: usize,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<bool, GeometryError> {
-        work.charge(1, cancel)?;
-        if !std::ptr::eq(self.definition, other.definition) {
-            return Ok(false);
-        }
-        self.original_spatial_restriction(index)?.same_operator(
-            other.original_spatial_restriction(other_index)?,
-            work,
-            cancel,
-        )
-    }
 
     /// The callback uses the actual spatial edge gauge, not UV trim parameters.
     pub(crate) fn with_native_spatial_curve<R>(

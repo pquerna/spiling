@@ -7790,10 +7790,12 @@ pub(super) fn filled_projection_distance(
     Ok(achieved)
 }
 
+#[cfg(test)]
 struct CyclePath {
     points: Vec<[Interval; 2]>,
     knots: Vec<f64>,
 }
+#[cfg(test)]
 impl CyclePath {
     fn push(
         &mut self,
@@ -7861,6 +7863,7 @@ impl CyclePath {
     }
 }
 
+#[cfg(test)]
 fn cyclic_path_distance(
     source: &Ring,
     target: &Ring,

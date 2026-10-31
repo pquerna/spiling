@@ -51,7 +51,6 @@ fn first_normal(jet: &SurfaceFirstEnclosure, orientation: bool) -> [Interval; 3]
 }
 
 pub(super) struct MaterialLinkCell {
-    pub position: [Interval; 3],
     pub effective_tolerance_mm: f64,
     pub convex_link: bool,
     outward: [Interval; 3],
@@ -323,7 +322,6 @@ impl<'a, 'd> PairedMaterialLink<'a, 'd> {
         };
         let convex = dot(b, cross(a, tangent)).hi <= 0.0;
         Ok(Ok(MaterialLinkCell {
-            position,
             effective_tolerance_mm: self.tolerance,
             convex_link: convex,
             outward: a,

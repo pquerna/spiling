@@ -320,28 +320,6 @@ pub struct Definition {
     pub(crate) original_source: source::OriginalSourceTopology,
 }
 
-/// Whole-source covering-chart authority. A pole graph does not prove a
-/// regular longitude inverse; its physical and UV bounds remain on the coedge.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum SourceChartCertificate {
-    Unproved,
-    InverseOrExact,
-    PoleMeridianGraph {
-        latitude_axis: usize,
-        pole_endpoints: [bool; 2],
-    },
-}
-
-impl SourceChartCertificate {
-    pub(crate) fn is_certified(self) -> bool {
-        !matches!(self, Self::Unproved)
-    }
-
-    pub(crate) fn has_regular_inverse(self) -> bool {
-        matches!(self, Self::InverseOrExact)
-    }
-}
-
 /// Captured native-material producer identity. Original STEP uncertainty remains
 /// provenance; there is no reconstructed collar or vertex-completion recipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -379,35 +357,6 @@ impl MaterialRealizationIdentity {
 }
 
 impl Definition {
-    /// Prepares the actual retained native edge law. Original STEP operands have
-    /// their own provider and must not be silently substituted for this binding.
-    pub(crate) fn prepare_boundary_curve<'a>(
-        &'a self,
-        edge: solidcore::EdgeId,
-        curve: &'a solidcore::curve::curve::Curve,
-        range: (f64, f64),
-        remaining_bytes: usize,
-        work: &mut crate::GeometryWorkBudget,
-        cancel: &std::sync::atomic::AtomicBool,
-    ) -> Result<crate::parametric::PreparedValidatedCurve<'a>, crate::GeometryError> {
-        if !self
-            .edge_curve(edge)
-            .is_some_and(|retained| std::ptr::eq(retained, curve))
-        {
-            return Err(crate::GeometryError::new(
-                spiling_contracts::geometry::GeometryErrorCode::InvalidGeometry,
-                "prepared native curve is not the retained edge operand",
-            ));
-        }
-        crate::parametric::PreparedValidatedCurve::new(
-            curve,
-            [range.0, range.1],
-            1.0,
-            remaining_bytes,
-            work,
-            cancel,
-        )
-    }
     pub fn id(&self) -> &DefinitionId {
         &self.id
     }

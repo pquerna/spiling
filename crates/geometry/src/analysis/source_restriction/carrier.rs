@@ -77,6 +77,7 @@ impl SourceCarrierAssociation {
     }
     /// Exact coefficient identity under the proved gauge, not equality of
     /// declared labels, domains, active branches or rounded query samples.
+    #[cfg(test)]
     pub(crate) fn is_literal(&self) -> bool {
         self.record.literal
     }

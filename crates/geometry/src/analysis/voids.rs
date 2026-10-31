@@ -87,10 +87,6 @@ struct NativeCapturedHole {
 /// The producer's complete native authority moves with the immutable slab
 /// capture. A collar is not a regular flow or a zero-void count.
 #[derive(Debug)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Retain owned native proof inline; boxing adds per-query allocation and splits resource accounting"
-)]
 enum NativeVoidContinuation {
     Regular {
         source_speed: f64,

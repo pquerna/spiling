@@ -34,6 +34,7 @@ impl EndpointRoot {
     pub(super) fn exact_parameter(&self) -> Option<f64> {
         self.exact
     }
+    #[cfg(test)]
     pub(super) fn source_error_mm(&self) -> f64 {
         self.error_mm
     }
