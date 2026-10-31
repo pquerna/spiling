@@ -100,6 +100,9 @@ pub struct NativeSection {
     /// One proved whole-curve error per consecutive output point pair.
     /// Conservative envelopes have their own uniform polygon certificate.
     pub(crate) loop_chord_errors_mm: Vec<Vec<f64>>,
+    /// Optional whole-native-curve derivative enclosures, oriented with and
+    /// paired to every actual chord. Derived envelopes carry no native jets.
+    pub(crate) loop_chord_tangents: Vec<Vec<[crate::parametric::Interval; 3]>>,
     pub(crate) sampling_tolerance_mm: f64,
     pub(crate) boolean_tolerance_mm: f64,
     pub(crate) certificate: NativeSectionCertificate,
@@ -180,7 +183,7 @@ impl NativeSection {
         };
         work.charge(1, cancel)?;
         if !self.is_native_intersection() {
-            return if self.loop_chord_errors_mm.is_empty() {
+            return if self.loop_chord_errors_mm.is_empty() && self.loop_chord_tangents.is_empty() {
                 Ok(())
             } else {
                 Err(invalid())
@@ -192,6 +195,22 @@ impl NativeSection {
             || self.loop_chord_errors_mm.len() != self.loops.len()
         {
             return Err(invalid());
+        }
+        if !self.loop_chord_tangents.is_empty() {
+            if self.loop_chord_tangents.len() != self.loops.len() {
+                return Err(invalid());
+            }
+            for (boundary, tangents) in self.loops.iter().zip(&self.loop_chord_tangents) {
+                work.charge(tangents.len() as u64 + 1, cancel)?;
+                if tangents.len().checked_add(1) != Some(boundary.points_mm.len())
+                    || tangents
+                        .iter()
+                        .flatten()
+                        .any(|v| !v.lo.is_finite() || !v.hi.is_finite() || v.lo > v.hi)
+                {
+                    return Err(invalid());
+                }
+            }
         }
         for (boundary, errors) in self.loops.iter().zip(&self.loop_chord_errors_mm) {
             work.charge(errors.len() as u64 + 1, cancel)?;
@@ -219,6 +238,15 @@ impl NativeSection {
                 .loop_source_faces
                 .iter()
                 .map(|f| f.capacity() * std::mem::size_of::<usize>())
+                .sum::<usize>()
+            + self.loop_chord_tangents.capacity()
+                * std::mem::size_of::<Vec<[crate::parametric::Interval; 3]>>()
+            + self
+                .loop_chord_tangents
+                .iter()
+                .map(|tangents| {
+                    tangents.capacity() * std::mem::size_of::<[crate::parametric::Interval; 3]>()
+                })
                 .sum::<usize>()
             + self.loop_chord_errors_mm.capacity() * std::mem::size_of::<Vec<f64>>()
             + self

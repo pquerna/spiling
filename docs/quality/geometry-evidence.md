@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source18 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source19 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -233,6 +233,13 @@ also retains its independently bounded native-curve error, including endpoint
 uncertainty. Reversal, point rotation, loop sorting and actual-pose transport
 preserve its point-pair association. Nonadjacent error tubes use the sum of the
 two local errors; missing, malformed or nonfinite native receipts refuse.
+A same-loop overlap of conservative tubes can instead use retained whole-native
+derivative intervals over the complete incidence-assembled chain. A floating
+bisector only proposes the scalar direction; every native interval and literal
+polygon chord must prove strict positive projection. Unknown derivatives,
+reversing chains and different loops retain the separation requirement. Rotation,
+loop sorting and actual affine pose transport preserve derivative/chord pairing;
+no tiny chord is removed and no distance tolerance supplies ordering.
 Conservative slab envelopes retain their separate uniform polygon certificate.
 All owned capacities coexist under the native query budget; packed SPLS bytes
 and its existing layout are unchanged. A raw intersection alone is not

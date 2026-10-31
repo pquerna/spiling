@@ -3562,6 +3562,7 @@ fn occupied_projection(
         loop_source_faces: Vec::new(),
         loop_spans: Vec::new(),
         loop_chord_errors_mm: Vec::new(),
+        loop_chord_tangents: Vec::new(),
         sampling_tolerance_mm: section.sampling_tolerance_mm,
         boolean_tolerance_mm: section.boolean_tolerance_mm,
         certificate,

@@ -545,6 +545,7 @@ pub(super) fn intersect(
         loop_source_faces: Vec::new(),
         loop_spans: Vec::new(),
         loop_chord_errors_mm: Vec::new(),
+        loop_chord_tangents: Vec::new(),
         sampling_tolerance_mm: SECTION_SAMPLING_TOLERANCE_MM,
         boolean_tolerance_mm: SECTION_BOOLEAN_TOLERANCE_MM,
         certificate: NativeSectionCertificate {
@@ -1621,6 +1622,7 @@ fn assemble(
         let first = canonicalize_points(&mut points, result.frame, work, cancel)?;
         work.charge(chord_errors.len() as u64, cancel)?;
         chord_errors.rotate_left(first);
+        tangents.rotate_left(first);
         admission.push(
             &mut result.loops,
             SectionLoopMm {
@@ -1631,6 +1633,7 @@ fn assemble(
         admission.push(&mut result.loop_source_faces, faces)?;
         admission.push(&mut result.loop_spans, spans)?;
         admission.push(&mut result.loop_chord_errors_mm, chord_errors)?;
+        admission.push(&mut result.loop_chord_tangents, tangents)?;
     }
     canonicalize_loops(result, work, cancel)?;
     certify_polygons(result, work, cancel)
@@ -1718,6 +1721,9 @@ fn canonicalize_loops(
             section.loop_spans.swap(j, j - 1);
             if section.is_native_intersection() {
                 section.loop_chord_errors_mm.swap(j, j - 1);
+                if !section.loop_chord_tangents.is_empty() {
+                    section.loop_chord_tangents.swap(j, j - 1);
+                }
             }
             j -= 1;
         }
@@ -1809,6 +1815,28 @@ fn certify_polygons(
                     if clear(d, a) || clear(e, b) {
                         continue;
                     }
+                    if li == lj
+                        && let Some(tangents) = section.loop_chord_tangents.get(li)
+                        && (certify_monotone_chain(
+                            left,
+                            tangents,
+                            section.frame,
+                            ei,
+                            ej,
+                            work,
+                            cancel,
+                        )? || certify_monotone_chain(
+                            left,
+                            tangents,
+                            section.frame,
+                            ej,
+                            ei,
+                            work,
+                            cancel,
+                        )?)
+                    {
+                        continue;
+                    }
                     return Err(indeterminate(format!(
                         "nonadjacent native curve error tubes have an unresolved crossing/touch: loops={li},{lj} chords={ei},{ej} local_errors={errors:?} section_error={} margin={margin} a={a:?} b={b:?}",
                         section.achieved_chord_error_mm()
@@ -1818,6 +1846,56 @@ fn certify_polygons(
         }
     }
     Ok(())
+}
+
+/// A strictly ordered native chain and its actual polygon cannot cross
+/// themselves. The floating bisector only proposes a scalar functional; whole
+/// interval derivatives AND each literal chord must prove its strict sign.
+/// This uses complete incidence-assembled traversal, never a skipped small edge
+/// or a distance tolerance. Other loops and unresolved turns retain tube checks.
+fn certify_monotone_chain(
+    boundary: &SectionLoopMm,
+    tangents: &[[Interval; 3]],
+    frame: PlaneFrameMm,
+    first: usize,
+    last: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let chord = |i: usize| {
+        let a = project(boundary.points_mm[i], frame);
+        let b = project(boundary.points_mm[i + 1], frame);
+        std::array::from_fn::<_, 2, _>(|axis| b[axis].sub(a[axis]))
+    };
+    let ends = [chord(first), chord(last)].map(|v| v.map(Interval::mid));
+    let lengths = ends.map(|v| v[0].hypot(v[1]));
+    if lengths
+        .iter()
+        .any(|length| !length.is_finite() || *length == 0.0)
+    {
+        return Ok(false);
+    }
+    let direction: [f64; 2] =
+        std::array::from_fn(|axis| ends[0][axis] / lengths[0] + ends[1][axis] / lengths[1]);
+    let scalar = |v: [Interval; 2]| {
+        v[0].mul(Interval::point(direction[0]))
+            .add(v[1].mul(Interval::point(direction[1])))
+    };
+    let mut i = first;
+    loop {
+        work.charge(1, cancel)?;
+        let native = [
+            dot(tangents[i], frame.x_axis),
+            dot(tangents[i], frame.y_axis),
+        ];
+        if scalar(native).lo <= 0.0 || scalar(chord(i)).lo <= 0.0 {
+            return Ok(false);
+        }
+        if i == last {
+            return Ok(true);
+        }
+        i = (i + 1) % tangents.len();
+    }
 }
 
 fn coedge_limit(
@@ -2067,6 +2145,10 @@ pub(crate) fn canonicalize_section_in_place(
             work.charge(errors.len() as u64, cancel)?;
             errors.rotate_left(first);
         }
+        if let Some(tangents) = section.loop_chord_tangents.get_mut(index) {
+            work.charge(tangents.len() as u64, cancel)?;
+            tangents.rotate_left(first);
+        }
     }
     canonicalize_loops(section, work, cancel)?;
     certify_polygons(section, work, cancel)
@@ -2162,12 +2244,86 @@ mod correspondence_tests {
             GeometryErrorCode::InvalidGeometry
         );
         section.loop_chord_errors_mm.clear();
+        section.loop_chord_tangents.clear();
         assert_eq!(
             certify_polygons(&section, &mut work, &cancel)
                 .unwrap_err()
                 .code,
             GeometryErrorCode::AnalysisIndeterminate
         );
+    }
+
+    #[test]
+    fn rounded_housing_near_cap_retains_native_monotonicity_across_short_chords() {
+        let definition = crate::from_step_bytes(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        )))
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let z = 9.00000006325437;
+        let mut result = section(
+            &definition,
+            PlaneMm {
+                origin_mm: [0.0, 0.0, z],
+                normal: [0.0, 0.0, 1.0],
+            },
+            &cancel,
+            MAX_SECTION_BYTES,
+            &mut work,
+        )
+        .expect("the unchanged ordinary housing retains its native ordered corner curve");
+        assert_eq!(result.loops.len(), 2);
+        assert_eq!(result.loops.iter().filter(|cycle| cycle.is_hole).count(), 1);
+        let actual = result
+            .loops
+            .iter()
+            .map(|cycle| {
+                signed_area(&cycle.points_mm, result.frame, &mut work, &cancel)
+                    .unwrap()
+                    .mid()
+                    * 0.5
+            })
+            .sum::<f64>();
+        let q = (4.0 - (z - 8.0_f64).powi(2)).sqrt();
+        let expected = 280.0 + 68.0 * q + std::f64::consts::PI * q * q - 9.0 * std::f64::consts::PI;
+        let perimeter = 68.0 + 2.0 * std::f64::consts::PI * (q + 3.0);
+        assert!((actual - expected).abs() <= 2.0 * perimeter * result.achieved_chord_error_mm());
+        let jets = std::mem::take(&mut result.loop_chord_tangents);
+        assert_eq!(
+            certify_polygons(&result, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::AnalysisIndeterminate,
+            "independent error tubes alone cannot establish the ordered short-chord chain"
+        );
+        result.loop_chord_tangents = jets
+            .iter()
+            .map(|cycle| {
+                cycle
+                    .iter()
+                    .map(|_| [Interval::new(-1.0, 1.0).unwrap(); 3])
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            certify_polygons(&result, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::AnalysisIndeterminate,
+            "derivatives containing zero supply no strict native ordering"
+        );
+        result.loop_chord_tangents = jets.clone();
+        result.loop_chord_tangents[0].pop();
+        assert_eq!(
+            certify_polygons(&result, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry
+        );
+        result.loop_chord_tangents = jets;
+        certify_polygons(&result, &mut work, &cancel).unwrap();
     }
 
     fn curve(points: Vec<CPoint>, degree: usize, knots: Vec<f64>, dim: u64) -> Curve {

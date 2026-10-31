@@ -1029,6 +1029,13 @@ fn transform_points(
             *point = actual;
         }
     }
+    for tangent in section.loop_chord_tangents.iter_mut().flatten() {
+        work.charge(1, cancel)?;
+        *tangent = apply(matrix, *tangent);
+        for coordinate in *tangent {
+            finite(coordinate)?;
+        }
+    }
     for spans in &mut section.loop_spans {
         for span in spans {
             work.charge(1, cancel)?;
@@ -2531,6 +2538,7 @@ mod tests {
             loop_source_faces: vec![vec![0]],
             loop_spans: Vec::new(),
             loop_chord_errors_mm: vec![vec![1e-5; 4]],
+            loop_chord_tangents: Vec::new(),
             sampling_tolerance_mm: SECTION_SAMPLING_TOLERANCE_MM,
             boolean_tolerance_mm: spiling_contracts::geometry::SECTION_BOOLEAN_TOLERANCE_MM,
             certificate: crate::NativeSectionCertificate {

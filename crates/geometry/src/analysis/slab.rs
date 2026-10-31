@@ -6010,6 +6010,7 @@ fn occupied_envelope_with_position_boxes(
         loop_source_faces: Vec::new(),
         loop_spans: Vec::new(),
         loop_chord_errors_mm: Vec::new(),
+        loop_chord_tangents: Vec::new(),
         sampling_tolerance_mm: section.sampling_tolerance_mm,
         boolean_tolerance_mm: section.boolean_tolerance_mm,
         certificate,
@@ -8902,6 +8903,7 @@ mod tests {
             loop_source_faces: Vec::new(),
             loop_spans: Vec::new(),
             loop_chord_errors_mm: vec![vec![0.0; 4]; 2],
+            loop_chord_tangents: Vec::new(),
             certificate: crate::NativeSectionCertificate {
                 definition_id: spiling_contracts::geometry::DefinitionId::from_source_sha256(
                     &[0; 32],
