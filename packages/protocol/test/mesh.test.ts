@@ -332,12 +332,14 @@ test("mesh manifest rejects missing trim and combined native allowance violation
   assert.throws(
     () =>
       validateMeshManifest(
-        [{
-          ...metadata,
-          carrier_deviation_mm: 0.02,
-          trim_deviation_mm: 0.006,
-          quantization_error_mm: 0,
-        }],
+        [
+          {
+            ...metadata,
+            carrier_deviation_mm: 0.02,
+            trim_deviation_mm: 0.006,
+            quantization_error_mm: 0,
+          },
+        ],
         expected,
       ),
     MeshDecodeError,
@@ -442,7 +444,10 @@ test("mesh enforces the frozen normal tolerance and permits profile maximum erro
 });
 
 test("mesh permits the full native allowance for either achieved error", async () => {
-  for (const [carrier, trim] of [[0.025, 0], [0, 0.025]] as const) {
+  for (const [carrier, trim] of [
+    [0.025, 0],
+    [0, 0.025],
+  ] as const) {
     await decodeMesh(
       golden,
       {

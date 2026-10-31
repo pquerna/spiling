@@ -28,3 +28,38 @@ fixtures/geometry/scenes/large-origin.scene.json
 fixtures/geometry/independent-exporters/manifest.json
 # Trusted TypeScript authoring output is reproduced byte-for-byte by its tool.
 fixtures/manufacturing/solid-fill.intent.json
+
+# Preserve upstream snapshot bytes and attribution; its owner controls formatting.
+vendor/
+# Frozen source/profile inputs and generator-owned goldens retain exact bytes.
+# Rust generators, trusted intent authors and fixture verifiers own their checks.
+crates/appearance/tests/fixtures/prusa-v7-synthetic.json
+fixtures/appearance/optical-layer-cycle.json
+fixtures/appearance/palette.json
+fixtures/appearance/reference-vectors.json
+fixtures/appearance/surface-color.palette.json
+fixtures/appearance/target-orange.json
+fixtures/appearance/target-red.json
+fixtures/manufacturing/bridges/manifest.json
+fixtures/manufacturing/complete-sparse.intent.json
+fixtures/manufacturing/fixed-dual-cycle.intent.json
+fixtures/manufacturing/fixed-dual.intent.json
+fixtures/manufacturing/housing-h1-combined.intent.json
+fixtures/manufacturing/housing-h1-fine.intent.json
+fixtures/manufacturing/housing-ordinary.intent.json
+fixtures/manufacturing/housing-two-zone.intent.json
+fixtures/manufacturing/material-profile-a.json
+fixtures/manufacturing/material-profile-b.json
+fixtures/manufacturing/native/manifest.json
+fixtures/manufacturing/native/tilted-cap-offset.points.json
+fixtures/manufacturing/native/tilted-cylinder-complete.intent.json
+fixtures/manufacturing/rounded-housing-bed-occurrence.json
+fixtures/manufacturing/software-fixed-dual.calibration.json
+fixtures/manufacturing/software-fixed-dual.configuration.json
+fixtures/manufacturing/surface-color-box.intent.json
+fixtures/manufacturing/surface-color-regional.intent.json
+fixtures/manufacturing/surface-color-window.intent.json
+fixtures/protocol/replay-fixed-dual.json
+fixtures/protocol/replay-sparse.json
+fixtures/protocol/replay-waste-only.json
+fixtures/protocol/replay.json

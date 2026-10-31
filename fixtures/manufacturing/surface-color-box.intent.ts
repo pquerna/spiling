@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-import type { ManufacturingIntent, SurfaceColorConstruction } from "../../packages/protocol/src/generated.ts";
+import type {
+  ManufacturingIntent,
+  SurfaceColorConstruction,
+} from "../../packages/protocol/src/generated.ts";
 import fixed from "./fixed-dual.intent.ts";
 
 // Frozen box-mm.step at [20,20,0], with its returned native -Y face.
@@ -24,7 +27,12 @@ const intent = {
       kind: "fixed_dual_marlin",
       job: {
         ...fixed.printer.workflow.job,
-        assignments: [{ ...fixed.printer.workflow.job.assignments[0], material: { kind: "uniform", material_id: "software-pla-b" } }],
+        assignments: [
+          {
+            ...fixed.printer.workflow.job.assignments[0],
+            material: { kind: "uniform", material_id: "software-pla-b" },
+          },
+        ],
         surface_constructions: [construction],
       },
     },

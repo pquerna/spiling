@@ -12,9 +12,10 @@ const tool = (index: 0 | 1): FixedDualTool => ({
   material: {
     id: index === 0 ? "software-pla-a" : "software-pla-b",
     revision: "1",
-    declaration_hash: index === 0
-      ? "883b1eaa92941d652997e2092ad5f5cf9aabeba3991c8654782a281dbfbf0111"
-      : "fabb4a0c776b0f4d2c0448b562bd106abe5cf10aee2a8e31fca120a1d2cc2f89",
+    declaration_hash:
+      index === 0
+        ? "883b1eaa92941d652997e2092ad5f5cf9aabeba3991c8654782a281dbfbf0111"
+        : "fabb4a0c776b0f4d2c0448b562bd106abe5cf10aee2a8e31fca120a1d2cc2f89",
     polymer_family: "PLA",
   },
   offset_xy_mm: index === 0 ? [0, 0] : [25, 0],
@@ -30,7 +31,16 @@ const tool = (index: 0 | 1): FixedDualTool => ({
   retract_filament_mm: 0.6,
   retract_speed_mm_s: 25,
   minimum_reprime_volume_mm3: 0.1,
-  waste_line_xy_mm: index === 0 ? [[60, 160], [80, 160]] : [[160, 160], [180, 160]],
+  waste_line_xy_mm:
+    index === 0
+      ? [
+          [60, 160],
+          [80, 160],
+        ]
+      : [
+          [160, 160],
+          [180, 160],
+        ],
 });
 
 const intent = {
@@ -59,8 +69,16 @@ const intent = {
         tools: [tool(0), tool(1)],
         surface_constructions: [],
         assignments: [
-          { occurrence_id: 1, material: { kind: "uniform", material_id: "software-pla-a" }, work_envelope_mm: { min: [19, 19, -1], max: [41, 31, 9] } },
-          { occurrence_id: 2, material: { kind: "uniform", material_id: "software-pla-b" }, work_envelope_mm: { min: [119, 19, -1], max: [141, 31, 9] } },
+          {
+            occurrence_id: 1,
+            material: { kind: "uniform", material_id: "software-pla-a" },
+            work_envelope_mm: { min: [19, 19, -1], max: [41, 31, 9] },
+          },
+          {
+            occurrence_id: 2,
+            material: { kind: "uniform", material_id: "software-pla-b" },
+            work_envelope_mm: { min: [119, 19, -1], max: [141, 31, 9] },
+          },
         ],
         transition_lift_mm: 0.5,
         carriage_travel_bounds_mm: { min: [-30, -5, 0], max: [220, 220, 220] },

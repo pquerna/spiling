@@ -24,7 +24,9 @@ export class SurfaceImageDecodeError extends Error {
     this.name = "SurfaceImageDecodeError";
   }
 }
-const fail = (message: string): never => { throw new SurfaceImageDecodeError(message); };
+const fail = (message: string): never => {
+  throw new SurfaceImageDecodeError(message);
+};
 
 /** Strict frozen P5 only; never normalizes a source PNG or accepts general PGM syntax. */
 export async function decodeSurfaceImage(
@@ -39,20 +41,29 @@ export async function decodeSurfaceImage(
   uint(record.width, "image width", fail, 2, 256);
   uint(record.height, "image height", fail, 2, 256);
   if (
-    typeof record.source_name !== "string" || record.source_name.length === 0 ||
+    typeof record.source_name !== "string" ||
+    record.source_name.length === 0 ||
     record.source_name.length > MAX_SURFACE_IMAGE_SOURCE_NAME_BYTES ||
     new TextEncoder().encode(record.source_name).byteLength > MAX_SURFACE_IMAGE_SOURCE_NAME_BYTES ||
     /[\u0000-\u001f\u007f-\u009f]/.test(record.source_name)
-  ) fail("invalid source name");
+  )
+    fail("invalid source name");
   const header = new TextEncoder().encode(`P5\n${record.width} ${record.height}\n255\n`);
   const length = header.byteLength + record.width * record.height;
-  if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== length || length > MAX_SURFACE_IMAGE_BYTES)
+  if (
+    !(bytes instanceof ArrayBuffer) ||
+    bytes.byteLength !== length ||
+    length > MAX_SURFACE_IMAGE_BYTES
+  )
     fail("payload size does not exactly match bounded dimensions");
   if (
-    record.byte_count !== length || resource.size_bytes !== String(length) ||
-    resource.sha256 !== record.image_hash || resource.name !== `artifacts/${record.image_hash}` ||
+    record.byte_count !== length ||
+    resource.size_bytes !== String(length) ||
+    resource.sha256 !== record.image_hash ||
+    resource.name !== `artifacts/${record.image_hash}` ||
     resource.media_type !== "image/x-portable-graymap"
-  ) fail("image record/resource descriptor mismatch");
+  )
+    fail("image record/resource descriptor mismatch");
   const content = new Uint8Array(bytes);
   for (let index = 0; index < header.byteLength; index += 1) {
     if (content[index] !== header[index]) fail("noncanonical P5 header");

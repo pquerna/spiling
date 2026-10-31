@@ -91,7 +91,11 @@ test("section winding is independent of tangential plane origin", async () => {
     data.setFloat64(offset + 8, data.getFloat64(offset + 8, true) + 1e9, true);
   }
   const decoded = await decodeSection(
-    bytes, await rehash(bytes, metadata), shifted, fixture.loops, expected,
+    bytes,
+    await rehash(bytes, metadata),
+    shifted,
+    fixture.loops,
+    expected,
   );
   const world = (points: Float64Array, origin: number[]) =>
     Array.from(points, (value, index) => value + origin[index % 3]!);

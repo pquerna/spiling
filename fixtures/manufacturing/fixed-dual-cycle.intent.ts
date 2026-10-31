@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-import type { ManufacturingIntent, OccurrenceMaterialAssignment } from "../../packages/protocol/src/generated.ts";
+import type {
+  ManufacturingIntent,
+  OccurrenceMaterialAssignment,
+} from "../../packages/protocol/src/generated.ts";
 import fixed from "./fixed-dual.intent.ts";
 
 // Same software-only native occurrences and loaded materials; opposite physical
@@ -11,7 +14,10 @@ const assignment = (index: 0 | 1): OccurrenceMaterialAssignment => ({
   material: {
     kind: "layer_cycle",
     recipe: {
-      slots: [{ material: 0, height_mm: 0.2 }, { material: 1, height_mm: 0.2 }],
+      slots: [
+        { material: 0, height_mm: 0.2 },
+        { material: 1, height_mm: 0.2 },
+      ],
       phase_slot: index,
       origin_z_mm: 0,
     },

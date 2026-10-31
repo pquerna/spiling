@@ -34,7 +34,12 @@ const printer = {
   workflow: { kind: "diagnostic_body_only" },
   nozzle_diameter_mm: 0.4,
   // Software-only local allocation envelope, not measured nozzle calibration.
-  deposition_limits: { min_bead_width_mm: 0.30, max_bead_width_mm: 0.75, min_bead_height_mm: 0.000001, max_bead_height_mm: 0.30 },
+  deposition_limits: {
+    min_bead_width_mm: 0.3,
+    max_bead_width_mm: 0.75,
+    min_bead_height_mm: 0.000001,
+    max_bead_height_mm: 0.3,
+  },
   max_feed_mm_s: 150,
   max_volumetric_flow_mm3_s: 12,
 } satisfies PrinterSpecification;

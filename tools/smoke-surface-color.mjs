@@ -21,14 +21,34 @@ const output = await mkdtemp(join(root, ".cache", "surface-color-"));
 let sequence = 0;
 async function invoke(args, failure = false, domain = "manufacturing") {
   const result = spawnSync(cli, [...args, "--engine", engine], {
-    cwd: root, encoding: "utf8", timeout: 330_000, maxBuffer: 16 * 1024 * 1024,
+    cwd: root,
+    encoding: "utf8",
+    timeout: 330_000,
+    maxBuffer: 16 * 1024 * 1024,
   });
   const receipt = join(output, `${String(++sequence).padStart(3, "0")}.json`);
-  await writeFile(receipt, JSON.stringify({ args, status: result.status, stdout: result.stdout, stderr: result.stderr }, null, 2));
+  await writeFile(
+    receipt,
+    JSON.stringify(
+      { args, status: result.status, stdout: result.stdout, stderr: result.stderr },
+      null,
+      2,
+    ),
+  );
   if (result.error) throw result.error;
   if (failure) {
     assert.notEqual(result.status, 0, `unsupported construction succeeded: ${receipt}`);
-    const diagnostic = result.stderr.trim().split("\n").map((line) => { try { return JSON.parse(line); } catch { return null; } }).find((row) => row?.domain === domain);
+    const diagnostic = result.stderr
+      .trim()
+      .split("\n")
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .find((row) => row?.domain === domain);
     assert.ok(diagnostic?.error, `missing typed refusal: ${receipt}`);
     return diagnostic.error;
   }
@@ -40,21 +60,48 @@ async function invoke(args, failure = false, domain = "manufacturing") {
 const json = async (path) => JSON.parse(await readFile(path, "utf8"));
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const results = [];
-const cases = ["box-mm.step", "through-hole.step"].flatMap((source) => [[source, "full"], [source, "window"]]);
-cases.push(["box-mm.step", "cycle"], ["box-mm.step", "all-white"], ["box-mm.step", "regional"], ["through-hole.step", "regional"], ["box-mm.step", "corner"], ["through-hole.step", "corner"], ["box-mm.step", "study"], ["through-hole.step", "study"]);
+const cases = ["box-mm.step", "through-hole.step"].flatMap((source) => [
+  [source, "full"],
+  [source, "window"],
+]);
+cases.push(
+  ["box-mm.step", "cycle"],
+  ["box-mm.step", "all-white"],
+  ["box-mm.step", "regional"],
+  ["through-hole.step", "regional"],
+  ["box-mm.step", "corner"],
+  ["through-hole.step", "corner"],
+  ["box-mm.step", "study"],
+  ["through-hole.step", "study"],
+);
 const modes = new Set(process.argv.slice(2));
-assert.ok([...modes].every((mode) => cases.some((c) => c[1] === mode)), "unknown smoke mode");
+assert.ok(
+  [...modes].every((mode) => cases.some((c) => c[1] === mode)),
+  "unknown smoke mode",
+);
 for (const [sourceName, mode] of cases) {
   if (modes.size && !modes.has(mode)) continue;
   const name = sourceName.replace(/\.step$/, "") + "-" + mode;
   const source = join(output, sourceName);
   const project = join(output, `${name}.spiling`);
   await copyFile(join(root, "fixtures", "geometry", sourceName), source);
-  const created = await invoke(["project", "create", project, "--import", source,
-    "--pose", "1", JSON.stringify({ translation_mm: [20, 20, 0], rotation_xyzw: [0, 0, 0, 1] })]);
+  const created = await invoke([
+    "project",
+    "create",
+    project,
+    "--import",
+    source,
+    "--pose",
+    "1",
+    JSON.stringify({ translation_mm: [20, 20, 0], rotation_xyzw: [0, 0, 0, 1] }),
+  ]);
   const faces = created.definitions[0].faces;
-  const inspected = await invoke(["project", "inspect", project,
-    ...faces.flatMap((face) => ["--inspect-face", "1", face.face_id])]);
+  const inspected = await invoke([
+    "project",
+    "inspect",
+    project,
+    ...faces.flatMap((face) => ["--inspect-face", "1", face.face_id]),
+  ]);
   const selected = inspected.face_inspections.find((row) => {
     const plane = row.face.geometry.analytic;
     return plane?.kind === "plane" && plane.normal[1] < -0.5 && plane.normal[2] === 0;
@@ -69,32 +116,63 @@ for (const [sourceName, mode] of cases) {
     min: bounds.min.map((v, axis) => v + [20, 20, 0][axis] - 1),
     max: bounds.max.map((v, axis) => v + [20, 20, 0][axis] + 1),
   };
-  job.surface_constructions = [{
-    optical_origin: null,
-    occurrence_id: 1, definition_id: selected.reference.definition_id,
-    source_hash: selected.provenance.source_hash,
-    faces: [{ face_id: selected.face.face_id, skin_depth_mm: 1.2, backing_depth_mm: 1.2, mask: mode === "window" || mode === "study" ? { min_u_mm: 4, max_u_mm: 16 } : null }],
-    shell: { kind: "uniform", material_id: job.tools[0].material.id },
-    white_material_id: job.tools[1].material.id,
-  }];
+  job.surface_constructions = [
+    {
+      optical_origin: null,
+      occurrence_id: 1,
+      definition_id: selected.reference.definition_id,
+      source_hash: selected.provenance.source_hash,
+      faces: [
+        {
+          face_id: selected.face.face_id,
+          skin_depth_mm: 1.2,
+          backing_depth_mm: 1.2,
+          mask: mode === "window" || mode === "study" ? { min_u_mm: 4, max_u_mm: 16 } : null,
+        },
+      ],
+      shell: { kind: "uniform", material_id: job.tools[0].material.id },
+      white_material_id: job.tools[1].material.id,
+    },
+  ];
   if (mode === "corner") {
     const side = inspected.face_inspections.find((row) => {
       const plane = row.face.geometry.analytic;
       return plane?.kind === "plane" && plane.normal[0] > 0.5 && plane.normal[2] === 0;
     });
     assert.ok(side, "native source has no adjoining upright exterior face");
-    job.surface_constructions[0].faces.push({ ...job.surface_constructions[0].faces[0], face_id: side.face.face_id });
+    job.surface_constructions[0].faces.push({
+      ...job.surface_constructions[0].faces[0],
+      face_id: side.face.face_id,
+    });
   } else if (mode === "regional") {
     job.surface_constructions.push(structuredClone(job.surface_constructions[0]));
     for (const [index, construction] of job.surface_constructions.entries()) {
       construction.faces[0].mask = { min_u_mm: [2, 12][index], max_u_mm: [8, 18][index] };
-      construction.shell = { kind: "layer_cycle", material_ids: job.tools.map((tool) => tool.material.id),
-        recipe: { slots: [{ material: 0, height_mm: 0.2 }, { material: 1, height_mm: 0.2 }], phase_slot: index, origin_z_mm: 0.03 } };
+      construction.shell = {
+        kind: "layer_cycle",
+        material_ids: job.tools.map((tool) => tool.material.id),
+        recipe: {
+          slots: [
+            { material: 0, height_mm: 0.2 },
+            { material: 1, height_mm: 0.2 },
+          ],
+          phase_slot: index,
+          origin_z_mm: 0.03,
+        },
+      };
     }
   } else if (mode === "cycle") {
     job.surface_constructions[0].shell = {
-      kind: "layer_cycle", material_ids: job.tools.map((tool) => tool.material.id),
-      recipe: { slots: [{ material: 0, height_mm: 0.2 }, { material: 1, height_mm: 0.2 }], phase_slot: 0, origin_z_mm: 0.03 },
+      kind: "layer_cycle",
+      material_ids: job.tools.map((tool) => tool.material.id),
+      recipe: {
+        slots: [
+          { material: 0, height_mm: 0.2 },
+          { material: 1, height_mm: 0.2 },
+        ],
+        phase_slot: 0,
+        origin_z_mm: 0.03,
+      },
     };
   } else if (mode === "all-white") {
     job.surface_constructions[0].shell.material_id = job.tools[1].material.id;
@@ -111,18 +189,47 @@ for (const [sourceName, mode] of cases) {
     const palette = await json(join(root, "fixtures", "appearance", "surface-color.palette.json"));
     const study = await json(join(root, "fixtures", "appearance", "optical-layer-cycle.json"));
     study.materials = palette.rows.map((row) => row.key);
-    study.recipe = { slots: [{ material: 0, height_mm: 0.2 }, { material: 1, height_mm: 0.2 }], phase_slot: 0, origin_z_mm: 0.03 };
+    study.recipe = {
+      slots: [
+        { material: 0, height_mm: 0.2 },
+        { material: 1, height_mm: 0.2 },
+      ],
+      phase_slot: 0,
+      origin_z_mm: 0.03,
+    };
     study.patch = { origin_mm: [24, 20, 0], normal_xy: [0, -1], width_mm: 12, height_mm: 0.15 };
-    study.search = { patterns: [{ materials: [0, 1] }, { materials: [1, 0] }], slot_heights_mm: [0.2], phase_slots: [0, 1], origin_z_mm: 0.03 };
+    study.search = {
+      patterns: [{ materials: [0, 1] }, { materials: [1, 0] }],
+      slot_heights_mm: [0.2],
+      phase_slots: [0, 1],
+      origin_z_mm: 0.03,
+    };
     paletteFile = join(output, `${name}.palette.json`);
     studyFile = join(output, `${name}.study.json`);
     await writeFile(paletteFile, JSON.stringify(palette));
     await writeFile(studyFile, JSON.stringify(study));
-    const retained = await invoke(["project", "edit", project, "--intent", intentFile,
-      "--appearance-palette", paletteFile, "--optical-study", studyFile, "--optical-compare", "--optical-accept", "requested", "--save"]);
+    const retained = await invoke([
+      "project",
+      "edit",
+      project,
+      "--intent",
+      intentFile,
+      "--appearance-palette",
+      paletteFile,
+      "--optical-study",
+      studyFile,
+      "--optical-compare",
+      "--optical-accept",
+      "requested",
+      "--save",
+    ]);
     const evidence = retained.optical[0].report;
-    const bindings = study.materials.map((key, index) => ({ evidence_key: key, evidence_hash: evidence.material_evidence_hashes[index],
-      loaded_material_id: job.tools[index].material.id, loaded_declaration_hash: job.tools[index].material.declaration_hash }));
+    const bindings = study.materials.map((key, index) => ({
+      evidence_key: key,
+      evidence_hash: evidence.material_evidence_hashes[index],
+      loaded_material_id: job.tools[index].material.id,
+      loaded_declaration_hash: job.tools[index].material.declaration_hash,
+    }));
     bindingsFile = join(output, `${name}.bindings.json`);
     await writeFile(bindingsFile, JSON.stringify(bindings));
     const wrong = structuredClone(bindings);
@@ -132,15 +239,29 @@ for (const [sourceName, mode] of cases) {
     await invoke(["project", "edit", project, "--apply-optical", "0", wrongFile], true, "project");
     applyArgs = ["--apply-optical", "0", bindingsFile];
   }
-  const compiled = await invoke(["project", "edit", project, ...applyArgs,
-    "--preflight", "--compile", "--verify", "--save", "--manufacturing-out", exported]);
+  const compiled = await invoke([
+    "project",
+    "edit",
+    project,
+    ...applyArgs,
+    "--preflight",
+    "--compile",
+    "--verify",
+    "--save",
+    "--manufacturing-out",
+    exported,
+  ]);
   if (mode === "study") {
     intent = compiled.manufacturing.intent;
     const applied = intent.printer.workflow.job.surface_constructions[0];
     assert.equal(applied.shell.kind, "layer_cycle");
     assert.equal(applied.optical_origin.materials[0].evidence.key, "software-blue/catalog");
     assert.deepEqual(applied.optical_origin.applied_pose.translation_mm, [20, 20, 0]);
-    assert.equal(compiled.scene.revision, 1, "reopened application must preserve its initial native scene epoch");
+    assert.equal(
+      compiled.scene.revision,
+      1,
+      "reopened application must preserve its initial native scene epoch",
+    );
     await writeFile(intentFile, JSON.stringify(intent));
   }
   assert.equal(compiled.manufacturing.verification.verified, true);
@@ -150,8 +271,13 @@ for (const [sourceName, mode] of cases) {
     assert.ok(plan.layers.some((l) => l.paths.some((p) => p.material_domain?.role === role)));
   }
   assert.ok(plan.layers.some((l) => l.region_coverage.sparse_interior_area_mm2 > 0));
-  assert.ok(plan.layers.every((l) => l.region_coverage.process_regions.every((r) =>
-    r.material_domain.role === "core" || r.fraction === 1)));
+  assert.ok(
+    plan.layers.every((l) =>
+      l.region_coverage.process_regions.every(
+        (r) => r.material_domain.role === "core" || r.fraction === 1,
+      ),
+    ),
+  );
   if (sourceName === "through-hole.step") {
     assert.ok(plan.layers.every((l) => l.region_coverage.protected_hole_area_mm2 > 0));
     assert.ok(plan.material_domains.some((d) => d.polygons.some((p) => p.holes_mm.length > 0)));
@@ -159,19 +285,32 @@ for (const [sourceName, mode] of cases) {
   if (mode === "window") {
     assert.deepEqual(plan.material_frames[0].selected_u_mm, [4, 16]);
     assert.deepEqual(plan.material_frames[0].horizontal_direction, [1, 0, 0]);
-    assert.ok(plan.layers.flatMap((l) => l.paths).filter((p) => p.material_domain.role === "shell")
-      .every((p) => p.points_mm.every((point) => point[0] > 24 && point[0] < 36)));
+    assert.ok(
+      plan.layers
+        .flatMap((l) => l.paths)
+        .filter((p) => p.material_domain.role === "shell")
+        .every((p) => p.points_mm.every((point) => point[0] > 24 && point[0] < 36)),
+    );
   }
   if (mode === "regional") {
-    assert.deepEqual(plan.material_frames.map((f) => f.selected_u_mm), [[2, 8], [12, 18]]);
+    assert.deepEqual(
+      plan.material_frames.map((f) => f.selected_u_mm),
+      [
+        [2, 8],
+        [12, 18],
+      ],
+    );
     for (const layer of plan.layers) {
       const tools = [new Set(), new Set()];
       for (const path of layer.paths) {
         const ref = path.material_domain;
         if (ref.role === "shell") {
           const material = job.surface_constructions[ref.construction_index].shell;
-          const slot = Math.floor(((path.physical_z_mm[0] + path.physical_z_mm[1]) / 2 - material.recipe.origin_z_mm) / 0.2);
-          tools[ref.construction_index].add(((slot + material.recipe.phase_slot) % 2 + 2) % 2);
+          const slot = Math.floor(
+            ((path.physical_z_mm[0] + path.physical_z_mm[1]) / 2 - material.recipe.origin_z_mm) /
+              0.2,
+          );
+          tools[ref.construction_index].add((((slot + material.recipe.phase_slot) % 2) + 2) % 2);
         } else assert.equal(ref.construction_index, 0);
       }
       assert.equal(tools[0].size, 1);
@@ -206,21 +345,51 @@ for (const [sourceName, mode] of cases) {
   const baseline = await readFile(join(exported, "program.gcode"));
   const changed = structuredClone(intent);
   if (mode === "corner") {
-    for (const face of changed.printer.workflow.job.surface_constructions[0].faces) face.skin_depth_mm = 1.35;
+    for (const face of changed.printer.workflow.job.surface_constructions[0].faces)
+      face.skin_depth_mm = 1.35;
   } else if (mode === "cycle" || mode === "regional") {
     changed.printer.workflow.job.surface_constructions[0].shell.recipe.phase_slot = 1;
   } else if (mode === "window") {
-    changed.printer.workflow.job.surface_constructions[0].faces[0].mask = { min_u_mm: 5, max_u_mm: 17 };
+    changed.printer.workflow.job.surface_constructions[0].faces[0].mask = {
+      min_u_mm: 5,
+      max_u_mm: 17,
+    };
   } else {
     changed.printer.workflow.job.surface_constructions[0].faces[0].skin_depth_mm = 1.35;
   }
   const changedFile = join(output, `${name}-changed.intent.json`);
   await writeFile(changedFile, JSON.stringify(changed, null, 2));
   const changedExport = join(output, `${name}-changed`);
-  await invoke(["project", "edit", project, "--intent", changedFile, "--compile", "--verify", "--save", "--manufacturing-out", changedExport]);
-  assert.notEqual(hash(await readFile(join(changedExport, "program.gcode"))), hash(baseline), "construction edit did not change actual output");
+  await invoke([
+    "project",
+    "edit",
+    project,
+    "--intent",
+    changedFile,
+    "--compile",
+    "--verify",
+    "--save",
+    "--manufacturing-out",
+    changedExport,
+  ]);
+  assert.notEqual(
+    hash(await readFile(join(changedExport, "program.gcode"))),
+    hash(baseline),
+    "construction edit did not change actual output",
+  );
   const restoredExport = join(output, `${name}-restored`);
-  await invoke(["project", "edit", project, "--intent", intentFile, "--compile", "--verify", "--save", "--manufacturing-out", restoredExport]);
+  await invoke([
+    "project",
+    "edit",
+    project,
+    "--intent",
+    intentFile,
+    "--compile",
+    "--verify",
+    "--save",
+    "--manufacturing-out",
+    restoredExport,
+  ]);
   assert.deepEqual(await readFile(join(restoredExport, "program.gcode")), baseline);
   if (mode === "study") {
     const movedExport = join(output, `${name}-moved`);
@@ -255,12 +424,35 @@ for (const [sourceName, mode] of cases) {
       "--save",
     ]);
   }
-  await invoke(["project", "edit", project, "--intent", changedFile, "--undo", "--redo", "--undo", "--verify", "--save"]);
+  await invoke([
+    "project",
+    "edit",
+    project,
+    "--intent",
+    changedFile,
+    "--undo",
+    "--redo",
+    "--undo",
+    "--verify",
+    "--save",
+  ]);
   await unlink(source); // Never remove repository fixtures or Core-owned assets.
-  if (mode === "study") { await unlink(paletteFile); await unlink(studyFile); }
+  if (mode === "study") {
+    await unlink(paletteFile);
+    await unlink(studyFile);
+  }
   const recoveredExport = join(output, `${name}-source-absent`);
   const replay = join(output, `${name}.splr`);
-  const recovered = await invoke(["project", "inspect", project, "--verify", "--manufacturing-out", recoveredExport, "--replay-out", replay]);
+  const recovered = await invoke([
+    "project",
+    "inspect",
+    project,
+    "--verify",
+    "--manufacturing-out",
+    recoveredExport,
+    "--replay-out",
+    replay,
+  ]);
   assert.deepEqual(
     (await json(join(recoveredExport, "provenance.json"))).inspection.surface_color,
     provenance.inspection.surface_color,
@@ -271,7 +463,9 @@ for (const [sourceName, mode] of cases) {
   let wasteOnly = 0;
   for (let layer = 0; layer < plan.layers.length; layer++) {
     for (const tool of [0, 1]) {
-      let epochs = 0, waste = 0, model = 0;
+      let epochs = 0,
+        waste = 0,
+        model = 0;
       for (let event = 0; event < decoded.eventCount; event++) {
         if (decoded.layer(event) !== layer || decoded.activeTool(event) !== tool) continue;
         const kind = decoded.kind(event);
@@ -296,8 +490,13 @@ for (const [sourceName, mode] of cases) {
       }
     }
     for (const layer of seen) {
-      assert.equal(layer[0].size, 1); assert.equal(layer[1].size, 1);
-      assert.notDeepEqual(layer[0], layer[1], "actual common-Z region tools lost independent phase");
+      assert.equal(layer[0].size, 1);
+      assert.equal(layer[1].size, 1);
+      assert.notDeepEqual(
+        layer[0],
+        layer[1],
+        "actual common-Z region tools lost independent phase",
+      );
     }
   }
   if (mode === "cycle" || mode === "all-white") assert.ok(wasteOnly > 0);
@@ -309,11 +508,36 @@ for (const [sourceName, mode] of cases) {
   await invoke(["project", "inspect", project, "--verify", "--replay-out", replayAgain]);
   assert.deepEqual(await readFile(replayAgain), await readFile(replay));
   for (const [key, alter] of [
-    ["wrong-source", (c) => { c.source_hash = "0".repeat(64); }],
-    ["thin-skin", (c) => { c.faces[0].skin_depth_mm = 0.01; }],
-    ["lost-core", (c) => { c.faces[0].backing_depth_mm = 100; }],
-    ["mask-outside-face", (c) => { c.faces[0].mask = { min_u_mm: 1, max_u_mm: 1000 }; }],
-    ["thin-window", (c) => { c.faces[0].mask = { min_u_mm: 4, max_u_mm: 4.01 }; }],
+    [
+      "wrong-source",
+      (c) => {
+        c.source_hash = "0".repeat(64);
+      },
+    ],
+    [
+      "thin-skin",
+      (c) => {
+        c.faces[0].skin_depth_mm = 0.01;
+      },
+    ],
+    [
+      "lost-core",
+      (c) => {
+        c.faces[0].backing_depth_mm = 100;
+      },
+    ],
+    [
+      "mask-outside-face",
+      (c) => {
+        c.faces[0].mask = { min_u_mm: 1, max_u_mm: 1000 };
+      },
+    ],
+    [
+      "thin-window",
+      (c) => {
+        c.faces[0].mask = { min_u_mm: 4, max_u_mm: 4.01 };
+      },
+    ],
   ]) {
     const invalid = structuredClone(intent);
     alter(invalid.printer.workflow.job.surface_constructions[0]);
@@ -323,10 +547,16 @@ for (const [sourceName, mode] of cases) {
   }
   if (mode === "regional") {
     const invalid = structuredClone(intent);
-    invalid.printer.workflow.job.surface_constructions[1].faces[0].mask = { min_u_mm: 7, max_u_mm: 15 };
+    invalid.printer.workflow.job.surface_constructions[1].faces[0].mask = {
+      min_u_mm: 7,
+      max_u_mm: 15,
+    };
     const invalidFile = join(output, `${name}-regional-overlap.json`);
     await writeFile(invalidFile, JSON.stringify(invalid));
-    const error = await invoke(["project", "edit", project, "--intent", invalidFile, "--compile"], true);
+    const error = await invoke(
+      ["project", "edit", project, "--intent", invalidFile, "--compile"],
+      true,
+    );
     assert.match(error.message, /overlap/);
   }
   if (mode === "corner") {
@@ -335,10 +565,22 @@ for (const [sourceName, mode] of cases) {
     invalid.printer.workflow.job.surface_constructions[0].faces[1].skin_depth_mm = 1.5;
     const invalidFile = join(output, `${name}-conflicting-corner.json`);
     await writeFile(invalidFile, JSON.stringify(invalid));
-    const error = await invoke(["project", "edit", project, "--intent", invalidFile, "--compile"], true);
+    const error = await invoke(
+      ["project", "edit", project, "--intent", invalidFile, "--compile"],
+      true,
+    );
     assert.match(error.message, /intersecting face constructions/);
   }
-  results.push({ source: sourceName, mode, program_sha256: hash(baseline), replay_sha256: hash(await readFile(replay)), layers: plan.layers.length });
+  results.push({
+    source: sourceName,
+    mode,
+    program_sha256: hash(baseline),
+    replay_sha256: hash(await readFile(replay)),
+    layers: plan.layers.length,
+  });
 }
-await writeFile(join(output, "result.json"), JSON.stringify({ software_only: true, results }, null, 2));
+await writeFile(
+  join(output, "result.json"),
+  JSON.stringify({ software_only: true, results }, null, 2),
+);
 console.log(JSON.stringify({ output, software_only: true, results }, null, 2));

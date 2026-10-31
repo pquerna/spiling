@@ -13,10 +13,15 @@ const intent = {
       ...full.printer.workflow,
       job: {
         ...full.printer.workflow.job,
-        surface_constructions: full.printer.workflow.job.surface_constructions.map((construction) => ({
-          ...construction,
-          faces: construction.faces.map((face) => ({ ...face, mask: { min_u_mm: 4, max_u_mm: 16 } })),
-        })),
+        surface_constructions: full.printer.workflow.job.surface_constructions.map(
+          (construction) => ({
+            ...construction,
+            faces: construction.faces.map((face) => ({
+              ...face,
+              mask: { min_u_mm: 4, max_u_mm: 16 },
+            })),
+          }),
+        ),
       },
     },
   },

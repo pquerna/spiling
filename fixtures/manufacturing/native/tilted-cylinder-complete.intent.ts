@@ -8,7 +8,12 @@ import completeIntent from "../complete-sparse.intent.ts";
 const intent = {
   printer: {
     ...completeIntent.printer,
-    deposition_limits: { min_bead_width_mm: 0.6, max_bead_width_mm: 0.6, min_bead_height_mm: 0.000001, max_bead_height_mm: 0.4 },
+    deposition_limits: {
+      min_bead_width_mm: 0.6,
+      max_bead_width_mm: 0.6,
+      min_bead_height_mm: 0.000001,
+      max_bead_height_mm: 0.4,
+    },
   },
   recipe: {
     ...completeIntent.recipe,

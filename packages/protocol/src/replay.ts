@@ -58,7 +58,11 @@ export interface DecodedReplayDisplay {
   kind(index: number): ReplayKind;
   knownStart(index: number): boolean;
   /** Nominal expected-plan association; never a physical bead measurement. */
-  association(index: number): { beadWidthMm: number; physicalZMm: [number, number]; regionalOwner: number | "mandatory_skin" | "wall" | null } | null;
+  association(index: number): {
+    beadWidthMm: number;
+    physicalZMm: [number, number];
+    regionalOwner: number | "mandatory_skin" | "wall" | null;
+  } | null;
 }
 export class ReplayDecodeError extends Error {
   constructor(message: string) {
@@ -127,12 +131,28 @@ export async function decodeReplayDisplay(
   uint(info.tool_epoch_count, "tool epoch count", fail, 0, MAX_DEPOSITION_SEGMENTS);
   uint(info.waste_count, "waste count", fail, 0, info.deposition_count);
   const dual = info.tool_epoch_count > 0;
-  if (dual ? info.tool_epoch_count !== 2 * info.layer_count || info.waste_count !== info.tool_epoch_count || info.lifecycle_count !== 2 || info.process_count !== 4 * info.layer_count - 2 : info.waste_count !== 0)
-    fail("inconsistent routed counts");
-  if (info.lifecycle_count !== 0 && info.lifecycle_count !== 4 &&
-      !(info.lifecycle_count === 2 && info.tool_epoch_count > 0)) fail("unsupported lifecycle count");
   if (
-    info.event_count !== info.deposition_count + info.travel_count + info.lifecycle_count + info.process_count + info.tool_epoch_count
+    dual
+      ? info.tool_epoch_count !== 2 * info.layer_count ||
+        info.waste_count !== info.tool_epoch_count ||
+        info.lifecycle_count !== 2 ||
+        info.process_count !== 4 * info.layer_count - 2
+      : info.waste_count !== 0
+  )
+    fail("inconsistent routed counts");
+  if (
+    info.lifecycle_count !== 0 &&
+    info.lifecycle_count !== 4 &&
+    !(info.lifecycle_count === 2 && info.tool_epoch_count > 0)
+  )
+    fail("unsupported lifecycle count");
+  if (
+    info.event_count !==
+    info.deposition_count +
+      info.travel_count +
+      info.lifecycle_count +
+      info.process_count +
+      info.tool_epoch_count
   )
     fail("count mismatch");
   bounds(info.bounds_mm, fail);
@@ -187,9 +207,12 @@ export async function decodeReplayDisplay(
     lastE = 0;
   let process = 0;
   let retractedE: number | undefined;
-  let epochs = 0, waste = 0, activeTool = 0;
+  let epochs = 0,
+    waste = 0,
+    activeTool = 0;
   const debts: (number | undefined)[] = [undefined, undefined];
-  let epochWaste = 0, epochModel = 0;
+  let epochWaste = 0,
+    epochModel = 0;
   for (let index = 0; index < info.event_count; index++) {
     const start = REPLAY_HEADER_BYTES + index * REPLAY_RECORD_BYTES;
     let moved = false;
@@ -207,12 +230,19 @@ export async function decodeReplayDisplay(
       layer = data.getUint16(start + 44, true);
     const kind = data.getUint8(start + 46),
       flags = data.getUint8(start + 47);
-    if (!Number.isFinite(e) || (e < 0 && kind !== 11 && retractedE === undefined) || !Number.isFinite(f) || (kind === 14 ? f !== 0 : f <= 0))
+    if (
+      !Number.isFinite(e) ||
+      (e < 0 && kind !== 11 && retractedE === undefined) ||
+      !Number.isFinite(f) ||
+      (kind === 14 ? f !== 0 : f <= 0)
+    )
       fail("invalid extrusion or feed");
     uint(line, "source line", fail, 1, MAX_MANUFACTURING_BUNDLE_BYTES);
     if (line <= lastLine) fail("source line sequence is not increasing");
-    const associated = (kind >= 1 && kind <= 5) || (kind >= 8 && kind <= 10) || kind === 13 || kind === 15;
-    if (kind > 15 || flags !== ((kind === 14 || index === 0 ? 0 : 1) | (associated ? 2 : 0))) fail("unknown kind or invalid association/start flags");
+    const associated =
+      (kind >= 1 && kind <= 5) || (kind >= 8 && kind <= 10) || kind === 13 || kind === 15;
+    if (kind > 15 || flags !== ((kind === 14 || index === 0 ? 0 : 1) | (associated ? 2 : 0)))
+      fail("unknown kind or invalid association/start flags");
     const width = data.getFloat64(start + 48, true);
     const lower = data.getFloat64(start + 56, true);
     const upper = data.getFloat64(start + 64, true);
@@ -220,18 +250,30 @@ export async function decodeReplayDisplay(
     const tool = data.getUint32(start + 76, true);
     if (tool > 1 || (kind !== 14 && tool !== activeTool)) fail("active tool changes outside epoch");
     if (dual && lifecyclePhase !== 0 && kind !== 6) fail("body after final lifecycle");
-    if (dual && (kind === 9 || kind === 10 || kind === 13)) fail("unsupported routed deposition role");
+    if (dual && (kind === 9 || kind === 10 || kind === 13))
+      fail("unsupported routed deposition role");
     if (dual && kind !== 14 && kind !== 6) {
       const epochLayer = Math.floor((epochs - 1) / 2);
-      if (layer !== epochLayer &&
-          !((kind === 0 || kind === 11) && activeTool === 1 && layer === epochLayer + 1))
+      if (
+        layer !== epochLayer &&
+        !((kind === 0 || kind === 11) && activeTool === 1 && layer === epochLayer + 1)
+      )
         fail("body outside current or outgoing epoch layer");
     }
     if (kind === 14) {
-      if (!dual || e !== 0 || tool !== epochs % 2 || layer !== Math.floor(epochs / 2) ||
-          (epochs > 0 && (epochWaste !== 1 || retractedE === undefined)))
+      if (
+        !dual ||
+        e !== 0 ||
+        tool !== epochs % 2 ||
+        layer !== Math.floor(epochs / 2) ||
+        (epochs > 0 && (epochWaste !== 1 || retractedE === undefined))
+      )
         fail("invalid tool epoch");
-      if (epochs > 0) debts[activeTool] = retractedE === undefined ? undefined : (e8Ticks(retractedE) - e8Ticks(lastE)) / 100_000_000;
+      if (epochs > 0)
+        debts[activeTool] =
+          retractedE === undefined
+            ? undefined
+            : (e8Ticks(retractedE) - e8Ticks(lastE)) / 100_000_000;
       activeTool = tool;
       retractedE = debts[tool];
       lastE = 0;
@@ -240,9 +282,15 @@ export async function decodeReplayDisplay(
       epochModel = 0;
     }
     if (associated) {
-      if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(lower) ||
-          !Number.isFinite(upper) || lower >= upper || Math.abs(upper - data.getFloat64(start + 16, true)) > 0.000000500001 ||
-          (owner < 0xfffffffd && owner >= MAX_PROCESS_REGIONS))
+      if (
+        !Number.isFinite(width) ||
+        width <= 0 ||
+        !Number.isFinite(lower) ||
+        !Number.isFinite(upper) ||
+        lower >= upper ||
+        Math.abs(upper - data.getFloat64(start + 16, true)) > 0.000000500001 ||
+        (owner < 0xfffffffd && owner >= MAX_PROCESS_REGIONS)
+      )
         fail("invalid nominal deposition association");
       if (kind === 15 && owner !== 0xffffffff) fail("waste has model owner");
     } else {
@@ -252,7 +300,10 @@ export async function decodeReplayDisplay(
     if (index === 0 && (dual ? kind !== 14 : kind !== 0 && kind !== 6))
       fail("invalid initial endpoint");
     if (kind === 6 || kind === 7) {
-      if ((info.lifecycle_count !== 4 && info.lifecycle_count !== 2) || layer !== REPLAY_LIFECYCLE_LAYER)
+      if (
+        (info.lifecycle_count !== 4 && info.lifecycle_count !== 2) ||
+        layer !== REPLAY_LIFECYCLE_LAYER
+      )
         fail("invalid lifecycle layer attribution");
       if (
         kind !== (info.lifecycle_count === 2 ? 6 : lifecyclePhase === 1 ? 7 : 6) ||
@@ -266,13 +317,16 @@ export async function decodeReplayDisplay(
       if (
         lifecyclePhase === (info.lifecycle_count === 2 ? 0 : 2) &&
         (data.getFloat64(start, true) !== data.getFloat64(start - REPLAY_RECORD_BYTES, true) ||
-          data.getFloat64(start + 8, true) !== data.getFloat64(start - REPLAY_RECORD_BYTES + 8, true) ||
-          data.getFloat64(start + 16, true) <= data.getFloat64(start - REPLAY_RECORD_BYTES + 16, true))
+          data.getFloat64(start + 8, true) !==
+            data.getFloat64(start - REPLAY_RECORD_BYTES + 8, true) ||
+          data.getFloat64(start + 16, true) <=
+            data.getFloat64(start - REPLAY_RECORD_BYTES + 16, true))
       )
         fail("final lift must be vertical with increasing Z");
       if (
         lifecyclePhase === (info.lifecycle_count === 2 ? 1 : 3) &&
-        data.getFloat64(start + 16, true) !== data.getFloat64(start - REPLAY_RECORD_BYTES + 16, true)
+        data.getFloat64(start + 16, true) !==
+          data.getFloat64(start - REPLAY_RECORD_BYTES + 16, true)
       )
         fail("park must retain clearance Z");
       if (kind === 7) {
@@ -284,15 +338,26 @@ export async function decodeReplayDisplay(
     } else {
       if (info.lifecycle_count === 4 && lifecyclePhase !== 2)
         fail("body outside lifecycle boundaries");
-      const startupRetraction = kind === 11 && process === 0 &&
-        info.lifecycle_count === 4 && lifecyclePhase === 2 && index > 0;
+      const startupRetraction =
+        kind === 11 &&
+        process === 0 &&
+        info.lifecycle_count === 4 &&
+        lifecyclePhase === 2 &&
+        index > 0;
       if (
         layer >= info.layer_count ||
-        (kind !== 14 && deposition === 0 && travel === 0 && ((!startupRetraction && kind !== 0) || layer !== 0))
+        (kind !== 14 &&
+          deposition === 0 &&
+          travel === 0 &&
+          ((!startupRetraction && kind !== 0) || layer !== 0))
       )
         fail("body must start with layer-zero travel or complete-job retraction");
       if (layer !== lastLayer) {
-        if (layer <= lastLayer || (travel !== 0 && layerDepositions === 0) || (kind !== 0 && kind !== 11 && kind !== 14))
+        if (
+          layer <= lastLayer ||
+          (travel !== 0 && layerDepositions === 0) ||
+          (kind !== 0 && kind !== 11 && kind !== 14)
+        )
           fail("invalid layer sequence");
         layerDepositions = 0;
         lastLayer = layer;
@@ -305,17 +370,24 @@ export async function decodeReplayDisplay(
       } else if (kind === 11 || kind === 12) {
         if (index === 0 || moved) fail("process extrusion must be known and stationary");
         if (kind === 11) {
-          if (retractedE !== undefined || e >= lastE || (dual && epochWaste !== 1)) fail("invalid retraction");
+          if (retractedE !== undefined || e >= lastE || (dual && epochWaste !== 1))
+            fail("invalid retraction");
           retractedE = lastE;
         } else {
-          if (e <= lastE || retractedE === undefined ||
-              (dual ? e8Ticks(retractedE) !== e8Ticks(e) || epochWaste !== 0 || epochModel !== 0 : retractedE !== e))
+          if (
+            e <= lastE ||
+            retractedE === undefined ||
+            (dual
+              ? e8Ticks(retractedE) !== e8Ticks(e) || epochWaste !== 0 || epochModel !== 0
+              : retractedE !== e)
+          )
             fail("invalid recovery");
           retractedE = undefined;
         }
         process++;
       } else {
-        if (dual && layer !== Math.floor((epochs - 1) / 2)) fail("deposition outside current epoch layer");
+        if (dual && layer !== Math.floor((epochs - 1) / 2))
+          fail("deposition outside current epoch layer");
         if (index === 0 || !moved || e <= lastE || retractedE !== undefined)
           fail("deposition needs known nonzero movement and recovered increasing extrusion");
         deposition++;
@@ -387,8 +459,18 @@ export async function decodeReplayDisplay(
       const owner = data.getUint32(start + 72, true);
       return {
         beadWidthMm: data.getFloat64(start + 48, true),
-        physicalZMm: [data.getFloat64(start + 56, true), data.getFloat64(start + 64, true)] as [number, number],
-        regionalOwner: owner === 0xffffffff ? null : owner === 0xfffffffe ? "mandatory_skin" as const : owner === 0xfffffffd ? "wall" as const : owner,
+        physicalZMm: [data.getFloat64(start + 56, true), data.getFloat64(start + 64, true)] as [
+          number,
+          number,
+        ],
+        regionalOwner:
+          owner === 0xffffffff
+            ? null
+            : owner === 0xfffffffe
+              ? ("mandatory_skin" as const)
+              : owner === 0xfffffffd
+                ? ("wall" as const)
+                : owner,
       };
     },
   });

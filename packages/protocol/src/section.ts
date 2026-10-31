@@ -345,7 +345,9 @@ export async function decodeSection(
         firstY = y;
         firstZ = z;
       }
-      const dx = x - firstX, dy = y - firstY, dz = z - firstZ;
+      const dx = x - firstX,
+        dy = y - firstY,
+        dz = z - firstZ;
       const u = dx * frameX[0] + dy * frameX[1] + dz * frameX[2];
       const v = dx * frameY[0] + dy * frameY[1] + dz * frameY[2];
       if (point > start) area += previousU * v - u * previousV;

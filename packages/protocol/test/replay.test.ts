@@ -69,7 +69,8 @@ test("native actual replay exposes borrowed strided f64 bytes and unknown first 
 
 test("native replay preserves actual program absolute E and source lines", async () => {
   const replay = await decodeReplayDisplay(golden, descriptor);
-  const motion = fixture.program.split("\n")
+  const motion = fixture.program
+    .split("\n")
     .map((line, index) => ({ line, sourceLine: index + 1 }))
     .filter(({ line }) => line.startsWith("G0 X") || line.startsWith("G1 X"));
   assert.equal(motion.length, replay.eventCount);
@@ -85,14 +86,20 @@ test("native replay preserves actual program absolute E and source lines", async
 
 test("native coarse sparse golden distinguishes associated stroke height from fine schedule", async () => {
   const fixture: {
-    encoding: string; descriptor: ReplayDisplayDescriptor; data: string;
-    actual_positions: number[][]; program: string;
-  } = JSON.parse(readFileSync(new URL("../../../fixtures/protocol/replay-sparse.json", import.meta.url), "utf8"));
+    encoding: string;
+    descriptor: ReplayDisplayDescriptor;
+    data: string;
+    actual_positions: number[][];
+    program: string;
+  } = JSON.parse(
+    readFileSync(new URL("../../../fixtures/protocol/replay-sparse.json", import.meta.url), "utf8"),
+  );
   assert.equal(fixture.encoding, "hex");
   const bytes = Uint8Array.from(Buffer.from(fixture.data, "hex")).buffer;
   const replay = await decodeReplayDisplay(bytes, fixture.descriptor);
   assert.equal(replay.layerCount, 3);
-  let coarse = 0, fine = 0;
+  let coarse = 0,
+    fine = 0;
   for (let event = 0; event < replay.eventCount; event++) {
     assert.deepEqual(replay.position(event), fixture.actual_positions[event]);
     const association = replay.association(event);
@@ -163,17 +170,24 @@ const corruptions: [string, (data: DataView) => void][] = [
 test("nominal associations are strict and separate from byte-derived coordinates", async () => {
   const replay = await decodeReplayDisplay(golden, descriptor);
   assert.equal(replay.association(0), null);
-  const deposition = Array.from({ length: replay.eventCount }, (_, event) => event)
-    .find(event => replay.association(event) !== null)!;
+  const deposition = Array.from({ length: replay.eventCount }, (_, event) => event).find(
+    (event) => replay.association(event) !== null,
+  )!;
   const association = replay.association(deposition)!;
   assert.ok(association.beadWidthMm > 0);
-  assert.ok(Math.abs(association.physicalZMm[1] - replay.position(deposition)[2]) <= 0.000000500001);
+  assert.ok(
+    Math.abs(association.physicalZMm[1] - replay.position(deposition)[2]) <= 0.000000500001,
+  );
   assert.ok(association.physicalZMm[0] < association.physicalZMm[1]);
   for (const [event, offset, value] of [
-    [0, 72, 0], [0, 48, 1], [deposition, 48, 0],
-    [deposition, 56, Infinity], [deposition, 64, 42],
+    [0, 72, 0],
+    [0, 48, 1],
+    [deposition, 48, 0],
+    [deposition, 56, Infinity],
+    [deposition, 64, 42],
   ]) {
-    const bytes = golden.slice(0), data = new DataView(bytes);
+    const bytes = golden.slice(0),
+      data = new DataView(bytes);
     const start = 96 + event! * 80 + offset!;
     if (offset === 72) data.setUint32(start, value!, true);
     else data.setFloat64(start, value!, true);
@@ -269,7 +283,8 @@ test("replay rejects loose bounds and attribution without printed layer endpoint
 });
 test("packed schedule may skip internal contact gaps without inventing events", async () => {
   // Structural admission only; native plan replay proves actual contact-gap semantics.
-  const bytes = golden.slice(0), data = new DataView(bytes);
+  const bytes = golden.slice(0),
+    data = new DataView(bytes);
   data.setUint32(24, 3, true);
   data.setUint16(96 + 2 * 80 + 44, 2, true);
   data.setUint16(96 + 3 * 80 + 44, 2, true);
@@ -277,18 +292,24 @@ test("packed schedule may skip internal contact gaps without inventing events", 
   value.info.layer_count = 3;
   const replay = await decodeReplayDisplay(bytes, await rehash(bytes, value));
   assert.equal(replay.layerCount, 3);
-  assert.deepEqual([0, 1, 2, 3].map((event) => replay.layer(event)), [0, 0, 2, 2]);
+  assert.deepEqual(
+    [0, 1, 2, 3].map((event) => replay.layer(event)),
+    [0, 0, 2, 2],
+  );
   const trailing = structuredClone(value);
   trailing.info.layer_count = 4;
   data.setUint32(24, 4, true);
-  await assert.rejects(decodeReplayDisplay(bytes, await rehash(bytes, trailing)), ReplayDecodeError);
+  await assert.rejects(
+    decodeReplayDisplay(bytes, await rehash(bytes, trailing)),
+    ReplayDecodeError,
+  );
 });
-
 
 test("stationary extrusion and new deposition roles are independently admitted", async () => {
   const native = await decodeReplayDisplay(golden, descriptor);
   const bytes = new ArrayBuffer(golden.byteLength + 160);
-  const raw = new Uint8Array(bytes), data = new DataView(bytes);
+  const raw = new Uint8Array(bytes),
+    data = new DataView(bytes);
   raw.set(new Uint8Array(golden, 0, 176));
   raw.set(new Uint8Array(golden, 176), 336);
   const value = structuredClone(descriptor);
@@ -300,7 +321,11 @@ test("stationary extrusion and new deposition roles are independently admitted",
   for (let event = 1; event <= 2; event++) {
     const start = 96 + event * 80;
     raw.set(new Uint8Array(golden, 96, 80), start);
-    data.setFloat64(start + 24, event === 1 ? native.extrusion(0) - 0.8 : native.extrusion(0), true);
+    data.setFloat64(
+      start + 24,
+      event === 1 ? native.extrusion(0) - 0.8 : native.extrusion(0),
+      true,
+    );
     data.setUint32(start + 40, native.sourceLine(0) + event, true);
     data.setUint8(start + 46, event === 1 ? 11 : 12);
     data.setUint8(start + 47, 1);
@@ -321,7 +346,10 @@ test("stationary extrusion and new deposition roles are independently admitted",
   ]) {
     const corrupted = bytes.slice(0);
     new DataView(corrupted).setFloat64(offset!, mutation!, true);
-    await assert.rejects(decodeReplayDisplay(corrupted, await rehash(corrupted, value)), ReplayDecodeError);
+    await assert.rejects(
+      decodeReplayDisplay(corrupted, await rehash(corrupted, value)),
+      ReplayDecodeError,
+    );
   }
   for (const role of [8, 9, 10, 13]) {
     const roleBytes = bytes.slice(0);
@@ -331,7 +359,10 @@ test("stationary extrusion and new deposition roles are independently admitted",
   }
   const countBytes = bytes.slice(0);
   new DataView(countBytes).setUint32(88, 1, true);
-  await assert.rejects(decodeReplayDisplay(countBytes, await rehash(countBytes, value)), ReplayDecodeError);
+  await assert.rejects(
+    decodeReplayDisplay(countBytes, await rehash(countBytes, value)),
+    ReplayDecodeError,
+  );
 });
 
 // Compose structural packed-replay cases around native body bytes. This does not assert
@@ -398,7 +429,8 @@ test("complete body admits actual stationary startup retraction after lifecycle 
   const complete = await lifecycleCase();
   const before = await decodeReplayDisplay(complete.bytes, complete.descriptor);
   const bytes = new ArrayBuffer(complete.bytes.byteLength + 160);
-  const raw = new Uint8Array(bytes), data = new DataView(bytes);
+  const raw = new Uint8Array(bytes),
+    data = new DataView(bytes);
   raw.set(new Uint8Array(complete.bytes, 0, 256));
   // Lifecycle prime supplies the known XYZ for the first body feeder-only event.
   raw.set(new Uint8Array(complete.bytes, 176, 80), 256);
@@ -419,24 +451,36 @@ test("complete body admits actual stationary startup retraction after lifecycle 
   for (let event = 0; event < value.info.event_count; event++)
     data.setUint32(96 + event * 80 + 40, event + 1, true);
   const admitted = await decodeReplayDisplay(bytes, await rehash(bytes, value));
-  assert.deepEqual([2, 3, 4].map((event) => admitted.kind(event)), [11, 0, 12]);
+  assert.deepEqual(
+    [2, 3, 4].map((event) => admitted.kind(event)),
+    [11, 0, 12],
+  );
   assert.deepEqual(admitted.position(2), admitted.position(1));
   assert.deepEqual(admitted.position(4), admitted.position(3));
   assert.equal(admitted.processCount, 2);
   assert.equal(admitted.extrusion(4), admitted.extrusion(1));
-  for (const [offset, byte] of [[256 + 47, 0], [256 + 44, 1], [256 + 46, 12]]) {
+  for (const [offset, byte] of [
+    [256 + 47, 0],
+    [256 + 44, 1],
+    [256 + 46, 12],
+  ]) {
     const corrupted = bytes.slice(0);
     new DataView(corrupted).setUint8(offset!, byte!);
-    await assert.rejects(decodeReplayDisplay(corrupted, await rehash(corrupted, value)), ReplayDecodeError);
+    await assert.rejects(
+      decodeReplayDisplay(corrupted, await rehash(corrupted, value)),
+      ReplayDecodeError,
+    );
   }
   const moved = bytes.slice(0);
   new DataView(moved).setFloat64(256, before.position(1)[0] + 0.1, true);
   await assert.rejects(decodeReplayDisplay(moved, await rehash(moved, value)), ReplayDecodeError);
   const extraRecovery = bytes.slice(0);
   new DataView(extraRecovery).setFloat64(416 + 24, before.extrusion(1) + 0.1, true);
-  await assert.rejects(decodeReplayDisplay(extraRecovery, await rehash(extraRecovery, value)), ReplayDecodeError);
+  await assert.rejects(
+    decodeReplayDisplay(extraRecovery, await rehash(extraRecovery, value)),
+    ReplayDecodeError,
+  );
 });
-
 
 test("lifecycle events retain unknown start and no object-layer attribution or object counts", async () => {
   const value = await lifecycleCase();
@@ -535,41 +579,72 @@ test("a new object layer must begin with travel after the prior layer deposited"
 // Wire-admission fixture only: this does not claim native program verification.
 async function dualWire(retracted = 1) {
   const rows = [
-    [14, 0, 0, 0, .2, 0], [0, 0, 1, 0, .2, 0],
-    [15, 0, 2, 0, .2, 1], [1, 0, 3, 0, .2, 2], [11, 0, 3, 0, .2, retracted],
-    [0, 0, 3, 0, .4, retracted],
-    [14, 1, 13, 0, .2, 0], [0, 1, 14, 0, .2, 0],
-    [15, 1, 15, 0, .2, 1], [1, 1, 16, 0, .2, 2], [11, 1, 16, 0, .2, 1],
-    [6, 1, 16, 0, 1, 1], [6, 1, 17, 0, 1, 1],
+    [14, 0, 0, 0, 0.2, 0],
+    [0, 0, 1, 0, 0.2, 0],
+    [15, 0, 2, 0, 0.2, 1],
+    [1, 0, 3, 0, 0.2, 2],
+    [11, 0, 3, 0, 0.2, retracted],
+    [0, 0, 3, 0, 0.4, retracted],
+    [14, 1, 13, 0, 0.2, 0],
+    [0, 1, 14, 0, 0.2, 0],
+    [15, 1, 15, 0, 0.2, 1],
+    [1, 1, 16, 0, 0.2, 2],
+    [11, 1, 16, 0, 0.2, 1],
+    [6, 1, 16, 0, 1, 1],
+    [6, 1, 17, 0, 1, 1],
   ];
-  const bytes = new ArrayBuffer(96 + rows.length * 80), data = new DataView(bytes);
+  const bytes = new ArrayBuffer(96 + rows.length * 80),
+    data = new DataView(bytes);
   data.setUint32(0, 0x524c5053, true);
-  data.setUint16(4, 6, true); data.setUint16(6, 96, true);
-  for (const [offset, value] of [[8, 13], [12, 80], [16, 4], [20, 3], [24, 1], [28, 2], [88, 2], [92, 2]])
+  data.setUint16(4, 6, true);
+  data.setUint16(6, 96, true);
+  for (const [offset, value] of [
+    [8, 13],
+    [12, 80],
+    [16, 4],
+    [20, 3],
+    [24, 1],
+    [28, 2],
+    [88, 2],
+    [92, 2],
+  ])
     data.setUint32(offset!, value!, true);
-  const min: [number, number, number] = [0, 0, .2], max: [number, number, number] = [17, 0, 1];
+  const min: [number, number, number] = [0, 0, 0.2],
+    max: [number, number, number] = [17, 0, 1];
   for (let axis = 0; axis < 3; axis++) {
     data.setFloat64(32 + axis * 8, min[axis]!, true);
     data.setFloat64(56 + axis * 8, max[axis]!, true);
   }
   rows.forEach(([kind, tool, x, y, z, e], index) => {
-    const start = 96 + index * 80, associated = kind === 1 || kind === 15;
-    [x, y, z, e, kind === 14 ? 0 : 600].forEach((value, axis) => data.setFloat64(start + axis * 8, value!, true));
+    const start = 96 + index * 80,
+      associated = kind === 1 || kind === 15;
+    [x, y, z, e, kind === 14 ? 0 : 600].forEach((value, axis) =>
+      data.setFloat64(start + axis * 8, value!, true),
+    );
     data.setUint32(start + 40, index + 1, true);
     data.setUint16(start + 44, kind === 6 ? 65535 : 0, true);
     data.setUint8(start + 46, kind!);
     data.setUint8(start + 47, (kind === 14 ? 0 : 1) | (associated ? 2 : 0));
     if (associated) {
-      data.setFloat64(start + 48, .45, true);
-      data.setFloat64(start + 64, .2, true);
+      data.setFloat64(start + 48, 0.45, true);
+      data.setFloat64(start + 64, 0.2, true);
     }
     data.setUint32(start + 72, 0xffffffff, true);
     data.setUint32(start + 76, tool!, true);
   });
   const base = structuredClone(descriptor);
-  Object.assign(base.info, { schema_version: 6, event_count: 13, deposition_count: 4,
-    travel_count: 3, layer_count: 1, lifecycle_count: 2, process_count: 2,
-    tool_epoch_count: 2, waste_count: 2, bounds_mm: { min, max } });
+  Object.assign(base.info, {
+    schema_version: 6,
+    event_count: 13,
+    deposition_count: 4,
+    travel_count: 3,
+    layer_count: 1,
+    lifecycle_count: 2,
+    process_count: 2,
+    tool_epoch_count: 2,
+    waste_count: 2,
+    bounds_mm: { min, max },
+  });
   base.resource.size_bytes = String(bytes.byteLength);
   return { bytes, descriptor: await rehash(bytes, base) };
 }
@@ -596,19 +671,36 @@ test("SPLR6 epochs establish separate tip frames and explicitly account waste", 
   ]) {
     const bytes = wire.bytes.slice(0);
     mutate(new DataView(bytes));
-    await assert.rejects(decodeReplayDisplay(bytes, await rehash(bytes, wire.descriptor)), ReplayDecodeError);
+    await assert.rejects(
+      decodeReplayDisplay(bytes, await rehash(bytes, wire.descriptor)),
+      ReplayDecodeError,
+    );
   }
 });
 
 test("SPLR6 descriptors require exact epoch/waste fields and bounded counters", async () => {
   for (const mutate of [
-    (info: Record<string, unknown>) => { delete info.tool_epoch_count; },
-    (info: Record<string, unknown>) => { delete info.waste_count; },
-    (info: Record<string, unknown>) => { info.extra = 0; },
-    (info: Record<string, unknown>) => { info.tool_epoch_count = 100001; },
-    (info: Record<string, unknown>) => { info.waste_count = 1; },
-    (info: Record<string, unknown>) => { info.schema_version = 5; },
-    (info: Record<string, unknown>) => { info.deposition_count = 100001; },
+    (info: Record<string, unknown>) => {
+      delete info.tool_epoch_count;
+    },
+    (info: Record<string, unknown>) => {
+      delete info.waste_count;
+    },
+    (info: Record<string, unknown>) => {
+      info.extra = 0;
+    },
+    (info: Record<string, unknown>) => {
+      info.tool_epoch_count = 100001;
+    },
+    (info: Record<string, unknown>) => {
+      info.waste_count = 1;
+    },
+    (info: Record<string, unknown>) => {
+      info.schema_version = 5;
+    },
+    (info: Record<string, unknown>) => {
+      info.deposition_count = 100001;
+    },
   ]) {
     const value = structuredClone(descriptor);
     mutate(value.info as unknown as Record<string, unknown>);
@@ -628,26 +720,43 @@ test("a first outgoing feeder can remain below E0 during its lifted travel", asy
 });
 
 test("native fixed-dual recovery rejects one E8 tick of unpaid or excess debt", async () => {
-  const native = JSON.parse(readFileSync(new URL("../../../fixtures/protocol/replay-fixed-dual.json", import.meta.url), "utf8"));
+  const native = JSON.parse(
+    readFileSync(
+      new URL("../../../fixtures/protocol/replay-fixed-dual.json", import.meta.url),
+      "utf8",
+    ),
+  );
   const bytes = Uint8Array.from(Buffer.from(native.data, "hex")).buffer;
   const replay = await decodeReplayDisplay(bytes, native.descriptor);
-  const recovery = Array.from({ length: replay.eventCount }, (_, event) => event).find(event => replay.kind(event) === 12)!;
+  const recovery = Array.from({ length: replay.eventCount }, (_, event) => event).find(
+    (event) => replay.kind(event) === 12,
+  )!;
   assert.notEqual(recovery, undefined);
   for (const delta of [-0.00000001, 0.00000001]) {
-    const changed = bytes.slice(0), data = new DataView(changed);
+    const changed = bytes.slice(0),
+      data = new DataView(changed);
     const value = Math.round((replay.extrusion(recovery) + delta) * 100_000_000) / 100_000_000;
     for (let event = recovery; event < recovery + 3; event++)
       data.setFloat64(96 + event * 80 + 24, value, true);
-    await assert.rejects(decodeReplayDisplay(changed, await rehash(changed, native.descriptor)), ReplayDecodeError);
+    await assert.rejects(
+      decodeReplayDisplay(changed, await rehash(changed, native.descriptor)),
+      ReplayDecodeError,
+    );
   }
 });
 
-
 test("native waste-only epochs retain support, exact feeder debt and zero model work", async () => {
-  const native = JSON.parse(readFileSync(new URL("../../../fixtures/protocol/replay-waste-only.json", import.meta.url), "utf8"));
+  const native = JSON.parse(
+    readFileSync(
+      new URL("../../../fixtures/protocol/replay-waste-only.json", import.meta.url),
+      "utf8",
+    ),
+  );
   const bytes = Uint8Array.from(Buffer.from(native.data, "hex")).buffer;
   const replay = await decodeReplayDisplay(bytes, native.descriptor);
-  let waste = 0, epochs = 0, model = 0;
+  let waste = 0,
+    epochs = 0,
+    model = 0;
   for (let event = 0; event < replay.eventCount; event++) {
     assert.deepEqual(replay.position(event), native.actual_positions[event]);
     const kind = replay.kind(event);
@@ -661,8 +770,14 @@ test("native waste-only epochs retain support, exact feeder debt and zero model 
   assert.equal(waste, 4);
   assert.equal(epochs, 4);
   assert.equal(model, 12);
-  const recovery = Array.from({ length: replay.eventCount }, (_, event) => event).find(event => replay.kind(event) === 12)!;
-  const changed = bytes.slice(0), data = new DataView(changed);
+  const recovery = Array.from({ length: replay.eventCount }, (_, event) => event).find(
+    (event) => replay.kind(event) === 12,
+  )!;
+  const changed = bytes.slice(0),
+    data = new DataView(changed);
   data.setFloat64(96 + recovery * 80 + 24, replay.extrusion(recovery) + 0.00000001, true);
-  await assert.rejects(decodeReplayDisplay(changed, await rehash(changed, native.descriptor)), ReplayDecodeError);
+  await assert.rejects(
+    decodeReplayDisplay(changed, await rehash(changed, native.descriptor)),
+    ReplayDecodeError,
+  );
 });

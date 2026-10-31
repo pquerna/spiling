@@ -20,43 +20,43 @@ Schema6 is an incompatible interpretation change: reserved fields now carry acti
 
 ## Header (96 bytes)
 
-| Offset | Bytes | Value |
-| --- | --- | --- |
-| 0 | 4 | ASCII `SPLR` |
-| 4 | 2 | u16 schema version6 |
-| 6 | 2 | u16 header bytes96 |
-| 8 | 4 | u32 event count |
-| 12 | 4 | u32 record bytes80 |
-| 16 | 4 | u32 deposition count: model + support + waste |
-| 20 | 4 | u32 travel count |
-| 24 | 4 | u32 scheduled layer count |
-| 28 | 4 | u32 lifecycle count |
-| 32 | 24 | f64 minimum XYZ |
-| 56 | 24 | f64 maximum XYZ |
-| 80 | 8 | reserved zero |
-| 88 | 4 | u32 stationary retract/recover count |
-| 92 | 4 | u32 tool epoch count |
+| Offset | Bytes | Value                                         |
+| ------ | ----- | --------------------------------------------- |
+| 0      | 4     | ASCII `SPLR`                                  |
+| 4      | 2     | u16 schema version6                           |
+| 6      | 2     | u16 header bytes96                            |
+| 8      | 4     | u32 event count                               |
+| 12     | 4     | u32 record bytes80                            |
+| 16     | 4     | u32 deposition count: model + support + waste |
+| 20     | 4     | u32 travel count                              |
+| 24     | 4     | u32 scheduled layer count                     |
+| 28     | 4     | u32 lifecycle count                           |
+| 32     | 24    | f64 minimum XYZ                               |
+| 56     | 24    | f64 maximum XYZ                               |
+| 80     | 8     | reserved zero                                 |
+| 88     | 4     | u32 stationary retract/recover count          |
+| 92     | 4     | u32 tool epoch count                          |
 
 Counts and bounds match metadata exactly. `event_count=deposition_count+travel_count+lifecycle_count+process_count+tool_epoch_count`; waste is already included in deposition count. Lifecycle count is0 for diagnostic,4 for single-tool complete, or2 for fixed-dual final lift/park. Scheduled layers are1..4096. Fixed-dual epochs alternate tool0/tool1 on every actual layer, with one explicit waste stroke followed by zero or more model strokes in each epoch. A waste-only epoch retains the same transition, exact feeder-debt and supported-waste obligations. No trailing bytes or unknown reserved bits are admitted.
 
 ## Event record (80 bytes)
 
-| Offset | Bytes | Value |
-| --- | --- | --- |
-| 0 | 8 | decoded X, f64 mm |
-| 8 | 8 | decoded Y, f64 mm |
-| 16 | 8 | decoded Z, f64 mm |
-| 24 | 8 | current epoch's absolute E, f64 filament mm |
-| 32 | 8 | F, f64 mm/min; zero sentinel only for non-motion tool epoch |
-| 40 | 4 | source program line, 1-based u32 |
-| 44 | 2 | u16 layer index; lifecycle sentinel65535 |
-| 46 | 1 | event kind below |
-| 47 | 1 | bit0 known start; bit1 nominal deposition association; remaining bits zero |
-| 48 | 8 | associated nominal bead width, f64 mm |
-| 56 | 8 | associated physical interval lower, f64 mm |
-| 64 | 8 | associated physical interval upper, f64 mm |
-| 72 | 4 | regional index below256; `0xfffffffd` Wall; `0xfffffffe` mandatory skin; `0xffffffff` unknown |
-| 76 | 4 | u32 active tool0 or1 |
+| Offset | Bytes | Value                                                                                         |
+| ------ | ----- | --------------------------------------------------------------------------------------------- |
+| 0      | 8     | decoded X, f64 mm                                                                             |
+| 8      | 8     | decoded Y, f64 mm                                                                             |
+| 16     | 8     | decoded Z, f64 mm                                                                             |
+| 24     | 8     | current epoch's absolute E, f64 filament mm                                                   |
+| 32     | 8     | F, f64 mm/min; zero sentinel only for non-motion tool epoch                                   |
+| 40     | 4     | source program line, 1-based u32                                                              |
+| 44     | 2     | u16 layer index; lifecycle sentinel65535                                                      |
+| 46     | 1     | event kind below                                                                              |
+| 47     | 1     | bit0 known start; bit1 nominal deposition association; remaining bits zero                    |
+| 48     | 8     | associated nominal bead width, f64 mm                                                         |
+| 56     | 8     | associated physical interval lower, f64 mm                                                    |
+| 64     | 8     | associated physical interval upper, f64 mm                                                    |
+| 72     | 4     | regional index below256; `0xfffffffd` Wall; `0xfffffffe` mandatory skin; `0xffffffff` unknown |
+| 76     | 4     | u32 active tool0 or1                                                                          |
 
 Kinds0–13 retain their meanings:0 travel,1 perimeter,2 solid fill,3 bottom skin,4 top skin,5 sparse fill,6 lifecycle travel,7 single-tool startup prime,8 bridge,9 support,10 support interface,11 retract,12 unretract,13 separator wall. **Kind14 is a tool epoch, not motion; kind15 is transition-waste deposition, not model/support.** The reference fixed-dual route refuses support/interface/separator roles; their existing single-tool meanings are unchanged.
 
