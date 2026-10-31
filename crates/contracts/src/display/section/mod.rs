@@ -33,6 +33,57 @@ fn point_body_start(loop_count: usize) -> Result<usize, GeometryError> {
 fn section_size(loop_count: usize, point_count: usize) -> Result<usize, GeometryError> {
     checked_size(point_body_start(loop_count)?, point_count, 24)
 }
+
+/// Exact SPLS wire size for the codec's complete-loop chunking, without
+/// coordinates, publication identities or retained native/packing storage.
+pub fn packed_section_size(
+    loop_point_counts: impl IntoIterator<Item = usize>,
+    chunk_limit: u32,
+) -> Result<usize, GeometryError> {
+    if !(168..=MAX_GEOMETRY_CHUNK_BYTES).contains(&chunk_limit) {
+        return Err(resource("invalid section chunk cap"));
+    }
+    let mut total = 0usize;
+    let mut loops = 0usize;
+    let mut points = 0usize;
+    for count in loop_point_counts {
+        if count < 4 {
+            return Err(invalid("closed section loop needs at least four points"));
+        }
+        if count > MAX_LOOP_POINTS as usize {
+            return Err(resource("section loop exceeds point cap"));
+        }
+        if section_size(1, count)? > chunk_limit as usize {
+            return Err(resource("complete section loop does not fit one chunk"));
+        }
+        let next_points = points
+            .checked_add(count)
+            .ok_or_else(|| resource("section point count overflow"))?;
+        if section_size(loops + 1, next_points)? > chunk_limit as usize {
+            total = total
+                .checked_add(section_size(loops, points)?)
+                .ok_or_else(|| resource("section byte budget exceeded"))?;
+            loops = 1;
+            points = count;
+        } else {
+            loops += 1;
+            points = next_points;
+        }
+        if total
+            .checked_add(section_size(loops, points)?)
+            .is_none_or(|bytes| bytes > MAX_SECTION_BYTES as usize)
+        {
+            return Err(resource("section byte budget exceeded"));
+        }
+    }
+    if loops == 0 {
+        Ok(0)
+    } else {
+        total
+            .checked_add(section_size(loops, points)?)
+            .ok_or_else(|| resource("section byte budget exceeded"))
+    }
+}
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }

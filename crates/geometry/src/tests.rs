@@ -261,14 +261,59 @@ fn remaining_scene_capacity_rejects_without_partial_native_artifacts() {
         origin_mm: [0.0, 0.0, 4.0],
         normal: [0.0, 0.0, 1.0],
     };
+    // The direct limit owns packed SPLS bytes. Native curve receipts stay
+    // in their separate query pool, even when they exceed this wire limit.
+    let reference = section(&definition, plane, &cancel).unwrap();
+    let mut encoder = spiling_contracts::display::SectionChunkBuilder::new(
+        spiling_contracts::geometry::SessionId::new(),
+        spiling_contracts::geometry::ArtifactId::new(1).unwrap(),
+        spiling_contracts::geometry::SceneRevision::ZERO,
+        plane,
+    )
+    .unwrap();
+    for boundary in &reference.loops {
+        encoder
+            .push_loop(
+                spiling_contracts::geometry::OccurrenceId::new(1).unwrap(),
+                definition.id().clone(),
+                boundary.is_hole,
+                &boundary.points_mm,
+            )
+            .unwrap();
+    }
+    let required = encoder.finish().unwrap().summary.total_bytes;
+    assert!(reference.retained_bytes() > required as usize);
+    assert!(required <= spiling_contracts::geometry::MAX_SECTION_BYTES);
     assert_eq!(
-        section_with_byte_limit(&definition, plane, &cancel, 959)
+        section_with_byte_limit(&definition, plane, &cancel, required - 1)
             .unwrap_err()
             .code,
         GeometryErrorCode::ResourceLimit
     );
-    let cut = section_with_byte_limit(&definition, plane, &cancel, 960).unwrap();
+    let cut = section_with_byte_limit(&definition, plane, &cancel, required).unwrap();
+    assert_eq!(
+        spiling_contracts::display::packed_section_size(
+            cut.loops.iter().map(|boundary| boundary.points_mm.len()),
+            spiling_contracts::geometry::MAX_GEOMETRY_CHUNK_BYTES,
+        )
+        .unwrap(),
+        required as usize,
+    );
     close(area(&cut, &cut.loops[0]), 200.0, 1e-6);
+    assert!(
+        section_with_byte_limit(
+            &definition,
+            PlaneMm {
+                origin_mm: [0.0, 0.0, 9.0],
+                normal: [0.0, 0.0, 1.0],
+            },
+            &cancel,
+            0
+        )
+        .unwrap()
+        .loops
+        .is_empty()
+    );
 }
 
 #[test]

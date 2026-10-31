@@ -522,7 +522,17 @@ pub(super) fn intersect(
         },
     };
     assemble(&mut arcs, &mut result, &mut admission, work, cancel)?;
-    if result.retained_bytes() > packed_byte_limit.min(MAX_SECTION_BYTES as usize) {
+    if result.retained_bytes() > limit {
+        return Err(resource_error(
+            "native section retained output exceeds query allowance",
+        ));
+    }
+    work.charge(result.loops.len() as u64, cancel)?;
+    let packed_bytes = spiling_contracts::display::packed_section_size(
+        result.loops.iter().map(|boundary| boundary.points_mm.len()),
+        spiling_contracts::geometry::MAX_GEOMETRY_CHUNK_BYTES,
+    )?;
+    if packed_bytes > packed_byte_limit.min(MAX_SECTION_BYTES as usize) {
         return Err(resource_error(
             "native section packed output exceeds allowance",
         ));

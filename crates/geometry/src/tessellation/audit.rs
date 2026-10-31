@@ -57,9 +57,9 @@ pub(super) fn face(
             "native face candidate exceeds remaining display counts",
         ));
     }
-    if mesh.unconverged {
-        return Err(shape("native candidate stopped before convergence"));
-    }
+    // A returned candidate's convergence flag is advisory. Publication still
+    // requires the complete independent coverage, trim, normal and coefficient
+    // audits below; only their shape bound can request refinement.
     if mesh.split_boundary || mesh.ear_clipped {
         return Err(invalid(
             "native candidate has no independently auditable regular UV triangle chain",

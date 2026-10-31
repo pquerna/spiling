@@ -505,7 +505,7 @@ path without disabling unrelated native import, inspection or admitted queries.
 `GeometryWorkBudget` in [`analysis/mod.rs`](../../crates/geometry/src/analysis/mod.rs)
 is cumulative across retries/subdivision. Prepared sources, pinned proofs,
 coexisting query scratch and output have separate retained-capacity accounting;
-a packed-output allowance cannot fund native preparation. These are not RSS
+a packed-output allowance cannot fund native preparation. Packed admission uses the SPLS codec's complete-loop chunk sizes; retained native curve receipts stay in the shared native pool rather than consuming the wire-byte quota. These are not RSS
 limits: native intermediate objects also require host-process memory bounds.
 Resource exhaustion, cancellation, unavailable parameter correspondence,
 conditioning, unsupported operations and invalid geometry remain distinct failures.

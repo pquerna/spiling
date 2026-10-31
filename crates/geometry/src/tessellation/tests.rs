@@ -212,8 +212,27 @@ fn complete_native_trim_proof_rejects_missing_and_duplicate_on_carrier_triangles
     let original =
         solidcore_mesh::tessellate_face(&kernel, definition.brep(), face, &edges, &options)
             .unwrap();
+    let outside = edges.retained_bytes() + original.retained_bytes();
+    {
+        let mut advisory = original.clone();
+        advisory.unconverged = true;
+        audit::face(
+            &definition,
+            0,
+            &advisory,
+            &edges,
+            MeshBudget::FROZEN,
+            outside,
+            &mut GeometryWorkBudget::new(20_000_000),
+            &AtomicBool::new(false),
+        )
+        .expect(
+            "a complete independently qualified candidate does not need a mesher confidence flag",
+        );
+    }
     for duplicate in [false, true] {
         let mut candidate = original.clone();
+        candidate.unconverged = true;
         if duplicate {
             candidate.triangles.push(candidate.triangles[0]);
         } else {
@@ -225,7 +244,7 @@ fn complete_native_trim_proof_rejects_missing_and_duplicate_on_carrier_triangles
             &candidate,
             &edges,
             MeshBudget::FROZEN,
-            0,
+            outside,
             &mut GeometryWorkBudget::new(20_000_000),
             &AtomicBool::new(false),
         )

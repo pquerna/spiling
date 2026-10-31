@@ -526,6 +526,45 @@ fn section(chunk_limit: u32) -> EncodedSection {
 }
 
 #[test]
+fn packed_section_size_matches_complete_loop_encoder_chunking() {
+    assert_eq!(
+        packed_section_size([], MAX_GEOMETRY_CHUNK_BYTES).unwrap(),
+        0
+    );
+    assert_eq!(
+        packed_section_size([5], MAX_GEOMETRY_CHUNK_BYTES).unwrap(),
+        192
+    );
+    for cap in [192, 319, 320, 512, MAX_GEOMETRY_CHUNK_BYTES] {
+        let encoded = section(cap);
+        let size = packed_section_size(
+            encoded.loops.iter().map(|row| row.point_count as usize),
+            cap,
+        )
+        .unwrap();
+        assert_eq!(size, encoded.summary.total_bytes as usize);
+        assert_eq!(
+            size,
+            encoded
+                .chunks
+                .iter()
+                .map(|chunk| chunk.bytes.len())
+                .sum::<usize>()
+        );
+    }
+    assert!(packed_section_size([5], 191).is_err());
+    assert!(packed_section_size([3], MAX_GEOMETRY_CHUNK_BYTES).is_err());
+    assert!(packed_section_size([usize::MAX], MAX_GEOMETRY_CHUNK_BYTES).is_err());
+    assert!(
+        packed_section_size(
+            std::iter::repeat_n(4, MAX_SECTION_BYTES as usize / 168 + 1),
+            168
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn section_packing_admits_live_point_and_encoded_copy_capacity_before_growth() {
     let make = || {
         let (session, artifact, definition) = ids();
