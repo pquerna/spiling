@@ -1386,7 +1386,7 @@ fn capture_native_port_branches(
     scratch: &mut Scratch,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<(Vec<[usize; 3]>, Vec<[usize; 3]>), GeometryError> {
+) -> Result<NativePortBranches, GeometryError> {
     let mut result = Vec::new();
     let mut exclusions = Vec::new();
     let section = &request.analysis.section;
@@ -4995,15 +4995,14 @@ fn certify_source_leaf(
     } = candidate_capture(actual_used_source_loops, z, work, cancel)?;
     let native_sample_sha256 = native_sample_hash(analysis, work, cancel)?;
     let radial_slab = analysis.radial_slab.as_ref();
-    if let Some(radial) = radial_slab {
-        if !radial.product.matches_world(definition, pose, interval, z)
-            || !radial.matches_native(&analysis.section.loops, work, cancel)?
-        {
-            return Err(error(
-                GeometryErrorCode::InvalidGeometry,
-                "closed radial product does not bind the exact native source/pose/scope/sample",
-            ));
-        }
+    if let Some(radial) = radial_slab
+        && (!radial.product.matches_world(definition, pose, interval, z)
+            || !radial.matches_native(&analysis.section.loops, work, cancel)?)
+    {
+        return Err(error(
+            GeometryErrorCode::InvalidGeometry,
+            "closed radial product does not bind the exact native source/pose/scope/sample",
+        ));
     }
     let mut scratch = Scratch { bytes: 0 };
     let mut proof_kind = if sample_only {
@@ -7791,10 +7790,12 @@ pub(super) fn filled_projection_distance(
     Ok(achieved)
 }
 
+#[cfg(test)]
 struct CyclePath {
     points: Vec<[Interval; 2]>,
     knots: Vec<f64>,
 }
+#[cfg(test)]
 impl CyclePath {
     fn push(
         &mut self,
@@ -7862,6 +7863,7 @@ impl CyclePath {
     }
 }
 
+#[cfg(test)]
 fn cyclic_path_distance(
     source: &Ring,
     target: &Ring,
@@ -8997,6 +8999,9 @@ fn rectangular_arrangement(
     feature_clearance(&actual_rings, 0.0, scratch, work, cancel)?;
     Ok((achieved, expected, attribution))
 }
+
+// Included and excluded (face, wire, coedge) identities.
+type NativePortBranches = (Vec<[usize; 3]>, Vec<[usize; 3]>);
 
 #[cfg(test)]
 mod tests {
@@ -10297,7 +10302,8 @@ mod tests {
         assert_eq!(upper_m.len(), 1);
         let lower_leaf = source_leaf(&source, 13, RigidPoseMm::IDENTITY, &lower, &mut work);
         let upper_leaf = source_leaf(&source, 13, RigidPoseMm::IDENTITY, &upper, &mut work);
-        for (analysis, leaf, other_leaf) in [(&lower, &lower_leaf, &upper_leaf)] {
+        {
+            let (analysis, leaf, other_leaf) = (&lower, &lower_leaf, &upper_leaf);
             let targets = [
                 NativeCriticalCollarTarget {
                     leaf: &lower_leaf,

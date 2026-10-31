@@ -351,6 +351,56 @@ fn unchanged_fitting_near_cap_section_preserves_original_back_root_and_material(
     }));
 }
 #[test]
+fn unchanged_spline_housing_retains_rounded_walls_and_blind_pocket() {
+    let definition = fixture("independent-exporters/occt-spline-housing-mm.step");
+    // Independent exporter recipe: 24 x 18 housing, R2 outer fillets and
+    // radius-3 blind pocket with its floor at Z4.13. Conservative import boxes
+    // are not an interior-height oracle.
+    for (height, holes) in [(3.0, 0), (5.0, 1), (7.0, 1)] {
+        for normal_z in [1.0, -1.0] {
+            let result = query(&definition, height, [0.0, 0.0, normal_z]);
+            assert_provenance(&definition, &result);
+            assert_eq!(result.loops().len(), 1 + holes);
+            assert_eq!(result.loops().iter().filter(|l| l.is_hole).count(), holes);
+            for boundary in result.loops() {
+                let expected = if boundary.is_hole {
+                    -9.0 * PI
+                } else {
+                    24.0 * 18.0 - (4.0 - PI) * 4.0
+                };
+                let perimeter = if boundary.is_hole {
+                    6.0 * PI
+                } else {
+                    68.0 + 4.0 * PI
+                };
+                assert!(
+                    (area(boundary, result.frame()) - expected).abs()
+                        <= perimeter * SECTION_SAMPLING_TOLERANCE_MM
+                            + PI * SECTION_SAMPLING_TOLERANCE_MM.powi(2)
+                            + 1e-7
+                );
+                for p in &boundary.points_mm {
+                    assert!((p[2] - height).abs() <= SECTION_PLANE_TOLERANCE_MM);
+                    if boundary.is_hole {
+                        assert!(
+                            ((p[0] - 12.0).hypot(p[1] - 9.0) - 3.0).abs()
+                                <= SECTION_SAMPLING_TOLERANCE_MM
+                        );
+                    }
+                }
+            }
+        }
+    }
+    for height in [-1.0, 11.0] {
+        assert!(
+            query(&definition, height, [0.0, 0.0, 1.0])
+                .loops()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
 fn unchanged_housing_near_floor_preserves_trimmed_material_under_plane_reversal() {
     let definition = fixture("independent-exporters/occt-rounded-housing-mm.step");
     for height in [0.0125_f64, 0.4249999535616466, 0.54999985] {

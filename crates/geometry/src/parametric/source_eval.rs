@@ -112,15 +112,15 @@ pub(crate) trait CurveEvaluator {
 }
 impl SurfaceEvaluator for Surface {
     fn active_domain(&self) -> [[f64; 2]; 2] {
-        if let Ok(Some(n)) = analytic_eval::native_surface_nurbs(self) {
-            if let (Some(a), Some(b), Some(c), Some(d)) = (
+        if let Ok(Some(n)) = analytic_eval::native_surface_nurbs(self)
+            && let (Some(a), Some(b), Some(c), Some(d)) = (
                 n.u_knots().get(n.p()),
                 n.u_knots().get(n.n() + 1),
                 n.v_knots().get(n.q()),
                 n.v_knots().get(n.m() + 1),
-            ) {
-                return [[*a, *b], [*c, *d]];
-            }
+            )
+        {
+            return [[*a, *b], [*c, *d]];
         }
         let d = self.natural_uv_domain();
         let lo = d.min();
@@ -219,10 +219,10 @@ impl SurfaceEvaluator for PreparedOriginalSurface<'_> {
 
 impl CurveEvaluator for Curve {
     fn active_range(&self) -> [f64; 2] {
-        if let Ok(Some(n)) = curve_prepared::native_curve_nurbs(self) {
-            if let (Some(a), Some(b)) = (n.knots().get(n.degree()), n.knots().get(n.cpts().len())) {
-                return [*a, *b];
-            }
+        if let Ok(Some(n)) = curve_prepared::native_curve_nurbs(self)
+            && let (Some(a), Some(b)) = (n.knots().get(n.degree()), n.knots().get(n.cpts().len()))
+        {
+            return [*a, *b];
         }
         let d = self.natural_interval();
         [d.min(), d.max()]

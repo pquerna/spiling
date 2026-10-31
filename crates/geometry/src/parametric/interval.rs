@@ -55,6 +55,10 @@ pub struct Interval {
     pub hi: f64,
 }
 
+#[expect(
+    clippy::should_implement_trait,
+    reason = "Named interval arithmetic makes outward rounding and fallible division explicit at proof call sites"
+)]
 impl Interval {
     pub fn new(lo: f64, hi: f64) -> Result<Self, GeometryError> {
         if !lo.is_finite() || !hi.is_finite() || lo > hi {
@@ -460,6 +464,10 @@ pub struct IntervalVec2 {
     pub v: Interval,
 }
 
+#[expect(
+    clippy::should_implement_trait,
+    reason = "Named vector operations retain the explicit outward-interval arithmetic interface"
+)]
 impl IntervalVec2 {
     #[inline]
     pub fn new(u: Interval, v: Interval) -> Self {
@@ -570,6 +578,10 @@ pub struct IntervalVec3 {
     pub z: Interval,
 }
 
+#[expect(
+    clippy::should_implement_trait,
+    reason = "Named vector operations retain the explicit outward-interval arithmetic interface"
+)]
 impl IntervalVec3 {
     #[inline]
     pub fn new(x: Interval, y: Interval, z: Interval) -> Self {
@@ -741,6 +753,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::approx_constant,
+        reason = "The original decimal chart fence deliberately differs from mathematical pi/2"
+    )]
     fn inward_transport_preserves_the_closed_domain_endpoint() {
         let anchor = Interval::point(1.570796326795);
         let offset = Interval::new(-4.0e-7, 0.0).unwrap();

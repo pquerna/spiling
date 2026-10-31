@@ -13,8 +13,7 @@ use super::{
     projected_bounds,
 };
 use crate::{
-    Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm,
-    parametric::{Interval, SurfaceEvaluator},
+    Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, parametric::Interval,
 };
 use spiling_contracts::geometry::{
     GeometryErrorCode, RigidPoseMm, SECTION_PLANE_TOLERANCE_MM, SECTION_SAMPLING_TOLERANCE_MM,
@@ -1566,9 +1565,7 @@ pub(crate) fn analyze_placed_slab(
             None
         } else {
             Some(
-                match (|| -> Result<_, crate::GeometryError> {
-                    super::slab::analyze_slab_sample(source, &prepared, work, cancel)
-                })() {
+                match super::slab::analyze_slab_sample(source, &prepared, work, cancel) {
                     Ok(proof) => Ok(proof),
                     Err(failure)
                         if matches!(
@@ -1660,15 +1657,13 @@ pub(crate) fn analyze_placed_slab(
                                 "closed radial sample commit exceeds coexisting capacity",
                             )
                         })?;
-                    (|| -> Result<_, crate::GeometryError> {
-                        world_candidate.commit(
-                            &mut prepared.section,
-                            &placement,
-                            transform_limit,
-                            work,
-                            cancel,
-                        )
-                    })()?;
+                    world_candidate.commit(
+                        &mut prepared.section,
+                        &placement,
+                        transform_limit,
+                        work,
+                        cancel,
+                    )?;
                     let bound = radial.bound_mm();
                     let occupied_bytes = coexisting_bytes
                         .saturating_add(prepared.section.retained_bytes())
@@ -1733,9 +1728,7 @@ pub(crate) fn analyze_placed_slab(
         let coexisting_bytes = coexisting_bytes.saturating_add(candidate_bytes);
         let source_proof = match source_proof {
             Some(proof) => proof,
-            None => (|| -> Result<_, crate::GeometryError> {
-                super::slab::analyze_slab_sample(source, &prepared, work, cancel)
-            })(),
+            None => super::slab::analyze_slab_sample(source, &prepared, work, cancel),
         };
         let mut result = match source_proof {
             Ok(proof) => proof.into_analysis(prepared.section),
@@ -1767,16 +1760,14 @@ pub(crate) fn analyze_placed_slab(
             sample_world_z_mm: request.sample_world_z_mm,
             native_shape_error_mm: request.native_shape_error_mm,
         };
-        (|| -> Result<_, crate::GeometryError> {
-            place_endpoint_strata(
-                &mut result.endpoint_strata,
-                source.definition(),
-                &map,
-                &placed,
-                work,
-                cancel,
-            )
-        })()?;
+        place_endpoint_strata(
+            &mut result.endpoint_strata,
+            source.definition(),
+            &map,
+            &placed,
+            work,
+            cancel,
+        )?;
         if let Some(seed) = result.collar_complex.as_ref() {
             // A nominal source foliation does not certify actual world critical
             // incidence. Retain the complete native event-face lineage, but prove
@@ -1815,15 +1806,13 @@ pub(crate) fn analyze_placed_slab(
                     "placed slab leaves no native section transform capacity",
                 )
             })?;
-        let arithmetic = (|| -> Result<_, crate::GeometryError> {
-            world_candidate.commit(
-                &mut result.section,
-                &placement,
-                section_byte_limit,
-                work,
-                cancel,
-            )
-        })()?;
+        let arithmetic = world_candidate.commit(
+            &mut result.section,
+            &placement,
+            section_byte_limit,
+            work,
+            cancel,
+        )?;
         let bound = finite(add(
             add(
                 mul(
@@ -1905,17 +1894,15 @@ pub(crate) fn analyze_placed_slab(
                 )?;
             }
         }
-        (|| -> Result<_, crate::GeometryError> {
-            certify_endpoint_radial_products(
-                source,
-                &map,
-                request,
-                &mut result,
-                coexisting_bytes.saturating_sub(candidate_bytes),
-                work,
-                cancel,
-            )
-        })()?;
+        certify_endpoint_radial_products(
+            source,
+            &map,
+            request,
+            &mut result,
+            coexisting_bytes.saturating_sub(candidate_bytes),
+            work,
+            cancel,
+        )?;
         Ok(result)
     })()
 }

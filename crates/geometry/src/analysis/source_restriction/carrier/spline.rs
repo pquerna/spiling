@@ -39,7 +39,7 @@ fn axis(
     count: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Option<([Interval; 2], [f64; 2])>, GeometryError> {
+) -> Result<Option<AffineAxisCorrespondence>, GeometryError> {
     if values.is_empty()
         || values.len() != multiplicities.len()
         || count <= degree
@@ -128,10 +128,10 @@ pub(super) fn try_associate(
     if indices.n.checked_add(1) != Some(nu) || indices.m.checked_add(1) != Some(nv) {
         return Ok(None);
     }
-    if let Some(weights) = &source.weights {
-        if weights.len() != nu {
-            return Ok(None);
-        }
+    if let Some(weights) = &source.weights
+        && weights.len() != nu
+    {
+        return Ok(None);
     }
     // The bridge flattens source rows with v fastest; create_canonical keeps
     // that ordering. It does not swap or reverse either spline axis.
@@ -394,3 +394,6 @@ fn extrusion(
         literal,
     }))
 }
+
+// Original-from-native offset/slope and the original active domain.
+type AffineAxisCorrespondence = ([Interval; 2], [f64; 2]);

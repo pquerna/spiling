@@ -173,10 +173,10 @@ impl<'d> SourceEdgeIncidence<'d> {
             for &id in faceuses {
                 work.charge(1, cancel)?;
                 let record = brep.faceuse(id).map_err(native)?;
-                if record.face == Some(face_id) {
-                    if outward.replace(same(record.orientation)?).is_some() {
-                        return Err(invalid("native material shell repeats a face use"));
-                    }
+                if record.face == Some(face_id)
+                    && outward.replace(same(record.orientation)?).is_some()
+                {
+                    return Err(invalid("native material shell repeats a face use"));
                 }
             }
             let outward =

@@ -1640,7 +1640,7 @@ fn certify_native_critical_collar_using(
                     definition,
                     face,
                     face_index,
-                    domain: &domain,
+                    domain,
                     matrix,
                     pose,
                     inputs,
@@ -1659,7 +1659,7 @@ fn certify_native_critical_collar_using(
                 PortFaceCoverQuery {
                     face,
                     face_index,
-                    domain: &domain,
+                    domain,
                     matrix,
                     pose,
                     ports: native_ports.as_deref().map(Vec::as_slice),
@@ -1700,7 +1700,7 @@ fn certify_native_critical_collar_using(
             continue;
         }
         let covered = (|surface| -> Result<(), GeometryError> {
-            let uv = super::slab::trim_parameter_box(&domain)?;
+            let uv = super::slab::trim_parameter_box(domain)?;
             let mut spans =
                 surface_parameter_boxes(surface, uv, work, cancel).map_err(|error| {
                     cell_context(error, "source parameter spans", Some(face_index), uv, 0)
@@ -4076,7 +4076,13 @@ fn isolated_critical_vertex_star(
     let mixed = functional.dot(jet.duv);
     // A whole interval determinant, not diagonal signs or sampled corners,
     // proves definiteness throughout this exact convex source cell.
-    if !(diagonal[0].mul(diagonal[1]).sub(mixed.square()).lo > 0.0) {
+    if diagonal[0]
+        .mul(diagonal[1])
+        .sub(mixed.square())
+        .lo
+        .partial_cmp(&0.0)
+        != Some(std::cmp::Ordering::Greater)
+    {
         return Ok(None);
     }
     let sign = if diagonal.iter().all(|value| value.hi < 0.0) {
@@ -4238,7 +4244,10 @@ fn isolated_critical_vertex_star(
                 )
             },
         );
-        if !(residual_squared.hi <= limit_squared.lo) {
+        if !matches!(
+            residual_squared.hi.partial_cmp(&limit_squared.lo),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        ) {
             continue;
         }
         let mut connection_normal = cross(connection_jet.du, connection_jet.dv);
@@ -6175,7 +6184,7 @@ fn certify_collar_complex(
     // Establish original event cofaces before adjacent native stars consume
     // their orientation; source order does not establish proof order.
     for event_pass in [true, false] {
-        for (index, &face) in definition.face_ids().iter().enumerate() {
+        for (index, &_face) in definition.face_ids().iter().enumerate() {
             work.charge(1, cancel)?;
             let event_index = events.iter().position(|event| event.face == index);
             if event_index.is_some() != event_pass {
@@ -6194,7 +6203,7 @@ fn certify_collar_complex(
                     critical_geometry_error(error, index, "original trim preparation")
                 })?;
             (|surface| -> Result<(), GeometryError> {
-            let uv = super::slab::trim_parameter_box(&domain)?;
+            let uv = super::slab::trim_parameter_box(domain)?;
             // Admission precedes every knot/adaptive partition: splitting a
             // nested C0 ridge into locally smooth cells cannot erase its
             // independent height-critical incidence obligation.
@@ -6253,7 +6262,7 @@ fn certify_collar_complex(
                     if covered {
                         accepted = true;
                         critical_owned = true;
-                    } else if let Some(cover) = critical_face_boundary_star(CriticalFaceBoundaryStarQuery { definition, face_index: index, surface, domain: &domain, cell: uv, jet: &jet, functional, request, events: &events, edges: &edges, terminal: pending_split.is_some_and(|(_, terminal)| terminal) }, work, cancel)? {
+                    } else if let Some(cover) = critical_face_boundary_star(CriticalFaceBoundaryStarQuery { definition, face_index: index, surface, domain, cell: uv, jet: &jet, functional, request, events: &events, edges: &edges, terminal: pending_split.is_some_and(|(_, terminal)| terminal) }, work, cancel)? {
                         if let Some(band) = cover {
                             if boundary_critical_bands.len() == band_capacity {
                                 return Err(failure(GeometryErrorCode::ResourceLimit, "critical star band capacity exhausted"));

@@ -7,9 +7,7 @@
 
 use super::*;
 use crate::analysis::placed::ActualMaterialCoordinates;
-use crate::parametric::{
-    SurfaceFunctional, surface_functional_enclosures, surface_piecewise_first_enclosure,
-};
+use crate::parametric::surface_piecewise_first_enclosure;
 type Box3 = [Interval; 3];
 type BoundaryVisitor<'a> = dyn for<'s> FnMut(
         BoundaryCell<'s>,

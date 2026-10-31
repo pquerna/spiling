@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source6 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source7 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -31,7 +31,7 @@ prerequisites. No geometry result establishes physical printability or machine r
   constructs native carriers. Unsupported conversion is not malformed source.
   Both SolidCraft libraries are checked-in third-party source under
   `vendor/solidcraft/`; its `UPSTREAM.toml` identifies the exact snapshot,
-  homogeneous-boundary closure correction and retained licensing. They are
+  homogeneous-boundary closure correction, native spline-chart construction and retained licensing. They are
   exchange/evaluation libraries, not another material kernel.
 - [`import/source.rs`](../../crates/geometry/src/import/source.rs) captures
   literal original face, loop, coedge, vertex and selected-curve identities in
@@ -48,6 +48,22 @@ prerequisites. No geometry result establishes physical printability or machine r
   selected masters and source frames remain distinct from generated native
   charts; absence or ambiguity can refuse that operand/finish query without
   conferring original declaration or embedding authority on a native query aid.
+
+Spline import can retain a unique associated original PCURVE as a native chart
+proposal when the retained source carrier and active parameter gauge match.
+Construction may restore rounding-close constant boundary coordinates and shared
+original-vertex endpoints; genuine exterior controls and distinct pole/seam UV
+branches remain separate. Completed BREP geometry validation and independent
+whole-curve native correspondence/containment still decide each query. Literal
+original STEP operands are preserved. The evaluator's active knot domain bounds
+queries even when native trim metadata has a larger conservative rectangle.
+
+The frozen spline housing has physical section regressions below and above its
+blind-pocket floor at Z3/5/7, including reversed plane normals, pocket dimensions
+and source lineage. This does not qualify complete-height sections, directional
+support or display: the Z9 separation, pole-junction and display obligations
+remain independent. Reproduce with `cargo test --locked -p spiling-geometry
+unchanged_spline_housing` and the unchanged corpus inspector.
 
 The importer materializes the decoder's optional `Loop.edges` cache once from
 bounded, reciprocal, owner-checked Loopuse/Edgeuse cycles and charges its retained

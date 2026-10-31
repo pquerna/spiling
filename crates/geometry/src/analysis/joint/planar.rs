@@ -1294,6 +1294,10 @@ fn proposal_distance(
 /// A refusal is a bounded result of the existing sufficient theorem, not
 /// geometry authority. Query resource/cancellation failures remain outer Err.
 #[derive(Debug, Clone, Copy)]
+#[expect(
+    dead_code,
+    reason = "Keep complete refusal operands for Debug diagnostics of the actual-pair collar theorem"
+)]
 pub(super) enum ActualPairCollarRefusal {
     InvalidCycle {
         side: usize,

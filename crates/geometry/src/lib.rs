@@ -51,12 +51,14 @@ pub use kernel::{
     KERNEL_ZONE_TOLERANCE_MM, SurfaceParameterMap, make_kernel_context,
 };
 pub use parametric::{Interval, IntervalVec2, IntervalVec3};
+#[cfg(test)]
+pub(crate) use section::NativeSectionCertificate;
+pub(crate) use section::SectionAuthority;
 pub use section::{
     MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES, NativeSection,
     PreparedSectionSource, SectionChartEndpoint, SectionCurve, SectionEndpoint, SectionGraphChart,
     SectionLoopMm, SectionSpan, prepare_section_source,
 };
-pub(crate) use section::{NativeSectionCertificate, SectionAuthority};
 pub use spiling_contracts::display::EncodedMesh as MeshArtifact;
 pub use spiling_contracts::display::MeshBudget;
 use spiling_contracts::geometry::GeometryErrorCode;

@@ -209,7 +209,6 @@ pub(super) struct CriticalSlabCertificate {
     covered_face_cells: u64,
     covered_coedge_cells: u64,
     regular_flow_speed: Option<f64>,
-    effective_tolerance_mm: f64,
     boundary_scope: Option<SourceBoundaryScope>,
 }
 impl CriticalSlabCertificate {
@@ -258,9 +257,6 @@ impl CriticalSlabCertificate {
     /// and native polygon/plane errors; critical 3D prism error is not XY motion.
     pub(super) fn regular_flow_speed_mm_per_height(&self) -> Option<f64> {
         self.regular_flow_speed
-    }
-    pub(super) fn effective_tolerance_mm(&self) -> f64 {
-        self.effective_tolerance_mm
     }
     pub(super) fn retained_bytes(&self) -> usize {
         // Every neighborhood is constructed with this certificate's capture;
@@ -387,7 +383,6 @@ impl CriticalSlabCertificate {
             covered_face_cells,
             covered_coedge_cells,
             regular_flow_speed: Some(proof.speed()),
-            effective_tolerance_mm: proof.effective_tolerance_mm(),
             boundary_scope: None,
         })
     }
@@ -484,7 +479,6 @@ impl CriticalSlabCertificate {
             covered_face_cells: proof.source_face_count() as u64,
             covered_coedge_cells: 0,
             regular_flow_speed: None,
-            effective_tolerance_mm: proof.effective_tolerance_mm(),
             boundary_scope: proof
                 .has_native_convex_source_proof()
                 .then_some(SourceBoundaryScope::WholeSource),
@@ -746,6 +740,7 @@ pub(super) fn exact_homogeneous_height_identity(
     }
     Ok(sum.sign() == 0)
 }
+#[cfg(test)]
 pub(super) fn exact_unit_vector_identity(
     vector: [f64; 3],
     work: &mut GeometryWorkBudget,
@@ -1995,7 +1990,7 @@ impl SamplePrism {
     fn radial_projection_frame(
         &self,
         position: [Interval; 3],
-    ) -> Result<Option<([Interval; 3], Option<[Interval; 3]>)>, GeometryError> {
+    ) -> Result<Option<RadialProjectionFrame>, GeometryError> {
         let relative =
             std::array::from_fn(|axis| position[axis].sub(Interval::point(self.center[axis])));
         let Some(core_radius) = self.core_radius else {
@@ -2454,12 +2449,14 @@ struct NativeFaceNegativeProposal {
     separation: f64,
 }
 
+#[cfg(test)]
 type PositionNormalEnclosure = ([Interval; 3], [Interval; 3]);
 
 /// UV and 3D edge parameters are independent. Cover the complete retained UV
 /// coedge in its OWN parameter, and exclude a UV subarc only by disjoint native
 /// POSITION enclosures. Union every compatible source normal: this is complete
 /// incidence coverage, never a sampled inverse/nearest parameter assignment.
+#[cfg(test)]
 fn coedge_normal_enclosure(
     domain: &PreparedFaceTrimDomain<'_>,
     coedge_index: usize,
@@ -3150,7 +3147,7 @@ pub(super) fn certify_critical_slab(
             ];
             for (index, &point_uv) in candidates.iter().enumerate() {
                 if candidates[..index].contains(&point_uv) { continue; }
-                let (point, separation) = if index == 0 {
+                let (_point, separation) = if index == 0 {
                     (proposal.position, proposal.separation)
                 } else {
                     // Coordinate-centered proposals stay in this already
@@ -3167,7 +3164,7 @@ pub(super) fn certify_critical_slab(
                     (point, separation)
                 };
                 if material_link::native_face_point_is_retained(
-                    source, &domain, face_index, point_uv,
+                    source, domain, face_index, point_uv,
                     chart_bytes, work, cancel,
                 )? {
                     return Err(failure(GeometryErrorCode::ShapeErrorExceeded,
@@ -3208,14 +3205,14 @@ pub(super) fn certify_critical_slab(
             })?;
             let first_domain = source.face_domain(first.face, chart_bytes, work, cancel)?;
             let second_domain = source.face_domain(second.face, chart_bytes, work, cancel)?;
-            let edge = first_domain.coedges()[first.coedge].edge;
+            let _edge = first_domain.coedges()[first.coedge].edge;
             let central_range = first_domain.coedges()[first.coedge].native_range;
             let paired_scratch = chart_bytes;
             let material_link = material_link::PairedMaterialLink::new(
                 definition,
-                &first_domain,
+                first_domain,
                 first,
-                &second_domain,
+                second_domain,
                 second,
                 central_range,
                 paired_scratch,
@@ -3249,10 +3246,7 @@ pub(super) fn certify_critical_slab(
             // Both selected source traces share the same sealed original spatial gauge.
             let partition_bytes = chart_bytes;
             let source_cuts = native_coedge_parameter_cuts(
-                [
-                    (&first_domain, first.coedge),
-                    (&second_domain, second.coedge),
-                ],
+                [(first_domain, first.coedge), (second_domain, second.coedge)],
                 partition_bytes,
                 work,
                 cancel,
@@ -3488,7 +3482,6 @@ pub(super) fn certify_critical_slab(
         covered_face_cells,
         covered_coedge_cells,
         regular_flow_speed: regular_flow,
-        effective_tolerance_mm: native_tolerance_error,
         boundary_scope: Some(if whole_source {
             SourceBoundaryScope::WholeSource
         } else {
@@ -3574,3 +3567,6 @@ fn occupied_projection(
 
 #[cfg(test)]
 mod tests;
+
+// Radial vector with the optional inner-core radial vector.
+type RadialProjectionFrame = ([Interval; 3], Option<[Interval; 3]>);

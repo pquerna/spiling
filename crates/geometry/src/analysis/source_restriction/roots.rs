@@ -34,6 +34,7 @@ impl EndpointRoot {
     pub(super) fn exact_parameter(&self) -> Option<f64> {
         self.exact
     }
+    #[cfg(test)]
     pub(super) fn source_error_mm(&self) -> f64 {
         self.error_mm
     }
@@ -326,12 +327,12 @@ fn retain(
                 "overlapping monotonic endpoint tubes have inconsistent root enclosures",
             ));
         };
-        if let (Some(a), Some(b)) = (previous.exact, root.exact) {
-            if a != b {
-                return Err(unavailable(
-                    "endpoint coefficient identities contradict monotonic root authority",
-                ));
-            }
+        if let (Some(a), Some(b)) = (previous.exact, root.exact)
+            && a != b
+        {
+            return Err(unavailable(
+                "endpoint coefficient identities contradict monotonic root authority",
+            ));
         }
         root = EndpointRoot {
             parameter,

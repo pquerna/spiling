@@ -54,7 +54,7 @@ async function invoke(args, failure = false, domain = "manufacturing") {
   }
   assert.equal(result.status, 0, `${receipt}: ${result.stderr}`);
   const report = JSON.parse(result.stdout);
-  assert.match(report.hello.engine_build, /planner34;emitter11;verifier17/);
+  assert.match(report.hello.engine_build, /planner35;emitter11;verifier17/);
   return report;
 }
 const json = async (path) => JSON.parse(await readFile(path, "utf8"));

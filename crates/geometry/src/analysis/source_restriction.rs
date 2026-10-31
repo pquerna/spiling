@@ -29,6 +29,10 @@ use roots::EndpointRoot;
 
 /// One selected original spatial operator. Native parameters never enter its
 /// normalized query gauge; the trim owner proves their separate association.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep the selected spatial proof inline in its charged retained owner rather than allocate a boxed variant"
+)]
 pub(crate) enum SourceSpatialRestriction<'a> {
     Line {
         source: &'a OriginalCoedgeSource,
@@ -42,6 +46,10 @@ pub(crate) enum SourceSpatialRestriction<'a> {
     Endpoint(EndpointRestrictedOriginal<'a>),
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The temporary original reference is admitted as one inline proof before correspondence calibration"
+)]
 enum OriginalSpatialReference<'a> {
     Line(SourceLineRestriction<'a>),
     Affine(SourceAffineRestriction<'a>, Option<SourceCurveCalibration>),
@@ -396,6 +404,7 @@ impl<'a> SourceSpatialRestriction<'a> {
                 Self::Endpoint(operator) => operator.heap_bytes(),
             }
     }
+    #[cfg(test)]
     pub(crate) fn original_master_association(&self) -> Option<&SourceCurveCalibration> {
         match self {
             Self::Line { .. } => None,
@@ -450,6 +459,7 @@ impl<'a> SourceSpatialRestriction<'a> {
             Self::Endpoint(operator) => &operator.knot_bands,
         }
     }
+    #[cfg(test)]
     pub(crate) fn original_knot_is_active(
         &self,
         index: usize,
@@ -463,6 +473,7 @@ impl<'a> SourceSpatialRestriction<'a> {
         let [a, b] = self.endpoint_parameters()?;
         Ok((a.hi <= parameter && parameter <= b.lo) || (b.hi <= parameter && parameter <= a.lo))
     }
+    #[cfg(test)]
     pub(crate) fn original_knot_jet(
         &self,
         index: usize,
@@ -489,6 +500,7 @@ impl<'a> SourceSpatialRestriction<'a> {
             }
         }
     }
+    #[cfg(test)]
     pub(crate) fn same_operator(
         &self,
         other: &Self,
@@ -684,20 +696,19 @@ fn endpoint_root(
     // excludes EVERY stationary root. It is disjoint from successful existing
     // stationary recipes, so it may precede their isolator without changing
     // those choices. Nonproof enters the unchanged isolator; errors propagate.
-    if period.is_none() {
-        if let Some(domain) = closed_domain.filter(|domain| domain.range() == search) {
-            if let Some(fence) = roots::closed_fence_endpoint(
-                curve,
-                vertex,
-                domain.range(),
-                allowance,
-                remaining,
-                work,
-                cancel,
-            )? {
-                return Ok(SourceEndpoint::ClosedFence(fence));
-            }
-        }
+    if period.is_none()
+        && let Some(domain) = closed_domain.filter(|domain| domain.range() == search)
+        && let Some(fence) = roots::closed_fence_endpoint(
+            curve,
+            vertex,
+            domain.range(),
+            allowance,
+            remaining,
+            work,
+            cancel,
+        )?
+    {
+        return Ok(SourceEndpoint::ClosedFence(fence));
     }
     let mut roots =
         roots::isolate_endpoint(curve, vertex, search, allowance, remaining, work, cancel)?;

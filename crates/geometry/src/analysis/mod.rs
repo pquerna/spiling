@@ -39,7 +39,6 @@ pub use joint::{
     certify_native_collar_incidence, certify_native_one_sided_source_leaf,
     certify_native_source_leaf, certify_native_union,
 };
-pub(crate) use material_source::MaterialSourceView;
 pub use material_source::{PreparedSolid, prepare_solid};
 pub use placed::{
     PlacedMaterialProjectedBounds, analyze_placed_height_domain, placed_bounds,
@@ -561,7 +560,7 @@ mod work_tests {
     use super::*;
     #[test]
     fn cancellation_does_not_discard_completed_native_work() {
-        let mut work = GeometryWorkBudget::new(10);
+        let work = GeometryWorkBudget::new(10);
         assert_eq!(
             work.charge(6, &AtomicBool::new(true)).unwrap_err().code,
             GeometryErrorCode::Cancelled

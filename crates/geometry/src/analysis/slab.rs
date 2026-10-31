@@ -593,7 +593,7 @@ pub(super) fn clip_height_box(
     heights: [f64; 2],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Option<([[f64; 2]; 2], crate::parametric::SurfaceEnclosure)>, GeometryError> {
+) -> Result<Option<ClippedHeightJet>, GeometryError> {
     let Some(uv) = clip_height_parameter_box(surface, uv, functional, heights, work, cancel)?
     else {
         return Ok(None);
@@ -1186,10 +1186,10 @@ pub(super) fn native_endpoint_height(
         if declared.lo == declared.hi
             && let Some(mut reference) =
                 denominator.product(&E::point(declared.lo), work, cancel)?
+            && reference.subtract(&numerator).is_some()
+            && reference.sign() == 0
         {
-            if reference.subtract(&numerator).is_some() && reference.sign() == 0 {
-                return Ok(declared);
-            }
+            return Ok(declared);
         }
         // Only the new native-line producer gains the nonidentity enclosure
         // route. Non-native consumers keep their existing identity-only lane.
@@ -2176,13 +2176,13 @@ fn analyze_height_functional(
                     ),
                 )
             })?;
-        let bounded_uv = trim_parameter_box(&domain)?;
+        let bounded_uv = trim_parameter_box(domain)?;
         let mut stage = "source face qualification";
         let mut curve_owner: Option<(usize, usize)> = None;
         let mut curve_window: Option<(f64, f64)> = None;
         let mut surface_window = bounded_uv;
         let mut vertex_point: Option<[f64; 3]> = None;
-        super::critical::with_native_material_face(&domain, bounded_uv, |original_face| -> Result<(), GeometryError> {
+        super::critical::with_native_material_face(domain, bounded_uv, |original_face| -> Result<(), GeometryError> {
         let surface = original_face.surface();
         let flat_height = if nominal_fast_paths { flat_native_surface_height(surface, frame, work, cancel)? } else { constant_spline_height(surface, functional, work, cancel)? };
         let glued = if flat_height.is_none() { original_face.prove_gluing(work, cancel)? } else { None };
@@ -2984,7 +2984,7 @@ fn decompose_endpoint_faces(
     };
     let mut incidence = None;
     let functional = HeightFunctional::from_frame(request.frame);
-    for (face_index, &face) in definition.face_ids().iter().enumerate() {
+    for (face_index, &_face) in definition.face_ids().iter().enumerate() {
         work.charge(1, cancel)?;
         let Some(h) =
             constant_source_face_height(definition, face_index, functional, work, cancel)?
@@ -3025,7 +3025,7 @@ fn decompose_endpoint_faces(
         let mut normal_sign = None;
         let oriented = (|| -> Result<bool, GeometryError> {
             let mut spans =
-                surface_parameter_boxes(surface, trim_parameter_box(&domain)?, work, cancel)?;
+                surface_parameter_boxes(surface, trim_parameter_box(domain)?, work, cancel)?;
             let mut stack = Vec::new();
             stack
                 .try_reserve_exact(MAX_DEPTH as usize + 2)
@@ -3354,7 +3354,7 @@ pub(super) fn source_vertical_boundary_flow(
                 }
                 return Ok(true);
             }
-            let bounded_uv = trim_parameter_box(&domain)?;
+            let bounded_uv = trim_parameter_box(domain)?;
             let mut spans = surface_parameter_boxes(surface, bounded_uv, work, cancel)?;
             let mut stack = Vec::new();
             stack
@@ -3701,7 +3701,7 @@ pub(super) fn native_closed_disk_product<'a>(
         let surface = &domain.surface_operand();
         let orientation = domain.orientation();
         let accepted = (|| -> Result<bool, GeometryError> {
-            let uv = trim_parameter_box(&domain)?;
+            let uv = trim_parameter_box(domain)?;
             if !super::critical::critical_face_gluing(surface, uv, work, cancel)? {
                 return Err(GeometryError::new(
                     GeometryErrorCode::AnalysisIndeterminate,
@@ -3922,7 +3922,7 @@ fn source_round_continuation<'a>(
             work,
             cancel,
         )?;
-        let mut cells = vec![(trim_parameter_box(&domain)?, 0u8)];
+        let mut cells = vec![(trim_parameter_box(domain)?, 0u8)];
         let mut feasible = false;
         while let Some((uv, depth)) = cells.pop() {
             work.charge(1, cancel)?;
@@ -4585,18 +4585,16 @@ pub(super) fn prepare_slab_sample<'s, 'd>(
     // declared sampling ledger; actual placed/world and native material gates
     // remain independent and may still refuse the resulting candidate.
     let sampling_chord_error_mm = spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM * 0.5;
-    let section = (|| -> Result<_, crate::GeometryError> {
-        source.section_for_query(
-            &crate::section::SectionQuery {
-                plane,
-                maximum_chord_error_mm: sampling_chord_error_mm,
-                maximum_plane_error_mm,
-            },
-            cancel,
-            section_bytes as u32,
-            work,
-        )
-    })()?;
+    let section = source.section_for_query(
+        &crate::section::SectionQuery {
+            plane,
+            maximum_chord_error_mm: sampling_chord_error_mm,
+            maximum_plane_error_mm,
+        },
+        cancel,
+        section_bytes as u32,
+        work,
+    )?;
     // This exact native reference reaches source proof, world placement and
     // planner output; the native section owns its chord/plane/winding receipts.
     Ok(PreparedSlabSample {
@@ -4665,9 +4663,7 @@ pub(super) fn analyze_slab_sample<'d>(
         frame: request.frame,
         range,
     };
-    let endpoints = (|| -> Result<_, crate::GeometryError> {
-        decompose_endpoint_faces(source, request, resident_bytes, work, cancel)
-    })()?;
+    let endpoints = decompose_endpoint_faces(source, request, resident_bytes, work, cancel)?;
     let invariance = if endpoints.faces.is_empty() {
         (|| -> Result<_, crate::GeometryError> {
             narrow_invariance_with_scratch_limit(
@@ -4755,9 +4751,8 @@ pub(super) fn analyze_slab_sample<'d>(
             covered_coedge_cells: 0,
         })
     } else if round.is_none() {
-        let regular = (|| -> Result<_, crate::GeometryError> {
-            regular_boundary_speed(source, &scope, &endpoints, resident_bytes, work, cancel)
-        })();
+        let regular =
+            regular_boundary_speed(source, &scope, &endpoints, resident_bytes, work, cancel);
         match regular {
             Ok(regular) => Some(regular),
             Err(unresolved) if unresolved.code == GeometryErrorCode::AnalysisIndeterminate => {
@@ -4942,18 +4937,16 @@ pub(super) fn analyze_slab_sample<'d>(
     }
     // At a proved round critical stratum the actual source branches close on
     // a ring/pole; sample approximation tubes, not event separation, stay apart.
-    (|| -> Result<_, crate::GeometryError> {
-        certify_loop_separation(
-            section,
-            if round.is_some() {
-                approximation
-            } else {
-                bound
-            },
-            work,
-            cancel,
-        )
-    })()?;
+    certify_loop_separation(
+        section,
+        if round.is_some() {
+            approximation
+        } else {
+            bound
+        },
+        work,
+        cancel,
+    )?;
     let output_resident = resident_bytes
         .saturating_add(endpoints.retained_bytes())
         .saturating_add(
@@ -5211,7 +5204,7 @@ fn regular_boundary_speed<'a>(
             cancel,
         )?;
         let surface = &domain.surface_operand();
-        let bounded_uv = trim_parameter_box(&domain)?;
+        let bounded_uv = trim_parameter_box(domain)?;
         (|| -> Result<(), GeometryError> {
             if !super::critical::critical_face_gluing(surface, bounded_uv, work, cancel)? {
                 if !overlaps(
@@ -5937,6 +5930,9 @@ fn occupied_envelope_with_position_boxes(
     })
 }
 
+// Contracted UV box and its complete spatial jet.
+type ClippedHeightJet = ([[f64; 2]; 2], crate::parametric::SurfaceEnclosure);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6128,7 +6124,10 @@ mod tests {
         let height = broad_height(&bounds, frame());
         assert_eq!([height.lo, height.hi], [10.0, 12.0]);
         assert!(9.0 < height.lo);
-        assert!(!(10.0 < height.lo), "closed endpoint contact is not empty");
+        assert!(
+            10.0_f64.partial_cmp(&height.lo) != Some(std::cmp::Ordering::Less),
+            "closed endpoint contact is not empty"
+        );
     }
 
     #[test]
@@ -6768,7 +6767,7 @@ mod tests {
         let mut links = HeightSourceLinks::new(&definition, allowance, &mut work, &cancel).unwrap();
         let functional = HeightFunctional::from_frame(frame());
         let mut constant = 0;
-        super::super::critical::with_native_material_face(&domain, trim_parameter_box(&domain).unwrap(),
+        super::super::critical::with_native_material_face(domain, trim_parameter_box(domain).unwrap(),
             |original_face| -> Result<(), GeometryError> {
             let glued = original_face.prove_gluing(&mut work, &cancel)?.unwrap();
             let joint = glued.normal([[1., 1.], [0., 0.]], &mut work, &cancel)?;

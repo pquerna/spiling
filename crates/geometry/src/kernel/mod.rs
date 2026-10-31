@@ -9,10 +9,8 @@ mod cylinder;
 pub(crate) mod trim;
 mod wall;
 pub(crate) use trim::{
-    OriginalCoedgeBinding, OriginalCoedgeCorrespondence, OriginalCorrespondenceProvenance,
-    OriginalSpanInventory, PreparedFaceTrimDomain, PreparedNativeTrimSource, PreparedTrimCurve,
-    PreparedTrimJoint, PreparedTrimSurface, SourceEndpointConnector, TrimClassification,
-    TrimJointKind, certified_curve2d_is_straight_regular,
+    PreparedFaceTrimDomain, PreparedNativeTrimSource, PreparedTrimSurface, TrimClassification,
+    certified_curve2d_is_straight_regular,
 };
 
 use serde::{Deserialize, Serialize};
@@ -322,28 +320,6 @@ pub struct Definition {
     pub(crate) original_source: source::OriginalSourceTopology,
 }
 
-/// Whole-source covering-chart authority. A pole graph does not prove a
-/// regular longitude inverse; its physical and UV bounds remain on the coedge.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum SourceChartCertificate {
-    Unproved,
-    InverseOrExact,
-    PoleMeridianGraph {
-        latitude_axis: usize,
-        pole_endpoints: [bool; 2],
-    },
-}
-
-impl SourceChartCertificate {
-    pub(crate) fn is_certified(self) -> bool {
-        !matches!(self, Self::Unproved)
-    }
-
-    pub(crate) fn has_regular_inverse(self) -> bool {
-        matches!(self, Self::InverseOrExact)
-    }
-}
-
 /// Captured native-material producer identity. Original STEP uncertainty remains
 /// provenance; there is no reconstructed collar or vertex-completion recipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,7 +333,7 @@ impl MaterialRealizationIdentity {
     }
     pub(crate) fn with_source_uncertainty(source_uncertainty_mm: Option<f64>) -> Self {
         Self {
-            version: 6,
+            version: 7,
             source_uncertainty_bits: source_uncertainty_mm.map(f64::to_bits),
         }
     }
@@ -367,7 +343,7 @@ impl MaterialRealizationIdentity {
         bytes[..4].copy_from_slice(&self.version.to_le_bytes());
         bytes[4] = u8::from(self.source_uncertainty_bits.is_some());
         bytes[5..13].copy_from_slice(&self.source_uncertainty_bits.unwrap_or(0).to_le_bytes());
-        for (chunk, value) in bytes[13..].chunks_exact_mut(8).zip([
+        for (chunk, value) in bytes[13..].as_chunks_mut::<8>().0.iter_mut().zip([
             KERNEL_ZONE_TOLERANCE_MM,
             KERNEL_INTERSECTION_TOLERANCE_MM,
             KERNEL_APPROXIMATION_TOLERANCE_MM,
@@ -381,35 +357,6 @@ impl MaterialRealizationIdentity {
 }
 
 impl Definition {
-    /// Prepares the actual retained native edge law. Original STEP operands have
-    /// their own provider and must not be silently substituted for this binding.
-    pub(crate) fn prepare_boundary_curve<'a>(
-        &'a self,
-        edge: solidcore::EdgeId,
-        curve: &'a solidcore::curve::curve::Curve,
-        range: (f64, f64),
-        remaining_bytes: usize,
-        work: &mut crate::GeometryWorkBudget,
-        cancel: &std::sync::atomic::AtomicBool,
-    ) -> Result<crate::parametric::PreparedValidatedCurve<'a>, crate::GeometryError> {
-        if !self
-            .edge_curve(edge)
-            .is_some_and(|retained| std::ptr::eq(retained, curve))
-        {
-            return Err(crate::GeometryError::new(
-                spiling_contracts::geometry::GeometryErrorCode::InvalidGeometry,
-                "prepared native curve is not the retained edge operand",
-            ));
-        }
-        crate::parametric::PreparedValidatedCurve::new(
-            curve,
-            [range.0, range.1],
-            1.0,
-            remaining_bytes,
-            work,
-            cancel,
-        )
-    }
     pub fn id(&self) -> &DefinitionId {
         &self.id
     }
@@ -565,12 +512,14 @@ const KERNEL_MODEL_SIZE_ESTIMATE_MM: f64 = 100.0;
 
 /// Constructs a deterministic thread-isolated `solidcore::Kernel` context with Spiling mm tolerances.
 pub fn make_kernel_context() -> solidcore::Kernel {
-    let mut tolerances = solidcore::Tolerances::default();
-    tolerances.zone_tol_3d = KERNEL_ZONE_TOLERANCE_MM;
-    tolerances.xsect_tol_3d = KERNEL_INTERSECTION_TOLERANCE_MM;
-    tolerances.approx_tol_3d = KERNEL_APPROXIMATION_TOLERANCE_MM;
-    tolerances.ang_tol_deg = KERNEL_ANGULAR_TOLERANCE_DEGREES;
-    tolerances.model_size_estimate = KERNEL_MODEL_SIZE_ESTIMATE_MM;
+    let tolerances = solidcore::Tolerances {
+        zone_tol_3d: KERNEL_ZONE_TOLERANCE_MM,
+        xsect_tol_3d: KERNEL_INTERSECTION_TOLERANCE_MM,
+        approx_tol_3d: KERNEL_APPROXIMATION_TOLERANCE_MM,
+        ang_tol_deg: KERNEL_ANGULAR_TOLERANCE_DEGREES,
+        model_size_estimate: KERNEL_MODEL_SIZE_ESTIMATE_MM,
+        ..solidcore::Tolerances::default()
+    };
 
     let options = solidcore::KernelOptions {
         tolerances,

@@ -190,23 +190,21 @@ fn endpoint_candidates(
     cancel: &AtomicBool,
 ) -> Result<RawEndpointCandidates, GeometryError> {
     let remaining = available(remaining, std::mem::size_of::<RawEndpointCandidates>())?;
-    if selected.period.is_none() {
-        if let Some(domain) = selected
+    if selected.period.is_none()
+        && let Some(domain) = selected
             .closed_domain
             .filter(|domain| domain.range() == selected.search)
-        {
-            if let Some(fence) = roots::closed_fence_endpoint(
-                lifted,
-                vertex,
-                domain.range(),
-                allowance,
-                remaining,
-                work,
-                cancel,
-            )? {
-                return Ok(RawEndpointCandidates::ClosedFence(fence));
-            }
-        }
+        && let Some(fence) = roots::closed_fence_endpoint(
+            lifted,
+            vertex,
+            domain.range(),
+            allowance,
+            remaining,
+            work,
+            cancel,
+        )?
+    {
+        return Ok(RawEndpointCandidates::ClosedFence(fence));
     }
     roots::isolate_endpoint(
         lifted,
@@ -310,6 +308,10 @@ fn same_periodic_branch(
 
 /// The Arc is the already admitted spatial payload, not a new root recipe or a
 /// second allocation. Its bytes are charged once by the owning trim cache.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Calibrated PCURVE data stays inline in the admitted restriction; shared data already uses its existing Arc owner"
+)]
 enum ParameterRecipe<'d> {
     Shared(Arc<SourceSpatialRestriction<'d>>),
     Calibrated {
@@ -774,7 +776,6 @@ impl<'d> SourcePcurveRestriction<'d> {
                 face,
                 coedge,
                 pcurve,
-                spatial,
                 allowance,
                 available(remaining, fixed)?,
                 work,
@@ -1113,6 +1114,7 @@ impl<'d> SourcePcurveRestriction<'d> {
         self.calibration()
             .map_or(0.0, SourceCurveCalibration::relative_derivative_error_bound)
     }
+    #[cfg(test)]
     pub(crate) fn exact_source_endpoints(&self) -> bool {
         self.exact_endpoints
     }
@@ -1149,10 +1151,10 @@ impl<'d> SourcePcurveRestriction<'d> {
                                 turns: bt,
                             },
                         ] = operator.endpoints
+                            && a == b
+                            && at != bt
                         {
-                            if a == b && at != bt {
-                                return Ok(true);
-                            }
+                            return Ok(true);
                         }
                     }
                     let exact = |endpoint| match endpoint {
@@ -1181,10 +1183,10 @@ impl<'d> SourcePcurveRestriction<'d> {
                             turns: bt,
                         },
                     ] = raw.endpoints
+                        && a == b
+                        && at != bt
                     {
-                        if a == b && at != bt {
-                            return Ok(true);
-                        }
+                        return Ok(true);
                     }
                 }
                 let exact = |endpoint| match endpoint {
@@ -1540,10 +1542,8 @@ mod tests {
             SourceSpatialRestriction::new(source, allowance, BYTES, &mut work, &cancel).unwrap(),
         );
         assert!(!preferred_identity(face, pcurve, &spatial, &mut work, &cancel).unwrap());
-        let mut selected = window::select(
-            face, source, pcurve, &spatial, allowance, BYTES, &mut work, &cancel,
-        )
-        .unwrap();
+        let mut selected =
+            window::select(face, source, pcurve, allowance, BYTES, &mut work, &cancel).unwrap();
         assert_eq!(
             selected.closed_domain.unwrap().range(),
             [-19.7537037037, 6.646296296296]
@@ -1656,10 +1656,8 @@ mod tests {
                 SourceSpatialRestriction::new(source, allowance, BYTES, &mut work, &cancel)
                     .unwrap(),
             );
-            let selected = window::select(
-                face, source, pcurve, &spatial, allowance, BYTES, &mut work, &cancel,
-            )
-            .unwrap();
+            let selected =
+                window::select(face, source, pcurve, allowance, BYTES, &mut work, &cancel).unwrap();
             assert!(selected.raw[0] < selected.search[0]);
             assert!(selected.search[1] < selected.raw[1]);
             assert!(selected.closed_domain.is_none());

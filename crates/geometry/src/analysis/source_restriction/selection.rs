@@ -169,19 +169,15 @@ pub(super) fn select_spatial_curve(
     // An untrimmed, nonperiodic selected PCurve LINE has no natural spatial
     // window. Reuse its existing source-coefficient cover, rather than assign
     // the independently gauged 3D reference's parameters or use native UV.
-    if matches!(curve, Curve::SurfaceCurve { .. }) {
-        if let Some(pcurve) = crate::kernel::source_operand::preferred_source_pcurve(curve)? {
-            if matches!(pcurve.curve.as_ref(), Curve::Line { .. })
-                && crate::kernel::source_operand::original_curve_parameter_period(
-                    curve, work, cancel,
-                )?
-                .is_none()
-            {
-                return super::pcurve::selected_master_window(
-                    source, pcurve, same_sense, allowance, remaining, work, cancel,
-                );
-            }
-        }
+    if matches!(curve, Curve::SurfaceCurve { .. })
+        && let Some(pcurve) = crate::kernel::source_operand::preferred_source_pcurve(curve)?
+        && matches!(pcurve.curve.as_ref(), Curve::Line { .. })
+        && crate::kernel::source_operand::original_curve_parameter_period(curve, work, cancel)?
+            .is_none()
+    {
+        return super::pcurve::selected_master_window(
+            source, pcurve, same_sense, allowance, remaining, work, cancel,
+        );
     }
     select_curve(curve, same_sense, work, cancel)
 }
@@ -238,29 +234,29 @@ pub(super) fn select_curve(
                         .iter()
                         .any(|value| matches!(value, Trim::Parameter(_)))
                 });
-                if *preference != TrimPreference::Parameter || !parameters_present {
-                    if let [Some(a), Some(b)] = points {
-                        if *preference == TrimPreference::Unspecified && parameters_present {
-                            return Err(unavailable(
-                                "unspecified dual trim selectors require proved parameter/Cartesian equivalence",
-                            ));
-                        }
-                        let targets = [a, b];
-                        if declared_endpoints.is_some()
-                            || endpoint_targets.is_some_and(|old| old != targets)
-                        {
-                            return Err(unavailable(
-                                "nested selected Cartesian restrictions require endpoint containment correspondence",
-                            ));
-                        }
-                        endpoint_targets = Some(targets);
-                        increasing = increasing == *sense;
-                        curve = basis;
-                        if depth == 63 {
-                            return Err(resource());
-                        }
-                        continue;
+                if (*preference != TrimPreference::Parameter || !parameters_present)
+                    && let [Some(a), Some(b)] = points
+                {
+                    if *preference == TrimPreference::Unspecified && parameters_present {
+                        return Err(unavailable(
+                            "unspecified dual trim selectors require proved parameter/Cartesian equivalence",
+                        ));
                     }
+                    let targets = [a, b];
+                    if declared_endpoints.is_some()
+                        || endpoint_targets.is_some_and(|old| old != targets)
+                    {
+                        return Err(unavailable(
+                            "nested selected Cartesian restrictions require endpoint containment correspondence",
+                        ));
+                    }
+                    endpoint_targets = Some(targets);
+                    increasing = increasing == *sense;
+                    curve = basis;
+                    if depth == 63 {
+                        return Err(resource());
+                    }
+                    continue;
                 }
                 let endpoints = [
                     parameter(trim_1, *preference, work, cancel)?,

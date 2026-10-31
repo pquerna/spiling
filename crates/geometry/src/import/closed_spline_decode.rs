@@ -97,7 +97,7 @@ fn closed_rows(
     e: &Entity,
     base: &[Param],
     cancel: &AtomicBool,
-) -> Result<Option<([usize; 2], [bool; 2], bool)>> {
+) -> Result<Option<ClosedRowInventory>> {
     let Some(rows) = base.get(2).and_then(Param::as_list) else {
         return Ok(None);
     };
@@ -445,24 +445,24 @@ pub(super) fn read_solid(
             continue;
         };
         for d in 0..2 {
-            if equal[d] && base.get(4 + d).and_then(Param::as_bool) == Some(true) {
-                if let Some(a) = axis(
+            if equal[d]
+                && base.get(4 + d).and_then(Param::as_bool) == Some(true)
+                && let Some(a) = axis(
                     carrier, e, d, controls, rational, &mut bytes, byte_limit, cancel,
-                )? {
-                    if axes.len() == axes.capacity() {
-                        let additional = axes.capacity().max(1);
-                        let growth =
-                            additional.checked_mul(size_of::<Axis>()).ok_or_else(|| {
-                                error(
-                                    GeometryErrorCode::ResourceLimit,
-                                    "closed spline decode metadata size overflow",
-                                )
-                            })?;
-                        charge(&mut bytes, growth, byte_limit)?;
-                        axes.reserve_exact(additional);
-                    }
-                    axes.push(a);
+                )?
+            {
+                if axes.len() == axes.capacity() {
+                    let additional = axes.capacity().max(1);
+                    let growth = additional.checked_mul(size_of::<Axis>()).ok_or_else(|| {
+                        error(
+                            GeometryErrorCode::ResourceLimit,
+                            "closed spline decode metadata size overflow",
+                        )
+                    })?;
+                    charge(&mut bytes, growth, byte_limit)?;
+                    axes.reserve_exact(additional);
                 }
+                axes.push(a);
             }
         }
     }
@@ -529,6 +529,9 @@ pub(super) fn read_solid(
     }
     Ok(solid)
 }
+
+// Control dimensions, exact closed-row flags and rationality.
+type ClosedRowInventory = ([usize; 2], [bool; 2], bool);
 
 #[cfg(test)]
 mod tests {

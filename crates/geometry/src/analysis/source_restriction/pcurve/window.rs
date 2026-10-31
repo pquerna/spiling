@@ -4,7 +4,7 @@
 
 //! Finite candidate covers in the literal PCURVE gauge. A cover is not endpoint
 //! incidence or permission to extend an authored trim; the owner proves those.
-use crate::analysis::source_restriction::{SourceSpatialRestriction, selection};
+use crate::analysis::source_restriction::selection;
 use crate::kernel::source::{OriginalCoedgeSource, OriginalFaceSource, OriginalPcurveSource};
 use crate::kernel::source_operand::{PreparedOriginalCurve, PreparedOriginalSurface};
 use crate::parametric::{Interval, down, up};
@@ -193,7 +193,6 @@ pub(super) fn select(
     face: &OriginalFaceSource,
     coedge: &OriginalCoedgeSource,
     pcurve: &OriginalPcurveSource,
-    _spatial: &SourceSpatialRestriction<'_>,
     allowance: f64,
     remaining: usize,
     work: &mut GeometryWorkBudget,

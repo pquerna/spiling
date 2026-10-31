@@ -299,72 +299,70 @@ impl<'d> NativeTrimCoedge<'d> {
             ));
         }
         let mut jet = parametric::curve2d_piecewise_jet(self.curve, range, work, cancel)?;
-        if let Some(domain) = self.native_carrier_domain {
-            if (0..2).any(|axis| {
+        if let Some(domain) = self.native_carrier_domain
+            && (0..2).any(|axis| {
                 jet.position[axis].lo < domain[axis][0] || jet.position[axis].hi > domain[axis][1]
-            }) {
-                // Only complete homogeneous coefficient containment removes
-                // outward UV arithmetic excess. Actual excursions and unproved
-                // periodic aliases cannot acquire carrier-domain authority.
-                let captured = self
-                    .native_carrier_containment
-                    .as_ref()
-                    .is_some_and(|proof| {
-                        std::ptr::eq(proof.curve, self.curve)
-                            && proof.domain == domain
-                            && proof.range[0] <= range[0]
-                            && range[1] <= proof.range[1]
-                    });
-                if !captured
-                    && !parametric::curve2d_image_within_box(
-                        self.curve, range, domain, work, cancel,
-                    )?
-                {
-                    // Failure-only native evaluations distinguish a loose
-                    // whole-cell hull from an actual fitted-chart excursion.
-                    // These points supply diagnostics, never containment.
-                    let parameters = [range[0], range[0] * 0.5 + range[1] * 0.5, range[1]];
-                    let mut point_images = [[Interval::point(0.0); 2]; 3];
-                    for (parameter, image) in parameters.into_iter().zip(&mut point_images) {
-                        let point = parametric::CurveEvaluator::tensor(
-                            self.curve,
-                            [parameter; 2],
-                            0,
-                            work,
-                            cancel,
-                        )?[0];
-                        *image = [point[0], point[1]];
-                    }
-                    return Err(GeometryError::new(
-                        GeometryErrorCode::ConditioningFailure,
-                        format!(
-                            "native face {:?} coedge {}/{} UV image lacks immutable carrier containment: \
+            })
+        {
+            // Only complete homogeneous coefficient containment removes
+            // outward UV arithmetic excess. Actual excursions and unproved
+            // periodic aliases cannot acquire carrier-domain authority.
+            let captured = self
+                .native_carrier_containment
+                .as_ref()
+                .is_some_and(|proof| {
+                    std::ptr::eq(proof.curve, self.curve)
+                        && proof.domain == domain
+                        && proof.range[0] <= range[0]
+                        && range[1] <= proof.range[1]
+                });
+            if !captured
+                && !parametric::curve2d_image_within_box(self.curve, range, domain, work, cancel)?
+            {
+                // Failure-only native evaluations distinguish a loose
+                // whole-cell hull from an actual fitted-chart excursion.
+                // These points supply diagnostics, never containment.
+                let parameters = [range[0], range[0] * 0.5 + range[1] * 0.5, range[1]];
+                let mut point_images = [[Interval::point(0.0); 2]; 3];
+                for (parameter, image) in parameters.into_iter().zip(&mut point_images) {
+                    let point = parametric::CurveEvaluator::tensor(
+                        self.curve,
+                        [parameter; 2],
+                        0,
+                        work,
+                        cancel,
+                    )?[0];
+                    *image = [point[0], point[1]];
+                }
+                return Err(GeometryError::new(
+                    GeometryErrorCode::ConditioningFailure,
+                    format!(
+                        "native face {:?} coedge {}/{} UV image lacks immutable carrier containment: \
                              owned_native_range={:?}, uv_range=[{:.17e},{:.17e}], \
                              uv_image=[[{:.17e},{:.17e}],[{:.17e},{:.17e}]], \
                              carrier_domain=[[{:.17e},{:.17e}],[{:.17e},{:.17e}]]; \
                              native_point_parameters={parameters:?}, native_point_uv={point_images:?}; \
                              no tolerance or periodic alias authority",
-                            self.face,
-                            self.loop_index,
-                            self.index,
-                            self.native_range,
-                            range[0],
-                            range[1],
-                            jet.position[0].lo,
-                            jet.position[0].hi,
-                            jet.position[1].lo,
-                            jet.position[1].hi,
-                            domain[0][0],
-                            domain[0][1],
-                            domain[1][0],
-                            domain[1][1],
-                        ),
-                    ));
-                }
-                for axis in 0..2 {
-                    jet.position[axis] = jet.position[axis]
-                        .intersect(Interval::new(domain[axis][0], domain[axis][1])?)?;
-                }
+                        self.face,
+                        self.loop_index,
+                        self.index,
+                        self.native_range,
+                        range[0],
+                        range[1],
+                        jet.position[0].lo,
+                        jet.position[0].hi,
+                        jet.position[1].lo,
+                        jet.position[1].hi,
+                        domain[0][0],
+                        domain[0][1],
+                        domain[1][0],
+                        domain[1][1],
+                    ),
+                ));
+            }
+            for axis in 0..2 {
+                jet.position[axis] = jet.position[axis]
+                    .intersect(Interval::new(domain[axis][0], domain[axis][1])?)?;
             }
         }
         Ok(jet)
@@ -981,11 +979,7 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         let surface = definition
             .face_surface(face_id)
             .ok_or_else(|| unavailable("native chart face has no coefficient carrier"))?;
-        let natural = surface.natural_uv_domain();
-        let domain = [
-            [natural.u_min(), natural.u_max()],
-            [natural.v_min(), natural.v_max()],
-        ];
+        let domain = parametric::surface_active_domain(surface)?;
         for axis in domain {
             Interval::new(axis[0], axis[1])?;
             if axis[0] >= axis[1] {
@@ -2260,16 +2254,14 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             if let (Some(affine), Some(original)) = (
                 line.exact_affine_coefficients(work, cancel)?,
                 circle.original_curve(),
-            ) {
-                if exact_affine_literal_circle_disjoint(
-                    &affine,
-                    line.active_range(),
-                    original,
-                    work,
-                    cancel,
-                )? {
-                    return Ok(true);
-                }
+            ) && exact_affine_literal_circle_disjoint(
+                &affine,
+                line.active_range(),
+                original,
+                work,
+                cancel,
+            )? {
+                return Ok(true);
             }
         }
         let cell = self.original_joints[joint].enclosure;
@@ -4478,15 +4470,7 @@ fn original_plane_line_coefficients(
     curve: &solidcraft_step::geom::Curve,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<
-    Option<(
-        [ExactCoefficient; 3],
-        [ExactCoefficient; 3],
-        [ExactCoefficient; 2],
-        [ExactCoefficient; 2],
-    )>,
-    GeometryError,
-> {
+) -> Result<Option<PlaneLineCoefficients>, GeometryError> {
     work.charge(1, cancel)?;
     let solidcraft_step::geom::Surface::Plane { position } = surface else {
         return Ok(None);
@@ -5320,21 +5304,19 @@ fn calibrate_curves(
     if let (Some(a), Some(b)) = (
         reference.exact_affine_coefficients(work, cancel)?,
         target.exact_affine_coefficients(work, cancel)?,
-    ) {
-        if a.denominator.sign() != 0
-            && a.derivative.iter().any(|v| v.sign() != 0)
-            && affine_endpoint_identity(&a, source_range, &b, target_range, work, cancel)?
-        {
-            return Ok(CurveCalibrationMap {
-                segments: Vec::new(),
-                cuts: Vec::new(),
-                source_range,
-                target_range,
-                affine: true,
-                maximum_position_error_mm: 0.0,
-                relative_derivative_error_bound: theorem.initial_relative_receipt(),
-            });
-        }
+    ) && a.denominator.sign() != 0
+        && a.derivative.iter().any(|v| v.sign() != 0)
+        && affine_endpoint_identity(&a, source_range, &b, target_range, work, cancel)?
+    {
+        return Ok(CurveCalibrationMap {
+            segments: Vec::new(),
+            cuts: Vec::new(),
+            source_range,
+            target_range,
+            affine: true,
+            maximum_position_error_mm: 0.0,
+            relative_derivative_error_bound: theorem.initial_relative_receipt(),
+        });
     }
     if copied_source_spline_identity(reference, target, source_range, target_range, work, cancel)? {
         return Ok(CurveCalibrationMap {
@@ -5593,6 +5575,10 @@ impl PreparedSharedSpatialCurve<'_> {
             - size_of::<SourceCurveCalibration>()
     }
 }
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Each original UV proof is stored inline and charged by the coedge owner; do not add a per-coedge box allocation"
+)]
 enum OriginalUvCurve<'d> {
     PlaneLine(SourcePlaneLineProjection<'d>),
     DerivedPlane(SourcePlanePullback<'d>),
@@ -5941,24 +5927,6 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         )?;
         let chart = self.original_coedge_uv_piecewise_jet(index, range, work, cancel)?;
         Ok((spatial, chart))
-    }
-    pub(crate) fn same_original_spatial_trace(
-        &self,
-        index: usize,
-        other: &PreparedFaceTrimDomain<'_>,
-        other_index: usize,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<bool, GeometryError> {
-        work.charge(1, cancel)?;
-        if !std::ptr::eq(self.definition, other.definition) {
-            return Ok(false);
-        }
-        self.original_spatial_restriction(index)?.same_operator(
-            other.original_spatial_restriction(other_index)?,
-            work,
-            cancel,
-        )
     }
 
     /// The callback uses the actual spatial edge gauge, not UV trim parameters.
@@ -8156,28 +8124,26 @@ fn exact_uv_endpoint_equal(
     if let (Some(a), Some(b)) = (
         a.curve.exact_affine_coefficients(work, cancel)?,
         b.curve.exact_affine_coefficients(work, cancel)?,
-    ) {
-        if affine_endpoint_identity(&a, [ta; 2], &b, [tb; 2], work, cancel)? {
-            return Ok(true);
-        }
+    ) && affine_endpoint_identity(&a, [ta; 2], &b, [tb; 2], work, cancel)?
+    {
+        return Ok(true);
     }
     if let (OriginalUvCurve::PlaneLine(a), OriginalUvCurve::PlaneLine(b)) =
         (&a.curve.curve, &b.curve.curve)
+        && a.exact_endpoints
+        && b.exact_endpoints
+        && std::ptr::eq(a.surface, b.surface)
+        && a.vertices[usize::from(ta == 1.0)] == b.vertices[usize::from(tb == 1.0)]
     {
-        if a.exact_endpoints
-            && b.exact_endpoints
-            && std::ptr::eq(a.surface, b.surface)
-            && a.vertices[usize::from(ta == 1.0)] == b.vertices[usize::from(tb == 1.0)]
-        {
-            // Both actual affine plane lifts equal the SAME captured point;
-            // the already-qualified original plane Gram inverse is injective.
-            return Ok(true);
-        }
+        // Both actual affine plane lifts equal the SAME captured point;
+        // the already-qualified original plane Gram inverse is injective.
+        return Ok(true);
     }
-    if std::ptr::eq(a, b) && ta != tb {
-        if let OriginalUvCurve::Pcurve(curve) = &a.curve.curve {
-            return curve.closed_uv_endpoint_identity(work, cancel);
-        }
+    if std::ptr::eq(a, b)
+        && ta != tb
+        && let OriginalUvCurve::Pcurve(curve) = &a.curve.curve
+    {
+        return curve.closed_uv_endpoint_identity(work, cancel);
     }
     Ok(false)
 }
@@ -8707,6 +8673,14 @@ impl PreparedFaceTrimDomain<'_> {
         ))
     }
 }
+
+// Spatial line origin/direction and its two plane-chart coefficient rows.
+type PlaneLineCoefficients = (
+    [ExactCoefficient; 3],
+    [ExactCoefficient; 3],
+    [ExactCoefficient; 2],
+    [ExactCoefficient; 2],
+);
 
 #[cfg(test)]
 mod tests {
@@ -9587,7 +9561,7 @@ mod tests {
             ref_direction: [1.0, 0.0, 0.0],
         };
         let circle = C::Circle {
-            position: frame.clone(),
+            position: frame,
             radius: 1.0,
         };
         let affine = |p: [f64; 2], d: [f64; 2], w| parametric::ExactAffineCurve {
@@ -9627,7 +9601,7 @@ mod tests {
         let nonorthonormal = C::Circle {
             position: Placement {
                 ref_direction: [2.0, 0.0, 0.0],
-                ..frame.clone()
+                ..frame
             },
             radius: 1.0,
         };

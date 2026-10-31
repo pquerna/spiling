@@ -387,7 +387,7 @@ pub(super) fn intersect(
                 "native face intersection has odd trim incidence",
             ));
         }
-        for pair in events.chunks_exact(2) {
+        for pair in events.as_chunks::<2>().0 {
             work.charge(1, cancel)?;
             let [a, b] = [pair[0], pair[1]];
             if a.crossing != -1 || b.crossing != 1 || a.uv[independent].hi >= b.uv[independent].lo {
@@ -551,7 +551,7 @@ fn exclude_carrier_roots(
     if depth >= 16 {
         return Ok(false);
     }
-    let axis = usize::from(depth % 2 != 0);
+    let axis = usize::from(!depth.is_multiple_of(2));
     let middle = uv[axis][0] * 0.5 + uv[axis][1] * 0.5;
     if middle <= uv[axis][0] || middle >= uv[axis][1] {
         return Ok(false);
@@ -576,7 +576,7 @@ fn classify_graph(
     plane: PlaneMm,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Option<(usize, i8, [[f64; 2]; 2])>, GeometryError> {
+) -> Result<Option<MonotoneChartGraph>, GeometryError> {
     if !p::surface_parameter_span_continuous(surface, domain, work, cancel)? {
         return Err(indeterminate(
             "native face chart has an unqualified C0 knot join",
@@ -702,7 +702,11 @@ fn cover_graph(
     // a dependent derivative sign (for example on a broad spherical chart).
     // Refining only the dependent coordinate need not tighten either bound.
     // Alternate coordinates while retaining the same complete cover and cap.
-    let split_axis = if depth % 2 == 0 { axis } else { 1 - axis };
+    let split_axis = if depth.is_multiple_of(2) {
+        axis
+    } else {
+        1 - axis
+    };
     let mid = uv[split_axis][0] * 0.5 + uv[split_axis][1] * 0.5;
     if mid <= uv[split_axis][0] || mid >= uv[split_axis][1] {
         return Err(indeterminate(
@@ -884,9 +888,9 @@ impl<'a> Boundary<'a> {
                     "native UV trim has an unqualified C0 knot join",
                 ));
             }
-            let box_ = surface.natural_uv_domain();
-            let min = box_.min();
-            let max = box_.max();
+            let domain = p::surface_active_domain(surface)?;
+            let min = solidcore::math::Point2::new(domain[0][0], domain[1][0]);
+            let max = solidcore::math::Point2::new(domain[0][1], domain[1][1]);
             if !p::curve2d_image_within_box(
                 uv_curve,
                 [d.min(), d.max()],
@@ -995,11 +999,11 @@ impl<'a> Boundary<'a> {
         r: [f64; 2],
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<([Interval; 3], [Interval; 3], [Interval; 2], [Interval; 2]), GeometryError> {
+    ) -> Result<BoundaryJet, GeometryError> {
         let (mut uv, derivative) = self.chart(r, work, cancel)?;
-        let domain = self.surface.natural_uv_domain();
-        let min = domain.min();
-        let max = domain.max();
+        let domain = p::surface_active_domain(self.surface)?;
+        let min = solidcore::math::Point2::new(domain[0][0], domain[1][0]);
+        let max = solidcore::math::Point2::new(domain[0][1], domain[1][1]);
         // An outward chart interval may extend by rounding; intersecting with
         // the declared chart is valid only after the native trim binding itself
         // is known to stay there, not by silently clamping a source pcurve.
@@ -1961,6 +1965,11 @@ pub(crate) fn canonicalize_section_in_place(
     canonicalize_loops(section, work, cancel)?;
     certify_polygons(section, work, cancel)
 }
+
+// Dependent axis, its strict sign and the retained graph rectangle.
+type MonotoneChartGraph = (usize, i8, [[f64; 2]; 2]);
+// Spatial position/first derivative followed by UV position/first derivative.
+type BoundaryJet = ([Interval; 3], [Interval; 3], [Interval; 2], [Interval; 2]);
 
 #[cfg(test)]
 mod correspondence_tests {

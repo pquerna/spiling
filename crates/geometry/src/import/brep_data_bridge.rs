@@ -23,7 +23,6 @@ use solidcore::geom::axis2_placement::Axis2Placement;
 use solidcore::geom::extent1d::Extent1d;
 use solidcore::geom::extent2d::Extent2d;
 use solidcore::geom::object::ObjectRef;
-use solidcore::geom::vector2d::Point2;
 use solidcore::geom::vector3d::{Point3, Vec3};
 use solidcore::kernel::Kernel;
 use solidcore::nurbs::b_spline_curve::p1::CanonicalData;
@@ -126,13 +125,13 @@ fn unique_knots_and_multiplicities(flat: &[f64]) -> (Vec<f64>, Vec<usize>) {
     let mut knots: Vec<f64> = Vec::new();
     let mut mults: Vec<usize> = Vec::new();
     for &k in flat {
-        if let Some(&last) = knots.last() {
-            if k == last {
-                if let Some(m) = mults.last_mut() {
-                    *m += 1;
-                }
-                continue;
+        if let Some(&last) = knots.last()
+            && k == last
+        {
+            if let Some(m) = mults.last_mut() {
+                *m += 1;
             }
+            continue;
         }
         knots.push(k);
         mults.push(1);
@@ -850,7 +849,10 @@ fn recompute_face_domain(
                 b::Curve2::RationalSpline { homogeneous, .. } => {
                     // A mixed/nonpositive-weight hull cannot narrow a chart.
                     // In particular, never silently omit its coefficients.
-                    if homogeneous.iter().any(|h| !(h[2] > 0.0)) {
+                    if homogeneous
+                        .iter()
+                        .any(|h| h[2].partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater))
+                    {
                         return Ok(previous);
                     }
                     for h in homogeneous {
@@ -870,7 +872,7 @@ fn recompute_face_domain(
         // existing chart. No new tolerance, natural period or wider domain.
         let pad = 1e-6 * (1.0 + (z - a)) + 1e-9 * a.abs().max(z.abs());
         out[d] = [previous[d][0].max(a - pad), previous[d][1].min(z + pad)];
-        if !(out[d][0] < out[d][1]) {
+        if out[d][0].partial_cmp(&out[d][1]) != Some(std::cmp::Ordering::Less) {
             return Err(super::invalid("normalized topology empty face domain"));
         }
     }
@@ -1435,7 +1437,7 @@ fn build_revolution_surface(
         }
     };
     let len = dot(axis, axis).sqrt();
-    if !(len > 0.0) {
+    if len.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return Err(BridgeError::Invalid("revolution axis"));
     }
     let z = scale(axis, 1.0 / len);
@@ -1755,41 +1757,41 @@ pub(crate) mod analytic {
         tol: f64,
     ) -> Option<(b::Surface, [[f64; 2]; 2])> {
         let linear = |k: &[f64]| k.len() == 4 && k[0] == k[1] && k[2] == k[3] && k[1] < k[2];
-        let (rows, arc_knots, arc_range, line_knots, line_range): (
-            [Vec<[f64; 4]>; 2],
-            &[f64],
-            [f64; 2],
-            &[f64],
-            [f64; 2],
-        ) = if net.iter().all(|r| r.len() == 2) && linear(v_knots) && !linear(u_knots) {
-            (
-                [
-                    net.iter().map(|r| r[0]).collect(),
-                    net.iter().map(|r| r[1]).collect(),
-                ],
-                u_knots,
-                domain[0],
-                v_knots,
-                domain[1],
-            )
-        } else if net.len() == 2 && linear(u_knots) && !linear(v_knots) {
-            (
-                [net.first()?.clone(), net.get(1)?.clone()],
-                v_knots,
-                domain[1],
-                u_knots,
-                domain[0],
-            )
-        } else {
-            return None;
-        };
+        type ExtrudedCircleRows<'a> =
+            ([Vec<[f64; 4]>; 2], &'a [f64], [f64; 2], &'a [f64], [f64; 2]);
+        let (rows, arc_knots, arc_range, line_knots, line_range): ExtrudedCircleRows<'_> =
+            if net.iter().all(|r| r.len() == 2) && linear(v_knots) && !linear(u_knots) {
+                (
+                    [
+                        net.iter().map(|r| r[0]).collect(),
+                        net.iter().map(|r| r[1]).collect(),
+                    ],
+                    u_knots,
+                    domain[0],
+                    v_knots,
+                    domain[1],
+                )
+            } else if net.len() == 2 && linear(u_knots) && !linear(v_knots) {
+                (
+                    [net.first()?.clone(), net.get(1)?.clone()],
+                    v_knots,
+                    domain[1],
+                    u_knots,
+                    domain[0],
+                )
+            } else {
+                return None;
+            };
         let cart = |h: &[f64; 4]| ScVec3::new(h[0] / h[3], h[1] / h[3], h[2] / h[3]);
         let (first, second) = (&rows[0], &rows[1]);
         let d = cart(second.first()?) - cart(first.first()?);
         let alike = first.iter().zip(second).all(|(p, q)| {
             (p[3] - q[3]).abs() <= 1e-12 * p[3].abs() && (cart(q) - cart(p) - d).len() <= tol
         });
-        if !alike || first.len() != second.len() || !(d.len() > tol) {
+        if !alike
+            || first.len() != second.len()
+            || d.len().partial_cmp(&tol) != Some(std::cmp::Ordering::Greater)
+        {
             return None;
         }
         let arc = CurveEval::new(&b::Curve::RationalSpline {
@@ -1983,7 +1985,7 @@ pub(crate) mod analytic {
             if let Some([s, e]) = self.line {
                 let d = e - s;
                 let len = d.len();
-                if !(len > 0.0) {
+                if len.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
                     return Err(NOT_ANALYTIC);
                 }
                 if (s - self.o).dot(y).abs() > 1e-9 * len.max(1.0) || d.dot(y).abs() > 1e-9 * len {
@@ -2023,7 +2025,7 @@ pub(crate) mod analytic {
                 let r0 = radial(s) - dr / dh * height(s);
                 let v = sorted(h0, h1);
                 if dr.abs() <= 1e-12 * len {
-                    if !(r0 > 0.0) {
+                    if r0.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
                         return Err(NOT_ANALYTIC);
                     }
                     return Ok((
@@ -2090,7 +2092,7 @@ pub(crate) mod analytic {
                 ));
             }
             let major = off.dot(x);
-            if !(major > radius) {
+            if major.partial_cmp(&radius) != Some(std::cmp::Ordering::Greater) {
                 return Err(NOT_ANALYTIC);
             }
             let torus = b::Surface::Torus {
@@ -2162,7 +2164,10 @@ pub(crate) mod analytic {
             let (p, du, dv) = s.derivs(u, w).ok_or(bad.clone())?;
             let uv = analytic_uv(analytic, p, near).ok_or(bad.clone())?;
             let (q, au, av) = a.derivs(uv[0], uv[1]).ok_or(bad.clone())?;
-            if !((p - q).len() <= tol) {
+            if !matches!(
+                (p - q).len().partial_cmp(&tol),
+                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+            ) {
                 return Err(bad.clone());
             }
             Ok(du.cross(dv).dot(au.cross(av)))
@@ -2176,7 +2181,7 @@ pub(crate) mod analytic {
             }
         }
         let d = normals(0.5 * (u0 + u1), 0.5 * (v0 + v1))?;
-        if !(d.abs() > 0.0) {
+        if d.abs().partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
             return Err(bad);
         }
         Ok(d < 0.0)
@@ -2188,7 +2193,7 @@ pub(crate) mod analytic {
         let (u, w) = (q - p, r - p);
         let normal = u.cross(w);
         let nn = normal.dot(normal);
-        if !(nn > 0.0) {
+        if nn.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
             return None;
         }
         let center = p + (normal.cross(u) * w.dot(w) + w.cross(normal) * u.dot(u)) * (0.5 / nn);

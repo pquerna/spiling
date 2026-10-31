@@ -307,7 +307,7 @@ impl std::fmt::Debug for PreparedValidatedCurve<'_> {
     }
 }
 impl<'a> PreparedValidatedCurve<'a> {
-    pub fn new(
+    pub(crate) fn new(
         curve: &'a dyn super::CurveEvaluator,
         range: [f64; 2],
         scale: f64,
@@ -514,7 +514,7 @@ impl<'a> PreparedValidatedCurve<'a> {
         let error = std::array::from_fn(|i| enclosure[i].sub(Interval::point(position[i])));
         Ok(ValidatedCurvePoint { position, error })
     }
-    pub fn parameter_intervals(&self) -> super::AxisSpans<'a> {
+    pub(crate) fn parameter_intervals(&self) -> super::AxisSpans<'a> {
         self.spans.clone()
     }
     /// Visit the complete sorted original explicit knot inventory, once each.
@@ -642,7 +642,7 @@ impl<'a> PreparedValidatedCurve<'a> {
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
     }
-    pub fn curve(&self) -> &'a dyn super::CurveEvaluator {
+    pub(crate) fn curve(&self) -> &'a dyn super::CurveEvaluator {
         self.curve
     }
     pub fn range(&self) -> [f64; 2] {
@@ -972,10 +972,7 @@ fn chart_image_box(
     cancel: &AtomicBool,
 ) -> Result<[[f64; 2]; 2], GeometryError> {
     let mut bounds = [[uv[0].lo, uv[0].hi], [uv[1].lo, uv[1].hi]];
-    let active = surface.natural_uv_domain();
-    let lo = active.min();
-    let hi = active.max();
-    let domain = [[lo.x, hi.x], [lo.y, hi.y]];
+    let domain = super::surface_active_domain(surface)?;
     if (0..2).any(|i| bounds[i][0] < domain[i][0] || bounds[i][1] > domain[i][1])
         && super::curve2d_image_within_box(chart, range, domain, work, cancel)?
     {
@@ -1259,10 +1256,10 @@ pub(crate) fn curve_endpoint_coordinate_equal(
             continue;
         }
         for i in span - degree..=span {
-            if let Some(endpoint) = clamped {
-                if i != endpoint {
-                    continue;
-                }
+            if let Some(endpoint) = clamped
+                && i != endpoint
+            {
+                continue;
             }
             work.charge(1, cancel)?;
             found = true;

@@ -34,7 +34,7 @@ pub use plane_roots::{
     PreparedBoundaryBinding, PreparedFacePlaneRoots,
 };
 
-use crate::{GeometryError, GeometryWorkBudget, PlaneFrameMm, check_cancel};
+use crate::{GeometryError, GeometryWorkBudget, check_cancel};
 use solidcore::{curve::curve::Curve, surface::surface::Surface};
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
@@ -855,16 +855,42 @@ impl Iterator for SurfaceParameterBoxes<'_> {
     type Item = [[f64; 2]; 2];
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(u) = self.active_u {
-                if let Some(v) = self.active_v.next() {
-                    return Some([u, v]);
-                }
+            if let Some(u) = self.active_u
+                && let Some(v) = self.active_v.next()
+            {
+                return Some([u, v]);
             }
             self.active_u = Some(self.u.next()?);
             self.active_v = self.v.clone();
         }
     }
 }
+/// Literal evaluator domain. A native face's metadata rectangle can enclose
+/// trim-control hulls outside the underlying NURBS knot domain; that rectangle
+/// is not permission to evaluate an extrapolated surface.
+pub(crate) fn surface_active_domain(surface: &Surface) -> Result<[[f64; 2]; 2], GeometryError> {
+    let metadata = surface.natural_uv_domain();
+    let lo = metadata.min();
+    let hi = metadata.max();
+    let mut domain = [[lo.x, hi.x], [lo.y, hi.y]];
+    if let Some(n) = analytic_eval::native_surface_nurbs(surface)? {
+        let knots = [
+            [n.u_knots()[n.p()], n.u_knots()[n.n() + 1]],
+            [n.v_knots()[n.q()], n.v_knots()[n.m() + 1]],
+        ];
+        for axis in 0..2 {
+            domain[axis] = [
+                domain[axis][0].max(knots[axis][0]),
+                domain[axis][1].min(knots[axis][1]),
+            ];
+        }
+    }
+    for axis in domain {
+        Interval::new(axis[0], axis[1])?;
+    }
+    Ok(domain)
+}
+
 fn validate_surface_partition(
     surface: &Surface,
     uv: [[f64; 2]; 2],
