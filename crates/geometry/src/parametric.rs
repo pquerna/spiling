@@ -1257,9 +1257,39 @@ struct DisplaySubdivisionScratch {
     residual: [Interval; 3],
 }
 const DISPLAY_EVALUATION_SCRATCH_BYTES: usize = nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES
+    + nurbs_eval::DISPLAY_AFFINE_SCRATCH_BYTES
     + continuity::SCRATCH_BYTES
     + std::mem::size_of::<[([[f64; 2]; 2], u8); 50]>()
     + 4 * std::mem::size_of::<SurfaceEnclosure>();
+/// Refine only display interpolation's already-qualified native jet. Section
+/// sampling retains its own enclosure/approximation contract. Exact affine
+/// coefficient identities add no regularity, denominator or trim authority.
+fn display_surface_enclosure(
+    surface: &Surface,
+    uv: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<SurfaceEnclosure, GeometryError> {
+    let mut bound = surface_piecewise_enclosure(surface, uv, work, cancel)?;
+    let Ok(Some(native)) = analytic_eval::native_surface_nurbs(surface) else {
+        return Ok(bound);
+    };
+    let mut tensor = [[[Interval::point(0.0); 3]; 4]; 4];
+    tensor[0][0] = bound.position;
+    tensor[1][0] = bound.du;
+    tensor[0][1] = bound.dv;
+    tensor[2][0] = bound.duu;
+    tensor[1][1] = bound.duv;
+    tensor[0][2] = bound.dvv;
+    nurbs_eval::tighten_display_affine_tensor(native, uv, 2, &mut tensor, work, cancel)?;
+    bound.du = tensor[1][0];
+    bound.dv = tensor[0][1];
+    bound.duu = tensor[2][0];
+    bound.duv = tensor[1][1];
+    bound.dvv = tensor[0][2];
+    Ok(bound)
+}
+
 impl<'a> DisplayTriangleProof<'a> {
     pub(crate) fn base_retained_bytes_for_vertices(count: usize) -> Result<usize, GeometryError> {
         count
@@ -1495,10 +1525,9 @@ impl<'a> DisplayTriangleProof<'a> {
             let full = if regular_derivatives(du, dv) {
                 None
             } else {
-                let bound = surface_piecewise_enclosure(self.surface, domain, work, cancel)
-                    .map_err(|cause| {
-                        display_proof_failure(cause, "box rank Jet2", box_index, domain)
-                    })?;
+                let bound = display_surface_enclosure(self.surface, domain, work, cancel).map_err(
+                    |cause| display_proof_failure(cause, "box rank Jet2", box_index, domain),
+                )?;
                 certify_surface_regular(self.surface, domain, &bound, work, cancel).map_err(|cause| {
                     GeometryError::new(cause.code, format!(
                         "obligation=box rank cache={box_index:?} triangle_uv={uv:?} triangle_points={points:?}: {}", cause.message,
@@ -1533,9 +1562,10 @@ impl<'a> DisplayTriangleProof<'a> {
         // A first-order bound/rank decline is not an error. Only then request
         // the existing Hessian/smooth-span proof. Native failures stay terminal.
         if self.box_proof(box_index).expect("same box").full.is_none() {
-            let bound = surface_piecewise_enclosure(self.surface, domain, work, cancel).map_err(
-                |cause| display_proof_failure(cause, "box Hessian jets", box_index, domain),
-            )?;
+            let bound =
+                display_surface_enclosure(self.surface, domain, work, cancel).map_err(|cause| {
+                    display_proof_failure(cause, "box Hessian jets", box_index, domain)
+                })?;
             // This exact box already has a completed first-jet rank proof.
             let smooth = surface_parameter_span_smooth(self.surface, domain, work, cancel)
                 .map_err(|cause| {
@@ -1961,7 +1991,7 @@ fn partition_display_hessian(
         work.charge(1, cancel)?;
         scratch.child = None;
         scratch.child = Some(
-            surface_piecewise_enclosure(surface, scratch.boxes[index], work, cancel).map_err(
+            display_surface_enclosure(surface, scratch.boxes[index], work, cancel).map_err(
                 |cause| {
                     GeometryError::new(
                         cause.code,

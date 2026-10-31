@@ -408,3 +408,87 @@ fn face_slot_and_resource_refusals_never_return_partial_artifacts() {
         .is_ok()
     );
 }
+
+#[test]
+fn native_ruled_triangle_retains_full_height_under_display_carrier_bound() {
+    let definition = fixture("independent-exporters/occt-spline-housing-mm.step");
+    let ordinal = definition
+        .faces()
+        .iter()
+        .position(|f| f.face_id.as_str() == "step:137")
+        .unwrap();
+    let kernel = crate::make_kernel_context();
+    let mut options = TessellateOptions::default().with_chord(MESH_CARRIER_TOLERANCE_MM * 0.25);
+    options.measure_deviation = false;
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(20_000_000);
+    let edges = candidate_query(0, &mut work, &cancel, |native| {
+        solidcore_mesh::tessellate_edge_set_with_budget(
+            &kernel,
+            definition.brep(),
+            &options,
+            native,
+        )
+    })
+    .unwrap();
+    let candidate = candidate_query(edges.retained_bytes(), &mut work, &cancel, |native| {
+        solidcore_mesh::tessellate_face_with_budget(
+            &kernel,
+            definition.brep(),
+            definition.face_ids()[ordinal],
+            &edges,
+            &options,
+            native,
+        )
+    })
+    .unwrap();
+    let triangle = candidate.triangles[0];
+    let uv = audit::triangle_uv(&candidate, triangle).unwrap();
+    let points = triangle.map(|i| {
+        let p = candidate.positions[i as usize];
+        [p.x, p.y, p.z]
+    });
+    let height = points
+        .iter()
+        .map(|p| p[2])
+        .fold(f64::NEG_INFINITY, f64::max)
+        - points.iter().map(|p| p[2]).fold(f64::INFINITY, f64::min);
+    assert!(
+        (height - 6.0).abs() < 1e-12,
+        "the original full-height triangle must remain: {points:?}"
+    );
+    let domain = std::array::from_fn(|axis| {
+        [
+            uv.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min),
+            uv.iter().map(|p| p[axis]).fold(f64::NEG_INFINITY, f64::max),
+        ]
+    });
+    let surface = definition.face_surface(candidate.face).unwrap();
+    let mut proof = crate::parametric::DisplayTriangleProof::with_mesh_inventory(
+        surface,
+        &candidate.uvs,
+        vec![0],
+        vec![crate::parametric::DisplayMeshBox::new(
+            crate::parametric::DisplayMeshBox::key_for(domain),
+        )],
+        PROOF_BYTES - edges.retained_bytes() - candidate.retained_bytes(),
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    let error = proof
+        .indexed_triangle_error_bound(
+            &uv,
+            &points,
+            0,
+            &triangle.map(|i| i as usize),
+            MESH_CARRIER_TOLERANCE_MM,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+    assert!(
+        error <= MESH_CARRIER_TOLERANCE_MM,
+        "native full-height carrier error {error}"
+    );
+}

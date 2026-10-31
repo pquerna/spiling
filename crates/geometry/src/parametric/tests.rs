@@ -1176,3 +1176,187 @@ fn uncertain_knot_cover_preserves_the_whole_band_and_validates_coverage() {
         vec![[0.5; 2]]
     );
 }
+
+fn rational_ruled_surface(transpose: bool, weights: [f64; 3], perturb: bool) -> srf_basic::Surface {
+    let bases = [[0.0, 0.0, 2.0], [2.0, 4.0, 2.0], [4.0, 0.0, 2.0]];
+    let generator = [2.0, -1.0, 3.0];
+    let mut points: Vec<Vec<CPoint>> = bases
+        .into_iter()
+        .zip(weights)
+        .map(|(base, w)| {
+            (0..2)
+                .map(|j| {
+                    let p: [f64; 3] =
+                        std::array::from_fn(|k| (base[k] + 6.0 * j as f64 * generator[k]) * w);
+                    CPoint::new(p[0], p[1], p[2], w)
+                })
+                .collect()
+        })
+        .collect();
+    if perturb {
+        points[1][1].y = up(points[1][1].y);
+    }
+    let curved = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+    let linear = vec![2.0, 2.0, 8.0, 8.0];
+    if transpose {
+        let points = (0..2)
+            .map(|j| (0..3).map(|i| points[i][j]).collect())
+            .collect();
+        srf_basic::Surface::new(points, 1, 2, linear, curved).unwrap()
+    } else {
+        srf_basic::Surface::new(points, 2, 1, curved, linear).unwrap()
+    }
+}
+
+#[test]
+fn rational_affine_generators_preserve_signed_weights_both_axes_and_third_derivatives() {
+    let cancel = AtomicBool::new(false);
+    for transpose in [false, true] {
+        for weights in [
+            [1.0, 2.0, 1.0],
+            [-1.0, -2.0, -1.0],
+            [1.0, -1.0, 1.0],
+            [0.0, 2.0, 1.0],
+        ] {
+            let raw = rational_ruled_surface(transpose, weights, false);
+            // Mixed weights retain a nonzero QUERY denominator. A zero anchor
+            // declines optional tightening without refusing an ordinary query.
+            let curved = if weights[0] == 0.0 {
+                [0.125, 0.25]
+            } else {
+                [0.0, 0.01]
+            };
+            let linear = if weights[0] == 0.0 || weights[0] * weights[1] < 0.0 {
+                [4.0; 2]
+            } else {
+                [2.0, 8.0]
+            };
+            let uv = if transpose {
+                [linear, curved]
+            } else {
+                [curved, linear]
+            };
+            let mut work = GeometryWorkBudget::new(1_000_000);
+            let mut jet =
+                super::nurbs_eval::evaluate_nurbs_surface_tensor(&raw, uv, 3, &mut work, &cancel)
+                    .unwrap();
+            super::nurbs_eval::tighten_display_affine_tensor(
+                &raw, uv, 3, &mut jet, &mut work, &cancel,
+            )
+            .unwrap();
+            if weights[0] != 0.0 {
+                assert_eq!(
+                    jet[if transpose { 0 } else { 2 }][if transpose { 2 } else { 0 }][2],
+                    Interval::point(0.0)
+                );
+            }
+            if weights[0] == 1.0 && weights[1] == 2.0 {
+                let curved_second = if transpose {
+                    jet[0][2][0]
+                } else {
+                    jet[2][0][0]
+                };
+                assert!(
+                    curved_second.contains(-40.0),
+                    "the nonconstant rational base retains real curvature: {curved_second:?}"
+                );
+            }
+            let fixed = usize::from(!transpose);
+            for (a, row) in jet.iter().enumerate().take(4) {
+                for (b, value) in row.iter().enumerate().take(4 - a) {
+                    let orders = [a, b];
+                    if orders[fixed] == 0 {
+                        continue;
+                    }
+                    for (k, bound) in value.iter().enumerate() {
+                        let expected = if orders[fixed] == 1 && orders[1 - fixed] == 0 {
+                            [2.0, -1.0, 3.0][k]
+                        } else {
+                            0.0
+                        };
+                        assert!(
+                            bound.contains(expected),
+                            "transpose={transpose} weights={weights:?} derivative={orders:?} axis={k} {bound:?}"
+                        );
+                        if weights[0] != 0.0 && orders.iter().sum::<usize>() > 1 {
+                            assert_eq!(*bound, Interval::point(0.0));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn rational_affine_tightening_refuses_a_one_ulp_bend_and_keeps_denominator_failure() {
+    let cancel = AtomicBool::new(false);
+    let raw = rational_ruled_surface(false, [1.0, 2.0, 1.0], true);
+    let mut work = GeometryWorkBudget::new(1_000_000);
+    let mut jet = super::nurbs_eval::evaluate_nurbs_surface_tensor(
+        &raw,
+        [[0.0; 2], [2.0; 2]],
+        3,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    super::nurbs_eval::tighten_display_affine_tensor(
+        &raw,
+        [[0.0; 2], [2.0; 2]],
+        3,
+        &mut jet,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    // The sole changed homogeneous coefficient contributes
+    // delta*B_1^2(u)*(v-2)/(6*W(u)); at (0,2), d_uv=delta/3.
+    let delta = up(-4.0) - (-4.0);
+    assert!(delta > 0.0);
+    assert!(
+        jet[1][1][1].contains(delta / 3.0),
+        "a real one-ULP bend is not affine: {:?}",
+        jet[1][1][1]
+    );
+    for k in [0, 2] {
+        assert_eq!(jet[1][1][k], Interval::point(0.0));
+    }
+    let singular = rational_ruled_surface(false, [1.0, -1.0, 1.0], false);
+    assert_eq!(
+        super::nurbs_eval::evaluate_nurbs_surface_tensor(
+            &singular,
+            [[0.5; 2], [2.0, 8.0]],
+            2,
+            &mut work,
+            &cancel
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::ConditioningFailure
+    );
+    assert_eq!(
+        super::nurbs_eval::evaluate_nurbs_surface_tensor(
+            &raw,
+            [[0.0, 1.0], [2.0, 8.0]],
+            2,
+            &mut GeometryWorkBudget::new(0),
+            &cancel
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::ResourceLimit
+    );
+    assert_eq!(
+        super::nurbs_eval::evaluate_nurbs_surface_tensor(
+            &raw,
+            [[0.0, 1.0], [2.0, 8.0]],
+            2,
+            &mut work,
+            &AtomicBool::new(true)
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::Cancelled
+    );
+}

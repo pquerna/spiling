@@ -344,6 +344,16 @@ C0 knot leaves use position enclosures only. Lifted PCurves use physical 3D
 positions and jets. A nonuniform parameter speed must not force mesh refinement
 when the complete geometric trace already satisfies the unchanged error cap.
 
+Display interpolation may tighten a qualified native rational jet when literal
+homogeneous coefficients prove a constant physical generator along a clamped
+two-row degree-one axis. Exact cross-products retain signed weights and reject
+nonzero residuals. A constant base component also removes its pure transverse
+curvature. Every active closed knot piece must qualify; otherwise the original
+component bound remains. Query denominators, continuity, regularity, trim and
+final carrier limits remain independent. This refinement belongs to display
+interpolation; general native jets and adaptive section sampling retain their
+existing behavior. Fixed identity scratch coexists under the unchanged audit cap.
+
 Triangle proof stopping criteria consume the remaining carrier allowance after
 certified trim and auxiliary transport, rather than the full publication cap.
 Existing proof-only subdivisions retain the original mesh triangle's affine

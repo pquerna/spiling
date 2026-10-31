@@ -8,6 +8,7 @@
 //! piece; recentering still carries weight derivatives through rational division.
 
 use super::interval::Interval;
+use crate::exact_coefficient::ExactCoefficient;
 use crate::{GeometryError, GeometryWorkBudget};
 use solidcore::nurbs::{b_spline_surface::BSplineSurface, srf_basic::Surface};
 use spiling_contracts::geometry::GeometryErrorCode;
@@ -28,8 +29,213 @@ pub const SURFACE_EVALUATION_SCRATCH_BYTES: usize = 3 * BASIS_SCRATCH_BYTES
         [Interval; 2],
         [usize; 8],
     )>();
+pub(super) const DISPLAY_AFFINE_SCRATCH_BYTES: usize = 10 * std::mem::size_of::<ExactCoefficient>()
+    + 3 * std::mem::size_of::<[RationalAffineAxis; 2]>()
+    + std::mem::size_of::<SurfaceTensor>()
+    + std::mem::size_of::<super::SurfaceEnclosure>();
 const ZERO: Interval = Interval::point(0.0);
 type DerivativeControls = [[[Interval; 3]; 4]; 4];
+
+#[derive(Clone, Copy, Default)]
+struct RationalAffineAxis {
+    derivative: [Option<Interval>; 3],
+    constant_base: [bool; 3],
+}
+
+/// A clamped two-row linear axis with equal paired weights has
+/// S(s,t)=F(s)+t*g exactly when each homogeneous row difference is w(s)*g.
+/// Cross-multiply literal differences before division; rounded Cartesian
+/// equality or a small residual supplies no affine authority. This optional
+/// identity never replaces the query's rational denominator proof.
+fn rational_affine_axis(
+    surface: &Surface,
+    span: [usize; 2],
+    axis: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<RationalAffineAxis, GeometryError> {
+    let degrees = [surface.p(), surface.q()];
+    let counts = [surface.n() + 1, surface.m() + 1];
+    if counts[axis] != 2 || degrees[axis] != 1 {
+        return Ok(RationalAffineAxis::default());
+    }
+    let knots = if axis == 0 {
+        surface.u_knots()
+    } else {
+        surface.v_knots()
+    };
+    if knots.len() != 4 || knots[0] != knots[1] || knots[2] != knots[3] || knots[1] >= knots[2] {
+        return Ok(RationalAffineAxis::default());
+    }
+    let at = |fixed, other| {
+        let (i, j) = if axis == 0 {
+            (fixed, other)
+        } else {
+            (other, fixed)
+        };
+        let c = surface.cpt(i, j).ok()?;
+        let point = [c.x, c.y, c.z, c.w];
+        point.iter().all(|value| value.is_finite()).then_some(point)
+    };
+    let first = span[1 - axis] - degrees[1 - axis];
+    let (Some(a), Some(b)) = (at(0, first), at(1, first)) else {
+        return Ok(RationalAffineAxis::default());
+    };
+    if a[3] == 0.0 || a[3] != b[3] {
+        return Ok(RationalAffineAxis::default());
+    }
+    let length = Interval::point(knots[2]).sub(Interval::point(knots[1]));
+    let mut result = [None; 3];
+    let mut constant_base = [true; 3];
+    for (k, value) in result.iter_mut().enumerate() {
+        *value = Interval::point(b[k])
+            .sub(Interval::point(a[k]))
+            .div(Interval::point(a[3]))
+            .and_then(|value| value.div(length))
+            .ok()
+            .filter(|value| value.lo.is_finite() && value.hi.is_finite());
+    }
+    for other in first..=span[1 - axis] {
+        work.charge(1, cancel)?;
+        let (Some(c), Some(d)) = (at(0, other), at(1, other)) else {
+            return Ok(RationalAffineAxis::default());
+        };
+        if c[3] != d[3] {
+            return Ok(RationalAffineAxis::default());
+        }
+        for (k, value) in result.iter_mut().enumerate() {
+            if value.is_none() {
+                continue;
+            }
+            let (Some(delta), Some(reference)) = (
+                ExactCoefficient::difference(d[k], c[k]),
+                ExactCoefficient::difference(b[k], a[k]),
+            ) else {
+                *value = None;
+                continue;
+            };
+            let (Some(mut delta), Some(reference)) = (
+                delta.product(&ExactCoefficient::point(a[3]), work, cancel)?,
+                reference.product(&ExactCoefficient::point(c[3]), work, cancel)?,
+            ) else {
+                *value = None;
+                continue;
+            };
+            if delta.subtract(&reference).is_none() || delta.sign() != 0 {
+                *value = None;
+            }
+            if !constant_base[k] || value.is_none() {
+                continue;
+            }
+            let (Some(mut base), Some(reference)) = (
+                ExactCoefficient::point(c[k]).product(
+                    &ExactCoefficient::point(a[3]),
+                    work,
+                    cancel,
+                )?,
+                ExactCoefficient::point(a[k]).product(
+                    &ExactCoefficient::point(c[3]),
+                    work,
+                    cancel,
+                )?,
+            ) else {
+                constant_base[k] = false;
+                continue;
+            };
+            constant_base[k] = base.subtract(&reference).is_some() && base.sign() == 0;
+        }
+    }
+    Ok(RationalAffineAxis {
+        derivative: result,
+        constant_base,
+    })
+}
+
+/// Optional same-carrier derivative refinement for display interpolation.
+/// Every closed active knot rectangle must supply the same component identity;
+/// one declined piece leaves that component's original enclosure untouched.
+pub(super) fn tighten_display_affine_tensor(
+    surface: &Surface,
+    uv: [[f64; 2]; 2],
+    order: usize,
+    jet: &mut SurfaceTensor,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    if !surface.is_rational() || order == 0 {
+        return Ok(());
+    }
+    if order > 3 {
+        return Err(conditioning(
+            "affine display derivative order exceeds three",
+        ));
+    }
+    let (p, q) = surface.degrees();
+    let (uk, vk) = (surface.u_knots(), surface.v_knots());
+    let (nu, nv) = (surface.n() + 1, surface.m() + 1);
+    validate_knots(uk, p, nu, uv[0], work, cancel)?;
+    validate_knots(vk, q, nv, uv[1], work, cancel)?;
+    let mut aggregate: Option<[RationalAffineAxis; 2]> = None;
+    for us in p..nu {
+        work.charge(1, cancel)?;
+        if uk[us] == uk[us + 1] || uk[us] > uv[0][1] || uk[us + 1] < uv[0][0] {
+            continue;
+        }
+        for vs in q..nv {
+            work.charge(1, cancel)?;
+            if vk[vs] == vk[vs + 1] || vk[vs] > uv[1][1] || vk[vs + 1] < uv[1][0] {
+                continue;
+            }
+            let bounds = [
+                rational_affine_axis(surface, [us, vs], 0, work, cancel)?,
+                rational_affine_axis(surface, [us, vs], 1, work, cancel)?,
+            ];
+            aggregate = Some(match aggregate {
+                None => bounds,
+                Some(previous) => std::array::from_fn(|axis| RationalAffineAxis {
+                    derivative: std::array::from_fn(|k| {
+                        match (previous[axis].derivative[k], bounds[axis].derivative[k]) {
+                            (Some(a), Some(b)) => Some(a.hull(b)),
+                            _ => None,
+                        }
+                    }),
+                    constant_base: std::array::from_fn(|k| {
+                        previous[axis].constant_base[k] && bounds[axis].constant_base[k]
+                    }),
+                }),
+            });
+        }
+    }
+    let bounds = aggregate.ok_or_else(|| conditioning("no complete affine display knot span"))?;
+    for (axis, derivatives) in bounds.into_iter().enumerate() {
+        for (a, row) in jet.iter_mut().enumerate().take(order + 1) {
+            for (b, derivative) in row.iter_mut().enumerate().take(order - a + 1) {
+                let orders = [a, b];
+                if a + b == 0 {
+                    continue;
+                }
+                for (k, (value, bound)) in derivative
+                    .iter_mut()
+                    .zip(derivatives.derivative)
+                    .enumerate()
+                {
+                    if let Some(bound) = bound {
+                        if orders[axis] == 0 && !derivatives.constant_base[k] {
+                            continue;
+                        }
+                        let bound = if orders[axis] == 1 && orders[1 - axis] == 0 {
+                            bound
+                        } else {
+                            ZERO
+                        };
+                        *value = value.intersect(bound)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Convex enclosure of one polynomial derivative on one original knot cell.
 /// Differentiate literal coefficients before evaluating basis intervals: a
