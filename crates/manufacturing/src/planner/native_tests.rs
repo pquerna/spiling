@@ -1074,7 +1074,11 @@ fn blocked_native_component_is_not_certified_by_nearby_valid_support_column() {
         &[translated(0.0, 0.0, 10.0), translated(30.0, 0.0, 10.0)],
     );
     let error = compile(scene.input(&intent(true)), &AtomicBool::new(false)).unwrap_err();
-    assert_eq!(error.code, ManufacturingErrorCode::UnsupportedGeometry);
+    assert_eq!(
+        error.code,
+        ManufacturingErrorCode::UnsupportedGeometry,
+        "{error}"
+    );
 }
 
 #[test]
@@ -1146,7 +1150,12 @@ fn genuine_native_cantilever_clearance_and_floating_gap_limits_are_explicit() {
     let unresolved = compile(scene.input(&enabled), &AtomicBool::new(false)).unwrap_err();
     assert_eq!(
         unresolved.code,
-        ManufacturingErrorCode::NativeAnalysisIndeterminate
+        ManufacturingErrorCode::UnsupportedGeometry,
+        "{unresolved}"
+    );
+    assert!(
+        unresolved.message.contains("support clearance"),
+        "{unresolved}"
     );
     let floating = NativeScene::new(BOX, &[translated(0.0, 0.0, 2.0)]);
     enabled.recipe.supports = SupportPolicy::Breakaway {
