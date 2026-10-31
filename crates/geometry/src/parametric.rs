@@ -39,11 +39,6 @@ use solidcore::{curve::curve::Curve, surface::surface::Surface};
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 
-pub(crate) fn dot_point(point: [f64; 3], direction: [f64; 3]) -> Interval {
-    (0..3).fold(Interval::point(0.0), |sum, axis| {
-        sum.add(Interval::point(point[axis]).mul(Interval::point(direction[axis])))
-    })
-}
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SurfaceFirstEnclosure {
     pub position: [Interval; 3],
@@ -834,17 +829,6 @@ fn native_curve2d_piecewise_jet(
         second_derivative: [j[2][0], j[2][1]],
     })
 }
-fn native_curve2d_c1_jet(
-    curve: &Curve,
-    range: [f64; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<Option<ChartCurveEnclosure>, GeometryError> {
-    if !curve_parameter_span_smooth(curve, range, work, cancel)? {
-        return Ok(None);
-    }
-    Ok(Some(curve2d_piecewise_jet(curve, range, work, cancel)?))
-}
 pub(crate) struct SurfaceParameterBoxes<'a> {
     u: AxisSpans<'a>,
     v: AxisSpans<'a>,
@@ -1174,30 +1158,6 @@ fn certify_surface_regular(
     Ok(())
 }
 
-/// Linear interpolation on a UV triangle, with an interval Taylor remainder
-/// over its complete bounding rectangle. Native vertex evaluation error is
-/// separately enclosed. The same barycentric weights pair every mesh point
-/// with a point of the complete native UV-triangle image and conversely, so
-/// the bound controls both metric directions. Trim coverage is a separate proof.
-#[cfg(test)]
-pub(crate) fn triangle_error_bound(
-    surface: &Surface,
-    uv: &[[f64; 2]; 3],
-    points: &[[f64; 3]; 3],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<f64, GeometryError> {
-    let domain = std::array::from_fn(|axis| {
-        [
-            uv.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min),
-            uv.iter().map(|p| p[axis]).fold(f64::NEG_INFINITY, f64::max),
-        ]
-    });
-    let bound = surface_piecewise_enclosure(surface, domain, work, cancel)?;
-    certify_surface_regular(surface, domain, &bound, work, cancel)?;
-    triangle_interpolation_error(surface, uv, points, domain, &bound, work, cancel)
-}
-
 /// Face-borrowed audit ownership. Original UV indices retain point enclosures,
 /// and exact inventoried mesh boxes retain completed proofs without eviction.
 /// Auxiliary comparison boxes/points use bounded keyed scratch. Triangle
@@ -1321,22 +1281,6 @@ impl<'a> DisplayTriangleProof<'a> {
                     .saturating_mul(std::mem::size_of::<DisplayMeshBox>()),
             )
     }
-    #[cfg(test)]
-    pub(crate) fn new(
-        surface: &'a Surface,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<Self, GeometryError> {
-        Self::with_mesh_inventory(
-            surface,
-            &[],
-            Vec::new(),
-            Vec::new(),
-            usize::MAX,
-            work,
-            cancel,
-        )
-    }
     pub(crate) fn with_mesh_inventory(
         surface: &'a Surface,
         mesh_uvs: &'a [solidcore::Vec2],
@@ -1413,24 +1357,6 @@ impl<'a> DisplayTriangleProof<'a> {
             triangle_boxes,
             mesh_boxes,
         })
-    }
-    #[cfg(test)]
-    pub(crate) fn triangle_error_bound(
-        &mut self,
-        uv: &[[f64; 2]; 3],
-        points: &[[f64; 3]; 3],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<f64, GeometryError> {
-        self.triangle_error_bound_at(
-            uv,
-            points,
-            None,
-            true,
-            spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM,
-            work,
-            cancel,
-        )
     }
     /// `maximum_error` is the caller's remaining carrier allowance after
     /// independent transport has been debited, never a wider geometry policy.
@@ -1954,34 +1880,6 @@ impl<'a> DisplayTriangleProof<'a> {
                 self.boxes[index].as_mut().map(|entry| &mut entry.proof)
             }
         }
-    }
-    /// Failure-only inspection of the captured original triangle/box binding.
-    pub(crate) fn smooth_span_for_triangle(
-        &self,
-        ordinal: usize,
-        uv: &[[f64; 2]; 3],
-    ) -> Option<bool> {
-        let domain: [[f64; 2]; 2] = std::array::from_fn(|axis| {
-            [
-                uv.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min),
-                uv.iter().map(|p| p[axis]).fold(f64::NEG_INFINITY, f64::max),
-            ]
-        });
-        let key = [
-            domain[0][0].to_bits(),
-            domain[0][1].to_bits(),
-            domain[1][0].to_bits(),
-            domain[1][1].to_bits(),
-        ];
-        let index = *self.triangle_boxes.get(ordinal)? as usize;
-        self.mesh_boxes
-            .get(index)
-            .filter(|entry| entry.key == key)?
-            .proof
-            .as_ref()?
-            .full
-            .as_ref()
-            .map(|full| full.smooth)
     }
 }
 

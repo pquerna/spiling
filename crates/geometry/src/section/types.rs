@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
-use crate::{GeometryError, PlaneFrameMm, PlaneMm};
+use crate::{PlaneFrameMm, PlaneMm};
 use solidcore::topology::EdgeuseId;
 use solidcore::{EdgeId, FaceId, VertexId};
-use spiling_contracts::geometry::{DefinitionId, GeometryErrorCode, SECTION_SAMPLING_TOLERANCE_MM};
+use spiling_contracts::geometry::DefinitionId;
 
 #[derive(Debug)]
 pub struct SectionLoopMm {
@@ -162,24 +162,6 @@ impl NativeSection {
             .get(index)
             .filter(|faces| !faces.is_empty())
             .map(Vec::as_slice)
-    }
-    pub(crate) fn charge_reference_displacement(
-        &mut self,
-        displacement_mm: f64,
-    ) -> Result<(), GeometryError> {
-        let total = (self.achieved_chord_error_mm() + displacement_mm).next_up();
-        if !self.is_native_intersection()
-            || !displacement_mm.is_finite()
-            || displacement_mm < 0.0
-            || total > SECTION_SAMPLING_TOLERANCE_MM
-        {
-            return Err(GeometryError::new(
-                GeometryErrorCode::AnalysisIndeterminate,
-                "reference displacement exceeds native curve authority",
-            ));
-        }
-        self.certificate.maximum_chord_error_mm = total;
-        Ok(())
     }
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()

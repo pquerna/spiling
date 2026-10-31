@@ -699,20 +699,6 @@ pub(crate) fn curve2d_piecewise_jet<C: CurveEvaluator + ?Sized>(
         second_derivative: [j[2][0], j[2][1]],
     })
 }
-pub(crate) fn curve2d_c1_jet<C: CurveEvaluator + ?Sized>(
-    curve: &C,
-    range: [f64; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<Option<ChartCurveEnclosure>, GeometryError> {
-    if let Some(native) = curve.native_curve() {
-        return super::native_curve2d_c1_jet(native, range, work, cancel);
-    }
-    if !curve.smooth(range, work, cancel)? {
-        return Ok(None);
-    }
-    Ok(Some(curve2d_piecewise_jet(curve, range, work, cancel)?))
-}
 
 impl CurveEvaluator for crate::analysis::source_restriction::SourceLineRestriction<'_> {
     fn active_range(&self) -> [f64; 2] {

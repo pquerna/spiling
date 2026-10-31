@@ -72,9 +72,6 @@ impl SourceCarrierAssociation {
         }
         Ok(Self { record })
     }
-    pub(crate) fn source_from_native(&self) -> [[Interval; 3]; 2] {
-        self.record.from_native
-    }
     /// Exact coefficient identity under the proved gauge, not equality of
     /// declared labels, domains, active branches or rounded query samples.
     #[cfg(test)]

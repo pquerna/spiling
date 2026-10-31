@@ -952,35 +952,6 @@ impl<'a> PreparedOriginalSurface<'a> {
             dvv: j[0][2],
         })
     }
-    /// Requested-order coefficients, without selected-trim membership authority.
-    /// The literal source operators still enforce rectangular/natural domains,
-    /// denominator support and the original parameter gauge.
-    pub(crate) fn carrier_evaluate_order(
-        &self,
-        uv: [[f64; 2]; 2],
-        order: usize,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<SurfaceTensor, GeometryError> {
-        work.charge(1, cancel)?;
-        if order > 3 {
-            return Err(conditioning(
-                "original surface derivative order exceeds three",
-            ));
-        }
-        surface_jet(self.source, uv, order, &self.inventory, 0, work, cancel)
-    }
-
-    pub(crate) fn carrier_continuity(
-        &self,
-        uv: [[f64; 2]; 2],
-        required: usize,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<bool, GeometryError> {
-        self.carrier_evaluate_order(uv, 0, work, cancel)?;
-        surface_continuity(self.source, uv, required, &self.inventory, 0, work, cancel)
-    }
 
     /// Evaluate the captured coefficient sheet on this finite query, not
     /// membership in its selected trim envelope. Source realization homotopies
