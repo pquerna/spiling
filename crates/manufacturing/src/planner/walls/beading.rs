@@ -2800,73 +2800,72 @@ fn canonical_foot(
     } else {
         None
     };
-    if site.point.is_none() {
-        if let Some(vertex) = vertex {
-            let mut focus = None;
-            let mut retain_focus = |point| -> Result<(), ManufacturingError> {
-                if focus.is_some_and(|prior| prior != point) {
-                    return Err(unsupported(
-                        "original source-node segment has ambiguous declared endpoint feet",
-                    ));
+    if site.point.is_none()
+        && let Some(vertex) = vertex
+    {
+        let mut focus = None;
+        let mut retain_focus = |point| -> Result<(), ManufacturingError> {
+            if focus.is_some_and(|prior| prior != point) {
+                return Err(unsupported(
+                    "original source-node segment has ambiguous declared endpoint feet",
+                ));
+            }
+            focus = Some(point);
+            Ok(())
+        };
+        let mut pairs = [None; 2];
+        let mut incident_count = 0usize;
+        for incident in incidence.at(vertex) {
+            check_cancel(cancel)?;
+            boolean::charge(work, 2)?;
+            let supports = &incidence.graph.edges[incident.edge].supports;
+            if incident_count < pairs.len() {
+                pairs[incident_count] = Some(supports);
+            }
+            incident_count += 1;
+            for other in supports {
+                if let Some(point) = other.point
+                    && other.boundary_index == site.boundary_index
+                    && (point == site.a || point == site.b)
+                {
+                    retain_focus(point)?;
                 }
-                focus = Some(point);
-                Ok(())
-            };
-            let mut pairs = [None; 2];
-            let mut incident_count = 0usize;
-            for incident in incidence.at(vertex) {
-                check_cancel(cancel)?;
-                boolean::charge(work, 2)?;
-                let supports = &incidence.graph.edges[incident.edge].supports;
-                if incident_count < pairs.len() {
-                    pairs[incident_count] = Some(supports);
-                }
-                incident_count += 1;
-                for other in supports {
-                    if let Some(point) = other.point {
-                        if other.boundary_index == site.boundary_index
-                            && (point == site.a || point == site.b)
+            }
+        }
+        if incident_count == 2 {
+            boolean::charge(work, 16)?;
+            if let [Some(a), Some(b)] = pairs {
+                // A degree-two site switch {A,B}->{A,C} has no retained
+                // B/C primary branch. Only its UNshared ports may use a
+                // unique literal B/C boundary endpoint. In particular,
+                // quantized collinearity does not authorize coalescing the
+                // original noncollinear segments or moving source vertices.
+                let common = a
+                    .iter()
+                    .filter(|x| b.iter().any(|y| same_literal_site(x, y)))
+                    .count();
+                let in_a = a.iter().any(|x| same_literal_site(x, &site));
+                let in_b = b.iter().any(|x| same_literal_site(x, &site));
+                if common == 1 && in_a != in_b {
+                    let (present, opposite) = if in_a { (a, b) } else { (b, a) };
+                    for other in opposite {
+                        if other.point.is_some()
+                            || other.boundary_index != site.boundary_index
+                            || present.iter().any(|x| same_literal_site(x, other))
                         {
-                            retain_focus(point)?;
+                            continue;
                         }
-                    }
-                }
-            }
-            if incident_count == 2 {
-                boolean::charge(work, 16)?;
-                if let [Some(a), Some(b)] = pairs {
-                    // A degree-two site switch {A,B}->{A,C} has no retained
-                    // B/C primary branch. Only its UNshared ports may use a
-                    // unique literal B/C boundary endpoint. In particular,
-                    // quantized collinearity does not authorize coalescing the
-                    // original noncollinear segments or moving source vertices.
-                    let common = a
-                        .iter()
-                        .filter(|x| b.iter().any(|y| same_literal_site(x, y)))
-                        .count();
-                    let in_a = a.iter().any(|x| same_literal_site(x, &site));
-                    let in_b = b.iter().any(|x| same_literal_site(x, &site));
-                    if common == 1 && in_a != in_b {
-                        let (present, opposite) = if in_a { (a, b) } else { (b, a) };
-                        for other in opposite {
-                            if other.point.is_some()
-                                || other.boundary_index != site.boundary_index
-                                || present.iter().any(|x| same_literal_site(x, other))
-                            {
-                                continue;
-                            }
-                            for point in [site.a, site.b] {
-                                if point == other.a || point == other.b {
-                                    retain_focus(point)?;
-                                }
+                        for point in [site.a, site.b] {
+                            if point == other.a || point == other.b {
+                                retain_focus(point)?;
                             }
                         }
                     }
                 }
             }
-            if let Some(point) = focus {
-                return Ok(point);
-            }
+        }
+        if let Some(point) = focus {
+            return Ok(point);
         }
     }
     Ok(site.foot(p))

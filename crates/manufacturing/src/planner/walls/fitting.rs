@@ -1051,10 +1051,10 @@ fn maximize(
     path.points_mm.truncate(written + 1);
     if let WidthProfile::PerEdge { widths_mm } = &mut path.width {
         widths_mm.truncate(written);
-        if let Some(&first) = widths_mm.first() {
-            if widths_mm.iter().all(|&w| w == first) {
-                path.width = WidthProfile::Constant { width_mm: first };
-            }
+        if let Some(&first) = widths_mm.first()
+            && widths_mm.iter().all(|&w| w == first)
+        {
+            path.width = WidthProfile::Constant { width_mm: first };
         }
     }
     correspondence.truncate(base + written);
@@ -1223,10 +1223,10 @@ pub(super) fn coalesce(
             read += 1;
             cursor = original.next(first)?;
             boolean::charge(work, permission_work)?;
-            if let Some(prior) = previous {
-                if let Some(merged) = merge(prior, run, permissions, &original, work, cancel)? {
-                    checkpoint = Some((read, cursor, merged));
-                }
+            if let Some(prior) = previous
+                && let Some(merged) = merge(prior, run, permissions, &original, work, cancel)?
+            {
+                checkpoint = Some((read, cursor, merged));
             }
         }
         if norm(sub(xy(run.b), xy(run.a))) < program_coordinates::MIN_DEPOSITION_COMMAND_MM {
@@ -1390,10 +1390,10 @@ pub(super) fn coalesce(
     path.points_mm.truncate(written + 1);
     if let WidthProfile::PerEdge { widths_mm } = &mut path.width {
         widths_mm.truncate(written);
-        if let Some(&first) = widths_mm.first() {
-            if widths_mm.iter().all(|&value| value == first) {
-                path.width = WidthProfile::Constant { width_mm: first };
-            }
+        if let Some(&first) = widths_mm.first()
+            && widths_mm.iter().all(|&value| value == first)
+        {
+            path.width = WidthProfile::Constant { width_mm: first };
         }
     }
     correspondence.truncate(base + written);
@@ -1449,10 +1449,10 @@ pub(super) fn coalesce(
         }
         prior = Some(current);
     }
-    if path.points_mm.first() == path.points_mm.last() {
-        if let (Some(a), Some(b)) = (prior, first) {
-            check_gradient(a, b)?;
-        }
+    if path.points_mm.first() == path.points_mm.last()
+        && let (Some(a), Some(b)) = (prior, first)
+    {
+        check_gradient(a, b)?;
     }
     Ok(())
 }

@@ -164,7 +164,7 @@ impl Rows {
                     .try_reserve_exact(count - self.intervals.len())
                     .map_err(|_| resource())?;
             }
-            for pair in self.hits.chunks_exact(2) {
+            for pair in self.hits.as_chunks::<2>().0 {
                 let interval = [pair[0], pair[1]];
                 if interval[0] < interval[1] {
                     self.intervals.push(interval);
@@ -216,7 +216,7 @@ impl Rows {
     }
     fn complete(&self, interval: [f64; 2]) -> bool {
         self.intervals.iter().any(|span| {
-            span.into_iter()
+            span.iter()
                 .zip(interval)
                 .all(|(a, b)| (*a - b).abs() <= arithmetic_slack(a.abs().max(b.abs())))
         })
@@ -551,10 +551,8 @@ pub(super) fn verify(
                     } else {
                         false
                     };
-                    if matches {
-                        if construction.replace((path_index, path, ends)).is_some() {
-                            return Err(failed("skin fit has duplicate actual constructions"));
-                        }
+                    if matches && construction.replace((path_index, path, ends)).is_some() {
+                        return Err(failed("skin fit has duplicate actual constructions"));
                     }
                 }
                 let (path_index, path, ends) = construction

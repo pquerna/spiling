@@ -223,15 +223,15 @@ pub(super) fn output_bytes(
                 .saturating_mul(std::mem::size_of::<super::NativeSurfaceSpan>()),
         );
     for (index, section) in sections.iter().enumerate() {
-        if let Some(captures) = &section.inner_material {
-            if !sections[..index].iter().any(|prior| {
+        if let Some(captures) = &section.inner_material
+            && !sections[..index].iter().any(|prior| {
                 prior
                     .inner_material
                     .as_ref()
                     .is_some_and(|other| Arc::ptr_eq(captures, other))
-            }) {
-                bytes = bytes.saturating_add(inner_capture_bytes(captures));
-            }
+            })
+        {
+            bytes = bytes.saturating_add(inner_capture_bytes(captures));
         }
         if !sections[..index]
             .iter()

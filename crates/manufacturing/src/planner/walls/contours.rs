@@ -638,28 +638,27 @@ pub(super) fn transport(
                 });
             }
         }
-        if sign > 0.0 {
-            if let Some(widths) = corner_widths {
-                for (edge, curve) in graph.edges.iter().enumerate() {
-                    check_cancel(cancel)?;
-                    boolean::charge(work, 64)?;
-                    if cells[edge].is_none() {
-                        continue;
+        if sign > 0.0
+            && let Some(widths) = corner_widths
+        {
+            for (edge, curve) in graph.edges.iter().enumerate() {
+                check_cancel(cancel)?;
+                boolean::charge(work, 64)?;
+                if cells[edge].is_none() {
+                    continue;
+                }
+                if let Some((vertex, limit)) =
+                    corner_seed(curve, graph, widths, request, work, cancel)?
+                    && limit < labels[vertex]
+                {
+                    labels[vertex] = limit;
+                    if queue.len() >= queue_bound {
+                        return Err(resource("source contour seed queue bound exceeded"));
                     }
-                    if let Some((vertex, limit)) =
-                        corner_seed(curve, graph, widths, request, work, cancel)?
-                    {
-                        if limit < labels[vertex] {
-                            labels[vertex] = limit;
-                            if queue.len() >= queue_bound {
-                                return Err(resource("source contour seed queue bound exceeded"));
-                            }
-                            queue.push(Pending {
-                                value: limit,
-                                vertex,
-                            });
-                        }
-                    }
+                    queue.push(Pending {
+                        value: limit,
+                        vertex,
+                    });
                 }
             }
         }

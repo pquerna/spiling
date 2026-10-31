@@ -591,7 +591,7 @@ impl<'a> RouteState<'a> {
                 account.waste_deposition_segments += 1;
                 account.waste_filament_length_mm += delta;
                 account.waste_volume_mm3 += delta * filament_area;
-                if let Some(sink) = replay.as_deref_mut() {
+                if let Some(sink) = replay {
                     sink.push_associated(
                         actual,
                         next,

@@ -84,7 +84,7 @@ fn contains_portion(
         if !hits.len().is_multiple_of(2) {
             return Err(failed("mixed bridge domain row is ambiguous"));
         }
-        for pair in hits.chunks_exact(2) {
+        for pair in hits.as_chunks::<2>().0 {
             if complete_raw && [pair[0], pair[1]] != required {
                 continue;
             }

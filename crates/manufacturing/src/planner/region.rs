@@ -1219,7 +1219,7 @@ pub(super) fn row_intersections(
         }
     }
     hits.sort_unstable_by(f64::total_cmp);
-    if hits.len() % 2 != 0 {
+    if !hits.len().is_multiple_of(2) {
         return Err(unsupported(
             "rectilinear hatch clipping has odd boundary parity",
         ));

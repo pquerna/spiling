@@ -253,31 +253,31 @@ impl Iterator for Expected<'_> {
             if self.layer == self.plan.layers.len() {
                 return None;
             }
-            if let Some(job) = self.routing {
-                if !self.loaded && self.groups_started < 2 {
-                    let next = self.plan.layers[self.layer]
-                        .paths
-                        .get(self.path)
-                        .map(|p| job.tool_for_path(p))
-                        .transpose();
-                    let next = match next {
-                        Ok(value) => value,
-                        Err(error) => {
-                            self.layer = self.plan.layers.len();
-                            return Some(Err(error));
-                        }
-                    };
-                    if next.is_none_or(|tool| tool >= self.groups_started) {
-                        let tool = self.groups_started;
-                        self.groups_started += 1;
-                        self.position =
-                            Some(job.waste_end_mm(tool, self.plan.layers[self.layer].z_mm));
-                        self.previous_group = Some((self.layer as u16, tool));
-                        return Some(Ok(Action::BeginTool {
-                            layer: self.layer as u16,
-                            tool,
-                        }));
+            if let Some(job) = self.routing
+                && !self.loaded
+                && self.groups_started < 2
+            {
+                let next = self.plan.layers[self.layer]
+                    .paths
+                    .get(self.path)
+                    .map(|p| job.tool_for_path(p))
+                    .transpose();
+                let next = match next {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.layer = self.plan.layers.len();
+                        return Some(Err(error));
                     }
+                };
+                if next.is_none_or(|tool| tool >= self.groups_started) {
+                    let tool = self.groups_started;
+                    self.groups_started += 1;
+                    self.position = Some(job.waste_end_mm(tool, self.plan.layers[self.layer].z_mm));
+                    self.previous_group = Some((self.layer as u16, tool));
+                    return Some(Ok(Action::BeginTool {
+                        layer: self.layer as u16,
+                        tool,
+                    }));
                 }
             }
             if self.path == self.plan.layers[self.layer].paths.len() {
@@ -286,11 +286,11 @@ impl Iterator for Expected<'_> {
                 self.groups_started = 0;
                 continue;
             }
-            if !self.loaded {
-                if let Err(error) = self.load() {
-                    self.layer = self.plan.layers.len();
-                    return Some(Err(error));
-                }
+            if !self.loaded
+                && let Err(error) = self.load()
+            {
+                self.layer = self.plan.layers.len();
+                return Some(Err(error));
             }
             while self.prefix_index < self.prefix.len() {
                 let value = self.prefix[self.prefix_index];

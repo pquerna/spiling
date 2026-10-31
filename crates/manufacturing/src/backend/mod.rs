@@ -248,15 +248,14 @@ pub fn emit(
                                 * (job.tools[usize::from(active_tool)].filament_diameter_mm * 0.5)
                                     .powi(2)
                         });
-                        if let (Some(job), Event::Waste(..)) = (routed, event) {
-                            if delta * filament_area
+                        if let (Some(job), Event::Waste(..)) = (routed, event)
+                            && delta * filament_area
                                 < job.tools[usize::from(active_tool)].minimum_reprime_volume_mm3
-                            {
-                                return Err(error(
-                                    ManufacturingErrorCode::InvalidSpecification,
-                                    "actual E8 waste volume is below declared reprime minimum",
-                                ));
-                            }
+                        {
+                            return Err(error(
+                                ManufacturingErrorCode::InvalidSpecification,
+                                "actual E8 waste volume is below declared reprime minimum",
+                            ));
                         }
                         let flow = delta * filament_area * feed / 60.0 / length;
                         let rounding_slack = (intent.effective_max_volumetric_flow_mm3_s()

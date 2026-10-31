@@ -537,12 +537,12 @@ impl Construction {
             for path in &mut layer.paths {
                 let mut owner = None;
                 for domain in self.active(path.physical_z_mm) {
-                    if contains(&domain.material, path, work, cancel)? {
-                        if owner.replace(domain.reference).is_some() {
-                            return Err(unsupported(
-                                "complete bead has ambiguous material ownership",
-                            ));
-                        }
+                    if contains(&domain.material, path, work, cancel)?
+                        && owner.replace(domain.reference).is_some()
+                    {
+                        return Err(unsupported(
+                            "complete bead has ambiguous material ownership",
+                        ));
                     }
                 }
                 path.material_domain = Some(owner.ok_or_else(|| {

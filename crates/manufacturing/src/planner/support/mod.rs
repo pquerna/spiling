@@ -565,17 +565,17 @@ pub(super) fn realize(
             .saturating_add(layer_payload_bytes(layers.iter()))
             .saturating_add(joined_layers.capacity() * std::mem::size_of::<bool>());
         anchors.set_budget(workspace_budget(retained, owned_bytes)?);
-        if let Some(first) = layers.first_mut() {
-            if !finalize_layer_interface(
+        if let Some(first) = layers.first_mut()
+            && !finalize_layer_interface(
                 0,
                 first,
                 segments,
                 &mut work,
                 owned_bytes.saturating_add(anchors.retained_bytes()),
                 &mut finalize_interface,
-            )? {
-                return Err(super::bonds::unresolved(first));
-            }
+            )?
+        {
+            return Err(super::bonds::unresolved(first));
         }
         for index in 1..layers.len() {
             owned_bytes = native_owned_bytes

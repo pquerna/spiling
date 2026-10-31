@@ -118,7 +118,7 @@ impl Rows {
                     .try_reserve_exact(needed - self.intervals.len())
                     .map_err(|_| resource("skin fitting interval allocation refused"))?;
             }
-            for pair in self.hits.chunks_exact(2) {
+            for pair in self.hits.as_chunks::<2>().0 {
                 if pair[0] < pair[1] {
                     self.intervals.push([pair[0], pair[1]]);
                 }

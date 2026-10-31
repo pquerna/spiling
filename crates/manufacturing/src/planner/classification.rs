@@ -82,7 +82,7 @@ pub(super) fn contribution_vec_bytes(values: &Vec<ProcessRegionContribution>) ->
 }
 
 pub(super) fn contribution_clone_bytes(values: &[ProcessRegionContribution]) -> usize {
-    values.len() * std::mem::size_of::<ProcessRegionContribution>()
+    std::mem::size_of_val(values)
         + values
             .iter()
             .map(|c| c.definition_id.allocated_bytes())
@@ -1399,8 +1399,9 @@ impl ClassifiedRegions {
                     owner.is_none() && !original.supported && !original.demands.is_empty();
                 // Preserve the authored component and its direct demand set.
                 // Stage constructed whole rows separately from that original.
-                if !original.supported && owner.is_some() {
-                    let (region_index, interior) = owner.expect("regional construction");
+                if !original.supported
+                    && let Some((region_index, interior)) = owner
+                {
                     let mut sources = source_domains.iter().filter(|domain| {
                         domain.coverage.fraction == interior.coverage.fraction
                             && domain.coverage.contributions == interior.coverage.contributions
@@ -2562,7 +2563,7 @@ impl ClassifiedRegions {
                     if !hits.len().is_multiple_of(2) {
                         continue 'rows;
                     }
-                    for interval in hits.chunks_exact(2) {
+                    for interval in hits.as_chunks::<2>().0 {
                         for endpoint in 0..2 {
                             let transition = path.points_mm[endpoint];
                             let core = path.points_mm[1 - endpoint];
@@ -2613,7 +2614,7 @@ impl ClassifiedRegions {
                                 if !source_hits.len().is_multiple_of(2) {
                                     continue 'rows;
                                 }
-                                for interval in source_hits.chunks_exact(2) {
+                                for interval in source_hits.as_chunks::<2>().0 {
                                     if grid(interval[0])?
                                         <= grid(core[along].min(transition[along]))?
                                         && grid(core[along].max(transition[along]))?

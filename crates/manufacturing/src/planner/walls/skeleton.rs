@@ -578,13 +578,13 @@ fn validate_rings(
             {
                 continue;
             }
-            if inside_ring(witness, sites, other, quantized, work, cancel)? {
-                if other.polygon == ring.polygon {
-                    if other.hole {
-                        own_holes += 1;
-                    } else {
-                        own_outer = true;
-                    }
+            if inside_ring(witness, sites, other, quantized, work, cancel)?
+                && other.polygon == ring.polygon
+            {
+                if other.hole {
+                    own_holes += 1;
+                } else {
+                    own_outer = true;
                 }
             }
         }

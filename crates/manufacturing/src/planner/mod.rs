@@ -374,11 +374,11 @@ impl ScheduleNativeAuthority {
 fn admit_schedule<'model>(
     input: &CompilerInput<'model>,
     cancel: &AtomicBool,
-    mut admission: &mut preflight::Admission,
+    admission: &mut preflight::Admission,
     prepared_sources: &PreparedSources<'model>,
     process_captures: &mut Vec<zones::Capture>,
-    mut schedule: &mut Vec<LayerElevation>,
-    mut surface_work: &mut usize,
+    schedule: &mut Vec<LayerElevation>,
+    surface_work: &mut usize,
     support_work: &mut support::SupportWork,
     prefix_upper: Option<f64>,
     native_prefix: Option<NativeScheduleCapture>,
@@ -461,17 +461,17 @@ fn admit_schedule<'model>(
                 &native::NativeSourceInputs {
                     input,
                     occurrences: &occurrences,
-                    sources: &prepared_sources,
+                    sources: prepared_sources,
                 },
-                &mut admission,
-                &mut schedule,
+                admission,
+                schedule,
                 &native::NativeSpanRequest {
                     index,
                     retained_points,
                     retained_output_bytes,
                 },
                 &mut native_stage,
-                &mut surface_work,
+                surface_work,
                 pool,
                 cancel,
             )?;
@@ -522,7 +522,7 @@ fn admit_schedule<'model>(
                         fields,
                         sample,
                         staged,
-                        &mut surface_work,
+                        surface_work,
                         cancel,
                     )?;
                     native_points = native_points
@@ -622,7 +622,7 @@ fn admit_schedule<'model>(
                 fields,
                 sample,
                 live_retained + native_points + region::point_count(&next),
-                &mut surface_work,
+                surface_work,
                 cancel,
             )?;
             let finished_bytes = native::material_bytes(&mut finished);
@@ -654,7 +654,7 @@ fn admit_schedule<'model>(
         validate_process_overlap(
             &process_domains,
             [slab_start, schedule[(end - 1) as usize].z],
-            &mut surface_work,
+            surface_work,
             cancel,
         )?;
         let source_area_mm2 = native_source_area_mm2;
@@ -684,9 +684,9 @@ fn admit_schedule<'model>(
                         requested: [slab_start, schedule[(end - 1) as usize].z],
                         native: [native_bounds.min[2], native_bounds.max[2]],
                     },
-                    &schedule,
+                    schedule,
                     live_retained + native_points + region::point_count(&next),
-                    &mut surface_work,
+                    surface_work,
                     cancel,
                 )?;
             }
@@ -753,12 +753,8 @@ fn admit_schedule<'model>(
                     {
                         let mut owner = None;
                         for (polygon_index, polygon) in native.0.iter().enumerate() {
-                            if field.owns_native_island(
-                                polygon,
-                                sample,
-                                &mut surface_work,
-                                cancel,
-                            )? && owner.replace(polygon_index).is_some()
+                            if field.owns_native_island(polygon, sample, surface_work, cancel)?
+                                && owner.replace(polygon_index).is_some()
                             {
                                 return Err(error(
                                     ManufacturingErrorCode::UnsupportedGeometry,
@@ -862,8 +858,7 @@ fn admit_schedule<'model>(
     drop(native_material);
     drop(native_occupied_shared);
     let count = if prefix_upper.is_some() {
-        unreachable_support_end(&schedule, recipe, &mut surface_work, cancel)?.min(count as usize)
-            as u32
+        unreachable_support_end(schedule, recipe, surface_work, cancel)?.min(count as usize) as u32
     } else {
         count
     };
@@ -876,7 +871,7 @@ fn admit_schedule<'model>(
     let mut construction = color::capture(
         input,
         &sections,
-        &schedule,
+        schedule,
         &admission.native_bounds,
         retained_points,
         construction_owned_bytes,
@@ -979,9 +974,9 @@ fn admit_schedule<'model>(
             let height = elevation.height;
             let top_axis = region::HatchAxis::for_policy(recipe.top_skin_axis, index);
             let current = span_at(&sections, index);
-            let below = physical_neighbor(&schedule, index, recipe.bottom_skin_thickness_mm, false)
+            let below = physical_neighbor(schedule, index, recipe.bottom_skin_thickness_mm, false)
                 .map(|i| span_at(&sections, i));
-            let above = physical_neighbor(&schedule, index, recipe.top_skin_thickness_mm, true)
+            let above = physical_neighbor(schedule, index, recipe.top_skin_thickness_mm, true)
                 .map(|i| span_at(&sections, i));
             if sections[current].material.0.is_empty() {
                 layers.push(PrintLayer {
@@ -1621,7 +1616,7 @@ fn admit_schedule<'model>(
             &mut layers,
             &support::SupportInput {
                 sections: &sections,
-                schedule: &schedule,
+                schedule,
                 native_points: support_native_points,
                 native_owned_bytes: support_native_owned_bytes,
                 recipe,
@@ -1675,14 +1670,14 @@ fn admit_schedule<'model>(
                     let elevation = &schedule[index];
                     let current = span_at(&sections, index as u32);
                     let below = physical_neighbor(
-                        &schedule,
+                        schedule,
                         index as u32,
                         recipe.bottom_skin_thickness_mm,
                         false,
                     )
                     .map(|i| span_at(&sections, i));
                     let above = physical_neighbor(
-                        &schedule,
+                        schedule,
                         index as u32,
                         recipe.top_skin_thickness_mm,
                         true,
@@ -1978,7 +1973,7 @@ fn admit_schedule<'model>(
                     })?;
                 let projected = native::project_protected_voids(
                     input,
-                    &prepared_sources,
+                    prepared_sources,
                     captures,
                     &native::ProtectedVoidDemand {
                         native_bounds: &admission.native_bounds,
@@ -2233,7 +2228,7 @@ fn admit_schedule<'model>(
             &mut result,
             input.intent,
             &sections,
-            &schedule,
+            schedule,
             &wall_layouts,
             &mut neighborhoods,
             retained_points,

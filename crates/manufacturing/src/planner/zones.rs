@@ -313,12 +313,11 @@ pub(super) fn capture(
         let mut cut = None;
         for a in 0..3 {
             for face in [min[a], max[a]] {
-                if face >= local.min[a] && face <= local.max[a] {
-                    if cut.replace((a, face)).is_some() {
-                        return Err(invalid(
-                            "SourceBoxMm has an extra face intersecting the conservative finished-D enclosure; exactly one X/Y/Z interface is admitted",
-                        ));
-                    }
+                if face >= local.min[a] && face <= local.max[a] && cut.replace((a, face)).is_some()
+                {
+                    return Err(invalid(
+                        "SourceBoxMm has an extra face intersecting the conservative finished-D enclosure; exactly one X/Y/Z interface is admitted",
+                    ));
                 }
             }
         }

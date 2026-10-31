@@ -305,10 +305,10 @@ pub(crate) fn stream(
             }
             for path in &layer.paths {
                 check_cancel(cancel)?;
-                if let Some(job) = routed {
-                    if usize::from(job.tool_for_path(path)?) != group {
-                        continue;
-                    }
+                if let Some(job) = routed
+                    && usize::from(job.tool_for_path(path)?) != group
+                {
+                    continue;
                 }
                 let target = path.points_mm[0];
                 let pwm = if path.kind == DepositionKind::Bridge {
@@ -436,7 +436,7 @@ pub(crate) fn stream(
                     if command_length < program_coordinates::MIN_DEPOSITION_COMMAND_MM {
                         return Err(error(
                             ManufacturingErrorCode::UnsupportedGeometry,
-                            &format!(
+                            format!(
                                 "deposition edge is below the declared software minimum command length: layer={} kind={:?} source={:?} xyz6={from:?}->{to:?} length_mm={command_length:.17e} minimum_mm={:.17e}",
                                 layer.index,
                                 path.kind,
