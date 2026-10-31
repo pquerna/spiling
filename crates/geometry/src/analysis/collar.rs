@@ -3348,10 +3348,8 @@ pub(super) fn regular_common_carrier_coedge(
     }
     let Some(link) = PairedMaterialLink::new(
         source.definition(),
-        a,
-        pair.first,
-        b,
-        second,
+        (a, pair.first),
+        (b, second),
         range,
         link_allowance,
         work,

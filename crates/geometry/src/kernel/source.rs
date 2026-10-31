@@ -72,6 +72,13 @@ pub(crate) struct OriginalCoedgeSource {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Original PCURVE entity identity and association ordinal remain captured genealogy independently of generated native charts"
+    )
+)]
 pub(crate) struct OriginalPcurveSource {
     pub(crate) source_pcurve: StepEntityId,
     pub(crate) carrier_id: StepEntityId,

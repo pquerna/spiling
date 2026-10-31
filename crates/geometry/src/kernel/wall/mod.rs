@@ -50,8 +50,7 @@ fn native_line_matches(
     range: [f64; 2],
     allowance: usize,
     orientation: bool,
-    front: [f64; 3],
-    back: [f64; 3],
+    [front, back]: [[f64; 3]; 2],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
@@ -398,8 +397,7 @@ impl Definition {
                 [edge.interval.min(), edge.interval.max()],
                 remaining,
                 forward,
-                points[i],
-                [b.x, b.y, b.z],
+                [points[i], [b.x, b.y, b.z]],
                 work,
                 cancel,
             )? {
@@ -568,8 +566,7 @@ mod tests {
                 ],
                 crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES,
                 true,
-                [6.0, 0.0, 0.0],
-                [8.0, 0.0, 0.0],
+                [[6.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
                 &mut work,
                 &cancel
             )
@@ -584,8 +581,7 @@ mod tests {
                 ],
                 crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES,
                 false,
-                [8.0, 0.0, 0.0],
-                [6.0, 0.0, 0.0],
+                [[8.0, 0.0, 0.0], [6.0, 0.0, 0.0]],
                 &mut work,
                 &cancel
             )
@@ -600,8 +596,7 @@ mod tests {
                 ],
                 crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES,
                 true,
-                [8.0, 0.0, 0.0],
-                [6.0, 0.0, 0.0],
+                [[8.0, 0.0, 0.0], [6.0, 0.0, 0.0]],
                 &mut work,
                 &cancel
             )
@@ -616,8 +611,7 @@ mod tests {
                 ],
                 crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES,
                 true,
-                [2.0, 0.0, 0.0],
-                [3.0, 0.0, 0.0],
+                [[2.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
                 &mut work,
                 &cancel
             )
@@ -629,8 +623,7 @@ mod tests {
                 [0.25, 0.75],
                 crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES,
                 true,
-                [6.5, 0.0, 0.0],
-                [7.5, 0.0, 0.0],
+                [[6.5, 0.0, 0.0], [7.5, 0.0, 0.0]],
                 &mut work,
                 &cancel
             )

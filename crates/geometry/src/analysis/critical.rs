@@ -3210,10 +3210,8 @@ pub(super) fn certify_critical_slab(
             let paired_scratch = chart_bytes;
             let material_link = material_link::PairedMaterialLink::new(
                 definition,
-                first_domain,
-                first,
-                second_domain,
-                second,
+                (first_domain, first),
+                (second_domain, second),
                 central_range,
                 paired_scratch,
                 work,

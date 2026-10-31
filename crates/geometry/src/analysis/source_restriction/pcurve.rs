@@ -259,8 +259,7 @@ fn with_turns(endpoint: RawEndpoint, turns: i32) -> Result<RawEndpoint, Geometry
 /// stationary endpoint must additionally equal the candidate's established
 /// root by whole-hull uniqueness. Different winding is never quotiented away.
 fn same_periodic_branch(
-    first: RawRestriction,
-    second: RawRestriction,
+    [first, second]: [RawRestriction; 2],
     uv_period: Option<Interval>,
     lifted: &LiftedPcurve<'_>,
     vertices: [[f64; 3]; 2],
@@ -320,14 +319,18 @@ enum ParameterRecipe<'d> {
     },
 }
 pub(crate) struct SourcePcurveRestriction<'d> {
-    face: &'d OriginalFaceSource,
-    coedge: &'d OriginalCoedgeSource,
-    source: &'d OriginalPcurveSource,
     chart: PreparedOriginalCurve<'d>,
     recipe: ParameterRecipe<'d>,
     original_knots: Vec<f64>,
     knot_bands: Vec<Interval>,
     cover_cuts: Vec<f64>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retain literal endpoint identity with the completed original PCURVE restriction"
+        )
+    )]
     exact_endpoints: bool,
 }
 
@@ -817,8 +820,7 @@ impl<'d> SourcePcurveRestriction<'d> {
                         .checked_mul(std::mem::size_of::<f64>())
                         .ok_or_else(capacity)?;
                     if same_periodic_branch(
-                        *previous,
-                        candidate,
+                        [*previous, candidate],
                         uv_period,
                         &lifted,
                         coedge.vertex_points_mm,
@@ -1041,9 +1043,6 @@ impl<'d> SourcePcurveRestriction<'d> {
             )
         };
         let mut result = Self {
-            face,
-            coedge,
-            source: pcurve,
             chart,
             recipe,
             original_knots: Vec::new(),
@@ -1621,14 +1620,13 @@ mod tests {
                 LiftedPcurve::new(&pcurve.operands, &selected, BYTES, &mut work, &cancel).unwrap();
             assert!(
                 same_periodic_branch(
-                    *raw,
-                    *raw,
+                    [*raw, *raw],
                     uv_period,
                     &lifted,
                     source.vertex_points_mm,
                     BYTES,
                     &mut work,
-                    &cancel,
+                    &cancel
                 )
                 .unwrap()
             );
@@ -1653,14 +1651,13 @@ mod tests {
             let shifted = shifted.expect("periodic source extension has no interior turn witness");
             assert!(
                 same_periodic_branch(
-                    *raw,
-                    shifted,
+                    [*raw, shifted],
                     uv_period,
                     &lifted,
                     source.vertex_points_mm,
                     BYTES,
                     &mut work,
-                    &cancel,
+                    &cancel
                 )
                 .unwrap()
             );
@@ -1670,27 +1667,25 @@ mod tests {
             };
             assert!(
                 !same_periodic_branch(
-                    *raw,
-                    different_winding,
+                    [*raw, different_winding],
                     uv_period,
                     &lifted,
                     source.vertex_points_mm,
                     BYTES,
                     &mut work,
-                    &cancel,
+                    &cancel
                 )
                 .unwrap()
             );
             assert!(
                 !same_periodic_branch(
-                    *raw,
-                    shifted,
+                    [*raw, shifted],
                     None,
                     &lifted,
                     source.vertex_points_mm,
                     BYTES,
                     &mut work,
-                    &cancel,
+                    &cancel
                 )
                 .unwrap()
             );

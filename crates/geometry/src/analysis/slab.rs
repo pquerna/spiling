@@ -3769,7 +3769,6 @@ struct RoundContinuation<'a> {
     height_coefficient: Interval,
     axial_column: [f64; 3],
     radial_columns: [[f64; 3]; 2],
-    effective_tolerance_mm: f64,
 }
 pub(super) struct RoundIncidenceProof<'a> {
     definition_id: &'a spiling_contracts::geometry::DefinitionId,
@@ -3777,12 +3776,8 @@ pub(super) struct RoundIncidenceProof<'a> {
     source_face_count: usize,
     tunnel_cycles: usize,
     native_convex_source: bool,
-    effective_tolerance_mm: f64,
 }
 impl RoundIncidenceProof<'_> {
-    pub(super) fn effective_tolerance_mm(&self) -> f64 {
-        self.effective_tolerance_mm
-    }
     pub(super) fn material_realization_identity(
         &self,
     ) -> crate::kernel::MaterialRealizationIdentity {
@@ -3813,7 +3808,7 @@ impl<'a> RoundContinuation<'a> {
             definition_id: self.definition_id,
             material_realization: self.material_realization,
             source_face_count: self.source_face_count,
-            effective_tolerance_mm: self.effective_tolerance_mm,
+
             tunnel_cycles: usize::from(self.carrier.major_radius.is_some()),
             // The complete positively bounded affine sphere was proved from
             // the entire original closed co-carrier patch complex above.
@@ -4005,7 +4000,7 @@ fn source_round_continuation<'a>(
         definition_id: definition.id(),
         material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
         source_face_count,
-        effective_tolerance_mm: source.trim_source().effective_tolerance_mm(),
+
         carrier,
         offset,
         height_coefficient: row[axis],
@@ -4733,7 +4728,7 @@ pub(super) fn analyze_slab_sample<'d>(
         Some(RegularContinuation {
             definition_id: definition.id(),
             material_realization: product.material_realization_identity(),
-            effective_tolerance_mm: source.trim_source().effective_tolerance_mm(),
+
             frame: request.frame,
             range,
             speed: 0.0,
@@ -5042,12 +5037,8 @@ pub(super) struct RegularContinuation<'a> {
     speed: f64,
     covered_face_cells: u64,
     covered_coedge_cells: u64,
-    effective_tolerance_mm: f64,
 }
 impl RegularContinuation<'_> {
-    pub(super) fn effective_tolerance_mm(&self) -> f64 {
-        self.effective_tolerance_mm
-    }
     pub(super) fn material_realization_identity(
         &self,
     ) -> crate::kernel::MaterialRealizationIdentity {
@@ -5651,7 +5642,7 @@ fn regular_boundary_speed<'a>(
     Ok(RegularContinuation {
         definition_id: definition.id(),
         material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
-        effective_tolerance_mm: source.trim_source().effective_tolerance_mm(),
+
         frame,
         range,
         speed,
