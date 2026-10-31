@@ -13,8 +13,7 @@ use super::{
     projected_bounds,
 };
 use crate::{
-    Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm,
-    parametric::{Interval, SurfaceEvaluator},
+    Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, parametric::Interval,
 };
 use spiling_contracts::geometry::{
     GeometryErrorCode, RigidPoseMm, SECTION_PLANE_TOLERANCE_MM, SECTION_SAMPLING_TOLERANCE_MM,

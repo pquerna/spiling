@@ -29,6 +29,10 @@ use roots::EndpointRoot;
 
 /// One selected original spatial operator. Native parameters never enter its
 /// normalized query gauge; the trim owner proves their separate association.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep the selected spatial proof inline in its charged retained owner rather than allocate a boxed variant"
+)]
 pub(crate) enum SourceSpatialRestriction<'a> {
     Line {
         source: &'a OriginalCoedgeSource,
@@ -42,6 +46,10 @@ pub(crate) enum SourceSpatialRestriction<'a> {
     Endpoint(EndpointRestrictedOriginal<'a>),
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The temporary original reference is admitted as one inline proof before correspondence calibration"
+)]
 enum OriginalSpatialReference<'a> {
     Line(SourceLineRestriction<'a>),
     Affine(SourceAffineRestriction<'a>, Option<SourceCurveCalibration>),

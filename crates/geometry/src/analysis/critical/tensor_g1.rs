@@ -127,7 +127,7 @@ pub(super) fn direct_tensor_axes<'a>(
     domain: [[f64; 2]; 2],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Option<[(&'a [f64], usize, usize); 2]>, GeometryError> {
+) -> Result<Option<TensorKnotAxes<'a>>, GeometryError> {
     Ok(
         tensor_coefficients(surface, domain, work, cancel)?.map(|tensor| {
             std::array::from_fn(|axis| {
@@ -451,6 +451,9 @@ pub(super) fn periodic_regular_join(
         cancel,
     )
 }
+
+// Each axis retains knots, degree and control count.
+type TensorKnotAxes<'a> = [(&'a [f64], usize, usize); 2];
 
 #[cfg(test)]
 mod tests {

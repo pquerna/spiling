@@ -1990,7 +1990,7 @@ impl SamplePrism {
     fn radial_projection_frame(
         &self,
         position: [Interval; 3],
-    ) -> Result<Option<([Interval; 3], Option<[Interval; 3]>)>, GeometryError> {
+    ) -> Result<Option<RadialProjectionFrame>, GeometryError> {
         let relative =
             std::array::from_fn(|axis| position[axis].sub(Interval::point(self.center[axis])));
         let Some(core_radius) = self.core_radius else {
@@ -3567,3 +3567,6 @@ fn occupied_projection(
 
 #[cfg(test)]
 mod tests;
+
+// Radial vector with the optional inner-core radial vector.
+type RadialProjectionFrame = ([Interval; 3], Option<[Interval; 3]>);

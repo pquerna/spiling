@@ -593,7 +593,7 @@ pub(super) fn clip_height_box(
     heights: [f64; 2],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Option<([[f64; 2]; 2], crate::parametric::SurfaceEnclosure)>, GeometryError> {
+) -> Result<Option<ClippedHeightJet>, GeometryError> {
     let Some(uv) = clip_height_parameter_box(surface, uv, functional, heights, work, cancel)?
     else {
         return Ok(None);
@@ -5930,6 +5930,9 @@ fn occupied_envelope_with_position_boxes(
     })
 }
 
+// Contracted UV box and its complete spatial jet.
+type ClippedHeightJet = ([[f64; 2]; 2], crate::parametric::SurfaceEnclosure);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6121,7 +6124,10 @@ mod tests {
         let height = broad_height(&bounds, frame());
         assert_eq!([height.lo, height.hi], [10.0, 12.0]);
         assert!(9.0 < height.lo);
-        assert!(!(10.0 < height.lo), "closed endpoint contact is not empty");
+        assert!(
+            10.0_f64.partial_cmp(&height.lo) != Some(std::cmp::Ordering::Less),
+            "closed endpoint contact is not empty"
+        );
     }
 
     #[test]

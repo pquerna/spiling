@@ -39,7 +39,7 @@ fn axis(
     count: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Option<([Interval; 2], [f64; 2])>, GeometryError> {
+) -> Result<Option<AffineAxisCorrespondence>, GeometryError> {
     if values.is_empty()
         || values.len() != multiplicities.len()
         || count <= degree
@@ -394,3 +394,6 @@ fn extrusion(
         literal,
     }))
 }
+
+// Original-from-native offset/slope and the original active domain.
+type AffineAxisCorrespondence = ([Interval; 2], [f64; 2]);

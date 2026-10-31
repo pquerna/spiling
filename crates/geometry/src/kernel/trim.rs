@@ -4470,15 +4470,7 @@ fn original_plane_line_coefficients(
     curve: &solidcraft_step::geom::Curve,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<
-    Option<(
-        [ExactCoefficient; 3],
-        [ExactCoefficient; 3],
-        [ExactCoefficient; 2],
-        [ExactCoefficient; 2],
-    )>,
-    GeometryError,
-> {
+) -> Result<Option<PlaneLineCoefficients>, GeometryError> {
     work.charge(1, cancel)?;
     let solidcraft_step::geom::Surface::Plane { position } = surface else {
         return Ok(None);
@@ -5583,6 +5575,10 @@ impl PreparedSharedSpatialCurve<'_> {
             - size_of::<SourceCurveCalibration>()
     }
 }
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Each original UV proof is stored inline and charged by the coedge owner; do not add a per-coedge box allocation"
+)]
 enum OriginalUvCurve<'d> {
     PlaneLine(SourcePlaneLineProjection<'d>),
     DerivedPlane(SourcePlanePullback<'d>),
@@ -8677,6 +8673,14 @@ impl PreparedFaceTrimDomain<'_> {
         ))
     }
 }
+
+// Spatial line origin/direction and its two plane-chart coefficient rows.
+type PlaneLineCoefficients = (
+    [ExactCoefficient; 3],
+    [ExactCoefficient; 3],
+    [ExactCoefficient; 2],
+    [ExactCoefficient; 2],
+);
 
 #[cfg(test)]
 mod tests {

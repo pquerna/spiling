@@ -512,12 +512,14 @@ const KERNEL_MODEL_SIZE_ESTIMATE_MM: f64 = 100.0;
 
 /// Constructs a deterministic thread-isolated `solidcore::Kernel` context with Spiling mm tolerances.
 pub fn make_kernel_context() -> solidcore::Kernel {
-    let mut tolerances = solidcore::Tolerances::default();
-    tolerances.zone_tol_3d = KERNEL_ZONE_TOLERANCE_MM;
-    tolerances.xsect_tol_3d = KERNEL_INTERSECTION_TOLERANCE_MM;
-    tolerances.approx_tol_3d = KERNEL_APPROXIMATION_TOLERANCE_MM;
-    tolerances.ang_tol_deg = KERNEL_ANGULAR_TOLERANCE_DEGREES;
-    tolerances.model_size_estimate = KERNEL_MODEL_SIZE_ESTIMATE_MM;
+    let tolerances = solidcore::Tolerances {
+        zone_tol_3d: KERNEL_ZONE_TOLERANCE_MM,
+        xsect_tol_3d: KERNEL_INTERSECTION_TOLERANCE_MM,
+        approx_tol_3d: KERNEL_APPROXIMATION_TOLERANCE_MM,
+        ang_tol_deg: KERNEL_ANGULAR_TOLERANCE_DEGREES,
+        model_size_estimate: KERNEL_MODEL_SIZE_ESTIMATE_MM,
+        ..solidcore::Tolerances::default()
+    };
 
     let options = solidcore::KernelOptions {
         tolerances,

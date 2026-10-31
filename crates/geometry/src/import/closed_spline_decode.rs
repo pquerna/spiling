@@ -97,7 +97,7 @@ fn closed_rows(
     e: &Entity,
     base: &[Param],
     cancel: &AtomicBool,
-) -> Result<Option<([usize; 2], [bool; 2], bool)>> {
+) -> Result<Option<ClosedRowInventory>> {
     let Some(rows) = base.get(2).and_then(Param::as_list) else {
         return Ok(None);
     };
@@ -529,6 +529,9 @@ pub(super) fn read_solid(
     }
     Ok(solid)
 }
+
+// Control dimensions, exact closed-row flags and rationality.
+type ClosedRowInventory = ([usize; 2], [bool; 2], bool);
 
 #[cfg(test)]
 mod tests {

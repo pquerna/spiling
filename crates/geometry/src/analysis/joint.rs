@@ -1386,7 +1386,7 @@ fn capture_native_port_branches(
     scratch: &mut Scratch,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<(Vec<[usize; 3]>, Vec<[usize; 3]>), GeometryError> {
+) -> Result<NativePortBranches, GeometryError> {
     let mut result = Vec::new();
     let mut exclusions = Vec::new();
     let section = &request.analysis.section;
@@ -8999,6 +8999,9 @@ fn rectangular_arrangement(
     feature_clearance(&actual_rings, 0.0, scratch, work, cancel)?;
     Ok((achieved, expected, attribution))
 }
+
+// Included and excluded (face, wire, coedge) identities.
+type NativePortBranches = (Vec<[usize; 3]>, Vec<[usize; 3]>);
 
 #[cfg(test)]
 mod tests {

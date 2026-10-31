@@ -2817,27 +2817,6 @@ pub(crate) fn exact_plane_curve_affine(
     }
     Err(resource())
 }
-impl PreparedOriginalSurface<'_> {
-    pub(crate) fn tensor_coefficients(
-        &self,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<Option<(&source::BSplineSurface, &[f64], &[f64])>, GeometryError> {
-        let mut surface = self.source;
-        for depth in 0..MAX_DEPTH {
-            check_depth(depth, work, cancel)?;
-            match surface {
-                Surface::RectangularTrimmed { basis, .. } => surface = basis,
-                Surface::BSpline(s) => {
-                    let (u, v) = self.inventory.surface_knots(s, work, cancel)?;
-                    return Ok(Some((s, u, v)));
-                }
-                _ => return Ok(None),
-            }
-        }
-        Err(resource())
-    }
-}
 
 #[cfg(test)]
 mod tests {

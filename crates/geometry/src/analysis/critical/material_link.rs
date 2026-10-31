@@ -189,10 +189,7 @@ impl<'a, 'd> PairedMaterialLink<'a, 'd> {
         curve: &CurveEnclosure,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<
-        Result<([Interval; 3], [Interval; 3], [Interval; 3]), MaterialLinkRefusal>,
-        GeometryError,
-    > {
+    ) -> Result<Result<PairedEdgeNormals, MaterialLinkRefusal>, GeometryError> {
         if range[0] < self.range[0] || range[1] > self.range[1] {
             return Err(GeometryError::new(
                 GeometryErrorCode::InvalidGeometry,
@@ -353,3 +350,6 @@ pub(crate) fn native_boundary_projection_cover(
     }
     Ok(xy)
 }
+
+// Complete position image and the two outward normal enclosures.
+type PairedEdgeNormals = ([Interval; 3], [Interval; 3], [Interval; 3]);

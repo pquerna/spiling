@@ -4076,7 +4076,13 @@ fn isolated_critical_vertex_star(
     let mixed = functional.dot(jet.duv);
     // A whole interval determinant, not diagonal signs or sampled corners,
     // proves definiteness throughout this exact convex source cell.
-    if !(diagonal[0].mul(diagonal[1]).sub(mixed.square()).lo > 0.0) {
+    if diagonal[0]
+        .mul(diagonal[1])
+        .sub(mixed.square())
+        .lo
+        .partial_cmp(&0.0)
+        != Some(std::cmp::Ordering::Greater)
+    {
         return Ok(None);
     }
     let sign = if diagonal.iter().all(|value| value.hi < 0.0) {
@@ -4238,7 +4244,10 @@ fn isolated_critical_vertex_star(
                 )
             },
         );
-        if !(residual_squared.hi <= limit_squared.lo) {
+        if !matches!(
+            residual_squared.hi.partial_cmp(&limit_squared.lo),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        ) {
             continue;
         }
         let mut connection_normal = cross(connection_jet.du, connection_jet.dv);

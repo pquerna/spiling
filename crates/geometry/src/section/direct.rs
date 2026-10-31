@@ -576,7 +576,7 @@ fn classify_graph(
     plane: PlaneMm,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Option<(usize, i8, [[f64; 2]; 2])>, GeometryError> {
+) -> Result<Option<MonotoneChartGraph>, GeometryError> {
     if !p::surface_parameter_span_continuous(surface, domain, work, cancel)? {
         return Err(indeterminate(
             "native face chart has an unqualified C0 knot join",
@@ -999,7 +999,7 @@ impl<'a> Boundary<'a> {
         r: [f64; 2],
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<([Interval; 3], [Interval; 3], [Interval; 2], [Interval; 2]), GeometryError> {
+    ) -> Result<BoundaryJet, GeometryError> {
         let (mut uv, derivative) = self.chart(r, work, cancel)?;
         let domain = p::surface_active_domain(self.surface)?;
         let min = solidcore::math::Point2::new(domain[0][0], domain[1][0]);
@@ -1965,6 +1965,11 @@ pub(crate) fn canonicalize_section_in_place(
     canonicalize_loops(section, work, cancel)?;
     certify_polygons(section, work, cancel)
 }
+
+// Dependent axis, its strict sign and the retained graph rectangle.
+type MonotoneChartGraph = (usize, i8, [[f64; 2]; 2]);
+// Spatial position/first derivative followed by UV position/first derivative.
+type BoundaryJet = ([Interval; 3], [Interval; 3], [Interval; 2], [Interval; 2]);
 
 #[cfg(test)]
 mod correspondence_tests {
