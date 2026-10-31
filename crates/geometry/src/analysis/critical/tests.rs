@@ -101,11 +101,11 @@ fn material_height_flow_uses_the_actual_oblique_dual_and_strict_submersion() {
     let face = material_face_flow_rate([1.0, 0.0, 0.0].map(Interval::point), height, vertical)
         .unwrap()
         .unwrap();
-    assert!(face >= 0.25 && face < 0.250000000001);
+    assert!((0.25..0.250000000001).contains(&face));
     let edge = material_edge_flow_rate([0.0, 0.0, 4.0].map(Interval::point), height, vertical)
         .unwrap()
         .unwrap();
-    assert!(edge >= 0.25 && edge < 0.250000000001);
+    assert!((0.25..0.250000000001).contains(&edge));
     assert!(
         material_face_flow_rate(height, height, vertical)
             .unwrap()
@@ -221,7 +221,7 @@ fn convex_box_distance_keeps_cap_bound_when_all_corners_are_on_boundary() {
         .unwrap();
     // Every corner has zero boundary distance, but the center is 0.1 mm
     // from either cap. Filled-set convexity alone would miss this maximum.
-    assert!(bound >= 0.1 && bound < 0.101, "{bound}");
+    assert!((0.1..0.101).contains(&bound), "{bound}");
 }
 
 #[test]
@@ -285,7 +285,7 @@ fn convex_disk_metric_never_assigns_cap_witnesses_to_exterior_angles() {
                 &cancel,
             )
             .unwrap();
-        assert!(interior >= 0.1 && interior < 0.101, "{index}: {interior}");
+        assert!((0.1..0.101).contains(&interior), "{index}: {interior}");
     }
 }
 
@@ -325,7 +325,7 @@ fn disk_side_witness_covers_complete_segment_and_clamps_endpoints() {
             &cancel,
         )
         .unwrap();
-    assert!(over_endpoint >= 0.09999 && over_endpoint < 0.10001);
+    assert!((0.09999..0.10001).contains(&over_endpoint));
 }
 
 #[test]
@@ -344,7 +344,7 @@ fn disk_side_witness_preserves_closed_height_and_sampling_reserves() {
             &cancel,
         )
         .unwrap();
-    assert!(near_cut >= 0.999e-6 && near_cut < 1.1e-6);
+    assert!((0.999e-6..1.1e-6).contains(&near_cut));
     let outside = prism
         .boundary_distance(
             [10.0, -10.0, 0.3].map(Interval::point),
@@ -353,7 +353,7 @@ fn disk_side_witness_preserves_closed_height_and_sampling_reserves() {
             &cancel,
         )
         .unwrap();
-    assert!(outside >= 0.19999 && outside < 0.20001);
+    assert!((0.19999..0.20001).contains(&outside));
     prism.approximation = 0.004;
     let reserved = prism
         .boundary_distance(
@@ -363,7 +363,7 @@ fn disk_side_witness_preserves_closed_height_and_sampling_reserves() {
             &cancel,
         )
         .unwrap();
-    assert!(reserved >= 0.012 && reserved < 0.012001);
+    assert!((0.012..0.012001).contains(&reserved));
 }
 
 #[test]
@@ -392,7 +392,7 @@ fn annular_ray_edge_functional_contracts_at_square_corner_and_closed_cut() {
         )
         .unwrap();
     assert!(
-        outside >= 0.19999 && outside < 0.20001,
+        (0.19999..0.20001).contains(&outside),
         "the side witness must account the actual closed-cut height: {outside}"
     );
     let unresolved = prism
@@ -679,7 +679,7 @@ fn source_normal_matching_uses_independent_uv_and_native_edge_parameters() {
             )
             .unwrap();
         let complete = coedge_normal_enclosure(
-            &domain,
+            domain,
             index,
             [Interval {
                 lo: -10.0,
@@ -696,7 +696,7 @@ fn source_normal_matching_uses_independent_uv_and_native_edge_parameters() {
             "all position-compatible portions of the source half-cycle must survive"
         );
         let disjoint = coedge_normal_enclosure(
-            &domain,
+            domain,
             index,
             [Interval {
                 lo: 100.0,

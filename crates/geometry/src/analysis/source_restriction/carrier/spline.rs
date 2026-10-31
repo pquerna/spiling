@@ -128,10 +128,10 @@ pub(super) fn try_associate(
     if indices.n.checked_add(1) != Some(nu) || indices.m.checked_add(1) != Some(nv) {
         return Ok(None);
     }
-    if let Some(weights) = &source.weights {
-        if weights.len() != nu {
-            return Ok(None);
-        }
+    if let Some(weights) = &source.weights
+        && weights.len() != nu
+    {
+        return Ok(None);
     }
     // The bridge flattens source rows with v fastest; create_canonical keeps
     // that ordering. It does not swap or reverse either spline axis.

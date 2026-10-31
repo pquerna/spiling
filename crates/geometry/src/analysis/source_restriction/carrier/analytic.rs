@@ -932,7 +932,7 @@ pub(super) fn try_associate(
                     crate::kernel::source_operand::original_circular_extrusion(original)
                 {
                     let cylinder = Surface::Cylinder {
-                        position: circle.position.clone(),
+                        position: *circle.position,
                         radius: circle.radius_mm,
                     };
                     let Some(mut record) = analytic(&cylinder, native, None, work, cancel)? else {
@@ -1136,10 +1136,10 @@ mod tests {
             .unwrap();
         assert!(!changed.literal);
         assert!(changed.error_coefficients[2] >= 1.0);
-        if let Surface::Extrusion { profile, .. } = &mut source {
-            if let Curve::BSpline(profile) = std::sync::Arc::make_mut(profile) {
-                profile.multiplicities[0] = 1;
-            }
+        if let Surface::Extrusion { profile, .. } = &mut source
+            && let Curve::BSpline(profile) = std::sync::Arc::make_mut(profile)
+        {
+            profile.multiplicities[0] = 1;
         }
         assert!(
             super::super::spline::try_associate(&source, &native, &mut work, &cancel)
@@ -1222,7 +1222,7 @@ mod tests {
             association
                 .error_coefficients
                 .into_iter()
-                .all(|e| e.is_finite() && e >= 0.0 && e < 1.0e-10)
+                .all(|e| e.is_finite() && (0.0..1.0e-10).contains(&e))
         );
     }
     #[test]

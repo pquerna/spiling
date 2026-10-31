@@ -113,10 +113,10 @@ pub fn prepare_solid<'d>(
         .and_then(|bytes| bytes.checked_add(size_of::<PreparedNativeTrimSource<'d>>()))
         .ok_or_else(capacity_error)?;
     let charts = PreparedNativeTrimSource::prepare_material(definition, allowance, work, cancel);
-    if let Err(error) = &charts {
-        if propagate_preparation_failure(error) {
-            return Err(error.clone());
-        }
+    if let Err(error) = &charts
+        && propagate_preparation_failure(error)
+    {
+        return Err(error.clone());
     }
     let mut solid = PreparedSolid {
         definition,

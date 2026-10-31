@@ -1256,10 +1256,10 @@ pub(crate) fn curve_endpoint_coordinate_equal(
             continue;
         }
         for i in span - degree..=span {
-            if let Some(endpoint) = clamped {
-                if i != endpoint {
-                    continue;
-                }
+            if let Some(endpoint) = clamped
+                && i != endpoint
+            {
+                continue;
             }
             work.charge(1, cancel)?;
             found = true;

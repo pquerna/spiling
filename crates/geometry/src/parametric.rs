@@ -34,7 +34,7 @@ pub use plane_roots::{
     PreparedBoundaryBinding, PreparedFacePlaneRoots,
 };
 
-use crate::{GeometryError, GeometryWorkBudget, PlaneFrameMm, check_cancel};
+use crate::{GeometryError, GeometryWorkBudget, check_cancel};
 use solidcore::{curve::curve::Curve, surface::surface::Surface};
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
@@ -855,10 +855,10 @@ impl Iterator for SurfaceParameterBoxes<'_> {
     type Item = [[f64; 2]; 2];
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(u) = self.active_u {
-                if let Some(v) = self.active_v.next() {
-                    return Some([u, v]);
-                }
+            if let Some(u) = self.active_u
+                && let Some(v) = self.active_v.next()
+            {
+                return Some([u, v]);
             }
             self.active_u = Some(self.u.next()?);
             self.active_v = self.v.clone();

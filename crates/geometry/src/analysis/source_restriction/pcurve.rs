@@ -190,23 +190,21 @@ fn endpoint_candidates(
     cancel: &AtomicBool,
 ) -> Result<RawEndpointCandidates, GeometryError> {
     let remaining = available(remaining, std::mem::size_of::<RawEndpointCandidates>())?;
-    if selected.period.is_none() {
-        if let Some(domain) = selected
+    if selected.period.is_none()
+        && let Some(domain) = selected
             .closed_domain
             .filter(|domain| domain.range() == selected.search)
-        {
-            if let Some(fence) = roots::closed_fence_endpoint(
-                lifted,
-                vertex,
-                domain.range(),
-                allowance,
-                remaining,
-                work,
-                cancel,
-            )? {
-                return Ok(RawEndpointCandidates::ClosedFence(fence));
-            }
-        }
+        && let Some(fence) = roots::closed_fence_endpoint(
+            lifted,
+            vertex,
+            domain.range(),
+            allowance,
+            remaining,
+            work,
+            cancel,
+        )?
+    {
+        return Ok(RawEndpointCandidates::ClosedFence(fence));
     }
     roots::isolate_endpoint(
         lifted,
@@ -1149,10 +1147,10 @@ impl<'d> SourcePcurveRestriction<'d> {
                                 turns: bt,
                             },
                         ] = operator.endpoints
+                            && a == b
+                            && at != bt
                         {
-                            if a == b && at != bt {
-                                return Ok(true);
-                            }
+                            return Ok(true);
                         }
                     }
                     let exact = |endpoint| match endpoint {
@@ -1181,10 +1179,10 @@ impl<'d> SourcePcurveRestriction<'d> {
                             turns: bt,
                         },
                     ] = raw.endpoints
+                        && a == b
+                        && at != bt
                     {
-                        if a == b && at != bt {
-                            return Ok(true);
-                        }
+                        return Ok(true);
                     }
                 }
                 let exact = |endpoint| match endpoint {

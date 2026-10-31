@@ -233,13 +233,12 @@ fn exact_circle_witnesses_bound_the_native_curved_extrema() {
     let def = from_step_bytes_with_cancel(&fixture("cylinder.step"), &cancelled()).unwrap();
     let mut circular = 0;
     for (_id, edge) in def.brep().edges().iter() {
-        if let Some(curve) = &edge.curve {
-            if let solidcore::curve::curve::p2::CurveKind::Ellipse(ell) = curve.kind() {
-                if ell.is_circle() {
-                    circular += 1;
-                    assert!((ell.x_radius() - 5.).abs() < 1e-8);
-                }
-            }
+        if let Some(curve) = &edge.curve
+            && let solidcore::curve::curve::p2::CurveKind::Ellipse(ell) = curve.kind()
+            && ell.is_circle()
+        {
+            circular += 1;
+            assert!((ell.x_radius() - 5.).abs() < 1e-8);
         }
     }
     assert!(circular >= 4, "two analytic half arcs on each cap");
@@ -595,7 +594,7 @@ fn closed_spline_decoder_preserves_active_domain_and_distinct_physical_seam_bran
         Some(&carrier),
         "source exchange restored before capture"
     );
-    let mut reader =
+    let reader =
         solidcraft_step::read::Reader::new(&exchange, solidcraft_step::read::Units::default());
     let source_edge = exchange.get(1306).unwrap().params();
     let seam_vertices = [1, 2].map(|i| {
@@ -1464,11 +1463,10 @@ fn negative_axis_circular_extrusion_does_not_acquire_positive_gauge_authority() 
         if let Surface::Extrusion {
             profile, direction, ..
         } = carrier
+            && matches!(profile.as_ref(), Curve::Circle { .. })
         {
-            if matches!(profile.as_ref(), Curve::Circle { .. }) {
-                *direction = [0.0, 0.0, -1.0];
-                changed += 1;
-            }
+            *direction = [0.0, 0.0, -1.0];
+            changed += 1;
         }
     }
     assert!(changed > 0);

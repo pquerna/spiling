@@ -387,7 +387,7 @@ pub(super) fn intersect(
                 "native face intersection has odd trim incidence",
             ));
         }
-        for pair in events.chunks_exact(2) {
+        for pair in events.as_chunks::<2>().0 {
             work.charge(1, cancel)?;
             let [a, b] = [pair[0], pair[1]];
             if a.crossing != -1 || b.crossing != 1 || a.uv[independent].hi >= b.uv[independent].lo {
@@ -551,7 +551,7 @@ fn exclude_carrier_roots(
     if depth >= 16 {
         return Ok(false);
     }
-    let axis = usize::from(depth % 2 != 0);
+    let axis = usize::from(!depth.is_multiple_of(2));
     let middle = uv[axis][0] * 0.5 + uv[axis][1] * 0.5;
     if middle <= uv[axis][0] || middle >= uv[axis][1] {
         return Ok(false);
@@ -702,7 +702,11 @@ fn cover_graph(
     // a dependent derivative sign (for example on a broad spherical chart).
     // Refining only the dependent coordinate need not tighten either bound.
     // Alternate coordinates while retaining the same complete cover and cap.
-    let split_axis = if depth % 2 == 0 { axis } else { 1 - axis };
+    let split_axis = if depth.is_multiple_of(2) {
+        axis
+    } else {
+        1 - axis
+    };
     let mid = uv[split_axis][0] * 0.5 + uv[split_axis][1] * 0.5;
     if mid <= uv[split_axis][0] || mid >= uv[split_axis][1] {
         return Err(indeterminate(

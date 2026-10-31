@@ -404,10 +404,10 @@ impl<'a> Inventory<'a> {
                         return Ok(());
                     }
                 }
-                if let Some(w) = &s.weights {
-                    if w.len() != s.points.len() {
-                        return Err(conditioning("original curve weight census mismatch"));
-                    }
+                if let Some(w) = &s.weights
+                    && w.len() != s.points.len()
+                {
+                    return Err(conditioning("original curve weight census mismatch"));
                 }
                 let knots = expanded_knots(
                     &s.knots,
@@ -502,10 +502,10 @@ impl<'a> Inventory<'a> {
                         "original surface control net is not rectangular",
                     ));
                 }
-                if let Some(weights) = &s.weights {
-                    if weights.len() != nu || weights.iter().any(|row| row.len() != nv) {
-                        return Err(conditioning("original surface weight census mismatch"));
-                    }
+                if let Some(weights) = &s.weights
+                    && (weights.len() != nu || weights.iter().any(|row| row.len() != nv))
+                {
+                    return Err(conditioning("original surface weight census mismatch"));
                 }
                 let u = expanded_knots(
                     &s.u_knots,
@@ -657,14 +657,13 @@ fn check_trim(
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
     if let Some([a, b]) = original_curve_parameter_restriction(curve)? {
-        if let Some(Curve::Trimmed { basis, sense, .. }) = selected_trim(curve, work, cancel)? {
-            if ((*sense && a >= b) || (!*sense && a <= b))
-                && original_curve_parameter_period(basis, work, cancel)?.is_some()
-            {
-                return Err(unavailable(
-                    "periodic trim requires its retained declared-turn expression",
-                ));
-            }
+        if let Some(Curve::Trimmed { basis, sense, .. }) = selected_trim(curve, work, cancel)?
+            && ((*sense && a >= b) || (!*sense && a <= b))
+            && original_curve_parameter_period(basis, work, cancel)?.is_some()
+        {
+            return Err(unavailable(
+                "periodic trim requires its retained declared-turn expression",
+            ));
         }
         if range[0] < a.min(b) || range[1] > a.max(b) {
             return Err(unavailable(
@@ -697,25 +696,24 @@ impl<'a> PreparedOriginalCurve<'a> {
         Interval::new(active[0], active[1])?;
         if let Some(trimmed @ Curve::Trimmed { basis, sense, .. }) =
             selected_trim(source, work, cancel)?
+            && let Some([a, b]) = original_curve_parameter_restriction(trimmed)?
         {
-            if let Some([a, b]) = original_curve_parameter_restriction(trimmed)? {
-                let turn = if *sense && a >= b {
-                    1
-                } else if !*sense && a <= b {
-                    -1
-                } else {
-                    0
-                };
-                if turn != 0 && original_curve_parameter_period(basis, work, cancel)?.is_some() {
-                    return Self::new_with_declared_turns(
-                        source,
-                        active,
-                        [0, turn],
-                        maximum_live_bytes,
-                        work,
-                        cancel,
-                    );
-                }
+            let turn = if *sense && a >= b {
+                1
+            } else if !*sense && a <= b {
+                -1
+            } else {
+                0
+            };
+            if turn != 0 && original_curve_parameter_period(basis, work, cancel)?.is_some() {
+                return Self::new_with_declared_turns(
+                    source,
+                    active,
+                    [0, turn],
+                    maximum_live_bytes,
+                    work,
+                    cancel,
+                );
             }
         }
         check_trim(source, active, work, cancel)?;
@@ -2367,10 +2365,8 @@ pub(crate) fn original_analytic_surface_pullback<'a>(
                     y = y.neg();
                 }
             }
-            Surface::Sphere { radius, .. } => {
-                if !radius.is_finite() || *radius <= 0.0 {
-                    return Err(conditioning("invalid original sphere radius"));
-                }
+            Surface::Sphere { radius, .. } if (!radius.is_finite() || *radius <= 0.0) => {
+                return Err(conditioning("invalid original sphere radius"));
             }
             _ => {}
         }
@@ -3084,7 +3080,7 @@ mod preferred_master_tests {
             magnitude: 1.0,
         });
         let cylinder = Arc::new(Surface::Cylinder {
-            position: frame.clone(),
+            position: frame,
             radius: 2.0,
         });
         let plane = Arc::new(Surface::Plane {

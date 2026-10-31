@@ -214,6 +214,7 @@ pub(super) fn native_fiber_degree_one(
 /// pointing into its bounded void. The caller must separately prove complete
 /// correction-support exclusion for this identical physical fiber.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) fn native_wall_fiber_degree_one(
     source: MaterialSourceView<'_, '_>,
     faces: &[usize],
@@ -608,8 +609,8 @@ fn validate_fiber(fiber: &NativeFiber) -> Result<(), GeometryError> {
             "original fiber lacks finite independent rows and a strictly increasing forward covector",
         ));
     }
-    if let Some(core) = fiber.core {
-        if !core.radius.is_finite()
+    if let Some(core) = fiber.core
+        && (!core.radius.is_finite()
             || core.radius <= 0.0
             || core
                 .frame
@@ -618,13 +619,12 @@ fn validate_fiber(fiber: &NativeFiber) -> Result<(), GeometryError> {
                 .chain(core.frame.x_axis)
                 .chain(core.frame.y_axis)
                 .chain(core.frame.z_axis)
-                .any(|v| !v.is_finite())
-        {
-            return Err(GeometryError::new(
-                GeometryErrorCode::ConditioningFailure,
-                "original fiber outer-core gate has invalid stored coefficients",
-            ));
-        }
+                .any(|v| !v.is_finite()))
+    {
+        return Err(GeometryError::new(
+            GeometryErrorCode::ConditioningFailure,
+            "original fiber outer-core gate has invalid stored coefficients",
+        ));
     }
     Ok(())
 }
@@ -881,15 +881,14 @@ fn qualify_fiber_root(
         {
             return Ok(QualifiedRoot::Excluded);
         }
-        if trim_inside {
-            if let Some(inward) =
+        if trim_inside
+            && let Some(inward) =
                 census_root_owned(fiber, jet.position, normal(&jet, orientation), restriction)
-            {
-                return Ok(QualifiedRoot::Owned {
-                    inward,
-                    forward: fiber_forward(fiber, jet.position),
-                });
-            }
+        {
+            return Ok(QualifiedRoot::Owned {
+                inward,
+                forward: fiber_forward(fiber, jet.position),
+            });
         }
         match fiber_krawczyk(surface, uv, &jet, fiber, work, cancel)? {
             FiberNewton::Excluded => {

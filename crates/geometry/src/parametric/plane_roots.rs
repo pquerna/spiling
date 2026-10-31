@@ -274,34 +274,34 @@ impl<'a> PreparedFacePlaneRoots<'a> {
                                     "bound original root chart exceeds the declared face domain",
                                 ));
                             }
-                            if let Some(previous) = roots.last_mut() {
-                                if range[0] <= previous.parameter_range[1] {
-                                    let exact_same_parameter =
-                                        range[0] == range[1] && previous.parameter_range == range;
-                                    if !exact_same_parameter
-                                        || project(
-                                            b.curve.position_bounds([range[0]; 2], work, cancel)?,
-                                            plane,
-                                        ) != ZERO
-                                    {
-                                        return Err(unresolved(
-                                            "overlapping original boundary root brackets have no proved unique branch identity",
-                                        ));
-                                    }
-                                    // Both complete adjacent spans prove this same
-                                    // literal source parameter is a root. Count the
-                                    // intersection once, without losing either bound.
-                                    for axis in 0..2 {
-                                        previous.uv_box[axis] =
-                                            previous.uv_box[axis].hull(uv_box[axis]);
-                                    }
-                                    for axis in 0..3 {
-                                        previous.position[axis] =
-                                            previous.position[axis].hull(jet.position[axis]);
-                                    }
-                                    accepted = true;
-                                    break;
+                            if let Some(previous) = roots.last_mut()
+                                && range[0] <= previous.parameter_range[1]
+                            {
+                                let exact_same_parameter =
+                                    range[0] == range[1] && previous.parameter_range == range;
+                                if !exact_same_parameter
+                                    || project(
+                                        b.curve.position_bounds([range[0]; 2], work, cancel)?,
+                                        plane,
+                                    ) != ZERO
+                                {
+                                    return Err(unresolved(
+                                        "overlapping original boundary root brackets have no proved unique branch identity",
+                                    ));
                                 }
+                                // Both complete adjacent spans prove this same
+                                // literal source parameter is a root. Count the
+                                // intersection once, without losing either bound.
+                                for axis in 0..2 {
+                                    previous.uv_box[axis] =
+                                        previous.uv_box[axis].hull(uv_box[axis]);
+                                }
+                                for axis in 0..3 {
+                                    previous.position[axis] =
+                                        previous.position[axis].hull(jet.position[axis]);
+                                }
+                                accepted = true;
+                                break;
                             }
                             push(
                                 &mut roots,

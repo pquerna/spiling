@@ -23,7 +23,6 @@ use solidcore::geom::axis2_placement::Axis2Placement;
 use solidcore::geom::extent1d::Extent1d;
 use solidcore::geom::extent2d::Extent2d;
 use solidcore::geom::object::ObjectRef;
-use solidcore::geom::vector2d::Point2;
 use solidcore::geom::vector3d::{Point3, Vec3};
 use solidcore::kernel::Kernel;
 use solidcore::nurbs::b_spline_curve::p1::CanonicalData;
@@ -126,13 +125,13 @@ fn unique_knots_and_multiplicities(flat: &[f64]) -> (Vec<f64>, Vec<usize>) {
     let mut knots: Vec<f64> = Vec::new();
     let mut mults: Vec<usize> = Vec::new();
     for &k in flat {
-        if let Some(&last) = knots.last() {
-            if k == last {
-                if let Some(m) = mults.last_mut() {
-                    *m += 1;
-                }
-                continue;
+        if let Some(&last) = knots.last()
+            && k == last
+        {
+            if let Some(m) = mults.last_mut() {
+                *m += 1;
             }
+            continue;
         }
         knots.push(k);
         mults.push(1);

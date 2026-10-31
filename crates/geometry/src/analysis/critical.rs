@@ -3150,7 +3150,7 @@ pub(super) fn certify_critical_slab(
             ];
             for (index, &point_uv) in candidates.iter().enumerate() {
                 if candidates[..index].contains(&point_uv) { continue; }
-                let (point, separation) = if index == 0 {
+                let (_point, separation) = if index == 0 {
                     (proposal.position, proposal.separation)
                 } else {
                     // Coordinate-centered proposals stay in this already
@@ -3167,7 +3167,7 @@ pub(super) fn certify_critical_slab(
                     (point, separation)
                 };
                 if material_link::native_face_point_is_retained(
-                    source, &domain, face_index, point_uv,
+                    source, domain, face_index, point_uv,
                     chart_bytes, work, cancel,
                 )? {
                     return Err(failure(GeometryErrorCode::ShapeErrorExceeded,
@@ -3208,14 +3208,14 @@ pub(super) fn certify_critical_slab(
             })?;
             let first_domain = source.face_domain(first.face, chart_bytes, work, cancel)?;
             let second_domain = source.face_domain(second.face, chart_bytes, work, cancel)?;
-            let edge = first_domain.coedges()[first.coedge].edge;
+            let _edge = first_domain.coedges()[first.coedge].edge;
             let central_range = first_domain.coedges()[first.coedge].native_range;
             let paired_scratch = chart_bytes;
             let material_link = material_link::PairedMaterialLink::new(
                 definition,
-                &first_domain,
+                first_domain,
                 first,
-                &second_domain,
+                second_domain,
                 second,
                 central_range,
                 paired_scratch,
@@ -3249,10 +3249,7 @@ pub(super) fn certify_critical_slab(
             // Both selected source traces share the same sealed original spatial gauge.
             let partition_bytes = chart_bytes;
             let source_cuts = native_coedge_parameter_cuts(
-                [
-                    (&first_domain, first.coedge),
-                    (&second_domain, second.coedge),
-                ],
+                [(first_domain, first.coedge), (second_domain, second.coedge)],
                 partition_bytes,
                 work,
                 cancel,

@@ -4995,15 +4995,14 @@ fn certify_source_leaf(
     } = candidate_capture(actual_used_source_loops, z, work, cancel)?;
     let native_sample_sha256 = native_sample_hash(analysis, work, cancel)?;
     let radial_slab = analysis.radial_slab.as_ref();
-    if let Some(radial) = radial_slab {
-        if !radial.product.matches_world(definition, pose, interval, z)
-            || !radial.matches_native(&analysis.section.loops, work, cancel)?
-        {
-            return Err(error(
-                GeometryErrorCode::InvalidGeometry,
-                "closed radial product does not bind the exact native source/pose/scope/sample",
-            ));
-        }
+    if let Some(radial) = radial_slab
+        && (!radial.product.matches_world(definition, pose, interval, z)
+            || !radial.matches_native(&analysis.section.loops, work, cancel)?)
+    {
+        return Err(error(
+            GeometryErrorCode::InvalidGeometry,
+            "closed radial product does not bind the exact native source/pose/scope/sample",
+        ));
     }
     let mut scratch = Scratch { bytes: 0 };
     let mut proof_kind = if sample_only {
@@ -10297,7 +10296,8 @@ mod tests {
         assert_eq!(upper_m.len(), 1);
         let lower_leaf = source_leaf(&source, 13, RigidPoseMm::IDENTITY, &lower, &mut work);
         let upper_leaf = source_leaf(&source, 13, RigidPoseMm::IDENTITY, &upper, &mut work);
-        for (analysis, leaf, other_leaf) in [(&lower, &lower_leaf, &upper_leaf)] {
+        {
+            let (analysis, leaf, other_leaf) = (&lower, &lower_leaf, &upper_leaf);
             let targets = [
                 NativeCriticalCollarTarget {
                     leaf: &lower_leaf,

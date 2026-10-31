@@ -326,12 +326,12 @@ fn retain(
                 "overlapping monotonic endpoint tubes have inconsistent root enclosures",
             ));
         };
-        if let (Some(a), Some(b)) = (previous.exact, root.exact) {
-            if a != b {
-                return Err(unavailable(
-                    "endpoint coefficient identities contradict monotonic root authority",
-                ));
-            }
+        if let (Some(a), Some(b)) = (previous.exact, root.exact)
+            && a != b
+        {
+            return Err(unavailable(
+                "endpoint coefficient identities contradict monotonic root authority",
+            ));
         }
         root = EndpointRoot {
             parameter,

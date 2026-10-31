@@ -9,10 +9,8 @@ mod cylinder;
 pub(crate) mod trim;
 mod wall;
 pub(crate) use trim::{
-    OriginalCoedgeBinding, OriginalCoedgeCorrespondence, OriginalCorrespondenceProvenance,
-    OriginalSpanInventory, PreparedFaceTrimDomain, PreparedNativeTrimSource, PreparedTrimCurve,
-    PreparedTrimJoint, PreparedTrimSurface, SourceEndpointConnector, TrimClassification,
-    TrimJointKind, certified_curve2d_is_straight_regular,
+    PreparedFaceTrimDomain, PreparedNativeTrimSource, PreparedTrimSurface, TrimClassification,
+    certified_curve2d_is_straight_regular,
 };
 
 use serde::{Deserialize, Serialize};
@@ -367,7 +365,7 @@ impl MaterialRealizationIdentity {
         bytes[..4].copy_from_slice(&self.version.to_le_bytes());
         bytes[4] = u8::from(self.source_uncertainty_bits.is_some());
         bytes[5..13].copy_from_slice(&self.source_uncertainty_bits.unwrap_or(0).to_le_bytes());
-        for (chunk, value) in bytes[13..].chunks_exact_mut(8).zip([
+        for (chunk, value) in bytes[13..].as_chunks_mut::<8>().0.iter_mut().zip([
             KERNEL_ZONE_TOLERANCE_MM,
             KERNEL_INTERSECTION_TOLERANCE_MM,
             KERNEL_APPROXIMATION_TOLERANCE_MM,

@@ -684,20 +684,19 @@ fn endpoint_root(
     // excludes EVERY stationary root. It is disjoint from successful existing
     // stationary recipes, so it may precede their isolator without changing
     // those choices. Nonproof enters the unchanged isolator; errors propagate.
-    if period.is_none() {
-        if let Some(domain) = closed_domain.filter(|domain| domain.range() == search) {
-            if let Some(fence) = roots::closed_fence_endpoint(
-                curve,
-                vertex,
-                domain.range(),
-                allowance,
-                remaining,
-                work,
-                cancel,
-            )? {
-                return Ok(SourceEndpoint::ClosedFence(fence));
-            }
-        }
+    if period.is_none()
+        && let Some(domain) = closed_domain.filter(|domain| domain.range() == search)
+        && let Some(fence) = roots::closed_fence_endpoint(
+            curve,
+            vertex,
+            domain.range(),
+            allowance,
+            remaining,
+            work,
+            cancel,
+        )?
+    {
+        return Ok(SourceEndpoint::ClosedFence(fence));
     }
     let mut roots =
         roots::isolate_endpoint(curve, vertex, search, allowance, remaining, work, cancel)?;

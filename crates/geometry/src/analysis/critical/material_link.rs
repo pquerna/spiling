@@ -16,6 +16,7 @@ mod coverage;
 mod fiber;
 mod radial_product;
 mod vertex_fan;
+#[cfg(test)]
 mod wall;
 pub(super) use coverage::{ClosedRadialLinks, MAX_CORRECTION_BYTES, native_face_point_is_retained};
 pub(in crate::analysis) use radial_product::{
@@ -26,6 +27,7 @@ pub(in crate::analysis) use radial_product::{
 pub(in crate::analysis) use vertex_fan::{
     qualify_native_common_carrier_vertex, qualify_native_vertex,
 };
+#[cfg(test)]
 pub(crate) use wall::prove_source_wall_component;
 
 pub(in crate::analysis) const UV_EMBEDDING_STACK_BYTES: usize = {

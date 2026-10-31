@@ -709,7 +709,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            radial_distance >= 7.0 && radial_distance < 7.000001,
+            (7.0..7.000001).contains(&radial_distance),
             "the unit-circle source hole must pay for the arm's missing material"
         );
         // A near boundary point exists on each adjacent arm side. It cannot
