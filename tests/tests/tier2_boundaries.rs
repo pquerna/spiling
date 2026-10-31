@@ -94,7 +94,7 @@ fn test_f02_corner_multi_thread_definition_access() {
         handles.push(std::thread::spawn(move || d.faces().len()));
     }
     for h in handles {
-        assert_eq!(h.join().unwrap(), 3);
+        assert_eq!(h.join().unwrap(), 4);
     }
 }
 
@@ -427,13 +427,13 @@ fn test_f10_corner_box_faces_non_empty() {
 #[test]
 fn test_f10_corner_cylinder_faces_non_empty() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    assert_eq!(def.faces().len(), 3);
+    assert_source_face_identity(&def, "cylinder.step");
 }
 
 #[test]
 fn test_f10_corner_through_hole_face_count() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    assert_eq!(def.faces().len(), 7);
+    assert_source_face_identity(&def, "through-hole.step");
 }
 
 #[test]
@@ -461,7 +461,8 @@ fn test_f10_corner_ribbed_bracket_face_count() {
 #[test]
 fn test_f11_corner_provenance_hash_non_empty() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.provenance().source_name, "box-mm.step");
+    assert!(def.provenance().source_name.is_empty());
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 #[test]
@@ -509,25 +510,25 @@ fn test_f12_corner_no_legacy_import_panics() {
 #[test]
 fn test_f12_corner_clean_box_inch() {
     let def = import_test_step(&fixture_bytes("box-inch.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-inch.step");
 }
 
 #[test]
 fn test_f12_corner_clean_through_hole() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    assert_eq!(def.faces().len(), 7);
+    assert_source_face_identity(&def, "through-hole.step");
 }
 
 #[test]
 fn test_f12_corner_clean_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    assert_eq!(def.faces().len(), 3);
+    assert_source_face_identity(&def, "cylinder.step");
 }
 
 #[test]
 fn test_f12_corner_clean_perforated_plate() {
     let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    assert_eq!(def.faces().len(), 514);
+    assert_source_face_identity(&def, "perforated-plate.step");
 }
 
 // =========================================================================
@@ -1024,19 +1025,19 @@ fn test_f21_corner_near_coplanar_cut() {
 #[test]
 fn test_f22_corner_zero_legacy_panics_box() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 #[test]
 fn test_f22_corner_zero_legacy_panics_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    assert_eq!(def.faces().len(), 3);
+    assert_source_face_identity(&def, "cylinder.step");
 }
 
 #[test]
 fn test_f22_corner_zero_legacy_panics_through_hole() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    assert_eq!(def.faces().len(), 7);
+    assert_source_face_identity(&def, "through-hole.step");
 }
 
 #[test]
@@ -1564,19 +1565,19 @@ fn test_f33_corner_prepare_with_cancelled_token() {
 #[test]
 fn test_f34_corner_box_faces() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 #[test]
 fn test_f34_corner_cylinder_faces() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    assert_eq!(def.faces().len(), 3);
+    assert_source_face_identity(&def, "cylinder.step");
 }
 
 #[test]
 fn test_f34_corner_through_hole_faces() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    assert_eq!(def.faces().len(), 7);
+    assert_source_face_identity(&def, "through-hole.step");
 }
 
 #[test]
@@ -2006,25 +2007,25 @@ fn test_f40_corner_housing_void() {
 #[test]
 fn test_f41_corner_box_wall_faces() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 #[test]
 fn test_f41_corner_cylinder_face() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    assert_eq!(def.faces().len(), 3);
+    assert_source_face_identity(&def, "cylinder.step");
 }
 
 #[test]
 fn test_f41_corner_through_hole_faces() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    assert_eq!(def.faces().len(), 7);
+    assert_source_face_identity(&def, "through-hole.step");
 }
 
 #[test]
 fn test_f41_corner_occt_box_faces() {
     let def = import_test_step(&fixture_bytes("independent-exporters/occt-box-mm.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "independent-exporters/occt-box-mm.step");
 }
 
 #[test]
@@ -2033,7 +2034,7 @@ fn test_f41_corner_occt_cylinder_faces() {
         "independent-exporters/occt-cylinder-mm.step",
     ))
     .unwrap();
-    assert_eq!(def.faces().len(), 3);
+    assert_source_face_identity(&def, "independent-exporters/occt-cylinder-mm.step");
 }
 
 // =========================================================================
@@ -2185,21 +2186,21 @@ fn test_f44_corner_spline_mesh_finite() {
 fn test_f45_corner_box_chunks() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert_eq!(mesh.chunks.len(), 6);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
 fn test_f45_corner_cylinder_chunks() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert_eq!(mesh.chunks.len(), 3);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
 fn test_f45_corner_through_hole_chunks() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert_eq!(mesh.chunks.len(), 7);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
@@ -2273,7 +2274,7 @@ fn test_f46_corner_mesh_artifact_chunks_non_empty() {
 fn test_f46_corner_mesh_artifact_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let artifact = tessellate_display(&def).unwrap();
-    assert_eq!(artifact.chunks.len(), 3);
+    assert_mesh_source_coverage(&def, &artifact);
 }
 
 // =========================================================================

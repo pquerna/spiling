@@ -132,3 +132,76 @@ pub fn mesh_indices(mesh: &MeshArtifact) -> Vec<u32> {
     }
     indices
 }
+
+/// These single-solid fixtures preserve their original ADVANCED_FACE identities.
+/// Compare original entities, not the converter's topology or an inferred count.
+pub fn assert_source_face_identity(definition: &Definition, fixture: &str) {
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeSet;
+    let bytes = crate::fixtures::fixture_bytes(fixture);
+    let source = solidcraft_step::p21::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
+    let expected: BTreeSet<_> = source
+        .entities
+        .iter()
+        .filter_map(|(&id, entity)| entity.has("ADVANCED_FACE").then_some(id))
+        .collect();
+    assert!(
+        !expected.is_empty(),
+        "fixture has no original faces: {fixture}"
+    );
+    let actual: BTreeSet<_> = definition
+        .faces()
+        .iter()
+        .map(|face| {
+            assert_eq!(face.source_entity_kind, "ADVANCED_FACE");
+            assert_eq!(
+                face.surface_face_entity,
+                face.face_id.step_entity().to_string()
+            );
+            face.face_id.step_entity()
+        })
+        .collect();
+    assert_eq!(
+        actual.len(),
+        definition.faces().len(),
+        "duplicate source face: {fixture}"
+    );
+    assert_eq!(actual, expected, "original face identity: {fixture}");
+    assert_eq!(
+        definition.provenance().source_hash.as_str(),
+        format!("{:x}", Sha256::digest(&bytes))
+    );
+}
+
+/// Wire admission and complete source-ordinal coverage, independent of packing.
+/// Native surface/trim fidelity is certified by the producer's separate audit.
+pub fn assert_mesh_source_coverage(definition: &Definition, mesh: &MeshArtifact) {
+    use std::collections::BTreeSet;
+    let mut faces = BTreeSet::new();
+    let mut vertices = 0;
+    let mut triangles = 0;
+    for (encoded, chunk) in mesh.chunks.iter().zip(mesh_chunks(mesh)) {
+        assert_eq!(&encoded.descriptor.definition_id, definition.id());
+        assert_eq!(
+            encoded.descriptor.face_count as usize,
+            definition.faces().len()
+        );
+        faces.extend(chunk.face_ordinals.iter());
+        vertices += chunk.positions.len() as u32;
+        triangles += (chunk.indices.len() / 3) as u32;
+    }
+    assert_eq!(
+        faces,
+        (0..definition.faces().len() as u32).collect(),
+        "complete source-ordinal coverage"
+    );
+    assert_eq!(vertices, mesh.vertex_count);
+    assert_eq!(triangles, mesh.triangle_count);
+    assert_eq!(
+        mesh.chunks
+            .iter()
+            .map(|c| c.bytes.len() as u64)
+            .sum::<u64>(),
+        u64::from(mesh.total_bytes)
+    );
+}

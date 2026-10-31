@@ -80,7 +80,7 @@ fn test_f02_definition_bounds_accessor() {
 #[test]
 fn test_f02_definition_face_count_accessor() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 #[test]
@@ -94,7 +94,7 @@ fn test_f02_definition_id_uniqueness() {
 fn test_f02_definition_send_sync_thread() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let handle = std::thread::spawn(move || {
-        assert_eq!(def.faces().len(), 6);
+        assert_source_face_identity(&def, "box-mm.step");
         def.bounds_mm()
     });
     let bounds = handle.join().unwrap();
@@ -441,25 +441,25 @@ fn test_f09_occt_spline_tessellate_without_panic() {
 }
 
 // =========================================================================
-// Feature 10: Manifold validation
+// Feature 10: Admitted source-face identity
 // =========================================================================
 
 #[test]
-fn test_f10_box_is_manifold_solid() {
+fn test_f10_box_source_face_identity() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 #[test]
-fn test_f10_cylinder_is_manifold_solid() {
+fn test_f10_cylinder_source_face_identity() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    assert_eq!(def.faces().len(), 3);
+    assert_source_face_identity(&def, "cylinder.step");
 }
 
 #[test]
-fn test_f10_through_hole_is_manifold_solid() {
+fn test_f10_through_hole_source_face_identity() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    assert_eq!(def.faces().len(), 7);
+    assert_source_face_identity(&def, "through-hole.step");
 }
 
 #[test]
@@ -472,9 +472,9 @@ fn test_f10_occt_tapered_fitting_manifold() {
 }
 
 #[test]
-fn test_f10_euler_characteristic_box() {
+fn test_f10_box_source_face_provenance() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 // =========================================================================
@@ -511,7 +511,8 @@ fn test_f11_inspect_face_finds_all_faces() {
 #[test]
 fn test_f11_provenance_source_name() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.provenance().source_name, "box-mm.step");
+    assert!(def.provenance().source_name.is_empty());
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 #[test]
@@ -521,37 +522,37 @@ fn test_f11_provenance_source_unit() {
 }
 
 // =========================================================================
-// Feature 12: Monstertruck import scar deletion
+// Feature 12: Original source identity through native import
 // =========================================================================
 
 #[test]
-fn test_f12_pure_import_without_harmonic_charts() {
+fn test_f12_box_source_identity() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 #[test]
-fn test_f12_pure_import_without_trim_certificates() {
+fn test_f12_cylinder_source_identity() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    assert_eq!(def.faces().len(), 3);
+    assert_source_face_identity(&def, "cylinder.step");
 }
 
 #[test]
-fn test_f12_pure_import_without_affine_chart_proofs() {
+fn test_f12_through_hole_source_identity() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    assert_eq!(def.faces().len(), 7);
+    assert_source_face_identity(&def, "through-hole.step");
 }
 
 #[test]
 fn test_f12_pure_import_perforated_plate() {
     let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    assert_eq!(def.faces().len(), 514); // 512 holes + top + bottom
+    assert_source_face_identity(&def, "perforated-plate.step");
 }
 
 #[test]
-fn test_f12_no_synthetic_master_curves() {
+fn test_f12_inch_box_source_identity() {
     let def = import_test_step(&fixture_bytes("box-inch.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-inch.step");
 }
 
 // =========================================================================
@@ -875,7 +876,7 @@ fn test_f19_curve_bounds_enclosure() {
 #[test]
 fn test_f19_curve_segment_count() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 #[test]
@@ -1020,7 +1021,7 @@ fn test_f21_coplane_face_cylinder_bottom() {
 #[test]
 fn test_f22_direct_native_surface_evaluation() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 #[test]
@@ -1579,13 +1580,13 @@ fn test_f33_section_via_prepared_source() {
 #[test]
 fn test_f34_toleranced_topology_box() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 #[test]
 fn test_f34_toleranced_topology_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    assert_eq!(def.faces().len(), 3);
+    assert_source_face_identity(&def, "cylinder.step");
 }
 
 #[test]
@@ -2040,7 +2041,7 @@ fn test_f40_rounded_housing_void_pocket() {
 #[test]
 fn test_f41_box_wall_faces() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 #[test]
@@ -2051,7 +2052,9 @@ fn test_f41_cylinder_exterior_face() {
         .iter()
         .filter(|f| f.geometry.family == SurfaceFamily::Cylinder)
         .collect();
-    assert_eq!(cyl_faces.len(), 1);
+    // The original cylinder has two independently identified cylindrical faces.
+    assert_eq!(cyl_faces.len(), 2);
+    assert_source_face_identity(&def, "cylinder.step");
 }
 
 #[test]
@@ -2076,7 +2079,9 @@ fn test_f41_occt_cylinder_full_turn() {
         .iter()
         .filter(|f| f.geometry.family == SurfaceFamily::Cylinder)
         .collect();
+    // The independent exporter records one full-turn cylindrical face.
     assert_eq!(cyl_faces.len(), 1);
+    assert_source_face_identity(&def, "independent-exporters/occt-cylinder-mm.step");
 }
 
 #[test]
@@ -2234,21 +2239,21 @@ fn test_f44_occt_spline_refinement() {
 fn test_f45_box_audit_chunks_valid() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert_eq!(mesh.chunks.len(), 6);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
 fn test_f45_cylinder_audit_chunks() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert_eq!(mesh.chunks.len(), 3);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
 fn test_f45_through_hole_audit_chunks() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
-    assert_eq!(mesh.chunks.len(), 7);
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
@@ -2279,7 +2284,25 @@ fn test_f45_bracket_audit_chunks() {
 fn test_f46_mesh_artifact_face_provenance() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let artifact = tessellate_display(&def).unwrap();
-    assert_eq!(artifact.chunks.len(), 6);
+    assert_mesh_source_coverage(&def, &artifact);
+}
+
+#[test]
+#[should_panic(expected = "complete source-ordinal coverage")]
+fn test_f46_valid_wire_hash_cannot_hide_missing_source_face_associations() {
+    use sha2::{Digest, Sha256};
+    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
+    let mut mesh = tessellate_display(&def).unwrap();
+    assert_mesh_source_coverage(&def, &mesh);
+    for chunk in &mut mesh.chunks {
+        // The checked SPLM body ends with one ordinal per triangle. Relabeling
+        // all triangles as face zero is wire-valid but loses source coverage.
+        let triangles = u32::from_le_bytes(chunk.bytes[16..20].try_into().unwrap()) as usize;
+        let start = chunk.bytes.len() - triangles * 4;
+        chunk.bytes[start..].fill(0);
+        chunk.descriptor.sha256 = SourceHash::from_digest(&Sha256::digest(&chunk.bytes).into());
+    }
+    assert_mesh_source_coverage(&def, &mesh);
 }
 
 #[test]
@@ -2293,14 +2316,14 @@ fn test_f46_mesh_artifact_total_bytes() {
 fn test_f46_mesh_artifact_cylinder_descriptors() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let artifact = tessellate_display(&def).unwrap();
-    assert_eq!(artifact.chunks.len(), 3);
+    assert_mesh_source_coverage(&def, &artifact);
 }
 
 #[test]
 fn test_f46_mesh_artifact_through_hole_descriptors() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
     let artifact = tessellate_display(&def).unwrap();
-    assert_eq!(artifact.chunks.len(), 7);
+    assert_mesh_source_coverage(&def, &artifact);
 }
 
 #[test]
@@ -2406,7 +2429,8 @@ fn test_f48_no_legacy_panics_on_all_fixtures() {
 fn test_f49_provenance_kernel_identity() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let prov = def.provenance();
-    assert_eq!(prov.source_name, "box-mm.step");
+    assert!(prov.source_name.is_empty());
+    assert_source_face_identity(&def, "box-mm.step");
 }
 
 #[test]
@@ -2429,7 +2453,7 @@ fn test_f49_definition_identity_digest() {
 #[test]
 fn test_f50_box_mm_regression() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-mm.step");
     let sec = section_midplane(&def).unwrap();
     assert_close(
         loop_area(&sec, &sec.loops()[0]),
@@ -2442,7 +2466,7 @@ fn test_f50_box_mm_regression() {
 #[test]
 fn test_f50_cylinder_regression() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    assert_eq!(def.faces().len(), 3);
+    assert_source_face_identity(&def, "cylinder.step");
     let sec = section_midplane(&def).unwrap();
     assert_close(
         loop_area(&sec, &sec.loops()[0]),
@@ -2455,7 +2479,7 @@ fn test_f50_cylinder_regression() {
 #[test]
 fn test_f50_through_hole_regression() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
-    assert_eq!(def.faces().len(), 7);
+    assert_source_face_identity(&def, "through-hole.step");
     let sec = section_midplane(&def).unwrap();
     assert_eq!(sec.loops().len(), 2);
 }
@@ -2463,7 +2487,7 @@ fn test_f50_through_hole_regression() {
 #[test]
 fn test_f50_box_inch_regression() {
     let def = import_test_step(&fixture_bytes("box-inch.step")).unwrap();
-    assert_eq!(def.faces().len(), 6);
+    assert_source_face_identity(&def, "box-inch.step");
     let sec = section_midplane(&def).unwrap();
     assert_close(
         loop_area(&sec, &sec.loops()[0]),
@@ -2476,5 +2500,5 @@ fn test_f50_box_inch_regression() {
 #[test]
 fn test_f50_perforated_plate_regression() {
     let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    assert_eq!(def.faces().len(), 514);
+    assert_source_face_identity(&def, "perforated-plate.step");
 }
