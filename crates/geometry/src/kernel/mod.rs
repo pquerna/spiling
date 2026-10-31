@@ -333,7 +333,7 @@ impl MaterialRealizationIdentity {
     }
     pub(crate) fn with_source_uncertainty(source_uncertainty_mm: Option<f64>) -> Self {
         Self {
-            version: 12,
+            version: 13,
             source_uncertainty_bits: source_uncertainty_mm.map(f64::to_bits),
         }
     }

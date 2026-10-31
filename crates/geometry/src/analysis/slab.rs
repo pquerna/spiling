@@ -4160,6 +4160,51 @@ fn broad_height(bounds: &[Interval; 3], frame: PlaneFrameMm) -> Interval {
         },
     )
 }
+/// The cheap XYZ box may overlap an empty slab. Reuse native directional
+/// support before asking for boundary continuation. Failure to qualify this
+/// optional enclosure grants nothing; cancellation and exhausted resources stay
+/// terminal and every attempt shares the caller's cumulative budget.
+fn directional_support_excludes_slab(
+    source: &super::material_source::PreparedSolid<'_>,
+    request: SlabRequest,
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let scale = norm(request.frame.z_axis.map(Interval::point))?;
+    let support = source.material_bounds(
+        request.frame.z_axis,
+        super::BoundsPolicy {
+            maximum_endpoint_uncertainty_mm: request.native_shape_error_mm / scale.hi,
+        },
+        remaining_bytes,
+        work,
+        cancel,
+    );
+    let support = match support {
+        Ok(support) => support,
+        Err(failure)
+            if matches!(
+                failure.code,
+                GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled
+            ) =>
+        {
+            return Err(failure);
+        }
+        Err(_) => return Ok(false),
+    };
+    // Support is mathematically normalized; slab heights use the literal frame
+    // normal. Retain its full outward length and the origin-relative offset,
+    // rather than treating an admitted near-unit frame as exactly unit.
+    let bounds = support.bounds();
+    let height = Interval {
+        lo: bounds.minimum[0],
+        hi: bounds.maximum[1],
+    }
+    .mul(scale)
+    .add(HeightFunctional::from_frame(request.frame).offset);
+    Ok(request.height_interval_mm[1] < height.lo || request.height_interval_mm[0] > height.hi)
+}
 /// Enclose the height functional over the entire returned native plane/tube,
 /// including stored normal renormalization and achieved plane uncertainty.
 pub(super) fn native_sample_height_band(
@@ -4682,7 +4727,10 @@ pub(super) fn analyze_slab_sample<'d>(
     if section.loops.is_empty() {
         let positions = super::placed::material_position_bounds(source, remaining, work, cancel)?;
         let broad = broad_height(&positions, request.frame);
-        if range[1] < broad.lo || range[0] > broad.hi {
+        if range[1] < broad.lo
+            || range[0] > broad.hi
+            || directional_support_excludes_slab(source_owner, request, remaining, work, cancel)?
+        {
             return certified_empty_slab(
                 section,
                 definition,
@@ -8593,6 +8641,110 @@ mod tests {
             contact.is_err(),
             "a nonempty CLOSED endpoint contact is not empty-slab reuse"
         );
+    }
+    #[test]
+    fn empty_slab_reuse_preserves_literal_frame_scale_origin_and_closed_contact() {
+        let cancel = AtomicBool::new(false);
+        let definition = parity_definition("native-parity-full-sphere.step");
+        let mut work = GeometryWorkBudget::new(50_000_000);
+        let prepared = super::super::material_source::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        for sign in [-1.0, 1.0] {
+            let scale = 1.0 + 1e-11;
+            let frame = PlaneFrameMm {
+                origin_mm: [0.0, 0.0, 2.0],
+                y_axis: [0.0, sign, 0.0],
+                z_axis: [0.0, 0.0, sign * scale],
+                ..frame()
+            };
+            frame.validate().unwrap();
+            // Independent physical sphere radius and the literal affine frame,
+            // rather than a result copied from the directional bounds service.
+            let maximum = 5.0 * scale - 2.0 * sign * scale;
+            let request = SlabRequest {
+                frame,
+                height_interval_mm: [maximum + 1.0, maximum + 2.0],
+                sample_height_mm: maximum + 1.5,
+                native_shape_error_mm: 0.1,
+            };
+            let result = analyze_slab(
+                &prepared,
+                request,
+                crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes(),
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            assert!(result.section.loops.is_empty());
+            assert!(result.invariance.is_some());
+            assert_eq!(result.boundary_motion_bound_mm, 0.0);
+            for lower in [maximum, up(maximum)] {
+                let contact = analyze_slab(
+                    &prepared,
+                    SlabRequest {
+                        height_interval_mm: [lower, maximum + 0.1],
+                        sample_height_mm: maximum + 0.05,
+                        ..request
+                    },
+                    crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes(),
+                    &mut work,
+                    &cancel,
+                );
+                assert!(
+                    contact.is_err(),
+                    "unresolved closed contact cannot reuse empty: {contact:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_slab_directional_tightening_preserves_terminal_budgets() {
+        let cancel = AtomicBool::new(false);
+        let definition = parity_definition("native-parity-full-sphere.step");
+        let mut work = GeometryWorkBudget::new(50_000_000);
+        let prepared = super::super::material_source::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let request = SlabRequest {
+            frame: frame(),
+            height_interval_mm: [6.0, 7.0],
+            sample_height_mm: 6.5,
+            native_shape_error_mm: 0.1,
+        };
+        for (bytes, limit, cancelled, expected) in [
+            (0, 50_000_000, false, GeometryErrorCode::ResourceLimit),
+            (
+                crate::MAX_PREPARED_SECTION_BYTES,
+                0,
+                false,
+                GeometryErrorCode::ResourceLimit,
+            ),
+            (
+                crate::MAX_PREPARED_SECTION_BYTES,
+                50_000_000,
+                true,
+                GeometryErrorCode::Cancelled,
+            ),
+        ] {
+            let result = directional_support_excludes_slab(
+                &prepared,
+                request,
+                bytes,
+                &mut GeometryWorkBudget::new(limit),
+                &AtomicBool::new(cancelled),
+            );
+            assert_eq!(result.unwrap_err().code, expected);
+        }
     }
     #[test]
     fn slab_crossing_native_critical_height_never_returns_a_sample_only_certificate() {

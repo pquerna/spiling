@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source12 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source13 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -72,6 +72,15 @@ independent spatial/chart trace tolerance remains in force. Original inspection
 charts retain their measured transport error. Unadmitted charts cannot borrow
 either premise. A smooth seam does not establish height transversality or
 authorize a section through a critical, coplanar or tangent stratum.
+
+An empty section grants exact reuse only after excluding the entire closed slab
+from native material support. The cheap Cartesian enclosure runs first; when it
+overlaps, the existing directional material bound may tighten the exclusion.
+Normalized support is converted with the literal frame-normal length and
+origin-relative offset under directed rounding. Contact, unresolved endpoint
+rounding and a lone empty sample grant no empty-reuse authority. Optional
+geometric unavailability preserves ordinary continuation; work, cancellation and
+shared scratch exhaustion remain terminal under unchanged limits.
 
 Height-event discovery restricts continuous native carrier cells to the requested
 height band and retains direct scalar coefficient bounds for height and its
