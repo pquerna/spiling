@@ -179,7 +179,7 @@ bind preselection waste-lane staging. SPLR6 retains its command/binary interpret
 
 ## Normalized plan
 
-`NormalizedPrintPlan` uses schema11/planner46. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
+`NormalizedPrintPlan` uses schema11/planner47. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
 
 Native sampling and offset construction bounds are each 0.005 mm; finish XY construction has a separate 0.001 mm bound. The explicit recipe `native_shape_error_mm` bounds source-target approximation independently of those construction tolerances. Each mapped image additionally declares its own vertical displacement-error bound.
 
@@ -221,6 +221,8 @@ Qualification independently compares commanded inner/outer occupancy with origin
 `R` is the minimum wall-needs target and the aggregate-excess denominator, not a maximum wall-ownership domain. Only a bounded permission fixed from the original source junction/count event can authorize overlap in nominal core (`D \\ R`); permissions remain clipped to D, and original-D/exterior/hole qualification stays independent. Exact XYZ6 positive collinear retraces and unauthorized proper nonlocal centerline crossings refuse regardless of whether assembly represents the same deposited geometry as one continuing path or several. Consecutive joins and cyclic seams are not proper crossings; harmless curved-path subdivision is not a per-segment cap-overlap test.
 
 A polygon-conversion overlap can be discharged only by a sufficient certificate over **every** relevant earlier/current actual-XYZ6 nominal capsule pair. Eligible canonical decimal dimensions use checked exact squared-distance comparison; other widths retain their full value in outward arithmetic. Overflow or an inconclusive pair never establishes separation and leaves the ordinary location gate unchanged. A permission alternative contains a whole capsule or the entire convex intersection enclosure, not a sampled witness. This changes neither dose, uniqueness, material/coverage nor independently decoded process checks.
+
+Source-corner permissions are declared in decreasing sharpness of their literal convex source incidence, before commands are proposed. Shallow neighboring events cannot claim a sharper turn's small fresh fragment first merely because the source graph enumerates them earlier. Arm/count declarations keep their preceding order. This changes neither permission regions nor local/aggregate limits.
 
 Local permission budgets retain original declaration order: `fresh_i = P_i \\ union(P_j, j<i)`, and the prefix incorporates original `P_i`, never only its fresh fragment. Spatial exclusion and owned local unions may normalize the prefix but cannot reorder source credit or count overlapping permissions twice. All simultaneous original/prefix/result buffers and old/new component metadata remain admitted before growth.
 
@@ -338,7 +340,7 @@ closed-strip trim contact and locally centered native PCURVE construction
 with literal endpoints and retained constant chart coordinates. Directional
 support intersects same-cell scalar/Cartesian coefficient and centered bounds
 before trim classification, without creating additional feasible witnesses;
-planner46 rejects previously compiled artifacts whose geometry producer differs.
+planner47 rejects previously compiled artifacts whose geometry producer differs.
 The current planner identity is specified with the normalized plan above.
 Original STEP bytes, immutable definition/face/use identity, units,
 uncertainty and original finish operands remain captured inputs and provenance,
@@ -388,7 +390,7 @@ An independent verifier decodes command state from emitted bytes, not emitter he
 
 Current Cartesian XYZ admission binds independently parsed coordinates to the checked XYZ6 projection of each captured expected point. Raw-plan half-step tolerance cannot authorize an alternate neighboring lattice point. The explicit `contracts::manufacturing::program_coordinates` module owns this fixed output precision, coordinate-conditioning range and outward decimal/height enclosures; backend serialization and verifier command parsing remain independent. Projection multiplies the binary64 input by `1_000_000`, rounds ties away from zero, divides by `1_000_000` and normalizes signed zero; it is not exact-real decimal rounding of the original input. Accepted absolute coordinates are at most `2^52 / 1_000_000` mm, preserving distinct adjacent parsed micrometre lattice points. Compensated gap subtraction checks every intermediate and its outward result for finiteness. Unrepresentable arithmetic refuses with `program_coordinate_conditioning_failure`, not a widened clearance tolerance.
 
-Current inspection/reopen requires planner46, binding native-first material authority, wall/finish/hatch construction and mandatory physical per-occurrence material events. Input fingerprints bind complete ordered authoring documents, source/pose and printer/recipe/routing policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, ownership, permanent plate extent/attachment and lower anchors; fixed-dual replay additionally reconstructs source/material and staged tool/frame/thermal/debt/waste state. It does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3 remain stable. Emitter11/verifier17 invalidate superseded transition programs; SPLR6 keeps its existing binary interpretation. Older development assignment shapes refuse without aliases or missing-policy defaults.
+Current inspection/reopen requires planner47, binding native-first material authority, wall/finish/hatch construction and mandatory physical per-occurrence material events. Input fingerprints bind complete ordered authoring documents, source/pose and printer/recipe/routing policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, ownership, permanent plate extent/attachment and lower anchors; fixed-dual replay additionally reconstructs source/material and staged tool/frame/thermal/debt/waste state. It does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3 remain stable. Emitter11/verifier17 invalidate superseded transition programs; SPLR6 keeps its existing binary interpretation. Older development assignment shapes refuse without aliases or missing-policy defaults.
 
 Final normalized-plan admission checks ordinary projected axes during its existing coordinate pass. Independent fresh verification separately checks preferred perimeter seam dot/distance/coordinate ordering before matching actual emitted commands. A mutually matching program and plan that ignore either consumed policy do not earn semantic success; stored `verified` metadata remains descriptive.
 

@@ -397,7 +397,7 @@ Source-bound planar surface color is exercised through the real CLI on the commi
 
 Retained optical studies apply through typed Core/engine/client/CLI transactions with complete accepted report/selection and explicit two-material evidence/declaration bindings. Queued cancellation and stale revisions preserve the committed project; ACK commits one revision without changing SceneRevision or publishing scene artifacts. Both native source workflows exercise application, physical depth/history edits, changed-pose reassessment and source/palette/study-deleted fresh verification/export. Inspection distinguishes the small requested patch from complete realized side exposure and reuses the existing model with captured evidence; it does not reuse the requested prediction as a printed outcome. Unknown evidence/conditions remain unassessed and backing optics remain unmodelled. The native Review panel supports source-hidden actual replay and catalog metadata tint by decoded tool, plus requested/realized inspection and fresh four-file export. The native window can consume a CLI-produced recovered project; local hardware evidence does not qualify other GPUs/platforms or physical color.
 
-Current identities are project10/manufacturing11/process3/surface3, source18/planner46,
+Current identities are project10/manufacturing11/process3/surface3, source18/planner47,
 emitter11/verifier17 and SPLR6; executable constants and exact native pins remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
@@ -460,11 +460,14 @@ requires separate eligibility and does not inherit full-cylinder authority.
 
 The [planar-image recovery journey](../../apps/cli/tests/project.rs)
 `planar_image_relief_survives_source_deletion_and_fresh_readonly_retrieval`
-currently refuses at its first thin image-event layer: local wall dose exceeds
-the source-local junction/count allowance. The source5/planner24 baseline has the
-same defect; it is not a native-first regression or a qualified image workflow.
-Keep the executable journey and its dose gate unchanged. Fixing that wall
-construction is separate from this landing.
+completes original-image authoring, Compile, fresh independent Verify/export,
+source deletion and read-only recovery with its asymmetric PNG and unchanged
+parameters. Source-corner permissions are declared from sharper literal turns
+before shallow neighboring events; graph enumeration cannot give a shallow turn
+first credit for a tiny fragment around a sharper one. Declaration precedes
+commands; regions, fractional freshness, local/aggregate dose limits and all
+coverage, void, crossing, retrace and command gates remain independent. This
+bounded workflow does not qualify arbitrary images, depths or carriers.
 
 The additional8×8/depth0.35 cylindrical-image workbench Compile also remains
 unqualified. Its captured image/intent/pose refuses on source5/planner24 at

@@ -338,7 +338,7 @@ pub(super) fn construct(
                 + std::mem::size_of::<Option<usize>>())
         + graph.edges.len()
             * (3 * std::mem::size_of::<CornerPlan>() + std::mem::size_of::<Option<f64>>())
-        + (graph.junctions.len() + 2 * graph.edges.len()) * std::mem::size_of::<(f64, usize)>()
+        + (graph.junctions.len() + 3 * graph.edges.len()) * std::mem::size_of::<(f64, usize)>()
         + graph.edges.len()
             * request.recipe.perimeter_count as usize
             * 24
@@ -1062,14 +1062,6 @@ fn emit_corners(
                 if bevel_corners {
                     bevel_corner(incidence, curve, widths, &mut event, request, work, cancel)?;
                 }
-                permissions.push(Junction {
-                    center: curve.at(event.parameter),
-                    radius_mm: (request.limits.max_bead_width_mm - event.position_error_mm)
-                        .next_down(),
-                    valence: 2,
-                    ports: Vec::new(),
-                    transition: None,
-                });
                 contour_events.push(event);
             }
         }
@@ -1081,6 +1073,39 @@ fn emit_corners(
             events,
             spines: Vec::new(),
         });
+    }
+    // A shallow source event must not spend the small fresh sliver around a
+    // sharper neighboring turn before that turn declares its own patch. Fix
+    // priority from literal source incidence, before any command is proposed.
+    // The qualifier preserves this declaration order, fractional freshness and
+    // every original local/aggregate bound; no result selects its own credit.
+    let mut permission_order = Vec::with_capacity(corners.len());
+    for (index, corner) in corners.iter().enumerate() {
+        check_cancel(cancel)?;
+        boolean::charge(work, 1)?;
+        let priority = contours::source_corner(&graph.edges[corner.edge], graph)
+            .and_then(|(_, _, rays)| {
+                let cosine = dot(rays[0], rays[1]) / (norm(rays[0]) * norm(rays[1]));
+                cosine.is_finite().then_some(-cosine)
+            })
+            .unwrap_or(1.0);
+        permission_order.push((priority, index));
+    }
+    boolean::sort_by(&mut permission_order, |entry| entry.0, work, cancel)?;
+    for (_, index) in permission_order {
+        let corner = &corners[index];
+        let curve = &graph.edges[corner.edge];
+        for event in &contour_events[corner.events[0]..corner.events[1]] {
+            check_cancel(cancel)?;
+            boolean::charge(work, 1)?;
+            permissions.push(Junction {
+                center: curve.at(event.parameter),
+                radius_mm: (request.limits.max_bead_width_mm - event.position_error_mm).next_down(),
+                valence: 2,
+                ports: Vec::new(),
+                transition: None,
+            });
+        }
     }
     if complete_joints {
         // Resolve the COMPLETE source event inventory before considering any
