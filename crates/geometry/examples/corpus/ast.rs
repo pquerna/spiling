@@ -190,51 +190,6 @@ pub fn implicit_intersections(source: &str, filename: &str) -> String {
     serialize(&exchange)
 }
 
-/// Controlled OCCT fitting adversary: its alternate top-face association stays
-/// valid, but the preferred PCURVE is moved to the distinct bottom plane.
-pub fn wrong_selected_master(source: &str, filename: &str) -> String {
-    let mut exchange = step_p21::parser::parse(source).expect("controlled OCCT fitting source");
-    parameters(
-        exchange
-            .header
-            .iter_mut()
-            .find(|record| record.name == "FILE_NAME")
-            .unwrap(),
-    )[0] = Parameter::String(filename.into());
-    let selected = {
-        let declaration = first(&mut exchange, "SURFACE_CURVE");
-        let fields = parameters(declaration);
-        assert!(matches!(&fields[3],Parameter::Enumeration(choice) if choice=="PCURVE_S1"));
-        let Parameter::List(associations) = &fields[2] else {
-            panic!("controlled associated geometry");
-        };
-        let Parameter::Ref(Name::Entity(selected)) = associations[0] else {
-            panic!("controlled preferred PCURVE");
-        };
-        selected
-    };
-    let bottom_plane = exchange.data[0]
-        .entities
-        .iter()
-        .filter_map(|entity| match entity {
-            EntityInstance::Simple { id, record } if record.name == "PLANE" => Some(*id),
-            _ => None,
-        })
-        .nth(1)
-        .expect("controlled fitting has distinct top and bottom planes");
-    let selected = exchange.data[0]
-        .entities
-        .iter_mut()
-        .find_map(|entity| match entity {
-            EntityInstance::Simple { id, record } if *id == selected => Some(record),
-            _ => None,
-        })
-        .expect("controlled preferred PCURVE entity");
-    assert_eq!(selected.name, "PCURVE");
-    parameters(selected)[1] = Parameter::Ref(Name::Entity(bottom_plane));
-    serialize(&exchange)
-}
-
 /// Invalid source LINE carrier while its original BREP vertices stay unchanged.
 /// A converter must not silently replace this declaration by the vertex chord.
 pub fn wrong_spatial_line(source: &str, filename: &str) -> String {

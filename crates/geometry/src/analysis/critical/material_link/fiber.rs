@@ -42,17 +42,10 @@ pub(super) struct FiberDegreeOne;
 /// Complete native cylinder-fiber calibration. An actual boundary atlas and
 /// the SAME request scope remain independent prerequisites.
 pub(super) struct CylinderFiberCensus {
-    #[cfg(test)]
-    outer_forward: Interval,
     inner_forward: Option<Interval>,
 }
 
 impl CylinderFiberCensus {
-    #[cfg(test)]
-    pub(super) fn outer_forward(&self) -> Interval {
-        self.outer_forward
-    }
-
     pub(super) fn inner_forward(&self) -> Option<Interval> {
         self.inner_forward
     }
@@ -285,8 +278,6 @@ pub(super) fn native_cylinder_fiber_census(
         census_native_fiber(source, fiber, restriction, remaining_bytes, work, cancel)?.and_then(
             |roots| {
                 roots.outward.map(|_outer_forward| CylinderFiberCensus {
-                    #[cfg(test)]
-                    outer_forward: _outer_forward,
                     inner_forward: roots.inward,
                 })
             },

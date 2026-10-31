@@ -10,7 +10,6 @@ pub(crate) use crate::kernel::source_operand::ExactAffineCurve;
 use crate::kernel::source_operand::{PreparedOriginalCurve, PreparedOriginalSurface};
 
 pub(crate) trait SurfaceEvaluator {
-    fn active_domain(&self) -> [[f64; 2]; 2];
     fn tensor(
         &self,
         uv: [[f64; 2]; 2],
@@ -111,22 +110,6 @@ pub(crate) trait CurveEvaluator {
     }
 }
 impl SurfaceEvaluator for Surface {
-    fn active_domain(&self) -> [[f64; 2]; 2] {
-        if let Ok(Some(n)) = analytic_eval::native_surface_nurbs(self)
-            && let (Some(a), Some(b), Some(c), Some(d)) = (
-                n.u_knots().get(n.p()),
-                n.u_knots().get(n.n() + 1),
-                n.v_knots().get(n.q()),
-                n.v_knots().get(n.m() + 1),
-            )
-        {
-            return [[*a, *b], [*c, *d]];
-        }
-        let d = self.natural_uv_domain();
-        let lo = d.min();
-        let hi = d.max();
-        [[lo.x, hi.x], [lo.y, hi.y]]
-    }
     fn tensor(
         &self,
         uv: [[f64; 2]; 2],
@@ -167,9 +150,6 @@ impl SurfaceEvaluator for Surface {
     }
 }
 impl SurfaceEvaluator for PreparedOriginalSurface<'_> {
-    fn active_domain(&self) -> [[f64; 2]; 2] {
-        PreparedOriginalSurface::active_domain(self)
-    }
     fn tensor(
         &self,
         uv: [[f64; 2]; 2],

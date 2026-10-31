@@ -216,6 +216,13 @@ enum SourceEndpoint {
     },
     Root {
         root: EndpointRoot,
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "Retain the selected original endpoint root ordinal as part of branch identity"
+            )
+        )]
         branch: usize,
         turns: i32,
     },

@@ -208,6 +208,7 @@ pub(crate) fn section(
 }
 /// Borrowed query service for the single prepared solid/material owner.
 /// `byte_limit` excludes all caller-owned coexisting source and output buffers.
+#[cfg(test)]
 pub(crate) fn section_for_query(
     definition: &Definition,
     query: &SectionQuery,

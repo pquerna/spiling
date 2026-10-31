@@ -10,10 +10,11 @@
 //! a zero conversion error. Missing active branch authority is not inferred from
 //! a native convenience range or an endpoint sample.
 
+#[cfg(test)]
+use crate::parametric::SurfaceEnclosure;
 use crate::parametric::nurbs_eval::{SurfaceTensor, basis_jet, binomial, validate_knots};
 use crate::parametric::{
-    CurveEnclosure, CurveThirdEnclosure, Interval, PreparedValidatedCurve, SurfaceEnclosure,
-    sin_cos_interval,
+    CurveEnclosure, CurveThirdEnclosure, Interval, PreparedValidatedCurve, sin_cos_interval,
 };
 use crate::{GeometryError, GeometryWorkBudget};
 use solidcraft_step::geom::{
@@ -264,6 +265,13 @@ fn selected_trim<'a>(
     }
     Err(resource())
 }
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Keep the declared source trim's literal parameters, turns and period with its immutable branch owner"
+    )
+)]
 pub(crate) struct OriginalDeclaredTrimBranch<'a> {
     trimmed: &'a Curve,
     literal_parameters: [f64; 2],
@@ -272,18 +280,23 @@ pub(crate) struct OriginalDeclaredTrimBranch<'a> {
     endpoint_parameters: [Interval; 2],
 }
 impl OriginalDeclaredTrimBranch<'_> {
+    #[cfg(test)]
     pub(crate) fn trimmed_source(&self) -> &Curve {
         self.trimmed
     }
+    #[cfg(test)]
     pub(crate) fn literal_parameters(&self) -> [f64; 2] {
         self.literal_parameters
     }
+    #[cfg(test)]
     pub(crate) fn declared_turns(&self) -> [i32; 2] {
         self.declared_turns
     }
+    #[cfg(test)]
     pub(crate) fn period(&self) -> Interval {
         self.period
     }
+    #[cfg(test)]
     pub(crate) fn endpoint_parameters(&self) -> [Interval; 2] {
         self.endpoint_parameters
     }
@@ -796,6 +809,7 @@ impl<'a> PreparedOriginalCurve<'a> {
         owner.evaluate_order(active, 0, work, cancel)?;
         Ok(owner)
     }
+    #[cfg(test)]
     pub(crate) fn declared_trim_branch(&self) -> Option<&OriginalDeclaredTrimBranch<'a>> {
         self.inventory.declared_branch.as_ref()
     }
@@ -936,6 +950,7 @@ impl<'a> PreparedOriginalSurface<'a> {
         }
         surface_jet(self.source, uv, order, &self.inventory, 0, work, cancel)
     }
+    #[cfg(test)]
     pub(crate) fn jet(
         &self,
         uv: [[f64; 2]; 2],
@@ -958,6 +973,7 @@ impl<'a> PreparedOriginalSurface<'a> {
     /// need this distinct operation; it grants no material or native parity.
     /// Literal rectangular restrictions, spline domains/denominators and C1
     /// admission remain enforced by the actual original coefficient operators.
+    #[cfg(test)]
     pub(crate) fn carrier_jet(
         &self,
         uv: [[f64; 2]; 2],
@@ -987,6 +1003,7 @@ impl<'a> PreparedOriginalSurface<'a> {
 
     /// Piecewise first bounds on the same captured coefficient sheet. C0 is
     /// required; an original derivative jump stays in the closed first hull.
+    #[cfg(test)]
     pub(crate) fn carrier_piecewise_first(
         &self,
         uv: [[f64; 2]; 2],
@@ -1013,6 +1030,7 @@ impl<'a> PreparedOriginalSurface<'a> {
     /// Position-only image of the captured coefficient sheet. Every original
     /// span and literal/natural restriction still applies; neither continuity
     /// nor selected-material membership is inferred from this enclosure.
+    #[cfg(test)]
     pub(crate) fn carrier_position_bounds(
         &self,
         uv: [[f64; 2]; 2],
@@ -1699,6 +1717,7 @@ pub(crate) fn lift(
     Ok(out)
 }
 
+#[cfg(test)]
 pub(crate) fn original_curve_on_surface_enclosure(
     surface: &PreparedOriginalSurface<'_>,
     chart: &PreparedOriginalCurve<'_>,
@@ -2219,6 +2238,11 @@ pub(crate) fn original_angular_parameter(
 /// Canonical analytic pullback expression, not an original-trim certificate.
 /// The expression is bound to the retained carrier and original vertex point;
 /// its nonzero residual must be consumed by the owning forward/joint proof.
+#[cfg(test)]
+#[expect(
+    dead_code,
+    reason = "The original pullback probe retains its carrier, phase lifts and full lifted position together with the tested residual"
+)]
 pub(crate) struct OriginalSurfacePullback<'a> {
     pub(crate) carrier: &'a Surface,
     pub(crate) point_mm: [f64; 3],
@@ -2227,9 +2251,11 @@ pub(crate) struct OriginalSurfacePullback<'a> {
     pub(crate) position_mm: [Interval; 3],
     pub(crate) residual_mm: [Interval; 3],
 }
+#[cfg(test)]
 fn dot(a: [Interval; 3], b: [Interval; 3]) -> Interval {
     (0..3).fold(ZERO, |v, k| v.add(a[k].mul(b[k])))
 }
+#[cfg(test)]
 fn phase_lift(angle: Interval, turns: i32) -> Result<Interval, GeometryError> {
     let pi = Interval {
         lo: crate::parametric::down(std::f64::consts::PI),
@@ -2241,6 +2267,7 @@ fn phase_lift(angle: Interval, turns: i32) -> Result<Interval, GeometryError> {
     );
     Interval::new(lifted.lo, lifted.hi)
 }
+#[cfg(test)]
 pub(crate) fn original_analytic_surface_pullback<'a>(
     surface: &'a PreparedOriginalSurface<'a>,
     point_mm: [f64; 3],
@@ -2678,6 +2705,7 @@ impl PreparedOriginalCurve<'_> {
         }
         Err(resource())
     }
+    #[cfg(test)]
     pub(crate) fn tensor_coefficients(
         &self,
         work: &mut GeometryWorkBudget,

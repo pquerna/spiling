@@ -320,14 +320,18 @@ enum ParameterRecipe<'d> {
     },
 }
 pub(crate) struct SourcePcurveRestriction<'d> {
-    face: &'d OriginalFaceSource,
-    coedge: &'d OriginalCoedgeSource,
-    source: &'d OriginalPcurveSource,
     chart: PreparedOriginalCurve<'d>,
     recipe: ParameterRecipe<'d>,
     original_knots: Vec<f64>,
     knot_bands: Vec<Interval>,
     cover_cuts: Vec<f64>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retain literal endpoint identity with the completed original PCURVE restriction"
+        )
+    )]
     exact_endpoints: bool,
 }
 
@@ -1041,9 +1045,6 @@ impl<'d> SourcePcurveRestriction<'d> {
             )
         };
         let mut result = Self {
-            face,
-            coedge,
-            source: pcurve,
             chart,
             recipe,
             original_knots: Vec::new(),

@@ -65,12 +65,6 @@ pub(crate) enum PreparedTrimSurface<'p, 'd> {
 }
 
 impl parametric::SurfaceEvaluator for PreparedTrimSurface<'_, '_> {
-    fn active_domain(&self) -> [[f64; 2]; 2] {
-        match self {
-            Self::Native(surface) => parametric::SurfaceEvaluator::active_domain(*surface),
-            Self::Original(surface) => surface.active_domain(),
-        }
-    }
     fn tensor(
         &self,
         uv: [[f64; 2]; 2],
@@ -241,7 +235,6 @@ pub(crate) struct NativeTrimCoedge<'d> {
     pub(crate) native_range: [f64; 2],
     pub(crate) uv_range: [f64; 2],
     pub(crate) forward: bool,
-    pub(crate) c1: bool,
     curve: &'d Curve,
     native_carrier_domain: Option<[[f64; 2]; 2]>,
     native_carrier_containment: Option<NativeCurveCarrierContainment<'d>>,
@@ -603,7 +596,6 @@ pub(crate) struct PreparedFaceTrimDomain<'d> {
     original_coedges: Vec<PreparedOriginalCoedge<'d>>,
     original_joints: Vec<PreparedTrimJoint>,
     joint_after: Vec<Option<usize>>,
-    original_margin_uv: Option<[f64; 2]>,
     original_chart_error_mm: Option<f64>,
     native_tolerance_mm: Option<f64>,
     native_bridges: Vec<NativeChartBridge>,
@@ -1033,7 +1025,6 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             original_orientation: None,
             original_coedges: Vec::new(),
             original_joints: Vec::new(),
-            original_margin_uv: None,
             original_chart_error_mm: None,
             joint_after: Vec::new(),
             native_tolerance_mm,
@@ -1133,7 +1124,6 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                     native_range,
                     uv_range,
                     forward,
-                    c1,
                     curve,
                     native_carrier_domain: native_tolerance_mm.map(|_| domain),
                     native_carrier_containment: (native_tolerance_mm.is_some()
@@ -1517,6 +1507,7 @@ impl<'d> PreparedFaceTrimDomain<'d> {
     }
     /// Source correction joints only. An empty result is a proved zero ordinary
     /// completion, never a native-only stand-in for missing source operands.
+    #[cfg(test)]
     pub(crate) fn original_joints(&self) -> Result<&[PreparedTrimJoint], GeometryError> {
         if self.original_surface.is_none() {
             return Err(unavailable(
@@ -3181,10 +3172,13 @@ impl OriginalCoedgeBinding {
 pub(crate) enum OriginalCorrespondenceProvenance {
     ExactCoefficients,
     Forward,
-    CompletedPoleGraph,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[expect(
+    dead_code,
+    reason = "The completed correspondence retains separate original and UV knot inventories for source diagnostics"
+)]
 pub(crate) struct OriginalSpanInventory {
     pub(crate) source_knot_boundaries: usize,
     pub(crate) source_knot_bands: usize,
@@ -3194,6 +3188,10 @@ pub(crate) struct OriginalSpanInventory {
 
 /// Sealed whole-original trace receipt. Construction evaluates the actual
 /// selected source operators; candidate IDs/ranges cannot construct this type.
+#[expect(
+    dead_code,
+    reason = "A sealed original correspondence retains its actual gauge, position and first-derivative scope even when consumers query only achieved position error"
+)]
 pub(crate) struct OriginalCoedgeCorrespondence {
     binding: OriginalCoedgeBinding,
     spatial_range: [f64; 2],
@@ -3205,12 +3203,6 @@ pub(crate) struct OriginalCoedgeCorrespondence {
     margin_uv: [f64; 2],
 }
 impl OriginalCoedgeCorrespondence {
-    pub(crate) fn binding(&self) -> Option<&OriginalCoedgeBinding> {
-        Some(&self.binding)
-    }
-    pub(crate) fn spatial_range(&self) -> [f64; 2] {
-        self.spatial_range
-    }
     pub(crate) fn uv_range(&self) -> [f64; 2] {
         [
             self.uv_ends[0].min(self.uv_ends[1]),
@@ -3226,65 +3218,10 @@ impl OriginalCoedgeCorrespondence {
     pub(crate) fn position_error_mm(&self) -> f64 {
         self.position_error_mm
     }
-    pub(crate) fn relative_derivative_error_bound(&self) -> f64 {
-        self.relative_derivative_error_bound
-    }
     // Query arithmetic is enclosed in jets. No artificial UV uncertainty is
     // added to the literal selected PCurve's coefficient expression.
-    pub(crate) fn margin_uv(&self) -> [f64; 2] {
-        self.margin_uv
-    }
-    pub(crate) fn span_inventory(&self) -> OriginalSpanInventory {
-        self.inventory
-    }
     pub(crate) fn uv_endpoint(&self, spatial_high: bool) -> f64 {
         self.uv_ends[usize::from(spatial_high)]
-    }
-    pub(crate) fn uv_endpoints(&self) -> [f64; 2] {
-        self.uv_ends
-    }
-    pub(crate) fn spatial_endpoint(&self, native_back: bool) -> f64 {
-        self.spatial_range[usize::from(native_back == self.binding.spatial_forward)]
-    }
-    pub(crate) fn uv_parameter_derivative(&self) -> Interval {
-        // Positive spatial length and nonzero UV length were proved before the
-        // sealed receipt was constructed.
-        Interval::point(self.uv_ends[1])
-            .sub(Interval::point(self.uv_ends[0]))
-            .div(Interval::point(self.spatial_range[1]).sub(Interval::point(self.spatial_range[0])))
-            .expect("qualified source affine parameter denominator")
-    }
-    pub(crate) fn uv_parameter_image(&self, range: [f64; 2]) -> Result<Interval, GeometryError> {
-        Interval::new(range[0], range[1])?;
-        if range[0] < self.spatial_range[0] || range[1] > self.spatial_range[1] {
-            return Err(unavailable(
-                "original source parameter query leaves its qualified spatial restriction",
-            ));
-        }
-        let image = Interval::point(self.uv_ends[0]).add(
-            Interval::new(range[0], range[1])?
-                .sub(Interval::point(self.spatial_range[0]))
-                .mul(self.uv_parameter_derivative()),
-        );
-        let domain = self.uv_range();
-        // The exact affine expression is a convex combination of its literal
-        // endpoint parameters on this restriction; intersection is proved.
-        Interval::new(image.lo.max(domain[0]), image.hi.min(domain[1]))
-    }
-    pub(crate) fn affine_spatial_parameter_preimage(
-        &self,
-        range: [f64; 2],
-    ) -> Result<Option<Interval>, GeometryError> {
-        let image = Interval::new(range[0], range[1])?
-            .sub(Interval::point(self.uv_ends[0]))
-            .div(self.uv_parameter_derivative())?
-            .add(Interval::point(self.spatial_range[0]));
-        Ok(Some(image))
-    }
-    pub(crate) fn same_affine_spatial_uv_map(&self, other: &Self) -> bool {
-        self.spatial_range == other.spatial_range
-            && self.uv_ends == other.uv_ends
-            && self.binding.source.source_edge == other.binding.source.source_edge
     }
 }
 
@@ -3473,7 +3410,6 @@ struct SourcePlaneLineProjection<'d> {
     parameter_origin: Interval,
     parameter_slope: Interval,
     exact_endpoints: bool,
-    source_error_mm: f64,
 }
 impl<'d> SourcePlaneLineProjection<'d> {
     fn new(
@@ -3569,7 +3505,6 @@ impl<'d> SourcePlaneLineProjection<'d> {
             parameter_origin,
             parameter_slope,
             exact_endpoints,
-            source_error_mm,
         }))
     }
 
@@ -4529,6 +4464,10 @@ impl parametric::CurveEvaluator for SourceEndpointConnector {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum TrimJointKind {
     EndpointUncertainty,
+    #[expect(
+        dead_code,
+        reason = "Retain the original pole chart and physical witness separately from independent native pole authority"
+    )]
     SphericalPole {
         polar_axis: usize,
         pole: SphericalPole,
@@ -4542,6 +4481,10 @@ pub(crate) enum TrimJointKind {
 /// Complete correction-joint inventory. Exact ordinary joins may be absent
 /// only after the constructor proves their full completion is zero.
 #[derive(Clone, Copy, Debug)]
+#[expect(
+    dead_code,
+    reason = "Every admitted original joint retains its shared vertex, oriented coedges and endpoint bindings; compact native material receipts cannot replace that source inventory"
+)]
 pub(crate) struct PreparedTrimJoint {
     pub(crate) vertex_id: VertexId,
     pub(crate) source_vertex_id: spiling_contracts::geometry::StepEntityId,
@@ -5460,7 +5403,6 @@ struct SourceSpatialCacheEntry<'d> {
 struct PreparedSharedSpatialCurve<'d> {
     operator: Arc<crate::analysis::source_restriction::SourceSpatialRestriction<'d>>,
     native_map: SourceCurveCalibration,
-    edge: EdgeId,
     spatial_forward: bool,
 }
 impl PreparedSharedSpatialCurve<'_> {
@@ -5493,7 +5435,6 @@ struct PreparedOriginalCoedge<'d> {
     // Raw whole-restriction jet of this same immutable selected operator.
     // The selected envelope above retains its separate domain semantics.
     full_uv_jet: parametric::ChartCurveEnclosure,
-    source_pcurve: Option<&'d super::source::OriginalPcurveSource>,
 }
 impl PreparedOriginalCoedge<'_> {
     fn owned_bytes(&self) -> usize {
@@ -5709,15 +5650,6 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             }
         }
         self.coedge_operand(index)
-    }
-    pub(crate) fn original_coedge_correspondence(
-        &self,
-        index: usize,
-    ) -> Result<&OriginalCoedgeCorrespondence, GeometryError> {
-        self.original_coedges
-            .get(index)
-            .map(|coedge| &coedge.correspondence)
-            .ok_or_else(|| unavailable("selected original coedge correspondence is unavailable"))
     }
     pub(crate) fn original_spatial_restriction(
         &self,
@@ -6058,6 +5990,10 @@ impl parametric::CurveEvaluator for NativeSpatialCurve<'_> {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[expect(
+    dead_code,
+    reason = "Retain both original endpoint identity operands in the immutable connector witness"
+)]
 struct SourceJointEndpointBinding {
     identity: NativeCoedgeIdentity,
     source_index: usize,
@@ -6658,7 +6594,6 @@ impl<'d> NativeFaceSkeleton<'d> {
                     native_range,
                     uv_range,
                     forward: entry.forward,
-                    c1: false,
                     curve,
                     native_carrier_domain: None,
                     native_carrier_containment: None,
@@ -6770,7 +6705,6 @@ impl<'d> PreparedNativeTrimSource<'d> {
         let shared = PreparedSharedSpatialCurve {
             operator: Arc::new(operator),
             native_map,
-            edge: native.edge,
             spatial_forward,
         };
         let payload = shared.retained_bytes() + 2 * size_of::<usize>();
@@ -7024,15 +6958,10 @@ fn norm(value: [Interval; 3]) -> Result<Interval, GeometryError> {
     }
     .norm()
 }
-impl PreparedFaceTrimDomain<'_> {}
-
-impl PreparedFaceTrimDomain<'_> {}
-
 struct OriginalCoedgeProposal<'d> {
     curve: PreparedOriginalUvCurve<'d>,
     binding: OriginalCoedgeBinding,
     image: [Interval; 2],
-    pcurve: Option<&'d super::source::OriginalPcurveSource>,
 }
 fn source_binding(
     native: &NativeTrimCoedge<'_>,
@@ -7483,7 +7412,6 @@ impl<'d> PreparedNativeTrimSource<'d> {
                         curve,
                         binding,
                         image,
-                        pcurve: Some(pcurve),
                     });
                 }
                 if derive_plane || derive_cylinder {
@@ -7532,7 +7460,6 @@ impl<'d> PreparedNativeTrimSource<'d> {
                         curve,
                         binding,
                         image,
-                        pcurve: None,
                     });
                 }
                 if choices.is_empty() {
@@ -7689,7 +7616,6 @@ impl<'d> PreparedNativeTrimSource<'d> {
                         correspondence: receipt,
                         full_uv_image: proposal.image,
                         full_uv_jet,
-                        source_pcurve: proposal.pcurve,
                     }));
                 }
             }
@@ -8098,7 +8024,6 @@ fn finish_original_face<'d>(
                 original_coedges: selected,
                 original_joints: joints,
                 joint_after,
-                original_margin_uv: Some([0.0; 2]),
                 original_chart_error_mm: Some(actual_error),
             };
             let remaining = allowance
