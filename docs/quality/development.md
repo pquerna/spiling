@@ -141,6 +141,11 @@ observation/cancellation semantics. Host checks do not substitute for dialogs,
 actual window/GPU or platform packaging acceptance. Preserve run output and
 producer/environment identities in ignored artifacts or PR verification notes.
 
+When automating a GTK chooser in an unmanaged X11 session, switch from Recent to a
+filesystem location (such as Home) before entering an absolute directory. Focus the
+location entry, submit it, and confirm the resulting engine Open receipt. Populated
+chooser text alone is not an opened project.
+
 Native source inspection uses `scene` for revision-bound pages, complete face tables and
 checked SPLM/SPLS transfers, and `viewport` for shared raw GPU storage, f64-rebased
 placement, camera and native face picking. Import an admitted part, click a source
@@ -191,7 +196,7 @@ mutation API or qualification of native dialogs. Upstream default fonts do not c
 ## Material authority and qualification
 
 [ADR005](../adr/ADR005-native-first-development-geometry.md) adopts the implemented
-source19/planner51 DEVELOPMENT route: one imported SolidCore BREP, exact
+source19/planner52 DEVELOPMENT route: one imported SolidCore BREP, exact
 kernel/tolerance binding, original STEP identity/provenance and original finish
 inputs. Qualify preserved operators with the actual coherent producer; do not
 relabel source5/planner24 reports or transfer older runtime evidence.

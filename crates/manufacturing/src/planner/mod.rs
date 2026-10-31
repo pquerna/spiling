@@ -170,12 +170,22 @@ pub(crate) fn plan(
     let mut support_work = support::SupportWork::default();
     let mut span_sizing = native::NativeSpanSizing::default();
     let mut slab_pool = native::NativeSlabPool::default();
+    // Freeze the original startup pair's physical scope. Retrying by current
+    // layer count would shrink that scope each time one interval is split.
+    let probe_scope = match input.intent.recipe.supports {
+        SupportPolicy::Disabled => schedule
+            .get(1)
+            .map(|layer| AnchorProbeScope::StartupPair { top_mm: layer.z }),
+        SupportPolicy::Breakaway { .. } => Some(AnchorProbeScope::UnreachableSupport),
+    };
     let native_prefix = loop {
-        let Some(upper) = deposition_prefix_upper(
+        let Some(scope) = probe_scope else { break None };
+        let Some(probe) = deposition_probe(
             input,
             &admission,
             &process_captures,
             &schedule,
+            scope,
             &mut surface_work,
             cancel,
         )?
@@ -191,7 +201,7 @@ pub(crate) fn plan(
             &mut schedule,
             &mut surface_work,
             &mut support_work,
-            Some(upper),
+            Some(probe),
             None,
             &mut span_sizing,
             &mut slab_pool,
@@ -399,7 +409,7 @@ fn admit_schedule<'model>(
     schedule: &mut Vec<LayerElevation>,
     surface_work: &mut usize,
     support_work: &mut support::SupportWork,
-    prefix_upper: Option<f64>,
+    probe: Option<DepositionProbe>,
     native_prefix: Option<NativeScheduleCapture>,
     span_sizing: &mut native::NativeSpanSizing,
     pool: &mut native::NativeSlabPool,
@@ -409,7 +419,10 @@ fn admit_schedule<'model>(
     for capture in process_captures.iter_mut() {
         capture.applied = false;
     }
-    let terminal_z = prefix_upper.unwrap_or_else(|| schedule.last().expect("nonempty schedule").z);
+    let terminal_z = probe.map_or_else(
+        || schedule.last().expect("nonempty schedule").z,
+        |probe| probe.native_top_mm,
+    );
     let mut count = schedule.partition_point(|layer| layer.z <= terminal_z) as u32;
     let mut occurrences = input.occurrences.iter().collect::<Vec<_>>();
     occurrences.sort_by_key(|o| o.occurrence_id);
@@ -438,7 +451,7 @@ fn admit_schedule<'model>(
         native_stage.replace_span_sizing(std::mem::take(span_sizing));
     }
     native_stage.set_capture_terminal(terminal_z);
-    native_stage.defer_void_capture(prefix_upper.is_some());
+    native_stage.defer_void_capture(probe.is_some());
     let mut index = sections.last().map_or(0, |section| section.end);
     let mut native_slab_end = index;
     let mut native_slab_start = 0u32;
@@ -833,7 +846,7 @@ fn admit_schedule<'model>(
         index = end;
     }
     let native_retained_points = retained_points;
-    let mut native_coverage = if prefix_upper.is_some() {
+    let mut native_coverage = if probe.is_some() {
         ScheduleNativeAuthority::Tentative {
             stage: native_stage,
         }
@@ -876,8 +889,11 @@ fn admit_schedule<'model>(
     drop(native_required);
     drop(native_material);
     drop(native_occupied_shared);
-    let count = if prefix_upper.is_some() {
-        unreachable_support_end(schedule, recipe, surface_work, cancel)?.min(count as usize) as u32
+    let count = if let Some(probe) = probe {
+        probe
+            .scope
+            .end(schedule, recipe, surface_work, cancel)?
+            .min(count as usize) as u32
     } else {
         count
     };
@@ -1595,7 +1611,7 @@ fn admit_schedule<'model>(
         drop(wall_layout);
         drop(templates);
         drop(phase_anchors);
-        if prefix_upper.is_none() {
+        if probe.is_none() {
             retained_points -= native_surfaces
                 .iter()
                 .map(|span| {
@@ -1655,7 +1671,7 @@ fn admit_schedule<'model>(
             &mut segments,
             cancel,
             &mut admission.geometry_work,
-            prefix_upper.is_some(),
+            probe.is_some(),
             support_work,
             |index,
              axis,
@@ -2012,7 +2028,7 @@ fn admit_schedule<'model>(
                         point_limit,
                         retained_native_owner_bytes: native_owner_bytes,
                     },
-                    prefix_upper.is_some(),
+                    probe.is_some(),
                     support_work,
                     native_work,
                     cancel,
@@ -2130,7 +2146,7 @@ fn admit_schedule<'model>(
                     recycled,
                 });
             }
-            support::SupportAdmission::Complete if prefix_upper.is_some() => {
+            support::SupportAdmission::Complete if probe.is_some() => {
                 let ScheduleNativeAuthority::Tentative { stage, .. } = native_coverage else {
                     unreachable!("tentative admission retains its unfinished ledger")
                 };
@@ -2607,15 +2623,46 @@ fn unreachable_support_end(
     Ok(schedule.len())
 }
 
-fn deposition_prefix_upper(
+#[derive(Clone, Copy)]
+enum AnchorProbeScope {
+    UnreachableSupport,
+    StartupPair { top_mm: f64 },
+}
+
+impl AnchorProbeScope {
+    fn end(
+        self,
+        schedule: &[LayerElevation],
+        recipe: &PlanarPrintRecipe,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<usize, ManufacturingError> {
+        match self {
+            Self::UnreachableSupport => unreachable_support_end(schedule, recipe, work, cancel),
+            Self::StartupPair { top_mm } => {
+                preflight::charge_capture_proposal_work(work, 1, cancel)?;
+                Ok(schedule.partition_point(|layer| layer.lower_z < top_mm))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DepositionProbe {
+    native_top_mm: f64,
+    scope: AnchorProbeScope,
+}
+
+fn deposition_probe(
     input: &CompilerInput<'_>,
     admission: &preflight::Admission,
     process: &[zones::Capture],
     schedule: &[LayerElevation],
+    scope: AnchorProbeScope,
     work: &mut usize,
     cancel: &AtomicBool,
-) -> Result<Option<f64>, ManufacturingError> {
-    let end = unreachable_support_end(schedule, &input.intent.recipe, work, cancel)?;
+) -> Result<Option<DepositionProbe>, ManufacturingError> {
+    let end = scope.end(schedule, &input.intent.recipe, work, cancel)?;
     if end <= 1 {
         return Ok(None);
     }
@@ -2653,7 +2700,10 @@ fn deposition_prefix_upper(
         }
         after += 1;
     }
-    Ok(Some(schedule[after - 1].z))
+    Ok(Some(DepositionProbe {
+        native_top_mm: schedule[after - 1].z,
+        scope,
+    }))
 }
 
 fn refine_deposition_pair(

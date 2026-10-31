@@ -3633,11 +3633,12 @@ fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
     let mut span_sizing = native::NativeSpanSizing::default();
     let mut slab_pool = native::NativeSlabPool::default();
     loop {
-        let upper = deposition_prefix_upper(
+        let probe = deposition_probe(
             &input,
             &admission,
             &captures,
             &schedule,
+            AnchorProbeScope::UnreachableSupport,
             &mut planar_work,
             &cancel,
         )
@@ -3652,7 +3653,7 @@ fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
             &mut schedule,
             &mut planar_work,
             &mut support_work,
-            Some(upper),
+            Some(probe),
             None,
             &mut span_sizing,
             &mut slab_pool,
@@ -4246,6 +4247,40 @@ fn frozen_bridge_component_merge_and_split_preserve_actual_replay_and_anchor_ref
             .iter()
             .flat_map(|layer| &layer.paths)
             .any(|path| path.kind == DepositionKind::Bridge)
+    );
+    visit_fresh_replayed_object_segments(&bundle, |_, _| {});
+}
+
+#[test]
+fn rounded_housing_disabled_supports_refines_startup_and_replays() {
+    let mut intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/manufacturing/housing-ordinary.intent.json",
+    ))
+    .unwrap();
+    intent.recipe.supports = SupportPolicy::Disabled;
+    intent.recipe.process.retraction = RetractionPolicy::Disabled;
+    let scene = NativeScene::new(
+        include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ),
+        &[RigidPoseMm {
+            translation_mm: [98.0, 100.99999999999977, 1.225587472778531e-9],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        }],
+    );
+    let bundle = compile(scene.input(&intent), &AtomicBool::new(false)).unwrap();
+    assert_eq!(bundle.verification.support_deposition_segments, 0);
+    assert!(bundle.plan.native_geometry.geometry_work <= MAX_NATIVE_WORK_UNITS);
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.paths)
+            .all(|path| !matches!(
+                path.kind,
+                DepositionKind::Support | DepositionKind::SupportInterface
+            ))
     );
     visit_fresh_replayed_object_segments(&bundle, |_, _| {});
 }

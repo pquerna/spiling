@@ -1685,3 +1685,34 @@ fn classification_reclaims_optional_ranges_before_refusing_live_scratch() {
     assert_eq!(coverage.section_area_mm2, 200.0);
     assert_eq!(coverage.protected_hole_area_mm2, 0.0);
 }
+
+#[test]
+fn startup_anchor_probe_keeps_original_physical_pair_after_splits() {
+    let cancel = AtomicBool::new(false);
+    let mut schedule = (0..3)
+        .map(|i| LayerElevation {
+            lower_z: i as f64 * 0.1,
+            z: (i + 1) as f64 * 0.1,
+            sample: (i as f64 + 0.5) * 0.1,
+            height: 0.1,
+        })
+        .collect::<Vec<_>>();
+    let scope = AnchorProbeScope::StartupPair {
+        top_mm: schedule[1].z,
+    };
+    let mut work = 0;
+    let recipe = recipe(0.25);
+    assert_eq!(
+        scope.end(&schedule, &recipe, &mut work, &cancel).unwrap(),
+        2
+    );
+    native::split_layer(&mut schedule, 0, "startup anchor regression").unwrap();
+    native::split_layer(&mut schedule, 2, "startup anchor regression").unwrap();
+    let end = scope.end(&schedule, &recipe, &mut work, &cancel).unwrap();
+    assert_eq!(end, 4);
+    assert_eq!(schedule[end - 1].z, 0.2);
+    assert_eq!(schedule[end].lower_z, 0.2);
+    assert!(schedule.iter().any(|layer| layer.z == 0.1));
+    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(scope.end(&schedule, &recipe, &mut work, &cancel).is_err());
+}

@@ -863,13 +863,13 @@ pub(super) fn realize(
             }
             if let Some(failure) = admission.failure.take() {
                 if matches!(recipe.supports, SupportPolicy::Disabled) {
-                    return Err(admission_error(
-                        index,
-                        layer.z_mm,
-                        &layer.paths,
-                        &failure,
-                        recipe,
-                    ));
+                    let failure =
+                        admission_error(index, layer.z_mm, &layer.paths, &failure, recipe);
+                    return if tentative && index > 0 {
+                        Ok(SupportAdmission::RefineUnreachableLayer { index, failure })
+                    } else {
+                        Err(failure)
+                    };
                 }
                 let live = native_owned_bytes
                     + layer_payload_bytes(
