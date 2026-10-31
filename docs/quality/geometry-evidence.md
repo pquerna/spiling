@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source17 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source18 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -73,8 +73,14 @@ still admits each query. The native bore cap regression exercises both endpoint
 slabs through source-leaf/union binding, missing-incidence refusal and protected
 hole retention. The combined box/bore/cone reference retains its separate cone
 transition-material assertion; that whole reference remains unqualified.
-Complete bore-job compilation also remains unqualified: native directional
-support can exhaust cumulative work on trim-boundary contacts.
+The frozen [`bezier-extrusion-bore.step`](../../fixtures/manufacturing/native/bezier-extrusion-bore.step)
+also exercises complete sparse-job compilation, fresh emitted program
+verification/export and source-independent saved-project reopen through the CLI.
+Use `complete-sparse.intent.json` and the exact upright pose `[90,100,0]`; its
+manifest retains the cubic profile, actual circular hole and construction owner.
+`cargo test --locked -p spiling-geometry --lib native_extrusion_height_support`
+checks both signed height directions under the placement work allowance. This narrow software journey does not qualify arbitrary spline parts
+or physical printability.
 
 Native periodic-seam qualification uses the literal stored carrier and chart
 coefficients, opposed uses of the same native edge, and exact periodic G1
@@ -443,7 +449,12 @@ a tolerance label does not replace a complete measured query bound.
   inspection enclosures from native-material contact receipts. Native vertices
   and spatial restrictions provide feasible witnesses; complete carrier/trim
   bounds exclude competing extrema. Independently feasible extrema may prune
-  another complete enclosure without creating a witness on that face.
+  another complete enclosure without creating a witness on that face. Tighten
+  scalar height/gradient bounds with the Cartesian coefficient enclosure of the
+  identical native carrier cell before trim classification. Their centered
+  first-jet bound can exclude costly trim-boundary contact from global extrema;
+  a midpoint used for this enclosure remains infeasible until separately
+  classified. Retained jets and query scratch coexist under the same byte cap.
   Actual affine coefficients, pose arithmetic, closed height limits and plane
   drift retain directed error accounting; process-scale padding is not a
   substitute for the placed query's arithmetic bound.

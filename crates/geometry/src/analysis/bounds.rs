@@ -199,8 +199,12 @@ fn native_projected_bounds(
     let tolerance = policy.maximum_endpoint_uncertainty_mm;
     // Coefficient evaluation uses fixed stack scratch, never a per-cell heap.
     // Reserve it together with the bounded live heap under the unchanged cap.
-    let evaluator_bytes = parametric::SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
-        .max(crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES);
+    let evaluator_bytes = (parametric::SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+        + std::mem::size_of::<(
+            parametric::SurfaceFirstEnclosure,
+            [parametric::SurfaceFunctionalEnclosure; 2],
+        )>())
+    .max(crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES);
     let byte_limit = remaining_bytes.min(MAX_SCRATCH_ALLOCATION_BYTES);
     if evaluator_bytes > byte_limit {
         return Err(error(
@@ -339,10 +343,15 @@ fn native_projected_bounds(
                         split_axis: 0,
                     }));
                 }
-                let class = trim.classify(cell, work, cancel)?;
-                if matches!(class, TrimClassification::Outside) {
-                    return Ok(None);
-                }
+                // The scalar and Cartesian coefficient laws enclose this SAME
+                // native sheet. Scalar projection retains affine cancellation;
+                // Cartesian control differences retain exact axis invariance.
+                // Tighten the sheet before classifying its trimmed subset: no
+                // new feasible point is inferred from a carrier enclosure.
+                let cartesian = parametric::surface_piecewise_first_enclosure(
+                    surface, cell, work, cancel,
+                )?;
+                let height = intersect(height, project(cartesian.position, direction)?)?;
                 let middle = cell.map(|span| span[0] * 0.5 + span[1] * 0.5);
                 let point_cell = middle.map(|value| [value, value]);
                 let [point] = parametric::surface_functional_enclosures(
@@ -359,12 +368,27 @@ fn native_projected_bounds(
                     lo: parametric::down(cell[axis][0] - middle[axis]),
                     hi: parametric::up(cell[axis][1] - middle[axis]),
                 });
-                let du = enclosure.du;
-                let dv = enclosure.dv;
+                let du = enclosure.du.intersect(project(cartesian.du, direction)?)?;
+                let dv = enclosure.dv.intersect(project(cartesian.dv, direction)?)?;
                 let centered = point_height.add(du.mul(delta[0])).add(dv.mul(delta[1]));
                 let height = intersect(height, centered)?;
                 let split_axis = usize::from(du.abs_upper() * width(cell[0])
                     < dv.abs_upper() * width(cell[1]));
+                if aggregate.is_some_and(|seed| {
+                    resolved_by_feasible_extrema(
+                        height, seed.minimum[1], seed.maximum[0], tolerance,
+                    )
+                }) {
+                    return Ok(Some(Evaluation {
+                        height,
+                        witness: None,
+                        split_axis,
+                    }));
+                }
+                let class = trim.classify(cell, work, cancel)?;
+                if matches!(class, TrimClassification::Outside) {
+                    return Ok(None);
+                }
                 let feasible = matches!(class, TrimClassification::Inside)
                     || matches!(trim.classify(point_cell, work, cancel)?, TrimClassification::Inside);
                 Ok(Some(Evaluation {
@@ -842,6 +866,37 @@ mod tests {
         assert!(bounds.maximum[0] <= 20.0 && 20.0 <= bounds.maximum[1]);
         assert!(width(bounds.minimum) <= precision);
         assert!(width(bounds.maximum) <= precision);
+    }
+
+    #[test]
+    fn native_extrusion_height_support_retains_trim_boundary_extrema_within_placement_work() {
+        let definition = crate::from_step_bytes(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/manufacturing/native/bezier-extrusion-bore.step"
+        )))
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        for (direction, expected) in [
+            ([0.0, 0.0, 1.0], [0.0, 8.0]),
+            ([0.0, 0.0, -1.0], [-8.0, 0.0]),
+        ] {
+            let mut work = GeometryWorkBudget::new(20_000_000);
+            let precision = 0.00001;
+            let receipt = material_projected_bounds(
+                &definition,
+                direction,
+                BoundsPolicy {
+                    maximum_endpoint_uncertainty_mm: precision,
+                },
+                &mut work,
+                &cancel,
+            )
+            .expect("native extrusion height support must fit the unchanged placement allowance");
+            let bounds = receipt.bounds();
+            assert!(bounds.minimum[0] <= expected[0] && expected[0] <= bounds.minimum[1]);
+            assert!(bounds.maximum[0] <= expected[1] && expected[1] <= bounds.maximum[1]);
+            assert!(bounds.achieved_uncertainty_mm <= precision);
+        }
     }
 
     fn search(

@@ -105,6 +105,58 @@
         0.24
       ],
       "sha256": "8a8ad6e80f658696e5d88963f9bfffefb7cdf71d160fecc2e101d84346d665f6"
+    },
+    {
+      "file": "bezier-extrusion-bore.step",
+      "sha256": "1bea756800447f9b90caca7b255172602905607ab8fc5f2d4d086bd16cbdb600",
+      "byte_count": 6791,
+      "source_recipe": "crates/geometry/src/analysis/test_source.rs::bezier_extrusion(true, false) through original_step_bytes",
+      "producer": "retained SolidCraft STEP writer; original Spiling authored geometry",
+      "height_mm": 8.0,
+      "profile_xy_mm": {
+        "bezier_controls": [
+          [
+            0,
+            0
+          ],
+          [
+            5,
+            -2
+          ],
+          [
+            15,
+            -2
+          ],
+          [
+            20,
+            0
+          ]
+        ],
+        "straight_return": [
+          [
+            20,
+            0
+          ],
+          [
+            20,
+            10
+          ],
+          [
+            0,
+            10
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        "hole_center": [
+          10,
+          5
+        ],
+        "hole_radius": 2
+      },
+      "section_area_expression_mm2": "221 - 4*pi"
     }
   ],
   "schema_version": 1,
