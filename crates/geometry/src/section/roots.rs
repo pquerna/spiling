@@ -129,6 +129,10 @@ fn strict_derivative_cover(
         .then(|| left_derivative.hull(right_derivative)))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Root isolation carries its current interval, depth, evaluator, certified endpoint state and admitted root output through bounded recursion"
+)]
 fn visit(
     range: [f64; 2],
     depth: u8,

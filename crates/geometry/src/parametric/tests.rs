@@ -229,6 +229,10 @@ fn native_surface_axis_invariance_preserves_mixed_derivatives() {
             let jet =
                 super::nurbs_eval::evaluate_nurbs_surface_tensor(&raw, uv, 3, &mut work, &cancel)
                     .unwrap();
+            #[expect(
+                clippy::needless_range_loop,
+                reason = "Check every triangular u/v derivative order explicitly, including the transposed chart"
+            )]
             for a in 0..=3 {
                 for b in 0..=3 - a {
                     if if transpose { a > 0 } else { b > 0 } {

@@ -688,6 +688,10 @@ fn endpoint_error(
     )
     .map(|v| v.hi)
 }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Original vertex, search cover, period and selector-owned closed domain must remain distinct endpoint proof inputs"
+)]
 fn endpoint_root(
     curve: &dyn CurveEvaluator,
     vertex: [f64; 3],
@@ -799,6 +803,10 @@ impl<'a> EndpointRestrictedOriginal<'a> {
             cancel,
         )
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the original coedge, selected oriented curve, selector and independent reference explicit during endpoint restriction"
+    )]
     fn from_selection(
         source: &'a OriginalCoedgeSource,
         curve: &'a Curve,

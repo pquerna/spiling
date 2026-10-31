@@ -768,6 +768,10 @@ fn face_orientation(brep: &Brep, face: FaceId) -> Result<f64, GeometryError> {
     }
     result.ok_or_else(|| indeterminate("native section face is absent from its oriented shell"))
 }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The edge root inventory binds definition/edge identity and plane/accuracy independently of output admission and cumulative work"
+)]
 fn ensure_edge_roots(
     definition: &Definition,
     edge_id: EdgeId,

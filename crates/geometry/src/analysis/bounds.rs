@@ -568,6 +568,10 @@ impl Scratch {
 /// Search a complete cover, sharing independently feasible extrema across all
 /// spans. `seed` must itself consist of feasible subset support brackets; its
 /// outer endpoints cover only that subset, never the unevaluated chart.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep candidate domains, dimension and tolerance distinct from the search scratch, evaluator and cancellation budget"
+)]
 fn search_domains(
     domains: impl Iterator<Item = [[f64; 2]; 2]>,
     dimensions: usize,
@@ -594,6 +598,10 @@ fn search_domains(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The evaluator receives its independently admitted scratch while the search retains its own domains, seed and convergence policy"
+)]
 fn search_domains_with_query_scratch(
     domains: impl Iterator<Item = [[f64; 2]; 2]>,
     dimensions: usize,

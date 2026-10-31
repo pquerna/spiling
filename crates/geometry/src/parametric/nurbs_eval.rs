@@ -243,6 +243,10 @@ pub(super) fn evaluate_nurbs_surface_tensor(
             // repeats along an active axis has zero derivatives in that axis.
             // Compare RAW coefficients, before recentering widens them.
             let mut invariant = [if order == 0 { 0_u8 } else { 15_u8 }; 2];
+            #[expect(
+                clippy::needless_range_loop,
+                reason = "Keep u/v coefficient, basis and invariant-row indices aligned throughout the homogeneous tensor accumulation"
+            )]
             for i in 0..=p {
                 let mut row_first = [0.0; 4];
                 for j in 0..=q {
@@ -313,6 +317,10 @@ pub(super) fn evaluate_nurbs_surface_tensor(
                 }
             }
             if !rational {
+                #[expect(
+                    clippy::needless_range_loop,
+                    reason = "Only the triangular mixed-derivative catalog is initialized in the homogeneous weight component"
+                )]
                 for a in 0..=order {
                     for b in 0..=order - a {
                         h[a][b][3] = ZERO;
@@ -320,6 +328,10 @@ pub(super) fn evaluate_nurbs_surface_tensor(
                 }
                 h[0][0][3] = Interval::point(1.0);
             }
+            #[expect(
+                clippy::needless_range_loop,
+                reason = "The quotient recurrence reads lower-order tensor entries; preserve its total-order schedule and accumulation order"
+            )]
             for total in 1..=order {
                 for a in 0..=total {
                     let b = total - a;
@@ -448,6 +460,10 @@ pub(super) fn evaluate_nurbs_surface_functionals<const N: usize>(
             let mut numerators = [[ZERO; 3]; N];
             let mut weights = [ZERO; 3];
             let mut hull: Option<Interval> = None;
+            #[expect(
+                clippy::needless_range_loop,
+                reason = "Functional coefficient sums share the original u/v basis indices and fixed accumulation order"
+            )]
             for i in 0..=p {
                 for j in 0..=q {
                     work.charge(1 + N as u64, cancel)?;

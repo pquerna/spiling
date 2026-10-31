@@ -26,6 +26,10 @@ pub(super) struct AuditedFace {
     pub trim_error: f64,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Audit the actual face and shared edges against independent source identity, remaining output budget and coexisting retained bytes"
+)]
 pub(super) fn face(
     definition: &Definition,
     ordinal: usize,

@@ -603,6 +603,10 @@ fn coefficient_equal(
     }
     Ok(equal)
 }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Expose each literal frame, radius, phase and affine chart coefficient rather than hide their separate correspondence checks"
+)]
 fn literal_analytic(
     position: &Placement,
     native: NativeAnalytic,

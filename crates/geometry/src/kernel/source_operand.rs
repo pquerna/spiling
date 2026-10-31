@@ -1065,6 +1065,10 @@ fn curve_jet(
 ) -> Result<[[Interval; 3]; 4], GeometryError> {
     curve_jet_selected(c, range, order, inventory, depth, None, work, cancel)
 }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Recursive coefficient evaluation keeps the literal source range, derivative order, retained inventory and selected trim identity explicit"
+)]
 fn curve_jet_selected(
     c: &Curve,
     range: [f64; 2],
@@ -1291,6 +1295,10 @@ fn spline_curve(
         finite(origin)?;
         let mut h = [[ZERO; 4]; 4];
         let mut weight_hull: Option<Interval> = None;
+        #[expect(
+            clippy::needless_range_loop,
+            reason = "Original control points and every derivative basis row share this span-relative coefficient index and accumulation order"
+        )]
         for i in 0..=p {
             work.charge(1, cancel)?;
             let at = span - p + i;
@@ -1580,6 +1588,10 @@ fn spline_surface(
             finite(origin)?;
             let mut h = [[[ZERO; 4]; 4]; 4];
             let mut weights: Option<Interval> = None;
+            #[expect(
+                clippy::needless_range_loop,
+                reason = "The original surface coefficient net and derivative basis tables share explicit u/v indices and a fixed summation order"
+            )]
             for i in 0..=p {
                 for j in 0..=q {
                     work.charge(1, cancel)?;
@@ -1613,6 +1625,10 @@ fn spline_surface(
                 }
             }
             if s.weights.is_none() {
+                #[expect(
+                    clippy::needless_range_loop,
+                    reason = "Initialize exactly the triangular mixed-derivative catalog in the homogeneous weight component"
+                )]
                 for a in 0..=order {
                     for b in 0..=order - a {
                         h[a][b][3] = ZERO;
@@ -1936,6 +1952,10 @@ fn curve_continuity(
 ) -> Result<bool, GeometryError> {
     curve_continuity_selected(curve, range, required, inventory, depth, None, work, cancel)
 }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Continuity recursion retains the requested order and selected trim branch independently of its source inventory and query budget"
+)]
 fn curve_continuity_selected(
     curve: &Curve,
     range: [f64; 2],
@@ -2021,6 +2041,10 @@ fn curve_continuity_selected(
                 if (i as f64) < range[0] || (i as f64) > range[1] {
                     continue;
                 }
+                #[expect(
+                    clippy::needless_range_loop,
+                    reason = "Compare adjacent polyline control points in the identical native coordinate axis while keeping both neighbor indices visible"
+                )]
                 for k in 0..3 {
                     let Some(mut left) =
                         ExactCoefficient::difference(points[i][k], points[i - 1][k])

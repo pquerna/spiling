@@ -344,6 +344,10 @@ fn native_face_support(
 /// source atlas supplies coverage, role and degree-one authority; the visitor
 /// independently pays for every role's same-azimuth displacement using native
 /// coefficient images. Neither topology nor polygon bounds supply this metric.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bind the source and slab to actual material coordinates and native loops while keeping geometric policy and live resources explicit"
+)]
 pub(in crate::analysis) fn certify_closed_radial_slab(
     source: MaterialSourceView<'_, '_>,
     request: &super::super::SlabRequest,

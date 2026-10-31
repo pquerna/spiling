@@ -210,6 +210,10 @@ pub(super) fn same_active_basis_with_inactive_end_slots(
         && original[1..last] == clamped[1..last]
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Original carrier identity and axis declaration are checked against control dimensions and rationality under a separate decode byte budget"
+)]
 fn axis(
     carrier: u64,
     e: &Entity,

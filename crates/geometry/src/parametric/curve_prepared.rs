@@ -219,6 +219,10 @@ fn validated_nurbs_jet(
             Interval::new(a, a)?;
         }
         let mut weight_hull: Option<Interval> = None;
+        #[expect(
+            clippy::needless_range_loop,
+            reason = "Native control points and the derivative basis tableau must retain the same span-relative coefficient index and summation order"
+        )]
         for i in 0..=degree {
             work.charge(1, cancel)?;
             let c = nurb.cpts()[span - degree + i];

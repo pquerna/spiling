@@ -1359,6 +1359,10 @@ impl<'a> DisplayTriangleProof<'a> {
     /// `maximum_error` is the caller's remaining carrier allowance after
     /// independent transport has been debited, never a wider geometry policy.
     /// It selects existing proof paths; the caller still checks the final sum.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep actual UV/XYZ candidates and original triangle/vertex identities distinct from the caller's remaining physical error allowance"
+    )]
     pub(crate) fn indexed_triangle_error_bound(
         &mut self,
         uv: &[[f64; 2]; 3],
@@ -1379,6 +1383,10 @@ impl<'a> DisplayTriangleProof<'a> {
             cancel,
         )
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Indexed and auxiliary candidates retain separate cache identity and eligibility while sharing explicit physical vertices, policy and query resources"
+    )]
     fn triangle_error_bound_at(
         &mut self,
         uv: &[[f64; 2]; 3],

@@ -3268,6 +3268,10 @@ fn lift_original_chart(
 
 /// Qualify a proposed restriction without changing any original coefficient.
 /// A declined candidate is not a certificate and cannot select a source branch.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bind original genealogy, spatial operand, carrier and chart with their distinct directed ranges before accepting correspondence error"
+)]
 fn qualify_original_correspondence(
     binding: OriginalCoedgeBinding,
     spatial: &dyn parametric::CurveEvaluator,
@@ -4925,6 +4929,10 @@ fn compose_curve_jet(
     }
     Ok(result)
 }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Source and target parameters, their secant and stationary-point permission are independent calibration observations"
+)]
 fn parameter_sample(
     reference: &dyn parametric::CurveEvaluator,
     target: &dyn parametric::CurveEvaluator,
@@ -5019,6 +5027,10 @@ impl CurveCalibrationTheorem {
 /// Calibrate two actual coefficient operators, without equating their gauges.
 /// The result proves a complete directed target restriction and a strict
 /// relative-tangent tube; it is not an exact-C0 or source-closure receipt.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The whole source correspondence keeps both operands, target range, physical error and independent depth/byte/work limits explicit"
+)]
 pub(crate) fn calibrate_source_curves(
     reference: &dyn parametric::CurveEvaluator,
     target: &dyn parametric::CurveEvaluator,
@@ -5052,6 +5064,10 @@ pub(crate) fn calibrate_source_curves(
 /// derived monotone query map, allowing actual stationary OUTER endpoints.
 /// Literal target endpoints are covered exactly. No original-source parameter,
 /// topology or relative-tangent authority is produced.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Position-only calibration must expose its operands, target range and limits without implying the stronger tangent correspondence theorem"
+)]
 pub(crate) fn calibrate_native_curve_position(
     reference: &dyn parametric::CurveEvaluator,
     target: &dyn parametric::CurveEvaluator,
@@ -5076,6 +5092,10 @@ pub(crate) fn calibrate_native_curve_position(
     .map(NativePositionCalibration)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The selected calibration theorem remains explicit alongside the actual operands, interval and separate geometric/resource limits"
+)]
 fn calibrate_curves(
     reference: &dyn parametric::CurveEvaluator,
     target: &dyn parametric::CurveEvaluator,
@@ -6599,6 +6619,10 @@ impl<'d> NativeFaceSkeleton<'d> {
     }
 }
 impl<'d> PreparedNativeTrimSource<'d> {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Source/native use identity, native/material orientation and extra live ownership must be checked separately before sharing a spatial proof"
+    )]
     fn source_spatial_use(
         &mut self,
         lookup: &mut SourceSpatialLookup,
@@ -6747,6 +6771,10 @@ impl<'d> PreparedNativeTrimSource<'d> {
         lookup.insert(key, index);
         Ok(operator)
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Wire selection binds one native skeleton and wire index against already selected source wires under the original error ceiling"
+    )]
     fn select_source_wire(
         &mut self,
         lookup: &mut SourceSpatialLookup,
@@ -7741,6 +7769,10 @@ fn exact_uv_endpoint_equal(
     }
     Ok(false)
 }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Both native coedge indices and selected original receipts independently bind the shared vertex, orientation and physical connector allowance"
+)]
 fn make_original_joint(
     surface: &PreparedOriginalSurface<'_>,
     native: &[NativeTrimCoedge<'_>],
@@ -7878,6 +7910,10 @@ fn next_choices(
     }
     false
 }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Final admission reconciles the native skeleton, original carrier, complete candidates, orientation, smoothness and measured/allowed error with live resources"
+)]
 fn finish_original_face<'d>(
     mut skeleton: NativeFaceSkeleton<'d>,
     surface: PreparedOriginalSurface<'d>,

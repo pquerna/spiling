@@ -848,6 +848,10 @@ fn ring_strictly_contains(
 /// Every foreign trim is excluded from the WHOLE strip, not just its corners.
 /// Consequently the named port reaches this connected section span, even when
 /// the same face owns other, disconnected contours.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Port identity, actual section span, material sides and endpoint slots are separate incidence obligations"
+)]
 fn native_port_strip(
     domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
     span: &crate::SectionSpan,
@@ -1615,6 +1619,10 @@ fn port_branch_lookup(
 /// Resolve every port on one interface before constructing its incidence
 /// graph. Refusal reports a bounded census rather than hiding all but the
 /// first unsupported branch behind repeated operator runs.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Compare both actual materials against the complete collar, port inventory, interface and sample without an implicit owner context"
+)]
 fn native_port_assignments(
     complex: &NativeCollarComplex,
     ports: &[super::collar::NativeCollarPort],
@@ -1824,6 +1832,10 @@ fn native_event_port_roles(
     Ok((selected, outer, roles))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The collar, triggering face, material pair and explicit port assignments independently bind the component transition"
+)]
 fn native_component_transition_error(
     complex: &NativeCollarComplex,
     collar: &NativeCriticalCollar,
@@ -3463,6 +3475,10 @@ fn regular_loop_matching(
     Ok(Some(matching))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Retain both independently admitted leaf receipts and boundary tubes together with the actual interface pair witnesses"
+)]
 fn certify_regular_material_interface(
     before: &NativeSourceLeafReceipt,
     after: &NativeSourceLeafReceipt,

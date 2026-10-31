@@ -629,6 +629,10 @@ fn directed(
     Ok(product.lo > 0.0)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Spatial and lifted chart operands, selected branch, retained cuts and coexisting live bytes have separate calibration ownership"
+)]
 fn calibrate_raw_branch(
     spatial: &SourceSpatialRestriction<'_>,
     lifted: &LiftedPcurve<'_>,
@@ -723,6 +727,10 @@ fn angular_uv_period(
 }
 
 impl<'d> SourcePcurveRestriction<'d> {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Bind the original face, coedge and PCURVE to the independently owned spatial restriction before admitting its error and resource policy"
+    )]
     pub(crate) fn new(
         face: &'d OriginalFaceSource,
         coedge: &'d OriginalCoedgeSource,

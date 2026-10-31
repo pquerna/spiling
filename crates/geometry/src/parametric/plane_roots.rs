@@ -127,6 +127,10 @@ impl<'a> PreparedFacePlaneRoots<'a> {
             + PreparedValidatedCurve::scratch_bytes()
             + super::nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "A root catalog binds native face identity, literal carrier/domain/orientation and complete boundary inventory to one plane and retention limit"
+    )]
     pub fn new(
         face_id: FaceId,
         surface: &'a Surface,

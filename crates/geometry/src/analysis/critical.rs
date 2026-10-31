@@ -1752,6 +1752,10 @@ impl SamplePrism {
             + plane_return);
         let mut outer_radius_lower = f64::INFINITY;
         let mut inner_radius_upper = 0.0_f64;
+        #[expect(
+            clippy::needless_range_loop,
+            reason = "Concatenated outer and inner cycles retain global edge indices for their distinct closure and material roles"
+        )]
         for edge in 0..count {
             work.charge(1, cancel)?;
             let inner = edge >= outer_count;
