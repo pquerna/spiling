@@ -981,11 +981,7 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         let surface = definition
             .face_surface(face_id)
             .ok_or_else(|| unavailable("native chart face has no coefficient carrier"))?;
-        let natural = surface.natural_uv_domain();
-        let domain = [
-            [natural.u_min(), natural.u_max()],
-            [natural.v_min(), natural.v_max()],
-        ];
+        let domain = parametric::surface_active_domain(surface)?;
         for axis in domain {
             Interval::new(axis[0], axis[1])?;
             if axis[0] >= axis[1] {

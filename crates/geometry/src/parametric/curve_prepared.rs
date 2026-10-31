@@ -972,10 +972,7 @@ fn chart_image_box(
     cancel: &AtomicBool,
 ) -> Result<[[f64; 2]; 2], GeometryError> {
     let mut bounds = [[uv[0].lo, uv[0].hi], [uv[1].lo, uv[1].hi]];
-    let active = surface.natural_uv_domain();
-    let lo = active.min();
-    let hi = active.max();
-    let domain = [[lo.x, hi.x], [lo.y, hi.y]];
+    let domain = super::surface_active_domain(surface)?;
     if (0..2).any(|i| bounds[i][0] < domain[i][0] || bounds[i][1] > domain[i][1])
         && super::curve2d_image_within_box(chart, range, domain, work, cancel)?
     {

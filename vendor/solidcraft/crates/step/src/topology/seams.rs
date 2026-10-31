@@ -311,7 +311,7 @@ impl Builder<'_, '_> {
             }
         }
         let i = index(self.edges.len())?;
-        self.edges.push(EdgeB { curve, interval, vertices, tolerance: self.tol });
+        self.edges.push(EdgeB { source_geometry: None, curve, interval, vertices, tolerance: self.tol });
         Ok((i, along))
     }
 
@@ -535,7 +535,7 @@ impl Builder<'_, '_> {
         let edge = self.edges.get(e as usize).ok_or("edge reference")?;
         let c = CurveEval::new(&edge.curve).map_err(|m| m.to_string())?;
         let p = c.point(t).ok_or("split point")?;
-        let (curve, [lo, hi], [a, b], tolerance) = (edge.curve.clone(), edge.interval, edge.vertices, edge.tolerance);
+        let (curve, [lo, hi], [a, b], tolerance, source_geometry) = (edge.curve.clone(), edge.interval, edge.vertices, edge.tolerance, edge.source_geometry);
         if !(t > lo && t < hi) {
             return Err("a split outside its edge".into());
         }
@@ -546,7 +546,7 @@ impl Builder<'_, '_> {
             x.interval = [lo, t];
             x.vertices = [a, v];
         }
-        self.edges.push(EdgeB { curve, interval: [t, hi], vertices: [v, b], tolerance });
+        self.edges.push(EdgeB { source_geometry, curve, interval: [t, hi], vertices: [v, b], tolerance });
         for f in &mut self.faces {
             for l in &mut f.loops {
                 let LoopB::Edges(es) = l else { continue };

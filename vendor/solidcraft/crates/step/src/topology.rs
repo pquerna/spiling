@@ -27,8 +27,10 @@
 //! distance (with margin) as its tolerance; a face whose edges lie off its surface gets its
 //! pcurves fitted at a looser tolerance, which its edges then carry.
 //!
-//! Pcurves are computed from the 3D edges and our surfaces ([`pcurve::pcurves`]); the file's
-//! own PCURVE entities are not used.
+//! Pcurves are computed from the 3D edges and our surfaces ([`pcurve::pcurves`]). A unique
+//! source-associated spline PCURVE on the identical spline carrier and parameter range may
+//! propose its unchanged law. Native spline construction preserves rounding-close chart
+//! boundaries and original shared endpoints; completed geometry validation remains mandatory.
 //!
 //! Input is hostile: every reference is checked, nesting and counts are capped, and the work of
 //! a whole file is bounded (shared shells count each time a solid uses them).
@@ -49,8 +51,11 @@ use crate::p21::{Entity, Exchange, Param};
 use crate::read::{R, Reader};
 use crate::units;
 
+mod charts;
 mod seams;
 mod swept;
+
+use charts::{construct_native_chart_boundaries, declared_spline_pcurve};
 
 /// Tolerance (mm) when the file states no uncertainty.
 pub const DEFAULT_TOLERANCE: f64 = 1e-3;
@@ -318,6 +323,7 @@ enum Kind {
 
 /// A curve the edge can be read on, and how its parameter relates to its vertices.
 struct EdgeB {
+    source_geometry: Option<u64>,
     curve: BCurve,
     interval: [f64; 2],
     vertices: [u32; 2],
@@ -331,6 +337,7 @@ enum LoopB {
 
 struct FaceB {
     step: u64,
+    source_surface: std::sync::Arc<crate::geom::Surface>,
     surface: BSurface,
     /// Relative to the surface's natural normal.
     loops: Vec<LoopB>,
@@ -433,7 +440,7 @@ impl<'b, 'a> Builder<'b, 'a> {
             self.raise_vertex(v, gap, id)?;
         }
         let i = index(self.edges.len())?;
-        self.edges.push(EdgeB { curve: mapped.curve, interval: mapped.interval, vertices, tolerance: self.tol });
+        self.edges.push(EdgeB { source_geometry: Some(rid(p.get(3), "edge geometry")?), curve: mapped.curve, interval: mapped.interval, vertices, tolerance: self.tol });
         self.edge_ids.insert(id, (i, mapped.with_step));
         Ok((i, mapped.with_step))
     }
@@ -592,7 +599,7 @@ impl<'b, 'a> Builder<'b, 'a> {
             }
         }
         let i = index(self.faces.len())?;
-        self.faces.push(FaceB { step: id, surface, loops, outer, forward: sense });
+        self.faces.push(FaceB { step: id, source_surface: step_surface, surface, loops, outer, forward: sense });
         Ok((i, sense))
     }
 
@@ -930,6 +937,7 @@ impl<'b, 'a> Builder<'b, 'a> {
     fn face_pcurves(&mut self, fi: usize) -> R<(Vec<Vec<Curve2>>, [[f64; 2]; 2], bool, f64)> {
         let face = self.faces.get(fi).ok_or("face reference")?;
         let surface = face.surface.clone();
+        let source_surface = face.source_surface.clone();
         let edge_loops: Vec<Vec<(u32, bool)>> = face
             .loops
             .iter()
@@ -940,14 +948,35 @@ impl<'b, 'a> Builder<'b, 'a> {
             .collect();
         // Which loop index in `face.loops` each edge loop is.
         let positions: Vec<usize> = face.loops.iter().enumerate().filter(|(_, l)| matches!(l, LoopB::Edges(_))).map(|(i, _)| i).collect();
+        // A spline carrier and spline spatial edge retain their STEP parameter
+        // laws. Preserve a unique authored pcurve on that same carrier instead
+        // of replacing its exact boundary law with a numerical fit.
+        let mut given = Vec::with_capacity(edge_loops.len());
+        for uses in &edge_loops {
+            let mut curves = Vec::with_capacity(uses.len());
+            for &(edge_index, _) in uses {
+                let edge = self.edges.get(edge_index as usize).ok_or("edge reference")?;
+                let curve = if matches!(&*source_surface, crate::geom::Surface::BSpline(_)) {
+                    match edge.source_geometry {
+                        Some(id) => {
+                            let source = self.reader.curve(id)?;
+                            declared_spline_pcurve(&source, &source_surface, &surface, &edge.curve, edge.interval, self.tol)?
+                        }
+                        None => None,
+                    }
+                } else { None };
+                curves.push(curve);
+            }
+            given.push(curves);
+        }
         let mut tol = self.tol;
-        let pcs = loop {
+        let mut pcs = loop {
             let mut uses = Vec::with_capacity(edge_loops.len());
-            for l in &edge_loops {
+            for (l, authored) in edge_loops.iter().zip(&given) {
                 let mut u = Vec::with_capacity(l.len());
-                for &(e, forward) in l {
+                for (&(e, forward), pc) in l.iter().zip(authored) {
                     let edge = self.edges.get(e as usize).ok_or("edge reference")?;
-                    u.push(EdgeUse { edge: e, curve: &edge.curve, interval: edge.interval, forward, tolerance: 0.0, given: None });
+                    u.push(EdgeUse { edge: e, curve: &edge.curve, interval: edge.interval, forward, tolerance: 0.0, given: pc.as_ref() });
                 }
                 uses.push(u);
             }
@@ -959,6 +988,10 @@ impl<'b, 'a> Builder<'b, 'a> {
                 Err(e) => return Err(e.to_string()),
             }
         };
+        drop(given);
+        if matches!(&*source_surface, crate::geom::Surface::BSpline(_)) {
+            construct_native_chart_boundaries(&surface, &edge_loops, &self.edges, &self.vertices, &mut pcs, tol)?;
+        }
         if tol > self.tol {
             for l in &edge_loops {
                 for &(e, _) in l {

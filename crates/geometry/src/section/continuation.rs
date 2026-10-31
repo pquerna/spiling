@@ -18,7 +18,7 @@ use solidcore::{FaceId, surface::surface::Surface};
 use spiling_contracts::geometry::RigidPoseMm;
 use std::sync::atomic::AtomicBool;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum NodeKind {
     Cut(CutRootId),
     Trim(usize),
@@ -327,9 +327,18 @@ pub(super) fn intersect_face(
                 if nodes[previous].uv(&cuts, events)[independent].hi
                     >= nodes[node].uv(&cuts, events)[independent].lo
                 {
-                    return Err(indeterminate(
-                        "native atlas roots lack strict local graph ordering",
-                    ));
+                    return Err(indeterminate(format!(
+                        "native atlas roots lack strict local graph ordering: cell={:?}, axis={}, graph={:?}; previous={:?} trim={:?} uv={:?}; next={:?} trim={:?} uv={:?}",
+                        cell.cell,
+                        cell.axis,
+                        cell.graph_domain,
+                        nodes[previous].kind,
+                        nodes[previous].trim,
+                        nodes[previous].uv(&cuts, events),
+                        nodes[node].kind,
+                        nodes[node].trim,
+                        nodes[node].uv(&cuts, events)
+                    )));
                 }
                 if inside_cell {
                     add_segment(

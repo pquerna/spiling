@@ -22,3 +22,7 @@ reason = "Make upstream package metadata, dependencies and lints standalone with
 [[changes]]
 paths = ["crates/geom/LICENSE-MIT", "crates/geom/LICENSE-APACHE", "crates/geom/NOTICE", "crates/step/LICENSE-MIT", "crates/step/LICENSE-APACHE", "crates/step/NOTICE"]
 reason = "Retain unmodified upstream notices alongside each crate for release collection."
+
+[[changes]]
+paths = ["crates/step/src/topology.rs", "crates/step/src/topology/charts.rs", "crates/step/src/topology/seams.rs"]
+reason = "Propose a unique source-associated spline PCURVE only on its identical retained carrier and gauge. Construct rounding-close native chart boundaries and common original-vertex endpoints before completed BREP geometry validation; preserve genuine exterior controls and distinct pole/seam branches. Original STEP operands remain unchanged and native consumers retain independent whole-curve/containment checks."

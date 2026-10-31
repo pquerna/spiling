@@ -85,9 +85,10 @@ pub(crate) fn validate_knots(
         }
     }
     if knots[degree] >= knots[count] || range[0] < knots[degree] || range[1] > knots[count] {
-        return Err(conditioning(
-            "query extends outside complete active spline domain",
-        ));
+        return Err(conditioning(&format!(
+            "query extends outside complete active spline domain: query={range:?}, active=[{},{}], degree={degree}, controls={count}",
+            knots[degree], knots[count]
+        )));
     }
     Ok(())
 }

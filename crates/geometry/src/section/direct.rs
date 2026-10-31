@@ -884,9 +884,9 @@ impl<'a> Boundary<'a> {
                     "native UV trim has an unqualified C0 knot join",
                 ));
             }
-            let box_ = surface.natural_uv_domain();
-            let min = box_.min();
-            let max = box_.max();
+            let domain = p::surface_active_domain(surface)?;
+            let min = solidcore::math::Point2::new(domain[0][0], domain[1][0]);
+            let max = solidcore::math::Point2::new(domain[0][1], domain[1][1]);
             if !p::curve2d_image_within_box(
                 uv_curve,
                 [d.min(), d.max()],
@@ -997,9 +997,9 @@ impl<'a> Boundary<'a> {
         cancel: &AtomicBool,
     ) -> Result<([Interval; 3], [Interval; 3], [Interval; 2], [Interval; 2]), GeometryError> {
         let (mut uv, derivative) = self.chart(r, work, cancel)?;
-        let domain = self.surface.natural_uv_domain();
-        let min = domain.min();
-        let max = domain.max();
+        let domain = p::surface_active_domain(self.surface)?;
+        let min = solidcore::math::Point2::new(domain[0][0], domain[1][0]);
+        let max = solidcore::math::Point2::new(domain[0][1], domain[1][1]);
         // An outward chart interval may extend by rounding; intersecting with
         // the declared chart is valid only after the native trim binding itself
         // is known to stay there, not by silently clamping a source pcurve.
