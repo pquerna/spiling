@@ -2138,11 +2138,23 @@ fn cylindrical_native_partial_resource_precision_and_cancel_are_explicit_refusal
         phase_fraction: 0.0,
     };
     scene.occurrences[0].pose.translation_mm[0] = 1e10;
+    // Native endpoint arithmetic cannot resolve the requested uncertainty at
+    // this placement. Preserve that distinction from known unsupported input;
+    // uncertainty must still terminate Compile before any output is published.
+    let unresolved = preflight(&scene.input(&intent), &cancel).unwrap();
     assert_eq!(
-        preflight(&scene.input(&intent), &cancel)
-            .unwrap()
-            .disposition,
-        PreflightDisposition::Refused
+        unresolved.disposition,
+        PreflightDisposition::Unresolved,
+        "{unresolved:?}"
+    );
+    assert!(unresolved.checks.iter().any(|check| {
+        check.required
+            && check.code == "native_conditioning_failure"
+            && check.evidence == PreflightEvidence::Indeterminate
+    }));
+    assert_eq!(
+        compile(scene.input(&intent), &cancel).unwrap_err().code,
+        ManufacturingErrorCode::NativeConditioningFailure
     );
 }
 
