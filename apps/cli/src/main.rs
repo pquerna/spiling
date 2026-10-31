@@ -276,7 +276,14 @@ async fn run(options: Options) -> Result<(), Error> {
                 report
             },
             Command::Project { workflow, plane, output: output_path, manufacturing_output: manufacturing_path, replay_output: replay_path, surface_image_output: image_path, appearance_report_output: appearance_path, optical_report_output: optical_path } => {
-                let mut report = project::run(&mut client, workflow, plane, output.as_mut(), manufacturing_output.as_mut(), replay_output.as_mut(), surface_image_output.as_mut(), appearance_report_output.as_mut(), optical_report_output.as_mut()).await?;
+                let mut report = project::run(&mut client, workflow, plane, project::Outputs {
+                    geometry: output.as_mut(),
+                    manufacturing: manufacturing_output.as_mut(),
+                    replay: replay_output.as_mut(),
+                    surface_image: surface_image_output.as_mut(),
+                    appearance_report: appearance_report_output.as_mut(),
+                    optical_report: optical_report_output.as_mut(),
+                }).await?;
                 report["transfer_and_jobs_us"] = serde_json::json!(transfer.elapsed().as_micros());
                 report["output"] = serde_json::json!(output_path.as_ref().map(|path| path.to_string_lossy()));
                 report["manufacturing_output"] = serde_json::json!(manufacturing_path.as_ref().map(|path| path.to_string_lossy()));

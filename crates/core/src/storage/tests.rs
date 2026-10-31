@@ -140,10 +140,7 @@ fn os_writer_lock_readonly_snapshot_and_reused_writer_are_independent() {
         false,
         &flag(),
         writer.storage(),
-        MAX_RETAINED_SOURCE_BYTES,
-        MAX_MANUFACTURING_RETAINED_BYTES as usize,
-        MAX_SURFACE_IMAGE_RETAINED_BYTES,
-        MAX_APPEARANCE_RETAINED_BYTES,
+        LoadBudgets::MAXIMUM,
     )
     .unwrap();
     assert!(Arc::ptr_eq(&reused.storage, &writer.storage().unwrap()));
@@ -402,10 +399,7 @@ fn same_writer_reopen_keeps_live_identity_high_water_without_dirty_revision_comp
         false,
         &flag(),
         project.storage(),
-        MAX_RETAINED_SOURCE_BYTES,
-        MAX_MANUFACTURING_RETAINED_BYTES as usize,
-        MAX_SURFACE_IMAGE_RETAINED_BYTES,
-        MAX_APPEARANCE_RETAINED_BYTES,
+        LoadBudgets::MAXIMUM,
     )
     .unwrap();
     let mut reopened = Project::from_loaded(loaded).unwrap();
@@ -748,10 +742,7 @@ fn cancelled_open_and_unattached_save_have_typed_nonmutating_failures() {
             false,
             &cancel,
             project.storage(),
-            MAX_RETAINED_SOURCE_BYTES,
-            MAX_MANUFACTURING_RETAINED_BYTES as usize,
-            MAX_SURFACE_IMAGE_RETAINED_BYTES,
-            MAX_APPEARANCE_RETAINED_BYTES,
+            LoadBudgets::MAXIMUM,
         )
         .unwrap_err()
         .code,
@@ -789,10 +780,7 @@ fn same_session_reopen_cannot_clear_known_durability_uncertainty() {
         false,
         &flag(),
         project.storage(),
-        MAX_RETAINED_SOURCE_BYTES,
-        MAX_MANUFACTURING_RETAINED_BYTES as usize,
-        MAX_SURFACE_IMAGE_RETAINED_BYTES,
-        MAX_APPEARANCE_RETAINED_BYTES,
+        LoadBudgets::MAXIMUM,
     )
     .unwrap();
     let mut reopened = Project::from_loaded(loaded).unwrap();
@@ -854,10 +842,10 @@ fn staged_open_enforces_remaining_source_budget_without_releasing_live_writer() 
         false,
         &flag(),
         project.storage(),
-        bytes - 1,
-        MAX_MANUFACTURING_RETAINED_BYTES as usize,
-        MAX_SURFACE_IMAGE_RETAINED_BYTES,
-        MAX_APPEARANCE_RETAINED_BYTES,
+        LoadBudgets {
+            source_bytes: bytes - 1,
+            ..LoadBudgets::MAXIMUM
+        },
     )
     .unwrap_err();
     assert_eq!(error.code, ProjectErrorCode::ResourceLimit);
@@ -874,10 +862,10 @@ fn staged_open_enforces_remaining_source_budget_without_releasing_live_writer() 
         false,
         &flag(),
         project.storage(),
-        bytes,
-        MAX_MANUFACTURING_RETAINED_BYTES as usize,
-        MAX_SURFACE_IMAGE_RETAINED_BYTES,
-        MAX_APPEARANCE_RETAINED_BYTES,
+        LoadBudgets {
+            source_bytes: bytes,
+            ..LoadBudgets::MAXIMUM
+        },
     )
     .unwrap();
     assert_eq!(loaded.manifest, project.capture().manifest);
@@ -1179,10 +1167,10 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
             false,
             &flag(),
             project.storage(),
-            MAX_RETAINED_SOURCE_BYTES,
-            count - 1,
-            MAX_SURFACE_IMAGE_RETAINED_BYTES,
-            MAX_APPEARANCE_RETAINED_BYTES,
+            LoadBudgets {
+                manufacturing_bytes: count - 1,
+                ..LoadBudgets::MAXIMUM
+            },
         )
         .unwrap_err()
         .code,
@@ -1201,10 +1189,10 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
         false,
         &flag(),
         project.storage(),
-        MAX_RETAINED_SOURCE_BYTES,
-        count,
-        MAX_SURFACE_IMAGE_RETAINED_BYTES,
-        MAX_APPEARANCE_RETAINED_BYTES,
+        LoadBudgets {
+            manufacturing_bytes: count,
+            ..LoadBudgets::MAXIMUM
+        },
     )
     .unwrap();
     assert_eq!(
@@ -1872,10 +1860,10 @@ fn staged_image_open_checks_remaining_allocation_before_releasing_live_state() {
             false,
             &flag(),
             project.storage(),
-            MAX_RETAINED_SOURCE_BYTES,
-            MAX_MANUFACTURING_RETAINED_BYTES as usize,
-            size - 1,
-            MAX_APPEARANCE_RETAINED_BYTES,
+            LoadBudgets {
+                image_bytes: size - 1,
+                ..LoadBudgets::MAXIMUM
+            },
         )
         .unwrap_err()
         .code,
@@ -1898,10 +1886,10 @@ fn staged_image_open_checks_remaining_allocation_before_releasing_live_state() {
         false,
         &flag(),
         project.storage(),
-        MAX_RETAINED_SOURCE_BYTES,
-        MAX_MANUFACTURING_RETAINED_BYTES as usize,
-        size,
-        MAX_APPEARANCE_RETAINED_BYTES,
+        LoadBudgets {
+            image_bytes: size,
+            ..LoadBudgets::MAXIMUM
+        },
     )
     .unwrap();
     assert_eq!(
@@ -2754,10 +2742,10 @@ fn appearance_staged_open_enforces_remaining_budget_without_releasing_writer() {
             false,
             &flag(),
             project.storage(),
-            MAX_RETAINED_SOURCE_BYTES,
-            MAX_MANUFACTURING_RETAINED_BYTES as usize,
-            MAX_SURFACE_IMAGE_RETAINED_BYTES,
-            0,
+            LoadBudgets {
+                appearance_bytes: 0,
+                ..LoadBudgets::MAXIMUM
+            },
         )
         .unwrap_err()
         .code,

@@ -788,24 +788,27 @@ fn open(
         recover_previous,
         cancel,
         existing,
-        source_budget,
-        (MAX_MANUFACTURING_RETAINED_BYTES - retained_manufacturing_bytes) as usize,
-        spiling_contracts::surface::MAX_SURFACE_IMAGE_RETAINED_BYTES
-            .checked_sub(retained_surface_image_bytes)
-            .ok_or_else(|| {
-                ProjectError::new(
-                    ProjectErrorCode::ResourceLimit,
-                    "retained surface image budget exceeded",
-                )
-            })?,
-        spiling_core::MAX_APPEARANCE_RETAINED_BYTES
-            .checked_sub(retained_appearance_bytes)
-            .ok_or_else(|| {
-                ProjectError::new(
-                    ProjectErrorCode::ResourceLimit,
-                    "retained appearance palette budget exceeded",
-                )
-            })?,
+        storage::LoadBudgets {
+            source_bytes: source_budget,
+            manufacturing_bytes: (MAX_MANUFACTURING_RETAINED_BYTES - retained_manufacturing_bytes)
+                as usize,
+            image_bytes: spiling_contracts::surface::MAX_SURFACE_IMAGE_RETAINED_BYTES
+                .checked_sub(retained_surface_image_bytes)
+                .ok_or_else(|| {
+                    ProjectError::new(
+                        ProjectErrorCode::ResourceLimit,
+                        "retained surface image budget exceeded",
+                    )
+                })?,
+            appearance_bytes: spiling_core::MAX_APPEARANCE_RETAINED_BYTES
+                .checked_sub(retained_appearance_bytes)
+                .ok_or_else(|| {
+                    ProjectError::new(
+                        ProjectErrorCode::ResourceLimit,
+                        "retained appearance palette budget exceeded",
+                    )
+                })?,
+        },
     )?;
     let mut capacity = Capacity::new(definitions, budget);
     let incoming_source_bytes = loaded.sources.values().fold(0usize, |bytes, source| {

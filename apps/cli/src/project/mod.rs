@@ -112,7 +112,7 @@ enum Operation {
     ProcessEdit(ProcessEdit),
     ProcessResolve(OccurrenceId),
     Intent(Arc<ManufacturingIntent>),
-    MaterialProfile(MaterialProfileSelection),
+    MaterialProfile(Box<MaterialProfileSelection>),
     Preflight,
     Compile,
     Verify,
@@ -464,7 +464,7 @@ pub fn parse(
                 }
                 let selection: MaterialProfileSelection = serde_json::from_slice(&bytes)?;
                 selection.validate()?;
-                operations.push(Operation::MaterialProfile(selection));
+                operations.push(Operation::MaterialProfile(Box::new(selection)));
             }
             Some("--preflight") => operations.push(Operation::Preflight),
             Some("--place-on-bed" | "--center-on-bed") => {
@@ -759,30 +759,22 @@ async fn preflight(client: &mut EngineClient) -> Result<PreflightReport, Error> 
     }
 }
 
+pub struct Outputs<'a> {
+    pub geometry: Option<&'a mut OutputDirectory>,
+    pub manufacturing: Option<&'a mut OutputDirectory>,
+    pub replay: Option<&'a mut OutputFile>,
+    pub surface_image: Option<&'a mut OutputFile>,
+    pub appearance_report: Option<&'a mut OutputFile>,
+    pub optical_report: Option<&'a mut OutputFile>,
+}
+
 pub async fn run(
     client: &mut EngineClient,
     workflow: Workflow,
     plane: Option<PlaneMm>,
-    output: Option<&mut OutputDirectory>,
-    manufacturing_output: Option<&mut OutputDirectory>,
-    replay_output: Option<&mut OutputFile>,
-    surface_image_output: Option<&mut OutputFile>,
-    appearance_report_output: Option<&mut OutputFile>,
-    optical_report_output: Option<&mut OutputFile>,
+    outputs: Outputs<'_>,
 ) -> Result<serde_json::Value, Error> {
-    match execute(
-        client,
-        workflow,
-        plane,
-        output,
-        manufacturing_output,
-        replay_output,
-        surface_image_output,
-        appearance_report_output,
-        optical_report_output,
-    )
-    .await
-    {
+    match execute(client, workflow, plane, outputs).await {
         Ok(report) => Ok(report),
         Err(error)
             if matches!(
@@ -805,13 +797,16 @@ async fn execute(
     client: &mut EngineClient,
     workflow: Workflow,
     plane: Option<PlaneMm>,
-    output: Option<&mut OutputDirectory>,
-    mut manufacturing_output: Option<&mut OutputDirectory>,
-    mut replay_output: Option<&mut OutputFile>,
-    mut surface_image_output: Option<&mut OutputFile>,
-    mut appearance_report_output: Option<&mut OutputFile>,
-    mut optical_report_output: Option<&mut OutputFile>,
+    outputs: Outputs<'_>,
 ) -> Result<serde_json::Value, Error> {
+    let Outputs {
+        geometry: output,
+        manufacturing: mut manufacturing_output,
+        replay: mut replay_output,
+        surface_image: mut surface_image_output,
+        appearance_report: mut appearance_report_output,
+        optical_report: mut optical_report_output,
+    } = outputs;
     let session = client.hello().session_id.clone();
     let summary = geometry::scene(client, &session).await?;
     let response = if workflow.mode == "create" {
@@ -1047,7 +1042,7 @@ async fn execute(
                 let captured = info(client).await?;
                 let (target, limits) = match operation {
                     Operation::AppearanceTarget(target) => {
-                        (target, captured.appearance_study.limits.clone())
+                        (target, captured.appearance_study.limits)
                     }
                     Operation::AppearanceLimits(limits) => (
                         captured
@@ -1416,7 +1411,7 @@ async fn execute(
                     .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
                         session_id: session.clone(),
                         base_revision,
-                        selection,
+                        selection: *selection,
                     })
                     .await?
                 {

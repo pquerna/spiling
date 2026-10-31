@@ -275,12 +275,11 @@ fn parse_recovery(bytes: &[u8]) -> Result<RecoveryRecord, ProjectError> {
 // The persisted request appears twice in JSON, but is one immutable allocation
 // in live project/history state after reconstruction.
 fn share_optical_request(manifest: &mut ProjectManifest) {
-    if let Some(optical) = &mut manifest.appearance_study.optical {
-        if let Some(report) = &mut optical.report {
-            if let Some(report) = Arc::get_mut(report) {
-                report.request = optical.request.clone();
-            }
-        }
+    if let Some(optical) = &mut manifest.appearance_study.optical
+        && let Some(report) = &mut optical.report
+        && let Some(report) = Arc::get_mut(report)
+    {
+        report.request = optical.request.clone();
     }
 }
 fn durability_failure(e: std::io::Error) -> ProjectError {
@@ -642,6 +641,23 @@ fn writer_lock(directory: &Directory) -> Result<File, ProjectError> {
         Err(std::fs::TryLockError::Error(e)) => Err(io(e)),
     }
 }
+/// Remaining incoming allocation capacity while the caller retains its live state.
+/// Each asset class is admitted independently before allocating its contents.
+#[derive(Clone, Copy)]
+pub struct LoadBudgets {
+    pub source_bytes: usize,
+    pub manufacturing_bytes: usize,
+    pub image_bytes: usize,
+    pub appearance_bytes: usize,
+}
+impl LoadBudgets {
+    pub const MAXIMUM: Self = Self {
+        source_bytes: MAX_RETAINED_SOURCE_BYTES,
+        manufacturing_bytes: MAX_MANUFACTURING_RETAINED_BYTES as usize,
+        image_bytes: MAX_SURFACE_IMAGE_RETAINED_BYTES,
+        appearance_bytes: MAX_APPEARANCE_RETAINED_BYTES,
+    };
+}
 pub fn open(
     path: &Path,
     read_only: bool,
@@ -654,10 +670,7 @@ pub fn open(
         recover_previous,
         cancel,
         None,
-        MAX_RETAINED_SOURCE_BYTES,
-        MAX_MANUFACTURING_RETAINED_BYTES as usize,
-        MAX_SURFACE_IMAGE_RETAINED_BYTES,
-        MAX_APPEARANCE_RETAINED_BYTES,
+        LoadBudgets::MAXIMUM,
     )
 }
 /// Same-path staged writer reopen retains the original lock until publication.
@@ -668,10 +681,7 @@ pub fn open_reusing(
     recover_previous: bool,
     cancel: &AtomicBool,
     existing: Option<Arc<Storage>>,
-    source_budget: usize,
-    manufacturing_budget: usize,
-    image_budget: usize,
-    appearance_budget: usize,
+    budgets: LoadBudgets,
 ) -> Result<LoadedProject, ProjectError> {
     cancelled(cancel)?;
     let directory = Directory::open(path).map_err(io)?;
@@ -760,19 +770,19 @@ pub fn open_reusing(
         let saved_revision = manifest.revision;
         (manifest, saved_revision)
     };
-    let sources = load_sources(&manifest, &storage.sources, source_budget, cancel)?;
-    let surface_images = load_images(&manifest, &storage.images, image_budget, cancel)?;
+    let sources = load_sources(&manifest, &storage.sources, budgets.source_bytes, cancel)?;
+    let surface_images = load_images(&manifest, &storage.images, budgets.image_bytes, cancel)?;
     let appearance_palettes = load_palettes(
         &manifest,
         &storage.palette_originals,
         &storage.palette_canonical,
-        appearance_budget,
+        budgets.appearance_bytes,
         cancel,
     )?;
     let manufacturing_artifact = load_manufacturing(
         &manifest,
         &storage.manufacturing,
-        manufacturing_budget,
+        budgets.manufacturing_bytes,
         cancel,
     )?;
     let snapshot = Snapshot {

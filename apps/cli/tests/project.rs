@@ -434,7 +434,13 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
             .arg(&source)
             .arg("--intent")
             .arg(manufacturing_intent_fixture())
+            // Place-on-bed preserves XY. Start strictly inside the bed so
+            // conservative XY support brackets do not straddle its boundary;
+            // then exercise both the Z-only and centered native proposals.
             .args([
+                "--pose",
+                "1",
+                r#"{"translation_mm":[20,30,5],"rotation_xyzw":[0,0,0,1]}"#,
                 "--place-on-bed",
                 "1",
                 "--center-on-bed",
@@ -501,9 +507,13 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
             assert_eq!(check["evidence"], "certified");
         }
     }
-    let declared_intent: Value =
+    // The domain declares these numbers as f64; JSON 220 and 220.0 are the
+    // same captured value, despite serde_json::Value retaining their spelling.
+    let declared_intent: spiling_contracts::manufacturing::ManufacturingIntent =
         serde_json::from_slice(&std::fs::read(manufacturing_intent_fixture()).unwrap()).unwrap();
-    assert_eq!(created["manufacturing"]["intent"], declared_intent);
+    let captured_intent: spiling_contracts::manufacturing::ManufacturingIntent =
+        serde_json::from_value(created["manufacturing"]["intent"].clone()).unwrap();
+    assert_eq!(captured_intent, declared_intent);
     let operations = created["operations"].as_array().unwrap();
     let preflight = operations
         .iter()
@@ -1230,7 +1240,7 @@ fn image_png() -> Vec<u8> {
         })
         .collect();
     let mut raw = Vec::new();
-    for row in pixels.chunks_exact(4) {
+    for row in pixels.as_chunks::<4>().0 {
         raw.push(0);
         raw.extend_from_slice(row);
     }
@@ -1609,7 +1619,8 @@ fn process_operator_workflow(source_fixture: &str) {
     let local_layer = second_value["provenance"]["layer_id"].clone();
     let erase = serde_json::json!({
         "op": "add_operation", "layer_id": local_layer,
-        "selector": {"kind": "whole_owned_volume"}, "action": {"kind": "erase"}
+        "selector": {"kind": "whole_owned_volume"}, "action": {"kind": "erase"},
+        "interface": null
     });
     let erased = report(
         cli("open", &project)
@@ -1753,6 +1764,10 @@ fn process_box_authoring_persists_explicit_permission_and_uses_shared_history() 
             .arg(fixture("box-mm.step"))
             .arg("--intent")
             .arg(intent)
+            // Establish the whole-owned base before its active box override.
+            // A later whole-owned layer would hide the original box, so the
+            // next box edit would create a new winner rather than adjust it.
+            .args(["--process-set", "1", "occurrence", "0.2"])
             .output()
             .unwrap(),
     );
@@ -1781,7 +1796,13 @@ fn process_box_authoring_persists_explicit_permission_and_uses_shared_history() 
             .unwrap(),
     );
     let document = &unauthorized["project"]["process_document"];
-    let operation = &document["layers"][0]["operations"][0];
+    let operation = document["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|layer| layer["operations"].as_array().unwrap())
+        .find(|operation| operation["selector"]["kind"] == "source_box_mm")
+        .unwrap();
     assert_eq!(operation["selector"]["kind"], "source_box_mm");
     assert_eq!(
         operation["selector"]["min"],
@@ -1841,7 +1862,10 @@ fn process_box_authoring_persists_explicit_permission_and_uses_shared_history() 
         boxes[0]["selector"]["max"],
         serde_json::json!([6.0, 8.0, 8.0])
     );
-    assert_eq!(boxes[0]["interface"], "separator_wall");
+    assert_eq!(
+        boxes[0]["interface"],
+        serde_json::json!({"kind":"separator_wall"})
+    );
     assert_eq!(boxes[0]["action"]["value"]["fraction"], 0.7);
     assert_eq!(
         resolved_process(&authorized, &occurrence)["value"]["fraction"],

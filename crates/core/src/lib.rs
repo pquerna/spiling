@@ -1344,8 +1344,8 @@ fn validate_appearance(snapshot: &Snapshot) -> Result<(), ProjectError> {
                     "appearance palette metadata differs from asset",
                 ));
             }
-            if let Some(report) = &snapshot.appearance_study.report {
-                if report.total_rows as usize != asset.document().rows.len()
+            if let Some(report) = &snapshot.appearance_study.report
+                && (report.total_rows as usize != asset.document().rows.len()
                     || report.visits.iter().any(|visit| {
                         asset
                             .document()
@@ -1365,13 +1365,12 @@ fn validate_appearance(snapshot: &Snapshot) -> Result<(), ProjectError> {
                             .is_none_or(|index| {
                                 asset.document().rows[index].name != alternative.name
                             })
-                    })
-                {
-                    return Err(error(
-                        ProjectErrorCode::CorruptAsset,
-                        "appearance report evidence differs from retained palette",
-                    ));
-                }
+                    }))
+            {
+                return Err(error(
+                    ProjectErrorCode::CorruptAsset,
+                    "appearance report evidence differs from retained palette",
+                ));
             }
             if let Some(optical) = &snapshot.appearance_study.optical {
                 optical.request.validate_palette(asset.prepared())?;

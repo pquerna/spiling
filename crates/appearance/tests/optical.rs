@@ -146,8 +146,8 @@ fn pinned_upstream_synthetic_oracle_through_public_compare() {
         let report = compare(&palette, request.clone(), &|| false).unwrap();
         assert!(Arc::ptr_eq(&request, &report.request));
         let (lab, display, error) = estimate(&report.requested);
-        for i in 0..3 {
-            near(lab[i], case.lab[i], 2e-10);
+        for (actual, expected) in lab.into_iter().zip(case.lab) {
+            near(actual, expected, 2e-10);
         }
         assert_eq!(display, case.display, "{}", case.name);
         near(
@@ -248,8 +248,8 @@ fn analytic_exposure_agrees_with_independent_short_interval_integral() {
                     z += slot.height_mm;
                 }
             }
-            for i in 0..3 {
-                near(actual.exposed_height_mm[i], expected[i], 2e-14);
+            for (actual, expected) in actual.exposed_height_mm.into_iter().zip(expected) {
+                near(actual, expected, 2e-14);
             }
         }
     }

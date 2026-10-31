@@ -257,10 +257,12 @@ fn payload_output_failure_reaps_real_engine_and_retains_foreign_file() {
     use std::time::{Duration, Instant};
     let root = root();
     let out = root.join("result");
+    // Exercise the output collision with an admitted mesh. The perforated
+    // plate's independent display obligation must not bypass this write path.
     let child = cli()
         .arg("geometry")
         .arg("--source")
-        .arg(fixture("perforated-plate.step"))
+        .arg(fixture("box-mm.step"))
         .arg("--out")
         .arg(&out)
         .stdout(Stdio::piped())
