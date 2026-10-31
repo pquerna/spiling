@@ -6701,8 +6701,8 @@ mod tests {
         );
         assert_eq!(
             knots,
-            vec![0.2],
-            "source knots stay in the actual original gauge"
+            vec![0.1, 0.2, 0.4],
+            "the closed visitor retains literal endpoints and the internal source knot in their original gauge"
         );
         let mut events = Vec::new();
         let mut proved = Vec::new();

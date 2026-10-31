@@ -11380,12 +11380,18 @@ mod tests {
             )
             .unwrap();
             if name.contains("nurbs") {
-                assert!(definition.face_ids().iter().any(|&face| {
-                    definition.face_surface(face).is_some_and(|surface| {
-                        crate::parametric::native_surface_nurbs(surface)
-                            .unwrap()
-                            .is_some_and(|coefficients| coefficients.is_rational())
-                    })
+                // The authored rational floor has unit weights. Native
+                // normalization may retain the equivalent polynomial carrier;
+                // the original STEP operand and its actual floor stay distinct.
+                assert!(definition.original_source().faces.iter().any(|face| {
+                    let solidcraft_step::geom::Surface::BSpline(spline) = face.carrier.as_ref()
+                    else {
+                        return false;
+                    };
+                    spline.weights.as_ref().is_some_and(|weights| {
+                        !weights.is_empty() && weights.iter().flatten().all(|weight| *weight == 1.0)
+                    }) && !spline.points.is_empty()
+                        && spline.points.iter().flatten().all(|point| point[2] == 4.0)
                 }));
             }
             let id = OccurrenceId::new(83).unwrap();

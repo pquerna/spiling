@@ -2535,7 +2535,35 @@ mod tests {
 
     #[test]
     fn transformed_native_points_are_not_projected_onto_the_declared_plane() {
-        let mut section = square_section();
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut section = crate::section(
+            &definition,
+            PlaneMm {
+                origin_mm: [0.0, 0.0, 2.0],
+                normal: [0.0, 0.0, 1.0],
+            },
+            &cancel,
+        )
+        .unwrap();
+        assert!(!section.loops.is_empty());
+        assert!(section.loops.iter().all(
+            |ring| ring.points_mm.len() >= 4 && ring.points_mm.first() == ring.points_mm.last()
+        ));
+        let source_loop_count = section.loops.len();
+        let source_identity = section.certificate.definition_id.clone();
+        let bounds = definition.bounds_mm();
+        let extent = std::array::from_fn(|axis| bounds.min[axis].abs().max(bounds.max[axis].abs()));
+        let mut expected: Vec<_> = section
+            .loops
+            .iter()
+            .flat_map(|ring| &ring.points_mm[..ring.points_mm.len() - 1])
+            .map(|point| [point[0] + 4.0, point[1] - 7.0, point[2] + 3.0])
+            .collect();
         let pose = RigidPoseMm {
             translation_mm: [4.0, -7.0, 3.0],
             ..RigidPoseMm::IDENTITY
@@ -2554,7 +2582,7 @@ mod tests {
             pose,
             sample: declared,
             sigma: 1.0,
-            extent: [2.0; 3],
+            extent,
         };
         WorldSampleCandidate::prepare(
             &section,
@@ -2573,7 +2601,34 @@ mod tests {
         )
         .unwrap();
         assert!(section.is_native_intersection());
-        assert_eq!(section.loops[0].points_mm[0], [4.0, -7.0, 5.0]);
+        let mut actual: Vec<_> = section
+            .loops
+            .iter()
+            .flat_map(|ring| ring.points_mm[..ring.points_mm.len() - 1].iter().copied())
+            .collect();
+        let order = |a: &[f64; 3], b: &[f64; 3]| {
+            a[0].total_cmp(&b[0])
+                .then_with(|| a[1].total_cmp(&b[1]))
+                .then_with(|| a[2].total_cmp(&b[2]))
+        };
+        assert_eq!(section.loops.len(), source_loop_count);
+        assert!(
+            section
+                .loops
+                .iter()
+                .all(|ring| ring.points_mm.first() == ring.points_mm.last())
+        );
+        // Canonicalization may rotate a closed ring's starting vertex. Compare
+        // its geometric vertices, excluding each repeated closing endpoint.
+        actual.sort_by(order);
+        expected.sort_by(order);
+        assert_eq!(
+            actual, expected,
+            "every actual source point retains its translation"
+        );
+        assert!(actual.iter().all(|point| point[2] != declared));
+        assert_eq!(section.certificate.definition_id, source_identity);
+        assert_eq!(section.loop_spans.len(), section.loops.len());
         assert_eq!(section.plane.origin_mm[2], declared);
         assert!(section.achieved_plane_error_mm() > 0.0);
         assert!(section.achieved_plane_error_mm() <= SECTION_PLANE_TOLERANCE_MM);
@@ -2607,8 +2662,26 @@ mod tests {
         )
         .unwrap();
         assert!(!occupied.is_native_intersection());
-        assert_eq!(occupied.loops[0].points_mm[0], [3.5, -7.5, 5.25]);
-        assert_eq!(occupied.loops[0].points_mm[2], [6.5, -4.5, 5.25]);
+        // Translate the 2 mm square, then expand by the independent 0.5 mm
+        // axial-drift bound. The emitted envelope must enclose these exact
+        // extrema with at most one outward ULP, never shave either side.
+        let exact: [[f64; 2]; 2] = [[3.5, 6.5], [-7.5, -4.5]];
+        for (axis, [low, high]) in exact.into_iter().enumerate() {
+            let lower = occupied
+                .loops
+                .iter()
+                .flat_map(|ring| &ring.points_mm)
+                .map(|point| point[axis])
+                .fold(f64::INFINITY, f64::min);
+            let upper = occupied
+                .loops
+                .iter()
+                .flat_map(|ring| &ring.points_mm)
+                .map(|point| point[axis])
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert!(low.next_down() <= lower && lower <= low);
+            assert!(high <= upper && upper <= high.next_up());
+        }
         assert!(
             occupied.loops[0]
                 .points_mm
