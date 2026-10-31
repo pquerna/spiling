@@ -443,3 +443,46 @@ fn actual_first_wall_diagnostics_detect_displaced_lobes_with_identical_extrema()
     assert_eq!(incomplete[0].evaluated_witnesses, 0);
     incomplete[0].validate().unwrap();
 }
+
+#[test]
+fn inactive_finish_does_not_require_another_occurrences_wall_boundary() {
+    use super::super::walls::WallPlan;
+    let mut field = planar();
+    let PreparedShape::Planar(planar) = &mut field.shape else {
+        unreachable!()
+    };
+    planar.image = None;
+    let fields = [field];
+    // No wall or material can belong to this captured face. This is harmless
+    // outside its height, but remains a mandatory refusal on every active slice.
+    let wall = WallPlan {
+        paths: vec![],
+        correspondence: vec![],
+        fill: MultiPolygon(vec![]),
+        retained_points: 0,
+        retained_bytes: 0,
+        section_area_mm2: 0.0,
+        wall_area_mm2: 0.0,
+        protected_hole_area_mm2: 0.0,
+    };
+    let absent = MultiPolygon(vec![]);
+    let cancel = AtomicBool::new(false);
+    for sample in [-1.0, 0.0, 3.0, 4.0] {
+        certify_first_wall(&wall, &absent, &fields, sample, &cancel).unwrap();
+    }
+    for sample in [0.5, 1.5, 2.5] {
+        let failure = certify_first_wall(&wall, &absent, &fields, sample, &cancel).unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::UnsupportedGeometry);
+        assert!(
+            failure
+                .message
+                .contains("required finish lost actual material boundary correspondence")
+        );
+    }
+    assert_eq!(
+        certify_first_wall(&wall, &absent, &fields, 4.0, &AtomicBool::new(true))
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::Cancelled,
+    );
+}

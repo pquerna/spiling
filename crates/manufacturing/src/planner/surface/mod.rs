@@ -887,11 +887,15 @@ pub(super) fn certify_first_wall(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
-    let strict_fields = fields
-        .iter()
-        .filter(|field| field.image().is_none())
-        .count();
-    if strict_fields == 0 {
+    // Construction is inactive outside the carrier's captured height. A
+    // different occurrence can still have walls there; those walls cannot own
+    // this face, and must not be required to prove an inactive finish.
+    let strict_fields = fields.iter().filter(|field| {
+        let bounds = field.bounds();
+        field.image().is_none() && !(sample <= bounds.min[2] || sample >= bounds.max[2])
+    });
+    let strict_count = strict_fields.clone().count();
+    if strict_count == 0 {
         return Ok(());
     }
     let comparisons = wall
@@ -899,7 +903,7 @@ pub(super) fn certify_first_wall(
         .iter()
         .map(|path| path.points_mm.len())
         .sum::<usize>()
-        .checked_mul(strict_fields)
+        .checked_mul(strict_count)
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -907,10 +911,8 @@ pub(super) fn certify_first_wall(
             )
         })?;
     proof::charge(&mut 0, comparisons)?;
-    for field in fields {
-        if field.image().is_some() {
-            continue;
-        } // Image feature loss is reported by attributed resolution witnesses.
+    for field in strict_fields {
+        check_cancel(cancel)?;
         let boundary = resolution::owning_boundary(material, field, cancel)?.ok_or_else(|| {
             unsupported(
                 field.face_id(),
@@ -924,9 +926,6 @@ pub(super) fn certify_first_wall(
                 continue;
             }
         };
-        if sample <= field.bounds.min[2] || sample >= field.bounds.max[2] {
-            continue;
-        }
         check_cancel(cancel)?;
         let peak = field.peak_mm;
         let error_bound = SURFACE_TOLERANCE_MM + super::OFFSET_TOLERANCE_MM;
