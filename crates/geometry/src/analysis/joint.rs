@@ -8473,15 +8473,11 @@ fn native_profile<'a>(
                                     "original affine profile has zero homogeneous denominator",
                                 ));
                             }
-                            for endpoint in 0..2 {
+                            for (endpoint, coordinates) in canonical.iter().enumerate() {
                                 let parameter = coedge.native_range[endpoint];
-                                for axis in 0..3 {
+                                for (axis, &coordinate) in coordinates.iter().enumerate() {
                                     if !affine.endpoint_coordinate_equal(
-                                        parameter,
-                                        axis,
-                                        canonical[endpoint][axis],
-                                        work,
-                                        cancel,
+                                        parameter, axis, coordinate, work, cancel,
                                     )? {
                                         return Ok(false);
                                     }
@@ -12076,9 +12072,9 @@ mod tests {
         assert!(rectangle.points_mm.iter().all(|point| point[2] == 0.0));
         for boundary in um.iter().filter(|boundary| boundary.is_hole) {
             for point in &boundary.points_mm {
-                for axis in 0..2 {
-                    assert!(rectangle.points_mm[0][axis] <= point[axis]);
-                    assert!(point[axis] <= rectangle.points_mm[2][axis]);
+                for (axis, &coordinate) in point[..2].iter().enumerate() {
+                    assert!(rectangle.points_mm[0][axis] <= coordinate);
+                    assert!(coordinate <= rectangle.points_mm[2][axis]);
                 }
             }
         }

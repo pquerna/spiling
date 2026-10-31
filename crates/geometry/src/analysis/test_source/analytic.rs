@@ -171,10 +171,10 @@ pub(super) fn sphere_belt() -> super::SourceBrep {
             ));
         }
     }
-    for i in 0..4 {
+    for (i, &radial) in RADIAL.iter().enumerate() {
         let mut meridian = edge(
             b::Curve::Circle {
-                frame: frame([0.0; 3], RADIAL[i], [0.0, 0.0, 1.0]),
+                frame: frame([0.0; 3], radial, [0.0, 0.0, 1.0]),
                 radius: 5.0,
             },
             [0.0, 1.0],
@@ -184,7 +184,7 @@ pub(super) fn sphere_belt() -> super::SourceBrep {
             knots: meridian_knots(),
             homogeneous: MERIDIAN
                 .iter()
-                .map(|&[a, z, w]| [a * RADIAL[i][0], a * RADIAL[i][1], z, w])
+                .map(|&[a, z, w]| [a * radial[0], a * radial[1], z, w])
                 .collect(),
         });
         edges.push(meridian);
@@ -366,20 +366,20 @@ pub(super) fn full_sphere() -> b::Brep {
             [(1 + i) as u32, (1 + (i + 1) % 4) as u32],
         ));
     }
-    for i in 0..4 {
+    for (i, &radial) in RADIAL.iter().enumerate() {
         edges.push(edge(
             b::Curve::Circle {
-                frame: frame([0.0; 3], [0.0, 0.0, -1.0], RADIAL[i]),
+                frame: frame([0.0; 3], [0.0, 0.0, -1.0], radial),
                 radius: 5.0,
             },
             [0.0, FRAC_PI_2],
             [0, (1 + i) as u32],
         ));
     }
-    for i in 0..4 {
+    for (i, &radial) in RADIAL.iter().enumerate() {
         edges.push(edge(
             b::Curve::Circle {
-                frame: frame([0.0; 3], RADIAL[i], [0.0, 0.0, 1.0]),
+                frame: frame([0.0; 3], radial, [0.0, 0.0, 1.0]),
                 radius: 5.0,
             },
             [0.0, FRAC_PI_2],
@@ -459,11 +459,11 @@ pub(super) fn ring_torus() -> b::Brep {
             ));
         }
     }
-    for i in 0..4 {
+    for (i, &radial) in RADIAL.iter().enumerate() {
         for j in 0..4 {
             edges.push(edge(
                 b::Curve::Circle {
-                    frame: frame(point(5.0, i, 0.0), RADIAL[i], [0.0, 0.0, -1.0]),
+                    frame: frame(point(5.0, i, 0.0), radial, [0.0, 0.0, -1.0]),
                     radius: 2.0,
                 },
                 [angle(j), angle(j + 1)],

@@ -301,7 +301,7 @@ pub(crate) fn prove_source_wall_component(
     // EVERY other actual source stratum from the isolated wall, not just an E
     // tube around a sampled contour. Exact endpoint sheets are retained below,
     // and are omitted here ONLY from the open regular source-height band.
-    for fi in 0..definition.face_ids().len() {
+    for (fi, _) in definition.face_ids().iter().enumerate() {
         if faces.contains(&fi) || constants[fi].is_some() {
             continue;
         }

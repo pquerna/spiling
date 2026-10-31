@@ -736,14 +736,14 @@ fn sample_segment(
             "native atlas graph produced no bounded segment",
         ));
     }
-    for end in 0..2 {
+    for (end, endpoint_tangent) in endpoint_tangents.iter().enumerate() {
         let slot = if end == 0 {
             tangent_start
         } else {
             tangent_end - 1
         };
         for axis in 0..3 {
-            tangents[slot][axis] = tangents[slot][axis].hull(endpoint_tangents[end][axis]);
+            tangents[slot][axis] = tangents[slot][axis].hull(endpoint_tangent[axis]);
         }
     }
     let desired = graph.material_reverse(x[0] * 0.5 + x[1] * 0.5, outward, work, cancel)?;

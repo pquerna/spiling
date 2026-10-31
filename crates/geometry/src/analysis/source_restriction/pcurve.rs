@@ -596,12 +596,12 @@ fn endpoint_error(
         .hi;
     let mut exact = parameter.lo == parameter.hi;
     if exact {
-        for axis in 0..3 {
+        for (axis, &coordinate) in vertex.iter().enumerate() {
             exact &= crate::parametric::curve_endpoint_coordinate_equal(
                 curve,
                 parameter.lo,
                 axis,
-                vertex[axis],
+                coordinate,
                 work,
                 cancel,
             )?;
@@ -1221,19 +1221,19 @@ impl<'d> SourcePcurveRestriction<'d> {
             let Some(point) = point else {
                 return Ok(false);
             };
-            for axis in 0..3 {
+            for (axis, &coordinate) in point.iter().enumerate() {
                 if !crate::parametric::curve_endpoint_coordinate_equal(
                     &self.chart,
                     a,
                     axis,
-                    point[axis],
+                    coordinate,
                     work,
                     cancel,
                 )? || !crate::parametric::curve_endpoint_coordinate_equal(
                     &self.chart,
                     b,
                     axis,
-                    point[axis],
+                    coordinate,
                     work,
                     cancel,
                 )? {

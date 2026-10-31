@@ -28,9 +28,9 @@ fn native_bounds_enclose_curved_extrema_between_source_vertices() {
         [0.0, -5.0, 4.0],
         [0.0, 5.0, 4.0],
     ] {
-        for axis in 0..3 {
-            assert!(definition.bounds.min[axis] <= point[axis]);
-            assert!(definition.bounds.max[axis] >= point[axis]);
+        for (axis, &coordinate) in point.iter().enumerate() {
+            assert!(definition.bounds.min[axis] <= coordinate);
+            assert!(definition.bounds.max[axis] >= coordinate);
         }
     }
 }

@@ -1214,8 +1214,7 @@ pub(super) fn native_endpoint_height(
     }
     if declared.lo == declared.hi {
         let mut exact = true;
-        for axis in 0..3 {
-            let direction = functional.direction[axis];
+        for (axis, &direction) in functional.direction.iter().enumerate() {
             if direction.lo == 0.0 && direction.hi == 0.0 {
                 continue;
             }
@@ -1311,15 +1310,12 @@ fn native_control_height_residual(
     let Some(mut result) = offset.product(&E::point(point[3]), work, cancel)? else {
         return Ok(None);
     };
-    for axis in 0..3 {
+    for (axis, &coordinate) in point[..3].iter().enumerate() {
         if functional.direction[axis].lo == 0.0 {
             continue;
         }
-        let Some(term) = E::point(point[axis]).product(
-            &E::point(functional.direction[axis].lo),
-            work,
-            cancel,
-        )?
+        let Some(term) =
+            E::point(coordinate).product(&E::point(functional.direction[axis].lo), work, cancel)?
         else {
             return Ok(None);
         };

@@ -659,14 +659,9 @@ fn endpoint_identity(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    for axis in 0..3 {
+    for (axis, &coordinate) in point.iter().enumerate() {
         if !crate::parametric::curve_endpoint_coordinate_equal(
-            curve,
-            parameter,
-            axis,
-            point[axis],
-            work,
-            cancel,
+            curve, parameter, axis, coordinate, work, cancel,
         )? {
             return Ok(false);
         }
@@ -1069,10 +1064,10 @@ impl<'a> EndpointRestrictedOriginal<'a> {
             ));
         }
         operator.exact_endpoints = true;
-        for endpoint in 0..2 {
+        for (endpoint, &parameter) in p.iter().enumerate() {
             let error = endpoint_error(
                 &operator.operand,
-                p[endpoint],
+                parameter,
                 source.vertex_points_mm[endpoint],
                 work,
                 cancel,
@@ -2072,13 +2067,15 @@ mod tests {
             let jet = operator
                 .tensor([parameter; 2], 1, &mut work, &cancel)
                 .unwrap();
-            for axis in 0..3 {
-                let expected = source.vertex_points_mm[0][axis] * (1.0 - parameter)
-                    + source.vertex_points_mm[1][axis] * parameter;
+            for (axis, (&front, &back)) in source.vertex_points_mm[0]
+                .iter()
+                .zip(&source.vertex_points_mm[1])
+                .enumerate()
+            {
+                let expected = front * (1.0 - parameter) + back * parameter;
                 let error = jet[0][axis].sub(Interval::point(expected));
                 assert!(error.lo.abs().max(error.hi.abs()) < 1.0e-7);
-                let expected_velocity =
-                    source.vertex_points_mm[1][axis] - source.vertex_points_mm[0][axis];
+                let expected_velocity = back - front;
                 let error = jet[1][axis].sub(Interval::point(expected_velocity));
                 assert!(error.lo.abs().max(error.hi.abs()) < 1.0e-7);
             }
@@ -2105,9 +2102,9 @@ mod tests {
             let position = operator
                 .tensor([endpoint as f64; 2], 0, &mut work, &cancel)
                 .unwrap()[0];
-            for axis in 0..3 {
+            for (axis, &coordinate) in position.iter().enumerate() {
                 let residual =
-                    position[axis].sub(Interval::point(source.vertex_points_mm[endpoint][axis]));
+                    coordinate.sub(Interval::point(source.vertex_points_mm[endpoint][axis]));
                 assert!(residual.lo.abs().max(residual.hi.abs()) < 1.0e-7);
             }
         }

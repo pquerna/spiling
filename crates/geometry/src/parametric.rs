@@ -679,8 +679,7 @@ fn native_curve2d_image_within_box(
             let mut contained = true;
             let mut endpoints = [None; 2];
             for axis in 0..2 {
-                for side in 0..2 {
-                    let bound = domain[axis][side];
+                for (side, &bound) in domain[axis].iter().enumerate() {
                     if (side == 0 && jet[0][axis].lo >= bound)
                         || (side == 1 && jet[0][axis].hi <= bound)
                     {
@@ -787,14 +786,13 @@ fn native_curve2d_control_hull_within_box(
             sign = this_sign;
             let coordinates = [p.x, p.y];
             for axis in 0..2 {
-                for side in 0..2 {
+                for (side, &bound) in domain[axis].iter().enumerate() {
                     let Some(mut difference) =
-                        crate::exact_coefficient::ExactCoefficient::point(domain[axis][side])
-                            .product(
-                                &crate::exact_coefficient::ExactCoefficient::point(w),
-                                work,
-                                cancel,
-                            )?
+                        crate::exact_coefficient::ExactCoefficient::point(bound).product(
+                            &crate::exact_coefficient::ExactCoefficient::point(w),
+                            work,
+                            cancel,
+                        )?
                     else {
                         return Ok(false);
                     };
@@ -1951,14 +1949,14 @@ fn partition_display_hessian(
             .as_ref()
             .expect("completed closed-subbox enclosure");
         if let Some(hull) = &mut scratch.hull {
-            for derivative in 0..3 {
+            for (derivative, row) in hull.iter_mut().enumerate() {
                 let current = match derivative {
                     0 => &child.duu,
                     1 => &child.duv,
                     _ => &child.dvv,
                 };
                 for axis in 0..3 {
-                    hull[derivative][axis] = hull[derivative][axis].hull(current[axis]);
+                    row[axis] = row[axis].hull(current[axis]);
                 }
             }
         } else {
@@ -1966,16 +1964,16 @@ fn partition_display_hessian(
         }
     }
     let mut hull = scratch.hull.expect("four closed subboxes cover the parent");
-    for derivative in 0..3 {
+    for (derivative, row) in hull.iter_mut().enumerate() {
         let original = match derivative {
             0 => &parent.bound.duu,
             1 => &parent.bound.duv,
             _ => &parent.bound.dvv,
         };
         for axis in 0..3 {
-            hull[derivative][axis] = Interval::new(
-                hull[derivative][axis].lo.max(original[axis].lo),
-                hull[derivative][axis].hi.min(original[axis].hi),
+            row[axis] = Interval::new(
+                row[axis].lo.max(original[axis].lo),
+                row[axis].hi.min(original[axis].hi),
             )?;
         }
     }

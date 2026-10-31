@@ -193,9 +193,9 @@ fn exact_vertex(
 ) -> Result<bool, GeometryError> {
     // This provider checks actual coefficient/clamped-control-point identities.
     // Overlapping endpoint position intervals cannot enter this proof.
-    for axis in 0..3 {
+    for (axis, &coordinate) in vertex.iter().enumerate() {
         work.charge(1, cancel)?;
-        if !curve_endpoint_coordinate_equal(curve, parameter, axis, vertex[axis], work, cancel)? {
+        if !curve_endpoint_coordinate_equal(curve, parameter, axis, coordinate, work, cancel)? {
             return Ok(false);
         }
     }
@@ -217,7 +217,7 @@ pub(super) fn affine_stationarity_sign(
     }
     // For C(t)=(P+tD)/w, w² g(t)=(P+tD-wV)·D.
     let mut value = ExactCoefficient::point(0.0);
-    for axis in 0..3 {
+    for (axis, &coordinate) in vertex.iter().enumerate() {
         let Some(mut delta) =
             affine.derivative[axis].product(&ExactCoefficient::point(parameter), work, cancel)?
         else {
@@ -231,7 +231,7 @@ pub(super) fn affine_stationarity_sign(
         let Some(reference) =
             affine
                 .denominator
-                .product(&ExactCoefficient::point(vertex[axis]), work, cancel)?
+                .product(&ExactCoefficient::point(coordinate), work, cancel)?
         else {
             return Ok(None);
         };
@@ -1118,15 +1118,10 @@ mod tests {
             assert_eq!(roots[0].enclosure().lo, parameter);
             assert_eq!(roots[0].enclosure().hi, parameter);
             assert_eq!(roots[0].source_error_mm(), 0.0);
-            for axis in 0..3 {
+            for (axis, &coordinate) in vertex.iter().enumerate() {
                 assert!(
                     curve_endpoint_coordinate_equal(
-                        &curve,
-                        parameter,
-                        axis,
-                        vertex[axis],
-                        &mut work,
-                        &cancel
+                        &curve, parameter, axis, coordinate, &mut work, &cancel
                     )
                     .unwrap()
                 );

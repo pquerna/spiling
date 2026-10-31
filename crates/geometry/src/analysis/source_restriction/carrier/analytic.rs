@@ -154,8 +154,8 @@ fn exact_source_frame(
         Interval::new(value, value)?;
     }
     let mut result = std::array::from_fn(|_| std::array::from_fn(|_| E::point(0.0)));
-    for k in 0..3 {
-        result[0][k] = E::point(p.origin[k]);
+    for (k, &origin) in p.origin.iter().enumerate() {
+        result[0][k] = E::point(origin);
         result[1][k] = E::point(p.ref_direction[k]);
         result[3][k] = E::point(p.axis[k]);
         let mut y = product(
@@ -621,10 +621,9 @@ fn literal_analytic(
     }
     let source = exact_source_frame(position, work, cancel)?;
     let mut same_origin = true;
-    for k in 0..3 {
+    for (k, &origin) in position.origin.iter().enumerate() {
         work.charge(1, cancel)?;
-        let mut delta =
-            E::difference(native.frame[0][k], position.origin[k]).ok_or_else(unavailable)?;
+        let mut delta = E::difference(native.frame[0][k], origin).ok_or_else(unavailable)?;
         delta
             .subtract(&product(&source[3][k], &E::point(offset_v), work, cancel)?)
             .ok_or_else(unavailable)?;

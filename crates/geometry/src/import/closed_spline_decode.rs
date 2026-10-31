@@ -444,8 +444,8 @@ pub(super) fn read_solid(
         let Some((controls, equal, rational)) = closed_rows(ex, e, base, cancel)? else {
             continue;
         };
-        for d in 0..2 {
-            if equal[d]
+        for (d, &closed) in equal.iter().enumerate() {
+            if closed
                 && base.get(4 + d).and_then(Param::as_bool) == Some(true)
                 && let Some(a) = axis(
                     carrier, e, d, controls, rational, &mut bytes, byte_limit, cancel,

@@ -132,13 +132,8 @@ impl<'d> SourceAffineRestriction<'d> {
                 &mut squared_direction,
                 &product(&raw.derivative[axis], &raw.derivative[axis], work, cancel)?,
             )?;
-            for endpoint in 0..2 {
-                let mut residual = product(
-                    &E::point(source.vertex_points_mm[endpoint][axis]),
-                    &raw.denominator,
-                    work,
-                    cancel,
-                )?;
+            for (endpoint, point) in source.vertex_points_mm.iter().enumerate() {
+                let mut residual = product(&E::point(point[axis]), &raw.denominator, work, cancel)?;
                 residual
                     .subtract(&raw.position[axis])
                     .ok_or_else(unavailable)?;
@@ -324,8 +319,8 @@ impl CurveEvaluator for SourceAffineRestriction<'_> {
             return Err(source_unavailable("affine source jet order exceeds three"));
         }
         let mut result = [[Interval::point(0.0); 3]; 4];
-        for axis in 0..3 {
-            result[0][axis] = finite(self.position[axis].add(self.derivative[axis].mul(s)))?;
+        for (axis, &position) in self.position.iter().enumerate() {
+            result[0][axis] = finite(position.add(self.derivative[axis].mul(s)))?;
             if order > 0 {
                 result[1][axis] = self.derivative[axis];
             }

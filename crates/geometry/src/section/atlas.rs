@@ -400,8 +400,8 @@ fn brackets_cut_roots(
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     for cut_axis in 0..2 {
-        for side in 0..2 {
-            let cut = cuts.cut(sides[cut_axis][side]);
+        for &cut_id in &sides[cut_axis] {
+            let cut = cuts.cut(cut_id);
             let other_range = cell[1 - cut_axis];
             for root in &cut.roots {
                 work.charge(1, cancel)?;

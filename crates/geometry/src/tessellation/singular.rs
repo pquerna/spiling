@@ -119,8 +119,8 @@ fn endpoint_uv(
 ) -> Result<[f64; 2], GeometryError> {
     let p = parametric::curve_enclosure(curve, (t, t), work, cancel)?.position;
     let q = [p[0].mid(), p[1].mid()];
-    for axis in 0..2 {
-        if !parametric::curve_endpoint_coordinate_equal(curve, t, axis, q[axis], work, cancel)? {
+    for (axis, &coordinate) in q.iter().enumerate() {
+        if !parametric::curve_endpoint_coordinate_equal(curve, t, axis, coordinate, work, cancel)? {
             return Err(invalid(
                 "singular display endpoint lacks exact native coefficient coordinates",
             ));
