@@ -632,7 +632,7 @@ fn native_edge_callbacks_keep_actual_restrictions_and_provenance_separate() {
     assert!(uses > 0);
 }
 #[test]
-fn source_normal_matching_uses_independent_uv_and_native_edge_parameters() {
+fn native_normal_matching_retains_independently_authored_source_parameters() {
     let cancel = AtomicBool::new(false);
     let definition = source("native-parity-nurbs-torus-independent-parameters.step");
     let mut work = GeometryWorkBudget::new(10_000_000);
@@ -760,6 +760,78 @@ fn imported_exact_tensor_proves_internal_and_periodic_projective_g1_identities()
     // Three internal knot lines in each axis, each split into four
     // one-sided spans by the other axis's original knot partition.
     assert_eq!(joins, 24);
+}
+
+#[test]
+fn native_periodic_seams_require_actual_owner_and_opposed_edge_uses() {
+    let cancel = AtomicBool::new(false);
+    let definition = source("native-parity-nurbs-torus.step");
+    let mut work = GeometryWorkBudget::new(10_000_000);
+    let prepared =
+        crate::prepare_solid(&definition, MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
+    let source = prepared.source_view().unwrap();
+    let domain = source
+        .face_domain(
+            0,
+            MAX_SCRATCH_BYTES - prepared.retained_bytes(),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+    assert!(domain.is_native_material());
+    assert_eq!(domain.chart_transport_error_mm(), 0.0);
+    assert!(domain.effective_tolerance_mm() > 0.0);
+    let surface = domain.surface_operand();
+    let mut paired_edges = 0;
+    for (first, a) in domain.coedges().iter().enumerate() {
+        for (second, b) in domain.coedges().iter().enumerate().skip(first + 1) {
+            let joined =
+                same_face_native_seam_join(&surface, domain, first, second, &mut work, &cancel)
+                    .unwrap();
+            if a.edge == b.edge && a.forward != b.forward {
+                assert!(
+                    joined,
+                    "opposed exact periodic native seam {first}/{second}"
+                );
+                paired_edges += 1;
+            } else {
+                assert!(
+                    !joined,
+                    "distinct native edges cannot acquire seam authority"
+                );
+            }
+        }
+        assert!(
+            !same_face_native_seam_join(&surface, domain, first, first, &mut work, &cancel)
+                .unwrap()
+        );
+    }
+    assert_eq!(paired_edges, 4);
+    let opposed = domain
+        .coedges()
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, coedge)| {
+            coedge.edge == domain.coedges()[0].edge && coedge.forward != domain.coedges()[0].forward
+        })
+        .unwrap()
+        .0;
+    let copied = surface.native_surface().unwrap().clone();
+    assert!(!same_face_native_seam_join(&copied, domain, 0, opposed, &mut work, &cancel).unwrap());
+    assert_eq!(
+        same_face_native_seam_join(
+            &surface,
+            domain,
+            0,
+            opposed,
+            &mut work,
+            &AtomicBool::new(true)
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::Cancelled
+    );
 }
 #[test]
 fn original_one_degree_tilted_cylinder_retains_its_terminal_slab() {

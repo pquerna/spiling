@@ -174,7 +174,7 @@ impl<'d> HeightSourceLinks<'d> {
             && uses.first.face == face
             && second.face == face
         {
-            receipt.smooth = super::critical::same_face_source_seam_join(
+            receipt.smooth = super::critical::same_face_native_seam_join(
                 surface,
                 domain,
                 uses.first.coedge,

@@ -889,9 +889,9 @@ fn spline_seam_join(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    // A nominal constant coordinate is source authority only without a source
-    // chart uncertainty tube. Otherwise the full normal-union proof is required.
-    if domain.source_chart_error_mm() != 0.0 {
+    // Exact identities of the literal native chart need no original-source
+    // transport. A transported chart's uncertainty cannot borrow that premise.
+    if domain.chart_transport_error_mm() != 0.0 {
         return Ok(false);
     }
     let constant = |coedge: usize,
@@ -1009,9 +1009,9 @@ fn intrinsically_smooth_carrier(surface: &(impl SurfaceEvaluator + ?Sized)) -> b
     false
 }
 
-/// One original paired native occurrence link, shared by critical topology and
+/// One paired native occurrence link, shared by critical topology and
 /// height regularity. This is geometric G1 continuation, not height transversality.
-pub(super) fn same_face_source_seam_join(
+pub(super) fn same_face_native_seam_join(
     surface: &(impl SurfaceEvaluator + ?Sized),
     domain: &PreparedFaceTrimDomain<'_>,
     first: usize,
@@ -2476,7 +2476,7 @@ fn coedge_normal_enclosure(
         .map(Interval::abs_upper)
         .fold(1.0_f64, f64::max);
     let target_width = up(2.0 * target_diameter
-        + 8.0 * domain.source_chart_error_mm()
+        + 8.0 * (domain.chart_transport_error_mm() + domain.effective_tolerance_mm())
         + scale * f64::EPSILON * 128.0);
     let mut enclosure: Option<[Interval; 3]> = None;
     let mut stack = Vec::with_capacity(usize::from(MAX_DEPTH) + 1);

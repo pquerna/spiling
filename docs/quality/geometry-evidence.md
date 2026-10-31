@@ -65,6 +65,14 @@ whole-curve native correspondence/containment still decide each query. Literal
 original STEP operands are preserved. The evaluator's active knot domain bounds
 queries even when native trim metadata has a larger conservative rectangle.
 
+Native periodic-seam qualification uses the literal stored carrier and chart
+coefficients, opposed uses of the same native edge, and exact periodic G1
+identities. Native charts have no original-source transport error; their
+independent spatial/chart trace tolerance remains in force. Original inspection
+charts retain their measured transport error. Unadmitted charts cannot borrow
+either premise. A smooth seam does not establish height transversality or
+authorize a section through a critical, coplanar or tangent stratum.
+
 The frozen spline housing has physical section regressions below and above its
 blind-pocket floor at Z3/5/7, including reversed plane normals, pocket dimensions
 and source lineage. This does not qualify complete-height sections, directional

@@ -6012,10 +6012,15 @@ struct SourceJointEndpointBinding {
     source_vertex: spiling_contracts::geometry::StepEntityId,
 }
 impl PreparedFaceTrimDomain<'_> {
-    /// Measured selected-original chart error; never the admissible ceiling.
-    pub(crate) fn source_chart_error_mm(&self) -> f64 {
-        self.original_chart_error_mm
-            .expect("source-only metadata requires an admitted original domain")
+    /// Measured selected-original chart transport, never its admissible ceiling.
+    /// Native material uses the literal stored chart, so has no original-chart
+    /// transport. Its independent C3D/C2 trace tolerance is retained separately.
+    pub(crate) fn chart_transport_error_mm(&self) -> f64 {
+        match self.original_chart_error_mm {
+            Some(error) => error,
+            None if self.is_native_material() => 0.0,
+            None => panic!("chart transport requires an admitted native or original domain"),
+        }
     }
 }
 
