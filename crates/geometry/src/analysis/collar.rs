@@ -8282,8 +8282,8 @@ mod tests {
             )
             .unwrap_err()
             .code,
-            GeometryErrorCode::SingularGeometry,
-            "a positional jump cannot supply the continuous-source mean-value theorem"
+            GeometryErrorCode::AnalysisIndeterminate,
+            "without a complete C0 receipt the continuous-source mean-value theorem remains unqualified"
         );
     }
 

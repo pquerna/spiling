@@ -195,7 +195,11 @@ fn outside_and_degenerate_sections_have_distinct_results() {
         &cancel,
     )
     .unwrap_err();
-    assert_eq!(boundary.code, GeometryErrorCode::DegenerateSection);
+    assert_eq!(
+        boundary.code,
+        GeometryErrorCode::AnalysisIndeterminate,
+        "the regular native section service requires isolated roots on a critical/coplanar cut"
+    );
 }
 
 #[test]

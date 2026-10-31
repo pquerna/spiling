@@ -6805,9 +6805,8 @@ mod tests {
             let joint = glued.normal([[1., 1.], [0., 0.]], &mut work, &cancel)?;
             assert!(norm(joint)?.lo > 0., "the original positive G1 joint has a regular one-sided normal");
             let crossing = glued.normal([[0.9, 1.1], [0., 0.]], &mut work, &cancel).unwrap_err();
-            assert_eq!(crossing.code, GeometryErrorCode::SingularGeometry);
-            assert!(crossing.message.contains("NonSmooth"),
-                "a positive-width query crossing both original knot interiors never borrows a one-sided normal");
+            assert_eq!(crossing.code, GeometryErrorCode::AnalysisIndeterminate,
+                "a closed query spanning parameter-speed jumps requires its own C1 authority, beyond the one-sided normal receipt");
             for coedge in domain.coedges() {
                 if constant_native_curve_height(definition.edge_curve(coedge.edge)
                     .expect("imported native seam edge has a carrier"), functional, &mut work, &cancel)?.is_some() {
