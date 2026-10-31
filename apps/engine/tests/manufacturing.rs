@@ -504,7 +504,8 @@ async fn compiled_bundle_survives_source_deletion_and_fresh_read_only_replay() {
     let bundle = fetch_bundle(&mut client, &record).await.unwrap();
     let before_invalid = status(&mut client).await;
     let mut invalid_inputs = Vec::new();
-    for fraction in [0.0, f64::NAN, 1.01] {
+    // Zero infill is supported; negative/nonfinite/above-one values are invalid.
+    for fraction in [-0.01, f64::NAN, 1.01] {
         let mut invalid = intent();
         invalid.recipe.infill_fraction = fraction;
         invalid_inputs.push(invalid);
@@ -1072,18 +1073,22 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
     assert!(completed.outputs.iter().any(|out| out == resource));
     let bytes = reader.fetch_replay_display(&record, display).await.unwrap();
     assert_eq!(&bytes[..4], b"SPLR");
-    assert_eq!(bytes.len(), 96 + 48 * display.info.event_count as usize);
     assert_eq!(
-        bytes[96 + 46],
+        bytes.len(),
+        REPLAY_HEADER_BYTES + REPLAY_RECORD_BYTES * display.info.event_count as usize
+    );
+    assert_eq!(
+        bytes[REPLAY_HEADER_BYTES + 46],
         6,
         "first event is endpoint-only lifecycle travel"
     );
-    assert_eq!(bytes[96 + 47], 0, "no invented origin");
-    let lifecycle: Vec<_> = bytes[96..]
-        .as_chunks::<48>()
+    assert_eq!(bytes[REPLAY_HEADER_BYTES + 47], 0, "no invented origin");
+    let lifecycle: Vec<_> = bytes[REPLAY_HEADER_BYTES..]
+        .as_chunks::<REPLAY_RECORD_BYTES>()
         .0
         .iter()
-        .filter(|event| event[46] >= 6)
+        // Bridge/support/process tags also exceed 6; only these two are lifecycle.
+        .filter(|event| matches!(event[46], 6 | 7))
         .collect();
     assert_eq!(lifecycle.len(), 4);
     assert!(
@@ -1095,7 +1100,10 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
         lifecycle[1][46], 7,
         "priming is separate from object deposition"
     );
-    for event in bytes[96..].as_chunks::<48>().0 {
+    for event in bytes[REPLAY_HEADER_BYTES..]
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+    {
         let source_line = u32::from_le_bytes(event[40..44].try_into().unwrap());
         let actual_line = bundle
             .program
@@ -1187,7 +1195,7 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
         ManufacturingErrorCode::CorruptArtifact,
     );
     let mut corrupt = bytes.clone();
-    corrupt[96 + 47] = 0x80;
+    corrupt[REPLAY_HEADER_BYTES + 47] = 0x80;
     let database = rusqlite::Connection::open(store.join("operations.sqlite")).unwrap();
     database
         .execute(

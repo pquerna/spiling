@@ -2453,10 +2453,13 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         let mut committed: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         for value in [&mut committed, &mut fixture] {
-            value["descriptor"]["info"]
-                .as_object_mut()
-                .unwrap()
-                .remove("bundle_hash");
+            // Producer freshness is checked against the captured bundle above.
+            // As with the sparse ABI golden, changing a producer must not
+            // require replacing unchanged motion bytes or decoded dimensions.
+            let info = value["descriptor"]["info"].as_object_mut().unwrap();
+            info.remove("bundle_hash");
+            info.remove("input_hash");
+            info.remove("verifier_version");
         }
         assert_eq!(committed, fixture, "native replay ABI golden drift");
     }
