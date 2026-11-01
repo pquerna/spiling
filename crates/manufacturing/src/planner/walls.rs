@@ -759,6 +759,16 @@ fn push_edge(
     if key(points[0])? == key(points[1])? {
         return Ok(());
     }
+    // Packing may shrink an otherwise admitted source field. Reject this
+    // candidate before assembling a path: its envelope is a construction
+    // obligation, not an invalid authored specification. The other finite
+    // source constructions still require complete independent qualification.
+    let [minimum, maximum] = admitted_width_range(request)?;
+    if !(minimum..=maximum).contains(&width_mm) {
+        return Err(unsupported(&format!(
+            "packed wall command escapes its physical width envelope: width={width_mm}, admitted={minimum}..{maximum}, supports={supports:?}, ordinal={ordinal}"
+        )));
+    }
     if output.len() >= MAX_DEPOSITION_SEGMENTS as usize {
         return Err(resource("wall command count exceeded"));
     }

@@ -531,7 +531,15 @@ fn shallow_source_steps_keep_boundary_lanes_and_physically_admitted_corner_caps(
         [10.123456789, 10.0],
         [0.0, 10.0],
     ];
-    for (reverse, offset) in [(false, [0.0, 0.0]), (true, [120.125, -30.375])] {
+    for (height, minimum_width, maximum_width, reverse, offset) in [
+        (0.4, 0.3, 1.0, false, [0.0, 0.0]),
+        (0.4, 0.3, 1.0, true, [120.125, -30.375]),
+        // The low machine width floor does not override actual bead height.
+        // Source-field packing can fall below that height at the shallow step;
+        // it must yield to the independently qualified boundary construction.
+        (0.20000000000000007, 0.01, 2.0, false, [0.0, 0.0]),
+        (0.20000000000000007, 0.01, 2.0, true, [120.125, -30.375]),
+    ] {
         let mut points: Vec<_> = boundary
             .into_iter()
             .map(|p| Coord {
@@ -546,12 +554,26 @@ fn shallow_source_steps_keep_boundary_lanes_and_physically_admitted_corner_caps(
         let section = MultiPolygon(vec![Polygon::new(geo::LineString(points), vec![])]);
         let required = region::RequiredMaterial::from_section(&section);
         let mut recipe = crate::planner::tests::recipe(1.0);
-        recipe.layer_height_mm = 0.4;
-        let plan = crate::planner::tests::wall_plan(
-            &section,
-            &required,
-            &recipe,
-            region::point_count(&section),
+        recipe.layer_height_mm = height;
+        let limits = DepositionLimits {
+            min_bead_width_mm: minimum_width,
+            max_bead_width_mm: maximum_width,
+            min_bead_height_mm: 0.000001,
+            max_bead_height_mm: 0.6,
+        };
+        let plan = plan_section_walls(
+            WallRequest {
+                material: &section,
+                required: &required,
+                recipe: &recipe,
+                limits: &limits,
+                nozzle_diameter_mm: 0.4,
+                lower_z: 0.0,
+                upper_z: height,
+                retained_points: region::point_count(&section),
+                owned_bytes: 0,
+            },
+            &mut 0,
             &AtomicBool::new(false),
         )
         .unwrap();

@@ -2284,6 +2284,12 @@ fn optical_study_source_deleted_reopen_and_revision_owned_acceptance() {
 #[test]
 #[ignore = "actual overlapping-source saved-job regression; requires SPILING_TEST_ENGINE"]
 fn shallow_overlapping_sources_compile_save_and_reopen_with_fresh_replay() {
+    for height in [0.4, 0.2] {
+        assert_shallow_overlap_saved_job(height);
+    }
+}
+
+fn assert_shallow_overlap_saved_job(height: f64) {
     let root = root();
     let project = root.join("project");
     let source = root.join("box.step");
@@ -2291,7 +2297,7 @@ fn shallow_overlapping_sources_compile_save_and_reopen_with_fresh_replay() {
     let intent_file = root.join("intent.json");
     let mut intent: Value =
         serde_json::from_slice(&std::fs::read(manufacturing_intent_fixture()).unwrap()).unwrap();
-    intent["recipe"]["layer_height_mm"] = 0.4.into();
+    intent["recipe"]["layer_height_mm"] = height.into();
     intent["recipe"]["bead_width_mm"] = 0.6.into();
     intent["recipe"]["perimeter_count"] = 1.into();
     intent["recipe"]["process"]["retraction"] = serde_json::json!({"kind":"disabled"});
