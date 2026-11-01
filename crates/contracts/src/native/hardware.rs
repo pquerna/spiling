@@ -1,0 +1,592 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+//! Checked hardware wire adapters. Private records never enter the capture type.
+use super::required;
+use crate::{geometry::SourceHash, hardware::*, rpc};
+impl TryFrom<rpc::HardwareModelDefinition> for HardwareModelDefinition {
+    type Error = String;
+    fn try_from(v: rpc::HardwareModelDefinition) -> Result<Self, String> {
+        let value = Self {
+            id: v.id,
+            vendor: v.vendor,
+            model: v.model,
+            source: v.source,
+            mounting_interface: v.mounting_interface,
+            declared_volume_mm: v.declared_volume_mm.map(TryInto::try_into).transpose()?,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<HardwareModelDefinition> for rpc::HardwareModelDefinition {
+    type Error = String;
+    fn try_from(v: HardwareModelDefinition) -> Result<Self, String> {
+        v.validate()?;
+        let value = Self {
+            id: v.id,
+            vendor: v.vendor,
+            model: v.model,
+            source: v.source,
+            mounting_interface: v.mounting_interface,
+            declared_volume_mm: v.declared_volume_mm.map(TryInto::try_into).transpose()?,
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<rpc::HardwareSetupDefinition> for HardwareSetupDefinition {
+    type Error = String;
+    fn try_from(v: rpc::HardwareSetupDefinition) -> Result<Self, String> {
+        let value = Self {
+            id: v.id,
+            label: v.label,
+            model: required(v.model, "HardwareSetupDefinition.model")?.try_into()?,
+            printer: required(v.printer, "HardwareSetupDefinition.printer")?.try_into()?,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<HardwareSetupDefinition> for rpc::HardwareSetupDefinition {
+    type Error = String;
+    fn try_from(v: HardwareSetupDefinition) -> Result<Self, String> {
+        v.validate()?;
+        let value = Self {
+            id: v.id,
+            label: v.label,
+            model: Some(v.model.try_into()?),
+            printer: Some(v.printer.try_into()?),
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<rpc::PlateFaceDefinition> for PlateFaceDefinition {
+    type Error = String;
+    fn try_from(v: rpc::PlateFaceDefinition) -> Result<Self, String> {
+        let value = Self {
+            key: v.key,
+            label: v.label,
+            surface: v.surface,
+            usable_mm: required(v.usable_mm, "PlateFaceDefinition.usable_mm")?.try_into()?,
+            keepouts_mm: v
+                .keepouts_mm
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            max_bed_celsius: v.max_bed_celsius,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<PlateFaceDefinition> for rpc::PlateFaceDefinition {
+    type Error = String;
+    fn try_from(v: PlateFaceDefinition) -> Result<Self, String> {
+        v.validate()?;
+        let value = Self {
+            key: v.key,
+            label: v.label,
+            surface: v.surface,
+            usable_mm: Some(v.usable_mm.try_into()?),
+            keepouts_mm: v
+                .keepouts_mm
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            max_bed_celsius: v.max_bed_celsius,
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<rpc::PlateDefinition> for PlateDefinition {
+    type Error = String;
+    fn try_from(v: rpc::PlateDefinition) -> Result<Self, String> {
+        let value = Self {
+            id: v.id,
+            label: v.label,
+            mounting_interface: v.mounting_interface,
+            thickness_mm: v.thickness_mm,
+            surface_z_mm: v.surface_z_mm,
+            faces: v
+                .faces
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            source: v.source,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<PlateDefinition> for rpc::PlateDefinition {
+    type Error = String;
+    fn try_from(v: PlateDefinition) -> Result<Self, String> {
+        v.validate()?;
+        let value = Self {
+            id: v.id,
+            label: v.label,
+            mounting_interface: v.mounting_interface,
+            thickness_mm: v.thickness_mm,
+            surface_z_mm: v.surface_z_mm,
+            faces: v
+                .faces
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            source: v.source,
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<rpc::ProjectHardwareCapture> for ProjectHardwareCapture {
+    type Error = String;
+    fn try_from(v: rpc::ProjectHardwareCapture) -> Result<Self, String> {
+        let value = Self {
+            setup: required(v.setup, "ProjectHardwareCapture.setup")?.try_into()?,
+            plate: required(v.plate, "ProjectHardwareCapture.plate")?.try_into()?,
+            face: v.face,
+            accessories: v
+                .accessories
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<ProjectHardwareCapture> for rpc::ProjectHardwareCapture {
+    type Error = String;
+    fn try_from(v: ProjectHardwareCapture) -> Result<Self, String> {
+        v.validate()?;
+        let value = Self {
+            setup: Some(v.setup.try_into()?),
+            plate: Some(v.plate.try_into()?),
+            face: v.face,
+            accessories: v
+                .accessories
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<rpc::OwnedMachine> for OwnedMachine {
+    type Error = String;
+    fn try_from(v: rpc::OwnedMachine) -> Result<Self, String> {
+        let value = Self {
+            id: v.id,
+            nickname: v.nickname,
+            serial: v.serial,
+            location: v.location,
+            setup: required(v.setup, "OwnedMachine.setup")?.try_into()?,
+            generation: v.generation,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<OwnedMachine> for rpc::OwnedMachine {
+    type Error = String;
+    fn try_from(v: OwnedMachine) -> Result<Self, String> {
+        v.validate()?;
+        let value = Self {
+            id: v.id,
+            nickname: v.nickname,
+            serial: v.serial,
+            location: v.location,
+            setup: Some(v.setup.try_into()?),
+            generation: v.generation,
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<rpc::OwnedPlate> for OwnedPlate {
+    type Error = String;
+    fn try_from(v: rpc::OwnedPlate) -> Result<Self, String> {
+        let value = Self {
+            id: v.id,
+            nickname: v.nickname,
+            definition: required(v.definition, "OwnedPlate.definition")?.try_into()?,
+            installed_machine: v.installed_machine,
+            notes: v.notes,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<OwnedPlate> for rpc::OwnedPlate {
+    type Error = String;
+    fn try_from(v: OwnedPlate) -> Result<Self, String> {
+        v.validate()?;
+        let value = Self {
+            id: v.id,
+            nickname: v.nickname,
+            definition: Some(v.definition.try_into()?),
+            installed_machine: v.installed_machine,
+            notes: v.notes,
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<rpc::OwnedAccessory> for OwnedAccessory {
+    type Error = String;
+    fn try_from(v: rpc::OwnedAccessory) -> Result<Self, String> {
+        let value = Self {
+            id: v.id,
+            nickname: v.nickname,
+            definition: required(v.definition, "OwnedAccessory.definition")?.try_into()?,
+            installed_machine: v.installed_machine,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<OwnedAccessory> for rpc::OwnedAccessory {
+    type Error = String;
+    fn try_from(v: OwnedAccessory) -> Result<Self, String> {
+        v.validate()?;
+        let value = Self {
+            id: v.id,
+            nickname: v.nickname,
+            definition: Some(v.definition.try_into()?),
+            installed_machine: v.installed_machine,
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<rpc::EndpointRoute> for EndpointRoute {
+    type Error = String;
+    fn try_from(v: rpc::EndpointRoute) -> Result<Self, String> {
+        let value = Self {
+            id: v.id,
+            machine_id: v.machine_id,
+            family: v.family.as_str().try_into()?,
+            endpoint: v.endpoint,
+            expected_identity: v.expected_identity,
+            generation: v.generation,
+            credential: v.credential.map(TryInto::try_into).transpose()?,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<EndpointRoute> for rpc::EndpointRoute {
+    type Error = String;
+    fn try_from(v: EndpointRoute) -> Result<Self, String> {
+        v.validate()?;
+        let value = Self {
+            id: v.id,
+            machine_id: v.machine_id,
+            family: v.family.into(),
+            endpoint: v.endpoint,
+            expected_identity: v.expected_identity,
+            generation: v.generation,
+            credential: v.credential.map(TryInto::try_into).transpose()?,
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<rpc::CredentialRef> for CredentialRef {
+    type Error = String;
+    fn try_from(v: rpc::CredentialRef) -> Result<Self, String> {
+        let value = Self {
+            slot_id: v.slot_id,
+            role: v.role.as_str().try_into()?,
+            backend: v.backend.as_str().try_into()?,
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<CredentialRef> for rpc::CredentialRef {
+    type Error = String;
+    fn try_from(v: CredentialRef) -> Result<Self, String> {
+        let value = Self {
+            slot_id: v.slot_id,
+            role: v.role.into(),
+            backend: v.backend.into(),
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<rpc::LocalProjectHardwareBinding> for LocalProjectHardwareBinding {
+    type Error = String;
+    fn try_from(v: rpc::LocalProjectHardwareBinding) -> Result<Self, String> {
+        let value = Self {
+            project_id: v.project_id,
+            attachment: required(v.attachment, "LocalProjectHardwareBinding.attachment")?
+                .try_into()?,
+            capture_hash: SourceHash::parse(v.capture_hash).map_err(|e| e.to_string())?,
+            machine_id: v.machine_id,
+            plate_id: v.plate_id,
+            machine_generation: v.machine_generation,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<LocalProjectHardwareBinding> for rpc::LocalProjectHardwareBinding {
+    type Error = String;
+    fn try_from(v: LocalProjectHardwareBinding) -> Result<Self, String> {
+        v.validate()?;
+        let value = Self {
+            project_id: v.project_id,
+            attachment: Some(v.attachment.try_into()?),
+            capture_hash: v.capture_hash.as_str().into(),
+            machine_id: v.machine_id,
+            plate_id: v.plate_id,
+            machine_generation: v.machine_generation,
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<rpc::HardwareLibrary> for HardwareLibrary {
+    type Error = String;
+    fn try_from(v: rpc::HardwareLibrary) -> Result<Self, String> {
+        let value = Self {
+            machines: v
+                .machines
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            plates: v
+                .plates
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            accessories: v
+                .accessories
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            routes: v
+                .routes
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            bindings: v
+                .bindings
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<HardwareLibrary> for rpc::HardwareLibrary {
+    type Error = String;
+    fn try_from(v: HardwareLibrary) -> Result<Self, String> {
+        v.validate()?;
+        let value = Self {
+            machines: v
+                .machines
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            plates: v
+                .plates
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            accessories: v
+                .accessories
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            routes: v
+                .routes
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            bindings: v
+                .bindings
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<rpc::LibraryHardware> for LibraryHardware {
+    type Error = String;
+    fn try_from(v: rpc::LibraryHardware) -> Result<Self, String> {
+        let value = Self {
+            identity: v.identity.map(TryInto::try_into).transpose()?,
+            hardware: required(v.hardware, "LibraryHardware.hardware")?.try_into()?,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<LibraryHardware> for rpc::LibraryHardware {
+    type Error = String;
+    fn try_from(v: LibraryHardware) -> Result<Self, String> {
+        v.validate()?;
+        let value = Self {
+            identity: v.identity.map(TryInto::try_into).transpose()?,
+            hardware: Some(v.hardware.try_into()?),
+        };
+        Ok(value)
+    }
+}
+impl TryFrom<&str> for CredentialBackend {
+    type Error = String;
+    fn try_from(v: &str) -> Result<Self, String> {
+        match v {
+            "keyring" => Ok(Self::Keyring),
+            "plaintext_file" => Ok(Self::PlaintextFile),
+            _ => Err("unknown hardware enum value".into()),
+        }
+    }
+}
+impl From<CredentialBackend> for String {
+    fn from(v: CredentialBackend) -> Self {
+        match v {
+            CredentialBackend::Keyring => "keyring".into(),
+            CredentialBackend::PlaintextFile => "plaintext_file".into(),
+        }
+    }
+}
+impl TryFrom<&str> for CredentialRole {
+    type Error = String;
+    fn try_from(v: &str) -> Result<Self, String> {
+        match v {
+            "lan-access-code" => Ok(Self::LanAccessCode),
+            "api-key" => Ok(Self::ApiKey),
+            "password" => Ok(Self::Password),
+            "refresh-token" => Ok(Self::RefreshToken),
+            _ => Err("unknown hardware enum value".into()),
+        }
+    }
+}
+impl From<CredentialRole> for String {
+    fn from(v: CredentialRole) -> Self {
+        match v {
+            CredentialRole::LanAccessCode => "lan-access-code".into(),
+            CredentialRole::ApiKey => "api-key".into(),
+            CredentialRole::Password => "password".into(),
+            CredentialRole::RefreshToken => "refresh-token".into(),
+        }
+    }
+}
+impl TryFrom<&str> for ConnectionFamily {
+    type Error = String;
+    fn try_from(v: &str) -> Result<Self, String> {
+        match v {
+            "file" => Ok(Self::File),
+            "bambu_connect" => Ok(Self::BambuConnect),
+            "bambu_developer_lan" => Ok(Self::BambuDeveloperLan),
+            "moonraker" => Ok(Self::Moonraker),
+            "octo_print" => Ok(Self::OctoPrint),
+            "prusa_link" => Ok(Self::PrusaLink),
+            "development_simulator" => Ok(Self::DevelopmentSimulator),
+            _ => Err("unknown hardware enum value".into()),
+        }
+    }
+}
+impl From<ConnectionFamily> for String {
+    fn from(v: ConnectionFamily) -> Self {
+        match v {
+            ConnectionFamily::File => "file".into(),
+            ConnectionFamily::BambuConnect => "bambu_connect".into(),
+            ConnectionFamily::BambuDeveloperLan => "bambu_developer_lan".into(),
+            ConnectionFamily::Moonraker => "moonraker".into(),
+            ConnectionFamily::OctoPrint => "octo_print".into(),
+            ConnectionFamily::PrusaLink => "prusa_link".into(),
+            ConnectionFamily::DevelopmentSimulator => "development_simulator".into(),
+        }
+    }
+}
+impl TryFrom<rpc::AccessoryDefinition> for AccessoryDefinition {
+    type Error = String;
+    fn try_from(v: rpc::AccessoryDefinition) -> Result<Self, String> {
+        use rpc::accessory_definition::Effect;
+        let value = Self {
+            id: v.id,
+            label: v.label,
+            mounting_interface: v.mounting_interface,
+            effect: match required(v.effect, "accessory effect")? {
+                Effect::Nozzle(n) => AccessoryEffect::Nozzle {
+                    diameter_mm: n.diameter_mm,
+                    material: n.material,
+                },
+                Effect::Fixture(b) => AccessoryEffect::Fixture {
+                    bounds_mm: b.try_into()?,
+                },
+            },
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<AccessoryDefinition> for rpc::AccessoryDefinition {
+    type Error = String;
+    fn try_from(v: AccessoryDefinition) -> Result<Self, String> {
+        v.validate()?;
+        use rpc::accessory_definition::Effect;
+        Ok(Self {
+            id: v.id,
+            label: v.label,
+            mounting_interface: v.mounting_interface,
+            effect: Some(match v.effect {
+                AccessoryEffect::Nozzle {
+                    diameter_mm,
+                    material,
+                } => Effect::Nozzle(rpc::HardwareNozzle {
+                    diameter_mm,
+                    material,
+                }),
+                AccessoryEffect::Fixture { bounds_mm } => Effect::Fixture(bounds_mm.try_into()?),
+            }),
+        })
+    }
+}
+
+impl TryFrom<rpc::HardwareCatalog> for HardwareCatalog {
+    type Error = String;
+    fn try_from(v: rpc::HardwareCatalog) -> Result<Self, String> {
+        let c = Self {
+            models: v
+                .models
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            setups: v
+                .setups
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            plates: v
+                .plates
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        };
+        c.validate()?;
+        Ok(c)
+    }
+}
+impl TryFrom<HardwareCatalog> for rpc::HardwareCatalog {
+    type Error = String;
+    fn try_from(v: HardwareCatalog) -> Result<Self, String> {
+        v.validate()?;
+        Ok(Self {
+            models: v
+                .models
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            setups: v
+                .setups
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            plates: v
+                .plates
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}

@@ -241,7 +241,8 @@ impl EngineRpc {
             ProjectCommand::Save {
                 target: Some(path), ..
             } => path.validate(),
-            ProjectCommand::PutRecipe { .. }
+            ProjectCommand::SetHardware { .. }
+            | ProjectCommand::PutRecipe { .. }
             | ProjectCommand::GetRecipe { .. }
             | ProjectCommand::ListRecipes { .. }
             | ProjectCommand::LoadRecipeStudy { .. }

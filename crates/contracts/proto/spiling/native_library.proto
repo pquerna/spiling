@@ -7,8 +7,11 @@ import "google/protobuf/empty.proto";
 import "spiling/native_common.proto";
 import "spiling/native_material.proto";
 import "spiling/native_appearance.proto";
+import "spiling/native_hardware.proto";
 
 service Libraries {
+ rpc GetHardwareCatalog(google.protobuf.Empty) returns (HardwareCatalog);
+ rpc GetHardware(google.protobuf.Empty) returns (LibraryHardware);
  rpc GetStatus(google.protobuf.Empty) returns (UserLibraryStatus);
  rpc SetLocation(LibraryLocationRequest) returns (UserLibraryStatus);
  rpc ListFilaments(LibraryListFilamentsRequest) returns (LibraryFilamentPage);
@@ -88,6 +91,7 @@ message LibraryWriteRequest {
   string remove_spool = 7;
   LibraryPutRecipe put_recipe = 8;
   LibraryRecipeRef remove_recipe = 9;
+  HardwareLibrary replace_hardware = 10;
  }
 }
 enum LibraryPublication {
@@ -113,3 +117,15 @@ message LibraryRecipePage { LibraryIdentity identity = 1; repeated LibraryRecipe
 message LibraryGetRecipeRequest { string library_id = 1; LibraryRecipeRef reference = 2; }
 message LibraryPutRecipe { LibraryRecipeTransfer transfer = 1; optional string expected = 2; }
 message RecipeStudyContext { OpticalPatch patch = 1; double cycle_origin_z_mm = 2; }
+
+// Private personal library data, excluded from portable project captures.
+message OwnedMachine {string id=1;string nickname=2;optional string serial=3;optional string location=4;HardwareSetupDefinition setup=5;uint64 generation=6;}
+message OwnedPlate {string id=1;string nickname=2;PlateDefinition definition=3;optional string installed_machine=4;string notes=5;}
+message OwnedAccessory {string id=1;string nickname=2;AccessoryDefinition definition=3;optional string installed_machine=4;}
+message CredentialRef {string slot_id=1;string role=2;string backend=3;}
+message EndpointRoute {string id=1;string machine_id=2;string family=3;string endpoint=4;string expected_identity=5;uint64 generation=6;CredentialRef credential=7;}
+message LocalProjectHardwareBinding {string project_id=1;NativePath attachment=2;string capture_hash=3;string machine_id=4;string plate_id=5;uint64 machine_generation=6;}
+message HardwareLibrary {repeated OwnedMachine machines=1;repeated OwnedPlate plates=2;repeated OwnedAccessory accessories=3;repeated EndpointRoute routes=4;repeated LocalProjectHardwareBinding bindings=5;}
+message LibraryHardware {LibraryIdentity identity=1;HardwareLibrary hardware=2;}
+
+message HardwareCatalog {repeated HardwareModelDefinition models=1;repeated HardwareSetupDefinition setups=2;repeated PlateDefinition plates=3;}

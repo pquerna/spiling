@@ -170,6 +170,7 @@ fn artifact_limits_are_class_specific_and_sizes_are_canonical() {
 #[test]
 fn clean_new_and_semantically_clean_undo_project_info_are_valid() {
     let info = ProjectInfo {
+        hardware: None,
         project_id: ProjectId::new(),
         revision: ProjectRevision(2),
         saved_revision: Some(ProjectRevision(1)),
@@ -243,6 +244,7 @@ fn project_typed_dispatch_preserves_scene_revision_and_native_paths() {
 fn failed_committed_save_keeps_operation_specific_uncertain_receipt() {
     let mut op = operation();
     let info = ProjectInfo {
+        hardware: None,
         project_id: ProjectId::new(),
         revision: ProjectRevision(7),
         saved_revision: Some(ProjectRevision(7)),
@@ -343,6 +345,7 @@ fn failed_committed_save_keeps_operation_specific_uncertain_receipt() {
         },
     ]);
     let invalid_info = rpc::ProjectInfo {
+        hardware: None,
         project_id: info.project_id.as_str().into(),
         revision: 7,
         saved_revision: Some(8),
@@ -469,6 +472,7 @@ fn surface_commands_have_checked_typed_roundtrips_and_no_missing_kind_defaults()
         }
     }
     let info = ProjectInfo {
+        hardware: None,
         project_id: ProjectId::new(),
         revision: ProjectRevision(0),
         saved_revision: None,
@@ -634,6 +638,7 @@ fn imported_image_receipt_matches_authoritative_metadata_and_new_layer() {
     let image = canonical_image_record();
     let layer_id = SurfaceLayerId::new(1).unwrap();
     let info = ProjectInfo {
+        hardware: None,
         project_id: ProjectId::new(),
         revision: ProjectRevision(1),
         saved_revision: None,

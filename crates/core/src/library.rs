@@ -53,6 +53,7 @@ struct Manifest {
     id: LibraryId,
     revision: u64,
     materials: CollectionRecord,
+    hardware: spiling_contracts::hardware::HardwareLibrary,
     spools: Vec<SpoolRecord>,
     receipts: Vec<LibraryReceipt>,
 }
@@ -101,6 +102,16 @@ impl LibraryCommit {
 impl LibraryStore {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
+    }
+    pub fn hardware(
+        &self,
+        cancel: &AtomicBool,
+    ) -> Result<spiling_contracts::hardware::LibraryHardware> {
+        let document = self.read(cancel)?;
+        Ok(spiling_contracts::hardware::LibraryHardware {
+            identity: document.as_ref().map(identity),
+            hardware: document.map(|d| d.hardware).unwrap_or_default(),
+        })
     }
     pub fn path(&self) -> &Path {
         &self.path
@@ -170,6 +181,7 @@ impl LibraryStore {
             id: manifest.id,
             revision: manifest.revision,
             materials,
+            hardware: manifest.hardware,
             spools: manifest.spools,
             receipts: manifest.receipts,
         };
@@ -429,6 +441,7 @@ impl LibraryStore {
                 id: LibraryId(uuid::Uuid::new_v4().to_string()),
                 revision: 0,
                 materials: MaterialCollection::default(),
+                hardware: Default::default(),
                 spools: Vec::new(),
                 receipts: Vec::new(),
             });
@@ -506,6 +519,7 @@ impl LibraryStore {
                 sha256: SourceHash::from_bytes(&materials),
                 byte_count: materials.len(),
             },
+            hardware: document.hardware.clone(),
             spools: document.spools.clone(),
             receipts: document.receipts.clone(),
         };
@@ -602,6 +616,61 @@ fn check_expected(
 }
 fn apply(document: &mut LibraryDocument, mutation: &LibraryMutation) -> Result<()> {
     match mutation {
+        LibraryMutation::ReplaceHardware { hardware } => {
+            hardware.validate().map_err(invalid)?;
+            let mut replacement = hardware.clone();
+            for m in &mut replacement.machines {
+                if let Some(old) = document.hardware.machines.iter().find(|o| o.id == m.id) {
+                    let next = old
+                        .generation
+                        .checked_add(1)
+                        .ok_or_else(|| invalid("machine generation exhausted"))?;
+                    if m.generation != old.generation && m.generation != next {
+                        return Err(invalid(
+                            "machine generation must retain or advance one installation",
+                        ));
+                    }
+                    if m.setup != old.setup {
+                        m.generation = next;
+                    }
+                } else if m.generation != 1 {
+                    return Err(invalid("new machine generation must be one"));
+                }
+            }
+            for r in &mut replacement.routes {
+                if let Some(old) = document.hardware.routes.iter().find(|o| o.id == r.id) {
+                    let next = old
+                        .generation
+                        .checked_add(1)
+                        .ok_or_else(|| invalid("connection generation exhausted"))?;
+                    if r.generation != old.generation && r.generation != next {
+                        return Err(invalid("connection generation must retain or advance once"));
+                    }
+                    if r.machine_id != old.machine_id
+                        || r.family != old.family
+                        || r.endpoint != old.endpoint
+                        || r.expected_identity != old.expected_identity
+                        || r.credential != old.credential
+                    {
+                        r.generation = next;
+                    }
+                    if (r.endpoint != old.endpoint
+                        || r.expected_identity != old.expected_identity
+                        || r.family != old.family
+                        || r.machine_id != old.machine_id)
+                        && r.credential.is_some()
+                        && r.credential == old.credential
+                    {
+                        return Err(invalid(
+                            "changed authenticated peer requires a fresh credential scope",
+                        ));
+                    }
+                } else if r.generation != 1 {
+                    return Err(invalid("new connection generation must be one"));
+                }
+            }
+            document.hardware = replacement;
+        }
         LibraryMutation::PutFilament {
             id,
             expected,
@@ -766,6 +835,99 @@ mod tests {
                 &AtomicBool::new(false),
             )
             .unwrap()
+    }
+    #[test]
+    fn hardware_generation_and_endpoint_credentials_are_native_cas_invariants() {
+        use spiling_contracts::hardware::*;
+        let root = Temporary::new();
+        let store = root.store();
+        let catalog = builtin_catalog().unwrap();
+        let mut h = HardwareLibrary::default();
+        let machine = uuid::Uuid::new_v4().to_string();
+        h.machines.push(OwnedMachine {
+            id: machine.clone(),
+            nickname: "Workshop".into(),
+            serial: None,
+            location: None,
+            setup: catalog.setups[0].clone(),
+            generation: 1,
+        });
+        h.routes.push(EndpointRoute {
+            id: uuid::Uuid::new_v4().to_string(),
+            machine_id: machine,
+            family: ConnectionFamily::OctoPrint,
+            endpoint: "http://printer-a.local".into(),
+            expected_identity: "configured-device-a".into(),
+            generation: 1,
+            credential: Some(CredentialRef {
+                slot_id: uuid::Uuid::new_v4().to_string(),
+                role: CredentialRole::ApiKey,
+                backend: CredentialBackend::PlaintextFile,
+            }),
+        });
+        let first = write(
+            &store,
+            None,
+            LibraryMutation::ReplaceHardware {
+                hardware: h.clone(),
+            },
+        );
+        h.machines[0].nickname = "Renamed workshop".into();
+        let second = write(
+            &store,
+            Some(&first.document),
+            LibraryMutation::ReplaceHardware {
+                hardware: h.clone(),
+            },
+        );
+        assert_eq!(second.document.hardware.machines[0].generation, 1);
+        h.machines[0].setup.printer.build_envelope.max[2] = 200.;
+        let third = write(
+            &store,
+            Some(&second.document),
+            LibraryMutation::ReplaceHardware {
+                hardware: h.clone(),
+            },
+        );
+        assert_eq!(third.document.hardware.machines[0].generation, 2);
+        let mut retargeted = third.document.hardware.clone();
+        retargeted.routes[0].endpoint = "http://printer-b.local".into();
+        let request = LibraryWrite {
+            library_id: Some(third.document.id.clone()),
+            base_revision: third.document.revision,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            mutation: LibraryMutation::ReplaceHardware {
+                hardware: retargeted.clone(),
+            },
+        };
+        assert_eq!(
+            store
+                .write(&request, &AtomicBool::new(false))
+                .unwrap_err()
+                .code,
+            LibraryErrorCode::InvalidData
+        );
+        retargeted.routes[0].credential = None;
+        let fourth = write(
+            &store,
+            Some(&third.document),
+            LibraryMutation::ReplaceHardware {
+                hardware: retargeted,
+            },
+        );
+        assert_eq!(fourth.document.hardware.routes[0].generation, 2);
+        let stale = LibraryWrite {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            mutation: LibraryMutation::ReplaceHardware { hardware: h },
+            ..request
+        };
+        assert_eq!(
+            store
+                .write(&stale, &AtomicBool::new(false))
+                .unwrap_err()
+                .code,
+            LibraryErrorCode::StaleRevision
+        );
     }
     #[test]
     fn twenty_filaments_duplicate_spools_and_exact_old_revisions_reopen_without_inputs() {

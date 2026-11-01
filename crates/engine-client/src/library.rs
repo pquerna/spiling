@@ -45,6 +45,28 @@ impl EngineRpc {
             .max_encoding_message_size(MAX_CONTROL_BYTES as usize)
             .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
     }
+    pub async fn hardware_catalog(
+        &self,
+    ) -> Result<spiling_contracts::hardware::HardwareCatalog, ClientError> {
+        self.libraries()
+            .get_hardware_catalog(self.request(()))
+            .await
+            .map_err(rpc_error)?
+            .into_inner()
+            .try_into()
+            .map_err(ClientError::Protocol)
+    }
+    pub async fn library_hardware(
+        &self,
+    ) -> Result<spiling_contracts::hardware::LibraryHardware, ClientError> {
+        self.libraries()
+            .get_hardware(self.request(()))
+            .await
+            .map_err(rpc_error)?
+            .into_inner()
+            .try_into()
+            .map_err(ClientError::Protocol)
+    }
     pub async fn library_status(&self) -> Result<LibraryStatus, ClientError> {
         self.libraries()
             .get_status(self.request(()))

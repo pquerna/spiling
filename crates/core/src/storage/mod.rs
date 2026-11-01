@@ -374,11 +374,13 @@ fn load_assets(
             .map(|record| (record.occurrence_id, record.clone()))
             .collect(),
         manufacturing_intent: manifest.manufacturing_intent.clone(),
+        hardware: manifest.hardware.clone(),
         surface_overlays: Arc::new(manifest.surface_overlays.clone()),
         process_document: Arc::new(manifest.process_document.clone()),
         appearance_study: Arc::new(manifest.appearance_study.clone()),
         ..Snapshot::default()
     };
+    super::hardware::share_capture(&mut snapshot);
     if let Some(record) = &manifest.materials {
         let bytes = read_asset(
             capture,

@@ -1660,6 +1660,20 @@ impl Runtime {
                     next_offset: (end < total).then_some(end),
                 }))
             }
+            ProjectCommand::SetHardware {
+                session_id,
+                base_revision,
+                capture,
+            } => {
+                self.metadata_base(&session_id, base_revision)?;
+                if self.project.info().hardware == capture {
+                    Ok(Reply::Project(ProjectResponse::Status {
+                        info: self.project.info(),
+                    }))
+                } else {
+                    self.commit_metadata_edit(Edit::SetHardware { capture })
+                }
+            }
             ProjectCommand::PutFilament {
                 session_id,
                 base_revision,

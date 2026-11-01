@@ -451,6 +451,16 @@ pub(super) fn admit<'a>(
                 }
             }
         }
+        if let Some(hardware) = &input.intent.hardware
+            && let Err(reason) = hardware.admits_bounds(&placed)
+        {
+            add(
+                "hardware_placement",
+                reason,
+                Some(occurrence.occurrence_id),
+                None,
+            );
+        }
         occurrence_bounds.insert(occurrence.occurrence_id, placed);
         if (0..3).any(|a| {
             placed.min[a] < envelope.min[a] - LAYER_QUANTIZATION_MM

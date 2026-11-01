@@ -5,12 +5,18 @@ use super::{Command, Error, Options, set_once};
 use spiling_contracts::{geometry::NativePath, library::*};
 use spiling_engine_client::EngineRpc;
 use std::{ffi::OsString, path::PathBuf};
-pub(super) const USAGE: &str = "library (status|filaments|recipes|recipe RECIPE_UUID|spools|add-filament NAME|add-spool FILAMENT_UUID|write REQUEST_JSON) [--library ABSOLUTE_PATH] [--query TEXT] [--on-hand] [--hex RRGGBB] [--grams N] [--engine PATH]. Unknown color, quantity and manufacturing identity remain unspecified. Rich definitions and explicit revision-bound edits use bounded LibraryWrite JSON; repeat its request_id to resolve an uncertain publication.";
+pub(super) const USAGE: &str = "library (hardware|hardware-catalog|add-machine NAME [--setup ID]|add-plate NAME [--plate ID]|hardware-capture --machine UUID --plate UUID --face KEY|replace-hardware HARDWARE_JSON|status|filaments|recipes|recipe RECIPE_UUID|spools|add-filament NAME|add-spool FILAMENT_UUID|write REQUEST_JSON) [--library ABSOLUTE_PATH] [--query TEXT] [--on-hand] [--hex RRGGBB] [--grams N] [--engine PATH]. Unknown color, quantity and manufacturing identity remain unspecified. Rich definitions and explicit revision-bound edits use bounded LibraryWrite JSON; repeat its request_id to resolve an uncertain publication.";
 pub(super) struct Workflow {
     location: Option<PathBuf>,
     action: Action,
 }
 enum Action {
+    Hardware,
+    HardwareCatalog,
+    AddMachine(String, Option<String>),
+    AddPlate(String, Option<String>),
+    HardwareCapture(String, String, String),
+    ReplaceHardware(Box<spiling_contracts::hardware::HardwareLibrary>),
     Status,
     Filaments(LibraryFilamentQuery),
     Spools,
@@ -28,7 +34,15 @@ pub(super) fn parse(
     let action = args.next().ok_or(USAGE)?;
     let argument = if matches!(
         action.to_str(),
-        Some("add-filament" | "add-spool" | "write" | "recipe")
+        Some(
+            "add-filament"
+                | "add-spool"
+                | "write"
+                | "recipe"
+                | "add-machine"
+                | "add-plate"
+                | "replace-hardware"
+        )
     ) {
         Some(args.next().ok_or(USAGE)?)
     } else {
@@ -39,9 +53,45 @@ pub(super) fn parse(
     let mut hex = None;
     let mut grams = None;
     let mut profile = None;
+    let mut setup_id = None;
+    let mut machine_id = None;
+    let mut plate_id = None;
+    let mut face = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--help" | "-h") => return Ok(None),
+            Some("--setup") => {
+                setup_id = Some(
+                    args.next()
+                        .ok_or("--setup requires ID")?
+                        .into_string()
+                        .map_err(|_| "setup requires UTF-8")?,
+                )
+            }
+            Some("--machine") => {
+                machine_id = Some(
+                    args.next()
+                        .ok_or("--machine requires ID")?
+                        .into_string()
+                        .map_err(|_| "machine requires UTF-8")?,
+                )
+            }
+            Some("--plate") => {
+                plate_id = Some(
+                    args.next()
+                        .ok_or("--plate requires ID")?
+                        .into_string()
+                        .map_err(|_| "plate requires UTF-8")?,
+                )
+            }
+            Some("--face") => {
+                face = Some(
+                    args.next()
+                        .ok_or("--face requires key")?
+                        .into_string()
+                        .map_err(|_| "face requires UTF-8")?,
+                )
+            }
             Some("--library") => set_once(
                 &mut location,
                 PathBuf::from(args.next().ok_or("--library requires a path")?),
@@ -109,6 +159,41 @@ pub(super) fn parse(
         return Err("--library must be absolute".into());
     }
     let action = match action.to_str() {
+        Some("hardware") => Action::Hardware,
+        Some("hardware-catalog") => Action::HardwareCatalog,
+        Some("add-machine") => Action::AddMachine(
+            argument
+                .unwrap()
+                .into_string()
+                .map_err(|_| "nickname requires UTF-8")?,
+            setup_id,
+        ),
+        Some("add-plate") => Action::AddPlate(
+            argument
+                .unwrap()
+                .into_string()
+                .map_err(|_| "nickname requires UTF-8")?,
+            plate_id,
+        ),
+        Some("hardware-capture") => Action::HardwareCapture(
+            machine_id.ok_or("--machine is required")?,
+            plate_id.ok_or("--plate is required")?,
+            face.ok_or("--face is required")?,
+        ),
+        Some("replace-hardware") => {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(PathBuf::from(argument.unwrap()))?
+                .take(49153)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 49152 {
+                return Err("hardware exceeds 48 KiB".into());
+            }
+            let value: spiling_contracts::hardware::HardwareLibrary =
+                serde_json::from_slice(&bytes)?;
+            value.validate()?;
+            Action::ReplaceHardware(Box::new(value))
+        }
         Some("status") => Action::Status,
         Some("filaments") => Action::Filaments(query),
         Some("spools") => Action::Spools,
@@ -178,6 +263,63 @@ pub(super) async fn execute(rpc: &EngineRpc, flow: Workflow) -> Result<serde_jso
             .await?;
     }
     let value = match flow.action {
+        Action::Hardware => serde_json::to_value(rpc.library_hardware().await?)?,
+        Action::HardwareCatalog => serde_json::to_value(rpc.hardware_catalog().await?)?,
+        Action::HardwareCapture(machine, plate, face) => serde_json::to_value(
+            rpc.library_hardware()
+                .await?
+                .hardware
+                .capture(&machine, &plate, &face)?,
+        )?,
+        action @ (Action::AddMachine(..) | Action::AddPlate(..) | Action::ReplaceHardware(..)) => {
+            use spiling_contracts::hardware::*;
+            let mut snapshot = rpc.library_hardware().await?;
+            match action {
+                Action::AddMachine(nickname, setup) => {
+                    let catalog = rpc.hardware_catalog().await?;
+                    let setup = catalog
+                        .setups
+                        .into_iter()
+                        .find(|s| setup.as_ref().is_none_or(|id| id == &s.id))
+                        .ok_or("catalog setup absent; catalog-only models cannot be planned")?;
+                    snapshot.hardware.machines.push(OwnedMachine {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        nickname,
+                        serial: None,
+                        location: None,
+                        setup,
+                        generation: 1,
+                    });
+                }
+                Action::AddPlate(nickname, plate) => {
+                    let catalog = rpc.hardware_catalog().await?;
+                    let definition = catalog
+                        .plates
+                        .into_iter()
+                        .find(|p| plate.as_ref().is_none_or(|id| id == &p.id))
+                        .ok_or("catalog plate absent")?;
+                    snapshot.hardware.plates.push(OwnedPlate {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        nickname,
+                        definition,
+                        installed_machine: None,
+                        notes: String::new(),
+                    });
+                }
+                Action::ReplaceHardware(h) => snapshot.hardware = *h,
+                _ => unreachable!(),
+            }
+            snapshot.hardware.validate()?;
+            let request = LibraryWrite {
+                library_id: snapshot.identity.as_ref().map(|i| i.id.clone()),
+                base_revision: snapshot.identity.map_or(0, |i| i.revision),
+                request_id: uuid::Uuid::new_v4().to_string(),
+                mutation: LibraryMutation::ReplaceHardware {
+                    hardware: snapshot.hardware,
+                },
+            };
+            serde_json::json!({"request":request,"receipt":rpc.library_write(&request).await?})
+        }
         Action::Status => serde_json::to_value(rpc.library_status().await?)?,
         Action::Filaments(mut query) => {
             let mut rows = Vec::new();

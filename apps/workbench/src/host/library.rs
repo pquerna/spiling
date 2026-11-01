@@ -5,6 +5,7 @@ use super::*;
 use spiling_contracts::{geometry::SourceHash, library::*};
 #[derive(Debug, Clone, Default)]
 pub struct State {
+    pub hardware: super::hardware::State,
     pub personal_recipes: Option<LibraryRecipePage>,
     pub project_recipes: Vec<RecipeSummary>,
     pub recipe_project: Option<(ProjectId, ProjectRevision)>,
@@ -58,6 +59,7 @@ impl DefinitionComparison {
 }
 #[derive(Debug, Clone)]
 pub enum LibraryAction {
+    Hardware(super::hardware::HardwareAction),
     Recipe(super::recipes::RecipeAction),
     Refresh(LibraryFilamentQuery),
     Inspect {
@@ -128,6 +130,7 @@ impl Actor {
     async fn library_inner(&mut self, action: LibraryAction) -> Result<(), ClientError> {
         let rpc = self.client.as_ref().expect("connected client").rpc();
         match action {
+            LibraryAction::Hardware(action) => self.hardware_action(action).await?,
             LibraryAction::Recipe(action) => self.recipe_action(action).await?,
             LibraryAction::Refresh(query) => {
                 // Project-owned content remains browsable even if personal storage fails.
@@ -283,7 +286,14 @@ impl Actor {
                 .into();
             }
             LibraryAction::SetLocation(location) => {
+                if self.state.library.hardware.credential_pending.is_some() {
+                    return Err(ClientError::InvalidRequest(
+                        "Resolve the pending credential write before changing personal libraries"
+                            .into(),
+                    ));
+                }
                 let status = rpc.library_set_location(location).await?;
+                self.library_location = Some(status.location.clone());
                 self.state.library = Arc::new(State {
                     status: Some(status),
                     ..Default::default()

@@ -115,6 +115,11 @@ async function contracts(check = false) {
     "--",
     ...(check ? ["--check"] : []),
   ]);
+  await run("node", [
+    "--experimental-strip-types",
+    "tools/generate-hardware-catalog.mjs",
+    ...(check ? ["--check"] : []),
+  ]);
 }
 
 async function stageEngine(release = false) {
@@ -595,6 +600,11 @@ async function main() {
     case "compare:slicers":
       await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-cli"]);
       await run("node", ["tools/compare-slicers.mjs", ...process.argv.slice(3)]);
+      break;
+    case "test:hardware":
+      await contracts(true);
+      await stageEngine();
+      await run("node", ["--import", "tsx", "tools/smoke-hardware-library.mjs"]);
       break;
     case "test:materials":
       await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-cli"]);

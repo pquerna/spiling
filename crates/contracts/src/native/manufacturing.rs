@@ -1072,6 +1072,10 @@ impl TryFrom<rpc::ManufacturingIntent> for ManufacturingIntent {
         valid(
             Self {
                 material_profile: value.material_profile.map(TryInto::try_into).transpose()?,
+                hardware: value
+                    .hardware
+                    .map(|h| h.try_into().map(Arc::new))
+                    .transpose()?,
                 printer: required(value.printer, "printer specification")?.try_into()?,
                 recipe: required(value.recipe, "planar recipe")?.try_into()?,
             },
@@ -1087,6 +1091,10 @@ impl TryFrom<ManufacturingIntent> for rpc::ManufacturingIntent {
             printer: Some(value.printer.try_into()?),
             recipe: Some(value.recipe.try_into()?),
             material_profile: value.material_profile.map(TryInto::try_into).transpose()?,
+            hardware: value
+                .hardware
+                .map(|h| (*h).clone().try_into())
+                .transpose()?,
         })
     }
 }

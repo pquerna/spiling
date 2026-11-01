@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 //! Runtime-independent authoring authority. Native caches are engine-owned.
+mod hardware;
 pub mod materials;
 mod optical_construction;
 mod process;
@@ -228,10 +229,14 @@ pub struct Snapshot {
     pub surface_images: BTreeMap<SourceHash, Arc<SurfaceImageAsset>>,
     pub appearance_study: Arc<AppearanceStudy>,
     pub materials: Option<Arc<materials::MaterialAsset>>,
+    pub hardware: Option<Arc<spiling_contracts::hardware::ProjectHardwareCapture>>,
     pub appearance_palettes: BTreeMap<SourceHash, Arc<PaletteAsset>>,
 }
 #[derive(Debug, Clone)]
 pub enum Edit {
+    SetHardware {
+        capture: Option<Arc<spiling_contracts::hardware::ProjectHardwareCapture>>,
+    },
     PutRecipe {
         transfer: spiling_contracts::library::RecipeTransfer,
         expected: Option<SourceHash>,
@@ -354,10 +359,12 @@ struct Content {
     process_document: Arc<ProcessDocument>,
     appearance_study: AppearanceStudyInfo,
     materials: Option<spiling_contracts::library::MaterialCollectionRecord>,
+    hardware: Option<Arc<spiling_contracts::hardware::ProjectHardwareCapture>>,
 }
 impl Content {
     fn matches(&self, snapshot: &Snapshot) -> bool {
-        self.materials.as_ref() == snapshot.materials.as_ref().map(|a| a.record())
+        self.hardware == snapshot.hardware
+            && self.materials.as_ref() == snapshot.materials.as_ref().map(|a| a.record())
             && self.occurrences == snapshot.occurrences
             && self.manufacturing_intent == snapshot.manufacturing_intent
             && self.surface_overlays == snapshot.surface_overlays
@@ -404,6 +411,7 @@ impl Content {
             process_document: Arc::new(manifest.process_document.clone()),
             appearance_study: manifest.appearance_study.info(),
             materials: manifest.materials.clone(),
+            hardware: manifest.hardware.clone(),
         }
     }
 }
@@ -420,6 +428,7 @@ pub struct Project {
     undo: VecDeque<Arc<Snapshot>>,
     redo: Vec<Arc<Snapshot>>,
     staged_images: Mutex<Vec<Weak<Vec<u8>>>>,
+    staged_hardware: Mutex<Vec<Weak<spiling_contracts::hardware::ProjectHardwareCapture>>>,
     staged_process: Mutex<Vec<Weak<ProcessDocument>>>,
     staged_appearance: Mutex<Vec<Weak<Snapshot>>>,
     saved: Option<(ProjectRevision, Content)>,
@@ -447,6 +456,7 @@ impl Project {
             undo: VecDeque::new(),
             redo: Vec::new(),
             staged_images: Mutex::new(Vec::new()),
+            staged_hardware: Mutex::new(Vec::new()),
             staged_process: Mutex::new(Vec::new()),
             staged_appearance: Mutex::new(Vec::new()),
             saved: None,
@@ -456,9 +466,12 @@ impl Project {
             save_uncertain: false,
         }
     }
-    pub fn from_loaded(loaded: LoadedProject) -> Result<Self, ProjectError> {
+    pub fn from_loaded(mut loaded: LoadedProject) -> Result<Self, ProjectError> {
         loaded.manifest.validate()?;
-        let snapshot = Snapshot {
+        if let Some(intent) = &mut loaded.manifest.manufacturing_intent {
+            Arc::make_mut(intent).hardware = loaded.manifest.hardware.clone();
+        }
+        let mut snapshot = Snapshot {
             sources: loaded.sources,
             occurrences: loaded
                 .manifest
@@ -474,8 +487,10 @@ impl Project {
             appearance_study: Arc::new(loaded.manifest.appearance_study.clone()),
             appearance_palettes: loaded.appearance_palettes,
             materials: loaded.materials,
+            hardware: loaded.manifest.hardware.clone(),
         };
         validate_snapshot(&snapshot, &loaded.manifest)?;
+        hardware::share_capture(&mut snapshot);
         let mut project = Self::new();
         project.project_id = loaded.manifest.project_id.clone();
         project.revision = loaded.manifest.revision;
@@ -503,7 +518,8 @@ impl Project {
                     || !self.current.surface_overlays.layers.is_empty()
                     || !self.current.process_document.layers.is_empty()
                     || *self.current.appearance_study != AppearanceStudy::default()
-                    || self.current.materials.is_some(),
+                    || self.current.materials.is_some()
+                    || self.current.hardware.is_some(),
                 |(_, content)| !content.matches(&self.current),
             );
         ProjectInfo {
@@ -524,6 +540,7 @@ impl Project {
             process_document: (*self.current.process_document).clone(),
             appearance_study: self.current.appearance_study.info(),
             materials: self.current.materials.as_ref().map(|a| a.record().clone()),
+            hardware: self.current.hardware.clone(),
             resolved_process: self.current.manufacturing_intent.as_ref().map_or_else(
                 Vec::new,
                 |intent| {
@@ -1046,7 +1063,29 @@ impl Project {
                     );
                 }
             }
-            Edit::SetManufacturingIntent { intent } => {
+            Edit::SetHardware { capture } => {
+                if let Some(c) = &capture {
+                    c.validate().map_err(invalid)?;
+                }
+                if let Some(old) = &snapshot.manufacturing_intent {
+                    let mut intent = (**old).clone();
+                    intent.hardware = capture.clone();
+                    if let Some(c) = &capture {
+                        intent.printer = c.setup.printer.clone();
+                    }
+                    intent.validate().map_err(|e| invalid(e.message))?;
+                    snapshot.manufacturing_intent = Some(Arc::new(intent));
+                }
+                snapshot.hardware = capture;
+            }
+            Edit::SetManufacturingIntent { mut intent } => {
+                if intent.hardware.is_none()
+                    && let Some(c) = &snapshot.hardware
+                {
+                    let edited = Arc::make_mut(&mut intent);
+                    edited.hardware = Some(c.clone());
+                }
+
                 intent.validate().map_err(|e| {
                     if e.code == ManufacturingErrorCode::ResourceLimit {
                         error(ProjectErrorCode::ResourceLimit, e.message)
@@ -1054,6 +1093,7 @@ impl Project {
                         invalid(e.message)
                     }
                 })?;
+                snapshot.hardware = intent.hardware.clone();
                 snapshot.manufacturing_intent = Some(intent);
             }
             Edit::PublishManufacturing { mut asset } => {
@@ -1206,6 +1246,33 @@ impl Project {
                 .chain(self.undo.iter().skip(skip).map(Arc::as_ref))
                 .chain(self.redo.iter().map(Arc::as_ref)),
         )?;
+        let mut staged_hardware = self
+            .staged_hardware
+            .lock()
+            .map_err(|_| error(ProjectErrorCode::Io, "hardware staging lock poisoned"))?;
+        staged_hardware.retain(|h| h.strong_count() != 0);
+        if hardware::bytes(
+            std::iter::once(&snapshot)
+                .chain(std::iter::once(self.current.as_ref()))
+                .chain(self.undo.iter().map(Arc::as_ref))
+                .chain(self.redo.iter().map(Arc::as_ref)),
+            staged_hardware.iter().filter_map(Weak::upgrade).chain(
+                self.saved
+                    .as_ref()
+                    .and_then(|(_, content)| content.hardware.clone()),
+            ),
+        )? > hardware::MAX_RETAINED_BYTES
+        {
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "retained and prepared hardware capture budget exceeded",
+            ));
+        }
+        if let Some(c) = &snapshot.hardware
+            && !staged_hardware.iter().any(|h| h.as_ptr() == Arc::as_ptr(c))
+        {
+            staged_hardware.push(Arc::downgrade(c));
+        }
         let mut staged_process = self
             .staged_process
             .lock()
@@ -1280,6 +1347,7 @@ impl Project {
         }
         let mut candidate = self.manifest();
         candidate.materials = snapshot.materials.as_ref().map(|a| a.record().clone());
+        candidate.hardware = snapshot.hardware.clone();
         candidate.revision = self.revision.next()?;
         candidate.next_occurrence = next_occurrence;
         candidate.next_surface_layer = next_surface_layer;
@@ -1406,6 +1474,7 @@ impl Project {
             process_document: (*self.current.process_document).clone(),
             appearance_study: (*self.current.appearance_study).clone(),
             materials: self.current.materials.as_ref().map(|a| a.record().clone()),
+            hardware: self.current.hardware.clone(),
             next_process_layer: self.next_process_layer,
             next_process_operation: self.next_process_operation,
             definitions: self
@@ -1800,6 +1869,14 @@ fn validate_surface_image_budget(snapshot: &Snapshot) -> Result<(), ProjectError
 }
 fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<(), ProjectError> {
     let snapshots: Vec<_> = snapshots.collect();
+    if hardware::bytes(snapshots.iter().copied(), std::iter::empty())?
+        > hardware::MAX_RETAINED_BYTES
+    {
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "retained hardware capture budget exceeded",
+        ));
+    }
     if materials::retained_bytes(snapshots.iter().copied()) > materials::MAX_RETAINED_MATERIAL_BYTES
     {
         return Err(error(
@@ -1913,6 +1990,11 @@ pub(crate) fn validate_snapshot(
     snapshot: &Snapshot,
     manifest: &ProjectManifest,
 ) -> Result<(), ProjectError> {
+    if manifest.hardware != snapshot.hardware {
+        return Err(invalid(
+            "project hardware capture differs from retained snapshot",
+        ));
+    }
     if manifest.materials.as_ref() != snapshot.materials.as_ref().map(|a| a.record()) {
         return Err(invalid(
             "project material descriptor and captured asset disagree",

@@ -399,6 +399,7 @@ pub struct LibraryDocument {
     pub id: LibraryId,
     pub revision: u64,
     pub materials: MaterialCollection,
+    pub hardware: crate::hardware::HardwareLibrary,
     pub spools: Vec<SpoolRecord>,
     pub receipts: Vec<LibraryReceipt>,
 }
@@ -413,6 +414,7 @@ impl LibraryDocument {
             return Err("library schema, revision or count limit".into());
         }
         self.materials.validate()?;
+        self.hardware.validate()?;
         let mut spools = BTreeSet::new();
         for spool in &self.spools {
             spool.validate()?;
@@ -437,6 +439,9 @@ impl LibraryDocument {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LibraryMutation {
+    ReplaceHardware {
+        hardware: crate::hardware::HardwareLibrary,
+    },
     PutFilament {
         id: FilamentId,
         #[serde(deserialize_with = "required_option")]
@@ -482,6 +487,7 @@ impl LibraryWrite {
             return Err("library revision exhausted".into());
         }
         match &self.mutation {
+            LibraryMutation::ReplaceHardware { hardware } => hardware.validate()?,
             LibraryMutation::PutFilament { id, definition, .. } => {
                 validate_library_uuid(&id.0)?;
                 definition.content_hash()?;

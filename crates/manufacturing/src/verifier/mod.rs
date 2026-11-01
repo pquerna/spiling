@@ -932,6 +932,25 @@ pub(crate) fn verify_actual(
                 }
             }
             let length = distance(from, position);
+            if let Some(hardware) = &intent.hardware {
+                let radius = association.map_or(recipe.bead_width_mm, |a| a.width) * 0.5;
+                let actual = spiling_contracts::geometry::AabbMm {
+                    min: [
+                        from[0].min(position[0]) - radius,
+                        from[1].min(position[1]) - radius,
+                        from[2].min(position[2])
+                            - association.map_or(recipe.layer_height_mm, |a| {
+                                a.physical_z[1] - a.physical_z[0]
+                            }),
+                    ],
+                    max: [
+                        from[0].max(position[0]) + radius,
+                        from[1].max(position[1]) + radius,
+                        from[2].max(position[2]),
+                    ],
+                };
+                hardware.admits_bounds(&actual).map_err(|e| failed(&e))?;
+            }
             let nominal_length = distance(source, target);
             let support = matches!(
                 deposition_kind,

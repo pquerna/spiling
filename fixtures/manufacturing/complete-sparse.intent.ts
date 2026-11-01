@@ -7,6 +7,7 @@ import printer from "./software-marlin.printer.ts";
 import solidIntent from "./solid-fill.intent.ts";
 
 const intent = {
+  hardware: null,
   material_profile: null,
   printer,
   recipe: {

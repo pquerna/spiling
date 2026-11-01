@@ -1022,6 +1022,8 @@ pub(crate) fn validate_global_infill_fraction(fraction: f64) -> Result<(), Manuf
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ManufacturingIntent {
+    #[serde(deserialize_with = "material::captured_hardware")]
+    pub hardware: Option<Arc<crate::hardware::ProjectHardwareCapture>>,
     #[serde(deserialize_with = "material::captured_material_profile")]
     pub material_profile: Option<ResolvedMaterialProfile>,
     pub printer: PrinterSpecification,
@@ -1055,6 +1057,9 @@ impl ManufacturingIntent {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         self.printer.validate()?;
         self.recipe.validate()?;
+        if let Some(hardware) = &self.hardware {
+            hardware.validate_intent(self).map_err(|e| invalid(&e))?;
+        }
         if let Some(profile) = &self.material_profile {
             profile.validate_for(self)?;
         }

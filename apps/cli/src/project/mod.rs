@@ -10,6 +10,7 @@ use crate::{
 use spiling_contracts::appearance::{
     AppearanceReport, AppearanceReportRecord, AppearanceTarget, SearchLimits,
 };
+use spiling_contracts::library::{LibraryMutation, LibraryWrite, LibraryWriteReceipt};
 use spiling_contracts::optical::{
     MAX_OPTICAL_REQUEST_BYTES, OpticalReport, OpticalReportRecord, OpticalRequest, OpticalSelection,
 };
@@ -117,6 +118,8 @@ enum Operation {
     ProcessEdit(ProcessEdit),
     ProcessResolve(OccurrenceId),
     Intent(Arc<ManufacturingIntent>),
+    Hardware(Option<Arc<spiling_contracts::hardware::ProjectHardwareCapture>>),
+    LocalHardware(String, String, String),
     MaterialProfile(Box<MaterialProfileSelection>),
     LibraryLocation(NativePath),
     UseLibraryFilament(String),
@@ -469,6 +472,33 @@ pub fn parse(
             Some("--process-resolve") => operations.push(Operation::ProcessResolve(
                 OccurrenceId::new(text(&mut args, "--process-resolve occurrence")?.parse()?)?,
             )),
+            Some("--hardware") => {
+                use std::io::Read;
+                let file = PathBuf::from(
+                    args.next()
+                        .ok_or("--hardware requires portable capture JSON")?,
+                );
+                let mut bytes = Vec::new();
+                std::fs::File::open(file)?
+                    .take(24577)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() > 24576 {
+                    return Err("hardware capture exceeds 24 KiB".into());
+                }
+                let capture: spiling_contracts::hardware::ProjectHardwareCapture =
+                    serde_json::from_slice(&bytes)?;
+                capture.validate()?;
+                operations.push(Operation::Hardware(Some(Arc::new(capture))));
+            }
+            Some("--hardware-clear") => operations.push(Operation::Hardware(None)),
+            Some("--hardware-local") => {
+                let machine = text(&mut args, "--hardware-local MACHINE_UUID PLATE_UUID FACE")?;
+                let plate = text(&mut args, "--hardware-local MACHINE_UUID PLATE_UUID FACE")?;
+                let face = text(&mut args, "--hardware-local MACHINE_UUID PLATE_UUID FACE")?;
+                spiling_contracts::library::validate_library_uuid(&machine)?;
+                spiling_contracts::library::validate_library_uuid(&plate)?;
+                operations.push(Operation::LocalHardware(machine, plate, face));
+            }
             Some("--intent") => operations.push(Operation::Intent(intent(&mut args)?.into())),
             Some("--library") => {
                 let path = args.next().ok_or("--library requires an absolute path")?;
@@ -1054,6 +1084,10 @@ async fn execute(
         optical_report: mut optical_report_output,
     } = outputs;
     let session = client.hello().session_id.clone();
+    let mut attachment = (workflow.mode != "create").then(|| workflow.path.clone());
+    let mut hardware_selection: Option<spiling_contracts::hardware::LocalProjectHardwareBinding> =
+        None;
+    let mut hardware_association = None;
     let summary = geometry::scene(client, &session).await?;
     let response = if workflow.mode == "create" {
         client
@@ -1068,7 +1102,7 @@ async fn execute(
             .project(ProjectCommand::Open {
                 session_id: session.clone(),
                 base_revision: summary.revision,
-                path: workflow.path,
+                path: workflow.path.clone(),
                 read_only: workflow.read_only,
                 recover_previous: workflow.mode == "recover",
                 discard_changes: false,
@@ -1892,6 +1926,46 @@ async fn execute(
                 process_inspections.push(evidence.clone());
                 process_resolution = Some(evidence);
             }
+            Operation::Hardware(capture) => {
+                label = "hardware";
+                let base_revision = info(client).await?.revision;
+                client
+                    .project(ProjectCommand::SetHardware {
+                        session_id: session.clone(),
+                        base_revision,
+                        capture,
+                    })
+                    .await?;
+            }
+            Operation::LocalHardware(machine, plate, face) => {
+                label = "hardware_local";
+                let personal = client.rpc().library_hardware().await?;
+                let capture = personal.hardware.capture(&machine, &plate, &face)?;
+                let project = info(client).await?;
+                let binding = spiling_contracts::hardware::LocalProjectHardwareBinding {
+                    project_id: project.project_id.as_str().into(),
+                    attachment: workflow.path.clone(),
+                    capture_hash: capture.hash()?,
+                    machine_id: machine.clone(),
+                    plate_id: plate,
+                    machine_generation: personal
+                        .hardware
+                        .machines
+                        .iter()
+                        .find(|m| m.id == machine)
+                        .expect("capture checked")
+                        .generation,
+                };
+                let base_revision = project.revision;
+                client
+                    .project(ProjectCommand::SetHardware {
+                        session_id: session.clone(),
+                        base_revision,
+                        capture: Some(Arc::new(capture)),
+                    })
+                    .await?;
+                hardware_selection = Some(binding);
+            }
             Operation::Intent(intent) => {
                 label = "intent";
                 let base_revision = info(client).await?.revision;
@@ -2226,6 +2300,7 @@ async fn execute(
             }
             Operation::Save(target) => {
                 label = "save";
+                let saved_attachment = target.clone().or_else(|| attachment.clone());
                 let result: Result<(), Error> = async {
                     let response = client
                         .project(ProjectCommand::Save {
@@ -2247,6 +2322,46 @@ async fn execute(
                     }
                     return Err(error);
                 }
+                attachment = saved_attachment;
+                if let (Some(binding), Some(path)) = (&hardware_selection, &attachment) {
+                    let project = info(client).await?;
+                    if project
+                        .hardware
+                        .as_ref()
+                        .and_then(|c| c.hash().ok())
+                        .as_ref()
+                        == Some(&binding.capture_hash)
+                    {
+                        let result: Result<LibraryWriteReceipt, Error> = async {
+                            let mut personal = client.rpc().library_hardware().await?;
+                            let mut binding = binding.clone();
+                            binding.attachment = path.clone();
+                            personal.hardware.bindings.retain(|b| {
+                                b.project_id != binding.project_id
+                                    || b.attachment != binding.attachment
+                            });
+                            personal.hardware.bindings.push(binding);
+                            let request = LibraryWrite {
+                                library_id: personal.identity.as_ref().map(|i| i.id.clone()),
+                                base_revision: personal.identity.map_or(0, |i| i.revision),
+                                request_id: uuid::Uuid::new_v4().to_string(),
+                                mutation: LibraryMutation::ReplaceHardware {
+                                    hardware: personal.hardware,
+                                },
+                            };
+                            Ok(client.rpc().library_write(&request).await?)
+                        }
+                        .await;
+                        hardware_association = Some(match result {
+                            Ok(receipt) => {
+                                serde_json::json!({"project_saved": true, "private_association": receipt})
+                            }
+                            Err(error) => {
+                                serde_json::json!({"project_saved": true, "private_association_error": error.to_string()})
+                            }
+                        });
+                    }
+                }
             }
         }
         let manufacturing = manufacturing_status(client, false).await?;
@@ -2259,6 +2374,7 @@ async fn execute(
         history.push(serde_json::json!({
             "operation": label, "project": project, "manufacturing": manufacturing,
             "storage_maintenance": storage_maintenance,
+            "hardware_association": if label == "save" { hardware_association.as_ref() } else { None },
             "preflight": if label == "preflight" { preflight_report.as_ref() } else { None },
             "process_resolution": process_resolution,
             "material_review": if label == "material_review" { material_review.as_ref() } else { None },

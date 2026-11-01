@@ -10,6 +10,12 @@ The executable storage schema is `spiling-contracts::project`; state and storage
 
 Format evolution and the initial release compatibility boundary follow the [canonical pre-release format policy](../../AGENTS.md#pre-release-format-evolution).
 
+Project status and manifests carry a strict required-nullable `hardware` capture,
+including before a recipe exists. Its complete portable definitions travel with
+history and manufacturing input; private fleet/route/credential data remains in
+the personal library. [Hardware contracts](hardware.md) own selection and
+invalidation semantics.
+
 ## Container and records
 
 ```text

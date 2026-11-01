@@ -11,6 +11,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+keyring = "=4.2.0"
+zeroize = "=1.8.2"
+directories = "=6.0.0"
 spiling-contracts.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -197,6 +197,7 @@ fn native_path_limit_and_problem_history_are_bounded() {
     let root = tempfile::tempdir().unwrap();
     let (updates, _) = watch::channel(Snapshot::default());
     let mut actor = Actor {
+        library_location: None,
         config: Config {
             engine: root.path().join("missing"),
             store: root.path().join("store"),
@@ -2598,4 +2599,263 @@ fn recipe_library_copy_and_fresh_study_use_native_host_services() {
     host.confirm(closing.confirmation.unwrap().id, true)
         .unwrap();
     wait(&host, |s| s.phase == Phase::Closed);
+}
+
+#[test]
+#[ignore = "actual hardware engine services; requires SPILING_TEST_ENGINE"]
+fn hardware_selection_save_as_restart_and_missing_library_keep_portable_authority() {
+    use super::hardware::HardwareAction;
+    use spiling_contracts::{hardware::*, library::*};
+    fn act(host: &Host, action: LibraryAction) -> Snapshot {
+        let serial = host.snapshot().serial;
+        host.library(action).unwrap();
+        idle_after(host, serial)
+    }
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    assert_eq!(
+        wait(&host, |s| s.phase != Phase::Starting).phase,
+        Phase::Running
+    );
+    act(
+        &host,
+        LibraryAction::SetLocation(native(&root.path().join("private-library.spil"))),
+    );
+    let s = act(&host, LibraryAction::Hardware(HardwareAction::Refresh));
+    let catalog = s.library.hardware.catalog.as_ref().unwrap();
+    let mut h = HardwareLibrary::default();
+    for _ in 0..3 {
+        h.machines.push(OwnedMachine {
+            id: uuid::Uuid::new_v4().to_string(),
+            nickname: "PRIVATE same-name workshop".into(),
+            serial: Some("PRIVATE machine serial".into()),
+            location: None,
+            setup: catalog.setups[0].clone(),
+            generation: 1,
+        });
+    }
+    for _ in 0..2 {
+        h.plates.push(OwnedPlate {
+            id: uuid::Uuid::new_v4().to_string(),
+            nickname: "PRIVATE sheet".into(),
+            definition: catalog.plates[0].clone(),
+            installed_machine: None,
+            notes: String::new(),
+        });
+    }
+    let s = act(
+        &host,
+        LibraryAction::Write(LibraryWrite {
+            library_id: None,
+            base_revision: 0,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            mutation: LibraryMutation::ReplaceHardware {
+                hardware: h.clone(),
+            },
+        }),
+    );
+    assert!(s.problems.is_empty(), "{:?}", s.problems);
+    let s = act(&host, LibraryAction::Hardware(HardwareAction::Refresh));
+    let project = s.project.as_ref().unwrap();
+    let s = act(
+        &host,
+        LibraryAction::Hardware(HardwareAction::Select {
+            project: project.project_id.clone(),
+            base: project.revision,
+            expected: s
+                .library
+                .hardware
+                .personal
+                .as_ref()
+                .unwrap()
+                .identity
+                .clone(),
+            machine: h.machines[0].id.clone(),
+            plate: h.plates[0].id.clone(),
+            face: "textured".into(),
+        }),
+    );
+    assert!(s.library.hardware.local_selection.as_ref().unwrap().matches);
+    let project = s.project.as_ref().unwrap();
+    let identity = s
+        .library
+        .hardware
+        .personal
+        .as_ref()
+        .unwrap()
+        .identity
+        .as_ref()
+        .unwrap();
+    h.machines[0].generation = 2;
+    act(
+        &host,
+        LibraryAction::Write(LibraryWrite {
+            library_id: Some(identity.id.clone()),
+            base_revision: identity.revision,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            mutation: LibraryMutation::ReplaceHardware {
+                hardware: h.clone(),
+            },
+        }),
+    );
+    let refreshed = act(&host, LibraryAction::Hardware(HardwareAction::Refresh));
+    assert!(
+        !refreshed
+            .library
+            .hardware
+            .local_selection
+            .as_ref()
+            .unwrap()
+            .matches,
+        "an unsaved choice must observe a changed installation"
+    );
+    let s = act(
+        &host,
+        LibraryAction::Hardware(HardwareAction::Select {
+            project: project.project_id.clone(),
+            base: project.revision,
+            expected: refreshed
+                .library
+                .hardware
+                .personal
+                .as_ref()
+                .unwrap()
+                .identity
+                .clone(),
+            machine: h.machines[0].id.clone(),
+            plate: h.plates[0].id.clone(),
+            face: "textured".into(),
+        }),
+    );
+    assert!(s.library.hardware.local_selection.as_ref().unwrap().matches);
+    let capture = s.project.as_ref().unwrap().hardware.clone().unwrap();
+    let revision = s.project.as_ref().unwrap().revision;
+    let first = root.path().join("first.spil");
+    let second = root.path().join("second.spil");
+    let s = send(
+        &host,
+        Action::Save {
+            target: Some(native(&first)),
+        },
+    );
+    assert!(!s.project.as_ref().unwrap().dirty, "{:?}", s.problems);
+    let s = send(
+        &host,
+        Action::Save {
+            target: Some(native(&second)),
+        },
+    );
+    assert!(s.library.hardware.local_selection.as_ref().unwrap().matches);
+    assert_eq!(
+        s.library
+            .hardware
+            .personal
+            .as_ref()
+            .unwrap()
+            .hardware
+            .bindings
+            .len(),
+        2
+    );
+    let s = act(
+        &host,
+        LibraryAction::Hardware(HardwareAction::Select {
+            project: s.project.as_ref().unwrap().project_id.clone(),
+            base: revision,
+            expected: s
+                .library
+                .hardware
+                .personal
+                .as_ref()
+                .unwrap()
+                .identity
+                .clone(),
+            machine: h.machines[1].id.clone(),
+            plate: h.plates[0].id.clone(),
+            face: "textured".into(),
+        }),
+    );
+    assert_eq!(
+        s.project.as_ref().unwrap().revision,
+        revision,
+        "identical physical replacement must preserve planning"
+    );
+    let s = send(&host, Action::Restart);
+    let selection = s.library.hardware.local_selection.as_ref().unwrap();
+    assert_eq!(selection.machine_id, h.machines[1].id);
+    assert!(selection.matches);
+    act(
+        &host,
+        LibraryAction::SetLocation(native(&root.path().join("absent.spil"))),
+    );
+    let s = act(&host, LibraryAction::Hardware(HardwareAction::Refresh));
+    assert!(s.library.hardware.local_selection.is_none());
+    assert_eq!(
+        s.project.as_ref().unwrap().hardware.as_ref(),
+        Some(&capture)
+    );
+    assert_eq!(s.project.as_ref().unwrap().revision, revision);
+    let s = send(&host, Action::Restart);
+    assert_eq!(
+        s.library.status.as_ref().unwrap().location,
+        native(&root.path().join("absent.spil"))
+    );
+    assert!(
+        s.library
+            .hardware
+            .personal
+            .as_ref()
+            .unwrap()
+            .identity
+            .is_none()
+    );
+    act(
+        &host,
+        LibraryAction::SetLocation(native(&root.path().join("private-library.spil"))),
+    );
+    std::fs::write(
+        root.path().join("private-library.spil"),
+        b"corrupt test inventory",
+    )
+    .unwrap();
+    act(
+        &host,
+        LibraryAction::Refresh(LibraryFilamentQuery::default()),
+    );
+    let s = send(&host, Action::Restart);
+    assert!(
+        s.library.hardware.personal.is_none(),
+        "a corrupt selected store cannot fall back to another library"
+    );
+    assert!(s.library.hardware.error.is_some());
+    assert_eq!(
+        s.project.as_ref().unwrap().hardware.as_ref(),
+        Some(&capture)
+    );
+    assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
+    for path in [first, second] {
+        let bytes = std::fs::read(path).unwrap();
+        for sentinel in [
+            "PRIVATE same-name workshop",
+            "PRIVATE machine serial",
+            "PRIVATE sheet",
+            h.machines[0].id.as_str(),
+            h.machines[1].id.as_str(),
+            h.plates[0].id.as_str(),
+        ] {
+            assert!(
+                !bytes
+                    .windows(sentinel.len())
+                    .any(|w| w == sentinel.as_bytes()),
+                "private inventory leaked"
+            );
+        }
+    }
 }

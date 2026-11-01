@@ -11,6 +11,10 @@ workbench use authenticated typed Libraries and Projects services. Neither clien
 opens the authoritative files. A missing or unavailable personal library does not
 prevent project authoring or opening project-owned material copies.
 
+Hardware inventory, public project captures and private machine/plate associations
+share this same container and mutation protocol. [Hardware contracts](hardware.md)
+own their identity, compatibility, credential and connection boundaries.
+
 ## Location and container identity
 
 The default is `My library.spil` under

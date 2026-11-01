@@ -407,6 +407,9 @@ async fn main() -> ExitCode {
         Ok(None) => {
             println!("{USAGE}\n\n{STORAGE_USAGE}\n{}", library::USAGE);
             println!(
+                "Portable hardware (ordered): project --library ABSOLUTE.spil --hardware-local MACHINE_UUID PLATE_UUID FACE | --hardware CAPTURE_JSON | --hardware-clear. The project captures public planning definitions; physical names and remembered device selections stay in My library. No network printing is supported."
+            );
+            println!(
                 "Portable materials: project --library ABSOLUTE.spil --library-use FILAMENT_UUID --project-materials --project-material-profile FILAMENT_UUID PROFILE_ID REVISION SETUP_JSON"
             );
             println!(

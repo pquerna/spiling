@@ -68,9 +68,55 @@ export type SpoolRecord = { id: SpoolId, filament: FilamentRef, name: string, st
 
 export type LibraryReceipt = { request_id: string, request_hash: SourceHash, revision: bigint, };
 
-export type LibraryDocument = { schema: number, id: LibraryId, revision: bigint, materials: MaterialCollection, spools: Array<SpoolRecord>, receipts: Array<LibraryReceipt>, };
+export type LibraryDocument = { schema: number, id: LibraryId, revision: bigint, materials: MaterialCollection, hardware: HardwareLibrary, spools: Array<SpoolRecord>, receipts: Array<LibraryReceipt>, };
 
-export type LibraryMutation = { "kind": "put_filament", id: FilamentId, expected: SourceHash | null, definition: FilamentDefinition, } | { "kind": "archive_filament", filament: FilamentRef, archived: boolean, } | { "kind": "put_spool", spool: SpoolRecord, } | { "kind": "remove_spool", id: SpoolId, } | { "kind": "put_recipe", transfer: RecipeTransfer, expected: SourceHash | null, } | { "kind": "remove_recipe", id: RecipeId, expected: SourceHash, };
+export type HardwareModelDefinition = { id: string, vendor: string, model: string,
+/**
+ * Public attribution only, never an import path or private device endpoint.
+ */
+source: string, mounting_interface: string, declared_volume_mm: AabbMm | null, };
+
+export type HardwareSetupDefinition = { id: string, label: string, model: HardwareModelDefinition, printer: PrinterSpecification, };
+
+export type PlateFaceDefinition = { key: string, label: string, surface: string, usable_mm: AabbMm, keepouts_mm: Array<AabbMm>, max_bed_celsius: number, };
+
+export type PlateDefinition = { id: string, label: string, mounting_interface: string, thickness_mm: number,
+/**
+ * Installed top surface in machine coordinates; thickness is not subtracted again.
+ */
+surface_z_mm: number, faces: Array<PlateFaceDefinition>, source: string, };
+
+export type AccessoryEffect = { "kind": "nozzle", diameter_mm: number, material: string, } | { "kind": "fixture", bounds_mm: AabbMm, };
+
+export type AccessoryDefinition = { id: string, label: string, mounting_interface: string, effect: AccessoryEffect, };
+
+export type ProjectHardwareCapture = { setup: HardwareSetupDefinition, plate: PlateDefinition, face: string, accessories: Array<AccessoryDefinition>, };
+
+export type OwnedMachine = { id: string, nickname: string, serial: string | null, location: string | null, setup: HardwareSetupDefinition, generation: bigint, };
+
+export type OwnedPlate = { id: string, nickname: string, definition: PlateDefinition, installed_machine: string | null, notes: string, };
+
+export type OwnedAccessory = { id: string, nickname: string, definition: AccessoryDefinition, installed_machine: string | null, };
+
+export type CredentialBackend = "keyring" | "plaintext_file";
+
+export type CredentialRole = "lan-access-code" | "api-key" | "password" | "refresh-token";
+
+export type CredentialRef = { slot_id: string, role: CredentialRole, backend: CredentialBackend, };
+
+export type ConnectionFamily = "file" | "bambu_connect" | "bambu_developer_lan" | "moonraker" | "octo_print" | "prusa_link" | "development_simulator";
+
+export type EndpointRoute = { id: string, machine_id: string, family: ConnectionFamily, endpoint: string, expected_identity: string, generation: bigint, credential: CredentialRef | null, };
+
+export type LocalProjectHardwareBinding = { project_id: string, attachment: NativePath, capture_hash: SourceHash, machine_id: string, plate_id: string, machine_generation: bigint, };
+
+export type HardwareLibrary = { machines: Array<OwnedMachine>, plates: Array<OwnedPlate>, accessories: Array<OwnedAccessory>, routes: Array<EndpointRoute>, bindings: Array<LocalProjectHardwareBinding>, };
+
+export type HardwareCatalog = { models: Array<HardwareModelDefinition>, setups: Array<HardwareSetupDefinition>, plates: Array<PlateDefinition>, };
+
+export type LibraryHardware = { identity: LibraryIdentity | null, hardware: HardwareLibrary, };
+
+export type LibraryMutation = { "kind": "replace_hardware", hardware: HardwareLibrary, } | { "kind": "put_filament", id: FilamentId, expected: SourceHash | null, definition: FilamentDefinition, } | { "kind": "archive_filament", filament: FilamentRef, archived: boolean, } | { "kind": "put_spool", spool: SpoolRecord, } | { "kind": "remove_spool", id: SpoolId, } | { "kind": "put_recipe", transfer: RecipeTransfer, expected: SourceHash | null, } | { "kind": "remove_recipe", id: RecipeId, expected: SourceHash, };
 
 export type LibraryWrite = { library_id: LibraryId | null, request_id: string, base_revision: bigint, mutation: LibraryMutation, };
 
@@ -410,9 +456,9 @@ export type ProcessRegionStatus = "applied" | "no_eligible_interior" | "no_densi
 
 export type ProcessRegionResolution = { occurrence_id: OccurrenceId, definition_id: DefinitionId, provenance: ProcessProvenance, status: ProcessRegionStatus, };
 
-export type ProjectManifest = { format_version: number, project_id: ProjectId, revision: ProjectRevision, units: ProjectUnits, frame: ProjectFrame, next_occurrence: number, next_surface_layer: number, surface_overlays: SurfaceOverlays, next_process_layer: number, next_process_operation: number, process_document: ProcessDocument, appearance_study: AppearanceStudy, materials: MaterialCollectionRecord | null, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, manufacturing_intent: ManufacturingIntent | null, manufacturing_artifact: ManufacturingArtifactRecord | null, };
+export type ProjectManifest = { format_version: number, project_id: ProjectId, revision: ProjectRevision, units: ProjectUnits, frame: ProjectFrame, next_occurrence: number, next_surface_layer: number, surface_overlays: SurfaceOverlays, next_process_layer: number, next_process_operation: number, process_document: ProcessDocument, appearance_study: AppearanceStudy, materials: MaterialCollectionRecord | null, hardware: ProjectHardwareCapture | null, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, manufacturing_intent: ManufacturingIntent | null, manufacturing_artifact: ManufacturingArtifactRecord | null, };
 
-export type ProjectInfo = { project_id: ProjectId, revision: ProjectRevision, saved_revision: ProjectRevision | null, path_label: string | null, dirty: boolean, save_uncertain: boolean, read_only: boolean, recovered_previous: boolean, can_undo: boolean, can_redo: boolean, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, appearance_study: AppearanceStudyInfo, materials: MaterialCollectionRecord | null, resolved_process: Array<ResolvedOccurrenceProcess>, };
+export type ProjectInfo = { project_id: ProjectId, revision: ProjectRevision, saved_revision: ProjectRevision | null, path_label: string | null, dirty: boolean, save_uncertain: boolean, read_only: boolean, recovered_previous: boolean, can_undo: boolean, can_redo: boolean, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, appearance_study: AppearanceStudyInfo, materials: MaterialCollectionRecord | null, hardware: ProjectHardwareCapture | null, resolved_process: Array<ResolvedOccurrenceProcess>, };
 
 export type ProjectStorageLimits = { chunk_bytes: bigint, object_bytes: bigint, root_bytes: bigint, guard_bytes: bigint, snapshot_bytes: bigint, database_bytes: bigint, journal_bytes: bigint, scratch_bytes: bigint, scratch_entries: bigint, snapshots: bigint, membership_rows: bigint, objects: bigint, mapping_rows: bigint, chunks: bigint, members_per_snapshot: bigint, };
 
@@ -420,7 +466,7 @@ export type ProjectStorageStats = { current_raw_bytes: bigint, previous_only_raw
 
 export type StorageMaintenanceAction = "stats" | "collect_unreachable" | "compact_to_new";
 
-export type ProjectCommand = { "op": "put_recipe", session_id: SessionId, base_revision: ProjectRevision, transfer: RecipeTransfer, expected: SourceHash | null, } | { "op": "get_recipe", session_id: SessionId, base_revision: ProjectRevision, reference: RecipeRef, } | { "op": "list_recipes", session_id: SessionId, base_revision: ProjectRevision, offset: number, } | { "op": "load_recipe_study", session_id: SessionId, base_revision: ProjectRevision, reference: RecipeRef, context: RecipeStudyContext, } | { "op": "capture_recipe", session_id: SessionId, base_revision: ProjectRevision, id: RecipeId, name: string, ingredients: Array<RecipeIngredient>, expected: SourceHash | null, } | { "op": "put_filament", session_id: SessionId, base_revision: ProjectRevision, revision: FilamentRevision, origin: LibraryOrigin | null, expected: SourceHash | null, } | { "op": "get_filament", session_id: SessionId, base_revision: ProjectRevision, reference: FilamentRef, } | { "op": "list_filaments", session_id: SessionId, base_revision: ProjectRevision, offset: number, } | { "op": "storage_maintenance", session_id: SessionId, base_revision: ProjectRevision, action: StorageMaintenanceAction, target: NativePath | null, } | { "op": "apply_optical_construction", session_id: SessionId, base_revision: ProjectRevision, application: ApplyOpticalConstruction, } | { "op": "import_appearance_palette", session_id: SessionId, base_revision: ProjectRevision, source: NativePath, } | { "op": "set_appearance_target", session_id: SessionId, base_revision: ProjectRevision, target: AppearanceTarget, limits: SearchLimits, } | { "op": "compare_appearance", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "accept_appearance_report", session_id: SessionId, base_revision: ProjectRevision, report_hash: SourceHash, selection: string | null, } | { "op": "get_appearance_report", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "set_optical_study", session_id: SessionId, base_revision: ProjectRevision, request: OpticalRequest, } | { "op": "compare_optical", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "get_optical_report", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "accept_optical_report", session_id: SessionId, base_revision: ProjectRevision, report_hash: SourceHash, selection: OpticalSelection | null, } | { "op": "edit_process", session_id: SessionId, base_revision: ProjectRevision, edit: ProcessEdit, } | { "op": "get", session_id: SessionId, } | { "op": "new", session_id: SessionId, base_revision: SceneRevision, discard_changes: boolean, } | { "op": "open", session_id: SessionId, base_revision: SceneRevision, path: NativePath, read_only: boolean, recover_previous: boolean, discard_changes: boolean, } | { "op": "save", session_id: SessionId, base_revision: SceneRevision, target: NativePath | null, } | { "op": "undo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "redo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "import_surface_image_finish", session_id: SessionId, base_revision: ProjectRevision, reference: FaceRef, scope: SurfaceScopeKind, source: NativePath, parameters: ImageReliefParameters, } | { "op": "get_surface_image", session_id: SessionId, base_revision: ProjectRevision, image_hash: SourceHash, } | { "op": "add_surface_finish", session_id: SessionId, base_revision: ProjectRevision, face_ref: FaceRef, scope: SurfaceScopeKind, finish: SurfaceFinish, } | { "op": "remove_surface_finish", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, } | { "op": "set_surface_finish_enabled", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, enabled: boolean, };
+export type ProjectCommand = { "op": "set_hardware", session_id: SessionId, base_revision: ProjectRevision, capture: ProjectHardwareCapture | null, } | { "op": "put_recipe", session_id: SessionId, base_revision: ProjectRevision, transfer: RecipeTransfer, expected: SourceHash | null, } | { "op": "get_recipe", session_id: SessionId, base_revision: ProjectRevision, reference: RecipeRef, } | { "op": "list_recipes", session_id: SessionId, base_revision: ProjectRevision, offset: number, } | { "op": "load_recipe_study", session_id: SessionId, base_revision: ProjectRevision, reference: RecipeRef, context: RecipeStudyContext, } | { "op": "capture_recipe", session_id: SessionId, base_revision: ProjectRevision, id: RecipeId, name: string, ingredients: Array<RecipeIngredient>, expected: SourceHash | null, } | { "op": "put_filament", session_id: SessionId, base_revision: ProjectRevision, revision: FilamentRevision, origin: LibraryOrigin | null, expected: SourceHash | null, } | { "op": "get_filament", session_id: SessionId, base_revision: ProjectRevision, reference: FilamentRef, } | { "op": "list_filaments", session_id: SessionId, base_revision: ProjectRevision, offset: number, } | { "op": "storage_maintenance", session_id: SessionId, base_revision: ProjectRevision, action: StorageMaintenanceAction, target: NativePath | null, } | { "op": "apply_optical_construction", session_id: SessionId, base_revision: ProjectRevision, application: ApplyOpticalConstruction, } | { "op": "import_appearance_palette", session_id: SessionId, base_revision: ProjectRevision, source: NativePath, } | { "op": "set_appearance_target", session_id: SessionId, base_revision: ProjectRevision, target: AppearanceTarget, limits: SearchLimits, } | { "op": "compare_appearance", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "accept_appearance_report", session_id: SessionId, base_revision: ProjectRevision, report_hash: SourceHash, selection: string | null, } | { "op": "get_appearance_report", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "set_optical_study", session_id: SessionId, base_revision: ProjectRevision, request: OpticalRequest, } | { "op": "compare_optical", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "get_optical_report", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "accept_optical_report", session_id: SessionId, base_revision: ProjectRevision, report_hash: SourceHash, selection: OpticalSelection | null, } | { "op": "edit_process", session_id: SessionId, base_revision: ProjectRevision, edit: ProcessEdit, } | { "op": "get", session_id: SessionId, } | { "op": "new", session_id: SessionId, base_revision: SceneRevision, discard_changes: boolean, } | { "op": "open", session_id: SessionId, base_revision: SceneRevision, path: NativePath, read_only: boolean, recover_previous: boolean, discard_changes: boolean, } | { "op": "save", session_id: SessionId, base_revision: SceneRevision, target: NativePath | null, } | { "op": "undo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "redo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "import_surface_image_finish", session_id: SessionId, base_revision: ProjectRevision, reference: FaceRef, scope: SurfaceScopeKind, source: NativePath, parameters: ImageReliefParameters, } | { "op": "get_surface_image", session_id: SessionId, base_revision: ProjectRevision, image_hash: SourceHash, } | { "op": "add_surface_finish", session_id: SessionId, base_revision: ProjectRevision, face_ref: FaceRef, scope: SurfaceScopeKind, finish: SurfaceFinish, } | { "op": "remove_surface_finish", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, } | { "op": "set_surface_finish_enabled", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, enabled: boolean, };
 
 export type ProjectResponse = { "type": "recipe", transfer: RecipeTransfer, } | { "type": "recipes", entries: Array<RecipeSummary>, total: number, next_offset: number | null, } | { "type": "filaments", entries: Array<LibraryFilamentSummary>, total: number, next_offset: number | null, } | { "type": "filament", revision: FilamentRevision, } | { "type": "status", info: ProjectInfo, } | { "type": "scene_changed", info: ProjectInfo, summary: SceneSummary, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "error", error: ProjectError, };
 
@@ -617,7 +663,7 @@ input_changed: boolean | null, settings: Array<MaterialSettingReview>, };
 
 export type MaterialReviewReport = { input_revision: ProjectRevision, query: string, offset: number, catalog_profiles: number, matching_profiles: number, candidates: Array<MaterialCandidateReview>, };
 
-export type ManufacturingIntent = { material_profile: ResolvedMaterialProfile | null, printer: PrinterSpecification, recipe: PlanarPrintRecipe, };
+export type ManufacturingIntent = { hardware: ProjectHardwareCapture | null, material_profile: ResolvedMaterialProfile | null, printer: PrinterSpecification, recipe: PlanarPrintRecipe, };
 
 export type DepositionKind = "perimeter" | "solid_fill" | "bottom_skin" | "top_skin" | "sparse_fill" | "bridge" | "support" | "support_interface" | "separator_wall";
 

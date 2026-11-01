@@ -317,3 +317,9 @@ impl ResolvedMaterialProfile {
         self.selection.validate()
     }
 }
+
+pub(super) fn captured_hardware<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<std::sync::Arc<crate::hardware::ProjectHardwareCapture>>, D::Error> {
+    serde::Deserialize::deserialize(d)
+}

@@ -12,6 +12,7 @@ use spiling_contracts::surface::SurfaceScope;
 
 fn intent() -> ManufacturingIntent {
     ManufacturingIntent {
+        hardware: None,
         material_profile: None,
         printer: PrinterSpecification {
             schema_version: MANUFACTURING_SCHEMA_VERSION,

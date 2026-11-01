@@ -1219,6 +1219,7 @@ mod public_state_tests {
             }],
         };
         let info = ProjectInfo {
+            hardware: None,
             project_id: ProjectId::new(),
             revision: ProjectRevision(1),
             saved_revision: None,

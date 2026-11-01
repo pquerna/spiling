@@ -8,6 +8,7 @@ mod bed_pose;
 mod color_naming;
 mod error;
 pub mod geometry;
+mod hardware;
 mod library;
 pub mod manufacturing;
 mod operation;

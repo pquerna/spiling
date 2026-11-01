@@ -6,6 +6,7 @@ import type { ManufacturingIntent } from "../../packages/protocol/src/generated.
 import printer from "./software-cartesian.printer.ts";
 
 const intent = {
+  hardware: null,
   material_profile: null,
   printer,
   recipe: {

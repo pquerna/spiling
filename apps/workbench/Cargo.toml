@@ -20,6 +20,7 @@ egui-wgpu = { version = "=0.37.0", default-features = false }
 wgpu = { version = "=30.0.0", default-features = false, features = ["std", "vulkan", "metal", "dx12", "wgsl"] }
 rfd = { version = "=0.17.2", default-features = false, features = ["xdg-portal"] }
 directories = "=6.0.0"
+zeroize = "=1.8.2"
 glam = "=0.34.1"
 bytemuck = { version = "=1.25.2", features = ["derive"] }
 serde_json.workspace = true

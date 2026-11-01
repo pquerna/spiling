@@ -176,6 +176,8 @@ pub struct ProjectManifest {
     pub appearance_study: AppearanceStudy,
     #[serde(deserialize_with = "required_option")]
     pub materials: Option<crate::library::MaterialCollectionRecord>,
+    #[serde(deserialize_with = "required_option")]
+    pub hardware: Option<Arc<crate::hardware::ProjectHardwareCapture>>,
     pub definitions: Vec<StoredDefinition>,
     pub occurrences: Vec<OccurrenceRecord>,
     #[serde(deserialize_with = "required_option")]
@@ -202,6 +204,18 @@ impl ProjectManifest {
             return Err(ProjectError::new(
                 ProjectErrorCode::ResourceLimit,
                 "project record budget exceeded",
+            ));
+        }
+        if let Some(h) = &self.hardware {
+            h.validate().map_err(|e| invalid(&e))?;
+        }
+        if self
+            .manufacturing_intent
+            .as_ref()
+            .is_some_and(|m| m.hardware != self.hardware)
+        {
+            return Err(invalid(
+                "hardware capture differs from manufacturing intent",
             ));
         }
         if let Some(materials) = &self.materials {
@@ -308,11 +322,18 @@ pub struct ProjectInfo {
     pub process_document: ProcessDocument,
     pub appearance_study: AppearanceStudyInfo,
     pub materials: Option<crate::library::MaterialCollectionRecord>,
+    #[serde(deserialize_with = "required_option")]
+    pub hardware: Option<Arc<crate::hardware::ProjectHardwareCapture>>,
     pub resolved_process: Vec<ResolvedOccurrenceProcess>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectCommand {
+    SetHardware {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        capture: Option<Arc<crate::hardware::ProjectHardwareCapture>>,
+    },
     PutRecipe {
         session_id: SessionId,
         base_revision: ProjectRevision,

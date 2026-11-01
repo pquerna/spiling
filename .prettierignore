@@ -63,3 +63,6 @@ fixtures/protocol/replay-fixed-dual.json
 fixtures/protocol/replay-sparse.json
 fixtures/protocol/replay-waste-only.json
 fixtures/protocol/replay.json
+
+# Trusted TypeScript author owns the generated hardware catalog bytes.
+crates/contracts/data/hardware-catalog.json

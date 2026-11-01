@@ -592,3 +592,305 @@ async fn complete_recipes_copy_atomically_reassess_and_reopen_without_personal_s
     assert!(!workspace.0.join("Missing.spil").exists());
     reopened.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory() {
+    use spiling_contracts::{hardware::*, manufacturing::*};
+    use std::sync::Arc;
+    let workspace = Workspace::new();
+    let mut client = spawn(&workspace.0, "hardware-one", "My library.spil").await;
+    let catalog = client.rpc().hardware_catalog().await.unwrap();
+    let machine = uuid::Uuid::new_v4().to_string();
+    let plate = uuid::Uuid::new_v4().to_string();
+    let slot = uuid::Uuid::new_v4().to_string();
+    let mut h = HardwareLibrary::default();
+    for id in [machine.clone(), uuid::Uuid::new_v4().to_string()] {
+        h.machines.push(OwnedMachine {
+            id,
+            nickname: "PRIVATE Workshop sentinel".into(),
+            serial: Some("PRIVATE-SERIAL-SENTINEL".into()),
+            location: Some("PRIVATE-ROOM-SENTINEL".into()),
+            setup: catalog.setups[0].clone(),
+            generation: 1,
+        });
+    }
+    for id in [plate.clone(), uuid::Uuid::new_v4().to_string()] {
+        h.plates.push(OwnedPlate {
+            id,
+            nickname: "PRIVATE-SHEET-SENTINEL".into(),
+            definition: catalog.plates[0].clone(),
+            installed_machine: None,
+            notes: "PRIVATE-CONDITION-SENTINEL".into(),
+        });
+    }
+    h.routes.push(EndpointRoute {
+        id: uuid::Uuid::new_v4().to_string(),
+        machine_id: machine.clone(),
+        family: ConnectionFamily::Moonraker,
+        endpoint: "http://private-endpoint.invalid".into(),
+        expected_identity: "PRIVATE-DEVICE-SENTINEL".into(),
+        generation: 1,
+        credential: Some(CredentialRef {
+            slot_id: slot.clone(),
+            role: CredentialRole::ApiKey,
+            backend: CredentialBackend::PlaintextFile,
+        }),
+    });
+    write(
+        &client,
+        LibraryMutation::ReplaceHardware {
+            hardware: h.clone(),
+        },
+    )
+    .await;
+    let capture = Arc::new(
+        client
+            .rpc()
+            .library_hardware()
+            .await
+            .unwrap()
+            .hardware
+            .capture(&machine, &plate, "textured")
+            .unwrap(),
+    );
+    let original = info(&client).await;
+    client
+        .rpc()
+        .project(ProjectCommand::SetHardware {
+            session_id: client.hello().session_id.clone(),
+            base_revision: original.revision,
+            capture: Some(capture.clone()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(info(&client).await.hardware, Some(capture.clone()));
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/geometry/box-mm.step");
+    let GeometryResponse::OperationAccepted { operation } = client
+        .rpc()
+        .geometry(GeometryCommand::ImportPart {
+            session_id: client.hello().session_id.clone(),
+            base_revision: scene_revision(&client).await,
+            source: native(&source),
+            initial_pose: RigidPoseMm::IDENTITY,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("import")
+    };
+    wait(&client, operation).await;
+    let intent: ManufacturingIntent = serde_json::from_str(include_str!(
+        "../../../fixtures/manufacturing/solid-fill.intent.json"
+    ))
+    .unwrap();
+    client
+        .rpc()
+        .manufacturing(ManufacturingCommand::SetIntent {
+            session_id: client.hello().session_id.clone(),
+            base_revision: info(&client).await.revision,
+            intent: Arc::new(intent),
+        })
+        .await
+        .unwrap();
+    let ManufacturingResponse::OperationAccepted { operation } = client
+        .rpc()
+        .manufacturing(ManufacturingCommand::Compile {
+            session_id: client.hello().session_id.clone(),
+            base_revision: info(&client).await.revision,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("compile")
+    };
+    let JobResult::ManufacturingCompiled { record, .. } = wait(&client, operation).await else {
+        panic!("compiled")
+    };
+    let ManufacturingResponse::OperationAccepted { operation } = client
+        .rpc()
+        .manufacturing(ManufacturingCommand::Inspect {
+            session_id: client.hello().session_id.clone(),
+            base_revision: info(&client).await.revision,
+            output: VerificationOutput::ReportOnly,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("inspect")
+    };
+    let JobResult::ManufacturingVerified { report, .. } = wait(&client, operation).await else {
+        panic!("verified")
+    };
+    assert!(report.verified);
+    let before = info(&client).await;
+    h.machines[0].nickname = "RENAMED-PRIVATE-SENTINEL".into();
+    write(&client, LibraryMutation::ReplaceHardware { hardware: h }).await;
+    assert_eq!(info(&client).await.revision, before.revision);
+    client
+        .rpc()
+        .project(ProjectCommand::SetHardware {
+            session_id: client.hello().session_id.clone(),
+            base_revision: before.revision,
+            capture: Some(capture.clone()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        info(&client).await.revision,
+        before.revision,
+        "same setup/local instance change must preserve project and artifact"
+    );
+    let mut changed = (*capture).clone();
+    changed.face = "smooth".into();
+    client
+        .rpc()
+        .project(ProjectCommand::SetHardware {
+            session_id: client.hello().session_id.clone(),
+            base_revision: before.revision,
+            capture: Some(Arc::new(changed)),
+        })
+        .await
+        .unwrap();
+    let ManufacturingResponse::Status { artifact, .. } = client
+        .rpc()
+        .manufacturing(ManufacturingCommand::Get {
+            session_id: client.hello().session_id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("status")
+    };
+    assert!(artifact.is_none());
+    client
+        .rpc()
+        .project(ProjectCommand::Undo {
+            session_id: client.hello().session_id.clone(),
+            base_revision: scene_revision(&client).await,
+        })
+        .await
+        .unwrap();
+    let ManufacturingResponse::Status { artifact, .. } = client
+        .rpc()
+        .manufacturing(ManufacturingCommand::Get {
+            session_id: client.hello().session_id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("status")
+    };
+    assert_eq!(artifact.as_ref().map(|r| &r.hash), Some(&record.hash));
+    let mut blocked = (*capture).clone();
+    blocked.plate.faces[0].keepouts_mm.push(AabbMm {
+        min: [-1.; 3],
+        max: [220.; 3],
+    });
+    client
+        .rpc()
+        .project(ProjectCommand::SetHardware {
+            session_id: client.hello().session_id.clone(),
+            base_revision: info(&client).await.revision,
+            capture: Some(Arc::new(blocked)),
+        })
+        .await
+        .unwrap();
+    let ManufacturingResponse::OperationAccepted { operation } = client
+        .rpc()
+        .manufacturing(ManufacturingCommand::Preflight {
+            session_id: client.hello().session_id.clone(),
+            base_revision: info(&client).await.revision,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("preflight")
+    };
+    let JobResult::ManufacturingPreflight { report } = wait(&client, operation).await else {
+        panic!("preflight report")
+    };
+    assert_eq!(report.disposition, PreflightDisposition::Refused);
+    assert!(report.checks.iter().any(|c| c.code == "hardware_placement"));
+    client
+        .rpc()
+        .project(ProjectCommand::Undo {
+            session_id: client.hello().session_id.clone(),
+            base_revision: scene_revision(&client).await,
+        })
+        .await
+        .unwrap();
+    let path = workspace.0.join("Hardware job.spil");
+    let ProjectResponse::OperationAccepted { operation } = client
+        .rpc()
+        .project(ProjectCommand::Save {
+            session_id: client.hello().session_id.clone(),
+            base_revision: scene_revision(&client).await,
+            target: Some(native(&path)),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("save")
+    };
+    wait(&client, operation).await;
+    client.shutdown().await.unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    for sentinel in [
+        "PRIVATE",
+        "private-endpoint.invalid",
+        slot.as_str(),
+        machine.as_str(),
+        plate.as_str(),
+    ] {
+        assert!(
+            !bytes
+                .windows(sentinel.len())
+                .any(|w| w == sentinel.as_bytes()),
+            "private hardware data leaked: {sentinel}"
+        );
+    }
+    let mut reopened = spawn(&workspace.0, "hardware-two", "Absent library.spil").await;
+    let ProjectResponse::OperationAccepted { operation } = reopened
+        .rpc()
+        .project(ProjectCommand::Open {
+            session_id: reopened.hello().session_id.clone(),
+            base_revision: scene_revision(&reopened).await,
+            path: native(&path),
+            read_only: true,
+            recover_previous: false,
+            discard_changes: false,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("open")
+    };
+    wait(&reopened, operation).await;
+    assert_eq!(info(&reopened).await.hardware, Some(capture));
+    assert!(
+        reopened
+            .rpc()
+            .library_hardware()
+            .await
+            .unwrap()
+            .identity
+            .is_none()
+    );
+    let ManufacturingResponse::OperationAccepted { operation } = reopened
+        .rpc()
+        .manufacturing(ManufacturingCommand::Inspect {
+            session_id: reopened.hello().session_id.clone(),
+            base_revision: info(&reopened).await.revision,
+            output: VerificationOutput::ReportOnly,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("fresh replay")
+    };
+    let JobResult::ManufacturingVerified { report, .. } = wait(&reopened, operation).await else {
+        panic!("replayed")
+    };
+    assert!(report.verified);
+    reopened.shutdown().await.unwrap();
+}

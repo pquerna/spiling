@@ -10,6 +10,7 @@ use spiling_contracts::{
 };
 
 mod comparison;
+mod hardware;
 mod recipes;
 
 struct ProjectDefinitionDraft {
@@ -20,6 +21,7 @@ struct ProjectDefinitionDraft {
 pub(super) struct LibraryUi {
     pub open: bool,
     recipes: recipes::RecipeUi,
+    hardware: hardware::HardwareUi,
     personal: bool,
     query: String,
     on_hand: bool,
@@ -56,6 +58,12 @@ impl LibraryUi {
         self.queued = Some(LibraryAction::Write(request));
     }
     fn refresh(&mut self) {
+        if self.hardware.active {
+            self.queued = Some(LibraryAction::Hardware(
+                crate::host::hardware::HardwareAction::Refresh,
+            ));
+            return;
+        }
         if self.recipes.active {
             self.queued = Some(LibraryAction::Recipe(
                 crate::host::recipes::RecipeAction::Refresh {
@@ -252,13 +260,47 @@ impl Workbench {
         let writable = ready && self.state.project.as_ref().is_some_and(|p| !p.read_only);
         let personal_write = ready && state.status.is_some() && self.library.pending.is_none();
         ui.horizontal(|ui| {
-            let before = (self.library.personal, self.library.recipes.active);
+            let before = (
+                self.library.personal,
+                self.library.recipes.active,
+                self.library.hardware.active,
+            );
             ui.selectable_value(&mut self.library.personal, true, "My library");
             ui.selectable_value(&mut self.library.personal, false, "Project");
             ui.separator();
-            ui.selectable_value(&mut self.library.recipes.active, false, "Filaments");
-            ui.selectable_value(&mut self.library.recipes.active, true, "Recipes");
-            if before != (self.library.personal, self.library.recipes.active) {
+            if ui
+                .selectable_label(
+                    !self.library.hardware.active && !self.library.recipes.active,
+                    "Filaments",
+                )
+                .clicked()
+            {
+                self.library.recipes.active = false;
+                self.library.hardware.active = false;
+            }
+            if ui
+                .selectable_label(
+                    !self.library.hardware.active && self.library.recipes.active,
+                    "Recipes",
+                )
+                .clicked()
+            {
+                self.library.recipes.active = true;
+                self.library.hardware.active = false;
+            }
+            if ui
+                .selectable_label(self.library.hardware.active, "My Hardware")
+                .clicked()
+            {
+                self.library.hardware.active = true;
+            }
+            if before
+                != (
+                    self.library.personal,
+                    self.library.recipes.active,
+                    self.library.hardware.active,
+                )
+            {
                 self.library.refresh();
             }
             if ui
@@ -270,6 +312,11 @@ impl Workbench {
         });
         if self.library.personal {
             self.library_header(ui, state, ready);
+        }
+        if self.library.hardware.active {
+            self.hardware_content(ui, state, ready, writable);
+            self.library_pending(ui, state, ready);
+            return;
         }
         if self.library.recipes.active {
             self.recipes_content(ui, state, ready, writable, personal_write);

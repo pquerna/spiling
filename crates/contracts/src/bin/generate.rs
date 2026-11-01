@@ -7,8 +7,8 @@ use spiling_contracts::{
     TRIANGLE_HEADER_BYTES, TRIANGLE_INDEX_COUNT, TRIANGLE_SCHEMA_VERSION, TRIANGLE_VERTEX_COUNT,
 };
 use spiling_contracts::{
-    appearance::*, color_naming::*, display::*, geometry::*, library::*, manufacturing::*,
-    optical::*, process::*, project::*, surface::*,
+    appearance::*, color_naming::*, display::*, geometry::*, hardware::*, library::*,
+    manufacturing::*, optical::*, process::*, project::*, surface::*,
 };
 use std::{env, fs, path::Path};
 use ts_rs::TS;
@@ -55,6 +55,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SpoolRecord::decl(&config),
         LibraryReceipt::decl(&config),
         LibraryDocument::decl(&config),
+        HardwareModelDefinition::decl(&config),
+        HardwareSetupDefinition::decl(&config),
+        PlateFaceDefinition::decl(&config),
+        PlateDefinition::decl(&config),
+        AccessoryEffect::decl(&config),
+        AccessoryDefinition::decl(&config),
+        ProjectHardwareCapture::decl(&config),
+        OwnedMachine::decl(&config),
+        OwnedPlate::decl(&config),
+        OwnedAccessory::decl(&config),
+        CredentialBackend::decl(&config),
+        CredentialRole::decl(&config),
+        CredentialRef::decl(&config),
+        ConnectionFamily::decl(&config),
+        EndpointRoute::decl(&config),
+        LocalProjectHardwareBinding::decl(&config),
+        HardwareLibrary::decl(&config),
+        HardwareCatalog::decl(&config),
+        LibraryHardware::decl(&config),
         LibraryMutation::decl(&config),
         LibraryWrite::decl(&config),
         LibraryErrorCode::decl(&config),

@@ -34,6 +34,7 @@ fn layer_preferences_resolve_without_changing_limits_and_protections_do_not() {
 
 fn intent() -> ManufacturingIntent {
     ManufacturingIntent {
+        hardware: None,
         material_profile: None,
         printer: PrinterSpecification {
             schema_version: MANUFACTURING_SCHEMA_VERSION,
@@ -1447,6 +1448,7 @@ fn manifest_artifact_must_reference_current_explicit_intent_and_input_hash() {
     let p = &bundle.provenance;
     let bytes = serde_json::to_vec(&bundle).unwrap();
     let mut manifest = ProjectManifest {
+        hardware: None,
         next_process_layer: 1,
         next_process_operation: 1,
         process_document: crate::process::ProcessDocument::empty(),

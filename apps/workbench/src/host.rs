@@ -4,6 +4,7 @@
 
 //! Native admission and the sole frontend owner of EngineClient. No engine domain logic lives here.
 use crate::manufacture;
+pub mod hardware;
 pub mod library;
 pub mod recipes;
 use crate::scene::{Scene, Section};
@@ -319,6 +320,7 @@ impl Host {
             pending: None,
             confirmation: None,
             route: None,
+            library_location: None,
             deferred: None,
             dialog: None,
             nonce: 0,
@@ -587,6 +589,7 @@ struct Actor {
     pending: Option<Pending>,
     confirmation: Option<GuardedAction>,
     route: Option<Route>,
+    library_location: Option<NativePath>,
     deferred: Option<Action>,
     dialog: Option<u64>,
     nonce: u64,
@@ -796,7 +799,19 @@ impl Actor {
         self.state.hello = None;
         self.state.project = None;
         self.state.scene = None;
-        match EngineClient::spawn_in(&self.config.engine, &self.config.store).await {
+        // Restart must preserve the chosen private store even when it becomes unavailable.
+        // Passing the exact location at launch avoids briefly selecting a different library.
+        let startup = async {
+            if let Some(location) = &self.library_location {
+                let mut command = tokio::process::Command::new(&self.config.engine);
+                command.arg("--library").arg(location.to_os_string()?);
+                EngineClient::spawn_command(command, self.config.store.clone()).await
+            } else {
+                EngineClient::spawn_in(&self.config.engine, &self.config.store).await
+            }
+        }
+        .await;
+        match startup {
             Ok(client) => {
                 eprintln!(
                     "Spiling native host: connected pid={} build={} session={:?}",
@@ -1012,6 +1027,18 @@ impl Actor {
         self.state.project = Some(Arc::new(project));
         self.state.scene = Some(scene);
         self.schedule_display();
+        if self
+            .state
+            .project
+            .as_ref()
+            .is_some_and(|p| p.hardware.is_some())
+            && let Err(e) = self.refresh_hardware().await
+        {
+            let state = Arc::make_mut(&mut self.state.library);
+            state.hardware.error = Some(e.to_string());
+            state.hardware.personal = None;
+            state.hardware.local_selection = None;
+        }
         Ok(())
     }
     async fn request(&mut self, request: Request) {
@@ -1527,6 +1554,9 @@ impl Actor {
         match (&pending.receipt, &operation.result) {
             (Receipt::Open(route), Some(JobResult::Scene { summary })) if completed => {
                 self.route = Some(route.clone());
+                Arc::make_mut(&mut self.state.library)
+                    .hardware
+                    .local_selection = None;
                 let _ = summary;
             }
             (Receipt::Save(route), Some(JobResult::ProjectSaved { info })) if completed => {
@@ -1536,6 +1566,7 @@ impl Actor {
                     self.route = Some(route);
                 }
                 self.state.project = Some(Arc::new(info.clone()));
+                self.remember_hardware_selection().await;
             }
             (Receipt::Save(route), Some(JobResult::ProjectSaveUncertain { info }))
                 if operation.status == JobStatus::Failed && info.save_uncertain =>

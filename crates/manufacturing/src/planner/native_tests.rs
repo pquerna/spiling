@@ -112,6 +112,7 @@ fn intent(supports: bool) -> ManufacturingIntent {
         SupportPolicy::Disabled
     };
     ManufacturingIntent {
+        hardware: None,
         material_profile: None,
         recipe,
         printer: PrinterSpecification {

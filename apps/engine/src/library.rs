@@ -102,6 +102,16 @@ where
 }
 #[tonic::async_trait]
 impl rpc::libraries_server::Libraries for LibraryService {
+    async fn get_hardware_catalog(
+        &self,
+        _: Request<()>,
+    ) -> Result<Response<rpc::HardwareCatalog>, Status> {
+        reply(spiling_contracts::hardware::builtin_catalog().map_err(Status::internal)?)
+    }
+    async fn get_hardware(&self, _: Request<()>) -> Result<Response<rpc::LibraryHardware>, Status> {
+        let store = self.store()?;
+        reply(self.run(move |cancel| store.hardware(cancel)).await?)
+    }
     async fn get_status(&self, _: Request<()>) -> Result<Response<rpc::UserLibraryStatus>, Status> {
         let store = self.store()?;
         reply(self.run(move |cancel| store.status(cancel)).await?)

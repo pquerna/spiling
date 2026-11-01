@@ -76,6 +76,7 @@ impl Workbench {
         if self.manufacturing.panel == 1 {
             ui.heading("Prepare");
             ui.label("Declared printer and process");
+            self.hardware_summary(ui);
             self.button(ui, Action::LoadIntent);
             self.button(ui, Action::Library);
             self.material_ui(ui, ready, writable);

@@ -707,3 +707,12 @@ Recipe host coverage is `SPILING_TEST_ENGINE=PATH cargo test -p spiling-workbenc
 recipe_library_copy_and_fresh_study_use_native_host_services -- --ignored`.
 It exercises fresh comparison display before acceptance, explicit acceptance and
 stale project-copy refusal through the native host, separately from GUI rendering.
+
+## Hardware library acceptance
+
+`pnpm test:hardware` builds and runs the separate CLI/engine hardware journey,
+including private selection persistence, exact saved export return and standalone
+semantic recompilation. [Hardware contracts](../protocol/hardware.md#reproduction)
+own the native host Save As/restart command and support limits. Run native
+workloads sequentially with the existing resource limits; a passing software
+journey does not qualify a physical printer, OS credential provider or connector.

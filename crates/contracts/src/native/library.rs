@@ -411,6 +411,9 @@ impl TryFrom<rpc::LibraryWriteRequest> for LibraryWrite {
     fn try_from(v: rpc::LibraryWriteRequest) -> Result<Self, String> {
         use rpc::library_write_request::Mutation as M;
         let mutation = match required(v.mutation, "library mutation")? {
+            M::ReplaceHardware(v) => LibraryMutation::ReplaceHardware {
+                hardware: v.try_into()?,
+            },
             M::PutFilament(v) => LibraryMutation::PutFilament {
                 id: FilamentId(v.id),
                 expected: v
@@ -458,6 +461,9 @@ impl TryFrom<LibraryWrite> for rpc::LibraryWriteRequest {
         v.validate()?;
         use rpc::library_write_request::Mutation as M;
         let mutation = match v.mutation {
+            LibraryMutation::ReplaceHardware { hardware } => {
+                M::ReplaceHardware(hardware.try_into()?)
+            }
             LibraryMutation::PutFilament {
                 id,
                 expected,

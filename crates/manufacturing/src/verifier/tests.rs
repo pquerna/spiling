@@ -100,6 +100,7 @@ fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan)
 }
 fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     let intent = ManufacturingIntent {
+        hardware: None,
         material_profile: None,
         printer: PrinterSpecification {
             schema_version: MANUFACTURING_SCHEMA_VERSION,
@@ -3270,4 +3271,41 @@ fn physical_cycles_route_same_z_occurrences_independently_in_actual_commands() {
         crate::backend::emit(&plan, &crossing, &cancel).is_err(),
         "an already captured physical interval may not straddle a recipe slot"
     );
+}
+
+#[test]
+fn actual_deposition_beads_recheck_captured_plate_and_fixture_bounds() {
+    use spiling_contracts::hardware::*;
+    let (mut intent, plan) = fixture();
+    let catalog = builtin_catalog().unwrap();
+    let mut capture = ProjectHardwareCapture {
+        setup: catalog.setups[0].clone(),
+        plate: catalog.plates[0].clone(),
+        face: "textured".into(),
+        accessories: vec![],
+    };
+    capture.setup.printer = intent.printer.clone();
+    let cancel = AtomicBool::new(false);
+    intent.hardware = Some(std::sync::Arc::new(capture.clone()));
+    assert!(verify(GOLDEN, &plan, &intent, &cancel).unwrap().verified);
+    // All command centerlines fit; the independent replay must include bead width.
+    capture.plate.faces[0].usable_mm.max[0] = 6.25;
+    intent.hardware = Some(std::sync::Arc::new(capture.clone()));
+    let error = verify(GOLDEN, &plan, &intent, &cancel).unwrap_err();
+    assert!(error.message.contains("usable region"), "{error:?}");
+    capture.plate.faces[0].usable_mm.max[0] = 100.;
+    capture.accessories.push(AccessoryDefinition {
+        id: "test.clip".into(),
+        label: "Clip".into(),
+        mounting_interface: capture.setup.model.mounting_interface.clone(),
+        effect: AccessoryEffect::Fixture {
+            bounds_mm: AabbMm {
+                min: [2.75, 0.55, 0.],
+                max: [3.25, 0.8, 0.5],
+            },
+        },
+    });
+    intent.hardware = Some(std::sync::Arc::new(capture));
+    let error = verify(GOLDEN, &plan, &intent, &cancel).unwrap_err();
+    assert!(error.message.contains("fixture"), "{error:?}");
 }

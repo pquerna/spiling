@@ -1,0 +1,215 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+syntax = "proto3";
+package spiling.engine;
+import "spiling/native_common.proto";
+import "spiling/native_material.proto";
+import "spiling/native_appearance.proto";
+enum PrinterCoordinateFrame {
+  PRINTER_COORDINATE_FRAME_UNSPECIFIED = 0;
+  RIGHT_HANDED_MILLIMETRES = 1;
+}
+enum MotionSpace {
+  MOTION_SPACE_UNSPECIFIED = 0;
+  CARTESIAN_XYZ = 1;
+}
+enum OutputDialect {
+  OUTPUT_DIALECT_UNSPECIFIED = 0;
+  CARTESIAN_ABSOLUTE_GCODE_V1 = 1;
+  MARLIN2_SINGLE_EXTRUDER_GCODE_V1 = 2;
+  MARLIN2_FIXED_DUAL_GCODE_V1 = 3;
+}
+message PrinterCapabilities {
+  MotionSpace motion_space = 1;
+  uint32 extruders = 2;
+  OutputDialect output_dialect = 3;
+  bool generated_supports = 4;
+}
+enum MachineComponentRole {
+  MACHINE_COMPONENT_ROLE_UNSPECIFIED = 0;
+  BED = 1;
+  TOOLHEAD = 2;
+  FIXTURE = 3;
+}
+message CylinderComponentShape {
+  double radius_mm = 1;
+  double height_mm = 2;
+}
+message MachineComponentShape {
+  oneof shape {
+    AabbMm box = 1;
+    CylinderComponentShape cylinder = 2;
+  }
+}
+message MachineComponent {
+  string id = 1;
+  MachineComponentRole role = 2;
+  RigidPoseMm pose = 3;
+  MachineComponentShape shape = 4;
+}
+message PrinterSpecification {
+  uint32 schema_version = 1;
+  string id = 2;
+  string revision = 3;
+  string name = 4;
+  PrinterCoordinateFrame coordinate_frame = 5;
+  AabbMm build_envelope = 6;
+  repeated MachineComponent components = 7;
+  PrinterCapabilities capabilities = 8;
+  double nozzle_diameter_mm = 9;
+  double max_feed_mm_s = 10;
+  double max_volumetric_flow_mm3_s = 11;
+  JobWorkflow workflow = 12;
+  DepositionLimits deposition_limits = 13;
+}
+message DiagnosticBodyOnly {}
+enum HomingCoordinateContract {
+  HOMING_COORDINATE_CONTRACT_UNSPECIFIED = 0;
+  MARLIN_NATIVE_CARTESIAN = 1;
+}
+message JobWorkflow {
+  oneof workflow {
+    DiagnosticBodyOnly diagnostic_body_only = 1;
+    SingleExtruderJob complete_marlin = 2;
+    FixedDualJob fixed_dual_marlin = 3;
+  }
+}
+message SingleExtruderJob {
+  string machine_id = 1;
+  string firmware_version = 2;
+  string configuration_hash = 3;
+  string calibration_record_hash = 4;
+  HomingCoordinateContract homing_contract = 5;
+  Vec3 home_position_mm = 6;
+  // Temperature targets/limits are finite positive integral Celsius degrees.
+  // Complete configuration must compile TEMPERATURE_UNITS_SUPPORT (M149 C).
+  double nozzle_temperature_c = 7;
+  double bed_temperature_c = 8;
+  double minimum_extrusion_temperature_c = 9;
+  double maximum_nozzle_temperature_c = 10;
+  double maximum_bed_temperature_c = 11;
+  // Complete prime segment excludes the conservative whole-object XY bounds
+  // plus half bead width and serialization padding, irrespective of Z/holes.
+  Vec3 prime_start_mm = 12;
+  Vec3 prime_end_mm = 13;
+  double prime_filament_length_mm = 14;
+  double prime_speed_mm_s = 15;
+  Vec3 park_position_mm = 16;
+}
+
+enum FixedDualConfiguration {
+  FIXED_DUAL_CONFIGURATION_UNSPECIFIED = 0;
+  MARLIN2125_NATIVE_FIXED_HOTENDS = 1;
+}
+message LoadedMaterial {
+  string id = 1;
+  string revision = 2;
+  string declaration_hash = 3;
+  string polymer_family = 4;
+}
+message FixedDualTool {
+  string id = 1;
+  string feeder_id = 2;
+  LoadedMaterial material = 3;
+  repeated double offset_xy_mm = 4;
+  double nozzle_diameter_mm = 5;
+  double filament_diameter_mm = 6;
+  DepositionLimits deposition_limits = 7;
+  double max_feed_mm_s = 8;
+  double max_volumetric_flow_mm3_s = 9;
+  double nozzle_temperature_c = 10;
+  double standby_temperature_c = 11;
+  double minimum_extrusion_temperature_c = 12;
+  double maximum_nozzle_temperature_c = 13;
+  double retract_filament_mm = 14;
+  double retract_speed_mm_s = 15;
+  double minimum_reprime_volume_mm3 = 16;
+  // Exactly four coordinates: start X/Y, then end X/Y.
+  repeated double waste_line_xy_mm = 17;
+}
+message UniformOccurrenceMaterial {
+  string material_id = 1;
+}
+message LayerCycleOccurrenceMaterial {
+  OpticalLayerCycle recipe = 1;
+  // Exactly two ordered, distinct immutable loaded material identities.
+  repeated string material_ids = 2;
+}
+message OccurrenceMaterialAssignment {
+  uint32 occurrence_id = 1;
+  reserved 2;
+  AabbMm work_envelope_mm = 3;
+  // Required: omission and unknown alternatives are rejected by adapters.
+  oneof material {
+    UniformOccurrenceMaterial uniform = 4;
+    LayerCycleOccurrenceMaterial layer_cycle = 5;
+  }
+}
+message FixedDualJob {
+  string machine_id = 1;
+  FixedDualConfiguration configuration = 2;
+  string firmware_revision = 3;
+  string configuration_hash = 4;
+  string calibration_record_hash = 5;
+  HomingCoordinateContract homing_contract = 6;
+  Vec3 home_position_mm = 7;
+  double bed_temperature_c = 8;
+  double maximum_bed_temperature_c = 9;
+  // Exactly two tools and one or two occurrence reservations, in domain order.
+  repeated FixedDualTool tools = 10;
+  repeated OccurrenceMaterialAssignment assignments = 11;
+  double transition_lift_mm = 12;
+  AabbMm carriage_travel_bounds_mm = 13;
+  AabbMm carriage_body_bounds_mm = 14;
+  double inactive_nozzle_radius_mm = 15;
+  Vec3 park_position_mm = 16;
+  repeated SurfaceColorConstruction surface_constructions = 17;
+}
+message SurfaceColorFace {
+  string face_id = 1;
+  double skin_depth_mm = 2;
+  double backing_depth_mm = 3;
+  SurfaceColorMask mask = 4;
+}
+message SurfaceColorMask {
+  double min_u_mm = 1;
+  double max_u_mm = 2;
+}
+message SurfaceColorConstruction {
+  uint32 occurrence_id = 1;
+  string definition_id = 2;
+  string source_hash = 3;
+  repeated SurfaceColorFace faces = 4;
+  oneof shell {
+    UniformOccurrenceMaterial uniform = 5;
+    LayerCycleOccurrenceMaterial layer_cycle = 6;
+  }
+  string white_material_id = 7;
+  OpticalConstructionOrigin optical_origin = 8;
+}
+message AppliedOpticalMaterial {
+ AppearancePaletteRow evidence = 1;
+ string evidence_hash = 2;
+ LoadedMaterial loaded_material = 3;
+}
+message OpticalConstructionOrigin {
+ OpticalReportRecord report = 1;
+ string palette_hash = 2;
+ OpticalSelection selection = 3;
+ OpticalModel model = 4;
+ OpticalObservation observation = 5;
+ OpticalTarget target = 6;
+ OpticalPatch requested_patch = 7;
+ OpticalLayerCycle recipe = 8;
+ repeated AppliedOpticalMaterial materials = 9;
+ RigidPoseMm applied_pose = 10;
+}
+
+// Portable inert hardware definitions; never private inventory or credentials.
+message HardwareModelDefinition {string id=1;string vendor=2;string model=3;string source=4;string mounting_interface=5;AabbMm declared_volume_mm=6;}
+message HardwareSetupDefinition {string id=1;string label=2;HardwareModelDefinition model=3;PrinterSpecification printer=4;}
+message PlateFaceDefinition {string key=1;string label=2;string surface=3;AabbMm usable_mm=4;repeated AabbMm keepouts_mm=5;double max_bed_celsius=6;}
+message PlateDefinition {string id=1;string label=2;string mounting_interface=3;double thickness_mm=4;double surface_z_mm=5;repeated PlateFaceDefinition faces=6;string source=7;}
+message HardwareNozzle {double diameter_mm=1;string material=2;}
+message AccessoryDefinition {string id=1;string label=2;string mounting_interface=3;oneof effect {HardwareNozzle nozzle=4;AabbMm fixture=5;}}
+message ProjectHardwareCapture {HardwareSetupDefinition setup=1;PlateDefinition plate=2;string face=3;repeated AccessoryDefinition accessories=4;}

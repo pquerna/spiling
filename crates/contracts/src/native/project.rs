@@ -1,3 +1,4 @@
+use std::sync::Arc;
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
@@ -100,6 +101,17 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
                 }),
             )
         }
+        ProjectCommand::SetHardware {
+            session_id,
+            base_revision,
+            capture,
+        } => (
+            session_id,
+            C::SetHardware(rpc::ProjectSetHardwareRequest {
+                base_revision: base_revision.0,
+                capture: capture.map(|c| (*c).clone().try_into()).transpose()?,
+            }),
+        ),
         ProjectCommand::PutFilament {
             session_id,
             base_revision,
@@ -494,6 +506,11 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
                         .transpose()?,
                 }
             }
+            C::SetHardware(v) => Self::SetHardware {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                capture: v.capture.map(|c| c.try_into().map(Arc::new)).transpose()?,
+            },
             C::PutFilament(v) => Self::PutFilament {
                 session_id,
                 base_revision: ProjectRevision(v.base_revision),
@@ -771,6 +788,7 @@ impl TryFrom<rpc::ProjectInfo> for ProjectInfo {
             process_document: required(v.process_document, "project process document")?
                 .try_into()?,
             materials: v.materials.map(TryInto::try_into).transpose()?,
+            hardware: v.hardware.map(|h| h.try_into().map(Arc::new)).transpose()?,
             appearance_study: required(v.appearance_study, "project appearance study")?
                 .try_into()?,
             resolved_process: v
@@ -802,6 +820,7 @@ impl TryFrom<ProjectInfo> for rpc::ProjectInfo {
             process_document: Some(v.process_document.try_into()?),
             appearance_study: Some(v.appearance_study.try_into()?),
             materials: v.materials.map(TryInto::try_into).transpose()?,
+            hardware: v.hardware.map(|h| (*h).clone().try_into()).transpose()?,
             resolved_process: v
                 .resolved_process
                 .into_iter()
