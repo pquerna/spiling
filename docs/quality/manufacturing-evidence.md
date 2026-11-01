@@ -108,7 +108,12 @@ scheduling retain physical-layer samples and semantics.
 Event partitions and job-local span sizing propose work, never prove geometry.
 Multi-layer proposals shorten before a typed singleton shape-error path may split
 a layer. Unsupported, indeterminate, conditioning, resource and cancellation
-failures propagate rather than masquerading as successful refinement.
+failures propagate rather than masquerading as successful refinement. A terminal
+split refusal retains its own failure category and the last rejected native or
+field cause. Source slab/leaf causes identify the occurrence, source, query
+interval and sample; field causes retain the physical interval, sample and
+measured versus allowed error. Retry diagnostics replace prior causes rather
+than accumulating a query history.
 
 Native height event bands also delimit capture proposals without creating
 physical slice planes. Contacting physical layers use singleton captures;

@@ -4,9 +4,7 @@
 use super::{LayerElevation, boolean, preflight, region};
 use crate::{CompilerInput, check_cancel, error};
 use geo::{Area, BooleanOps, BoundingRect, Intersects, MultiPolygon};
-use spiling_contracts::geometry::{
-    DefinitionId, GeometryErrorCode, OccurrenceId, OccurrenceRecord, RigidPoseMm,
-};
+use spiling_contracts::geometry::{DefinitionId, OccurrenceId, OccurrenceRecord, RigidPoseMm};
 use spiling_contracts::manufacturing::program_coordinates::{
     project_xyz6_bead_height_mm, project_xyz6_coordinate_mm, project_xyz6_segment_bead_height_mm,
     xyz6_coordinate_error_mm,
@@ -1287,6 +1285,7 @@ pub(super) fn collect_span(
                         &mut state.sizing,
                         partition_end_z_bits,
                         "composed native shape-error refinement",
+                        &failure,
                     )?;
                     drop(candidate);
                     drop(current);
@@ -1826,12 +1825,23 @@ fn capture_base(
         check_cancel(cancel)?;
         let (interval, sample) = native_span_reference(schedule, index, end)?;
         let layer = &schedule[index as usize];
-        let mut refine = false;
-        for fields in admission.surface_fields.values() {
+        let mut refinement_cause = None;
+        for (occurrence_id, fields) in &admission.surface_fields {
             for field in fields {
                 if let Some(allowed) = field.allowed_vertical_error() {
-                    refine |=
-                        field.vertical_error_bound(layer.lower_z, layer.z, layer.sample)? > allowed;
+                    let bound = field.vertical_error_bound(layer.lower_z, layer.z, layer.sample)?;
+                    if bound > allowed {
+                        refinement_cause = Some(error(
+                            ManufacturingErrorCode::NativeShapeErrorExceeded,
+                            format!(
+                                "surface field at layer {index}, interval [{:.17e}, {:.17e}] mm, sample {:.17e} mm, occurrence {}: vertical error bound {bound:.17e} mm exceeds policy {allowed:.17e} mm",
+                                layer.lower_z,
+                                layer.z,
+                                layer.sample,
+                                occurrence_id.get()
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -1852,7 +1862,7 @@ fn capture_base(
             retained_bytes.saturating_add(pool.retained_bytes()),
         )?;
         let mut analyses = Vec::with_capacity(occurrences.len());
-        if !refine {
+        if refinement_cause.is_none() {
             for occurrence in occurrences {
                 check_cancel(cancel)?;
                 let cached = pool.take(
@@ -1890,21 +1900,23 @@ fn capture_base(
                     );
                     let analysis = match analysis {
                         Ok(analysis) => analysis,
-                        Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => {
-                            refine = true;
-                            break;
-                        }
                         Err(failure) => {
-                            return Err(super::native_error(
+                            let failure = super::native_error(
                                 failure,
                                 &format!(
-                                    "native slab at layer {index}, world interval [{:.17e}, {:.17e}] mm, sample {:.17e} mm, occurrence {}",
+                                    "native slab at layer {index}, world interval [{:.17e}, {:.17e}] mm, sample {:.17e} mm, occurrence {}, definition {}",
                                     interval[0],
                                     interval[1],
                                     sample,
-                                    occurrence.occurrence_id.get()
+                                    occurrence.occurrence_id.get(),
+                                    occurrence.definition_id.as_str(),
                                 ),
-                            ));
+                            );
+                            if failure.code == ManufacturingErrorCode::NativeShapeErrorExceeded {
+                                refinement_cause = Some(failure);
+                                break;
+                            }
+                            return Err(failure);
                         }
                     };
                     CapturedEvidence {
@@ -1951,7 +1963,7 @@ fn capture_base(
                 analyses.push(evidence);
             }
         }
-        if refine {
+        if let Some(cause) = refinement_cause {
             refine_candidate(
                 schedule,
                 index,
@@ -1959,6 +1971,7 @@ fn capture_base(
                 sizing,
                 partition_end_z_bits,
                 "native/field shape-error refinement",
+                &cause,
             )?;
             continue;
         }
@@ -2050,22 +2063,24 @@ fn capture_base(
                 cancel,
             ) {
                 Ok(leaf) => leaf,
-                Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => {
-                    refine = true;
-                    break;
-                }
                 Err(failure) => {
-                    return Err(super::native_error(
+                    let failure = super::native_error(
                         failure,
                         &format!(
-                            "actual source-M leaf at layer {index}, interval [{:.17e}, {:.17e}], sample {:.17e}, occurrence {}, pose {:?}",
+                            "actual source-M leaf at layer {index}, interval [{:.17e}, {:.17e}], sample {:.17e}, occurrence {}, definition {}, pose {:?}",
                             interval[0],
                             interval[1],
                             sample,
                             occurrence.occurrence_id.get(),
+                            occurrence.definition_id.as_str(),
                             occurrence.pose
                         ),
-                    ));
+                    );
+                    if failure.code == ManufacturingErrorCode::NativeShapeErrorExceeded {
+                        refinement_cause = Some(failure);
+                        break;
+                    }
+                    return Err(failure);
                 }
             };
             let source = SourceMaterial {
@@ -2240,7 +2255,7 @@ fn capture_base(
                 },
             )?;
         }
-        if refine {
+        if let Some(cause) = refinement_cause {
             refine_candidate(
                 schedule,
                 index,
@@ -2248,6 +2263,7 @@ fn capture_base(
                 sizing,
                 partition_end_z_bits,
                 "actual source-M leaf shape-error refinement",
+                &cause,
             )?;
             continue;
         }
@@ -2338,6 +2354,7 @@ fn refine_candidate(
     sizing: &mut NativeSpanSizing,
     partition_end_z_bits: u64,
     context: &str,
+    cause: &ManufacturingError,
 ) -> Result<(), ManufacturingError> {
     if *end > index + 1 {
         *end = index + (*end - index) / 2;
@@ -2345,7 +2362,13 @@ fn refine_candidate(
         return Ok(());
     }
     sizing.tighten(partition_end_z_bits, 1);
-    split_layer(schedule, index, context)?;
+    split_layer(schedule, index, context).map_err(|mut failure| {
+        // Keep only this rejected query's cause: accumulating prior retries
+        // would grow the diagnostic and could identify a different interval.
+        failure.message.push_str("; last rejected capture: ");
+        failure.message.push_str(&cause.to_string());
+        failure
+    })?;
     *end = index + 1;
     Ok(())
 }
@@ -4271,6 +4294,118 @@ mod allowance_tests {
             admit_bytes(usize::MAX, 1, 0).unwrap_err().code,
             ManufacturingErrorCode::ResourceLimit
         );
+    }
+}
+
+#[cfg(test)]
+mod refinement_tests {
+    use super::*;
+
+    fn layer(lower_z: f64, z: f64) -> LayerElevation {
+        let height = z - lower_z;
+        LayerElevation {
+            lower_z,
+            z,
+            sample: lower_z + height * 0.5,
+            height,
+        }
+    }
+
+    #[test]
+    fn terminal_refinement_reports_only_the_last_rejected_query() {
+        let mut schedule = vec![layer(0.0, 0.4)];
+        let mut sizing = NativeSpanSizing::default();
+        let mut end = 1;
+        let mut attempt = 0;
+        loop {
+            let cause = error(
+                ManufacturingErrorCode::NativeShapeErrorExceeded,
+                format!("native slab occurrence 7; rejected-query-{attempt}; native cause"),
+            );
+            let result = refine_candidate(
+                &mut schedule,
+                0,
+                &mut end,
+                &mut sizing,
+                0.4_f64.to_bits(),
+                "native shape-error refinement",
+                &cause,
+            );
+            if let Err(failure) = result {
+                assert!(attempt > 1, "exercise several successful retries first");
+                assert_eq!(
+                    failure.code,
+                    ManufacturingErrorCode::NativeShapeErrorExceeded
+                );
+                assert!(failure.message.contains("process-resolvable thickness"));
+                assert!(failure.message.ends_with(&cause.to_string()));
+                assert_eq!(failure.message.matches("rejected-query-").count(), 1);
+                assert_eq!(schedule[0].lower_z, 0.0);
+                assert_eq!(schedule.last().unwrap().z, 0.4);
+                break;
+            }
+            attempt += 1;
+        }
+    }
+
+    #[test]
+    fn exhausted_schedule_keeps_resource_failure_and_native_cause() {
+        let mut schedule: Vec<_> = (0..MAX_PRINT_LAYERS)
+            .map(|index| layer(index as f64 * 0.4, (index + 1) as f64 * 0.4))
+            .collect();
+        let cause = error(
+            ManufacturingErrorCode::NativeShapeErrorExceeded,
+            "actual source-M leaf, occurrence 2: original native rejection",
+        );
+        let failure = refine_candidate(
+            &mut schedule,
+            0,
+            &mut 1,
+            &mut NativeSpanSizing::default(),
+            0.4_f64.to_bits(),
+            "actual source-M leaf shape-error refinement",
+            &cause,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
+        assert!(failure.message.contains("layer budget"));
+        assert!(failure.message.ends_with(&cause.to_string()));
+        assert_eq!(schedule.len(), MAX_PRINT_LAYERS as usize);
+        assert_eq!(schedule[0].z, 0.4);
+    }
+
+    #[test]
+    fn narrower_capture_precedes_physical_subdivision() {
+        let mut schedule: Vec<_> = (0..4)
+            .map(|index| layer(index as f64 * 0.5, (index + 1) as f64 * 0.5))
+            .collect();
+        let mut sizing = NativeSpanSizing::default();
+        let mut end = 4;
+        let cause = error(
+            ManufacturingErrorCode::NativeShapeErrorExceeded,
+            "composed native metric exceeds policy",
+        );
+        for expected_end in [2, 1, 1] {
+            refine_candidate(
+                &mut schedule,
+                0,
+                &mut end,
+                &mut sizing,
+                2.0_f64.to_bits(),
+                "composed native shape-error refinement",
+                &cause,
+            )
+            .unwrap();
+            assert_eq!(end, expected_end);
+            assert_eq!(schedule.last().unwrap().z, 2.0);
+            if schedule.len() == 4 {
+                assert_eq!(schedule[0].z, 0.5);
+            }
+        }
+        assert_eq!(schedule.len(), 5);
+        assert_eq!(schedule[0].z, 0.25);
+        assert_eq!(schedule[1].lower_z, 0.25);
+        assert_eq!(schedule[1].z, 0.5);
     }
 }
 
