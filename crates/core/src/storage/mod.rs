@@ -34,6 +34,7 @@ const MANUFACTURING: u16 = 2;
 const IMAGE: u16 = 3;
 const PALETTE_ORIGINAL: u16 = 4;
 const PALETTE_CANONICAL: u16 = 5;
+const MATERIALS: u16 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveStage {
@@ -132,6 +133,7 @@ pub struct LoadedProject {
     pub manufacturing_artifact: Option<Arc<ManufacturingAsset>>,
     pub surface_images: BTreeMap<SourceHash, Arc<SurfaceImageAsset>>,
     pub appearance_palettes: BTreeMap<SourceHash, Arc<PaletteAsset>>,
+    pub materials: Option<Arc<super::materials::MaterialAsset>>,
     pub storage: Arc<Storage>,
     pub recovered_previous: bool,
     pub(crate) binding: StorageBinding,
@@ -152,6 +154,7 @@ pub struct LoadBudgets {
     pub manufacturing_bytes: usize,
     pub image_bytes: usize,
     pub appearance_bytes: usize,
+    pub material_bytes: usize,
 }
 impl LoadBudgets {
     pub const MAXIMUM: Self = Self {
@@ -159,6 +162,7 @@ impl LoadBudgets {
         manufacturing_bytes: MAX_MANUFACTURING_RETAINED_BYTES as usize,
         image_bytes: MAX_SURFACE_IMAGE_RETAINED_BYTES,
         appearance_bytes: MAX_APPEARANCE_RETAINED_BYTES,
+        material_bytes: super::materials::MAX_RETAINED_MATERIAL_BYTES,
     };
 }
 
@@ -298,6 +302,9 @@ fn member(role: u16, hash: &SourceHash) -> Member {
 
 fn expected_members(manifest: &ProjectManifest) -> BTreeSet<Member> {
     let mut result = BTreeSet::new();
+    if let Some(record) = &manifest.materials {
+        result.insert(member(MATERIALS, &record.hash));
+    }
     for definition in &manifest.definitions {
         result.insert(member(SOURCE, &definition.provenance.source_hash));
     }
@@ -372,6 +379,20 @@ fn load_assets(
         appearance_study: Arc::new(manifest.appearance_study.clone()),
         ..Snapshot::default()
     };
+    if let Some(record) = &manifest.materials {
+        let bytes = read_asset(
+            capture,
+            &record.hash,
+            budgets
+                .material_bytes
+                .min(spiling_contracts::library::MAX_MATERIAL_COLLECTION_BYTES),
+            None,
+            cancel,
+        )?;
+        snapshot.materials = Some(Arc::new(super::materials::MaterialAsset::decode(
+            record, bytes,
+        )?));
+    }
     let mut source_budget = budgets.source_bytes.min(MAX_RETAINED_SOURCE_BYTES);
     for record in &manifest.definitions {
         let bytes = read_asset(
@@ -544,6 +565,7 @@ pub fn open_reusing(
         manufacturing_artifact: snapshot.manufacturing_artifact,
         surface_images: snapshot.surface_images,
         appearance_palettes: snapshot.appearance_palettes,
+        materials: snapshot.materials,
         storage,
         recovered_previous: recover_previous,
         binding,
@@ -577,6 +599,12 @@ fn validate_other_root(
 
 fn snapshot_objects(snapshot: &Snapshot) -> BTreeMap<Member, Arc<Vec<u8>>> {
     let mut objects = BTreeMap::new();
+    if let Some(asset) = &snapshot.materials {
+        objects.insert(
+            member(MATERIALS, &asset.record().hash),
+            asset.bytes().clone(),
+        );
+    }
     for asset in snapshot.sources.values() {
         objects.insert(
             member(SOURCE, &asset.record.provenance.source_hash),
@@ -643,6 +671,14 @@ pub(crate) fn remaining_budgets(project: &Project) -> Result<LoadBudgets, Projec
         }
     }
     Ok(LoadBudgets {
+        material_bytes: super::materials::MAX_RETAINED_MATERIAL_BYTES.saturating_sub(
+            super::materials::retained_bytes(
+                std::iter::once(project.current.as_ref())
+                    .chain(project.undo.iter().map(Arc::as_ref))
+                    .chain(project.redo.iter().map(Arc::as_ref))
+                    .chain(staged.iter().map(Arc::as_ref)),
+            ),
+        ),
         source_bytes: MAX_RETAINED_SOURCE_BYTES
             .saturating_sub(allocation_sum(sources.values().copied())?),
         manufacturing_bytes: (MAX_MANUFACTURING_RETAINED_BYTES as usize)
@@ -768,6 +804,7 @@ pub fn save(
                         SOURCE => &mut budgets.source_bytes,
                         MANUFACTURING => &mut budgets.manufacturing_bytes,
                         IMAGE => &mut budgets.image_bytes,
+                        MATERIALS => &mut budgets.material_bytes,
                         PALETTE_ORIGINAL | PALETTE_CANONICAL => &mut budgets.appearance_bytes,
                         _ => return Err(invalid("unknown retained project object role")),
                     };

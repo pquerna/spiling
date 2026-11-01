@@ -7,6 +7,7 @@ import "google/longrunning/operations.proto";
 import "spiling/native_common.proto";
 import "spiling/native_geometry.proto";
 import "spiling/native_appearance.proto";
+import "spiling/native_library.proto";
 service Projects {
  rpc StorageMaintenance(StorageMaintenanceRequest) returns (google.longrunning.Operation) {
   option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
@@ -46,6 +47,9 @@ service Projects {
 message ProjectRequest {
  string parent = 1;
  oneof command {
+  ProjectPutFilamentRequest put_filament = 14;
+  ProjectGetFilamentRequest get_filament = 15;
+  ProjectListFilamentsRequest list_filaments = 16;
   GetProjectRequest get = 2;
   NewProjectRequest new = 3;
   UndoProjectRequest undo = 4;
@@ -60,6 +64,11 @@ message ProjectRequest {
   AcceptOpticalReportRequest accept_optical_report = 13;
  }
 }
+message MaterialCollectionRecord { string hash = 1; uint64 byte_count = 2; uint32 filament_count = 3; uint32 recipe_count = 4; }
+message ProjectPutFilamentRequest { uint32 base_revision = 1; LibraryFilamentRevision revision = 2; LibraryOrigin origin = 3; optional string expected = 4; }
+message ProjectGetFilamentRequest { uint32 base_revision = 1; LibraryFilamentRef reference = 2; }
+message ProjectListFilamentsRequest { uint32 base_revision = 1; uint32 offset = 2; }
+message ProjectFilamentPage { repeated LibraryFilamentSummary entries = 1; uint32 total = 2; optional uint32 next_offset = 3; }
 message GetProjectRequest {}
 message NewProjectRequest {uint32 base_revision = 1; bool discard_changes = 2;}
 message UndoProjectRequest {uint32 base_revision = 1;}
@@ -159,9 +168,9 @@ message ImportSurfaceImageFinishRequest { string parent = 1; string request_id =
 message GetSurfaceImageRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; string image_hash = 4; }
 message SurfaceImageImportedResult { ProjectInfo info = 1; SurfaceImageRecord image = 2; uint32 layer_id = 3; }
 message SurfaceImagePreparedResult { string project_id = 1; uint32 captured_revision = 2; SurfaceImageRecord record = 3; Artifact resource = 4; }
-message ProjectInfo {string project_id = 1; uint32 revision = 2; optional uint32 saved_revision = 3; optional string path_label = 4; bool dirty = 5; bool save_uncertain = 6; bool read_only = 7; bool recovered_previous = 8; bool can_undo = 9; bool can_redo = 10; SurfaceOverlays surface_overlays = 11; ProcessDocument process_document = 12; repeated ResolvedOccurrenceProcess resolved_process = 13; AppearanceStudyInfo appearance_study = 14;}
+message ProjectInfo {string project_id = 1; uint32 revision = 2; optional uint32 saved_revision = 3; optional string path_label = 4; bool dirty = 5; bool save_uncertain = 6; bool read_only = 7; bool recovered_previous = 8; bool can_undo = 9; bool can_redo = 10; SurfaceOverlays surface_overlays = 11; ProcessDocument process_document = 12; repeated ResolvedOccurrenceProcess resolved_process = 13; AppearanceStudyInfo appearance_study = 14; MaterialCollectionRecord materials = 15;}
 message ProjectSceneChanged {ProjectInfo info = 1; SceneSummary summary = 2;}
-message ProjectReply {oneof response {ProjectInfo status = 1; ProjectSceneChanged scene_changed = 2;}}
+message ProjectReply {oneof response {ProjectInfo status = 1; ProjectSceneChanged scene_changed = 2; ProjectFilamentPage filaments = 3; LibraryFilamentRevision filament = 4;}}
 message ImportAppearancePaletteRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath source = 4; }
 message CompareAppearanceRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }
 message GetAppearanceReportRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }

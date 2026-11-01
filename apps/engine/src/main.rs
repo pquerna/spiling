@@ -4,6 +4,7 @@
 
 mod geometry;
 mod jobs;
+mod library;
 mod native;
 mod session;
 use geometry::{Control, Reply};
@@ -787,13 +788,27 @@ pub(crate) fn diagnostic(level: &str, event: &str, message: &str) {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);
-    if args.next().as_deref() != Some(std::ffi::OsStr::new("--store")) {
-        return Err("engine requires --store PATH".into());
+    let mut store = None;
+    let mut library_path = None;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--store") if store.is_none() => {
+                store = Some(PathBuf::from(args.next().ok_or("store path missing")?))
+            }
+            Some("--library") if library_path.is_none() => {
+                library_path = Some(PathBuf::from(args.next().ok_or("library path missing")?))
+            }
+            _ => return Err("unexpected or duplicate engine argument".into()),
+        }
     }
-    let store = PathBuf::from(args.next().ok_or("store path missing")?);
-    if args.next().is_some() {
-        return Err("unexpected engine argument".into());
+    let store = store.ok_or("engine requires --store PATH")?;
+    if library_path
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute())
+    {
+        return Err("library path must be absolute".into());
     }
+    let library = library::LibraryService::new(library_path);
     let (stop, mut stopping) = watch::channel(false);
     let (startup_tx, startup_rx) = tokio::sync::oneshot::channel();
     let eof = stop.clone();
@@ -949,6 +964,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .add_service(tonic::service::interceptor::InterceptedService::new(
             manufacturing_server::ManufacturingServer::new(service.clone())
+                .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
+                .max_encoding_message_size(MAX_CONTROL_BYTES as usize),
+            authenticate.clone(),
+        ))
+        .add_service(tonic::service::interceptor::InterceptedService::new(
+            libraries_server::LibrariesServer::new(library)
                 .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
                 .max_encoding_message_size(MAX_CONTROL_BYTES as usize),
             authenticate.clone(),

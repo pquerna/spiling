@@ -14,6 +14,76 @@ export type NativeOperationView = { name: string, session_id: SessionId, capture
 
 export type Hello = { instance_id: string, engine_build: string, kernel: string, geometry_capabilities: Array<string>, max_control_bytes: number, max_binary_bytes: number, pid: number, session_id: SessionId, kernel_identity: KernelIdentity, geometry_limits: GeometryLimits, manufacturing_capabilities: Array<string>, project_capabilities: Array<string>, };
 
+export type MaterialCollectionRecord = { hash: SourceHash, byte_count: bigint, filament_count: number, recipe_count: number, };
+
+export type LibraryId = string;
+
+export type FilamentId = string;
+
+export type SpoolId = string;
+
+export type RecipeId = string;
+
+export type DefinitionSource = { "kind": "operator" } | { "kind": "imported", name: string, sha256: SourceHash, };
+
+export type DeclaredAppearance = { color: AppearanceColor, source: DefinitionSource, };
+
+export type FilamentDefinition = { name: string, material: MaterialDefinition | null, color_name: string | null, appearance: DeclaredAppearance | null, profiles: Array<MaterialProcessProfile>, source: DefinitionSource, };
+
+export type FilamentRef = { id: FilamentId, revision: SourceHash, };
+
+export type FilamentRevision = { reference: FilamentRef, definition: FilamentDefinition, };
+
+export type LibraryOrigin = { library_id: LibraryId, filament: FilamentRef, };
+
+export type FilamentEntry = { current: FilamentRef, archived: boolean, origin: LibraryOrigin | null, };
+
+export type RecipeIngredient = { filament: FilamentRef, palette_key: string, };
+
+export type RecipeDefinition = { name: string, ingredients: Array<RecipeIngredient>, palette: PaletteDocument, request: OpticalRequest, };
+
+export type RecipeEntry = { id: RecipeId, revision: SourceHash, definition: RecipeDefinition, };
+
+export type MaterialCollection = { entries: Array<FilamentEntry>, revisions: Array<FilamentRevision>, recipes: Array<RecipeEntry>, };
+
+export type StockState = "on_hand" | "ordered" | "empty" | "archived";
+
+export type QuantitySource = "entered" | "weighed";
+
+export type StockQuantity = { remaining_g: number, source: QuantitySource, };
+
+export type SpoolRecord = { id: SpoolId, filament: FilamentRef, name: string, state: StockState, quantity: StockQuantity | null, lot: string | null, location: string | null, };
+
+export type LibraryReceipt = { request_id: string, request_hash: SourceHash, revision: bigint, };
+
+export type LibraryDocument = { schema: number, id: LibraryId, revision: bigint, materials: MaterialCollection, spools: Array<SpoolRecord>, receipts: Array<LibraryReceipt>, };
+
+export type LibraryMutation = { "kind": "put_filament", id: FilamentId, expected: SourceHash | null, definition: FilamentDefinition, } | { "kind": "archive_filament", filament: FilamentRef, archived: boolean, } | { "kind": "put_spool", spool: SpoolRecord, } | { "kind": "remove_spool", id: SpoolId, } | { "kind": "put_recipe", id: RecipeId, expected: SourceHash | null, definition: RecipeDefinition, } | { "kind": "remove_recipe", id: RecipeId, expected: SourceHash, };
+
+export type LibraryWrite = { library_id: LibraryId | null, request_id: string, base_revision: bigint, mutation: LibraryMutation, };
+
+export type LibraryErrorCode = "invalid_data" | "not_found" | "stale_revision" | "locked" | "read_only" | "resource_limit" | "cancelled" | "io";
+
+export type LibraryError = { code: LibraryErrorCode, message: string, };
+
+export type LibraryIdentity = { id: LibraryId, revision: bigint, };
+
+export type LibraryStatus = { location: NativePath, identity: LibraryIdentity | null, filament_count: number, spool_count: number, recipe_count: number, };
+
+export type LibraryFilamentSummary = { entry: FilamentEntry, name: string, material: MaterialDefinition | null, color_name: string | null, appearance: DeclaredAppearance | null, profile_count: number, on_hand_spools: number, earlier_spools: number, };
+
+export type LibraryFilamentPage = { identity: LibraryIdentity | null, entries: Array<LibraryFilamentSummary>, total_matches: number, next_offset: number | null, };
+
+export type LibrarySpoolPage = { identity: LibraryIdentity | null, spools: Array<SpoolRecord>, total_matches: number, next_offset: number | null, };
+
+export type LibraryPublication = "confirmed" | "unconfirmed" | "unknown";
+
+export type LibraryWriteReceipt = { identity: LibraryIdentity, request_id: string, publication: LibraryPublication, replayed: boolean, message: string | null, };
+
+export type LibraryFilamentQuery = { expected: LibraryIdentity | null, query: string, offset: number, page_size: number, on_hand_only: boolean, include_archived: boolean, };
+
+export type LibrarySpoolQuery = { expected: LibraryIdentity | null, filament: FilamentRef | null, offset: number, page_size: number, };
+
 export type ColorNamingMode = "exact" | "nearest" | "descriptive";
 
 export type ColorModifier = "dark" | "light" | "muted" | "pale" | "vivid";
@@ -234,7 +304,7 @@ export type JobStatus = "queued" | "running" | "cancelling" | "completed" | "fai
 
 export type JobResult = { "kind": "project_storage_maintained", action: StorageMaintenanceAction, stats: ProjectStorageStats, } | { "kind": "optical_construction_applied", info: ProjectInfo, construction_index: number, } | { "kind": "scene", summary: SceneSummary, } | { "kind": "section", artifact_id: ArtifactId, } | { "kind": "bed_pose_prepared", preparation: BedPosePreparation, } | { "kind": "project_saved", info: ProjectInfo, } | { "kind": "project_save_uncertain", info: ProjectInfo, } | { "kind": "surface_image_imported", info: ProjectInfo, image: SurfaceImageRecord, layer_id: SurfaceLayerId, } | { "kind": "surface_image_prepared", project_id: ProjectId, captured_revision: ProjectRevision, record: SurfaceImageRecord, resource: ArtifactView, } | { "kind": "appearance_palette_imported", info: ProjectInfo, palette: PaletteRecord, } | { "kind": "appearance_compared", project_id: ProjectId, captured_revision: ProjectRevision, record: AppearanceReportRecord, resource: ArtifactView, } | { "kind": "optical_compared", project_id: ProjectId, captured_revision: ProjectRevision, record: OpticalReportRecord, resource: ArtifactView, } | { "kind": "manufacturing_preflight", report: PreflightReport, } | { "kind": "manufacturing_compiled", info: ProjectInfo, record: ManufacturingArtifactRecord, resource: ArtifactView, } | { "kind": "manufacturing_verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, };
 
-export type JobError = { "domain": "geometry", error: GeometryError, } | { "domain": "project", error: ProjectError, } | { "domain": "manufacturing", error: ManufacturingError, };
+export type JobError = { "domain": "geometry", error: GeometryError, } | { "domain": "project", error: ProjectError, } | { "domain": "manufacturing", error: ManufacturingError, } | { "domain": "library", error: LibraryError, };
 
 export type ProjectErrorCode = "invalid_project" | "unsupported_format" | "missing_asset" | "corrupt_asset" | "project_locked" | "read_only" | "dirty_project" | "no_saved_path" | "no_undo" | "no_redo" | "stale_revision" | "busy" | "resource_limit" | "cancelled" | "io";
 
@@ -328,9 +398,9 @@ export type ProcessRegionStatus = "applied" | "no_eligible_interior" | "no_densi
 
 export type ProcessRegionResolution = { occurrence_id: OccurrenceId, definition_id: DefinitionId, provenance: ProcessProvenance, status: ProcessRegionStatus, };
 
-export type ProjectManifest = { format_version: number, project_id: ProjectId, revision: ProjectRevision, units: ProjectUnits, frame: ProjectFrame, next_occurrence: number, next_surface_layer: number, surface_overlays: SurfaceOverlays, next_process_layer: number, next_process_operation: number, process_document: ProcessDocument, appearance_study: AppearanceStudy, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, manufacturing_intent: ManufacturingIntent | null, manufacturing_artifact: ManufacturingArtifactRecord | null, };
+export type ProjectManifest = { format_version: number, project_id: ProjectId, revision: ProjectRevision, units: ProjectUnits, frame: ProjectFrame, next_occurrence: number, next_surface_layer: number, surface_overlays: SurfaceOverlays, next_process_layer: number, next_process_operation: number, process_document: ProcessDocument, appearance_study: AppearanceStudy, materials: MaterialCollectionRecord | null, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, manufacturing_intent: ManufacturingIntent | null, manufacturing_artifact: ManufacturingArtifactRecord | null, };
 
-export type ProjectInfo = { project_id: ProjectId, revision: ProjectRevision, saved_revision: ProjectRevision | null, path_label: string | null, dirty: boolean, save_uncertain: boolean, read_only: boolean, recovered_previous: boolean, can_undo: boolean, can_redo: boolean, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, appearance_study: AppearanceStudyInfo, resolved_process: Array<ResolvedOccurrenceProcess>, };
+export type ProjectInfo = { project_id: ProjectId, revision: ProjectRevision, saved_revision: ProjectRevision | null, path_label: string | null, dirty: boolean, save_uncertain: boolean, read_only: boolean, recovered_previous: boolean, can_undo: boolean, can_redo: boolean, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, appearance_study: AppearanceStudyInfo, materials: MaterialCollectionRecord | null, resolved_process: Array<ResolvedOccurrenceProcess>, };
 
 export type ProjectStorageLimits = { chunk_bytes: bigint, object_bytes: bigint, root_bytes: bigint, guard_bytes: bigint, snapshot_bytes: bigint, database_bytes: bigint, journal_bytes: bigint, scratch_bytes: bigint, scratch_entries: bigint, snapshots: bigint, membership_rows: bigint, objects: bigint, mapping_rows: bigint, chunks: bigint, members_per_snapshot: bigint, };
 
@@ -338,9 +408,9 @@ export type ProjectStorageStats = { current_raw_bytes: bigint, previous_only_raw
 
 export type StorageMaintenanceAction = "stats" | "collect_unreachable" | "compact_to_new";
 
-export type ProjectCommand = { "op": "storage_maintenance", session_id: SessionId, base_revision: ProjectRevision, action: StorageMaintenanceAction, target: NativePath | null, } | { "op": "apply_optical_construction", session_id: SessionId, base_revision: ProjectRevision, application: ApplyOpticalConstruction, } | { "op": "import_appearance_palette", session_id: SessionId, base_revision: ProjectRevision, source: NativePath, } | { "op": "set_appearance_target", session_id: SessionId, base_revision: ProjectRevision, target: AppearanceTarget, limits: SearchLimits, } | { "op": "compare_appearance", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "accept_appearance_report", session_id: SessionId, base_revision: ProjectRevision, report_hash: SourceHash, selection: string | null, } | { "op": "get_appearance_report", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "set_optical_study", session_id: SessionId, base_revision: ProjectRevision, request: OpticalRequest, } | { "op": "compare_optical", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "get_optical_report", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "accept_optical_report", session_id: SessionId, base_revision: ProjectRevision, report_hash: SourceHash, selection: OpticalSelection | null, } | { "op": "edit_process", session_id: SessionId, base_revision: ProjectRevision, edit: ProcessEdit, } | { "op": "get", session_id: SessionId, } | { "op": "new", session_id: SessionId, base_revision: SceneRevision, discard_changes: boolean, } | { "op": "open", session_id: SessionId, base_revision: SceneRevision, path: NativePath, read_only: boolean, recover_previous: boolean, discard_changes: boolean, } | { "op": "save", session_id: SessionId, base_revision: SceneRevision, target: NativePath | null, } | { "op": "undo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "redo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "import_surface_image_finish", session_id: SessionId, base_revision: ProjectRevision, reference: FaceRef, scope: SurfaceScopeKind, source: NativePath, parameters: ImageReliefParameters, } | { "op": "get_surface_image", session_id: SessionId, base_revision: ProjectRevision, image_hash: SourceHash, } | { "op": "add_surface_finish", session_id: SessionId, base_revision: ProjectRevision, face_ref: FaceRef, scope: SurfaceScopeKind, finish: SurfaceFinish, } | { "op": "remove_surface_finish", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, } | { "op": "set_surface_finish_enabled", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, enabled: boolean, };
+export type ProjectCommand = { "op": "put_filament", session_id: SessionId, base_revision: ProjectRevision, revision: FilamentRevision, origin: LibraryOrigin | null, expected: SourceHash | null, } | { "op": "get_filament", session_id: SessionId, base_revision: ProjectRevision, reference: FilamentRef, } | { "op": "list_filaments", session_id: SessionId, base_revision: ProjectRevision, offset: number, } | { "op": "storage_maintenance", session_id: SessionId, base_revision: ProjectRevision, action: StorageMaintenanceAction, target: NativePath | null, } | { "op": "apply_optical_construction", session_id: SessionId, base_revision: ProjectRevision, application: ApplyOpticalConstruction, } | { "op": "import_appearance_palette", session_id: SessionId, base_revision: ProjectRevision, source: NativePath, } | { "op": "set_appearance_target", session_id: SessionId, base_revision: ProjectRevision, target: AppearanceTarget, limits: SearchLimits, } | { "op": "compare_appearance", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "accept_appearance_report", session_id: SessionId, base_revision: ProjectRevision, report_hash: SourceHash, selection: string | null, } | { "op": "get_appearance_report", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "set_optical_study", session_id: SessionId, base_revision: ProjectRevision, request: OpticalRequest, } | { "op": "compare_optical", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "get_optical_report", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "accept_optical_report", session_id: SessionId, base_revision: ProjectRevision, report_hash: SourceHash, selection: OpticalSelection | null, } | { "op": "edit_process", session_id: SessionId, base_revision: ProjectRevision, edit: ProcessEdit, } | { "op": "get", session_id: SessionId, } | { "op": "new", session_id: SessionId, base_revision: SceneRevision, discard_changes: boolean, } | { "op": "open", session_id: SessionId, base_revision: SceneRevision, path: NativePath, read_only: boolean, recover_previous: boolean, discard_changes: boolean, } | { "op": "save", session_id: SessionId, base_revision: SceneRevision, target: NativePath | null, } | { "op": "undo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "redo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "import_surface_image_finish", session_id: SessionId, base_revision: ProjectRevision, reference: FaceRef, scope: SurfaceScopeKind, source: NativePath, parameters: ImageReliefParameters, } | { "op": "get_surface_image", session_id: SessionId, base_revision: ProjectRevision, image_hash: SourceHash, } | { "op": "add_surface_finish", session_id: SessionId, base_revision: ProjectRevision, face_ref: FaceRef, scope: SurfaceScopeKind, finish: SurfaceFinish, } | { "op": "remove_surface_finish", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, } | { "op": "set_surface_finish_enabled", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, enabled: boolean, };
 
-export type ProjectResponse = { "type": "status", info: ProjectInfo, } | { "type": "scene_changed", info: ProjectInfo, summary: SceneSummary, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "error", error: ProjectError, };
+export type ProjectResponse = { "type": "filaments", entries: Array<LibraryFilamentSummary>, total: number, next_offset: number | null, } | { "type": "filament", revision: FilamentRevision, } | { "type": "status", info: ProjectInfo, } | { "type": "scene_changed", info: ProjectInfo, summary: SceneSummary, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "error", error: ProjectError, };
 
 export type ArtifactSummary = { "kind": "mesh", artifact_id: ArtifactId, definition_id: DefinitionId, chunk_count: number, total_bytes: number, } | { "kind": "section", summary: SectionSummary, };
 

@@ -167,3 +167,12 @@ Explicit previous recovery validates that root's complete graph and guard indepe
 The filesystem adapter currently admits Unix paths and uses anchored no-follow ancestry, separate OS leases, SQLite's pinned standard VFS with the mandatory recovery namespace guard, and atomic no-replace rename. Linux is the local test surface. macOS code is not exercised durability evidence; non-Unix admission explicitly refuses rather than silently weakening safety. Network/cloud-synchronized filesystems, hostile concurrent namespace changes, cross-platform packaging and power-loss behavior remain unqualified.
 
 See [storage conformance and reproduction](../quality/authoring-evidence.md), `cargo test -p spiling-core-ptac` and `cargo test -p spiling-core`. Native geometry reconstruction, independently decoded actual-program replay and physical printability have separate owning gates.
+
+## Portable material collections
+
+A project captures reusable filament/profile definitions as immutable collection
+content, with a small explicit nullable descriptor in its root. Role 6 owns the
+exact collection bytes. This is separate from personal physical stock and from
+the material profile actually applied to manufacturing intent. The
+[personal/project material contract](library.md) owns identities, limits,
+transactions, publication and consumer workflows.

@@ -32,7 +32,12 @@ struct Database {
 }
 
 impl Database {
-    fn open(location: Arc<Location>, read_only: bool, creating: bool) -> Result<Self> {
+    fn open(
+        location: Arc<Location>,
+        read_only: bool,
+        creating: bool,
+        profile: DocumentProfile,
+    ) -> Result<Self> {
         let guard = Guard::new(location.clone(), !read_only, creating)?;
         #[cfg(test)]
         let fault = crate::fault_vfs::FaultVfs::for_current_thread(guard.name())?;
@@ -53,9 +58,9 @@ impl Database {
         let mut execution = Execution::new(&connection, &cancel);
         schema::configure(&connection, read_only)?;
         if creating {
-            schema::create(&connection)?;
+            schema::create(&connection, profile)?;
         } else {
-            schema::admit(&connection)?;
+            schema::admit(&connection, profile)?;
             let result: String =
                 connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
             if result != "ok" {
@@ -138,6 +143,7 @@ impl Database {
 }
 
 pub struct Container {
+    profile: DocumentProfile,
     database: Mutex<Option<Database>>,
     location: Arc<Location>,
     lease: Option<File>,
@@ -277,6 +283,7 @@ impl Container {
             self.location.clone(),
             self.read_only(),
             false,
+            self.profile,
         )?);
         self.poisoned.store(false, Ordering::Release);
         Ok(())
@@ -308,14 +315,22 @@ impl Container {
         Ok(DatabaseGuard(guard))
     }
     pub fn open_existing(path: &Path, read_only: bool) -> Result<Arc<Self>> {
+        Self::open_existing_for_profile(path, read_only, DocumentProfile::Project)
+    }
+    pub fn open_existing_for_profile(
+        path: &Path,
+        read_only: bool,
+        profile: DocumentProfile,
+    ) -> Result<Arc<Self>> {
         let location = Location::attach(path, false)?;
         let lease = if read_only {
             None
         } else {
             Some(location.writer_lease()?)
         };
-        let database = Database::open(location.clone(), read_only, false)?;
+        let database = Database::open(location.clone(), read_only, false, profile)?;
         Ok(Arc::new(Self {
+            profile,
             database: Mutex::new(Some(database)),
             location,
             lease,
@@ -338,7 +353,7 @@ impl Container {
             let mut execution = Execution::new(&database.connection, cancel);
             database.connection.execute_batch("BEGIN")?;
             let result = (|| {
-                let (heads, guard) = read_heads(&database.connection)?;
+                let (heads, guard) = read_heads(&database.connection, self.profile)?;
                 let selected = match selection {
                     Selection::Current => heads.current,
                     Selection::Previous => heads.previous.ok_or(Error::NoPrevious)?,
@@ -376,7 +391,7 @@ impl Container {
         cancel: &AtomicBool,
         observe: impl FnMut(SaveStage) -> bool,
     ) -> Result<Publication> {
-        Self::create(path, input, None, cancel, observe)
+        Self::create(path, DocumentProfile::Project, input, None, cancel, observe)
     }
     pub fn create_new_retaining(
         path: &Path,
@@ -385,10 +400,27 @@ impl Container {
         cancel: &AtomicBool,
         observe: impl FnMut(SaveStage) -> bool,
     ) -> Result<Publication> {
-        Self::create(path, input, Some(previous), cancel, observe)
+        Self::create(
+            path,
+            DocumentProfile::Project,
+            input,
+            Some(previous),
+            cancel,
+            observe,
+        )
+    }
+    pub fn create_new_for_profile(
+        path: &Path,
+        profile: DocumentProfile,
+        input: SnapshotInput<'_>,
+        cancel: &AtomicBool,
+        observe: impl FnMut(SaveStage) -> bool,
+    ) -> Result<Publication> {
+        Self::create(path, profile, input, None, cancel, observe)
     }
     fn create(
         path: &Path,
+        profile: DocumentProfile,
         input: SnapshotInput<'_>,
         previous: Option<SnapshotInput<'_>>,
         cancel: &AtomicBool,
@@ -404,7 +436,7 @@ impl Container {
         if !observe(SaveStage::Staged) {
             return Err(Error::Cancelled);
         }
-        let database = Database::open(stage.location.clone(), false, true)?;
+        let database = Database::open(stage.location.clone(), false, true, profile)?;
         let mut execution = Execution::new(&database.connection, cancel);
         database.connection.execute_batch("BEGIN IMMEDIATE")?;
         insert(&database.connection, &candidate, &mut staged, cancel)?;
@@ -420,7 +452,7 @@ impl Container {
         database.connection.execute(
             "INSERT INTO container VALUES(1,?1,1,?2,?3,?4,?5)",
             params![
-                PROFILE,
+                profile.name(),
                 &candidate.id.0[..],
                 previous_id.as_ref().map(|id| &id.0[..]),
                 candidate.guard,
@@ -438,7 +470,7 @@ impl Container {
         execution.finish();
         drop(execution);
         drop(database);
-        let checker = Database::open(stage.location.clone(), true, false)?;
+        let checker = Database::open(stage.location.clone(), true, false, profile)?;
         let verification = Execution::new(&checker.connection, cancel);
         verify_snapshot(&checker.connection, candidate.id, cancel)?;
         if let Some(previous) = previous_id {
@@ -451,13 +483,14 @@ impl Container {
             current: candidate.id,
             previous: previous_id,
         };
-        Self::publish_stage(target, lease, stage, heads, cancel, observe)
+        Self::publish_stage(target, lease, stage, heads, profile, cancel, observe)
     }
     fn publish_stage(
         target: Arc<Location>,
         lease: File,
         stage: Stage,
         heads: Heads,
+        profile: DocumentProfile,
         cancel: &AtomicBool,
         mut observe: impl FnMut(SaveStage) -> bool,
     ) -> Result<Publication> {
@@ -475,12 +508,13 @@ impl Container {
         if !observed && durability.is_ok() {
             durability = Err(invalid("post-publication observer failed"));
         }
-        let (database, reopen_error) = match Database::open(target.clone(), false, false) {
+        let (database, reopen_error) = match Database::open(target.clone(), false, false, profile) {
             Ok(database) => (Some(database), None),
             Err(error) => (None, Some(error)),
         };
         let unavailable = reopen_error.is_some();
         let container = Arc::new(Self {
+            profile,
             database: Mutex::new(database),
             location: target,
             lease: Some(lease),
@@ -520,7 +554,7 @@ impl Container {
         let mut execution = Execution::new(connection, cancel);
         connection.execute_batch("BEGIN IMMEDIATE")?;
         let preparation = (|| {
-            if read_heads(connection)?.0 != base {
+            if read_heads(connection, self.profile)?.0 != base {
                 return Err(Error::Conflict);
             }
             let retained = match retain {
@@ -542,7 +576,7 @@ impl Container {
                 .checked_add(1)
                 .ok_or_else(|| limit("generation exhausted"))?;
             connection.execute("UPDATE container SET generation=?1,current_snapshot=?2,previous_snapshot=?3,guard=?4,guard_hash=?5 WHERE singleton=1", params![generation, &candidate.id.0[..], previous.as_ref().map(|id| &id.0[..]), candidate.guard, &hash(candidate.guard)[..]])?;
-            schema::admit(connection)?;
+            schema::admit(connection, self.profile)?;
             cancelled(cancel)?;
             execution.commit_phase();
             if !observe(SaveStage::BeforeCommit) {
@@ -579,7 +613,7 @@ impl Container {
             Err(error) => {
                 let _ = connection.execute_batch("ROLLBACK");
                 let observed = if connection.is_autocommit() {
-                    reconcile(connection)
+                    reconcile(connection, self.profile)
                 } else {
                     Err(invalid("commit/rollback outcome unknown"))
                 };
@@ -606,7 +640,7 @@ impl Container {
     }
     pub fn check(&self, cancel: &AtomicBool) -> Result<()> {
         let current = self.capture(Selection::Current, cancel)?;
-        check_connection(&current.database.connection, cancel)
+        check_connection(&current.database.connection, self.profile, cancel)
     }
     pub fn compact_to_new(
         &self,
@@ -617,7 +651,7 @@ impl Container {
         self.writable()?;
         let current = self.capture(Selection::Current, cancel)?;
         let source = &current.database.connection;
-        check_connection(source, cancel)?;
+        check_connection(source, self.profile, cancel)?;
         let mut graphs = vec![(current.heads.current, graph(source, current.heads.current)?)];
         if let Some(previous) = current.heads.previous {
             graphs.push((previous, graph(source, previous)?));
@@ -634,7 +668,7 @@ impl Container {
         if !observe(SaveStage::Staged) {
             return Err(Error::Cancelled);
         }
-        let destination = Database::open(stage.location.clone(), false, true)?;
+        let destination = Database::open(stage.location.clone(), false, true, self.profile)?;
         let mut execution = Execution::new(&destination.connection, cancel);
         let connection = &destination.connection;
         connection.execute_batch("BEGIN IMMEDIATE")?;
@@ -711,7 +745,7 @@ impl Container {
         connection.execute(
             "INSERT INTO container VALUES(1,?1,1,?2,?3,?4,?5)",
             params![
-                PROFILE,
+                self.profile.name(),
                 &heads.current.0[..],
                 heads.previous.as_ref().map(|id| &id.0[..]),
                 &current.guard,
@@ -723,7 +757,7 @@ impl Container {
         execution.finish();
         drop(execution);
         drop(destination);
-        let checker = Database::open(stage.location.clone(), true, false)?;
+        let checker = Database::open(stage.location.clone(), true, false, self.profile)?;
         let verification = Execution::new(&checker.connection, cancel);
         verify_snapshot(&checker.connection, heads.current, cancel)?;
         if let Some(previous) = heads.previous {
@@ -731,7 +765,7 @@ impl Container {
         }
         drop(verification);
         drop(checker);
-        Self::publish_stage(target, lease, stage, heads, cancel, observe)
+        Self::publish_stage(target, lease, stage, heads, self.profile, cancel, observe)
     }
     pub fn collect_unreachable(
         &self,
@@ -744,7 +778,7 @@ impl Container {
         let mut execution = Execution::new(connection, cancel);
         connection.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            check_connection(connection, cancel)?;
+            check_connection(connection, self.profile, cancel)?;
             connection.execute_batch("DELETE FROM snapshot_objects WHERE snapshot_id NOT IN (SELECT current_snapshot FROM container UNION SELECT previous_snapshot FROM container WHERE previous_snapshot IS NOT NULL); DELETE FROM snapshots WHERE snapshot_id NOT IN (SELECT current_snapshot FROM container UNION SELECT previous_snapshot FROM container WHERE previous_snapshot IS NOT NULL); DELETE FROM object_chunks WHERE object_id NOT IN (SELECT root_object FROM snapshots UNION SELECT object_id FROM snapshot_objects); DELETE FROM objects WHERE object_id NOT IN (SELECT root_object FROM snapshots UNION SELECT object_id FROM snapshot_objects); DELETE FROM chunks WHERE chunk_id NOT IN (SELECT chunk_id FROM object_chunks);")?;
             cancelled(cancel)?;
             execution.commit_phase();
@@ -822,9 +856,13 @@ impl Container {
     }
 }
 
-fn check_connection(connection: &Connection, cancel: &AtomicBool) -> Result<()> {
-    schema::admit(connection)?;
-    let (heads, _) = read_heads(connection)?;
+fn check_connection(
+    connection: &Connection,
+    profile_kind: DocumentProfile,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    schema::admit(connection, profile_kind)?;
+    let (heads, _) = read_heads(connection, profile_kind)?;
     verify_snapshot(connection, heads.current, cancel)?;
     if let Some(previous) = heads.previous {
         verify_snapshot(connection, previous, cancel)?;
@@ -889,7 +927,7 @@ fn check_connection(connection: &Connection, cancel: &AtomicBool) -> Result<()> 
     Ok(())
 }
 
-fn reconcile(connection: &Connection) -> Result<(Heads, Vec<u8>)> {
+fn reconcile(connection: &Connection, profile_kind: DocumentProfile) -> Result<(Heads, Vec<u8>)> {
     let cancel = AtomicBool::new(false);
     let mut execution = Execution::new(connection, &cancel);
     connection.execute_batch("BEGIN")?;
@@ -899,7 +937,7 @@ fn reconcile(connection: &Connection) -> Result<(Heads, Vec<u8>)> {
         if integrity != "ok" {
             return Err(invalid("uncertain commit failed structural inspection"));
         }
-        let (heads, guard) = read_heads(connection)?;
+        let (heads, guard) = read_heads(connection, profile_kind)?;
         verify_snapshot(connection, heads.current, &cancel)?;
         if let Some(previous) = heads.previous {
             verify_snapshot(connection, previous, &cancel)?;
@@ -911,7 +949,7 @@ fn reconcile(connection: &Connection) -> Result<(Heads, Vec<u8>)> {
     result
 }
 
-fn read_heads(connection: &Connection) -> Result<(Heads, Vec<u8>)> {
+fn read_heads(connection: &Connection, profile_kind: DocumentProfile) -> Result<(Heads, Vec<u8>)> {
     let mut statement = connection.prepare("SELECT profile,generation,current_snapshot,previous_snapshot,guard,guard_hash FROM container WHERE singleton=1")?;
     let mut rows = statement.query([])?;
     let row = rows
@@ -935,7 +973,7 @@ fn read_heads(connection: &Connection) -> Result<(Heads, Vec<u8>)> {
     };
     let guard = blob(4)?;
     let digest = digest_bytes(blob(5)?)?;
-    if profile != PROFILE
+    if profile != profile_kind.name()
         || generation < 1
         || guard.is_empty()
         || guard.len() > MAX_GUARD_BYTES

@@ -4,6 +4,7 @@
 
 //! Shared gRPC client. RPC cancellation does not own accepted operations or the process.
 pub mod export;
+mod library;
 mod native;
 #[cfg(test)]
 mod tests;
@@ -46,6 +47,8 @@ pub enum ClientError {
     Geometry(#[from] spiling_contracts::geometry::GeometryError),
     #[error("project: {0}")]
     Project(#[from] spiling_contracts::project::ProjectError),
+    #[error("library: {0}")]
+    Library(#[from] spiling_contracts::library::LibraryError),
     #[error("manufacturing: {0}")]
     Manufacturing(#[from] spiling_contracts::manufacturing::ManufacturingError),
     #[error("invalid local request: {0}")]
@@ -61,6 +64,7 @@ impl ClientError {
         !matches!(
             self,
             Self::Geometry(_)
+                | Self::Library(_)
                 | Self::Project(_)
                 | Self::Manufacturing(_)
                 | Self::InvalidRequest(_)

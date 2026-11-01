@@ -1,0 +1,96 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
+syntax = "proto3";
+package spiling.engine;
+import "google/protobuf/empty.proto";
+import "spiling/native_common.proto";
+import "spiling/native_material.proto";
+import "spiling/native_appearance.proto";
+
+service Libraries {
+ rpc GetStatus(google.protobuf.Empty) returns (UserLibraryStatus);
+ rpc SetLocation(LibraryLocationRequest) returns (UserLibraryStatus);
+ rpc ListFilaments(LibraryListFilamentsRequest) returns (LibraryFilamentPage);
+ rpc GetFilament(LibraryGetFilamentRequest) returns (LibraryFilamentRevision);
+ rpc ListSpools(LibraryListSpoolsRequest) returns (LibrarySpoolPage);
+ rpc Write(LibraryWriteRequest) returns (LibraryWriteReceipt);
+}
+message LibraryLocationRequest { NativePath location = 1; }
+message LibraryIdentity { string id = 1; uint64 revision = 2; }
+message UserLibraryStatus {
+ NativePath location = 1;
+ LibraryIdentity identity = 2;
+ uint32 filament_count = 3;
+ uint32 spool_count = 4;
+ uint32 recipe_count = 5;
+}
+message LibraryImportedSource { string name = 1; string sha256 = 2; }
+message LibraryDefinitionSource {
+ oneof kind { google.protobuf.Empty operator = 1; LibraryImportedSource imported = 2; }
+}
+message LibraryAppearanceDeclaration { AppearanceColor color = 1; LibraryDefinitionSource source = 2; }
+message LibraryFilamentDefinition {
+ string name = 1; MaterialDefinition material = 2; optional string color_name = 3;
+ LibraryAppearanceDeclaration appearance = 4; repeated MaterialProcessProfile profiles = 5;
+ LibraryDefinitionSource source = 6;
+}
+message LibraryFilamentRef { string id = 1; string revision = 2; }
+message LibraryFilamentRevision { LibraryFilamentRef reference = 1; LibraryFilamentDefinition definition = 2; }
+message LibraryOrigin { string library_id = 1; LibraryFilamentRef filament = 2; }
+message LibraryFilamentEntry { LibraryFilamentRef current = 1; bool archived = 2; LibraryOrigin origin = 3; }
+message LibraryFilamentSummary {
+ LibraryFilamentEntry entry = 1; string name = 2; MaterialDefinition material = 3;
+ optional string color_name = 4; LibraryAppearanceDeclaration appearance = 5;
+ uint32 profile_count = 6; uint32 on_hand_spools = 7; uint32 earlier_spools = 8;
+}
+message LibraryListFilamentsRequest {
+ LibraryIdentity expected = 1; string query = 2; uint32 offset = 3; uint32 page_size = 4;
+ bool on_hand_only = 5; bool include_archived = 6;
+}
+message LibraryFilamentPage {
+ LibraryIdentity identity = 1; repeated LibraryFilamentSummary entries = 2;
+ uint32 total_matches = 3; optional uint32 next_offset = 4;
+}
+message LibraryGetFilamentRequest { string library_id = 1; LibraryFilamentRef reference = 2; }
+enum LibraryStockState {
+ LIBRARY_STOCK_STATE_UNSPECIFIED = 0; LIBRARY_STOCK_ON_HAND = 1;
+ LIBRARY_STOCK_ORDERED = 2; LIBRARY_STOCK_EMPTY = 3; LIBRARY_STOCK_ARCHIVED = 4;
+}
+enum LibraryQuantitySource {
+ LIBRARY_QUANTITY_SOURCE_UNSPECIFIED = 0; LIBRARY_QUANTITY_ENTERED = 1; LIBRARY_QUANTITY_WEIGHED = 2;
+}
+message LibraryStockQuantity { double remaining_g = 1; LibraryQuantitySource source = 2; }
+message LibrarySpoolRecord {
+ string id = 1; LibraryFilamentRef filament = 2; string name = 3;
+ LibraryStockState state = 4; LibraryStockQuantity quantity = 5;
+ optional string lot = 6; optional string location = 7;
+}
+message LibraryListSpoolsRequest {
+ LibraryIdentity expected = 1; LibraryFilamentRef filament = 2; uint32 offset = 3; uint32 page_size = 4;
+}
+message LibrarySpoolPage {
+ LibraryIdentity identity = 1; repeated LibrarySpoolRecord spools = 2;
+ uint32 total_matches = 3; optional uint32 next_offset = 4;
+}
+message LibraryPutFilament {
+ string id = 1; optional string expected = 2; LibraryFilamentDefinition definition = 3;
+}
+message LibraryArchiveFilament { LibraryFilamentRef filament = 1; bool archived = 2; }
+message LibraryWriteRequest {
+ optional string library_id = 1; string request_id = 2; uint64 base_revision = 3;
+ oneof mutation {
+  LibraryPutFilament put_filament = 4;
+  LibraryArchiveFilament archive_filament = 5;
+  LibrarySpoolRecord put_spool = 6;
+  string remove_spool = 7;
+ }
+}
+enum LibraryPublication {
+ LIBRARY_PUBLICATION_UNSPECIFIED = 0; LIBRARY_PUBLICATION_CONFIRMED = 1;
+ LIBRARY_PUBLICATION_UNCONFIRMED = 2; LIBRARY_PUBLICATION_UNKNOWN = 3;
+}
+message LibraryWriteReceipt {
+ LibraryIdentity identity = 1; string request_id = 2; LibraryPublication publication = 3;
+ bool replayed = 4; optional string message = 5;
+}

@@ -630,3 +630,15 @@ and byte-identical export. Evidence is retained in ignored
 inputs and outcomes; its independent decoder is shared with the
 [G-code comparison](gcode-parity.md), not the production verifier. Synthetic profile
 values and nominal output accounting do not establish physical material behavior.
+
+## Personal filament library
+
+[Library contracts](../protocol/library.md) define the per-user `.spil`, exact
+project copies, explicit manufacturing application and current support limits.
+After building the engine and CLI, run `node tools/smoke-filament-library.mjs` with
+`CARGO_TARGET_DIR` set to the build target when necessary. The runner retains
+owned inputs/receipts under ignored `.cache/filament-library-*`, registers duplicate
+spools, captures a profile into a native cube job, then deletes its original
+source/profile files and removes library access before fresh project replay/export.
+It checks all four exported artifacts. Use the existing native resource controls;
+these are software checks, not measured stock, color or machine qualification.

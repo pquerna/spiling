@@ -72,6 +72,16 @@ CREATE TABLE container (
 ) STRICT;
 ";
 
+fn ddl(profile: crate::DocumentProfile) -> std::borrow::Cow<'static, str> {
+    match profile {
+        crate::DocumentProfile::Project => std::borrow::Cow::Borrowed(DDL),
+        crate::DocumentProfile::UserLibrary => std::borrow::Cow::Owned(DDL.replace(
+            "CHECK(profile='spiling.project')",
+            "CHECK(profile='spiling.user-library')",
+        )),
+    }
+}
+
 pub(crate) fn configure(connection: &Connection, read_only: bool) -> Result<()> {
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
@@ -93,9 +103,9 @@ pub(crate) fn configure(connection: &Connection, read_only: bool) -> Result<()> 
     Ok(())
 }
 
-pub(crate) fn create(connection: &Connection) -> Result<()> {
+pub(crate) fn create(connection: &Connection, profile: crate::DocumentProfile) -> Result<()> {
     connection.execute_batch("PRAGMA page_size=4096; PRAGMA journal_mode=DELETE; PRAGMA auto_vacuum=NONE; PRAGMA application_id=1347699011; PRAGMA user_version=1;")?;
-    connection.execute_batch(DDL)?;
+    connection.execute_batch(&ddl(profile))?;
     Ok(())
 }
 
@@ -123,9 +133,9 @@ fn catalog(connection: &Connection) -> Result<Vec<CatalogRow>> {
     Ok(output)
 }
 
-pub(crate) fn admit(connection: &Connection) -> Result<()> {
+pub(crate) fn admit(connection: &Connection, profile: crate::DocumentProfile) -> Result<()> {
     let expected = Connection::open_in_memory()?;
-    expected.execute_batch(DDL)?;
+    expected.execute_batch(&ddl(profile))?;
     if catalog(connection)? != catalog(&expected)? {
         return Err(invalid("unexpected or weakened SQLite catalog"));
     }

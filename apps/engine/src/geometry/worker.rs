@@ -72,6 +72,7 @@ pub struct OpenRequest {
     pub budget: MeshBudget,
     pub retained_surface_image_bytes: usize,
     pub retained_appearance_bytes: usize,
+    pub retained_material_bytes: usize,
 }
 struct Opened {
     project: Project,
@@ -780,6 +781,7 @@ fn open(
         budget,
         retained_surface_image_bytes,
         retained_appearance_bytes,
+        retained_material_bytes,
     } = request;
     let path = project_path(path)?;
     // Old current/history allocations survive until ACK, even for identical IDs.
@@ -804,6 +806,14 @@ fn open(
         existing,
         storage::LoadBudgets {
             source_bytes: source_budget,
+            material_bytes: spiling_core::materials::MAX_RETAINED_MATERIAL_BYTES
+                .checked_sub(retained_material_bytes)
+                .ok_or_else(|| {
+                    ProjectError::new(
+                        ProjectErrorCode::ResourceLimit,
+                        "retained project material budget exceeded",
+                    )
+                })?,
             manufacturing_bytes: (MAX_MANUFACTURING_RETAINED_BYTES - retained_manufacturing_bytes)
                 as usize,
             image_bytes: spiling_contracts::surface::MAX_SURFACE_IMAGE_RETAINED_BYTES

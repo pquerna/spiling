@@ -21,7 +21,7 @@ message GeometryLimits {
 }
 message DomainError { string code = 1; string message = 2; }
 message DomainErrorDetail {
-  oneof error { DomainError geometry = 1; DomainError project = 2; DomainError manufacturing = 3; }
+  oneof error { DomainError geometry = 1; DomainError project = 2; DomainError manufacturing = 3; DomainError library = 4; }
 }
 message Artifact {
   string name = 1;

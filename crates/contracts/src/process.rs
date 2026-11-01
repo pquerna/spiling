@@ -1176,7 +1176,7 @@ mod tests {
             let ProjectCall::Execute(wire) = project_call(command.clone(), "").unwrap() else {
                 panic!("process edit must use Projects.Execute")
             };
-            assert_eq!(ProjectCommand::try_from(wire).unwrap(), command);
+            assert_eq!(ProjectCommand::try_from(*wire).unwrap(), command);
         }
         assert!(ProcessEdit::try_from(crate::rpc::ProcessEdit { op: None }).is_err());
         assert!(ProcessAction::try_from(crate::rpc::ProcessAction { kind: None }).is_err());
@@ -1239,6 +1239,7 @@ mod public_state_tests {
             }],
             process_document: document,
             appearance_study: crate::appearance::AppearanceStudy::default().info(),
+            materials: None,
         };
         let wire: crate::rpc::ProjectInfo = info.clone().try_into().unwrap();
         assert_eq!(ProjectInfo::try_from(wire.clone()).unwrap(), info);

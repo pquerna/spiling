@@ -213,6 +213,9 @@ pub(crate) async fn wait_operation(
                 return Err(operation
                     .error
                     .map(|error| match error {
+                        JobError::Library { error } => {
+                            Error::from(spiling_engine_client::ClientError::Library(error))
+                        }
                         JobError::Geometry { error } => {
                             Error::from(spiling_engine_client::ClientError::Geometry(error))
                         }

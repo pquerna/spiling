@@ -174,6 +174,8 @@ pub struct ProjectManifest {
     pub next_process_operation: u32,
     pub process_document: ProcessDocument,
     pub appearance_study: AppearanceStudy,
+    #[serde(deserialize_with = "required_option")]
+    pub materials: Option<crate::library::MaterialCollectionRecord>,
     pub definitions: Vec<StoredDefinition>,
     pub occurrences: Vec<OccurrenceRecord>,
     #[serde(deserialize_with = "required_option")]
@@ -201,6 +203,9 @@ impl ProjectManifest {
                 ProjectErrorCode::ResourceLimit,
                 "project record budget exceeded",
             ));
+        }
+        if let Some(materials) = &self.materials {
+            materials.validate().map_err(|e| invalid(&e))?;
         }
         let mut definitions = BTreeSet::new();
         for definition in &self.definitions {
@@ -302,11 +307,29 @@ pub struct ProjectInfo {
     pub surface_overlays: SurfaceOverlays,
     pub process_document: ProcessDocument,
     pub appearance_study: AppearanceStudyInfo,
+    pub materials: Option<crate::library::MaterialCollectionRecord>,
     pub resolved_process: Vec<ResolvedOccurrenceProcess>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectCommand {
+    PutFilament {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        revision: crate::library::FilamentRevision,
+        origin: Option<crate::library::LibraryOrigin>,
+        expected: Option<SourceHash>,
+    },
+    GetFilament {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        reference: crate::library::FilamentRef,
+    },
+    ListFilaments {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        offset: u32,
+    },
     StorageMaintenance {
         session_id: SessionId,
         base_revision: ProjectRevision,
@@ -435,6 +458,14 @@ pub enum ProjectCommand {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectResponse {
+    Filaments {
+        entries: Vec<crate::library::LibraryFilamentSummary>,
+        total: u32,
+        next_offset: Option<u32>,
+    },
+    Filament {
+        revision: crate::library::FilamentRevision,
+    },
     Status {
         info: ProjectInfo,
     },

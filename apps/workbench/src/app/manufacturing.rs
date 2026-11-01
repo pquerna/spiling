@@ -76,6 +76,7 @@ impl Workbench {
             ui.heading("Prepare");
             ui.label("Declared printer and process");
             self.button(ui, Action::LoadIntent);
+            self.button(ui, Action::Library);
             self.material_ui(ui, ready, writable);
             ui.separator();
             ui.heading("Recipe and construction");

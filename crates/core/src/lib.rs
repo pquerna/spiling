@@ -3,9 +3,11 @@
 // Licensed under the Open Software License version 3.0
 
 //! Runtime-independent authoring authority. Native caches are engine-owned.
+pub mod materials;
 mod optical_construction;
 mod process;
 pub use optical_construction::{OpticalConstructionCandidate, prepare_optical_construction};
+pub mod library;
 pub mod storage;
 use process::apply_process_edit;
 use sha2::{Digest, Sha256};
@@ -224,10 +226,16 @@ pub struct Snapshot {
     pub process_document: Arc<ProcessDocument>,
     pub surface_images: BTreeMap<SourceHash, Arc<SurfaceImageAsset>>,
     pub appearance_study: Arc<AppearanceStudy>,
+    pub materials: Option<Arc<materials::MaterialAsset>>,
     pub appearance_palettes: BTreeMap<SourceHash, Arc<PaletteAsset>>,
 }
 #[derive(Debug, Clone)]
 pub enum Edit {
+    PutFilament {
+        revision: spiling_contracts::library::FilamentRevision,
+        origin: Option<spiling_contracts::library::LibraryOrigin>,
+        expected: Option<SourceHash>,
+    },
     ApplyOpticalConstruction {
         candidate: OpticalConstructionCandidate,
     },
@@ -330,10 +338,12 @@ struct Content {
     surface_overlays: Arc<SurfaceOverlays>,
     process_document: Arc<ProcessDocument>,
     appearance_study: AppearanceStudyInfo,
+    materials: Option<spiling_contracts::library::MaterialCollectionRecord>,
 }
 impl Content {
     fn matches(&self, snapshot: &Snapshot) -> bool {
-        self.occurrences == snapshot.occurrences
+        self.materials.as_ref() == snapshot.materials.as_ref().map(|a| a.record())
+            && self.occurrences == snapshot.occurrences
             && self.manufacturing_intent == snapshot.manufacturing_intent
             && self.surface_overlays == snapshot.surface_overlays
             && self.process_document == snapshot.process_document
@@ -378,6 +388,7 @@ impl Content {
             surface_overlays: Arc::new(manifest.surface_overlays.clone()),
             process_document: Arc::new(manifest.process_document.clone()),
             appearance_study: manifest.appearance_study.info(),
+            materials: manifest.materials.clone(),
         }
     }
 }
@@ -447,6 +458,7 @@ impl Project {
             surface_images: loaded.surface_images,
             appearance_study: Arc::new(loaded.manifest.appearance_study.clone()),
             appearance_palettes: loaded.appearance_palettes,
+            materials: loaded.materials,
         };
         validate_snapshot(&snapshot, &loaded.manifest)?;
         let mut project = Self::new();
@@ -475,7 +487,8 @@ impl Project {
                     || self.current.manufacturing_intent.is_some()
                     || !self.current.surface_overlays.layers.is_empty()
                     || !self.current.process_document.layers.is_empty()
-                    || *self.current.appearance_study != AppearanceStudy::default(),
+                    || *self.current.appearance_study != AppearanceStudy::default()
+                    || self.current.materials.is_some(),
                 |(_, content)| !content.matches(&self.current),
             );
         ProjectInfo {
@@ -495,6 +508,7 @@ impl Project {
             surface_overlays: (*self.current.surface_overlays).clone(),
             process_document: (*self.current.process_document).clone(),
             appearance_study: self.current.appearance_study.info(),
+            materials: self.current.materials.as_ref().map(|a| a.record().clone()),
             resolved_process: self.current.manufacturing_intent.as_ref().map_or_else(
                 Vec::new,
                 |intent| {
@@ -530,6 +544,19 @@ impl Project {
         &self.current.appearance_study
     }
     /// Includes live prepared candidates, even after their revision becomes stale.
+    pub fn retained_material_bytes(&self) -> Result<usize, ProjectError> {
+        let staged = self
+            .staged_appearance
+            .lock()
+            .map_err(|_| error(ProjectErrorCode::Io, "material staging lock poisoned"))?;
+        let live: Vec<_> = staged.iter().filter_map(Weak::upgrade).collect();
+        Ok(materials::retained_bytes(
+            std::iter::once(self.current.as_ref())
+                .chain(self.undo.iter().map(Arc::as_ref))
+                .chain(self.redo.iter().map(Arc::as_ref))
+                .chain(live.iter().map(Arc::as_ref)),
+        ))
+    }
     pub fn retained_appearance_bytes(&self) -> Result<usize, ProjectError> {
         let staged = self
             .staged_appearance
@@ -667,7 +694,8 @@ impl Project {
         // Invalidation is part of the same atomic edit; history keeps the coherent old pair.
         if !matches!(
             &edit,
-            Edit::PublishManufacturing { .. }
+            Edit::PutFilament { .. }
+                | Edit::PublishManufacturing { .. }
                 | Edit::ImportAppearancePalette { .. }
                 | Edit::SetAppearanceTarget { .. }
                 | Edit::AcceptAppearanceReport { .. }
@@ -677,6 +705,67 @@ impl Project {
             snapshot.manufacturing_artifact = None;
         }
         match edit {
+            Edit::PutFilament {
+                revision,
+                origin,
+                expected,
+            } => {
+                use spiling_contracts::library::*;
+                revision.validate().map_err(invalid)?;
+                let mut document = snapshot
+                    .materials
+                    .as_ref()
+                    .map(|a| a.document())
+                    .transpose()?
+                    .unwrap_or_default();
+                let entry = document
+                    .entries
+                    .iter_mut()
+                    .find(|e| e.current.id == revision.reference.id);
+                match entry {
+                    Some(entry) => {
+                        if expected.as_ref() != Some(&entry.current.revision) {
+                            return Err(error(
+                                ProjectErrorCode::StaleRevision,
+                                "project material changed; review the retained draft",
+                            ));
+                        }
+                        entry.current = revision.reference.clone();
+                        entry.origin = origin;
+                    }
+                    None => {
+                        if expected.is_some() {
+                            return Err(error(
+                                ProjectErrorCode::StaleRevision,
+                                "project material no longer exists",
+                            ));
+                        }
+                        document.entries.push(FilamentEntry {
+                            current: revision.reference.clone(),
+                            archived: false,
+                            origin,
+                        });
+                    }
+                }
+                if !document
+                    .revisions
+                    .iter()
+                    .any(|r| r.reference == revision.reference)
+                {
+                    document.revisions.push(revision);
+                }
+                document.revisions.retain(|r| {
+                    document.entries.iter().any(|e| e.current == r.reference)
+                        || document.recipes.iter().any(|recipe| {
+                            recipe
+                                .definition
+                                .ingredients
+                                .iter()
+                                .any(|i| i.filament == r.reference)
+                        })
+                });
+                snapshot.materials = Some(Arc::new(materials::MaterialAsset::new(&document)?));
+            }
             Edit::ApplyOpticalConstruction { candidate } => {
                 if candidate.captured_revision != self.revision
                     || !Arc::ptr_eq(&candidate.captured, &self.current)
@@ -1161,6 +1250,7 @@ impl Project {
             staged.push(Arc::downgrade(&bytes));
         }
         let mut candidate = self.manifest();
+        candidate.materials = snapshot.materials.as_ref().map(|a| a.record().clone());
         candidate.revision = self.revision.next()?;
         candidate.next_occurrence = next_occurrence;
         candidate.next_surface_layer = next_surface_layer;
@@ -1188,6 +1278,19 @@ impl Project {
             .map_err(|_| error(ProjectErrorCode::Io, "appearance staging lock poisoned"))?;
         staged.retain(|state| state.strong_count() != 0);
         let live: Vec<_> = staged.iter().filter_map(Weak::upgrade).collect();
+        if materials::retained_bytes(
+            std::iter::once(snapshot.as_ref())
+                .chain(std::iter::once(self.current.as_ref()))
+                .chain(self.undo.iter().map(Arc::as_ref))
+                .chain(self.redo.iter().map(Arc::as_ref))
+                .chain(live.iter().map(Arc::as_ref)),
+        ) > materials::MAX_RETAINED_MATERIAL_BYTES
+        {
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "retained/staged project materials exceed 64 MiB",
+            ));
+        }
         let retained = appearance_bytes_with_incoming(
             std::iter::once(snapshot.as_ref())
                 .chain(std::iter::once(self.current.as_ref()))
@@ -1273,6 +1376,7 @@ impl Project {
             surface_overlays: (*self.current.surface_overlays).clone(),
             process_document: (*self.current.process_document).clone(),
             appearance_study: (*self.current.appearance_study).clone(),
+            materials: self.current.materials.as_ref().map(|a| a.record().clone()),
             next_process_layer: self.next_process_layer,
             next_process_operation: self.next_process_operation,
             definitions: self
@@ -1667,6 +1771,13 @@ fn validate_surface_image_budget(snapshot: &Snapshot) -> Result<(), ProjectError
 }
 fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<(), ProjectError> {
     let snapshots: Vec<_> = snapshots.collect();
+    if materials::retained_bytes(snapshots.iter().copied()) > materials::MAX_RETAINED_MATERIAL_BYTES
+    {
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "retained project material bytes exceed 64 MiB",
+        ));
+    }
     if appearance_bytes(snapshots.iter().copied())? > MAX_APPEARANCE_RETAINED_BYTES {
         return Err(error(
             ProjectErrorCode::ResourceLimit,
@@ -1773,6 +1884,12 @@ pub(crate) fn validate_snapshot(
     snapshot: &Snapshot,
     manifest: &ProjectManifest,
 ) -> Result<(), ProjectError> {
+    if manifest.materials.as_ref() != snapshot.materials.as_ref().map(|a| a.record()) {
+        return Err(invalid(
+            "project material descriptor and captured asset disagree",
+        ));
+    }
+
     manifest.validate()?;
     if !Content::from_manifest(manifest).matches(snapshot)
         || snapshot.sources.len() != manifest.definitions.len()

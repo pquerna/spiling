@@ -18,12 +18,15 @@ const PREFS: &str = "spiling-native-preferences-v1";
 struct Preferences {
     theme: Theme,
     accepted_osl3: bool,
+    #[serde(default)]
+    library_location: Option<NativePath>,
 }
 impl Default for Preferences {
     fn default() -> Self {
         Self {
             theme: Theme::Graphite,
             accepted_osl3: false,
+            library_location: None,
         }
     }
 }
@@ -64,6 +67,7 @@ pub struct Workbench {
     surface: surface::SurfaceUi,
     study: study::StudyUi,
     colors: ui::ColorInspector,
+    library: library::LibraryUi,
     queued_image: Option<crate::assets::ImageRequest>,
 }
 impl Workbench {
@@ -124,6 +128,7 @@ impl Workbench {
             surface: surface::SurfaceUi::default(),
             study: study::StudyUi::default(),
             colors: ui::ColorInspector::default(),
+            library: library::LibraryUi::default(),
             queued_image: None,
         }
     }
@@ -158,6 +163,10 @@ impl Workbench {
             return;
         }
         match action {
+            Action::Library => {
+                self.library.open = true;
+                return;
+            }
             Action::License => {
                 self.show_license = true;
                 return;
@@ -399,6 +408,7 @@ impl Workbench {
         });
     }
 }
+mod library;
 mod manufacturing;
 mod material;
 mod policies;
@@ -430,6 +440,26 @@ impl eframe::App for Workbench {
             && let Some(host) = &self.host
         {
             match host.open_from_launch(open) {
+                Ok(()) => self.awaiting_serial = Some(self.state.serial),
+                Err(error) => self.local_problem = Some(error),
+            }
+        }
+        if self.state.phase == Phase::Running
+            && !self.state.busy
+            && self.library.locator.is_none()
+            && let Some(location) = self.prefs.library_location.clone()
+        {
+            self.library.locator = Some(location.clone());
+            self.library.queued = Some(crate::host::LibraryAction::SetLocation(location));
+        }
+        if let Some(status) = &self.state.library.status {
+            self.prefs.library_location = Some(status.location.clone());
+            self.library.locator = Some(status.location.clone());
+        }
+        if let Some(action) = self.library.queued.take()
+            && let Some(host) = &self.host
+        {
+            match host.library(action) {
                 Ok(()) => self.awaiting_serial = Some(self.state.serial),
                 Err(error) => self.local_problem = Some(error),
             }
@@ -571,6 +601,7 @@ impl eframe::App for Workbench {
                 }
                 ui.menu_button("Project", |ui| {
                     for action in [
+                        Action::Library,
                         Action::New,
                         Action::Open,
                         Action::OpenReadOnly,
@@ -819,6 +850,7 @@ impl eframe::App for Workbench {
         if previous_theme != self.prefs.theme {
             self.prefs.theme.apply(&ctx);
         }
+        self.library_window(&ctx);
         // Side effects execute once in logic(), even if egui lays out the UI in multiple passes.
         if self.queued.is_some()
             || self.confirmation.is_some()
@@ -827,6 +859,7 @@ impl eframe::App for Workbench {
             || self.queued_picker.is_some()
             || self.queued_manufacturing.is_some()
             || self.queued_project.is_some()
+            || self.library.queued.is_some()
             || self.queued_image.is_some()
         {
             ctx.request_repaint();

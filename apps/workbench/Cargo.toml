@@ -24,6 +24,7 @@ glam = "=0.34.1"
 bytemuck = { version = "=1.25.2", features = ["derive"] }
 serde_json.workspace = true
 serde.workspace = true
+uuid.workspace = true
 tokio.workspace = true
 spiling-contracts.workspace = true
 spiling-appearance.workspace = true

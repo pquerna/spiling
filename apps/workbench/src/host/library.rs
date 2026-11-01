@@ -1,0 +1,318 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
+use super::*;
+use spiling_contracts::{geometry::SourceHash, library::*};
+#[derive(Debug, Clone, Default)]
+pub struct State {
+    pub status: Option<LibraryStatus>,
+    pub personal: Option<LibraryFilamentPage>,
+    pub project: Vec<LibraryFilamentSummary>,
+    pub project_capture: Option<(ProjectId, ProjectRevision)>,
+    pub selected: Option<(bool, FilamentRevision)>,
+    pub selected_project: Option<(ProjectId, ProjectRevision)>,
+    pub spools: Vec<SpoolRecord>,
+    pub receipt: Option<LibraryWriteReceipt>,
+    pub rejected_request: Option<String>,
+}
+#[derive(Debug, Clone)]
+pub enum LibraryAction {
+    Refresh(LibraryFilamentQuery),
+    Inspect {
+        personal: bool,
+        reference: FilamentRef,
+    },
+    Write(LibraryWrite),
+    SetLocation(NativePath),
+    UseInProject {
+        revision: FilamentRevision,
+        origin: LibraryOrigin,
+        expected: Option<SourceHash>,
+        base_revision: ProjectRevision,
+    },
+    ReviewProfile(spiling_contracts::manufacturing::MaterialProcessProfile),
+}
+impl Host {
+    pub fn library(&self, action: LibraryAction) -> Result<(), String> {
+        match &action {
+            LibraryAction::Write(request) => {
+                request.validate()?;
+                if serde_json::to_vec(request)
+                    .map_err(|e| e.to_string())?
+                    .len()
+                    > spiling_contracts::MAX_CONTROL_BYTES as usize
+                {
+                    return Err("Library draft exceeds the bounded host control limit".into());
+                }
+            }
+            LibraryAction::UseInProject { revision, .. } => {
+                revision.validate()?;
+            }
+            LibraryAction::ReviewProfile(profile) => {
+                profile.validate().map_err(|e| e.to_string())?;
+            }
+            LibraryAction::Refresh(query) => query.validate()?,
+            LibraryAction::SetLocation(path) => path.validate().map_err(|e| e.to_string())?,
+            _ => {}
+        }
+        self.send(Request::Library(Box::new(action)))
+    }
+}
+impl Actor {
+    pub(super) async fn library_action(&mut self, action: LibraryAction) {
+        if self.client.is_none() {
+            self.problem("Engine is disconnected");
+            return;
+        }
+        let result = self.library_inner(action).await;
+        if let Err(error) = result {
+            self.failure(error).await;
+        }
+    }
+    async fn library_inner(&mut self, action: LibraryAction) -> Result<(), ClientError> {
+        let rpc = self.client.as_ref().expect("connected client").rpc();
+        match action {
+            LibraryAction::Refresh(query) => {
+                // Project-owned content remains browsable even if personal storage fails.
+                let personal = async {
+                    let status = rpc.library_status().await?;
+                    let page = rpc.library_filaments(&query).await?;
+                    Ok::<_, ClientError>((status, page))
+                }
+                .await;
+                let state = Arc::make_mut(&mut self.state.library);
+                match &personal {
+                    Ok((status, page)) => {
+                        state.status = Some(status.clone());
+                        state.personal = Some(page.clone());
+                    }
+                    Err(_) => {
+                        state.status = None;
+                        state.personal = None;
+                    }
+                }
+                if let (Some(project), Some(hello)) = (&self.state.project, &self.state.hello) {
+                    let mut offset = 0;
+                    let mut rows = Vec::new();
+                    loop {
+                        match rpc
+                            .project(ProjectCommand::ListFilaments {
+                                session_id: hello.session_id.clone(),
+                                base_revision: project.revision,
+                                offset,
+                            })
+                            .await?
+                        {
+                            ProjectResponse::Filaments {
+                                entries,
+                                next_offset,
+                                ..
+                            } => {
+                                rows.extend(entries);
+                                if let Some(next) = next_offset {
+                                    offset = next;
+                                } else {
+                                    break;
+                                }
+                            }
+                            ProjectResponse::Error { error } => return Err(error.into()),
+                            _ => {
+                                return Err(ClientError::Protocol(
+                                    "expected project materials".into(),
+                                ));
+                            }
+                        }
+                    }
+                    state.project = rows;
+                    state.project_capture = Some((project.project_id.clone(), project.revision));
+                }
+                personal?;
+            }
+            LibraryAction::Inspect {
+                personal,
+                reference,
+            } => {
+                let mut capture = None;
+                let revision = if personal {
+                    let status = rpc.library_status().await?;
+                    let id = status
+                        .identity
+                        .as_ref()
+                        .ok_or_else(|| ClientError::InvalidRequest("My library is empty".into()))?;
+                    let revision = rpc.library_filament(&id.id, &reference).await?;
+                    let mut query = LibrarySpoolQuery {
+                        expected: Some(id.clone()),
+                        filament: Some(reference.clone()),
+                        ..Default::default()
+                    };
+                    let mut spools = Vec::new();
+                    loop {
+                        let page = rpc.library_spools(&query).await?;
+                        spools.extend(page.spools);
+                        if let Some(next) = page.next_offset {
+                            query.offset = next;
+                        } else {
+                            break;
+                        }
+                    }
+                    let state = Arc::make_mut(&mut self.state.library);
+                    state.status = Some(status);
+                    state.spools = spools;
+                    revision
+                } else {
+                    let project = self
+                        .state
+                        .project
+                        .as_ref()
+                        .ok_or_else(|| ClientError::InvalidRequest("no project".into()))?;
+                    capture = Some((project.project_id.clone(), project.revision));
+                    match rpc
+                        .project(ProjectCommand::GetFilament {
+                            session_id: self
+                                .state
+                                .hello
+                                .as_ref()
+                                .expect("connected")
+                                .session_id
+                                .clone(),
+                            base_revision: project.revision,
+                            reference,
+                        })
+                        .await?
+                    {
+                        ProjectResponse::Filament { revision } => revision,
+                        ProjectResponse::Error { error } => return Err(error.into()),
+                        _ => return Err(ClientError::Protocol("expected project filament".into())),
+                    }
+                };
+                let state = Arc::make_mut(&mut self.state.library);
+                state.selected = Some((personal, revision));
+                state.selected_project = capture;
+            }
+            LibraryAction::Write(request) => {
+                Arc::make_mut(&mut self.state.library).rejected_request = None;
+                let receipt = match rpc.library_write(&request).await {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        if matches!(
+                            &error,
+                            ClientError::Library(_) | ClientError::InvalidRequest(_)
+                        ) {
+                            Arc::make_mut(&mut self.state.library).rejected_request =
+                                Some(request.request_id.clone());
+                        }
+                        return Err(error);
+                    }
+                };
+                let confirmed = receipt.publication == LibraryPublication::Confirmed;
+                if confirmed {
+                    let state = Arc::make_mut(&mut self.state.library);
+                    state.selected = None;
+                    state.selected_project = None;
+                    state.spools.clear();
+                }
+                Arc::make_mut(&mut self.state.library).receipt = Some(receipt);
+                self.state.message = if confirmed {
+                    "My library saved"
+                } else {
+                    "Library save is uncertain; retain and resolve the original request"
+                }
+                .into();
+            }
+            LibraryAction::SetLocation(location) => {
+                let status = rpc.library_set_location(location).await?;
+                self.state.library = Arc::new(State {
+                    status: Some(status),
+                    ..Default::default()
+                });
+            }
+            LibraryAction::UseInProject {
+                revision,
+                origin,
+                expected,
+                base_revision,
+            } => {
+                let session_id = self
+                    .state
+                    .hello
+                    .as_ref()
+                    .expect("connected")
+                    .session_id
+                    .clone();
+                self.project_edit(ProjectCommand::PutFilament {
+                    session_id,
+                    base_revision,
+                    revision,
+                    origin: Some(origin),
+                    expected,
+                })
+                .await;
+            }
+            LibraryAction::ReviewProfile(profile) => {
+                use spiling_contracts::manufacturing::*;
+                let project = self
+                    .state
+                    .project
+                    .as_ref()
+                    .ok_or_else(|| ClientError::InvalidRequest("no project".into()))?;
+                let selection = &self.state.library;
+                if selection.selected_project.as_ref()
+                    != Some(&(project.project_id.clone(), project.revision))
+                    || !selection
+                        .selected
+                        .as_ref()
+                        .is_some_and(|(personal, selected)| {
+                            !personal && selected.definition.profiles.contains(&profile)
+                        })
+                {
+                    return Err(ClientError::InvalidRequest(
+                        "Refresh and inspect the current project material before reviewing its profile"
+                            .into(),
+                    ));
+                }
+                let setup = self
+                    .state
+                    .manufacturing
+                    .intent
+                    .as_ref()
+                    .and_then(|i| i.material_profile.as_ref())
+                    .map(|p| p.selection.setup.clone())
+                    .unwrap_or(MaterialToolSetup {
+                        hotend_id: profile.hotend_id.clone(),
+                        nozzle_material: profile.nozzle_material.clone(),
+                        abrasion_resistant_nozzle: false,
+                        cooling_configuration_id: profile.cooling_configuration_id.clone(),
+                    });
+                self.nonce += 1;
+                Arc::make_mut(&mut self.state.manufacturing).loaded_material =
+                    Some(Arc::new(manufacture::LoadedMaterial {
+                        nonce: self.nonce,
+                        label: "Project material".into(),
+                        project: project.project_id.clone(),
+                        revision: project.revision,
+                        session: self
+                            .state
+                            .hello
+                            .as_ref()
+                            .expect("connected")
+                            .session_id
+                            .clone(),
+                        selection: MaterialProfileSelection {
+                            profile,
+                            setup,
+                            overrides: MaterialProfileOverrides {
+                                nozzle_temperature_c: None,
+                                bed_temperature_c: None,
+                                print_speed_mm_s: None,
+                                flow_multiplier: None,
+                                process: None,
+                            },
+                        },
+                    }));
+                self.state.message =
+                    "Project profile ready in Manufacturing; inspect values and Apply".into();
+            }
+        }
+        Ok(())
+    }
+}

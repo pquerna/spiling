@@ -7,7 +7,7 @@ use crate::{geometry::*, project::*, rpc, surface::*};
 pub enum ProjectCall {
     StorageMaintenance(rpc::StorageMaintenanceRequest),
     ApplyOpticalConstruction(rpc::ApplyOpticalConstructionRequest),
-    Execute(rpc::ProjectRequest),
+    Execute(Box<rpc::ProjectRequest>),
     Open(rpc::OpenProjectRequest),
     Save(rpc::SaveProjectRequest),
     ImportSurfaceImageFinish(rpc::ImportSurfaceImageFinishRequest),
@@ -22,6 +22,43 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
     request_id(id)?;
     use rpc::project_request::Command as C;
     let (session_id, command) = match command {
+        ProjectCommand::PutFilament {
+            session_id,
+            base_revision,
+            revision,
+            origin,
+            expected,
+        } => (
+            session_id,
+            C::PutFilament(rpc::ProjectPutFilamentRequest {
+                base_revision: base_revision.0,
+                revision: Some(revision.try_into()?),
+                origin: origin.map(TryInto::try_into).transpose()?,
+                expected: expected.map(|h| h.as_str().to_owned()),
+            }),
+        ),
+        ProjectCommand::GetFilament {
+            session_id,
+            base_revision,
+            reference,
+        } => (
+            session_id,
+            C::GetFilament(rpc::ProjectGetFilamentRequest {
+                base_revision: base_revision.0,
+                reference: Some(reference.try_into()?),
+            }),
+        ),
+        ProjectCommand::ListFilaments {
+            session_id,
+            base_revision,
+            offset,
+        } => (
+            session_id,
+            C::ListFilaments(rpc::ProjectListFilamentsRequest {
+                base_revision: base_revision.0,
+                offset,
+            }),
+        ),
         ProjectCommand::StorageMaintenance {
             session_id,
             base_revision,
@@ -318,10 +355,10 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
             }),
         ),
     };
-    Ok(ProjectCall::Execute(rpc::ProjectRequest {
+    Ok(ProjectCall::Execute(Box::new(rpc::ProjectRequest {
         parent: format!("sessions/{}", session_id.as_str()),
         command: Some(command),
-    }))
+    })))
 }
 impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
     type Error = String;
@@ -329,6 +366,27 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
         let session_id = session_parent(&v.parent)?;
         use rpc::project_request::Command as C;
         Ok(match required(v.command, "project command")? {
+            C::PutFilament(v) => Self::PutFilament {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                revision: required(v.revision, "filament revision")?.try_into()?,
+                origin: v.origin.map(TryInto::try_into).transpose()?,
+                expected: v
+                    .expected
+                    .map(SourceHash::parse)
+                    .transpose()
+                    .map_err(|e| e.to_string())?,
+            },
+            C::GetFilament(v) => Self::GetFilament {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                reference: required(v.reference, "filament reference")?.try_into()?,
+            },
+            C::ListFilaments(v) => Self::ListFilaments {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                offset: v.offset,
+            },
             C::SetOpticalStudy(value) => Self::SetOpticalStudy {
                 session_id,
                 base_revision: ProjectRevision(value.base_revision),
@@ -522,6 +580,9 @@ impl TryFrom<rpc::GetOpticalReportRequest> for ProjectCommand {
     }
 }
 pub fn validate_project_info(v: &ProjectInfo) -> Result<(), String> {
+    if let Some(record) = &v.materials {
+        record.validate()?;
+    }
     v.surface_overlays.validate().map_err(|e| e.to_string())?;
     v.process_document.validate().map_err(|e| e.to_string())?;
     v.appearance_study
@@ -581,6 +642,7 @@ impl TryFrom<rpc::ProjectInfo> for ProjectInfo {
                 .try_into()?,
             process_document: required(v.process_document, "project process document")?
                 .try_into()?,
+            materials: v.materials.map(TryInto::try_into).transpose()?,
             appearance_study: required(v.appearance_study, "project appearance study")?
                 .try_into()?,
             resolved_process: v
@@ -611,6 +673,7 @@ impl TryFrom<ProjectInfo> for rpc::ProjectInfo {
             surface_overlays: Some(v.surface_overlays.try_into()?),
             process_document: Some(v.process_document.try_into()?),
             appearance_study: Some(v.appearance_study.try_into()?),
+            materials: v.materials.map(TryInto::try_into).transpose()?,
             resolved_process: v
                 .resolved_process
                 .into_iter()
@@ -624,6 +687,27 @@ impl TryFrom<rpc::ProjectReply> for ProjectResponse {
     fn try_from(v: rpc::ProjectReply) -> Result<Self, String> {
         use rpc::project_reply::Response as R;
         Ok(match required(v.response, "project reply")? {
+            R::Filament(v) => Self::Filament {
+                revision: v.try_into()?,
+            },
+            R::Filaments(v) => {
+                if v.entries.len() > crate::library::MAX_LIBRARY_PAGE as usize
+                    || v.total > crate::library::MAX_FILAMENTS as u32
+                    || v.entries.len() > v.total as usize
+                    || v.next_offset.is_some_and(|n| n == 0 || n >= v.total)
+                {
+                    return Err("invalid project material page".into());
+                }
+                Self::Filaments {
+                    entries: v
+                        .entries
+                        .into_iter()
+                        .map(TryInto::try_into)
+                        .collect::<Result<_, _>>()?,
+                    total: v.total,
+                    next_offset: v.next_offset,
+                }
+            }
             R::Status(info) => Self::Status {
                 info: info.try_into()?,
             },
@@ -640,6 +724,19 @@ impl TryFrom<ProjectResponse> for rpc::ProjectReply {
         use rpc::project_reply::Response as R;
         Ok(Self {
             response: Some(match v {
+                ProjectResponse::Filament { revision } => R::Filament(revision.try_into()?),
+                ProjectResponse::Filaments {
+                    entries,
+                    total,
+                    next_offset,
+                } => R::Filaments(rpc::ProjectFilamentPage {
+                    entries: entries
+                        .into_iter()
+                        .map(TryInto::try_into)
+                        .collect::<Result<_, _>>()?,
+                    total,
+                    next_offset,
+                }),
                 ProjectResponse::Status { info } => R::Status(info.try_into()?),
                 ProjectResponse::SceneChanged { info, summary } => {
                     R::SceneChanged(rpc::ProjectSceneChanged {

@@ -8,6 +8,7 @@ package spiling.engine;
 import "google/longrunning/operations.proto";
 import "spiling/native_common.proto";
 import "spiling/native_project.proto";
+import "spiling/native_material.proto";
 import "spiling/native_appearance.proto";
 
 service Manufacturing {
@@ -237,12 +238,6 @@ message PrinterSpecification {
   DepositionLimits deposition_limits = 13;
 }
 message DiagnosticBodyOnly {}
-message DepositionLimits {
-  double min_bead_width_mm = 1;
-  double max_bead_width_mm = 2;
-  double min_bead_height_mm = 3;
-  double max_bead_height_mm = 4;
-}
 enum HomingCoordinateContract {
   HOMING_COORDINATE_CONTRACT_UNSPECIFIED = 0;
   MARLIN_NATIVE_CARTESIAN = 1;
@@ -456,30 +451,6 @@ enum RectilinearAxisPolicy {
   ALTERNATING_XY = 3;
   ALTERNATING_YX = 4;
 }
-message RetractionDisabled {}
-message RetractionEnabled {
-  double distance_mm = 1;
-  double speed_mm_s = 2;
-  double minimum_travel_mm = 3;
-  double z_hop_mm = 4;
-}
-message RetractionPolicy {
-  oneof policy {
-    RetractionDisabled disabled = 1;
-    RetractionEnabled enabled = 2;
-  }
-}
-message ProcessPolicy {
-  double first_layer_speed_factor = 1;
-  double first_layer_flow_factor = 2;
-  uint32 fan_first_layers = 3;
-  uint32 fan_after_first_layers = 4;
-  double bridge_speed_factor = 5;
-  double bridge_flow_factor = 6;
-  uint32 bridge_fan_pwm = 7;
-  double max_bridge_span_mm = 8;
-  RetractionPolicy retraction = 9;
-}
 message SupportsDisabled {}
 message BreakawaySupports {
   double density = 1;
@@ -645,88 +616,6 @@ message SurfaceColorInspection {
  double tool_zero_fraction = 7;
  double tool_one_fraction = 8;
  OpticalInspectionAssessment reference = 9;
-}
-
-enum MaterialFillerKind {
-  MATERIAL_FILLER_KIND_UNSPECIFIED = 0;
-  MATERIAL_FILLER_KIND_CARBON_FIBER = 1;
-  MATERIAL_FILLER_KIND_GLASS_FIBER = 2;
-}
-
-enum MaterialProfileSourceKind {
-  MATERIAL_PROFILE_SOURCE_KIND_UNSPECIFIED = 0;
-  MATERIAL_PROFILE_SOURCE_KIND_SYNTHETIC_TEST = 1;
-  MATERIAL_PROFILE_SOURCE_KIND_IMPORTED_RECOMMENDATION = 2;
-  MATERIAL_PROFILE_SOURCE_KIND_OPERATOR_DECLARATION = 3;
-}
-
-message MaterialDefinition {
-  string id = 1;
-  string revision = 2;
-  string manufacturer = 3;
-  string product = 4;
-  string polymer_family = 5;
-  MaterialFiller filler = 6;
-  double filament_diameter_mm = 7;
-  optional bool requires_abrasion_resistant_nozzle = 8;
-}
-
-message MaterialFiller {
-  MaterialFillerKind kind = 1;
-  optional double mass_fraction = 2;
-}
-
-message MaterialToolSetup {
-  string hotend_id = 4;
-  string nozzle_material = 1;
-  optional bool abrasion_resistant_nozzle = 2;
-  string cooling_configuration_id = 3;
-}
-
-message MaterialProfileSource {
-  MaterialProfileSourceKind kind = 1;
-  string source_id = 2;
-  string source_revision = 3;
-  string source_hash = 4;
-}
-
-message MaterialProcessProfile {
-  string hotend_id = 16;
-  string nozzle_material = 17;
-  string id = 1;
-  string revision = 2;
-  MaterialDefinition material = 3;
-  string printer_id = 4;
-  string printer_revision = 5;
-  double nozzle_diameter_mm = 6;
-  string cooling_configuration_id = 7;
-  DepositionLimits deposition_limits = 8;
-  double nozzle_temperature_c = 9;
-  double bed_temperature_c = 10;
-  double print_speed_mm_s = 11;
-  double flow_multiplier = 12;
-  double max_volumetric_flow_mm3_s = 13;
-  ProcessPolicy process = 14;
-  MaterialProfileSource source = 15;
-}
-
-message MaterialProfileOverrides {
-  optional double nozzle_temperature_c = 1;
-  optional double bed_temperature_c = 2;
-  optional double print_speed_mm_s = 3;
-  optional double flow_multiplier = 4;
-  ProcessPolicy process = 5;
-}
-
-message MaterialProfileSelection {
-  MaterialProcessProfile profile = 1;
-  MaterialToolSetup setup = 2;
-  MaterialProfileOverrides overrides = 3;
-}
-
-message ResolvedMaterialProfile {
-  uint32 resolver_version = 1;
-  MaterialProfileSelection selection = 2;
 }
 
 enum MaterialSettingField {

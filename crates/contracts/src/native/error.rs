@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
+use crate::library::{LibraryError, LibraryErrorCode};
 use crate::{DOMAIN_ERROR_TYPE, geometry::*, google, manufacturing::*, project::*, rpc};
 use prost::Message;
 impl TryFrom<rpc::DomainError> for GeometryError {
@@ -169,6 +170,31 @@ fn manufacturing_parse(code: &str) -> Result<ManufacturingErrorCode, String> {
         _ => return Err("unknown domain error code".into()),
     })
 }
+fn library_code(code: LibraryErrorCode) -> &'static str {
+    match code {
+        LibraryErrorCode::InvalidData => "invalid_data",
+        LibraryErrorCode::NotFound => "not_found",
+        LibraryErrorCode::StaleRevision => "stale_revision",
+        LibraryErrorCode::Locked => "locked",
+        LibraryErrorCode::ReadOnly => "read_only",
+        LibraryErrorCode::ResourceLimit => "resource_limit",
+        LibraryErrorCode::Cancelled => "cancelled",
+        LibraryErrorCode::Io => "io",
+    }
+}
+fn library_parse(code: &str) -> Result<LibraryErrorCode, String> {
+    Ok(match code {
+        "invalid_data" => LibraryErrorCode::InvalidData,
+        "not_found" => LibraryErrorCode::NotFound,
+        "stale_revision" => LibraryErrorCode::StaleRevision,
+        "locked" => LibraryErrorCode::Locked,
+        "read_only" => LibraryErrorCode::ReadOnly,
+        "resource_limit" => LibraryErrorCode::ResourceLimit,
+        "cancelled" => LibraryErrorCode::Cancelled,
+        "io" => LibraryErrorCode::Io,
+        _ => return Err("unknown library error code".into()),
+    })
+}
 pub fn domain_status(error: &JobError) -> google::rpc::Status {
     use rpc::domain_error_detail::Error as E;
     let (detail, code, message) = match error {
@@ -188,6 +214,14 @@ pub fn domain_status(error: &JobError) -> google::rpc::Status {
             project_code(error.code),
             bounded_text(&error.message, MAX_PROJECT_ERROR_BYTES),
         ),
+        JobError::Library { error } => (
+            E::Library(rpc::DomainError {
+                code: library_code(error.code).into(),
+                message: bounded_text(&error.message, 1024),
+            }),
+            library_code(error.code),
+            bounded_text(&error.message, 1024),
+        ),
         JobError::Manufacturing { error } => (
             E::Manufacturing(rpc::DomainError {
                 code: manufacturing_code(error.code).into(),
@@ -200,9 +234,9 @@ pub fn domain_status(error: &JobError) -> google::rpc::Status {
     let canonical = match code {
         "cancelled" => 1,
         "resource_limit" => 8,
-        "busy" | "project_locked" => 9,
+        "busy" | "project_locked" | "locked" => 9,
         "stale_revision" => 10,
-        "unknown_handle" | "missing_asset" | "no_saved_path" => 5,
+        "unknown_handle" | "missing_asset" | "no_saved_path" | "not_found" => 5,
         "source_io"
         | "io"
         | "kernel_failure"
@@ -299,6 +333,17 @@ pub(super) fn status_error_and_receipt(
                 },
             }
         }
+        E::Library(e) => {
+            if e.message.len() > 1024 || e.message != status.message {
+                return Err("invalid library error message".into());
+            }
+            JobError::Library {
+                error: LibraryError {
+                    code: library_parse(&e.code)?,
+                    message: e.message,
+                },
+            }
+        }
         E::Manufacturing(e) => {
             if e.message.len() > MAX_MANUFACTURING_ERROR_BYTES || e.message != status.message {
                 return Err("invalid manufacturing error message".into());
@@ -323,6 +368,11 @@ pub(super) fn status_error_and_receipt(
                 } | JobError::Project {
                     error: ProjectError {
                         code: ProjectErrorCode::Cancelled,
+                        ..
+                    }
+                } | JobError::Library {
+                    error: LibraryError {
+                        code: LibraryErrorCode::Cancelled,
                         ..
                     }
                 } | JobError::Manufacturing {

@@ -4,7 +4,9 @@
 
 //! Native admission and the sole frontend owner of EngineClient. No engine domain logic lives here.
 use crate::manufacture;
+pub mod library;
 use crate::scene::{Scene, Section};
+pub use library::LibraryAction;
 use spiling_contracts::manufacturing::{ManufacturingCommand, ManufacturingResponse};
 use spiling_contracts::{
     Hello, NativeOperationView,
@@ -60,6 +62,7 @@ pub struct JobView {
 
 #[derive(Debug, Clone)]
 pub struct Snapshot {
+    pub library: Arc<library::State>,
     pub diagnostic: Option<Arc<spiling_contracts::OperationView>>,
     pub diagnostic_triangle: bool,
     pub generation: u64,
@@ -91,6 +94,7 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            library: Arc::default(),
             diagnostic: None,
             diagnostic_triangle: false,
             generation: 0,
@@ -178,6 +182,7 @@ pub enum Command {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Picker {
+    Library,
     Open,
     OpenReadOnly,
     Recover,
@@ -192,6 +197,7 @@ pub enum Picker {
 impl Picker {
     fn title(self) -> &'static str {
         match self {
+            Self::Library => "Choose My library (.spil)",
             Self::Open => "Open Spiling project (.spil)",
             Self::OpenReadOnly => "Open Spiling project read-only (.spil)",
             Self::Recover => "Recover previous save from a Spiling project (.spil)",
@@ -220,6 +226,7 @@ enum Action {
     },
     Import(NativePath),
     LoadIntent(NativePath),
+    SetLibraryLocation(NativePath),
     LoadMaterial(NativePath),
     LoadMaterialCatalog(NativePath),
     ImportImage {
@@ -240,6 +247,7 @@ impl Action {
             Self::Save { .. } => "Save project",
             Self::Import(_) => "Import part",
             Self::ImportImage { .. } => "Import image and apply relief",
+            Self::SetLibraryLocation(_) => "Choose My library",
             Self::LoadIntent(_) => "Load manufacturing intent",
             Self::LoadMaterial(_) => "Load material profile",
             Self::LoadMaterialCatalog(_) => "Load material catalog",
@@ -258,6 +266,7 @@ impl Action {
     }
 }
 enum Request {
+    Library(Box<LibraryAction>),
     Geometry(Box<GeometryCommand>),
     StartupOpen(crate::launch::Open),
     Manufacturing(Box<ManufacturingCommand>),
@@ -524,6 +533,7 @@ impl Drop for Host {
 fn selected_action(picker: Picker, path: &std::path::Path) -> Result<Action, String> {
     let path = NativePath::from_os_str(path.as_os_str()).map_err(|e| e.to_string())?;
     Ok(match picker {
+        Picker::Library => Action::SetLibraryLocation(path),
         Picker::Save => Action::Save { target: Some(path) },
         Picker::Import => Action::Import(path),
         Picker::Intent => Action::LoadIntent(path),
@@ -1018,6 +1028,7 @@ impl Actor {
                 .await
             }
             Request::Manufacturing(command) => self.manufacturing(*command).await,
+            Request::Library(action) => self.library_action(*action).await,
             Request::Project(command) => self.project_edit(*command).await,
             Request::Geometry(command) => {
                 if matches!(*command, GeometryCommand::StartSection { .. })
@@ -1286,6 +1297,7 @@ impl Actor {
             action,
             Action::LoadIntent(_)
                 | Action::LoadMaterial(_)
+                | Action::SetLibraryLocation(_)
                 | Action::LoadMaterialCatalog(_)
                 | Action::Export(_)
         ) {
@@ -1389,6 +1401,7 @@ impl Actor {
             | Action::Restart
             | Action::LoadIntent(_)
             | Action::LoadMaterial(_)
+            | Action::SetLibraryLocation(_)
             | Action::LoadMaterialCatalog(_)
             | Action::Export(_)
             | Action::ImportImage { .. } => {
@@ -1412,6 +1425,9 @@ impl Actor {
                     self.disconnect("Unexpected accepted project action".into())
                         .await;
                 }
+            }
+            Ok(ProjectResponse::Filament { .. } | ProjectResponse::Filaments { .. }) => {
+                self.problem("Unexpected material response to project action")
             }
             Ok(ProjectResponse::Error { error }) => {
                 self.problem(error.to_string());
@@ -1659,6 +1675,7 @@ impl Actor {
                 .error
                 .as_ref()
                 .map(|error| match error {
+                    JobError::Library { error } => error.to_string(),
                     JobError::Geometry { error } => error.to_string(),
                     JobError::Project { error } => error.to_string(),
                     JobError::Manufacturing { error } => error.to_string(),

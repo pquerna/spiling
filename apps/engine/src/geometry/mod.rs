@@ -1561,6 +1561,106 @@ impl Runtime {
     }
     fn project_control_inner(&mut self, command: ProjectCommand) -> Result<Reply, ProjectError> {
         match command {
+            ProjectCommand::PutFilament {
+                session_id,
+                base_revision,
+                revision,
+                origin,
+                expected,
+            } => {
+                self.metadata_base(&session_id, base_revision)?;
+                self.commit_metadata_edit(Edit::PutFilament {
+                    revision,
+                    origin,
+                    expected,
+                })
+            }
+            ProjectCommand::GetFilament {
+                session_id,
+                base_revision,
+                reference,
+            } => {
+                if session_id != self.session_id || base_revision != self.project.info().revision {
+                    return Err(project_error(
+                        ProjectErrorCode::StaleRevision,
+                        "project material query is stale",
+                    ));
+                }
+                let collection = self
+                    .project
+                    .snapshot()
+                    .materials
+                    .as_ref()
+                    .map(|a| a.document())
+                    .transpose()?
+                    .unwrap_or_default();
+                let revision = collection
+                    .revisions
+                    .into_iter()
+                    .find(|r| r.reference == reference)
+                    .ok_or_else(|| {
+                        project_error(
+                            ProjectErrorCode::MissingAsset,
+                            "project filament revision is absent",
+                        )
+                    })?;
+                Ok(Reply::Project(ProjectResponse::Filament { revision }))
+            }
+            ProjectCommand::ListFilaments {
+                session_id,
+                base_revision,
+                offset,
+            } => {
+                use spiling_contracts::library::*;
+                if session_id != self.session_id || base_revision != self.project.info().revision {
+                    return Err(project_error(
+                        ProjectErrorCode::StaleRevision,
+                        "project material query is stale",
+                    ));
+                }
+                let collection = self
+                    .project
+                    .snapshot()
+                    .materials
+                    .as_ref()
+                    .map(|a| a.document())
+                    .transpose()?
+                    .unwrap_or_default();
+                if offset as usize > collection.entries.len() {
+                    return Err(project_error(
+                        ProjectErrorCode::InvalidProject,
+                        "project material page offset is invalid",
+                    ));
+                }
+                let total = collection.entries.len() as u32;
+                let entries = collection
+                    .entries
+                    .iter()
+                    .skip(offset as usize)
+                    .take(MAX_LIBRARY_PAGE as usize)
+                    .map(|entry| {
+                        let definition = collection
+                            .resolve(&entry.current)
+                            .expect("validated collection closure");
+                        LibraryFilamentSummary {
+                            entry: entry.clone(),
+                            name: definition.name.clone(),
+                            material: definition.material.clone(),
+                            color_name: definition.color_name.clone(),
+                            appearance: definition.appearance.clone(),
+                            profile_count: definition.profiles.len() as u32,
+                            on_hand_spools: 0,
+                            earlier_spools: 0,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let end = offset + entries.len() as u32;
+                Ok(Reply::Project(ProjectResponse::Filaments {
+                    entries,
+                    total,
+                    next_offset: (end < total).then_some(end),
+                }))
+            }
             ProjectCommand::StorageMaintenance {
                 session_id,
                 base_revision,
@@ -1739,6 +1839,7 @@ impl Runtime {
                 let retained_manufacturing_bytes = self.manufacturing_bytes();
                 let retained_surface_image_bytes = self.surface_image_bytes()?;
                 let retained_appearance_bytes = self.project.retained_appearance_bytes()?;
+                let retained_material_bytes = self.project.retained_material_bytes()?;
                 let budget = worker::MeshBudget {
                     vertices: MAX_DISPLAY_VERTICES
                         - self.definitions.values().map(|d| d.vertices).sum::<u32>(),
@@ -1760,6 +1861,7 @@ impl Runtime {
                             retained_manufacturing_bytes,
                             retained_surface_image_bytes,
                             retained_appearance_bytes,
+                            retained_material_bytes,
                         })
                     })
                     .map_err(project_geometry_error)?;

@@ -114,6 +114,10 @@ enum Operation {
     ProcessResolve(OccurrenceId),
     Intent(Arc<ManufacturingIntent>),
     MaterialProfile(Box<MaterialProfileSelection>),
+    LibraryLocation(NativePath),
+    UseLibraryFilament(String),
+    ProjectMaterials,
+    ProjectMaterialProfile(String, String, String, MaterialToolSetup),
     MaterialReview(Box<MaterialReviewRequest>),
     MaterialSearch(String),
     MaterialPage(u32),
@@ -455,6 +459,33 @@ pub fn parse(
                 OccurrenceId::new(text(&mut args, "--process-resolve occurrence")?.parse()?)?,
             )),
             Some("--intent") => operations.push(Operation::Intent(intent(&mut args)?.into())),
+            Some("--library") => {
+                let path = args.next().ok_or("--library requires an absolute path")?;
+                if !std::path::Path::new(&path).is_absolute() {
+                    return Err("--library must be absolute".into());
+                }
+                operations.push(Operation::LibraryLocation(NativePath::from_os_str(&path)?));
+            }
+            Some("--library-use") => {
+                let id = text(&mut args, "--library-use FILAMENT_UUID")?;
+                spiling_contracts::library::validate_library_uuid(&id)?;
+                operations.push(Operation::UseLibraryFilament(id));
+            }
+            Some("--project-materials") => operations.push(Operation::ProjectMaterials),
+            Some("--project-material-profile") => {
+                let id = text(&mut args, "--project-material-profile FILAMENT_UUID")?;
+                spiling_contracts::library::validate_library_uuid(&id)?;
+                let profile = text(&mut args, "--project-material-profile PROFILE_ID")?;
+                let revision = text(&mut args, "--project-material-profile PROFILE_REVISION")?;
+                let setup: MaterialToolSetup = serde_json::from_str(&text(
+                    &mut args,
+                    "--project-material-profile SETUP_JSON",
+                )?)?;
+                setup.validate()?;
+                operations.push(Operation::ProjectMaterialProfile(
+                    id, profile, revision, setup,
+                ));
+            }
             Some("--material-catalog") => {
                 let file = args
                     .next()
@@ -597,7 +628,9 @@ pub fn parse(
             || operations.iter().any(|operation| {
                 !matches!(
                     operation,
-                    Operation::StorageMaintenance(StorageMaintenanceAction::Stats, None)
+                    Operation::LibraryLocation(_)
+                        | Operation::ProjectMaterials
+                        | Operation::StorageMaintenance(StorageMaintenanceAction::Stats, None)
                         | Operation::MaterialReview(_)
                         | Operation::MaterialSearch(_)
                         | Operation::MaterialPage(_)
@@ -677,8 +710,47 @@ async fn info(client: &mut EngineClient) -> Result<ProjectInfo, Error> {
         _ => Err("unexpected project status response".into()),
     }
 }
+async fn project_materials(
+    client: &mut EngineClient,
+) -> Result<Vec<spiling_contracts::library::LibraryFilamentSummary>, Error> {
+    let session_id = client.hello().session_id.clone();
+    let base_revision = info(client).await?.revision;
+    let mut offset = 0;
+    let mut rows = Vec::new();
+    loop {
+        match client
+            .project(ProjectCommand::ListFilaments {
+                session_id: session_id.clone(),
+                base_revision,
+                offset,
+            })
+            .await?
+        {
+            ProjectResponse::Filaments {
+                entries,
+                next_offset,
+                ..
+            } => {
+                rows.extend(entries);
+                if let Some(next) = next_offset {
+                    offset = next;
+                } else {
+                    break;
+                }
+            }
+            ProjectResponse::Error { error } => {
+                return Err(spiling_engine_client::ClientError::Project(error).into());
+            }
+            _ => return Err("expected project materials".into()),
+        }
+    }
+    Ok(rows)
+}
 async fn complete(client: &mut EngineClient, response: ProjectResponse) -> Result<(), Error> {
     match response {
+        ProjectResponse::Filaments { .. } | ProjectResponse::Filament { .. } => {
+            Err("unexpected material query response to project edit".into())
+        }
         ProjectResponse::SceneChanged { .. } | ProjectResponse::Status { .. } => Ok(()),
         ProjectResponse::OperationAccepted { operation } => {
             let session = client.hello().session_id.clone();
@@ -930,6 +1002,113 @@ async fn execute(
         let mut process_resolution = None;
         let mut storage_maintenance = None;
         match operation {
+            Operation::LibraryLocation(path) => {
+                label = "library_location";
+                client.rpc().library_set_location(path).await?;
+            }
+            Operation::ProjectMaterials => {
+                label = "project_materials";
+                let rows = project_materials(client).await?;
+                history.push(serde_json::json!({"step":"project_materials","entries":rows}));
+            }
+            Operation::UseLibraryFilament(id) => {
+                use spiling_contracts::library::*;
+                label = "library_use";
+                let status = client.rpc().library_status().await?;
+                let identity = status.identity.ok_or("My library is empty")?;
+                let mut query = LibraryFilamentQuery {
+                    expected: Some(identity.clone()),
+                    ..Default::default()
+                };
+                let reference = loop {
+                    let page = client.rpc().library_filaments(&query).await?;
+                    if let Some(row) = page
+                        .entries
+                        .into_iter()
+                        .find(|r| r.entry.current.id.0 == id)
+                    {
+                        break row.entry.current;
+                    }
+                    if let Some(offset) = page.next_offset {
+                        query.offset = offset;
+                    } else {
+                        return Err("filament is absent from My library".into());
+                    }
+                };
+                let revision = client
+                    .rpc()
+                    .library_filament(&identity.id, &reference)
+                    .await?;
+                let rows = project_materials(client).await?;
+                let expected = rows
+                    .iter()
+                    .find(|r| r.entry.current.id == reference.id)
+                    .map(|r| r.entry.current.revision.clone());
+                let base_revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::PutFilament {
+                        session_id: session.clone(),
+                        base_revision,
+                        revision,
+                        origin: Some(LibraryOrigin {
+                            library_id: identity.id,
+                            filament: reference,
+                        }),
+                        expected,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
+            Operation::ProjectMaterialProfile(id, profile_id, profile_revision, setup) => {
+                label = "project_material_profile";
+                let rows = project_materials(client).await?;
+                let entry = rows
+                    .iter()
+                    .find(|r| r.entry.current.id.0 == id)
+                    .ok_or("filament is not captured in Project")?;
+                let base_revision = info(client).await?.revision;
+                let ProjectResponse::Filament { revision } = client
+                    .project(ProjectCommand::GetFilament {
+                        session_id: session.clone(),
+                        base_revision,
+                        reference: entry.entry.current.clone(),
+                    })
+                    .await?
+                else {
+                    return Err("expected project filament".into());
+                };
+                let profile = revision
+                    .definition
+                    .profiles
+                    .into_iter()
+                    .find(|p| p.id == profile_id && p.revision == profile_revision)
+                    .ok_or("profile is not captured in this project material")?;
+                let selection = MaterialProfileSelection {
+                    profile,
+                    setup,
+                    overrides: MaterialProfileOverrides {
+                        nozzle_temperature_c: None,
+                        bed_temperature_c: None,
+                        print_speed_mm_s: None,
+                        flow_multiplier: None,
+                        process: None,
+                    },
+                };
+                match client
+                    .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+                        session_id: session.clone(),
+                        base_revision,
+                        selection,
+                    })
+                    .await?
+                {
+                    ManufacturingResponse::Status { .. } => {}
+                    ManufacturingResponse::Error { error } => {
+                        return Err(spiling_engine_client::ClientError::Manufacturing(error).into());
+                    }
+                    _ => return Err("unexpected project material application response".into()),
+                }
+            }
             Operation::StorageMaintenance(action, target) => {
                 label = "storage_maintenance";
                 let base_revision = info(client).await?.revision;

@@ -14,6 +14,7 @@ mod tests {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
+    Library,
     New,
     Open,
     OpenReadOnly,
@@ -39,6 +40,7 @@ pub enum Action {
 }
 impl Action {
     pub const ALL: &[Self] = &[
+        Self::Library,
         Self::New,
         Self::Open,
         Self::OpenReadOnly,
@@ -64,6 +66,7 @@ impl Action {
     ];
     pub fn label(self) -> &'static str {
         match self {
+            Self::Library => "Materials and My library…",
             Self::New => "New project",
             Self::Open => "Open project…",
             Self::OpenReadOnly => "Open read-only…",

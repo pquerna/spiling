@@ -28,6 +28,7 @@ use uuid::Uuid;
 fn domain_error(error: JobError) -> ClientError {
     match error {
         JobError::Geometry { error } => ClientError::Geometry(error),
+        JobError::Library { error } => ClientError::Library(error),
         JobError::Project { error } => ClientError::Project(error),
         JobError::Manufacturing { error } => ClientError::Manufacturing(error),
     }
@@ -240,7 +241,10 @@ impl EngineRpc {
             ProjectCommand::Save {
                 target: Some(path), ..
             } => path.validate(),
-            ProjectCommand::Get { .. }
+            ProjectCommand::PutFilament { .. }
+            | ProjectCommand::GetFilament { .. }
+            | ProjectCommand::ListFilaments { .. }
+            | ProjectCommand::Get { .. }
             | ProjectCommand::ApplyOpticalConstruction { .. }
             | ProjectCommand::New { .. }
             | ProjectCommand::Save { target: None, .. }
@@ -291,7 +295,7 @@ impl EngineRpc {
             }
             ProjectCall::Execute(request) => {
                 let reply = client
-                    .execute(self.request(bounded(request)?))
+                    .execute(self.request(bounded(*request)?))
                     .await
                     .map_err(rpc_error)?
                     .into_inner();

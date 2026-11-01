@@ -4,6 +4,7 @@
 
 mod color;
 mod geometry;
+mod library;
 mod project;
 use spiling_contracts::{geometry::PlaneMm, metadata, operation_view, rpc::RunDiagnosticRequest};
 use spiling_engine_client::{EngineClient, export as output};
@@ -20,6 +21,7 @@ struct Options {
 const STORAGE_USAGE: &str = "Storage maintenance: project open FILE.spil --storage-stats | --collect-unreachable | --compact-to NEW.spil. Stats permits read-only inspect. Collection retains current and previous roots; compact exclusively creates a new project file without switching the open attachment. Maintenance does not change project history or scene. Interrupted scratch and uncertain publication require explicit inspection, never automatic retry.";
 enum Command {
     Diagnose,
+    Library(library::Workflow),
     Color(spiling_contracts::color_naming::ColorNamingRequest),
     Job {
         request: RunDiagnosticRequest,
@@ -128,6 +130,7 @@ fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<Option<Opti
                 )?,
                 "--section",
             )?,
+            Some("library") if command.is_none() => return library::parse(args, engine, store),
             Some("color") if command.is_none() => {
                 if triangle_output.is_some()
                     || output.is_some()
@@ -249,6 +252,7 @@ async fn run(options: Options) -> Result<(), Error> {
     let operation: Result<serde_json::Value, Error> = async {
         let transfer = Instant::now();
         let mut report = match options.command {
+            Command::Library(workflow) => library::execute(&client.rpc(), workflow).await?,
             Command::Color(request) => {
                 serde_json::json!({"command":"color","hello":client.hello(),"naming":client.rpc().name_colors(&request).await?})
             },
@@ -378,6 +382,9 @@ fn failure_report(error: &(dyn std::error::Error + 'static)) -> serde_json::Valu
         Some(ClientError::Project(error)) => {
             serde_json::json!({"level":"error","event":"cli_failure","domain":"project","error":error,"message":error.to_string()})
         }
+        Some(ClientError::Library(error)) => {
+            serde_json::json!({"level":"error","event":"cli_failure","domain":"library","code":error.code,"message":error.message})
+        }
         Some(ClientError::Geometry(error)) => {
             serde_json::json!({"level":"error","event":"cli_failure","domain":"geometry","error":error,"message":error.to_string()})
         }
@@ -398,7 +405,10 @@ async fn main() -> ExitCode {
     let result = match parse_options(env::args_os().skip(1)) {
         Ok(Some(options)) => run(options).await,
         Ok(None) => {
-            println!("{USAGE}\n\n{STORAGE_USAGE}");
+            println!("{USAGE}\n\n{STORAGE_USAGE}\n{}", library::USAGE);
+            println!(
+                "Portable materials: project --library ABSOLUTE.spil --library-use FILAMENT_UUID --project-materials --project-material-profile FILAMENT_UUID PROFILE_ID REVISION SETUP_JSON"
+            );
             println!(
                 "Appearance study flags (ordered; no geometry required): --appearance-palette NATIVE_JSON_PATH --appearance-target TARGET_JSON_FILE --appearance-limits LIMITS_JSON_FILE --appearance-compare --appearance-accept KEY --appearance-accept-report --appearance-report NEW_FILE. Compare/report permit read-only; acceptance requires the latest complete current-revision comparison. Target and limits are bounded inert JSON; reports are fetched from the engine, not evaluated locally."
             );

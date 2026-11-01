@@ -399,6 +399,7 @@ async fn project_job(
             }
             if current.status.is_terminal() {
                 return Err(match current.error.unwrap() {
+                    JobError::Library { error } => ClientError::Library(error),
                     JobError::Geometry { error } => ClientError::Geometry(error),
                     JobError::Project { error } => ClientError::Project(error),
                     JobError::Manufacturing { error } => ClientError::Manufacturing(error),

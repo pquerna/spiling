@@ -202,6 +202,9 @@ pub enum JobError {
     Manufacturing {
         error: crate::manufacturing::ManufacturingError,
     },
+    Library {
+        error: crate::library::LibraryError,
+    },
 }
 impl From<GeometryError> for JobError {
     fn from(error: GeometryError) -> Self {

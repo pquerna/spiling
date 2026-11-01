@@ -1811,3 +1811,174 @@ fn catalog_review_is_nonmutating_bound_and_available_read_only() {
     assert!(readonly.problems.is_empty(), "{:?}", readonly.problems);
     assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
 }
+
+#[test]
+#[ignore = "actual library engine services; requires SPILING_TEST_ENGINE"]
+fn library_inventory_and_project_copy_use_native_host_services() {
+    use spiling_contracts::library::*;
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    let initial = wait(&host, |s| s.phase != Phase::Starting);
+    assert_eq!(initial.phase, Phase::Running);
+    let serial = initial.serial;
+    host.library(LibraryAction::SetLocation(native(
+        &root.path().join("My library.spil"),
+    )))
+    .unwrap();
+    wait(&host, |s| {
+        s.serial > serial && !s.busy && s.library.status.is_some()
+    });
+    let selection: spiling_contracts::manufacturing::MaterialProfileSelection =
+        serde_json::from_slice(include_bytes!(
+            "../../../../fixtures/manufacturing/material-profile-a.json"
+        ))
+        .unwrap();
+    let definition = FilamentDefinition {
+        name: "Native stock".into(),
+        material: Some(selection.profile.material.clone()),
+        color_name: None,
+        appearance: None,
+        profiles: vec![selection.profile.clone()],
+        source: DefinitionSource::Operator,
+    };
+    let id = FilamentId("b6a8aaac-0506-4c0b-89f4-6dbec7d3fd67".into());
+    let request = LibraryWrite {
+        library_id: None,
+        base_revision: 0,
+        request_id: "b6a8aaac-0506-4c0b-89f4-6dbec7d3fd68".into(),
+        mutation: LibraryMutation::PutFilament {
+            id: id.clone(),
+            expected: None,
+            definition,
+        },
+    };
+    host.library(LibraryAction::Write(request.clone())).unwrap();
+    let saved = wait(&host, |s| {
+        !s.busy
+            && s.library
+                .receipt
+                .as_ref()
+                .is_some_and(|r| r.request_id == request.request_id)
+    });
+    assert_eq!(
+        saved.library.receipt.as_ref().unwrap().publication,
+        LibraryPublication::Confirmed
+    );
+    host.library(LibraryAction::Refresh(LibraryFilamentQuery::default()))
+        .unwrap();
+    let listed = wait(&host, |s| {
+        !s.busy
+            && s.library
+                .personal
+                .as_ref()
+                .is_some_and(|p| p.entries.len() == 1)
+    });
+    let reference = listed.library.personal.as_ref().unwrap().entries[0]
+        .entry
+        .current
+        .clone();
+    host.library(LibraryAction::Inspect {
+        personal: true,
+        reference: reference.clone(),
+    })
+    .unwrap();
+    let inspected = wait(&host, |s| !s.busy && s.library.selected.is_some());
+    let revision = inspected.library.selected.as_ref().unwrap().1.clone();
+    host.library(LibraryAction::UseInProject {
+        revision,
+        origin: LibraryOrigin {
+            library_id: saved.library.receipt.as_ref().unwrap().identity.id.clone(),
+            filament: reference.clone(),
+        },
+        expected: None,
+        base_revision: inspected.project.unwrap().revision,
+    })
+    .unwrap();
+    let copied = wait(&host, |s| {
+        !s.busy && s.project.as_ref().is_some_and(|p| p.materials.is_some())
+    });
+    assert!(copied.project.unwrap().dirty);
+    host.library(LibraryAction::Refresh(LibraryFilamentQuery::default()))
+        .unwrap();
+    let project = wait(&host, |s| !s.busy && s.library.project.len() == 1);
+    assert_eq!(project.library.project[0].entry.current, reference);
+    let serial = host.snapshot().serial;
+    host.library(LibraryAction::Inspect {
+        personal: false,
+        reference: reference.clone(),
+    })
+    .unwrap();
+    let inspected = idle_after(&host, serial);
+    assert_eq!(
+        inspected.library.selected_project,
+        inspected
+            .project
+            .as_ref()
+            .map(|p| (p.project_id.clone(), p.revision))
+    );
+    let serial = inspected.serial;
+    host.library(LibraryAction::ReviewProfile(selection.profile.clone()))
+        .unwrap();
+    let reviewed = idle_after(&host, serial);
+    assert_eq!(
+        reviewed
+            .manufacturing
+            .loaded_material
+            .as_ref()
+            .unwrap()
+            .revision,
+        inspected.project.as_ref().unwrap().revision
+    );
+    let serial = reviewed.serial;
+    host.command(Command::Undo).unwrap();
+    let undone = idle_after(&host, serial);
+    let serial = undone.serial;
+    host.command(Command::Redo).unwrap();
+    let redone = idle_after(&host, serial);
+    assert_ne!(
+        redone.project.as_ref().unwrap().revision,
+        inspected.project.as_ref().unwrap().revision
+    );
+    let serial = redone.serial;
+    host.library(LibraryAction::ReviewProfile(selection.profile))
+        .unwrap();
+    let stale = idle_after(&host, serial);
+    assert!(
+        stale
+            .problems
+            .back()
+            .unwrap()
+            .contains("Refresh and inspect")
+    );
+    assert!(
+        stale
+            .manufacturing
+            .loaded_material
+            .as_ref()
+            .is_none_or(|m| { m.revision == inspected.project.as_ref().unwrap().revision })
+    );
+    std::fs::write(
+        root.path().join("My library.spil"),
+        b"damaged personal file",
+    )
+    .unwrap();
+    let serial = host.snapshot().serial;
+    host.library(LibraryAction::Refresh(LibraryFilamentQuery::default()))
+        .unwrap();
+    let independent = idle_after(&host, serial);
+    assert_eq!(independent.phase, Phase::Running);
+    assert_eq!(independent.library.project.len(), 1);
+    assert!(independent.library.personal.is_none());
+    host.command(Command::Close).unwrap();
+    let closing = wait(&host, |s| s.confirmation.is_some());
+    host.confirm(closing.confirmation.unwrap().id, true)
+        .unwrap();
+    wait(&host, |s| s.phase == Phase::Closed);
+}

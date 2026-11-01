@@ -19,6 +19,22 @@ pub const MAX_SNAPSHOT_BYTES: usize = 160 * 1024 * 1024;
 pub const MAX_DATABASE_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_JOURNAL_BYTES: u64 = 2 * MAX_DATABASE_BYTES;
 pub const PROFILE: &str = "spiling.project";
+
+/// Closed application profiles; callers select the expected document authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentProfile {
+    Project,
+    UserLibrary,
+}
+impl DocumentProfile {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Project => PROFILE,
+            Self::UserLibrary => "spiling.user-library",
+        }
+    }
+}
+
 pub const APPLICATION_ID: u32 = 0x50544143;
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_SNAPSHOTS: u64 = 512;

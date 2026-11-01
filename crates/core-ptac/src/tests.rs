@@ -461,3 +461,81 @@ fn real_create_publish_capture_and_previous() {
         b"second"
     );
 }
+
+#[test]
+fn document_profiles_refuse_cross_open_and_survive_publication_and_compaction() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cancel = AtomicBool::new(false);
+    for (name, profile, foreign) in [
+        (
+            "project",
+            DocumentProfile::Project,
+            DocumentProfile::UserLibrary,
+        ),
+        (
+            "library",
+            DocumentProfile::UserLibrary,
+            DocumentProfile::Project,
+        ),
+    ] {
+        let path = temporary.path().join(format!("{name}.spil"));
+        let created =
+            Container::create_new_for_profile(&path, profile, input(b"first"), &cancel, |_| true)
+                .unwrap();
+        assert_eq!(created.outcome, PublicationOutcome::PublishedConfirmed);
+        assert!(Container::open_existing_for_profile(&path, true, foreign).is_err());
+        let read = Container::open_existing_for_profile(&path, true, profile).unwrap();
+        assert_eq!(
+            read.capture(Selection::Current, &cancel).unwrap().root,
+            b"first"
+        );
+        drop(read);
+        let updated = created
+            .container
+            .publish(
+                created.heads,
+                Selection::Current,
+                input(b"second"),
+                &cancel,
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(updated.outcome, PublicationOutcome::PublishedConfirmed);
+        updated.container.check(&cancel).unwrap();
+        updated.container.reopen().unwrap();
+        let previous = updated
+            .container
+            .capture(Selection::Previous, &cancel)
+            .unwrap();
+        assert_eq!(previous.root, b"first");
+        drop(previous);
+        let target = temporary.path().join(format!("{name}-copy.spil"));
+        let compact = updated
+            .container
+            .compact_to_new(&target, &cancel, |_| true)
+            .unwrap();
+        assert_eq!(compact.outcome, PublicationOutcome::PublishedConfirmed);
+        assert!(Container::open_existing_for_profile(&target, true, foreign).is_err());
+        assert_eq!(
+            compact
+                .container
+                .capture(Selection::Current, &cancel)
+                .unwrap()
+                .root,
+            b"second"
+        );
+        assert_eq!(
+            compact
+                .container
+                .capture(Selection::Previous, &cancel)
+                .unwrap()
+                .root,
+            b"first"
+        );
+        compact
+            .container
+            .collect_unreachable(&cancel, || true)
+            .unwrap();
+        compact.container.check(&cancel).unwrap();
+    }
+}

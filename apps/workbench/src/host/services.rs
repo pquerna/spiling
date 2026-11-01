@@ -163,6 +163,9 @@ impl Actor {
                     .await
             }
             Ok(ProjectResponse::SceneChanged { .. } | ProjectResponse::Status { .. }) => {}
+            Ok(ProjectResponse::Filament { .. } | ProjectResponse::Filaments { .. }) => {
+                self.problem("Unexpected material query response to project edit")
+            }
             Ok(ProjectResponse::Error { error }) => self.problem(error.to_string()),
             Err(error) => self.failure(error).await,
         }
@@ -251,6 +254,9 @@ impl Actor {
                     Ok(Err(error)) => self.problem(error),
                     Err(error) => self.problem(error.to_string()),
                 }
+            }
+            Action::SetLibraryLocation(path) => {
+                self.library_action(LibraryAction::SetLocation(path)).await;
             }
             Action::LoadMaterial(path) => {
                 let Some(project) = self.state.project.clone() else {

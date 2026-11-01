@@ -8,6 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keep bounded protobuf control oneofs inline rather than adding per-call boxes.
     for oneof in [
         ".spiling.engine.ArtifactSummary.kind",
+        ".spiling.engine.LibraryWriteRequest.mutation",
         ".spiling.engine.ManufacturingRequest.command",
         ".spiling.engine.ManufacturingReply.result",
         ".spiling.engine.AppearancePaletteRow.evidence",
@@ -26,6 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::path::PathBuf::from("proto/spiling/native_project.proto"),
             std::path::PathBuf::from("proto/spiling/native_manufacturing.proto"),
             std::path::PathBuf::from("proto/spiling/native_appearance.proto"),
+            std::path::PathBuf::from("proto/spiling/native_library.proto"),
+            std::path::PathBuf::from("proto/spiling/native_material.proto"),
             std::path::PathBuf::from("proto/vendor/google/longrunning/operations.proto"),
             std::path::PathBuf::from("proto/vendor/google/bytestream/bytestream.proto"),
         ],

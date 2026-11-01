@@ -3929,6 +3929,7 @@ dependencies = [
 name = "spiling-engine"
 version = "0.1.0"
 dependencies = [
+ "directories",
  "fs2",
  "libc",
  "parking_lot",
@@ -4028,6 +4029,7 @@ dependencies = [
  "spiling-engine-client",
  "tempfile",
  "tokio",
+ "uuid",
  "wgpu",
 ]
 
