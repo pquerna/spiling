@@ -3,7 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 mod color;
-pub use color::{ColorInspector, color_chip, color_details, color_summary, color_swatch};
+pub use color::{ColorDensity, ColorInspector, ColorMeaning, ColorPresentation};
 
 use egui::{Color32, RichText, Ui};
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,7 @@ impl Theme {
         visuals.window_fill = tokens.panel;
         visuals.extreme_bg_color = tokens.canvas;
         visuals.override_text_color = Some(tokens.text);
+        visuals.weak_text_color = Some(tokens.muted);
         visuals.selection.stroke.color = tokens.accent;
         visuals.hyperlink_color = tokens.accent;
         visuals.warn_fg_color = tokens.warning;
@@ -138,14 +139,34 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
     let mut inspector = ui.data_mut(|d| d.get_temp::<ColorInspector>(color_id).unwrap_or_default());
     inspector.show(ui);
     ui.data_mut(|d| d.insert_temp(color_id, inspector));
-    for (rgb, declared) in [
-        ([255, 255, 255], None),
-        ([0, 0, 0], None),
-        ([127, 127, 127], None),
-        ([207, 82, 78], Some("Supplier coral")),
+    ui.heading("Color presentation");
+    ui.label("The same sample in compact, standard and expanded views");
+    let coral = ColorPresentation::known([207, 82, 78], ColorMeaning::DeclaredAppearance)
+        .declared_name("Supplier coral");
+    for (id, density) in [
+        ("compact", ColorDensity::Compact),
+        ("standard", ColorDensity::Standard),
+        ("expanded", ColorDensity::Expanded),
     ] {
-        color_chip(ui, rgb, declared);
+        ui.label(id);
+        coral.show(ui, id, density);
     }
+    ui.separator();
+    for (id, rgb, meaning) in [
+        ("white", [255; 3], ColorMeaning::Target),
+        ("black", [0; 3], ColorMeaning::CatalogEstimate),
+        ("estimate", [189, 120, 101], ColorMeaning::ReferenceEstimate),
+    ] {
+        ColorPresentation::known(rgb, meaning).show(ui, id, ColorDensity::Standard);
+    }
+    ColorPresentation::unspecified(ColorMeaning::DeclaredAppearance).show(
+        ui,
+        "unknown-color",
+        ColorDensity::Standard,
+    );
+    ColorPresentation::unspecified(ColorMeaning::DeclaredAppearance)
+        .declared_name("Supplier natural")
+        .show(ui, "named-without-sample", ColorDensity::Standard);
     ui.separator();
     ui.colored_label(
         tokens.warning,
@@ -177,6 +198,39 @@ pub fn number(ui: &mut Ui, label: &str, value: &mut f64, speed: f64) -> egui::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_themes_keep_secondary_text_readable_on_panel_and_canvas() {
+        fn luminance(color: Color32) -> f64 {
+            let [r, g, b, _] = color.to_array();
+            let linear = [r, g, b].map(|v| {
+                let c = f64::from(v) / 255.0;
+                if c <= 0.04045 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            });
+            0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+        }
+        for theme in [Theme::Graphite, Theme::Paper] {
+            let tokens = theme.tokens();
+            let ctx = egui::Context::default();
+            theme.apply(&ctx);
+            assert_eq!(
+                ctx.global_style().visuals.weak_text_color,
+                Some(tokens.muted)
+            );
+            for foreground in [tokens.text, tokens.muted] {
+                for background in [tokens.panel, tokens.canvas] {
+                    let a = luminance(foreground);
+                    let b = luminance(background);
+                    let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                    assert!(ratio >= 4.5, "{theme:?} text contrast {ratio}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn numeric_typing_survives_a_draft_warning_inserted_above_the_field() {

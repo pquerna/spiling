@@ -105,6 +105,11 @@ impl Workbench {
             "{} · {}",
             p.material.manufacturer, p.material.product
         ));
+        ui::ColorPresentation::unspecified(ui::ColorMeaning::DeclaredAppearance).show(
+            ui,
+            "material-appearance",
+            ui::ColorDensity::Standard,
+        );
         ui.weak(format!(
             "Profile {} / {} · material {} / {}",
             p.id, p.revision, p.material.id, p.material.revision

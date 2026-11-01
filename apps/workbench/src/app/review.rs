@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use spiling_contracts::{manufacturing::*, optical::OpticalAssessment};
+use spiling_contracts::{
+    appearance::AppearanceColor, manufacturing::*, optical::OpticalAssessment,
+};
 
 pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
     let report = &review.capture.report;
@@ -37,12 +39,45 @@ pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
                 ui.weak("Captured reference estimate; backing optics are unmodelled. No calibrated or physical color qualification.");
                 ui.label(if reference.patch_matches_request{"Requested patch matches"}else{"Realized patch differs from requested study"});
                 if !reference.pose_matches_application{ui.label("Occurrence pose changed since application");}
-                assessment(ui,"Requested",&reference.requested);assessment(ui,"Realized",&reference.realized);
+                ui.push_id(("surface-reference",face.construction_index,face.face_id.as_str()), |ui| {
+                    assessment(ui,"Requested cycle",&reference.requested);
+                    assessment(ui,"Realized exposure",&reference.realized);
+                });
             }
         }
     });
     }
 }
+/// Keep the exact source encoding visible; only an explicit sRGB target has an sRGB swatch.
+pub(super) fn target(ui: &mut egui::Ui, color: AppearanceColor) {
+    ui.collapsing("Target color", |ui| {
+        if let Err(error) = color.validate() {
+            ui.label(format!("Target cannot be displayed: {error}"));
+            return;
+        }
+        match color {
+            AppearanceColor::Srgb { channels } => {
+                crate::ui::ColorPresentation::known(
+                    channels.map(|v| (v * 255.0).round() as u8),
+                    crate::ui::ColorMeaning::Target,
+                )
+                .show(ui, "target", crate::ui::ColorDensity::Standard);
+                ui.label(format!("Encoded sRGB: R {} · G {} · B {}", channels[0], channels[1], channels[2]));
+                ui.weak("The swatch and name use an 8-bit display sample; target coordinates remain unchanged.");
+            }
+            AppearanceColor::D65Lab { channels } => {
+                ui.label(format!("Target · D65 Lab: L* {} · a* {} · b* {}", channels[0], channels[1], channels[2]));
+            }
+            AppearanceColor::XyzY1 { channels } => {
+                ui.label(format!("Target · XYZ (Y = 1): X {} · Y {} · Z {}", channels[0], channels[1], channels[2]));
+            }
+            AppearanceColor::XyzY100 { channels } => {
+                ui.label(format!("Target · XYZ (Y = 100): X {} · Y {} · Z {}", channels[0], channels[1], channels[2]));
+            }
+        }
+    });
+}
+
 pub(super) fn assessment(ui: &mut egui::Ui, label: &str, value: &OpticalAssessment) {
     ui.label(label);
     match value {
@@ -62,9 +97,17 @@ pub(super) fn assessment(ui: &mut egui::Ui, label: &str, value: &OpticalAssessme
             within_tolerance,
             ..
         } => {
-            crate::ui::color_chip(ui, *display_srgb8, None);
+            crate::ui::ColorPresentation::known(
+                *display_srgb8,
+                crate::ui::ColorMeaning::ReferenceEstimate,
+            )
+            .show(
+                ui,
+                ("optical-color", label),
+                crate::ui::ColorDensity::Standard,
+            );
             ui.label(format!(
-                "Reference estimate · ΔE00 {:.3} · {}",
+                "ΔE00 {:.3} · {}",
                 delta_e00,
                 if *within_tolerance {
                     "Within target"
@@ -72,13 +115,6 @@ pub(super) fn assessment(ui: &mut egui::Ui, label: &str, value: &OpticalAssessme
                     "Outside target"
                 }
             ));
-            ui.collapsing("Color-name details", |ui| {
-                let named = spiling_appearance::naming::describe(
-                    *display_srgb8,
-                    spiling_contracts::color_naming::ColorNamingMode::Descriptive,
-                );
-                crate::ui::color_details(ui, &named);
-            });
             ui.label(format!(
                 "Nominal material exposure {}",
                 exposure_text(&exposure.fractions)
@@ -135,7 +171,11 @@ pub(super) fn assessment_label(value: &OpticalAssessment) -> String {
             ..
         } => format!(
             "{} · ΔE00 {:.3} · {}",
-            crate::ui::color_summary(*display_srgb8),
+            crate::ui::ColorPresentation::known(
+                *display_srgb8,
+                crate::ui::ColorMeaning::ReferenceEstimate,
+            )
+            .summary(),
             delta_e00,
             if *within_tolerance {
                 "Within target"

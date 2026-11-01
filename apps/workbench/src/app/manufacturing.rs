@@ -386,12 +386,20 @@ impl Workbench {
         {
             ui.collapsing("Declared tool-color legend", |ui| {
                 for (tool, rgba) in colors.iter().enumerate() {
-                    ui.label(format!("Tool T{tool} · catalog estimate"));
-                    ui::color_chip(
-                        ui,
+                    if let JobWorkflow::FixedDualMarlin { job } =
+                        &review.capture.provenance.workflow
+                    {
+                        let material = &job.tools[tool].material;
+                        ui.label(format!(
+                            "Tool T{tool} · {} · {}",
+                            material.polymer_family, material.id
+                        ));
+                    }
+                    ui::ColorPresentation::known(
                         [rgba[0], rgba[1], rgba[2]].map(|c| (c * 255.0).round() as u8),
-                        None,
-                    );
+                        ui::ColorMeaning::CatalogEstimate,
+                    )
+                    .show(ui, ("tool-color", tool), ui::ColorDensity::Standard);
                 }
             });
         }

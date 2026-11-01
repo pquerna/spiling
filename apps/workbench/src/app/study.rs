@@ -98,7 +98,8 @@ impl Workbench {
             capture.report.total_candidates,
             capture.report.visits.len()
         ));
-        super::review::assessment(ui, "Requested reference", &capture.report.requested);
+        super::review::target(ui, capture.report.request.target.color);
+        super::review::assessment(ui, "Requested cycle", &capture.report.requested);
         ui.selectable_value(
             &mut self.study.selection,
             Some(OpticalSelection::Requested),
@@ -131,6 +132,17 @@ impl Workbench {
                     }
                 }
             });
+        if let Some(OpticalSelection::Candidate { index }) = self.study.selection
+            && let Some(visit) = capture
+                .report
+                .visits
+                .iter()
+                .find(|visit| visit.index == index)
+        {
+            ui.push_id(("selected-candidate", index), |ui| {
+                super::review::assessment(ui, "Selected candidate", &visit.assessment);
+            });
+        }
         if ui
             .add_enabled(
                 writable

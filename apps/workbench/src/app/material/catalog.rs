@@ -123,6 +123,9 @@ impl Workbench {
                     ui.weak(format!("{} / {} · {}", p.id, p.revision,
                         if candidate.issues.is_empty() { "Compatible declaration" } else { "Incompatible" }));
                     if selected {
+                        ui::ColorPresentation::unspecified(ui::ColorMeaning::DeclaredAppearance).show(
+                            ui, "material-appearance", ui::ColorDensity::Standard,
+                        );
                         if candidate.issues.is_empty() {
                             ui.label(if candidate.input_changed == Some(false) {
                                 "Already captured; no input change."
