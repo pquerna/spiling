@@ -929,6 +929,75 @@ impl TryFrom<RectilinearAxisPolicy> for rpc::RectilinearAxisPolicy {
         })
     }
 }
+impl TryFrom<rpc::LayerHeightPolicy> for LayerHeightPolicy {
+    type Error = String;
+    fn try_from(value: rpc::LayerHeightPolicy) -> Result<Self, String> {
+        match value {
+            rpc::LayerHeightPolicy::Preferred => Ok(Self::Preferred),
+            rpc::LayerHeightPolicy::ProtectedMaximum => Ok(Self::ProtectedMaximum),
+            rpc::LayerHeightPolicy::Unspecified => Err("unspecified layer-height policy".into()),
+        }
+    }
+}
+impl From<LayerHeightPolicy> for rpc::LayerHeightPolicy {
+    fn from(value: LayerHeightPolicy) -> Self {
+        match value {
+            LayerHeightPolicy::Preferred => Self::Preferred,
+            LayerHeightPolicy::ProtectedMaximum => Self::ProtectedMaximum,
+        }
+    }
+}
+impl TryFrom<rpc::LayerHeightAssessment> for LayerHeightAssessment {
+    type Error = String;
+    fn try_from(value: rpc::LayerHeightAssessment) -> Result<Self, String> {
+        valid(
+            Self {
+                policy: rpc::LayerHeightPolicy::try_from(value.policy)
+                    .map_err(|_| "unknown layer-height policy")?
+                    .try_into()?,
+                requested_mm: value.requested_mm,
+                selected_mm: value.selected_mm,
+                reason: match rpc::LayerHeightReason::try_from(value.reason)
+                    .map_err(|_| "unknown layer-height reason")?
+                {
+                    rpc::LayerHeightReason::Requested => LayerHeightReason::Requested,
+                    rpc::LayerHeightReason::ProcessMinimum => LayerHeightReason::ProcessMinimum,
+                    rpc::LayerHeightReason::ProcessMaximum => LayerHeightReason::ProcessMaximum,
+                    rpc::LayerHeightReason::Unspecified => {
+                        return Err("unspecified layer-height reason".into());
+                    }
+                },
+                realized_min_mm: value.realized_min_mm,
+                realized_max_mm: value.realized_max_mm,
+                layer_count: value.layer_count,
+                differing_layer_count: value.differing_layer_count,
+                first_differing_layer: value.first_differing_layer,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<LayerHeightAssessment> for rpc::LayerHeightAssessment {
+    type Error = String;
+    fn try_from(value: LayerHeightAssessment) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            policy: rpc::LayerHeightPolicy::from(value.policy) as i32,
+            requested_mm: value.requested_mm,
+            selected_mm: value.selected_mm,
+            reason: match value.reason {
+                LayerHeightReason::Requested => rpc::LayerHeightReason::Requested,
+                LayerHeightReason::ProcessMinimum => rpc::LayerHeightReason::ProcessMinimum,
+                LayerHeightReason::ProcessMaximum => rpc::LayerHeightReason::ProcessMaximum,
+            } as i32,
+            realized_min_mm: value.realized_min_mm,
+            realized_max_mm: value.realized_max_mm,
+            layer_count: value.layer_count,
+            differing_layer_count: value.differing_layer_count,
+            first_differing_layer: value.first_differing_layer,
+        })
+    }
+}
 impl TryFrom<rpc::PlanarPrintRecipe> for PlanarPrintRecipe {
     type Error = String;
     fn try_from(value: rpc::PlanarPrintRecipe) -> Result<Self, String> {
@@ -940,6 +1009,9 @@ impl TryFrom<rpc::PlanarPrintRecipe> for PlanarPrintRecipe {
                 material_revision: value.material_revision,
                 filament_diameter_mm: value.filament_diameter_mm,
                 layer_height_mm: value.layer_height_mm,
+                layer_height_policy: rpc::LayerHeightPolicy::try_from(value.layer_height_policy)
+                    .map_err(|_| "unknown layer-height policy")?
+                    .try_into()?,
                 native_shape_error_mm: value.native_shape_error_mm,
                 bead_width_mm: value.bead_width_mm,
                 perimeter_count: value.perimeter_count,
@@ -975,6 +1047,7 @@ impl TryFrom<PlanarPrintRecipe> for rpc::PlanarPrintRecipe {
             material_revision: value.material_revision,
             filament_diameter_mm: value.filament_diameter_mm,
             layer_height_mm: value.layer_height_mm,
+            layer_height_policy: rpc::LayerHeightPolicy::from(value.layer_height_policy) as i32,
             native_shape_error_mm: value.native_shape_error_mm,
             bead_width_mm: value.bead_width_mm,
             perimeter_count: value.perimeter_count,
@@ -1177,6 +1250,8 @@ impl TryFrom<rpc::ManufacturingSummary> for ManufacturingSummary {
         }
         valid(
             Self {
+                layer_height: required(value.layer_height, "layer-height assessment")?
+                    .try_into()?,
                 layers: value.layers,
                 routing: value.routing.map(TryInto::try_into).transpose()?,
                 paths: value.paths,
@@ -1209,6 +1284,7 @@ impl TryFrom<ManufacturingSummary> for rpc::ManufacturingSummary {
     fn try_from(value: ManufacturingSummary) -> Result<Self, String> {
         value.validate().map_err(|e| e.to_string())?;
         Ok(Self {
+            layer_height: Some(value.layer_height.try_into()?),
             layers: value.layers,
             routing: value.routing.map(TryInto::try_into).transpose()?,
             paths: value.paths,
@@ -1260,6 +1336,8 @@ impl TryFrom<rpc::VerificationReport> for VerificationReport {
     fn try_from(value: rpc::VerificationReport) -> Result<Self, String> {
         valid(
             Self {
+                layer_height: required(value.layer_height, "layer-height assessment")?
+                    .try_into()?,
                 verified: value.verified,
                 routing: value.routing.map(TryInto::try_into).transpose()?,
                 coverage: value.coverage,
@@ -1287,6 +1365,7 @@ impl TryFrom<VerificationReport> for rpc::VerificationReport {
     fn try_from(value: VerificationReport) -> Result<Self, String> {
         value.validate().map_err(|e| e.to_string())?;
         Ok(Self {
+            layer_height: Some(value.layer_height.try_into()?),
             verified: value.verified,
             routing: value.routing.map(TryInto::try_into).transpose()?,
             coverage: value.coverage,
@@ -1482,6 +1561,11 @@ mod tests {
     fn consumed_recipe_wire_rejects_missing_unknown_and_invalid_policies() {
         use prost::Message;
         let wire = rpc::ManufacturingIntent::try_from(intent()).unwrap();
+        for policy in [0, -1, i32::MAX] {
+            let mut invalid = wire.clone();
+            invalid.recipe.as_mut().unwrap().layer_height_policy = policy;
+            assert!(ManufacturingIntent::try_from(invalid).is_err());
+        }
         for seam_policy in [
             None,
             Some(rpc::SeamPolicy { policy: None }),
@@ -1729,6 +1813,17 @@ mod tests {
             input_hash: SourceHash::from_bytes(b"input"),
             byte_count: 6,
             summary: ManufacturingSummary {
+                layer_height: crate::manufacturing::LayerHeightAssessment {
+                    policy: crate::manufacturing::LayerHeightPolicy::ProtectedMaximum,
+                    requested_mm: 0.2,
+                    selected_mm: 0.2,
+                    reason: crate::manufacturing::LayerHeightReason::Requested,
+                    realized_min_mm: 0.2,
+                    realized_max_mm: 0.2,
+                    layer_count: 1,
+                    differing_layer_count: 0,
+                    first_differing_layer: None,
+                },
                 layers: 1,
                 routing: None,
                 process_resolution: vec![],
@@ -1880,6 +1975,17 @@ mod tests {
     #[test]
     fn reports_reject_unbounded_descriptions_and_nonfinite_measurements() {
         let report = VerificationReport {
+            layer_height: crate::manufacturing::LayerHeightAssessment {
+                policy: crate::manufacturing::LayerHeightPolicy::ProtectedMaximum,
+                requested_mm: 0.2,
+                selected_mm: 0.2,
+                reason: crate::manufacturing::LayerHeightReason::Requested,
+                realized_min_mm: 0.2,
+                realized_max_mm: 0.2,
+                layer_count: 1,
+                differing_layer_count: 0,
+                first_differing_layer: None,
+            },
             verified: true,
             routing: None,
             coverage: vec!["software replay".into()],
@@ -2773,6 +2879,17 @@ mod routed_report_wire_tests {
             }),
         };
         let report = VerificationReport {
+            layer_height: crate::manufacturing::LayerHeightAssessment {
+                policy: crate::manufacturing::LayerHeightPolicy::ProtectedMaximum,
+                requested_mm: 0.2,
+                selected_mm: 0.2,
+                reason: crate::manufacturing::LayerHeightReason::Requested,
+                realized_min_mm: 0.2,
+                realized_max_mm: 0.2,
+                layer_count: 1,
+                differing_layer_count: 0,
+                first_differing_layer: None,
+            },
             verified: true,
             coverage: vec!["decoded route".into()],
             limitations: vec!["software only".into()],
@@ -2801,6 +2918,17 @@ mod routed_report_wire_tests {
         assert!(VerificationReport::try_from(invalid).is_err());
 
         let summary = ManufacturingSummary {
+            layer_height: crate::manufacturing::LayerHeightAssessment {
+                policy: crate::manufacturing::LayerHeightPolicy::ProtectedMaximum,
+                requested_mm: 0.2,
+                selected_mm: 0.2,
+                reason: crate::manufacturing::LayerHeightReason::Requested,
+                realized_min_mm: 0.2,
+                realized_max_mm: 0.2,
+                layer_count: 1,
+                differing_layer_count: 0,
+                first_differing_layer: None,
+            },
             layers: 1,
             paths: 2,
             deposition_segments: 2,

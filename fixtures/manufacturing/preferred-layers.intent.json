@@ -1,0 +1,108 @@
+{
+  "material_profile": null,
+  "printer": {
+    "schema_version": 11,
+    "id": "software-goal-example",
+    "revision": "1",
+    "name": "Software layer-goal example, not a calibrated printer",
+    "coordinate_frame": "right_handed_millimetres",
+    "build_envelope": {
+      "min": [0, 0, 0],
+      "max": [220, 220, 220]
+    },
+    "components": [
+      {
+        "id": "bed",
+        "role": "bed",
+        "pose": {
+          "translation_mm": [0, 0, 0],
+          "rotation_xyzw": [0, 0, 0, 1]
+        },
+        "shape": {
+          "kind": "box",
+          "bounds_mm": {
+            "min": [0, 0, -4],
+            "max": [220, 220, 0]
+          }
+        }
+      },
+      {
+        "id": "toolhead-envelope",
+        "role": "toolhead",
+        "pose": {
+          "translation_mm": [0, 0, 0],
+          "rotation_xyzw": [0, 0, 0, 1]
+        },
+        "shape": {
+          "kind": "cylinder",
+          "radius_mm": 10,
+          "height_mm": 25
+        }
+      }
+    ],
+    "capabilities": {
+      "motion_space": "cartesian_xyz",
+      "extruders": 1,
+      "output_dialect": "cartesian_absolute_gcode_v1",
+      "generated_supports": false
+    },
+    "workflow": {
+      "kind": "diagnostic_body_only"
+    },
+    "nozzle_diameter_mm": 0.4,
+    "deposition_limits": {
+      "min_bead_width_mm": 0.3,
+      "max_bead_width_mm": 0.75,
+      "min_bead_height_mm": 0.1,
+      "max_bead_height_mm": 0.3
+    },
+    "max_feed_mm_s": 150,
+    "max_volumetric_flow_mm3_s": 12
+  },
+  "recipe": {
+    "id": "preferred-layers",
+    "revision": "1",
+    "material_id": "nominal-software-filament",
+    "material_revision": "1",
+    "filament_diameter_mm": 1.75,
+    "layer_height_mm": 0.05,
+    "layer_height_policy": "preferred",
+    "native_shape_error_mm": 0.1,
+    "bead_width_mm": 0.45,
+    "perimeter_count": 2,
+    "infill_fraction": 1,
+    "sparse_infill": {
+      "kind": "fine"
+    },
+    "top_skin_thickness_mm": 0.8,
+    "bottom_skin_thickness_mm": 0.8,
+    "print_speed_mm_s": 35,
+    "travel_speed_mm_s": 100,
+    "flow_multiplier": 1,
+    "process": {
+      "first_layer_speed_factor": 0.5,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 128,
+      "bridge_speed_factor": 0.6,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 255,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 25,
+        "minimum_travel_mm": 2,
+        "z_hop_mm": 0.2
+      }
+    },
+    "supports": {
+      "kind": "disabled"
+    },
+    "seam_policy": {
+      "kind": "nearest"
+    },
+    "rectilinear_axis": "alternating_xy",
+    "top_skin_axis": "alternating_xy"
+  }
+}

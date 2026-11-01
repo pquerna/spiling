@@ -17,6 +17,7 @@ pub(super) fn recipe(fraction: f64) -> PlanarPrintRecipe {
         material_revision: "1".into(),
         filament_diameter_mm: 1.75,
         layer_height_mm: 0.4,
+        layer_height_policy: LayerHeightPolicy::ProtectedMaximum,
         bead_width_mm: 0.6,
         sparse_infill: SparseInfillPolicy::Fine,
         perimeter_count: 1,

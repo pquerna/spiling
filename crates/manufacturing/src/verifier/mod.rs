@@ -1174,6 +1174,7 @@ pub(crate) fn verify_actual(
         return Err(failed("decoded deposited volume is nonfinite"));
     }
     Ok(VerificationReport {
+        layer_height: LayerHeightAssessment::from_plan(intent, &plan.layers)?,
         verified: true,
         coverage: vec![
             format!(

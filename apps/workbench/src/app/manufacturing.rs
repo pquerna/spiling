@@ -33,10 +33,14 @@ pub(super) struct ManufacturingUi {
     bead_statistics: Option<BeadStatistics>,
 }
 impl ManufacturingUi {
-    pub(super) fn has_intent_draft(&self, project: &ProjectId) -> bool {
-        self.draft
-            .as_ref()
-            .is_some_and(|d| &d.project == project && d.value != *d.original)
+    pub(super) fn has_intent_draft(
+        &self,
+        project: &ProjectId,
+        current: Option<&ManufacturingIntent>,
+    ) -> bool {
+        self.draft.as_ref().is_some_and(|d| {
+            &d.project == project && d.value != *d.original && current != Some(&d.value)
+        })
     }
 }
 impl Workbench {
@@ -121,8 +125,13 @@ impl Workbench {
                     d.value.recipe.id, d.value.recipe.revision
                 ));
                 ui.add_enabled_ui(writable && !conflict, |ui| {
+                    ui.heading("Protect the part");
+                    ui::number(ui, "Shape approximation limit (mm)", &mut d.value.recipe.native_shape_error_mm, 0.001);
+                    ui.weak("Source material and holes remain protected. This bounds geometry approximation, not physical print accuracy.");
+                    ui.separator();
+                    ui.heading("Construction goals");
+                    ui::layer_height_goal(ui, &mut d.value, self.prefs.theme.tokens());
                     for (label, value) in [
-                        ("Layer height (mm)", &mut d.value.recipe.layer_height_mm),
                         ("Bead width (mm)", &mut d.value.recipe.bead_width_mm),
                         ("Sparse fraction", &mut d.value.recipe.infill_fraction),
                         ("Top skin (mm)", &mut d.value.recipe.top_skin_thickness_mm),
@@ -159,10 +168,12 @@ impl Workbench {
                         )
                         .clicked()
                     {
+                        let value = valid.expect("validated complete intent");
+                        d.value = value.clone();
                         self.queued_manufacturing = Some(ManufacturingCommand::SetIntent {
                             session_id: hello.session_id.clone(),
                             base_revision: d.revision,
-                            intent: Arc::new(valid.expect("validated complete intent")),
+                            intent: Arc::new(value),
                         });
                     }
                 });
@@ -278,6 +289,16 @@ impl Workbench {
             if self.manufacturing_current()
                 && let Some(review) = &m.review
             {
+                if m.loaded.is_some()
+                    || self
+                        .manufacturing
+                        .has_intent_draft(&project.project_id, m.intent.as_deref())
+                {
+                    ui.colored_label(
+                        self.prefs.theme.tokens().warning,
+                        "Unapplied construction changes. This review describes committed settings.",
+                    );
+                }
                 let report = &review.capture.report;
                 ui.label(format!(
                     "Fresh verification: {}",
@@ -291,6 +312,62 @@ impl Workbench {
                     "{:.3} mm³ deposited · {:.3} mm filament",
                     report.deposited_volume_mm3, report.filament_length_mm
                 ));
+                let goal = &report.layer_height;
+                ui.separator();
+                ui.heading("Construction goals");
+                ui.label(match goal.policy {
+                    LayerHeightPolicy::Preferred => "Layer height · preferred target",
+                    LayerHeightPolicy::ProtectedMaximum => "Layer height · protected maximum",
+                });
+                ui.label(format!(
+                    "Requested {:.3} mm; selected nominal {:.3} mm",
+                    goal.requested_mm, goal.selected_mm
+                ));
+                ui.label(format!(
+                    "Actual layer heights {:.6}–{:.6} mm",
+                    goal.realized_min_mm, goal.realized_max_mm
+                ));
+                if goal.reason != LayerHeightReason::Requested {
+                    ui.colored_label(
+                        self.prefs.theme.tokens().warning,
+                        match goal.reason {
+                            LayerHeightReason::ProcessMinimum => {
+                                "Goal adjusted · captured process minimum requires thicker layers."
+                            }
+                            LayerHeightReason::ProcessMaximum => {
+                                "Goal adjusted · captured process maximum requires thinner layers."
+                            }
+                            LayerHeightReason::Requested => unreachable!(),
+                        },
+                    );
+                }
+                if let Some(index) = goal.first_differing_layer {
+                    ui.label(format!(
+                        "{} of {} layers differ from the target by more than command precision.",
+                        goal.differing_layer_count, goal.layer_count
+                    ));
+                    if ui.button("Inspect first adjusted layer").clicked() {
+                        self.manufacturing.replay.layer = Some(index as u16);
+                        self.manufacturing.replay.events = review
+                            .display
+                            .as_ref()
+                            .and_then(|display| {
+                                display
+                                    .batches
+                                    .iter()
+                                    .flat_map(|batch| &batch.events)
+                                    .filter(|event| u32::from(event.1) == index)
+                                    .map(|event| event.0)
+                                    .max()
+                                    .and_then(|event| event.checked_add(1))
+                            })
+                            .unwrap_or(u32::MAX);
+                        self.manufacturing.replay.visible = true;
+                        self.manufacturing.replay.role = None;
+                        self.manufacturing.replay.tool = None;
+                    }
+                }
+                ui.weak("Geometry, anchors and physical interval boundaries remain checked. This assessment does not predict strength or physical printability.");
                 super::review::details(ui, review);
                 ui.collapsing("Coverage", |ui| {
                     for row in &report.coverage {
@@ -558,4 +635,44 @@ fn event_controls(
         }
     }
     ui.collapsing("Actual motion legend",|ui|{ui.label("Perimeter · solid · top/bottom · sparse · bridge · support/interface · prime · waste · travel · stationary retract/unretract. Tool epochs change state without a connecting segment. Dimensions and tool colors are nominal declarations.");});
+}
+
+#[cfg(test)]
+mod goal_draft_tests {
+    use super::*;
+
+    #[test]
+    fn acknowledged_intent_is_not_pending_before_prepare_refreshes_its_draft() {
+        let original: ManufacturingIntent = serde_json::from_str(include_str!(
+            "../../../../fixtures/manufacturing/preferred-layers.intent.json"
+        ))
+        .unwrap();
+        let mut edited = original.clone();
+        edited.recipe.layer_height_mm = 0.15;
+        let project = ProjectId::default();
+        let view = ManufacturingUi {
+            draft: Some(IntentDraft {
+                project: project.clone(),
+                revision: ProjectRevision(3),
+                nonce: 0,
+                original: Arc::new(original.clone()),
+                value: edited.clone(),
+            }),
+            ..Default::default()
+        };
+        assert!(
+            view.has_intent_draft(&project, Some(&original)),
+            "unacknowledged edits remain visible"
+        );
+        assert!(
+            !view.has_intent_draft(&project, Some(&edited)),
+            "a matching engine receipt clears pending status without rendering Prepare"
+        );
+        let mut different = edited.clone();
+        different.recipe.bead_width_mm += 0.01;
+        assert!(
+            view.has_intent_draft(&project, Some(&different)),
+            "another authoritative result cannot acknowledge this draft"
+        );
+    }
 }

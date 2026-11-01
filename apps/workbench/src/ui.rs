@@ -7,6 +7,7 @@ pub use color::{ColorDensity, ColorInspector, ColorMeaning, ColorPresentation};
 
 use egui::{Color32, RichText, Ui};
 use serde::{Deserialize, Serialize};
+use spiling_contracts::manufacturing::{LayerHeightPolicy, LayerHeightReason, ManufacturingIntent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Theme {
@@ -135,6 +136,19 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
     });
     ui.label("Inherited from definition · occurrence override · mixed values");
     ui.separator();
+    ui.heading("Construction goal draft");
+    let goal_id = ui.make_persistent_id("gallery-layer-goal");
+    let mut intent = ui
+        .data_mut(|d| d.get_temp::<ManufacturingIntent>(goal_id))
+        .unwrap_or_else(|| {
+            serde_json::from_str(include_str!(
+                "../../../fixtures/manufacturing/preferred-layers.intent.json"
+            ))
+            .expect("checked illustrative intent")
+        });
+    layer_height_goal(ui, &mut intent, tokens);
+    ui.data_mut(|d| d.insert_temp(goal_id, intent));
+    ui.separator();
     let color_id = ui.make_persistent_id("gallery-color-reference");
     let mut inspector = ui.data_mut(|d| d.get_temp::<ColorInspector>(color_id).unwrap_or_default());
     inspector.show(ui);
@@ -176,6 +190,58 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
         tokens.warning,
         "Save outcome uncertain — inspect the project before another action",
     );
+}
+
+/// Shared production/gallery draft control. No engine work or project mutation.
+pub fn layer_height_goal(ui: &mut Ui, intent: &mut ManufacturingIntent, tokens: Tokens) {
+    ui.label("Layer height goal");
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(
+            &mut intent.recipe.layer_height_policy,
+            LayerHeightPolicy::Preferred,
+            "Preferred target",
+        );
+        ui.selectable_value(
+            &mut intent.recipe.layer_height_policy,
+            LayerHeightPolicy::ProtectedMaximum,
+            "Protected maximum",
+        );
+    });
+    number(
+        ui,
+        "Requested height (mm)",
+        &mut intent.recipe.layer_height_mm,
+        0.01,
+    );
+    match intent.select_layer_height() {
+        Ok(selected) => {
+            let limits = intent.effective_deposition_limits();
+            ui.weak(format!(
+                "Captured range {:.3}–{:.3} mm",
+                limits.min_bead_height_mm,
+                limits.max_bead_height_mm.min(intent.recipe.bead_width_mm)
+            ));
+            ui.label(format!("Draft selection: {:.3} mm", selected.height_mm));
+            if selected.reason != LayerHeightReason::Requested {
+                ui.colored_label(
+                    tokens.warning,
+                    match selected.reason {
+                        LayerHeightReason::ProcessMinimum => {
+                            "A thicker layer is selected to meet the captured process minimum."
+                        }
+                        LayerHeightReason::ProcessMaximum => {
+                            "A thinner layer is selected to meet the captured process maximum."
+                        }
+                        LayerHeightReason::Requested => unreachable!(),
+                    },
+                );
+            }
+            ui.weak("Draft preview. Geometry and protected features can change the final schedule; Compile and fresh Verify establish actual output.");
+        }
+        Err(error) => {
+            ui.colored_label(tokens.warning, error.to_string());
+        }
+    }
 }
 
 /// A local draft field; project mutation occurs only on its form's explicit Apply.

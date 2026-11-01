@@ -137,6 +137,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             material_revision: "1".into(),
             filament_diameter_mm: 2.0,
             layer_height_mm: 1.0,
+            layer_height_policy: LayerHeightPolicy::ProtectedMaximum,
             bead_width_mm: 1.0,
             sparse_infill: SparseInfillPolicy::Fine,
             perimeter_count: 1,

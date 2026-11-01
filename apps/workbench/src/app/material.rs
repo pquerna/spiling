@@ -86,8 +86,10 @@ impl Workbench {
         });
         self.catalog_ui(ui, &project, &hello.session_id, ready);
 
-        let pending_intent =
-            m.loaded.is_some() || self.manufacturing.has_intent_draft(&project.project_id);
+        let pending_intent = m.loaded.is_some()
+            || self
+                .manufacturing
+                .has_intent_draft(&project.project_id, m.intent.as_deref());
         if pending_intent {
             ui.weak("Apply or reload the full intent draft before applying a material profile.");
         }

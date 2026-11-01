@@ -56,7 +56,7 @@ fn intent() -> ManufacturingIntent {
             "deposition_limits":{"min_bead_width_mm":0.3,"max_bead_width_mm":0.75,"min_bead_height_mm":0.000001,"max_bead_height_mm":0.3},
             "nozzle_diameter_mm":0.4,"max_feed_mm_s":150.0,"max_volumetric_flow_mm3_s":20.0
         },
-        "recipe":{"id":"solid","revision":"1","material_id":"nominal","material_revision":"1","filament_diameter_mm":1.75,"layer_height_mm":0.2,"native_shape_error_mm":0.1,"bead_width_mm":0.4,"perimeter_count":1,"infill_fraction":1.0,"top_skin_thickness_mm":0.2,"bottom_skin_thickness_mm":0.2,"print_speed_mm_s":20.0,"travel_speed_mm_s":80.0,"flow_multiplier":1.0,
+        "recipe":{"id":"solid","revision":"1","material_id":"nominal","material_revision":"1","filament_diameter_mm":1.75,"layer_height_mm":0.2, "layer_height_policy": "protected_maximum","native_shape_error_mm":0.1,"bead_width_mm":0.4,"perimeter_count":1,"infill_fraction":1.0,"top_skin_thickness_mm":0.2,"bottom_skin_thickness_mm":0.2,"print_speed_mm_s":20.0,"travel_speed_mm_s":80.0,"flow_multiplier":1.0,
             "process":{"first_layer_speed_factor":1.0,"first_layer_flow_factor":1.0,"fan_first_layers":0,"fan_after_first_layers":0,"bridge_speed_factor":1.0,"bridge_flow_factor":1.0,"bridge_fan_pwm":0,"max_bridge_span_mm":5.0,"retraction":{"kind":"disabled"}},
             "supports":{"kind":"disabled"},
             "seam_policy":{"kind":"nearest"},"rectilinear_axis":"alternating_xy","top_skin_axis":"alternating_xy","sparse_infill":{"kind":"fine"}}
@@ -269,6 +269,67 @@ async fn preflight(client: &mut EngineClient) -> NativeOperationView {
         panic!("preflight must be a durable native operation")
     };
     wait(client, operation.name).await
+}
+
+#[tokio::test]
+async fn preferred_goal_survives_history_and_source_independent_fresh_replay() {
+    let work = Workspace::new();
+    let source = work.source("box-mm.step");
+    let project = work.0.join("goal.spil");
+    let mut client = spawn().await;
+    import(&mut client, &source).await;
+    let unchanged_scene = scene(&mut client).await;
+    let mut goal = intent();
+    goal.printer.deposition_limits.min_bead_height_mm = 0.1;
+    goal.recipe.layer_height_mm = 0.05;
+    goal.recipe.layer_height_policy = LayerHeightPolicy::Preferred;
+    set_intent(&mut client, goal.clone()).await;
+    assert_eq!(scene(&mut client).await, unchanged_scene);
+    let record = compile(&mut client).await;
+    let (_, fresh) = inspect(&mut client).await;
+    assert_eq!(record.summary.layer_height, fresh.layer_height);
+    assert_eq!(fresh.layer_height.reason, LayerHeightReason::ProcessMinimum);
+    let captured = fetch_bundle(&mut client, &record).await.unwrap();
+    assert_eq!(captured.provenance.intent, goal);
+
+    let mut revised = goal.clone();
+    revised.recipe.layer_height_mm = 0.15;
+    set_intent(&mut client, revised).await;
+    assert!(status(&mut client).await.1.is_none());
+    history(&mut client, true).await;
+    assert_eq!(status(&mut client).await.1, Some(record.clone()));
+    history(&mut client, false).await;
+    assert!(status(&mut client).await.1.is_none());
+    history(&mut client, true).await;
+    let before = status(&mut client).await;
+    let mut protected = goal;
+    protected.recipe.layer_height_policy = LayerHeightPolicy::ProtectedMaximum;
+    typed(
+        client
+            .manufacturing(ManufacturingCommand::SetIntent {
+                session_id: client.hello().session_id.clone(),
+                base_revision: before.0.revision,
+                intent: protected.into(),
+            })
+            .await,
+        ManufacturingErrorCode::InvalidSpecification,
+    );
+    assert_eq!(status(&mut client).await, before);
+    save(&mut client, &project).await;
+    std::fs::remove_file(source).unwrap();
+    client.shutdown().await.unwrap();
+
+    let mut reader = spawn().await;
+    assert_eq!(
+        open(&mut reader, &project, true).await.status,
+        JobStatus::Completed
+    );
+    let (returned, report) = inspect(&mut reader).await;
+    assert_eq!(returned, record);
+    assert_eq!(report, fresh);
+    assert_eq!(fetch_bundle(&mut reader, &record).await.unwrap(), captured);
+    assert!(status(&mut reader).await.0.read_only);
+    reader.shutdown().await.unwrap();
 }
 
 #[tokio::test]

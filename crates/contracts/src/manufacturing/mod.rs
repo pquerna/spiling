@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, sync::Arc};
 use ts_rs::TS;
 
+mod goals;
+pub use goals::*;
 mod surface_inspection;
 pub use surface_inspection::*;
 mod replay;
@@ -960,6 +962,7 @@ pub struct PlanarPrintRecipe {
     pub material_revision: String,
     pub filament_diameter_mm: f64,
     pub layer_height_mm: f64,
+    pub layer_height_policy: LayerHeightPolicy,
     pub native_shape_error_mm: f64,
     pub bead_width_mm: f64,
     pub sparse_infill: SparseInfillPolicy,
@@ -997,7 +1000,10 @@ impl PlanarPrintRecipe {
             self.top_skin_thickness_mm,
             self.bottom_skin_thickness_mm,
         ])?;
-        if !(1..=8).contains(&self.perimeter_count) || self.layer_height_mm > self.bead_width_mm {
+        if !(1..=8).contains(&self.perimeter_count)
+            || (self.layer_height_policy == LayerHeightPolicy::ProtectedMaximum
+                && self.layer_height_mm > self.bead_width_mm)
+        {
             return Err(invalid(
                 "recipe requires 1..8 perimeters and layer height <= bead width",
             ));
@@ -1055,7 +1061,8 @@ impl ManufacturingIntent {
         let p = &self.printer;
         let r = &self.recipe;
         r.process.validate_printer(p)?;
-        if !self.admits_deposition(r.bead_width_mm, r.layer_height_mm) {
+        let selected_height = self.select_layer_height()?.height_mm;
+        if !self.admits_deposition(r.bead_width_mm, selected_height) {
             return Err(invalid(
                 "nominal recipe deposition exceeds printer envelope",
             ));
@@ -1065,8 +1072,8 @@ impl ManufacturingIntent {
                 "breakaway supports require declared generated_supports capability",
             ));
         }
-        let area = ((r.bead_width_mm - r.layer_height_mm) * r.layer_height_mm
-            + std::f64::consts::PI * (r.layer_height_mm / 2.0).powi(2))
+        let area = ((r.bead_width_mm - selected_height) * selected_height
+            + std::f64::consts::PI * (selected_height / 2.0).powi(2))
             * r.flow_multiplier;
         let filament_area = std::f64::consts::PI * (r.filament_diameter_mm / 2.0).powi(2);
         let flow = r.print_speed_mm_s * area;
@@ -2780,7 +2787,7 @@ impl NormalizedPrintPlan {
                 || !layer.section_z_mm.is_finite()
                 || !height.is_finite()
                 || height <= 0.0
-                || height > intent.recipe.layer_height_mm + self.layer_quantization_mm
+                || height > intent.layer_height_ceiling_mm()? + self.layer_quantization_mm
                 || height > intent.recipe.bead_width_mm
                 || !layer.lower_z_mm.is_finite()
                 || layer.lower_z_mm != lower_z
@@ -3279,6 +3286,7 @@ fn validate_routing_totals(
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct VerificationReport {
+    pub layer_height: LayerHeightAssessment,
     pub verified: bool,
     #[serde(deserialize_with = "descriptions")]
     pub coverage: Vec<String>,
@@ -3302,6 +3310,7 @@ pub struct VerificationReport {
 }
 impl VerificationReport {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
+        self.layer_height.validate()?;
         let waste_segments = validate_routing_totals(
             self.routing.as_ref(),
             self.deposition_segments,
@@ -3386,6 +3395,7 @@ impl VerificationReport {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ManufacturingSummary {
+    pub layer_height: LayerHeightAssessment,
     pub layers: u32,
     pub paths: u32,
     pub deposition_segments: u32,
@@ -3404,6 +3414,12 @@ pub struct ManufacturingSummary {
 }
 impl ManufacturingSummary {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
+        self.layer_height.validate()?;
+        if self.layer_height.layer_count != self.layers {
+            return Err(invalid(
+                "layer-height assessment count disagrees with summary",
+            ));
+        }
         let waste_segments = validate_routing_totals(
             self.routing.as_ref(),
             self.deposition_segments,
@@ -3824,6 +3840,13 @@ impl ManufacturingBundle {
                 "verification/plan object or support segment count mismatch",
             ));
         }
+        if self.verification.layer_height
+            != LayerHeightAssessment::from_plan(&self.provenance.intent, &self.plan.layers)?
+        {
+            return Err(invalid(
+                "layer-height assessment disagrees with captured intent/schedule",
+            ));
+        }
         self.summary().validate()?;
         json_bytes(self, MAX_MANUFACTURING_BUNDLE_BYTES as usize)?;
         Ok(())
@@ -3831,6 +3854,7 @@ impl ManufacturingBundle {
     /// Call after validation; measurements describe stored replay, not physical support.
     pub fn summary(&self) -> ManufacturingSummary {
         ManufacturingSummary {
+            layer_height: self.verification.layer_height.clone(),
             layers: self.plan.layers.len() as u32,
             paths: self.plan.layers.iter().map(|l| l.paths.len() as u32).sum(),
             deposition_segments: self.verification.deposition_segments,

@@ -13,6 +13,7 @@ export default {
     id: "software-h1-housing",
     revision: "1",
     layer_height_mm: 0.1,
+    layer_height_policy: "protected_maximum",
     top_skin_axis: "alternating_xy",
     sparse_infill: { kind: "fine" },
   },

@@ -18,6 +18,41 @@ An operator may author a TypeScript data module against generated Rust-defined t
 
 All names, IDs and revision labels below are nonempty strings of at most 256 UTF-8 bytes, without control characters. Numeric process parameters must be finite and positive. Unknown enum discriminants fail decoding. Profile/intent JSON is at most 32,768 bytes. All fields below are required, including explicit `null` manifest option values.
 
+## Construction goals and protected layer heights
+
+`PlanarPrintRecipe.layer_height_policy` is required: `preferred` or
+`protected_maximum`. Missing/unknown JSON or protobuf values refuse; there is no
+legacy policy default. `layer_height_mm` always retains the authored request.
+The effective height range is the intersection of captured machine/material
+limits, additionally bounded above by bead width. Preferred targets select the
+nearest value in that range; protected maxima require an admitted requested
+height and preserve it as an upper bound. Empty ranges and invalid/nonfinite
+parameters remain errors. Fixed-dual physical slots require `protected_maximum`.
+
+Both policies preserve native event boundaries and actual shape, void, anchor,
+flow and command obligations. A preferred schedule may use slightly thicker
+layers than its selected nominal to keep whole intervals above the captured
+process minimum; it never raises the process maximum or changes source geometry.
+A valid preferred result may carry a nonrequired Preflight advisory. Eligibility
+and draft selection still do not establish completed construction.
+
+`VerificationReport.layer_height` and `ManufacturingSummary.layer_height` carry
+one required checked `LayerHeightAssessment`: policy, requested/selected heights,
+`requested`/`process_minimum`/`process_maximum` reason, command-projected
+`realized_min_mm`/`realized_max_mm`, layer count, differing-layer count and nullable
+first differing zero-based index. Counts/index/ranges and reason consistency are
+checked. Difference reporting ignores one XYZ6 quantum plus subtraction roundoff;
+this descriptive allowance never relaxes geometric or deposition validation.
+The range describes scheduled physical intervals after coordinate projection,
+not measured physical deposition or strength.
+
+Bundle admission binds the assessment to complete captured intent and plan.
+Fresh independent replay validates actual command correspondence and recomputes
+it. The ordinary four export files retain request, schedule and fresh assessment;
+there is no separately trusted warning file. Goal edits use ordinary intent
+transactions, invalidate manufacturing and preserve history/scene ownership.
+[ADR008](../adr/008-construction-goals.md) owns the product distinction.
+
 ## Printer and recipe data
 
 `PrinterSpecification` fields:
@@ -41,7 +76,7 @@ The complete-job firmware contract requires native Cartesian coordinates without
 
 Pose is proper finite rigid motion with a unit quaternion: no scale, shear or reflection. Fixed component conservative bounds additionally exclude finished surface occurrences; this is not a rendered/executable machine model or a swept-tool collision certificate.
 
-`PlanarPrintRecipe` requires `id`, `revision`, `material_id`, `material_revision`, `filament_diameter_mm`, `layer_height_mm`, `bead_width_mm`, `perimeter_count`, `infill_fraction`, positive physical `top_skin_thickness_mm`, `bottom_skin_thickness_mm`, `print_speed_mm_s`, `travel_speed_mm_s`, `flow_multiplier`. Perimeters are 1..8; layer height is at most bead width; finite global density is in `[0,1]`, with 0 meaning intentional hollow interior, 1 meaning solid interior and positive smaller values sparse rectilinear interior. Zero retains interior/void coverage but generates no centered, alternate or transported interior rows; walls and required skins remain mandatory and roof admission still requires actual deposited anchors. Authored `ProcessValue` density overrides retain their positive-only `(0,1]` contract. Skin thickness uses conservative whole-layer horizons. Print/travel speed must not exceed printer feed limits. Nominal bead area is `(width-height)*height + pi*(height/2)^2`; flow is area × multiplier × print speed and must not exceed the explicit volumetric limit. Filament area is `pi*(diameter/2)^2`. Numeric overflow/underflow that destroys finite positive areas is rejected. These are declared geometric accounting models, not material calibration, strength or measured deposition physics.
+`PlanarPrintRecipe` requires `id`, `revision`, `material_id`, `material_revision`, `filament_diameter_mm`, `layer_height_mm`, `layer_height_policy`, `bead_width_mm`, `perimeter_count`, `infill_fraction`, positive physical `top_skin_thickness_mm`, `bottom_skin_thickness_mm`, `print_speed_mm_s`, `travel_speed_mm_s`, `flow_multiplier`. Perimeters are 1..8; selected and actual layer heights are at most bead width (a preferred target can exceed it); finite global density is in `[0,1]`, with 0 meaning intentional hollow interior, 1 meaning solid interior and positive smaller values sparse rectilinear interior. Zero retains interior/void coverage but generates no centered, alternate or transported interior rows; walls and required skins remain mandatory and roof admission still requires actual deposited anchors. Authored `ProcessValue` density overrides retain their positive-only `(0,1]` contract. Skin thickness uses conservative whole-layer horizons. Print/travel speed must not exceed printer feed limits. Nominal bead area is `(width-height)*height + pi*(height/2)^2`; flow is area × multiplier × print speed and must not exceed the explicit volumetric limit. Filament area is `pi*(diameter/2)^2`. Numeric overflow/underflow that destroys finite positive areas is rejected. These are declared geometric accounting models, not material calibration, strength or measured deposition physics.
 
 `bead_width_mm` is the preferred wall allocation width; `perimeter_count` is a maximum nominal contour-depth target, not a promise of that many closed loops. Automatic local allocation may vary count and width under the captured process envelope. No algorithm selector or variable-width opt-in exists.
 
@@ -242,16 +277,16 @@ process-height, waste/reprime, native/void/contact and command gates still apply
 
 The normalized plan, captured route and actual SPLR6 tool/XYZ/E events expose the
 realized construction for inspection/reassessment. Routing does not promote a
-stored optical estimate. A separately applied captured origin permits explicit reassessment of the realized finite patch from actual intervals/material mapping and original conditions/evidence. Backing optics, arbitrary regional paint, Local-Z/sublayer parity, measured bond and physical color accuracy remain outside support. Planner30 binds mandatory physical material events and waste-only groups; emitter11/verifier17
+stored optical estimate. A separately applied captured origin permits explicit reassessment of the realized finite patch from actual intervals/material mapping and original conditions/evidence. Backing optics, arbitrary regional paint, Local-Z/sublayer parity, measured bond and physical color accuracy remain outside support. Planner30 binds mandatory physical material events and waste-only groups; emitter11/verifier18
 bind preselection waste-lane staging. SPLR6 retains its command/binary interpretation.
 
 ## Normalized plan
 
-`NormalizedPrintPlan` uses schema11/planner53. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
+`NormalizedPrintPlan` uses schema11/planner54. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
 
 Native sampling and offset construction bounds are each 0.005 mm; finish XY construction has a separate 0.001 mm bound. The explicit recipe `native_shape_error_mm` bounds source-target approximation independently of those construction tolerances. Each mapped image additionally declares its own vertical displacement-error bound.
 
-Surface documents remain schema3. Emitter11/verifier17 consume constant/per-edge widths, immutable Wall ownership, permanent plate ownership, mixed regional/mandatory-skin Bridge portions and fresh interval-aware anchors/interface proofs. SPLR6 keeps those nominal associations separate from actual XYZ/E/feed, and retains distinct tool epochs/transition waste. Preselection staging changes the command lifecycle, not the packed layout; document counters and existing kind meanings do not change.
+Surface documents remain schema3. Emitter11/verifier18 consume constant/per-edge widths, immutable Wall ownership, permanent plate ownership, mixed regional/mandatory-skin Bridge portions and fresh interval-aware anchors/interface proofs. SPLR6 keeps those nominal associations separate from actual XYZ/E/feed, and retains distinct tool epochs/transition waste. Preselection staging changes the command lifecycle, not the packed layout; document counters and existing kind meanings do not change.
 
 Required `native_geometry.source_feature_coverage` is a bounded count summary, not a global invariance enum: `disjoint_source_layer_count + invariant_source_union_layer_count + native_interface_complex_layer_count == certified_layer_count`, using checked arithmetic. It partitions actual accepted scheduled layers into disjoint source, closed-slab invariant-union and native interface-complex evidence. The interface-complex category requires the actual continuing-core/critical-contribution proof and complete leaf ledger; its name never establishes that capability. Mixed jobs cannot claim global source-union invariance. `slab_count` counts accepted original-occurrence/slab evidence captures, including inactive sources and owned critical contributions. An invariant accepted slab may cover several scheduled layers without creating additional captures, so `height_analysis_count <= slab_count <= height_analysis_count * certified_layer_count`; there is no per-layer lower bound on captures. `owned_critical_slab_count` counts unique original-occurrence/slab captures with any owned endpoint stratum or nonzero transition collar, not faces, and cannot exceed `slab_count`. Missing source contributions cannot be disguised as empty height domains. Reused native evidence remains bound to each accepted capture; failed/refined candidates affect only cumulative `geometry_work`. All count fields are explicitly required on checked JSON/native admission and bounded by existing layer/occurrence caps. Summary admission neither reconstructs private native receipts nor certifies the emitted physical union boundary.
 
@@ -408,7 +443,7 @@ closed-strip trim contact and locally centered native PCURVE construction
 with literal endpoints and retained constant chart coordinates. Directional
 support intersects same-cell scalar/Cartesian coefficient and centered bounds
 before trim classification, without creating additional feasible witnesses;
-planner53 rejects previously compiled artifacts whose geometry producer differs.
+planner54 rejects previously compiled artifacts whose geometry producer differs.
 The current planner identity is specified with the normalized plan above.
 Original STEP bytes, immutable definition/face/use identity, units,
 uncertainty and original finish operands remain captured inputs and provenance,
@@ -458,7 +493,7 @@ An independent verifier decodes command state from emitted bytes, not emitter he
 
 Current Cartesian XYZ admission binds independently parsed coordinates to the checked XYZ6 projection of each captured expected point. Raw-plan half-step tolerance cannot authorize an alternate neighboring lattice point. The explicit `contracts::manufacturing::program_coordinates` module owns this fixed output precision, coordinate-conditioning range and outward decimal/height enclosures; backend serialization and verifier command parsing remain independent. Projection multiplies the binary64 input by `1_000_000`, rounds ties away from zero, divides by `1_000_000` and normalizes signed zero; it is not exact-real decimal rounding of the original input. Accepted absolute coordinates are at most `2^52 / 1_000_000` mm, preserving distinct adjacent parsed micrometre lattice points. Compensated gap subtraction checks every intermediate and its outward result for finiteness. Unrepresentable arithmetic refuses with `program_coordinate_conditioning_failure`, not a widened clearance tolerance.
 
-Current inspection/reopen requires planner53, binding native-first material authority, wall/finish/hatch construction and mandatory physical per-occurrence material events. Input fingerprints bind complete ordered authoring documents, source/pose and printer/recipe/routing policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, ownership, permanent plate extent/attachment and lower anchors; fixed-dual replay additionally reconstructs source/material and staged tool/frame/thermal/debt/waste state. It does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3 remain stable. Emitter11/verifier17 invalidate superseded transition programs; SPLR6 keeps its existing binary interpretation. Older development assignment shapes refuse without aliases or missing-policy defaults.
+Current inspection/reopen requires planner54, binding native-first material authority, wall/finish/hatch construction and mandatory physical per-occurrence material events. Input fingerprints bind complete ordered authoring documents, source/pose and printer/recipe/routing policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, ownership, permanent plate extent/attachment and lower anchors; fixed-dual replay additionally reconstructs source/material and staged tool/frame/thermal/debt/waste state. It does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3 remain stable. Emitter11/verifier18 invalidate superseded transition programs; SPLR6 keeps its existing binary interpretation. Older development assignment shapes refuse without aliases or missing-policy defaults.
 
 Final normalized-plan admission checks ordinary projected axes during its existing coordinate pass. Independent fresh verification separately checks preferred perimeter seam dot/distance/coordinate ordering before matching actual emitted commands. A mutually matching program and plan that ignore either consumed policy do not earn semantic success; stored `verified` metadata remains descriptive.
 

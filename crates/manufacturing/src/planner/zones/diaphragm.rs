@@ -367,10 +367,10 @@ pub(in crate::planner) fn schedule_diagnostic(
             .filter(|zone| zone.axis == 2)
             .map(|zone| zone.coordinate),
     );
-    let baseline_schedule = match super::super::layer_schedule(
+    let baseline_schedule = match super::super::goal_layer_schedule(
+        input.intent,
         bed,
         top,
-        recipe.layer_height_mm,
         &baseline,
     ) {
         Ok(schedule) => schedule,
@@ -445,7 +445,7 @@ pub(in crate::planner) fn schedule_diagnostic(
                 }
             }
         }
-        let scheduled = super::super::layer_schedule(bed, top, recipe.layer_height_mm, &events)
+        let scheduled = super::super::goal_layer_schedule(input.intent, bed, top, &events)
             .and_then(|schedule| {
                 super::super::refine_surface_schedule(schedule, &admission.surface_fields, cancel)
             });

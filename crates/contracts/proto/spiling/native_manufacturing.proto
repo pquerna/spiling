@@ -383,6 +383,28 @@ message FixedDualVerification {
   // Exactly two entries, indexed by tool.
   repeated RoutedToolAccounting tools = 2;
 }
+enum LayerHeightPolicy {
+  LAYER_HEIGHT_POLICY_UNSPECIFIED = 0;
+  LAYER_HEIGHT_POLICY_PREFERRED = 1;
+  LAYER_HEIGHT_POLICY_PROTECTED_MAXIMUM = 2;
+}
+enum LayerHeightReason {
+  LAYER_HEIGHT_REASON_UNSPECIFIED = 0;
+  LAYER_HEIGHT_REASON_REQUESTED = 1;
+  LAYER_HEIGHT_REASON_PROCESS_MINIMUM = 2;
+  LAYER_HEIGHT_REASON_PROCESS_MAXIMUM = 3;
+}
+message LayerHeightAssessment {
+  LayerHeightPolicy policy = 1;
+  double requested_mm = 2;
+  double selected_mm = 3;
+  LayerHeightReason reason = 4;
+  double realized_min_mm = 5;
+  double realized_max_mm = 6;
+  uint32 layer_count = 7;
+  uint32 differing_layer_count = 8;
+  optional uint32 first_differing_layer = 9;
+}
 message PlanarPrintRecipe {
   string id = 1;
   string revision = 2;
@@ -390,6 +412,7 @@ message PlanarPrintRecipe {
   string material_revision = 4;
   double filament_diameter_mm = 5;
   double layer_height_mm = 6;
+  LayerHeightPolicy layer_height_policy = 22;
   double bead_width_mm = 7;
   uint32 perimeter_count = 8;
   double infill_fraction = 9;
@@ -518,6 +541,7 @@ message ProcessRegionResolution {
   ProcessRegionStatus status = 4;
 }
 message ManufacturingSummary {
+  LayerHeightAssessment layer_height = 14;
   uint32 layers = 1;
   uint32 paths = 2;
   uint32 deposition_segments = 3;
@@ -535,6 +559,7 @@ message ManufacturingSummary {
 // Sampled nominal-bead advisory counts, not an emitted-verification certificate.
 message SurfaceResolutionTotals { uint64 evaluated_witnesses = 1; uint64 resolved = 2; uint64 ambiguous = 3; uint64 below_nominal_resolution = 4; uint64 unavailable = 5; bool coverage_complete = 6; }
 message VerificationReport {
+  LayerHeightAssessment layer_height = 18;
   bool verified = 1;
   repeated string coverage = 2;
   repeated string limitations = 3;

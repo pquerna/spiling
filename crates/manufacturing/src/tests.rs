@@ -48,6 +48,7 @@ fn intent() -> ManufacturingIntent {
             material_revision: "1".into(),
             filament_diameter_mm: 1.75,
             layer_height_mm: 0.4,
+            layer_height_policy: LayerHeightPolicy::ProtectedMaximum,
             bead_width_mm: 0.6,
             sparse_infill: spiling_contracts::manufacturing::SparseInfillPolicy::Fine,
             perimeter_count: 1,
@@ -162,6 +163,62 @@ impl Scene {
 const BOX: &[u8] = include_bytes!("../../../fixtures/geometry/box-mm.step");
 const CYLINDER: &[u8] = include_bytes!("../../../fixtures/geometry/cylinder.step");
 const HOLE: &[u8] = include_bytes!("../../../fixtures/geometry/through-hole.step");
+
+#[test]
+fn preferred_layer_goal_compiles_thicker_output_and_fresh_replay_preserves_the_assessment() {
+    let scene = Scene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let mut requested = intent();
+    requested.printer.deposition_limits.min_bead_height_mm = 0.1;
+    requested.recipe.layer_height_mm = 0.05;
+    requested.recipe.layer_height_policy = LayerHeightPolicy::Preferred;
+    let limits = requested.printer.deposition_limits;
+    let eligibility = preflight(&scene.input(&requested), &AtomicBool::new(false)).unwrap();
+    assert_eq!(eligibility.disposition, PreflightDisposition::Admitted);
+    assert!(
+        eligibility
+            .checks
+            .iter()
+            .any(|c| c.code == "layer_height_goal_adjusted" && !c.required)
+    );
+    let bundle = scene.compile(&requested).unwrap();
+    assert_eq!(bundle.provenance.intent, requested);
+    assert_eq!(bundle.provenance.intent.printer.deposition_limits, limits);
+    let assessment = &bundle.verification.layer_height;
+    assert_eq!(assessment.requested_mm, 0.05);
+    assert_eq!(assessment.selected_mm, 0.1);
+    assert_eq!(assessment.reason, LayerHeightReason::ProcessMinimum);
+    assert!(assessment.realized_min_mm >= 0.1);
+    assert!(assessment.realized_max_mm <= limits.max_bead_height_mm);
+    assert_eq!(
+        assessment.differing_layer_count,
+        bundle.plan.layers.len() as u32
+    );
+    assert_eq!(assessment.first_differing_layer, Some(0));
+    assert_eq!(bundle.plan.layers[0].lower_z_mm, 0.0);
+    assert!((bundle.plan.layers.last().unwrap().z_mm - 8.0).abs() < 0.000001);
+    let bytes = serde_json::to_vec(&bundle).unwrap();
+    let saved = decode_bundle(&bytes).unwrap();
+    let fresh = inspect_bundle(
+        &saved,
+        &SourceHash::from_bytes(&bytes),
+        VerificationOutput::ReportOnly,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(fresh.report.layer_height, *assessment);
+    let mut falsely_met = saved.clone();
+    falsely_met.verification.layer_height.requested_mm = 0.1012655;
+    falsely_met.verification.layer_height.selected_mm = 0.1012655;
+    falsely_met.verification.layer_height.reason = LayerHeightReason::Requested;
+    falsely_met.verification.layer_height.differing_layer_count = 0;
+    falsely_met.verification.layer_height.first_differing_layer = None;
+    falsely_met.verification.layer_height.validate().unwrap();
+    assert!(falsely_met.validate().is_err());
+    let mut protected = requested;
+    protected.recipe.layer_height_policy = LayerHeightPolicy::ProtectedMaximum;
+    assert!(protected.validate().is_err());
+    assert!(scene.compile(&protected).is_err());
+}
 
 fn surface_color_intent(scene: &Scene) -> ManufacturingIntent {
     let mut intent: ManufacturingIntent = serde_json::from_str(include_str!(

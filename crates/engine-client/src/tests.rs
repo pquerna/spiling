@@ -15,6 +15,17 @@ fn manufacturing_record(bytes: &[u8]) -> ManufacturingArtifactRecord {
         input_hash: spiling_contracts::geometry::SourceHash::from_bytes(b"input"),
         byte_count: bytes.len() as u32,
         summary: spiling_contracts::manufacturing::ManufacturingSummary {
+            layer_height: spiling_contracts::manufacturing::LayerHeightAssessment {
+                policy: spiling_contracts::manufacturing::LayerHeightPolicy::ProtectedMaximum,
+                requested_mm: 0.2,
+                selected_mm: 0.2,
+                reason: spiling_contracts::manufacturing::LayerHeightReason::Requested,
+                realized_min_mm: 0.2,
+                realized_max_mm: 0.2,
+                layer_count: 1,
+                differing_layer_count: 0,
+                first_differing_layer: None,
+            },
             layers: 1,
             process_resolution: Vec::new(),
             native_geometry: NativeGeometryCoverageSummary {

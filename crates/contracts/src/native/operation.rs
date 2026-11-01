@@ -162,6 +162,7 @@ fn validate_verified(
         }
     }
     if !report.verified
+        || report.layer_height != record.summary.layer_height
         || report.deposition_segments != record.summary.deposition_segments
         || report.support_deposition_segments != record.summary.support_deposition_segments
         || report.support_deposited_volume_mm3 != record.summary.support_deposited_volume_mm3

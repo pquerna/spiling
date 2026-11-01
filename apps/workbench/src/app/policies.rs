@@ -27,7 +27,6 @@ pub(super) fn prepared(value: &ManufacturingIntent) -> Result<ManufacturingInten
 }
 pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
     ui.collapsing("Native accuracy and material",|ui|{
-        ui::number(ui,"Native shape error (mm)",&mut intent.recipe.native_shape_error_mm,0.001);
         ui.add_enabled_ui(intent.material_profile.is_none(), |ui| { ui::number(ui,"Filament diameter (mm)",&mut intent.recipe.filament_diameter_mm,0.01); });
         ui::number(ui,"Minimum wall width (mm)",&mut intent.printer.deposition_limits.min_bead_width_mm,0.01);
         ui::number(ui,"Maximum wall width (mm)",&mut intent.printer.deposition_limits.max_bead_width_mm,0.01);

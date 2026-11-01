@@ -21,6 +21,30 @@ program/process decoding remains mandatory and explicitly reports native-kernel
 reliance, not independent certification of original STEP topology/embedding.
 There is no custom original-source material reconstruction or fallback.
 
+## Preferred layer-height review
+
+The [goal contract](../protocol/manufacturing.md#construction-goals-and-protected-layer-heights)
+distinguishes a preferred target from a protected maximum. The software-only
+`fixtures/manufacturing/preferred-layers.intent.ts` and its generated inert JSON
+request 0.05 mm under a declared 0.1 mm minimum. With the admitted box input,
+Compile selects thicker admissible layers, retains source/event bounds and
+fresh Verify reports the command-projected range and first differing layer.
+This is a construction adjustment, not stronger material or printer calibration.
+
+```sh
+spiling-cli project create goal.spil --import fixtures/geometry/box-mm.step --intent fixtures/manufacturing/preferred-layers.intent.json --preflight --compile --verify --manufacturing-out goal-output --engine spiling-engine
+spiling-cli project inspect goal.spil --verify --manufacturing-out returned-output --engine spiling-engine
+```
+
+The native Prepare form shares its immediate draft calculation with the component
+gallery. Apply commits once; history invalidates fresh review. Review shows the
+request, selected nominal and actual interval range; **Inspect first adjusted
+layer** selects actual motion without inheriting an unrelated role/tool filter.
+Save and source-independent read-only return retain the same assessment and fresh
+four-file export. A protected target below the process minimum, empty effective
+range, false assessment or invalid actual commands must still refuse. Draft
+preview and Preflight are not completed manufacturing acceptance.
+
 Qualification is specific to the actual producer and inputs. Historical
 source5/planner23–24 and Monstertruck evidence does not transfer to this route.
 Fitting, ordinary housing, source-zoned centered plate, genuine H1 and narrow

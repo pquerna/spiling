@@ -11,6 +11,7 @@ export default {
     ...baseline.recipe,
     id: "software-ordinary-housing",
     layer_height_mm: 0.1,
+    layer_height_policy: "protected_maximum",
     rectilinear_axis: "alternating_xy",
     top_skin_axis: "alternating_xy",
     sparse_infill: { kind: "fine" },

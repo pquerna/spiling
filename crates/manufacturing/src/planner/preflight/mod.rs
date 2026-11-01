@@ -498,6 +498,18 @@ pub(super) fn admit<'a>(
         add("floating_without_support", "Native material starts above the bed; enable breakaway supports or place it on the bed".into(), None, None);
     }
     drop(add);
+    if let Ok(selected) = input.intent.select_layer_height()
+        && selected.reason != LayerHeightReason::Requested
+    {
+        result.report.checks.push(PreflightCheck {
+            code: "layer_height_goal_adjusted".into(),
+            severity: PreflightSeverity::Warning,
+            evidence: PreflightEvidence::Certified,
+            required: false,
+            message: format!("Preferred layer height {} mm selects {} mm under captured process limits; actual intervals and geometry remain Compile obligations", input.intent.recipe.layer_height_mm, selected.height_mm),
+            occurrence_id: None, face_id: None,
+        });
+    }
     if truncated {
         result.report.checks.push(PreflightCheck {
             code: "additional_errors".into(),

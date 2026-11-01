@@ -453,7 +453,15 @@ export type PrinterSpecification = { schema_version: number, id: string, revisio
 
 export type DepositionLimits = { min_bead_width_mm: number, max_bead_width_mm: number, min_bead_height_mm: number, max_bead_height_mm: number, };
 
-export type PlanarPrintRecipe = { id: string, revision: string, material_id: string, material_revision: string, filament_diameter_mm: number, layer_height_mm: number, native_shape_error_mm: number, bead_width_mm: number, sparse_infill: SparseInfillPolicy, perimeter_count: number, infill_fraction: number, top_skin_thickness_mm: number, bottom_skin_thickness_mm: number, print_speed_mm_s: number, travel_speed_mm_s: number, flow_multiplier: number, process: ProcessPolicy, supports: SupportPolicy, seam_policy: SeamPolicy, rectilinear_axis: RectilinearAxisPolicy, top_skin_axis: RectilinearAxisPolicy, };
+export type LayerHeightPolicy = "preferred" | "protected_maximum";
+
+export type LayerHeightReason = "requested" | "process_minimum" | "process_maximum";
+
+export type LayerHeightSelection = { height_mm: number, reason: LayerHeightReason, };
+
+export type LayerHeightAssessment = { policy: LayerHeightPolicy, requested_mm: number, selected_mm: number, reason: LayerHeightReason, realized_min_mm: number, realized_max_mm: number, layer_count: number, differing_layer_count: number, first_differing_layer: number | null, };
+
+export type PlanarPrintRecipe = { id: string, revision: string, material_id: string, material_revision: string, filament_diameter_mm: number, layer_height_mm: number, layer_height_policy: LayerHeightPolicy, native_shape_error_mm: number, bead_width_mm: number, sparse_infill: SparseInfillPolicy, perimeter_count: number, infill_fraction: number, top_skin_thickness_mm: number, bottom_skin_thickness_mm: number, print_speed_mm_s: number, travel_speed_mm_s: number, flow_multiplier: number, process: ProcessPolicy, supports: SupportPolicy, seam_policy: SeamPolicy, rectilinear_axis: RectilinearAxisPolicy, top_skin_axis: RectilinearAxisPolicy, };
 
 export type SeamPolicy = { "kind": "nearest" } | { "kind": "preferred_build_direction", xy: [number, number], };
 
@@ -576,7 +584,7 @@ export type NormalizedPrintPlan = { material_frames: Array<SurfaceColorFrame>, m
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
-export type VerificationReport = { verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, lifecycle_motion_count: number, priming_filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, retraction_count: number, retracted_filament_mm: number, routing: FixedDualVerification | null, };
+export type VerificationReport = { layer_height: LayerHeightAssessment, verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, lifecycle_motion_count: number, priming_filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, retraction_count: number, retracted_filament_mm: number, routing: FixedDualVerification | null, };
 
 export type VerificationOutput = "report_only" | "report_and_motion";
 
@@ -604,7 +612,7 @@ export type SurfaceResolution = { surface_layer_id: SurfaceLayerId, occurrence_i
 
 export type SurfaceResolutionTotals = { evaluated_witnesses: number, resolved: number, ambiguous: number, below_nominal_resolution: number, unavailable: number, coverage_complete: boolean, };
 
-export type ManufacturingSummary = { layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, software_only: boolean, surface_resolution: SurfaceResolutionTotals, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, routing: FixedDualVerification | null, };
+export type ManufacturingSummary = { layer_height: LayerHeightAssessment, layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, software_only: boolean, surface_resolution: SurfaceResolutionTotals, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, routing: FixedDualVerification | null, };
 
 export type ManufacturingBundle = { schema_version: number, provenance: ManufacturingProvenance, plan: NormalizedPrintPlan, program: string, verification: VerificationReport, };
 

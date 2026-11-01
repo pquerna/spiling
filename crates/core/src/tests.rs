@@ -441,6 +441,7 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
             material_revision: "1".into(),
             filament_diameter_mm: 1.75,
             layer_height_mm: 0.2,
+            layer_height_policy: LayerHeightPolicy::ProtectedMaximum,
             native_shape_error_mm: 0.1,
             bead_width_mm: 0.4,
             sparse_infill: spiling_contracts::manufacturing::SparseInfillPolicy::Fine,
@@ -601,6 +602,17 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
         ),
         // Storage tests exercise schema/integrity, not an independent replay service.
         verification: VerificationReport {
+            layer_height: spiling_contracts::manufacturing::LayerHeightAssessment {
+                policy: spiling_contracts::manufacturing::LayerHeightPolicy::ProtectedMaximum,
+                requested_mm: 0.2,
+                selected_mm: 0.2,
+                reason: spiling_contracts::manufacturing::LayerHeightReason::Requested,
+                realized_min_mm: 0.2,
+                realized_max_mm: 0.2,
+                layer_count: 1,
+                differing_layer_count: 0,
+                first_differing_layer: None,
+            },
             verified: false,
             coverage: vec!["analytic storage fixture".into()],
             limitations: vec!["not independently replayed".into()],

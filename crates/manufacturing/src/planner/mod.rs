@@ -2854,7 +2854,7 @@ fn scheduled_layers(
             check_cancel(cancel)?;
             let scale = event
                 .abs()
-                .max(recipe.layer_height_mm)
+                .max(input.intent.select_layer_height()?.height_mm)
                 .max(z_gap_mm)
                 .max(1.0);
             let arithmetic = (8.0 * f64::EPSILON * scale).next_up();
@@ -2920,7 +2920,7 @@ fn scheduled_layers(
             events.extend(zone.z_events());
         }
     }
-    let proposal = layer_schedule(bed, top, recipe.layer_height_mm, &events)
+    let proposal = goal_layer_schedule(input.intent, bed, top, &events)
         .and_then(|schedule| refine_surface_schedule(schedule, &admission.surface_fields, cancel))
         .and_then(|schedule| {
             if schedule.iter().any(|layer| {
@@ -2955,10 +2955,40 @@ fn scheduled_layers(
     }
 }
 
+fn goal_layer_schedule(
+    intent: &ManufacturingIntent,
+    bed: f64,
+    top: f64,
+    events: &[f64],
+) -> Result<Vec<LayerElevation>, ManufacturingError> {
+    let nominal = intent.select_layer_height()?.height_mm;
+    let limits = intent.effective_deposition_limits();
+    let (minimum, maximum) = match intent.recipe.layer_height_policy {
+        LayerHeightPolicy::Preferred => (
+            limits.min_bead_height_mm,
+            limits.max_bead_height_mm.min(intent.recipe.bead_width_mm),
+        ),
+        LayerHeightPolicy::ProtectedMaximum => (0.0, nominal),
+    };
+    layer_schedule_with_bounds(bed, top, nominal, minimum, maximum, events)
+}
+
+#[cfg(test)]
 fn layer_schedule(
     bed: f64,
     top: f64,
     nominal: f64,
+    events: &[f64],
+) -> Result<Vec<LayerElevation>, ManufacturingError> {
+    layer_schedule_with_bounds(bed, top, nominal, 0.0, nominal, events)
+}
+
+fn layer_schedule_with_bounds(
+    bed: f64,
+    top: f64,
+    nominal: f64,
+    minimum: f64,
+    maximum: f64,
     events: &[f64],
 ) -> Result<Vec<LayerElevation>, ManufacturingError> {
     let identity_roundoff = 4.0 * f64::EPSILON * bed.abs().max(top.abs()).max(1.0);
@@ -3013,6 +3043,61 @@ fn layer_schedule(
         let candidate_height = width / count as f64;
         if candidate_height > nominal && candidate_height - nominal > roundoff {
             count += 1;
+        }
+        if minimum > 0.0 && width / (count as f64) < minimum {
+            let possible = (width / minimum).floor();
+            if possible < 1.0 || !possible.is_finite() {
+                return Err(error(
+                    ManufacturingErrorCode::UnsupportedGeometry,
+                    "protected geometric boundaries leave no process-admissible layer",
+                ));
+            }
+            count = count.min(possible as usize);
+        }
+        if minimum > 0.0 {
+            // Test the intervals we will actually construct and project, not
+            // merely width/count. Prefer an adjacent admissible allocation to
+            // weakening the captured lower/upper process boundaries.
+            let fits = |candidate: usize| -> Result<bool, ManufacturingError> {
+                let mut previous = start;
+                for index in 1..=candidate {
+                    let z = if index == candidate {
+                        end
+                    } else {
+                        start + width * (index as f64 / candidate as f64)
+                    };
+                    let height = z - previous;
+                    let command_height =
+                        project_xyz6_coordinate_mm(z)? - project_xyz6_coordinate_mm(previous)?;
+                    if height < minimum
+                        || height > maximum
+                        || command_height < minimum
+                        || command_height > maximum
+                    {
+                        return Ok(false);
+                    }
+                    previous = z;
+                }
+                Ok(true)
+            };
+            if !fits(count)? {
+                if count > 1 && fits(count - 1)? {
+                    count -= 1;
+                } else if count < MAX_PRINT_LAYERS as usize && fits(count + 1)? {
+                    count += 1;
+                } else {
+                    return Err(error(
+                        ManufacturingErrorCode::UnsupportedGeometry,
+                        "protected geometric boundaries have no neighboring command-admissible layer allocation",
+                    ));
+                }
+            }
+        }
+        if width / count as f64 > maximum + roundoff {
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "protected geometric boundaries cannot fit the captured layer-height envelope",
+            ));
         }
         Ok(count)
     };

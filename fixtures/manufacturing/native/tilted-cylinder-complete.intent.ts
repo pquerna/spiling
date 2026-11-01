@@ -20,6 +20,7 @@ const intent = {
     id: "native-deadline-tilt",
     revision: "6",
     layer_height_mm: 0.4,
+    layer_height_policy: "protected_maximum",
     bead_width_mm: 0.6,
     perimeter_count: 1,
     infill_fraction: 1,

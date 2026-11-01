@@ -4,6 +4,34 @@
 
 use super::*;
 
+#[test]
+fn layer_preferences_resolve_without_changing_limits_and_protections_do_not() {
+    let mut value = intent();
+    value.recipe.layer_height_policy = LayerHeightPolicy::Preferred;
+    let captured = value.printer.deposition_limits;
+    value.recipe.layer_height_mm = captured.max_bead_height_mm * 2.0;
+    value.validate().unwrap();
+    assert_eq!(
+        value.select_layer_height().unwrap().reason,
+        LayerHeightReason::ProcessMaximum
+    );
+    assert_eq!(value.printer.deposition_limits, captured);
+    value.recipe.layer_height_mm = captured.min_bead_height_mm * 0.5;
+    value.validate().unwrap();
+    assert_eq!(
+        value.select_layer_height().unwrap().reason,
+        LayerHeightReason::ProcessMinimum
+    );
+    let mut protected = value.clone();
+    protected.recipe.layer_height_policy = LayerHeightPolicy::ProtectedMaximum;
+    assert!(protected.validate().is_err());
+    value.recipe.layer_height_mm = f64::NAN;
+    assert!(value.validate().is_err());
+    value.recipe.layer_height_mm = 0.2;
+    value.printer.deposition_limits.min_bead_height_mm = value.recipe.bead_width_mm + 0.01;
+    assert!(value.select_layer_height().is_err());
+}
+
 fn intent() -> ManufacturingIntent {
     ManufacturingIntent {
         material_profile: None,
@@ -63,6 +91,7 @@ fn intent() -> ManufacturingIntent {
             material_revision: "1".into(),
             filament_diameter_mm: 1.75,
             layer_height_mm: 0.2,
+            layer_height_policy: LayerHeightPolicy::ProtectedMaximum,
             native_shape_error_mm: 0.02,
             bead_width_mm: 0.45,
             sparse_infill: SparseInfillPolicy::Fine,
@@ -751,6 +780,8 @@ fn bundle() -> ManufacturingBundle {
         &crate::process::ProcessDocument::empty(),
     )
     .unwrap();
+    let plan = plan();
+    let layer_height = LayerHeightAssessment::from_plan(&intent, &plan.layers).unwrap();
     ManufacturingBundle {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         provenance: ManufacturingProvenance {
@@ -772,9 +803,10 @@ fn bundle() -> ManufacturingBundle {
             emitter_version: "contract-test-emitter".into(),
             verifier_version: "contract-test-verifier".into(),
         },
-        plan: plan(),
+        plan,
         program: "; arbitrary bytes do not imply replay success\n".into(),
         verification: VerificationReport {
+            layer_height,
             verified: false,
             coverage: vec!["schema".into()],
             limitations: vec!["no physics".into()],
@@ -1636,6 +1668,9 @@ fn plan_json_admits_exact_cumulative_segment_budget_across_paths_and_layers() {
         );
         let mut artifact = bundle();
         artifact.plan = expected;
+        artifact.verification.layer_height =
+            LayerHeightAssessment::from_plan(&artifact.provenance.intent, &artifact.plan.layers)
+                .unwrap();
         artifact.verification.deposition_segments = 100_000;
         let decoded = decode_bundle(&serde_json::to_vec(&artifact).unwrap()).unwrap();
         assert_eq!(decoded, artifact);
