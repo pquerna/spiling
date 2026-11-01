@@ -475,6 +475,11 @@ a tolerance label does not replace a complete measured query bound.
   native face, physical coedge and vertex coverage is required. Whole-control
   scalar support may exclude an inactive coedge only with the actual complete
   native law; endpoint samples and near-zero derivatives are insufficient.
+  Vertical-flow reuse retains complete native face/coedge checks. Two global
+  cap levels can prove a whole column; a terraced source with more cap levels
+  can prove a query-local product only when no cap meets its closed interval.
+  A local product cannot authorize whole-source absence or absorb a touching
+  shelf: exact endpoints retain their independent cap/collar obligations.
   Height invariance and regular continuation do not cross unqualified critical
   brackets. [`placed/material_coordinates.rs`](../../crates/geometry/src/analysis/placed/material_coordinates.rs)
   captures actual physical coordinates, not a nominal orthogonal surrogate.

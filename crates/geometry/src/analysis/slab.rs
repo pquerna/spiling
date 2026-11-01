@@ -3345,7 +3345,9 @@ pub(super) fn source_vertical_boundary_flow(
         ));
     }
     let functional = HeightFunctional::from_frame(frame);
-    let mut cap_levels = [None, None];
+    let mut cap_levels: [Option<f64>; 2] = [None, None];
+    let mut additional_cap_levels = false;
+    let mut cap_meets_query = false;
     let mut side_cells = 0u64;
     for face_index in 0..definition.face_ids().len() {
         work.charge(1, cancel)?;
@@ -3361,13 +3363,13 @@ pub(super) fn source_vertical_boundary_flow(
                 if h.lo != h.hi || !h.lo.is_finite() {
                     return Ok(false);
                 }
-                if cap_levels[0].is_none() {
-                    cap_levels[0] = Some(h.lo);
-                } else if cap_levels[0] != Some(h.lo) && cap_levels[1] != Some(h.lo) {
-                    if cap_levels[1].is_some() {
-                        return Ok(false);
+                cap_meets_query |= range[0] <= h.lo && h.lo <= range[1];
+                match cap_levels {
+                    [Some(lo), Some(hi)] => {
+                        additional_cap_levels |= lo != hi && h.lo != lo && h.lo != hi;
+                        cap_levels = [Some(lo.min(h.lo)), Some(hi.max(h.lo))];
                     }
-                    cap_levels[1] = Some(h.lo);
+                    _ => cap_levels = [Some(h.lo), Some(h.lo)],
                 }
                 return Ok(true);
             }
@@ -3451,8 +3453,15 @@ pub(super) fn source_vertical_boundary_flow(
             ));
         }
     }
-    // Two proved cap levels bound the complete flow cylinder. A third level is
-    // a genuine potential change, not an event that may be ignored for reuse.
+    // Two global cap levels still prove the complete column. More levels
+    // permit only a query-local product with no cap in its closed interval:
+    // shelves outside that interval cannot invalidate its vertical flow, and
+    // shelves inside it cannot be silently crossed by an invariance receipt.
+    if additional_cap_levels && cap_meets_query {
+        return Err(indeterminate(
+            "native vertical-flow query meets an intermediate cap level",
+        ));
+    }
     let [Some(a), Some(b)] = cap_levels else {
         return Err(GeometryError::new(
             GeometryErrorCode::AnalysisIndeterminate,
@@ -7213,6 +7222,76 @@ mod tests {
                 .regular_flow_speed_mm_per_height()
                 .is_some_and(|speed| speed.is_finite())
         }));
+    }
+
+    #[test]
+    fn terraced_vertical_flow_is_local_and_preserves_closed_cap_obligations() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/manufacturing/native/non-grid-shelf.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let owner = super::super::material_source::prepare_solid(
+            &definition,
+            MAX_SLAB_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let source = owner.source_view().unwrap();
+        let remaining = MAX_SLAB_SCRATCH_BYTES - owner.retained_bytes();
+        for reverse in [false, true] {
+            let mut frame = frame();
+            if reverse {
+                frame.y_axis = [0.0, -1.0, 0.0];
+                frame.z_axis = [0.0, 0.0, -1.0];
+            }
+            let posed_range = |range: [f64; 2]| {
+                if reverse {
+                    [-range[1], -range[0]]
+                } else {
+                    range
+                }
+            };
+            // A third cap elsewhere does not invalidate a complete constant
+            // cross-section in this interval, including the first post-event
+            // request produced by the ordinary native scheduler.
+            for range in [[0.2, 3.0], [3.15_f64.next_up(), 3.55], [3.2, 7.7]] {
+                let range = posed_range(range);
+                let certificate = narrow_invariance_with_scratch_limit(
+                    source, frame, range, remaining, &mut work, &cancel,
+                )
+                .unwrap()
+                .expect("whole native boundary proves the query-local vertical product");
+                assert!(certificate.matches_native_material(&definition));
+                assert_eq!(certificate.frame(), frame);
+                assert_eq!(certificate.height_interval_mm(), range);
+            }
+            // Neither a crossing nor an exactly touching shelf acquires a
+            // product receipt: its original closed cap/contact still needs
+            // the independent endpoint or collar consumer.
+            for range in [[3.0, 3.3], [3.15, 3.55], [3.0, 3.15], [-1.0, 9.0]] {
+                assert!(
+                    narrow_invariance_with_scratch_limit(
+                        source,
+                        frame,
+                        posed_range(range),
+                        remaining,
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "a query-local product cannot erase the shelf at {range:?}",
+                );
+            }
+        }
+        assert!(
+            native_closed_disk_product(source, remaining, &mut work, &cancel).is_err(),
+            "a local terraced product is not whole-source disk-product authority",
+        );
     }
 
     #[test]
