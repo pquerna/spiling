@@ -816,9 +816,11 @@ async fn native_sections_preserve_hole_winding_and_domain_survival() {
     )
     .await;
     assert_eq!(tangent.status, JobStatus::Failed);
+    // The native graph has no certified critical/coplanar incidence here.
+    // Preserve that unresolved category through the job failure boundary.
     assert_eq!(
         geometry_job_error(tangent),
-        GeometryErrorCode::DegenerateSection
+        GeometryErrorCode::AnalysisIndeterminate
     );
     client.ping().await.unwrap();
     assert_eq!(scene(&mut client).await, before);

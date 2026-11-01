@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::thread;
@@ -10,9 +12,7 @@ use spiling_contracts::geometry::{
     FaceId, GeometryErrorCode, SectionCurve2d, SectionSpan2d, SourceEdgeId, SourceFaceId,
     StepEntityId,
 };
-use spiling_geometry::{
-    SurfaceParameterMap, from_step_bytes, from_step_bytes_with_limits, make_kernel_context,
-};
+use spiling_geometry::{SurfaceParameterMap, from_step_bytes, from_step_bytes_with_limits};
 
 fn fixture_path(rel_path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -269,80 +269,28 @@ fn challenge2_concurrent_step_import_thread_isolation() {
 // =========================================================================
 
 #[test]
-fn challenge3_units_scaling_reveals_double_scaling_bug() {
-    let mm_bytes = fixture_bytes("box-mm.step");
-    let inch_bytes = fixture_bytes("box-inch.step");
-
-    let mm_def = from_step_bytes(&mm_bytes).expect("box-mm import");
-    let inch_def = from_step_bytes(&inch_bytes).expect("box-inch import");
-
-    let mm_bounds = mm_def.bounds_mm();
-    let inch_bounds = inch_def.bounds_mm();
-
-    // 1. Box physical dimensions in mm are 20 x 10 x 8 mm.
-    assert!((mm_bounds.min[0] - 0.0).abs() < 1e-5);
-    assert!((mm_bounds.min[1] - 0.0).abs() < 1e-5);
-    assert!((mm_bounds.min[2] - 0.0).abs() < 1e-5);
-    assert!((mm_bounds.max[0] - 20.0).abs() < 1e-5);
-    assert!((mm_bounds.max[1] - 10.0).abs() < 1e-5);
-    assert!((mm_bounds.max[2] - 8.0).abs() < 1e-5);
-
-    // 2. Query the underlying solidcore B-Rep directly:
-    let k = make_kernel_context();
-    let mm_bbox = solidcore::query::brep::calculate_tight_bounding_box(&k, mm_def.brep())
-        .expect("mm brep bbox");
-    let inch_bbox = solidcore::query::brep::calculate_tight_bounding_box(&k, inch_def.brep())
-        .expect("inch brep bbox");
-
-    // The solidcore B-Rep produced by solidcraft_step is ALREADY in millimeters!
-    assert!((mm_bbox.max().x - 20.0).abs() < 1e-5);
-    assert!((mm_bbox.max().y - 10.0).abs() < 1e-5);
-    assert!((mm_bbox.max().z - 8.0).abs() < 1e-5);
-
-    assert!(
-        (inch_bbox.max().x - 20.0).abs() < 1e-5,
-        "solidcore Brep for inch box is ALREADY scaled to 20mm by solidcraft_step, got {}",
-        inch_bbox.max().x
+fn challenge3_units_scaling_preserves_native_physical_dimensions() {
+    let mm_def = from_step_bytes(&fixture_bytes("box-mm.step")).expect("box-mm import");
+    let inch_def = from_step_bytes(&fixture_bytes("box-inch.step")).expect("box-inch import");
+    assert_eq!(
+        mm_def.provenance().source_unit,
+        spiling_contracts::geometry::SourceUnit::Millimetre
     );
-    assert!(
-        (inch_bbox.max().y - 10.0).abs() < 1e-5,
-        "solidcore Brep for inch box is ALREADY scaled to 10mm by solidcraft_step, got {}",
-        inch_bbox.max().y
+    assert_eq!(
+        inch_def.provenance().source_unit,
+        spiling_contracts::geometry::SourceUnit::Inch
     );
-    assert!(
-        (inch_bbox.max().z - 8.0).abs() < 1e-5,
-        "solidcore Brep for inch box is ALREADY scaled to 8mm by solidcraft_step, got {}",
-        inch_bbox.max().z
-    );
-
-    // 3. EMPIRICAL DEMONSTRATION OF THE BUG:
-    // In import/mod.rs lines 1151-1159:
-    // bounds = AabbMm::new([bbox.min * scale], [bbox.max * scale]);
-    // Because scale is 25.4 and bbox was already in mm (20x10x8),
-    // inch_def.bounds_mm() is erroneously multiplied by 25.4 a SECOND time:
-    // 20.0 * 25.4 = 508.0 mm!
-    // 10.0 * 25.4 = 254.0 mm!
-    // 3. Physical bounding box verification:
-    // In import/mod.rs, bounds are constructed directly from solidcore's metric bbox.
-    // Both box-mm and box-inch must have identical physical bounding boxes [20, 10, 8] mm.
-    assert!(
-        (inch_bounds.max[0] - 20.0).abs() < 1e-4,
-        "Inch box bounds max[0] must be 20.0 mm, got {}",
-        inch_bounds.max[0]
-    );
-    assert!(
-        (inch_bounds.max[1] - 10.0).abs() < 1e-4,
-        "Inch box bounds max[1] must be 10.0 mm, got {}",
-        inch_bounds.max[1]
-    );
-    assert!(
-        (inch_bounds.max[2] - 8.0).abs() < 1e-4,
-        "Inch box bounds max[2] must be 8.0 mm, got {}",
-        inch_bounds.max[2]
-    );
-    for i in 0..3 {
-        assert!((inch_bounds.min[i] - mm_bounds.min[i]).abs() < 1e-5);
-        assert!((inch_bounds.max[i] - mm_bounds.max[i]).abs() < 1e-5);
+    let mm_bounds = common::physical_bounds(&mm_def, 1e-5).expect("millimetre physical bounds");
+    let inch_bounds = common::physical_bounds(&inch_def, 1e-5).expect("inch physical bounds");
+    for bounds in [mm_bounds, inch_bounds] {
+        for (axis, maximum) in [20.0, 10.0, 8.0].into_iter().enumerate() {
+            assert!(bounds.min[axis].abs() < 1e-5);
+            assert!((bounds.max[axis] - maximum).abs() < 1e-5);
+        }
+    }
+    for axis in 0..3 {
+        assert!((inch_bounds.min[axis] - mm_bounds.min[axis]).abs() < 1e-5);
+        assert!((inch_bounds.max[axis] - mm_bounds.max[axis]).abs() < 1e-5);
     }
 }
 

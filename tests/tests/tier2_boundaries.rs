@@ -12,6 +12,59 @@ use spiling_e2e_tests::helpers::*;
 use spiling_geometry::*;
 use std::sync::atomic::AtomicBool;
 
+/// Exact cap queries require native incidence the section service does not yet
+/// certify. Preserve each frozen source/plane case and distinguish its typed
+/// refusal from nearby regular material and proved outside emptiness.
+#[test]
+fn native_cap_queries_preserve_unresolved_regular_and_empty_distinctions() {
+    for fixture in [
+        "box-mm.step",
+        "cylinder.step",
+        "independent-exporters/occt-spline-housing-mm.step",
+    ] {
+        let def = import_test_step(&fixture_bytes(fixture)).unwrap();
+        let bounds = fixture_physical_bounds(fixture);
+        for z in [bounds.min[2], bounds.max[2]] {
+            let failure = section_at_z(&def, z).expect_err("unqualified native cap incidence");
+            assert_eq!(
+                failure.code,
+                GeometryErrorCode::AnalysisIndeterminate,
+                "{fixture} at original cap Z {z}: {failure}",
+            );
+        }
+        if fixture != "independent-exporters/occt-spline-housing-mm.step" {
+            // These two unchanged extrusions have independent constant-area
+            // oracles. The spline's positive section obligations stay separate.
+            let (expected, perimeter) = if fixture == "box-mm.step" {
+                (200.0, 60.0)
+            } else {
+                (25.0 * std::f64::consts::PI, 10.0 * std::f64::consts::PI)
+            };
+            let epsilon = SECTION_SAMPLING_TOLERANCE_MM;
+            let area_bound = perimeter * epsilon + std::f64::consts::PI * epsilon * epsilon;
+            for z in [bounds.min[2] + 0.01, bounds.max[2] - 0.01] {
+                let section = section_at_z(&def, z).expect("near-cap regular section");
+                assert_eq!(section.loops().len(), 1, "{fixture} at Z {z}");
+                assert_close(
+                    loop_area(&section, &section.loops()[0]).abs(),
+                    expected,
+                    area_bound,
+                    "independent near-cap material area",
+                );
+            }
+        }
+        // Exclusion consumes the importer's conservative enclosure. Nominal
+        // fixture dimensions above identify cap probes, not exclusion authority.
+        let enclosure = def.bounds_mm();
+        for z in [enclosure.min[2] - 0.01, enclosure.max[2] + 0.01] {
+            let section = section_at_z(&def, z).unwrap_or_else(|failure| {
+                panic!("{fixture} outside enclosure at Z {z}: {failure}")
+            });
+            assert!(section.loops().is_empty(), "{fixture} at Z {z}");
+        }
+    }
+}
+
 // =========================================================================
 // Feature 1 Corner Cases: Large entity IDs, u32 limits, float loss prevention
 // =========================================================================
@@ -392,24 +445,6 @@ fn test_f09_corner_spline_housing_outside_cut() {
     assert!(sec.loops().is_empty());
 }
 
-#[test]
-fn test_f09_corner_spline_housing_degenerate_boundary() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-spline-housing-mm.step",
-    ))
-    .unwrap();
-    let cancel = AtomicBool::new(false);
-    let top = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 10.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(top.unwrap_err().code, GeometryErrorCode::DegenerateSection);
-}
-
 // =========================================================================
 // Feature 10 Corner Cases: Non-manifold edge cases
 // =========================================================================
@@ -680,24 +715,6 @@ fn test_f16_corner_spline_housing_extreme_cuts() {
 }
 
 #[test]
-fn test_f16_corner_spline_housing_tangent_cut() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-spline-housing-mm.step",
-    ))
-    .unwrap();
-    let cancel = AtomicBool::new(false);
-    let bot = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(bot.unwrap_err().code, GeometryErrorCode::DegenerateSection);
-}
-
-#[test]
 fn test_f16_corner_rounded_housing_pocket_floor_boundary() {
     let def = import_test_step(&fixture_bytes(
         "independent-exporters/occt-rounded-housing-mm.step",
@@ -800,36 +817,6 @@ fn test_f17_corner_rounded_housing_bounds() {
 // =========================================================================
 // Feature 18 Corner Cases: Analytic jets at poles and boundaries
 // =========================================================================
-
-#[test]
-fn test_f18_corner_cylinder_at_z_zero_boundary() {
-    let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let bot = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(bot.unwrap_err().code, GeometryErrorCode::DegenerateSection);
-}
-
-#[test]
-fn test_f18_corner_cylinder_at_z_eight_boundary() {
-    let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let top = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 8.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(top.unwrap_err().code, GeometryErrorCode::DegenerateSection);
-}
 
 #[test]
 fn test_f18_corner_tapered_fitting_cone_slope() {
@@ -955,66 +942,6 @@ fn test_f20_corner_near_miss_z() {
 // =========================================================================
 // Feature 21 Corner Cases: Coplanar edge cases
 // =========================================================================
-
-#[test]
-fn test_f21_corner_box_coplanar_top() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let top = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 8.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(top.unwrap_err().code, GeometryErrorCode::DegenerateSection);
-}
-
-#[test]
-fn test_f21_corner_box_coplanar_bottom() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let bot = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(bot.unwrap_err().code, GeometryErrorCode::DegenerateSection);
-}
-
-#[test]
-fn test_f21_corner_cylinder_coplanar_top() {
-    let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let top = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 8.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(top.unwrap_err().code, GeometryErrorCode::DegenerateSection);
-}
-
-#[test]
-fn test_f21_corner_cylinder_coplanar_bottom() {
-    let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let bot = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(bot.unwrap_err().code, GeometryErrorCode::DegenerateSection);
-}
 
 #[test]
 fn test_f21_corner_near_coplanar_cut() {
@@ -1365,36 +1292,6 @@ fn test_f28_corner_narrow_pocket_hole_negative() {
 // =========================================================================
 // Feature 29 Corner Cases: Coplanar wire boundaries
 // =========================================================================
-
-#[test]
-fn test_f29_corner_box_coplanar_top_degenerate() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let top = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 8.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(top.unwrap_err().code, GeometryErrorCode::DegenerateSection);
-}
-
-#[test]
-fn test_f29_corner_box_coplanar_bottom_degenerate() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let bot = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(bot.unwrap_err().code, GeometryErrorCode::DegenerateSection);
-}
 
 #[test]
 fn test_f29_corner_box_near_top_valid() {

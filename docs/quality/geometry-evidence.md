@@ -89,6 +89,11 @@ independent spatial/chart trace tolerance remains in force. Original inspection
 charts retain their measured transport error. Unadmitted charts cannot borrow
 either premise. A smooth seam does not establish height transversality or
 authorize a section through a critical, coplanar or tangent stratum.
+Unresolved native section incidence returns `AnalysisIndeterminate`. A regular
+interior cut can succeed, while a proved outside cut succeeds with no loops.
+The [cap-boundary matrix](../../tests/tests/tier2_boundaries.rs) retains these
+distinct outcomes; the engine geometry tests additionally require a failed query
+to preserve the scene.
 
 An empty section grants exact reuse only after excluding the entire closed slab
 from native material support. The cheap Cartesian enclosure runs first; when it

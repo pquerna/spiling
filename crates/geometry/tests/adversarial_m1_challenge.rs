@@ -13,6 +13,8 @@
 //! 6. Cancellation and resource limit enforcement
 //! 7. Thread transfer (Send) and upstream Sync analysis
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
@@ -251,12 +253,16 @@ fn challenge_arena_borrows_zero_mutex_simultaneous_references() {
 fn challenge_definition_send_across_threads() {
     // Verify Definition implements Send so it can be moved between threads/actors
     let def = from_step_bytes(&load_fixture("box-mm.step")).expect("box-mm");
+    let expected = def.bounds_mm();
     let handle = std::thread::spawn(move || {
         assert_eq!(def.faces().len(), 6);
         def.bounds_mm()
     });
     let bounds = handle.join().expect("thread completed");
-    assert_eq!(bounds.max[0], 20.0);
+    assert_eq!(
+        bounds, expected,
+        "thread transfer preserves the import enclosure"
+    );
 }
 
 // =========================================================================
@@ -369,7 +375,7 @@ fn challenge_baseline_accepted_fixtures_geometry_and_scaling() {
     let box_mm = from_step_bytes(&load_fixture("box-mm.step")).expect("box-mm");
     assert_eq!(box_mm.faces().len(), 6);
     assert_eq!(box_mm.provenance().source_unit, SourceUnit::Millimetre);
-    let b_mm = box_mm.bounds_mm();
+    let b_mm = common::physical_bounds(&box_mm, 1e-5).expect("certified physical extents");
     assert!((b_mm.min[0] - 0.0).abs() < 1e-5);
     assert!((b_mm.min[1] - 0.0).abs() < 1e-5);
     assert!((b_mm.min[2] - 0.0).abs() < 1e-5);
@@ -381,7 +387,7 @@ fn challenge_baseline_accepted_fixtures_geometry_and_scaling() {
     let box_in = from_step_bytes(&load_fixture("box-inch.step")).expect("box-inch");
     assert_eq!(box_in.faces().len(), 6);
     assert_eq!(box_in.provenance().source_unit, SourceUnit::Inch);
-    let b_in = box_in.bounds_mm();
+    let b_in = common::physical_bounds(&box_in, 1e-5).expect("certified physical extents");
     assert!((b_in.min[0] - 0.0).abs() < 1e-5);
     assert!((b_in.min[1] - 0.0).abs() < 1e-5);
     assert!((b_in.min[2] - 0.0).abs() < 1e-5);
@@ -396,7 +402,7 @@ fn challenge_baseline_accepted_fixtures_geometry_and_scaling() {
         4,
         "cylinder has 2 semi-cylinders + 2 planar caps = 4 faces"
     );
-    let b_cyl = cyl.bounds_mm();
+    let b_cyl = common::physical_bounds(&cyl, 1e-5).expect("certified physical extents");
     assert!((b_cyl.min[0] - (-5.0)).abs() < 1e-5);
     assert!((b_cyl.min[1] - (-5.0)).abs() < 1e-5);
     assert!((b_cyl.min[2] - 0.0).abs() < 1e-5);
@@ -406,7 +412,7 @@ fn challenge_baseline_accepted_fixtures_geometry_and_scaling() {
 
     // 3. Through-hole
     let th = from_step_bytes(&load_fixture("through-hole.step")).expect("through-hole");
-    let b_th = th.bounds_mm();
+    let b_th = common::physical_bounds(&th, 1e-5).expect("certified physical extents");
     assert!((b_th.min[0] - 0.0).abs() < 1e-5);
     assert!((b_th.max[0] - 20.0).abs() < 1e-5);
     assert!((b_th.max[1] - 20.0).abs() < 1e-5);
@@ -414,7 +420,7 @@ fn challenge_baseline_accepted_fixtures_geometry_and_scaling() {
 
     // 4. Perforated plate
     let plate = from_step_bytes(&load_fixture("perforated-plate.step")).expect("plate");
-    let b_plate = plate.bounds_mm();
+    let b_plate = common::physical_bounds(&plate, 1e-4).expect("certified physical extents");
     assert!((b_plate.min[0] - 0.0).abs() < 1e-4);
     assert!((b_plate.max[0] - 1640.0).abs() < 1e-4);
     assert!((b_plate.max[1] - 840.0).abs() < 1e-4);
@@ -424,7 +430,7 @@ fn challenge_baseline_accepted_fixtures_geometry_and_scaling() {
 #[test]
 fn challenge_reproduce_box_inch_bounds_double_scaling_bug() {
     let box_inch = from_step_bytes(&load_fixture("box-inch.step")).expect("box-inch");
-    let b_in = box_inch.bounds_mm();
+    let b_in = common::physical_bounds(&box_inch, 1e-4).expect("inch physical extents");
 
     // Verify double-scaling fix:
     // manifest.json and RFC 07 specify expected bounds max: [20.0, 10.0, 8.0] mm.

@@ -941,82 +941,10 @@ fn test_f20_plane_roots_stepped_heights() {
 // =========================================================================
 
 #[test]
-fn test_f21_coplane_face_classification_box_top() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let top_cut = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 8.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(
-        top_cut.unwrap_err().code,
-        GeometryErrorCode::DegenerateSection
-    );
-}
-
-#[test]
-fn test_f21_coplane_face_classification_box_bottom() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let bot_cut = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(
-        bot_cut.unwrap_err().code,
-        GeometryErrorCode::DegenerateSection
-    );
-}
-
-#[test]
 fn test_f21_coplane_face_interior_cut_valid() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let sec = section_at_z(&def, 4.0);
     assert!(sec.is_ok());
-}
-
-#[test]
-fn test_f21_coplane_face_cylinder_top() {
-    let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let top_cut = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 8.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(
-        top_cut.unwrap_err().code,
-        GeometryErrorCode::DegenerateSection
-    );
-}
-
-#[test]
-fn test_f21_coplane_face_cylinder_bottom() {
-    let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let bot_cut = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(
-        bot_cut.unwrap_err().code,
-        GeometryErrorCode::DegenerateSection
-    );
 }
 
 // =========================================================================
@@ -1385,36 +1313,6 @@ fn test_f28_narrow_pocket_orientation() {
 // =========================================================================
 // Feature 29: Coplanar face wire contribution
 // =========================================================================
-
-#[test]
-fn test_f29_coplanar_face_detection_top_boundary() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let top = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 8.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(top.unwrap_err().code, GeometryErrorCode::DegenerateSection);
-}
-
-#[test]
-fn test_f29_coplanar_face_detection_bottom_boundary() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let cancel = AtomicBool::new(false);
-    let bot = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
-    );
-    assert_eq!(bot.unwrap_err().code, GeometryErrorCode::DegenerateSection);
-}
 
 #[test]
 fn test_f29_interior_cut_near_boundary_safe() {
