@@ -78,6 +78,24 @@ manufacturing artifacts; applying a different process profile uses the existing
 manufacturing transaction and invalidation. Editing My library does not alter a
 captured project or job.
 
+The native Project scope supports editing a standalone definition while retaining
+its captured origin. A comparison reads the current personal entry under a
+captured library identity/revision and shows which fields differ. It distinguishes
+same content, a project edit, a personal update and changes on both sides against
+the captured origin. Missing or foreign personal origins leave a usable standalone
+copy; saving a new personal item remains available.
+
+Replacement is explicit and whole-definition. Accepting the personal version
+commits a normal project transaction and updates its origin; Undo/Redo restores
+both content and origin. Promoting the project version commits only the personal
+file, using the reviewed library generation and expected prior content hash.
+Concurrent writes reject that draft for renewed review; they cannot silently
+stamp it with newer authority. A promotion does not mark the project saved or
+rewrite its origin. Existing stock-variant protections still apply. Neither
+replacement applies a process profile to the current job: Manufacturing review
+and Apply remain separate. Read-only projects can be compared and deliberately
+promoted, while project replacement remains disabled.
+
 The project root and ProjectInfo contain an explicit nullable
 MaterialCollectionRecord (hash, bytes and counts), never the full collection.
 Project PTAC role 6 contains exact canonical collection bytes. Core validates
@@ -144,7 +162,8 @@ UUID when resolving uncertainty. No stock operation confers machine readiness.
 Exercise storage/domain regressions with `cargo test -p spiling-core-ptac` and
 `cargo test -p spiling-core`. Actual child coverage is
 `cargo test -p spiling-engine --test library`. Native host coverage is
-`SPILING_TEST_ENGINE=PATH cargo test -p spiling-workbench library_inventory_and_project_copy_use_native_host_services -- --ignored`.
+`SPILING_TEST_ENGINE=PATH cargo test -p spiling-workbench library_ -- --ignored` (inventory/copy plus project editing, comparison,
+stale promotion, Undo/Redo and read-only return).
 Use the [development resource controls](../quality/development.md) for native
 builds/checks. These tests establish scoped software behavior, not power-loss,
 physical color, printer or cross-platform packaging qualification.

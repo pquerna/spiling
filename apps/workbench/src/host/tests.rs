@@ -1891,12 +1891,13 @@ fn library_inventory_and_project_copy_use_native_host_services() {
     .unwrap();
     let inspected = wait(&host, |s| !s.busy && s.library.selected.is_some());
     let revision = inspected.library.selected.as_ref().unwrap().1.clone();
-    host.library(LibraryAction::UseInProject {
+    host.library(LibraryAction::PutProjectFilament {
+        project_id: inspected.project.as_ref().unwrap().project_id.clone(),
         revision,
-        origin: LibraryOrigin {
+        origin: Some(LibraryOrigin {
             library_id: saved.library.receipt.as_ref().unwrap().identity.id.clone(),
             filament: reference.clone(),
-        },
+        }),
         expected: None,
         base_revision: inspected.project.unwrap().revision,
     })
@@ -1981,4 +1982,275 @@ fn library_inventory_and_project_copy_use_native_host_services() {
     host.confirm(closing.confirmation.unwrap().id, true)
         .unwrap();
     wait(&host, |s| s.phase == Phase::Closed);
+}
+
+#[test]
+#[ignore = "actual library engine services; requires SPILING_TEST_ENGINE"]
+fn project_library_comparison_preserves_copies_and_rejects_stale_promotion() {
+    use spiling_contracts::{geometry::SourceHash, library::*};
+    fn act(host: &Host, action: LibraryAction) -> Snapshot {
+        let serial = host.snapshot().serial;
+        host.library(action).unwrap();
+        idle_after(host, serial)
+    }
+    fn inspect(host: &Host, reference: &FilamentRef) -> Snapshot {
+        act(
+            host,
+            LibraryAction::Refresh(LibraryFilamentQuery::default()),
+        );
+        act(
+            host,
+            LibraryAction::Inspect {
+                personal: false,
+                reference: reference.clone(),
+            },
+        )
+    }
+    fn compare(host: &Host, reference: &FilamentRef) -> library::DefinitionComparison {
+        let s = inspect(host, reference);
+        let p = s.project.unwrap();
+        act(
+            host,
+            LibraryAction::CompareOrigin {
+                project_id: p.project_id.clone(),
+                base_revision: p.revision,
+                reference: reference.clone(),
+            },
+        )
+        .library
+        .comparison
+        .clone()
+        .unwrap()
+    }
+    fn request(
+        identity: Option<&LibraryIdentity>,
+        id: &FilamentId,
+        expected: Option<SourceHash>,
+        definition: FilamentDefinition,
+    ) -> LibraryWrite {
+        LibraryWrite {
+            library_id: identity.map(|i| i.id.clone()),
+            base_revision: identity.map_or(0, |i| i.revision),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            mutation: LibraryMutation::PutFilament {
+                id: id.clone(),
+                expected,
+                definition,
+            },
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    assert_eq!(
+        wait(&host, |s| s.phase != Phase::Starting).phase,
+        Phase::Running
+    );
+    act(
+        &host,
+        LibraryAction::SetLocation(native(&root.path().join("My library.spil"))),
+    );
+    let original = FilamentDefinition {
+        name: "Original personal filament".into(),
+        material: None,
+        color_name: None,
+        appearance: None,
+        profiles: vec![],
+        source: DefinitionSource::Operator,
+    };
+    let id = FilamentId(uuid::Uuid::new_v4().to_string());
+    let reference = FilamentRef {
+        id: id.clone(),
+        revision: original.content_hash().unwrap(),
+    };
+    let saved = act(
+        &host,
+        LibraryAction::Write(request(None, &id, None, original.clone())),
+    );
+    let identity = saved.library.receipt.as_ref().unwrap().identity.clone();
+    let origin = LibraryOrigin {
+        library_id: identity.id.clone(),
+        filament: reference.clone(),
+    };
+    let p = saved.project.unwrap();
+    act(
+        &host,
+        LibraryAction::PutProjectFilament {
+            project_id: p.project_id.clone(),
+            base_revision: p.revision,
+            revision: FilamentRevision {
+                reference: reference.clone(),
+                definition: original.clone(),
+            },
+            origin: Some(origin.clone()),
+            expected: None,
+        },
+    );
+    let same = compare(&host, &reference);
+    assert_eq!(same.summary(), "Same content as My library");
+    let mut edited = original.clone();
+    edited.name = "Project-only revision".into();
+    let edited_ref = FilamentRef {
+        id: id.clone(),
+        revision: edited.content_hash().unwrap(),
+    };
+    act(
+        &host,
+        LibraryAction::PutProjectFilament {
+            project_id: same.project.0,
+            base_revision: same.project.1,
+            revision: FilamentRevision {
+                reference: edited_ref.clone(),
+                definition: edited.clone(),
+            },
+            origin: Some(origin.clone()),
+            expected: Some(reference.revision.clone()),
+        },
+    );
+    let project_only = compare(&host, &edited_ref);
+    assert_eq!(project_only.personal.definition, original);
+    assert_eq!(project_only.summary(), "Edited in Project");
+    let mut personal = original.clone();
+    personal.name = "Concurrent personal revision".into();
+    let updated = act(
+        &host,
+        LibraryAction::Write(request(
+            Some(&identity),
+            &id,
+            Some(reference.revision.clone()),
+            personal.clone(),
+        )),
+    );
+    let personal_identity = updated.library.receipt.as_ref().unwrap().identity.clone();
+    assert_eq!(
+        updated.project.as_ref().unwrap().revision,
+        project_only.project.1
+    );
+    // A reviewed promotion cannot be stamped with the latest library generation.
+    let stale = request(
+        Some(&project_only.identity),
+        &id,
+        Some(project_only.personal.reference.revision.clone()),
+        project_only.copy.definition,
+    );
+    let rejected = act(&host, LibraryAction::Write(stale.clone()));
+    assert_eq!(
+        rejected.library.rejected_request.as_deref(),
+        Some(stale.request_id.as_str())
+    );
+    assert_eq!(rejected.phase, Phase::Running);
+    let both = compare(&host, &edited_ref);
+    assert_eq!(both.summary(), "Both copies changed since capture");
+    assert_eq!(both.identity, personal_identity);
+    assert_eq!(both.personal.definition, personal);
+    assert_eq!(both.copy.definition, edited);
+    let promoted = act(
+        &host,
+        LibraryAction::Write(request(
+            Some(&both.identity),
+            &id,
+            Some(both.personal.reference.revision.clone()),
+            both.copy.definition,
+        )),
+    );
+    let promoted_identity = promoted.library.receipt.as_ref().unwrap().identity.clone();
+    assert_eq!(promoted.project.as_ref().unwrap().revision, both.project.1);
+    assert_eq!(
+        compare(&host, &edited_ref).summary(),
+        "Same content as My library"
+    );
+    personal.name = "Next reusable revision".into();
+    let latest = act(
+        &host,
+        LibraryAction::Write(request(
+            Some(&promoted_identity),
+            &id,
+            Some(edited_ref.revision.clone()),
+            personal.clone(),
+        )),
+    );
+    assert_eq!(latest.project.as_ref().unwrap().revision, both.project.1);
+    let update = compare(&host, &edited_ref);
+    let replacement = update.personal.clone();
+    act(
+        &host,
+        LibraryAction::PutProjectFilament {
+            project_id: update.project.0.clone(),
+            base_revision: update.project.1,
+            revision: replacement.clone(),
+            origin: Some(LibraryOrigin {
+                library_id: update.identity.id,
+                filament: replacement.reference.clone(),
+            }),
+            expected: Some(edited_ref.revision.clone()),
+        },
+    );
+    let refreshed = act(
+        &host,
+        LibraryAction::Refresh(LibraryFilamentQuery::default()),
+    );
+    assert_eq!(
+        refreshed.library.project[0].entry.current,
+        replacement.reference
+    );
+    let undone = send(&host, Action::Undo);
+    assert!(undone.project.as_ref().unwrap().revision > update.project.1);
+    let refreshed = act(
+        &host,
+        LibraryAction::Refresh(LibraryFilamentQuery::default()),
+    );
+    assert_eq!(refreshed.library.project[0].entry.current, edited_ref);
+    assert_eq!(
+        refreshed.library.project[0].entry.origin.as_ref(),
+        Some(&origin)
+    );
+    send(&host, Action::Redo);
+    let path = root.path().join("Portable.spil");
+    let saved = send(
+        &host,
+        Action::Save {
+            target: Some(native(&path)),
+        },
+    );
+    assert!(!saved.project.as_ref().unwrap().dirty);
+    send(&host, Action::New);
+    let opened = send(
+        &host,
+        Action::Open {
+            path: native(&path),
+            read_only: true,
+            recover_previous: false,
+        },
+    );
+    assert!(opened.project.as_ref().unwrap().read_only);
+    let readonly = compare(&host, &replacement.reference);
+    assert_eq!(readonly.summary(), "Same content as My library");
+    assert_eq!(readonly.copy.definition, personal);
+    // A draft from the old project cannot target a new project with the same revision.
+    send(&host, Action::New);
+    let wrong_project = act(
+        &host,
+        LibraryAction::PutProjectFilament {
+            project_id: readonly.project.0,
+            base_revision: readonly.project.1,
+            revision: replacement,
+            origin: None,
+            expected: None,
+        },
+    );
+    assert!(
+        wrong_project
+            .problems
+            .back()
+            .unwrap()
+            .contains("another project")
+    );
+    assert!(wrong_project.project.as_ref().unwrap().materials.is_none());
+    assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
 }

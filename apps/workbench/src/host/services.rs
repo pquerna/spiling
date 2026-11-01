@@ -147,10 +147,11 @@ impl Actor {
             self.refresh_after_failure().await;
         }
     }
-    pub(super) async fn project_edit(&mut self, command: ProjectCommand) {
+    pub(super) async fn project_edit(&mut self, command: ProjectCommand) -> Option<ProjectInfo> {
         if !self.control_ready() {
-            return;
+            return None;
         }
+        let mut receipt = None;
         match self
             .client
             .as_ref()
@@ -162,7 +163,8 @@ impl Actor {
                 self.accept(operation, Receipt::Project, "Project edit")
                     .await
             }
-            Ok(ProjectResponse::SceneChanged { .. } | ProjectResponse::Status { .. }) => {}
+            Ok(ProjectResponse::Status { info }) => receipt = Some(info),
+            Ok(ProjectResponse::SceneChanged { .. }) => {}
             Ok(ProjectResponse::Filament { .. } | ProjectResponse::Filaments { .. }) => {
                 self.problem("Unexpected material query response to project edit")
             }
@@ -172,6 +174,7 @@ impl Actor {
         if self.pending.is_none() {
             self.refresh_after_failure().await;
         }
+        receipt
     }
     pub(super) async fn verified(
         &mut self,

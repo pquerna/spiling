@@ -1029,7 +1029,9 @@ impl Actor {
             }
             Request::Manufacturing(command) => self.manufacturing(*command).await,
             Request::Library(action) => self.library_action(*action).await,
-            Request::Project(command) => self.project_edit(*command).await,
+            Request::Project(command) => {
+                self.project_edit(*command).await;
+            }
             Request::Geometry(command) => {
                 if matches!(*command, GeometryCommand::StartSection { .. })
                     && self.section_task.is_some()

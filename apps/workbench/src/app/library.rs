@@ -3,8 +3,18 @@
 // Licensed under the Open Software License version 3.0
 use super::*;
 use crate::host::{LibraryAction, library::State};
-use spiling_contracts::{appearance::AppearanceColor, library::*};
+use spiling_contracts::{
+    appearance::AppearanceColor,
+    library::*,
+    project::{ProjectId, ProjectRevision},
+};
 
+mod comparison;
+
+struct ProjectDefinitionDraft {
+    capture: (ProjectId, ProjectRevision),
+    origin: Option<LibraryOrigin>,
+}
 #[derive(Default)]
 pub(super) struct LibraryUi {
     pub open: bool,
@@ -22,11 +32,14 @@ pub(super) struct LibraryUi {
     lot: String,
     location: String,
     draft: Option<FilamentRevision>,
+    draft_project: Option<ProjectDefinitionDraft>,
     pending: Option<LibraryWrite>,
     pub queued: Option<LibraryAction>,
     pub locator: Option<NativePath>,
     initialized: bool,
     receipt_seen: Option<String>,
+    project_receipt_seen: Option<(ProjectId, ProjectRevision)>,
+    project_submission: Option<FilamentRef>,
 }
 impl LibraryUi {
     fn mutation(&mut self, status: Option<&LibraryStatus>, mutation: LibraryMutation) {
@@ -49,6 +62,7 @@ impl LibraryUi {
         }));
     }
     fn edit(&mut self, selected: &FilamentRevision) {
+        self.draft_project = None;
         self.draft = Some(selected.clone());
         self.name = selected.definition.name.clone();
         self.color_name = selected.definition.color_name.clone().unwrap_or_default();
@@ -144,7 +158,7 @@ impl Workbench {
         {
             self.library.receipt_seen = Some(receipt.request_id.clone());
             match &pending.mutation {
-                LibraryMutation::PutFilament { .. } => {
+                LibraryMutation::PutFilament { .. } if self.library.draft_project.is_none() => {
                     self.library.draft = None;
                     self.library.name.clear();
                     self.library.color_name.clear();
@@ -158,6 +172,35 @@ impl Workbench {
             }
             self.library.pending = None;
             self.library.refresh();
+        }
+        if let Some(receipt) = &state.project_receipt {
+            let identity = (receipt.project.clone(), receipt.after);
+            let current = self
+                .state
+                .project
+                .as_ref()
+                .map(|p| (p.project_id.clone(), p.revision));
+            if current.as_ref() == Some(&identity)
+                && self.library.project_receipt_seen.as_ref() != Some(&identity)
+            {
+                self.library.project_receipt_seen = Some(identity);
+                if self
+                    .library
+                    .draft_project
+                    .as_ref()
+                    .is_some_and(|d| d.capture == (receipt.project.clone(), receipt.before))
+                    && self.library.project_submission.as_ref() == Some(&receipt.reference)
+                {
+                    self.library.draft = None;
+                    self.library.draft_project = None;
+                    self.library.project_submission = None;
+                    self.library.name.clear();
+                    self.library.color_name.clear();
+                    self.library.hex.clear();
+                }
+                self.library.personal = false;
+                self.library.refresh();
+            }
         }
         if !self.library.open {
             return;
@@ -212,15 +255,31 @@ impl Workbench {
         }
         if self.library.personal {
             self.library_capture_job(ui, state, personal_write);
+        }
+        let project_draft = self.library.draft_project.is_some();
+        if self.library.personal && !project_draft {
             ui.separator();
             let title = if self.library.draft.is_some() {
-                "Edit definition"
+                "Edit My library definition"
             } else {
                 "Add filament"
             };
             ui.collapsing(title, |ui| {
                 self.library_definition_editor(ui, state, personal_write)
             });
+        } else if !self.library.personal && project_draft {
+            ui.separator();
+            ui.heading("Edit project copy");
+            self.library_definition_editor(ui, state, writable);
+        } else if self.library.draft.is_some() {
+            ui.weak(if project_draft {
+                "A Project definition draft is retained. Switch to Project to finish it."
+            } else {
+                "A My library definition draft is retained. Switch to My library to finish it."
+            });
+        }
+        if !self.library.personal {
+            self.library_comparison(ui, state, writable, personal_write);
         }
         self.library_pending(ui, state, ready);
     }
@@ -405,6 +464,43 @@ impl Workbench {
         personal_write: bool,
     ) {
         ui.horizontal_wrapped(|ui| {
+            if !personal {
+                if ui
+                    .add_enabled(writable, egui::Button::new("Edit project copy"))
+                    .clicked()
+                {
+                    let origin = state
+                        .project
+                        .iter()
+                        .find(|r| r.entry.current == selected.reference)
+                        .and_then(|r| r.entry.origin.clone());
+                    self.library.edit(selected);
+                    self.library.draft_project = state
+                        .selected_project
+                        .clone()
+                        .map(|capture| ProjectDefinitionDraft { capture, origin });
+                }
+                let ready = self.state.phase == Phase::Running
+                    && !self.state.busy
+                    && self.awaiting_serial.is_none();
+                let origin = state
+                    .project
+                    .iter()
+                    .find(|r| r.entry.current == selected.reference)
+                    .and_then(|r| r.entry.origin.as_ref());
+                if origin.is_some()
+                    && ui
+                        .add_enabled(ready, egui::Button::new("Compare with My library"))
+                        .clicked()
+                    && let Some((project_id, base_revision)) = &state.selected_project
+                {
+                    self.library.queued = Some(LibraryAction::CompareOrigin {
+                        project_id: project_id.clone(),
+                        base_revision: *base_revision,
+                        reference: selected.reference.clone(),
+                    });
+                }
+            }
             if personal
                 && ui
                     .add_enabled(writable, egui::Button::new("Add to project"))
@@ -471,10 +567,9 @@ impl Workbench {
         });
     }
     fn library_copy_to_project(&mut self, state: &State, selected: &FilamentRevision) {
-        let (Some(id), Some(project)) = (
-            state.status.as_ref().and_then(|s| s.identity.as_ref()),
-            self.state.project.as_ref(),
-        ) else {
+        let (Some(id), Some(project)) =
+            (state.selected_library.as_ref(), self.state.project.as_ref())
+        else {
             return;
         };
         if state.project_capture.as_ref() != Some(&(project.project_id.clone(), project.revision)) {
@@ -488,12 +583,17 @@ impl Workbench {
             .iter()
             .find(|r| r.entry.current.id == selected.reference.id)
             .map(|r| r.entry.current.revision.clone());
-        self.library.queued = Some(LibraryAction::UseInProject {
+        if expected.is_some() {
+            self.local_problem = Some("This filament is already in Project. Inspect its Project copy and use Compare with My library to review a replacement.".into());
+            return;
+        }
+        self.library.queued = Some(LibraryAction::PutProjectFilament {
+            project_id: project.project_id.clone(),
             revision: selected.clone(),
-            origin: LibraryOrigin {
-                library_id: id.id.clone(),
+            origin: Some(LibraryOrigin {
+                library_id: id.clone(),
                 filament: selected.reference.clone(),
-            },
+            }),
             expected,
             base_revision: project.revision,
         });
@@ -662,17 +762,69 @@ impl Workbench {
             ui.text_edit_singleline(&mut self.library.hex);
         });
         ui.weak("New colors are operator declarations. Unspecified color and profile are allowed.");
+        let current = self
+            .state
+            .project
+            .as_ref()
+            .map(|p| (p.project_id.clone(), p.revision));
+        let draft_current = self
+            .library
+            .draft_project
+            .as_ref()
+            .is_none_or(|d| current.as_ref() == Some(&d.capture));
+        if !draft_current {
+            ui.weak("Project revision changed. Draft values are retained; discard and inspect the current copy to start a fresh edit.");
+        }
+        let label = if self.library.draft_project.is_some() {
+            "Save project copy"
+        } else {
+            "Save definition"
+        };
         if ui
-            .add_enabled(writable, egui::Button::new("Save definition"))
+            .add_enabled(writable && draft_current, egui::Button::new(label))
             .clicked()
         {
             match self.library.definition_mutation() {
-                Ok(mutation) => self.library.mutation(state.status.as_ref(), mutation),
+                Ok(LibraryMutation::PutFilament {
+                    id,
+                    expected,
+                    definition,
+                }) => {
+                    if let Some(draft) = &self.library.draft_project {
+                        let revision = FilamentRevision {
+                            reference: FilamentRef {
+                                id,
+                                revision: definition.content_hash().expect("validated definition"),
+                            },
+                            definition,
+                        };
+                        self.library.project_submission = Some(revision.reference.clone());
+                        self.library.queued = Some(LibraryAction::PutProjectFilament {
+                            project_id: draft.capture.0.clone(),
+                            base_revision: draft.capture.1,
+                            revision,
+                            expected,
+                            origin: draft.origin.clone(),
+                        });
+                    } else {
+                        self.library.mutation(
+                            state.status.as_ref(),
+                            LibraryMutation::PutFilament {
+                                id,
+                                expected,
+                                definition,
+                            },
+                        );
+                    }
+                }
+                Ok(_) => unreachable!("definition mutation"),
                 Err(error) => self.local_problem = Some(error),
             }
         }
         if ui.button("Discard definition draft").clicked() {
             self.library.draft = None;
+            self.library.draft_project = None;
+            self.library.project_submission = None;
             self.library.name.clear();
             self.library.color_name.clear();
             self.library.hex.clear();

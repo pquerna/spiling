@@ -11,9 +11,46 @@ pub struct State {
     pub project_capture: Option<(ProjectId, ProjectRevision)>,
     pub selected: Option<(bool, FilamentRevision)>,
     pub selected_project: Option<(ProjectId, ProjectRevision)>,
+    pub selected_library: Option<LibraryId>,
+    pub comparison: Option<DefinitionComparison>,
+    pub project_receipt: Option<ProjectMaterialReceipt>,
     pub spools: Vec<SpoolRecord>,
     pub receipt: Option<LibraryWriteReceipt>,
     pub rejected_request: Option<String>,
+}
+#[derive(Debug, Clone)]
+pub struct ProjectMaterialReceipt {
+    pub project: ProjectId,
+    pub before: ProjectRevision,
+    pub after: ProjectRevision,
+    pub reference: FilamentRef,
+}
+/// Exact operands retained for an explicit cross-file replacement; never a sync link.
+#[derive(Debug, Clone)]
+pub struct DefinitionComparison {
+    pub project: (ProjectId, ProjectRevision),
+    pub copy: FilamentRevision,
+    pub origin: LibraryOrigin,
+    pub identity: LibraryIdentity,
+    pub personal: FilamentRevision,
+    pub archived: bool,
+}
+impl DefinitionComparison {
+    pub fn summary(&self) -> &'static str {
+        if self.copy.definition == self.personal.definition {
+            "Same content as My library"
+        } else {
+            match (
+                self.copy.reference.revision != self.origin.filament.revision,
+                self.personal.reference.revision != self.origin.filament.revision,
+            ) {
+                (true, true) => "Both copies changed since capture",
+                (true, false) => "Edited in Project",
+                (false, true) => "Update available in My library",
+                (false, false) => "Different captured content",
+            }
+        }
+    }
 }
 #[derive(Debug, Clone)]
 pub enum LibraryAction {
@@ -24,11 +61,17 @@ pub enum LibraryAction {
     },
     Write(LibraryWrite),
     SetLocation(NativePath),
-    UseInProject {
+    PutProjectFilament {
+        project_id: ProjectId,
         revision: FilamentRevision,
-        origin: LibraryOrigin,
+        origin: Option<LibraryOrigin>,
         expected: Option<SourceHash>,
         base_revision: ProjectRevision,
+    },
+    CompareOrigin {
+        project_id: ProjectId,
+        base_revision: ProjectRevision,
+        reference: FilamentRef,
     },
     ReviewProfile(spiling_contracts::manufacturing::MaterialProcessProfile),
 }
@@ -45,13 +88,14 @@ impl Host {
                     return Err("Library draft exceeds the bounded host control limit".into());
                 }
             }
-            LibraryAction::UseInProject { revision, .. } => {
+            LibraryAction::PutProjectFilament { revision, .. } => {
                 revision.validate()?;
             }
             LibraryAction::ReviewProfile(profile) => {
                 profile.validate().map_err(|e| e.to_string())?;
             }
             LibraryAction::Refresh(query) => query.validate()?,
+            LibraryAction::CompareOrigin { reference, .. } => reference.validate()?,
             LibraryAction::SetLocation(path) => path.validate().map_err(|e| e.to_string())?,
             _ => {}
         }
@@ -133,6 +177,7 @@ impl Actor {
                 reference,
             } => {
                 let mut capture = None;
+                let mut selected_library = None;
                 let revision = if personal {
                     let status = rpc.library_status().await?;
                     let id = status
@@ -140,6 +185,7 @@ impl Actor {
                         .as_ref()
                         .ok_or_else(|| ClientError::InvalidRequest("My library is empty".into()))?;
                     let revision = rpc.library_filament(&id.id, &reference).await?;
+                    selected_library = Some(id.id.clone());
                     let mut query = LibrarySpoolQuery {
                         expected: Some(id.clone()),
                         filament: Some(reference.clone()),
@@ -186,8 +232,10 @@ impl Actor {
                     }
                 };
                 let state = Arc::make_mut(&mut self.state.library);
+                state.comparison = None;
                 state.selected = Some((personal, revision));
                 state.selected_project = capture;
+                state.selected_library = selected_library;
             }
             LibraryAction::Write(request) => {
                 Arc::make_mut(&mut self.state.library).rejected_request = None;
@@ -207,8 +255,10 @@ impl Actor {
                 let confirmed = receipt.publication == LibraryPublication::Confirmed;
                 if confirmed {
                     let state = Arc::make_mut(&mut self.state.library);
+                    state.comparison = None;
                     state.selected = None;
                     state.selected_project = None;
+                    state.selected_library = None;
                     state.spools.clear();
                 }
                 Arc::make_mut(&mut self.state.library).receipt = Some(receipt);
@@ -226,12 +276,23 @@ impl Actor {
                     ..Default::default()
                 });
             }
-            LibraryAction::UseInProject {
+            LibraryAction::PutProjectFilament {
+                project_id,
                 revision,
                 origin,
                 expected,
                 base_revision,
             } => {
+                if self
+                    .state
+                    .project
+                    .as_ref()
+                    .is_none_or(|p| p.project_id != project_id)
+                {
+                    return Err(ClientError::InvalidRequest(
+                        "The material draft belongs to another project".into(),
+                    ));
+                }
                 let session_id = self
                     .state
                     .hello
@@ -239,14 +300,112 @@ impl Actor {
                     .expect("connected")
                     .session_id
                     .clone();
-                self.project_edit(ProjectCommand::PutFilament {
-                    session_id,
-                    base_revision,
-                    revision,
-                    origin: Some(origin),
-                    expected,
-                })
-                .await;
+                let reference = revision.reference.clone();
+                if let Some(info) = self
+                    .project_edit(ProjectCommand::PutFilament {
+                        session_id,
+                        base_revision,
+                        revision,
+                        origin,
+                        expected,
+                    })
+                    .await
+                {
+                    if info.project_id != project_id || info.revision <= base_revision {
+                        return Err(ClientError::Protocol(
+                            "Project material receipt does not match its captured mutation".into(),
+                        ));
+                    }
+                    let state = Arc::make_mut(&mut self.state.library);
+                    state.selected = None;
+                    state.selected_project = None;
+                    state.selected_library = None;
+                    state.comparison = None;
+                    state.project_receipt = Some(ProjectMaterialReceipt {
+                        project: project_id,
+                        before: base_revision,
+                        after: info.revision,
+                        reference,
+                    });
+                    self.state.message =
+                        "Project material saved; current job profile is unchanged".into();
+                }
+            }
+            LibraryAction::CompareOrigin {
+                project_id,
+                base_revision,
+                reference,
+            } => {
+                let capture = (project_id, base_revision);
+                let project = self
+                    .state
+                    .project
+                    .as_ref()
+                    .ok_or_else(|| ClientError::InvalidRequest("no project".into()))?;
+                let state = &self.state.library;
+                if capture != (project.project_id.clone(), project.revision)
+                    || state.project_capture.as_ref() != Some(&capture)
+                    || state.selected_project.as_ref() != Some(&capture)
+                {
+                    return Err(ClientError::InvalidRequest(
+                        "Refresh and inspect the current project material before comparison".into(),
+                    ));
+                }
+                let copy = state
+                    .selected
+                    .as_ref()
+                    .filter(|(personal, r)| !personal && r.reference == reference)
+                    .map(|(_, r)| r.clone())
+                    .ok_or_else(|| {
+                        ClientError::InvalidRequest(
+                            "Inspect the project material before comparison".into(),
+                        )
+                    })?;
+                let origin = state.project.iter()
+                    .find(|row| row.entry.current == reference)
+                    .and_then(|row| row.entry.origin.clone())
+                    .ok_or_else(|| ClientError::InvalidRequest("This project copy has no personal origin; save a new copy to My library".into()))?;
+                let status = rpc.library_status().await?;
+                let identity = status.identity.as_ref()
+                    .filter(|id| id.id == origin.library_id)
+                    .ok_or_else(|| ClientError::InvalidRequest("This project copy is independent of the selected library; save a new copy to reuse it here".into()))?
+                    .clone();
+                let mut query = LibraryFilamentQuery {
+                    expected: Some(identity.clone()),
+                    include_archived: true,
+                    ..Default::default()
+                };
+                let row = loop {
+                    let page = rpc.library_filaments(&query).await?;
+                    if let Some(row) = page
+                        .entries
+                        .into_iter()
+                        .find(|r| r.entry.current.id == origin.filament.id)
+                    {
+                        break row;
+                    }
+                    if let Some(next) = page.next_offset {
+                        query.offset = next;
+                    } else {
+                        return Err(ClientError::InvalidRequest("The source entry is absent; the project copy remains usable and can be saved as a new item".into()));
+                    }
+                };
+                let personal = rpc
+                    .library_filament(&identity.id, &row.entry.current)
+                    .await?;
+                let state = Arc::make_mut(&mut self.state.library);
+                state.status = Some(status);
+                state.comparison = Some(DefinitionComparison {
+                    project: capture,
+                    copy,
+                    origin,
+                    identity,
+                    personal,
+                    archived: row.entry.archived,
+                });
+                self.state.message =
+                    "Material comparison ready; choose an explicit replacement or keep both copies"
+                        .into();
             }
             LibraryAction::ReviewProfile(profile) => {
                 use spiling_contracts::manufacturing::*;
