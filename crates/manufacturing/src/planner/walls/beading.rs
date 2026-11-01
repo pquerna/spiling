@@ -202,10 +202,19 @@ struct InnerBevel {
     width_mm: f64,
 }
 
+/// Two finite objectives over one immutable source graph. Neither is material
+/// authority: only the complete commanded candidate can pass qualification.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Construction {
+    SourceFields,
+    BoundaryCaps,
+}
+
 /// Immutable source walks/events survive candidate qualification. Finite
 /// whole-arm counts and source-owned inner-turn constructions advance without
 /// reconstructing the skeleton or independent material target.
 pub(super) struct SourcePlan {
+    construction: Construction,
     cells: Vec<Option<f64>>,
     adjacency: Adjacency,
     contour_adjacency: Adjacency,
@@ -225,6 +234,7 @@ pub(super) fn construct(
     nominal_fill: &MultiPolygon<f64>,
     request: &WallRequest<'_>,
     permissions: &mut Vec<Junction>,
+    construction: Construction,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<SourcePlan, ManufacturingError> {
@@ -242,7 +252,7 @@ pub(super) fn construct(
         + (permissions.len() + graph.junctions.len()) * std::mem::size_of::<Junction>() * 3
         + graph.junctions.len() * 2 * std::mem::size_of::<usize>();
     let walk_request = staged_request(request, walk_bytes + permission_bytes(permissions))?;
-    let cells = contours::cells(graph, request, work, cancel)?;
+    let cells = contours::cells(graph, request, construction, work, cancel)?;
     let adjacency = Adjacency::new(graph, &cells, false, work, cancel)?;
     let contour_adjacency = Adjacency::new(graph, &cells, true, work, cancel)?;
     let contour_components = contour_components(graph, &contour_adjacency, work, cancel)?;
@@ -339,6 +349,11 @@ pub(super) fn construct(
         + graph.junctions.len()
             * (std::mem::size_of::<Option<contours::VertexField>>()
                 + 4 * std::mem::size_of::<f64>()
+                + if construction == Construction::BoundaryCaps {
+                    std::mem::size_of::<Option<f64>>()
+                } else {
+                    0
+                }
                 + std::mem::size_of::<Option<usize>>())
         + graph.edges.len()
             * (3 * std::mem::size_of::<CornerPlan>() + std::mem::size_of::<Option<f64>>())
@@ -421,6 +436,7 @@ pub(super) fn construct(
     }
     drop(junction_permissions);
     Ok(SourcePlan {
+        construction,
         cells,
         adjacency,
         contour_adjacency,
@@ -501,6 +517,7 @@ pub(super) fn emit(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let SourcePlan {
+        construction,
         cells,
         adjacency,
         contour_adjacency,
@@ -619,6 +636,9 @@ pub(super) fn emit(
             break;
         }
     }
+    if *construction == Construction::BoundaryCaps {
+        needs_outer = false;
+    }
     let outer_widths = if needs_outer {
         Some(contours::transport(
             graph,
@@ -645,6 +665,7 @@ pub(super) fn emit(
         nominal_fill,
         *complete_joints,
         *bevel_corners,
+        *construction,
         request,
         edges,
         permissions,
@@ -1023,6 +1044,7 @@ fn emit_corners(
     nominal_fill: &MultiPolygon<f64>,
     complete_joints: bool,
     bevel_corners: bool,
+    construction: Construction,
     request: &WallRequest<'_>,
     output: &mut Vec<BoundaryEdge>,
     permissions: &mut Vec<Junction>,
@@ -1032,6 +1054,29 @@ fn emit_corners(
     let mut corners = Vec::new();
     let mut contour_events = Vec::new();
     let preferred = source_width_mm(request)?;
+    // A short literal corner may end before its preferred outer-lane birth.
+    // Keep its physical cap width at the retained opposite source node so the
+    // neighboring birth completes the same stroke across that exact incidence.
+    // The cap is proposed before any missing-area witness exists.
+    let mut cap_widths = if construction == Construction::BoundaryCaps {
+        vec![None::<f64>; graph.junctions.len()]
+    } else {
+        Vec::new()
+    };
+    if construction == Construction::BoundaryCaps {
+        for curve in &graph.edges {
+            check_cancel(cancel)?;
+            boolean::charge(work, 64)?;
+            if let Some((_, end, _)) = contours::source_corner(curve, graph)
+                && let Some((_, width)) =
+                    contours::corner_seed(curve, graph, vertex_widths, request, work, cancel)?
+            {
+                let vertex = curve.vertex_ids[1 - end];
+                cap_widths[vertex] =
+                    Some(cap_widths[vertex].map_or(width, |prior| prior.min(width)));
+            }
+        }
+    }
     // Resolve all endpoint-bracketed source births before any corner bead.
     for (edge, curve) in graph.edges.iter().enumerate() {
         check_cancel(cancel)?;
@@ -1349,6 +1394,115 @@ fn emit_corners(
                     Some(ids[0]),
                     event.ordinal,
                     [bevel.width_mm; 2],
+                    &command_request,
+                )?;
+            }
+        }
+        // Complete a boundary-lane birth only through its original source cell.
+        // No ordinary boundary lane is replaced by a whole-arm narrow spine.
+        // Sampling, fitting, source/void/coverage and local dose still qualify
+        // the complete actual commanded union, including every extra cap.
+        if construction == Construction::BoundaryCaps {
+            let minimum = admitted_width_range(request)?[0];
+            for event in events.iter().filter(|event| event.ordinal == 0) {
+                for end in 0..2 {
+                    check_cancel(cancel)?;
+                    boolean::charge(work, 32)?;
+                    let radii = curve.supports.map(|site| site.radius(curve.endpoints[end]));
+                    if radii.into_iter().any(|r| !r.is_finite() || r < 0.0) {
+                        return Err(unsupported("source cap radius is unconditioned"));
+                    }
+                    let radius = radii[0].min(radii[1]);
+                    let width = (2.0 * radius
+                        - 2.0 * program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM
+                        - 1.0 / SITE_SCALE)
+                        .min(
+                            cap_widths[curve.vertex_ids[end]].unwrap_or(source_width_mm(request)?),
+                        );
+                    if width < minimum || radius >= corner.outer.at(end as f64) * 0.5 {
+                        continue;
+                    }
+                    let (begin, finish) = if event.parameter < end as f64 {
+                        (event.parameter, end as f64)
+                    } else {
+                        (end as f64, event.parameter)
+                    };
+                    // Sampling owns a different vector from the live output.
+                    // Include that output while cap scratch grows; push_edge
+                    // later accounts for its own old/replacement capacities.
+                    let cap_sampling_request = staged_request(
+                        &command_request,
+                        output.capacity() * std::mem::size_of::<BoundaryEdge>(),
+                    )?;
+                    let mut cap_samples = Vec::new();
+                    reserve_stage(&mut cap_samples, 1, &cap_sampling_request, 0)?;
+                    cap_samples.push((begin, curve.at(begin)));
+                    refine(
+                        curve,
+                        begin,
+                        finish,
+                        0,
+                        &cap_sampling_request,
+                        &mut cap_samples,
+                        work,
+                        cancel,
+                    )?;
+                    let cap_request = staged_request(
+                        &command_request,
+                        cap_samples.capacity() * std::mem::size_of::<(f64, [f64; 2])>(),
+                    )?;
+                    for pair in cap_samples.windows(2) {
+                        check_cancel(cancel)?;
+                        push_edge(
+                            output,
+                            [pair[0].1, pair[1].1],
+                            width,
+                            ids,
+                            None,
+                            0,
+                            [width; 2],
+                            &cap_request,
+                        )?;
+                    }
+                }
+            }
+        }
+        if construction == Construction::BoundaryCaps
+            && let Some((_, terminal, _)) = contours::source_corner(curve, graph)
+            && let Some((_, width)) =
+                contours::corner_seed(curve, graph, vertex_widths, request, work, cancel)?
+        {
+            let radius =
+                width * 0.5 + FIT_ERROR_MM + program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM;
+            let begin = events
+                .iter()
+                .find(|event| event.ordinal == 0)
+                .map_or((1 - terminal) as f64, |event| event.parameter);
+            if curve.supports[0].radius(curve.at(begin)) > radius {
+                let mut near = terminal as f64;
+                let mut far = begin;
+                for _ in 0..48 {
+                    check_cancel(cancel)?;
+                    boolean::charge(work, 16)?;
+                    let mid = (near + far) * 0.5;
+                    let evaluated = curve.supports[0].radius(curve.at(mid));
+                    if !evaluated.is_finite() {
+                        return Err(unsupported("source corner cap is unconditioned"));
+                    }
+                    if evaluated < radius {
+                        near = mid;
+                    } else {
+                        far = mid;
+                    }
+                }
+                push_edge(
+                    output,
+                    [curve.at(begin), curve.at(far)],
+                    width,
+                    ids,
+                    None,
+                    0,
+                    [width; 2],
                     &command_request,
                 )?;
             }
@@ -3487,6 +3641,7 @@ mod corner_width_tests {
                 &fill,
                 &request,
                 &mut permissions,
+                Construction::SourceFields,
                 &mut work,
                 &cancel,
             )
@@ -3593,7 +3748,14 @@ mod corner_width_tests {
             assert_eq!(allocation.count, 4);
             assert_eq!(allocation.width, resolved);
             assert!(allocation.residual);
-            let cells = contours::cells(&graph, &request, &mut work, &cancel).unwrap();
+            let cells = contours::cells(
+                &graph,
+                &request,
+                Construction::SourceFields,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
             let adjacency = Adjacency::new(&graph, &cells, false, &mut work, &cancel).unwrap();
             let contour_adjacency =
                 Adjacency::new(&graph, &cells, true, &mut work, &cancel).unwrap();

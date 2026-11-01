@@ -2280,3 +2280,110 @@ fn optical_study_source_deleted_reopen_and_revision_owned_acceptance() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+#[ignore = "actual overlapping-source saved-job regression; requires SPILING_TEST_ENGINE"]
+fn shallow_overlapping_sources_compile_save_and_reopen_with_fresh_replay() {
+    let root = root();
+    let project = root.join("project");
+    let source = root.join("box.step");
+    std::fs::copy(fixture("box-mm.step"), &source).unwrap();
+    let intent_file = root.join("intent.json");
+    let mut intent: Value =
+        serde_json::from_slice(&std::fs::read(manufacturing_intent_fixture()).unwrap()).unwrap();
+    intent["recipe"]["layer_height_mm"] = 0.4.into();
+    intent["recipe"]["bead_width_mm"] = 0.6.into();
+    intent["recipe"]["perimeter_count"] = 1.into();
+    intent["recipe"]["process"]["retraction"] = serde_json::json!({"kind":"disabled"});
+    intent["printer"]["deposition_limits"] = serde_json::json!({
+        "min_bead_width_mm":0.01,"max_bead_width_mm":2.0,
+        "min_bead_height_mm":0.000001,"max_bead_height_mm":0.6
+    });
+    std::fs::write(&intent_file, serde_json::to_vec(&intent).unwrap()).unwrap();
+    let prepared = report(
+        cli("create", &project)
+            .arg("--import")
+            .arg(&source)
+            .arg("--intent")
+            .arg(&intent_file)
+            .args([
+                "--pose",
+                "1",
+                r#"{"translation_mm":[20,30,0],"rotation_xyzw":[0,0,0,1]}"#,
+            ])
+            .output()
+            .unwrap(),
+    );
+    let definition = prepared["occurrences"][0]["definition_id"]
+        .as_str()
+        .unwrap();
+    let first_export = root.join("first-export");
+    let first_replay = root.join("first.splr");
+    let compiled = report(
+        cli("edit", &project)
+            .args([
+                "--add",
+                definition,
+                r#"{"translation_mm":[30.123456789,30.234567891,0],"rotation_xyzw":[0,0,0,1]}"#,
+                "--preflight",
+                "--compile",
+                "--verify",
+                "--save",
+                "--manufacturing-out",
+            ])
+            .arg(&first_export)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(compiled["occurrences"].as_array().unwrap().len(), 2);
+    assert_eq!(compiled["manufacturing"]["verification"]["verified"], true);
+    assert_eq!(compiled["project"]["dirty"], false);
+    assert_eq!(compiled["project"]["save_uncertain"], false);
+    let first_motion = report(
+        cli("inspect", &project)
+            .args(["--verify", "--replay-out"])
+            .arg(&first_replay)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        first_motion["manufacturing"]["verification"]["verified"],
+        true
+    );
+    std::fs::remove_file(&source).unwrap();
+    std::fs::remove_file(&intent_file).unwrap();
+    let reopened_export = root.join("reopened-export");
+    let reopened_replay = root.join("reopened.splr");
+    let reopened = report(
+        cli("inspect", &project)
+            .args(["--verify", "--manufacturing-out"])
+            .arg(&reopened_export)
+            .arg("--replay-out")
+            .arg(&reopened_replay)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(reopened["project"]["read_only"], true);
+    assert_eq!(reopened["manufacturing"]["verification"]["verified"], true);
+    assert_eq!(
+        reopened["manufacturing"]["artifact"],
+        compiled["manufacturing"]["artifact"]
+    );
+    for name in [
+        "plan.json",
+        "program.gcode",
+        "verification.json",
+        "provenance.json",
+    ] {
+        assert_eq!(
+            std::fs::read(first_export.join(name)).unwrap(),
+            std::fs::read(reopened_export.join(name)).unwrap(),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(first_replay).unwrap(),
+        std::fs::read(reopened_replay).unwrap()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -340,84 +340,114 @@ fn plan_section_walls_against<'a>(
 
     let mut edge_output = Vec::new();
     let mut junctions = Vec::new();
-    let mut source_plan =
-        beading::construct(&skeleton, &fill, &request, &mut junctions, work, cancel)?;
-
+    let mut construction = beading::Construction::SourceFields;
     let (paths, correspondence, qualified_fill) = loop {
-        check_cancel(cancel)?;
-        boolean::charge(work, 1)?;
-
-        let candidate: Result<_, ManufacturingError> = (|| {
-            beading::emit(
-                &source_plan,
+        let attempt = (|| {
+            let mut source_plan = beading::construct(
                 &skeleton,
                 &fill,
                 &request,
-                &mut edge_output,
                 &mut junctions,
+                construction,
                 work,
                 cancel,
             )?;
+            loop {
+                check_cancel(cancel)?;
+                boolean::charge(work, 1)?;
 
-            // The retained immutable source plan, graph and candidate buffers
-            // coexist through assembly and independent qualification.
-            let mut candidate_request = request;
-            candidate_request.owned_bytes = candidate_request
-                .owned_bytes
-                .checked_add(beading::retained_bytes(&source_plan))
-                .and_then(|b| {
-                    b.checked_add(edge_output.capacity() * std::mem::size_of::<BoundaryEdge>())
-                })
-                .and_then(|b| b.checked_add(permission_bytes(&junctions)))
-                .ok_or_else(|| resource("wall candidate staging byte overflow"))?;
-            let assembly_bytes = edge_output.len()
-                * (3 * std::mem::size_of::<DepositionPath>() + 6 * std::mem::size_of::<[f64; 3]>()
-                + 3 * std::mem::size_of::<BoundaryCorrespondence>()
-                // Source variable-width growth can retain N old + 2N new
-                // values; constant-to-fitted output needs at most two N buffers.
-                + 3 * std::mem::size_of::<f64>() + 256);
-            let assembly_request = staged_request(&candidate_request, assembly_bytes)?;
-            let (mut paths, correspondence) = assemble(
-                &edge_output,
-                &junctions,
-                &assembly_request,
-                strict_material,
-                work,
-                cancel,
-            )?;
-            if strict_material {
-                fit_material_boundaries(&mut paths, &candidate_request, work, cancel)?;
+                let candidate: Result<_, ManufacturingError> = (|| {
+                    beading::emit(
+                        &source_plan,
+                        &skeleton,
+                        &fill,
+                        &request,
+                        &mut edge_output,
+                        &mut junctions,
+                        work,
+                        cancel,
+                    )?;
+
+                    // The retained immutable source plan, graph and candidate buffers
+                    // coexist through assembly and independent qualification.
+                    let mut candidate_request = request;
+                    candidate_request.owned_bytes = candidate_request
+                        .owned_bytes
+                        .checked_add(beading::retained_bytes(&source_plan))
+                        .and_then(|b| {
+                            b.checked_add(
+                                edge_output.capacity() * std::mem::size_of::<BoundaryEdge>(),
+                            )
+                        })
+                        .and_then(|b| b.checked_add(permission_bytes(&junctions)))
+                        .ok_or_else(|| resource("wall candidate staging byte overflow"))?;
+                    // Include variable-width growth (N old plus 2N new values)
+                    // and constant-to-fitted staging in the same reservation.
+                    let assembly_bytes = edge_output.len()
+                        * (3 * std::mem::size_of::<DepositionPath>()
+                            + 6 * std::mem::size_of::<[f64; 3]>()
+                            + 3 * std::mem::size_of::<BoundaryCorrespondence>()
+                            + 3 * std::mem::size_of::<f64>()
+                            + 256);
+                    let assembly_request = staged_request(&candidate_request, assembly_bytes)?;
+                    let (mut paths, correspondence) = assemble(
+                        &edge_output,
+                        &junctions,
+                        &assembly_request,
+                        strict_material,
+                        work,
+                        cancel,
+                    )?;
+                    if strict_material {
+                        fit_material_boundaries(&mut paths, &candidate_request, work, cancel)?;
+                    }
+                    candidate_request.owned_bytes = candidate_request
+                        .owned_bytes
+                        .checked_add(path_bytes(&paths))
+                        .and_then(|b| {
+                            b.checked_add(
+                                correspondence.capacity()
+                                    * std::mem::size_of::<BoundaryCorrespondence>(),
+                            )
+                        })
+                        .ok_or_else(|| resource("wall command candidate byte overflow"))?;
+
+                    let qualified_fill = qualification::qualify(
+                        &candidate_request,
+                        &paths,
+                        &junctions,
+                        &fill,
+                        work,
+                        cancel,
+                    )?;
+                    Ok((paths, correspondence, qualified_fill))
+                })();
+
+                match candidate {
+                    Ok(qualified) => break Ok(qualified),
+                    Err(reason)
+                        if reason.code == ManufacturingErrorCode::UnsupportedGeometry
+                            && beading::advance(&mut source_plan) => {}
+                    Err(reason) => return Err(reason),
+                }
             }
-            candidate_request.owned_bytes = candidate_request
-                .owned_bytes
-                .checked_add(path_bytes(&paths))
-                .and_then(|b| {
-                    b.checked_add(
-                        correspondence.capacity() * std::mem::size_of::<BoundaryCorrespondence>(),
-                    )
-                })
-                .ok_or_else(|| resource("wall command candidate byte overflow"))?;
-
-            let qualified_fill = qualification::qualify(
-                &candidate_request,
-                &paths,
-                &junctions,
-                &fill,
-                work,
-                cancel,
-            )?;
-            Ok((paths, correspondence, qualified_fill))
         })();
-
-        match candidate {
+        match attempt {
             Ok(qualified) => break qualified,
             Err(reason)
                 if reason.code == ManufacturingErrorCode::UnsupportedGeometry
-                    && beading::advance(&mut source_plan) => {}
+                    && construction == beading::Construction::SourceFields =>
+            {
+                // The immutable native target and skeleton survive, but no old
+                // plan, permission payload or output capacity coexists with the
+                // next constructor without being included in its byte inventory.
+                edge_output = Vec::new();
+                junctions = Vec::new();
+                construction = beading::Construction::BoundaryCaps;
+            }
             Err(reason) => return Err(reason),
         }
     };
-    drop(source_plan);
     drop(edge_output);
     drop(skeleton);
     drop(junctions);

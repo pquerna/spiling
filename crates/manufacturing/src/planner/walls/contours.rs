@@ -166,6 +166,7 @@ pub(super) fn corner_seed(
 pub(super) fn cells(
     graph: &skeleton::Skeleton,
     request: &WallRequest<'_>,
+    construction: beading::Construction,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<Option<f64>>, ManufacturingError> {
@@ -174,19 +175,22 @@ pub(super) fn cells(
     let target = (2 * request.recipe.perimeter_count as usize).max(1) as f64;
     let gradient_squared = program_coordinates::MAX_WALL_WIDTH_GRADIENT.powi(2);
     let preferred = source_width_mm(request)?;
+    let all_contours = construction == beading::Construction::BoundaryCaps;
     for curve in &graph.edges {
         check_cancel(cancel)?;
         boolean::charge(work, 1)?;
         let supports = curve.supports;
         if supports.iter().any(|site| site.point.is_some()) {
-            if !point_field_cannot_separate(
-                curve,
-                [minimum, maximum],
-                target,
-                preferred,
-                work,
-                cancel,
-            )? && !point_field_exceeds_gradient(curve, target, request, work, cancel)?
+            if !all_contours
+                && !point_field_cannot_separate(
+                    curve,
+                    [minimum, maximum],
+                    target,
+                    preferred,
+                    work,
+                    cancel,
+                )?
+                && !point_field_exceeds_gradient(curve, target, request, work, cancel)?
             {
                 cells.push(None);
                 continue;
@@ -229,7 +233,7 @@ pub(super) fn cells(
             // cannot continue; original material/process proofs still decide.
             let contour_rate = (4.0 - gradient_squared) * (product - magnitude)
                 > gradient_squared * count * count * (product + magnitude);
-            if !adjacent_supports(supports) && opposed && !contour_rate {
+            if !all_contours && !adjacent_supports(supports) && opposed && !contour_rate {
                 cells.push(None);
                 continue;
             }

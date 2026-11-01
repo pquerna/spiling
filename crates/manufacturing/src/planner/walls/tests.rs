@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 use super::*;
-use geo::{Distance, Euclidean, Line, polygon};
+use geo::{Coord, Distance, Euclidean, Line, polygon};
 
 fn plan(section: &MultiPolygon<f64>) -> WallPlan {
     let mut recipe = crate::planner::tests::recipe(0.25);
@@ -514,4 +514,50 @@ fn junction_neighborhood_count_transition_preserves_incoming_field_and_actual_la
         );
     }
     assert_connected_inner_material(&plan);
+}
+
+#[test]
+fn shallow_source_steps_keep_boundary_lanes_and_physically_admitted_corner_caps() {
+    // The non-grid two-box union has short convex/reentrant steps. Collapsing a
+    // curved source arm to its narrowest constant bead loses the requested band;
+    // deleting its short exterior proposal does not repair that material loss.
+    let boundary = [
+        [0.0, 0.0],
+        [20.0, 0.0],
+        [20.0, 0.234567891],
+        [30.123456789, 0.234567891],
+        [30.123456789, 10.234567891],
+        [10.123456789, 10.234567891],
+        [10.123456789, 10.0],
+        [0.0, 10.0],
+    ];
+    for (reverse, offset) in [(false, [0.0, 0.0]), (true, [120.125, -30.375])] {
+        let mut points: Vec<_> = boundary
+            .into_iter()
+            .map(|p| Coord {
+                x: p[0] + offset[0],
+                y: p[1] + offset[1],
+            })
+            .collect();
+        if reverse {
+            points.reverse();
+        }
+        points.push(points[0]);
+        let section = MultiPolygon(vec![Polygon::new(geo::LineString(points), vec![])]);
+        let required = region::RequiredMaterial::from_section(&section);
+        let mut recipe = crate::planner::tests::recipe(1.0);
+        recipe.layer_height_mm = 0.4;
+        let plan = crate::planner::tests::wall_plan(
+            &section,
+            &required,
+            &recipe,
+            region::point_count(&section),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let [minimum, maximum] = assert_command_resolution(&plan);
+        assert!(minimum >= recipe.layer_height_mm);
+        assert!(maximum <= recipe.bead_width_mm);
+        assert_connected_inner_material(&plan);
+    }
 }
