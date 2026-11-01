@@ -542,7 +542,50 @@ fn checked_scene_picking_shared_occurrences_sections_and_large_origin() {
     })
     .unwrap();
     let section = wait(&host, |s| s.section.is_some());
-    assert!(section.section.unwrap().summary.total_loop_count >= 2);
+    let section = section.section.unwrap();
+    assert!(section.summary.total_loop_count >= 2);
+    let all = crate::analysis::ContourPreview::load(&section, None).unwrap();
+    let scoped =
+        crate::analysis::ContourPreview::load(&section, Some(copied.occurrences[0].occurrence_id))
+            .unwrap();
+    assert!(all.matches(&section, None));
+    assert!(scoped.matches(&section, Some(copied.occurrences[0].occurrence_id)));
+    let mut cut = crate::analysis::SectionView {
+        enabled: true,
+        offset_mm: center.z,
+        ..Default::default()
+    };
+    let plane = cut.plane(None);
+    let ray_origin = center + glam::DVec3::Z * 100.0;
+    assert!(
+        crate::viewport::pick_clipped(&copied, ray_origin, -glam::DVec3::Z, &cut, plane, None)
+            .is_none(),
+        "synthetic cap must not pick the backing native face"
+    );
+    cut.flipped = true;
+    assert!(
+        crate::viewport::pick_clipped(&copied, ray_origin, -glam::DVec3::Z, &cut, plane, None)
+            .is_some(),
+        "retained outer face remains native pickable"
+    );
+    cut.selected_only = true;
+    assert!(
+        crate::viewport::pick_clipped(
+            &copied,
+            ray_origin,
+            -glam::DVec3::Z,
+            &cut,
+            plane,
+            Some(copied.occurrences[1].occurrence_id)
+        )
+        .is_none(),
+        "scope excludes the original occurrence"
+    );
+    cut.section_only = true;
+    assert!(
+        crate::viewport::pick_clipped(&copied, ray_origin, -glam::DVec3::Z, &cut, plane, None)
+            .is_none()
+    );
     let original = copied.occurrences[0].clone();
     host.geometry(GeometryCommand::RemoveInstance {
         session_id: copied.summary.session_id.clone(),
@@ -733,6 +776,43 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
     let r = s.manufacturing.review.as_ref().unwrap();
     assert!(r.capture.report.verified);
     assert!(r.motion.is_some());
+    // Exercise the production controls against a real checked job. Widget focus
+    // must be read before input_mut, or this draw deadlocks the native UI.
+    let ctx = egui::Context::default();
+    let mut browser = crate::layers::Browser::default();
+    let mut selection = crate::replay::View::default();
+    let mut draw = |events| {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(100.0, 500.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                browser.rail(ui, &mut selection, r);
+            },
+        );
+        output.textures_delta.clear();
+    };
+    draw(vec![]);
+    draw(vec![
+        egui::Event::PointerMoved(egui::pos2(50.0, 200.0)),
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -1.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+    assert_eq!(selection.layer, Some(0));
+    assert_eq!(
+        selection.layer_end,
+        Some((r.bundle.plan.layers.len() - 2) as u16)
+    );
     let replay = r.display.as_ref().unwrap();
     assert!(!replay.batches.is_empty());
     assert!(

@@ -33,8 +33,11 @@ pub struct Replay {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct View {
     pub layer: Option<u16>,
+    /// Inclusive upper layer; None preserves single-layer selection.
+    pub layer_end: Option<u16>,
     pub events: u32,
     pub travels: bool,
+    pub pressure: bool,
     pub source: bool,
     pub visible: bool,
     pub material: bool,
@@ -46,8 +49,10 @@ impl Default for View {
     fn default() -> Self {
         Self {
             layer: None,
+            layer_end: None,
             events: u32::MAX,
             travels: true,
+            pressure: false,
             source: false,
             visible: true,
             material: false,
@@ -102,17 +107,39 @@ fn event_range(
 ) -> Range<u32> {
     if !view.visible
         || (!view.travels && matches!(kind, 0 | 6))
+        || (!view.pressure && matches!(kind, 11 | 12))
         || view.role.is_some_and(|role| role != kind)
         || view.tool.is_some_and(|selected| selected != tool)
     {
         return 0..0;
     }
-    let start = view
-        .layer
-        .map_or(0, |layer| events.partition_point(|(_, l)| *l < layer));
-    let end = events.partition_point(|(event, layer)| {
-        *event < view.events && view.layer.is_none_or(|l| *layer <= l)
-    });
+    // Lifecycle events can share a role/tool batch with body commands. Exclude
+    // leading/trailing unattributed sentinels before searching ordered layers,
+    // while retaining batch offsets and global command ordinals.
+    let (offset, events) = if view.layer.is_some() {
+        let first = events
+            .iter()
+            .position(|(_, l)| *l != u16::MAX)
+            .unwrap_or(events.len());
+        let last = events
+            .iter()
+            .rposition(|(_, l)| *l != u16::MAX)
+            .map_or(first, |i| i + 1);
+        (first, &events[first..last])
+    } else {
+        (0, events)
+    };
+    let start = offset
+        + view
+            .layer
+            .map_or(0, |layer| events.partition_point(|(_, l)| *l < layer));
+    let end = offset
+        + events.partition_point(|(event, layer)| {
+            *event < view.events
+                && view
+                    .layer
+                    .is_none_or(|l| *layer <= view.layer_end.unwrap_or(l).max(l))
+        });
     (start * vertices) as u32..(end.max(start) * vertices) as u32
 }
 impl Batch {
@@ -308,9 +335,15 @@ mod tests {
             let origin = DVec3::splat(0.125);
             let replay = Replay::project(&bytes, &descriptor, 0, origin).unwrap();
             assert!(Replay::project(&bytes, &descriptor, 128 * 1024 * 1024, origin).is_err());
-            let all = View::default();
+            let all = View {
+                pressure: true,
+                ..Default::default()
+            };
             for batch in &replay.batches {
                 assert_ne!(batch.kind, 14);
+                if matches!(batch.kind, 11 | 12) {
+                    assert!(batch.range(View::default()).is_empty());
+                }
                 assert_eq!(batch.range(all).len(), batch.vertices.len());
                 for (j, (event, layer)) in batch.events.iter().enumerate() {
                     let n = if batch.points { 1 } else { 2 };
@@ -522,5 +555,82 @@ mod bead_tests {
             Replay::project(&bytes, &descriptor, 0, DVec3::new(10_000.0, 0.0, 0.0)).unwrap();
         assert!(replay.beads.as_ref().unwrap_err().contains("numerical"));
         assert!(!replay.batches.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod layer_range_tests {
+    use super::*;
+    #[test]
+    fn inclusive_layer_ranges_compose_with_exclusive_progress_and_role_tool_filters() {
+        let events = [(2, 0), (3, 0), (5, 1), (7, 1), (9, 2), (12, 3)];
+        let view = View {
+            layer: Some(1),
+            layer_end: Some(2),
+            events: 9,
+            ..Default::default()
+        };
+        assert_eq!(event_range(&events, 1, 0, view, 2), 4..8);
+        let lifecycle = [
+            (0, u16::MAX),
+            (2, 0),
+            (5, 1),
+            (7, 1),
+            (9, 2),
+            (20, u16::MAX),
+        ];
+        assert_eq!(event_range(&lifecycle, 1, 0, view, 2), 4..8);
+        assert_eq!(
+            event_range(&lifecycle, 1, 0, View { events: 10, ..view }, 2),
+            4..10
+        );
+        assert_eq!(event_range(&[(0, u16::MAX)], 1, 0, view, 2), 2..2);
+        assert_eq!(
+            event_range(&events, 1, 0, View { events: 10, ..view }, 1),
+            2..5
+        );
+        assert_eq!(
+            event_range(&events, 1, 0, View { events: 3, ..view }, 2),
+            4..4
+        );
+        assert_eq!(
+            event_range(
+                &events,
+                1,
+                0,
+                View {
+                    role: Some(2),
+                    ..view
+                },
+                2
+            ),
+            0..0
+        );
+        assert_eq!(
+            event_range(
+                &events,
+                1,
+                0,
+                View {
+                    tool: Some(1),
+                    ..view
+                },
+                2
+            ),
+            0..0
+        );
+        assert_eq!(
+            event_range(
+                &events,
+                1,
+                0,
+                View {
+                    visible: false,
+                    ..view
+                },
+                2
+            ),
+            0..0
+        );
     }
 }

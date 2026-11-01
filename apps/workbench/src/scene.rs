@@ -341,6 +341,9 @@ pub struct Section {
     pub loops: Vec<SectionLoopMetadata>,
     pub chunks: Vec<SectionChunk>,
 }
+/// Accounts for raw chunks, active/staged lines, GPU copies and bounded 2D contour inspection.
+pub(crate) const SECTION_DISPLAY_MULTIPLIER: usize = 10;
+
 /// Ephemeral native sections are released after checked transfer, including failure/cancel.
 pub async fn load_section(
     rpc: EngineRpc,
@@ -382,7 +385,7 @@ pub async fn load_section(
                     return Err(invalid("Stale or inconsistent section manifest"));
                 }
                 if reserved
-                    .checked_add(summary.total_bytes as usize * 6)
+                    .checked_add(summary.total_bytes as usize * SECTION_DISPLAY_MULTIPLIER)
                     .is_none_or(|n| n > MAX_DISPLAY_BUFFER_BYTES as usize)
                 {
                     return Err(ClientError::InvalidRequest(

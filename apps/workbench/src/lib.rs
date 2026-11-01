@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+pub mod analysis;
 pub mod app;
 pub mod assets;
 pub mod commands;
 pub mod diagnostics;
 pub mod host;
 pub mod launch;
+pub mod layers;
 pub mod manufacture;
 pub mod replay;
 pub mod scene;
@@ -26,6 +28,7 @@ pub fn native_options() -> eframe::NativeOptions {
             .with_min_inner_size([640.0, 480.0]),
         renderer: eframe::Renderer::Wgpu,
         depth_buffer: 24,
+        stencil_buffer: 8,
         ..Default::default()
     }
 }

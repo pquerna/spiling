@@ -769,13 +769,12 @@ impl Actor {
             summary.clone(),
             self.state.display.clone(),
             self.display_cancel.clone(),
-            self.state
-                .section
-                .as_ref()
-                .map_or(0, |s| s.summary.total_bytes as usize * 6)
-                + self.state.manufacturing.display_bytes()
+            self.state.section.as_ref().map_or(0, |s| {
+                s.summary.total_bytes as usize * crate::scene::SECTION_DISPLAY_MULTIPLIER
+            }) + self.state.manufacturing.display_bytes()
                 + if self.section_task.is_some() {
-                    spiling_contracts::geometry::MAX_SECTION_BYTES as usize * 6
+                    spiling_contracts::geometry::MAX_SECTION_BYTES as usize
+                        * crate::scene::SECTION_DISPLAY_MULTIPLIER
                 } else {
                     0
                 },
@@ -1649,11 +1648,10 @@ impl Actor {
                         self.section_cancel.clone(),
                         self.state.display.as_ref().map_or(0, |s| s.raw_bytes * 2)
                             + self.state.manufacturing.display_bytes()
-                            + self
-                                .state
-                                .section
-                                .as_ref()
-                                .map_or(0, |s| s.summary.total_bytes as usize * 6)
+                            + self.state.section.as_ref().map_or(0, |s| {
+                                s.summary.total_bytes as usize
+                                    * crate::scene::SECTION_DISPLAY_MULTIPLIER
+                            })
                             + if self.review_task.is_some() {
                                 80 * 1024 * 1024
                             } else {

@@ -29,6 +29,7 @@ pub(super) struct ManufacturingUi {
     draft: Option<IntentDraft>,
     pub panel: usize,
     pub replay: crate::replay::View,
+    pub layers: crate::layers::Browser,
     pub review_nonce: Option<u64>,
     bead_statistics: Option<BeadStatistics>,
 }
@@ -349,6 +350,12 @@ impl Workbench {
                     ));
                     if ui.button("Inspect first adjusted layer").clicked() {
                         self.manufacturing.replay.layer = Some(index as u16);
+                        self.manufacturing.replay.layer_end = None;
+                        self.analysis.open = true;
+                        self.analysis.follow_layer = true;
+                        self.analysis.view.enabled = true;
+                        self.analysis.view.representation =
+                            crate::analysis::Representation::Compare;
                         self.manufacturing.replay.events = review
                             .display
                             .as_ref()
@@ -444,16 +451,23 @@ impl Workbench {
             self.manufacturing.review_nonce = Some(review.capture.nonce);
             self.manufacturing.replay.events = descriptor.info.event_count;
             self.manufacturing.replay.layer = None;
+            self.manufacturing.replay.layer_end = None;
             self.manufacturing.replay.role = None;
             self.manufacturing.replay.tool = None;
         }
         let compact = ui.available_height() < 500.0 || ui.available_width() < 600.0;
+        let section_representation = self.analysis.view.enabled;
         let view = &mut self.manufacturing.replay;
         ui.horizontal_wrapped(|ui| {
             ui.label("Actual emitted motion");
-            ui.checkbox(&mut view.source, "Show source");
+            if section_representation {
+                ui.weak("Representation controlled by Section Analysis");
+            } else {
+                ui.checkbox(&mut view.source, "Show source");
+                ui.checkbox(&mut view.visible, "Motion");
+            }
             ui.checkbox(&mut view.travels, "Travels");
-            ui.checkbox(&mut view.visible, "Motion");
+            ui.checkbox(&mut view.pressure, "Pressure events");
             if crate::replay::declared_tool_colors(&review.capture.provenance.workflow).is_some() {
                 ui.checkbox(&mut view.material, "Declared material tints");
             }
@@ -486,10 +500,12 @@ impl Workbench {
                 view.beads = false;
             }
             ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(&mut view.beads, false, "Centerlines");
-                ui.add_enabled_ui(display.beads.is_ok(), |ui| {
-                    ui.selectable_value(&mut view.beads, true, "Nominal beads");
-                });
+                if !section_representation {
+                    ui.selectable_value(&mut view.beads, false, "Centerlines");
+                    ui.add_enabled_ui(display.beads.is_ok(), |ui| {
+                        ui.selectable_value(&mut view.beads, true, "Nominal beads");
+                    });
+                }
                 egui::ComboBox::from_id_salt("replay-role")
                     .selected_text(
                         view.role
@@ -564,21 +580,7 @@ impl Workbench {
                 });
             }
         }
-        ui.horizontal_wrapped(|ui| {
-            let mut all = view.layer.is_none();
-            if ui.checkbox(&mut all, "All layers").changed() {
-                view.layer = if all { None } else { Some(0) };
-            }
-            if let Some(layer) = &mut view.layer {
-                ui.add(
-                    egui::Slider::new(
-                        layer,
-                        0..=descriptor.info.layer_count.saturating_sub(1) as u16,
-                    )
-                    .text("Layer index"),
-                );
-            }
-        });
+        self.manufacturing.layers.controls(ui, view, &review);
         if compact {
             ui.collapsing("Event and model details", |ui| {
                 ui.label(BEAD_MODEL);
@@ -594,12 +596,25 @@ fn event_controls(
     ui: &mut egui::Ui,
     view: &mut crate::replay::View,
     review: &crate::manufacture::Review,
-    descriptor: &ReplayDisplayDescriptor,
+    _descriptor: &ReplayDisplayDescriptor,
 ) {
-    ui.add(
-        egui::Slider::new(&mut view.events, 0..=descriptor.info.event_count).text("Actual events"),
-    );
-    if let Some(index) = view.events.checked_sub(1)
+    let window = crate::layers::event_window(review, *view);
+    let mut progress = view
+        .events
+        .saturating_sub(window.start)
+        .min(window.end - window.start);
+    if ui
+        .add(
+            egui::Slider::new(&mut progress, 0..=window.end - window.start)
+                .text("Commands in selection"),
+        )
+        .changed()
+    {
+        view.events = window.start + progress;
+    }
+    if view.events > window.start
+        && view.events <= window.end
+        && let Some(index) = view.events.checked_sub(1)
         && let Some(bytes) = &review.motion
     {
         let start = REPLAY_HEADER_BYTES + index as usize * REPLAY_RECORD_BYTES;

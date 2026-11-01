@@ -9,6 +9,7 @@ use crate::{
     ui::{self, Theme},
 };
 use egui::{Key, KeyboardShortcut, Modifiers, RichText};
+use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use spiling_contracts::geometry::*;
 
@@ -20,6 +21,8 @@ struct Preferences {
     accepted_osl3: bool,
     #[serde(default)]
     library_location: Option<NativePath>,
+    #[serde(default)]
+    analysis_pins: Vec<analysis::Pinned>,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -27,6 +30,7 @@ impl Default for Preferences {
             theme: Theme::Graphite,
             accepted_osl3: false,
             library_location: None,
+            analysis_pins: Vec::new(),
         }
     }
 }
@@ -55,7 +59,7 @@ pub struct Workbench {
     occurrence: Option<OccurrenceId>,
     pose: [f64; 6],
     pose_revision: Option<SceneRevision>,
-    section_z: f64,
+    analysis: analysis::AnalysisUi,
     queued_geometry: Option<GeometryCommand>,
     queued_host: Option<Command>,
     queued_picker: Option<Picker>,
@@ -75,10 +79,12 @@ impl Workbench {
         Self::with_open(cc, None)
     }
     pub fn with_open(cc: &eframe::CreationContext<'_>, open: Option<crate::launch::Open>) -> Self {
-        let prefs: Preferences = cc
+        let mut prefs: Preferences = cc
             .storage
             .and_then(|s| eframe::get_value(s, PREFS))
             .unwrap_or_default();
+        prefs.analysis_pins.retain(|p| p.valid());
+        prefs.analysis_pins.truncate(32);
         prefs.theme.apply(&cc.egui_ctx);
         let gpu = cc
             .wgpu_render_state
@@ -116,7 +122,7 @@ impl Workbench {
             occurrence: None,
             pose: [0.0; 6],
             pose_revision: None,
-            section_z: 1.0,
+            analysis: analysis::AnalysisUi::default(),
             queued_geometry: None,
             queued_host: None,
             queued_picker: None,
@@ -146,7 +152,9 @@ impl Workbench {
         }
     }
     fn disabled(&self, action: Action) -> Option<&'static str> {
-        if self.awaiting_serial.is_some() && !matches!(action, Action::Gallery | Action::License) {
+        if self.awaiting_serial.is_some()
+            && !matches!(action, Action::Gallery | Action::License | Action::Analysis)
+        {
             Some("Waiting for native admission")
         } else {
             action.disabled(&self.state)
@@ -163,6 +171,10 @@ impl Workbench {
             return;
         }
         match action {
+            Action::Analysis => {
+                self.analysis.open = true;
+                return;
+            }
             Action::Library => {
                 self.library.open = true;
                 return;
@@ -408,6 +420,7 @@ impl Workbench {
         });
     }
 }
+mod analysis;
 mod library;
 mod manufacturing;
 mod material;
@@ -614,6 +627,7 @@ impl eframe::App for Workbench {
                         self.button(ui, action);
                     }
                 });
+                self.button(ui, Action::Analysis);
                 ui.menu_button("Edit", |ui| {
                     for action in [Action::Undo, Action::Redo] {
                         self.button(ui, action);
@@ -754,7 +768,7 @@ impl eframe::App for Workbench {
                 } else {
                     None
                 };
-                let view = if review.is_some() {
+                let mut view = if review.is_some() {
                     self.manufacturing.replay
                 } else {
                     crate::replay::View {
@@ -763,22 +777,83 @@ impl eframe::App for Workbench {
                         ..Default::default()
                     }
                 };
-                if let Some(reference) = self.viewport.show(
-                    ui,
-                    crate::viewport::Input {
-                        scene: if review.is_some() && !current {
-                            None
-                        } else {
-                            self.state.display.clone()
+                let plane = self.analysis_plane();
+                let mut analysis = self.analysis.view.clone();
+                analysis.enabled &= analysis.valid()
+                    && (!analysis.local_frame || self.analysis_pose().is_some())
+                    && (!analysis.selected_only || self.occurrence.is_some());
+                if analysis.enabled {
+                    match self.analysis.view.representation {
+                        crate::analysis::Representation::Source => {
+                            view.source = true;
+                            view.visible = false;
+                        }
+                        crate::analysis::Representation::Actual => {
+                            view.source = false;
+                            view.visible = review.is_some();
+                        }
+                        crate::analysis::Representation::Compare => {
+                            view.source = true;
+                            view.visible = review.is_some();
+                        }
+                    }
+                }
+                let mut picked = None;
+                ui.horizontal_top(|ui| {
+                    let rail = if review.is_some() { 84.0 } else { 0.0 };
+                    let size = egui::vec2(
+                        (ui.available_width() - rail).max(1.0),
+                        ui.available_height(),
+                    );
+                    ui.allocate_ui_with_layout(
+                        size,
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            picked = self.viewport.show(
+                                ui,
+                                crate::viewport::Input {
+                                    scene: if review.is_some() && !current {
+                                        None
+                                    } else {
+                                        self.state.display.clone()
+                                    },
+                                    section: self.state.section.clone().filter(|s| {
+                                        self.analysis.view.enabled
+                                            && (DVec3::from_array(s.summary.plane.normal)
+                                                - DVec3::from_array(plane.normal))
+                                            .length()
+                                                < 1e-10
+                                            && DVec3::from_array(plane.normal)
+                                                .dot(
+                                                    DVec3::from_array(s.summary.plane.origin_mm)
+                                                        - DVec3::from_array(plane.origin_mm),
+                                                )
+                                                .abs()
+                                                < 1e-9
+                                    }),
+                                    review: review.clone(),
+                                    view,
+                                    selected: self.selected.as_ref(),
+                                    interactive: current,
+                                    analysis: &mut analysis,
+                                    plane,
+                                    scope: self.occurrence,
+                                },
+                                frame,
+                            );
                         },
-                        section: self.state.section.clone(),
-                        review,
-                        view,
-                        selected: self.selected.as_ref(),
-                        interactive: current,
-                    },
-                    frame,
-                ) {
+                    );
+                    if let Some(review) = &review {
+                        self.manufacturing
+                            .layers
+                            .rail(ui, &mut self.manufacturing.replay, review);
+                    }
+                });
+                if analysis.enabled && self.analysis.view.offset_mm != analysis.offset_mm {
+                    self.analysis.follow_layer = false;
+                    self.analysis.view.offset_mm = analysis.offset_mm;
+                }
+                if let Some(reference) = picked {
                     self.select_face(reference);
                 }
             });
@@ -851,6 +926,7 @@ impl eframe::App for Workbench {
             self.prefs.theme.apply(&ctx);
         }
         self.library_window(&ctx);
+        self.analysis_window(&ctx);
         // Side effects execute once in logic(), even if egui lays out the UI in multiple passes.
         if self.queued.is_some()
             || self.confirmation.is_some()

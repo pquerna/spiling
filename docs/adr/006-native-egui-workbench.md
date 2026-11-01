@@ -57,6 +57,18 @@ retain centerlines with an explanation when bead display is unavailable.
 Immutable role/tool/layer/event ranges serve both representations. Camera
 orientation preserves framing; Fit is explicit.
 
+One shared transient Section Analysis state serves Inspect, Prepare, Finish and
+Review. A world or occurrence-local plane clips checked source meshes and fresh
+actual-program nominal beads on the GPU; filled display caps preserve sampled
+holes but confer no geometry authority or exact measurement. Native section
+queries remain separately revision-bound, debounced and cancellable, with explicit
+refusals. Sampled contour inspection retains its sampling allowance. Construction
+coverage comes from the captured plan at its recorded layer height; the current
+engine does not supply an arbitrary-plane constructed-solid contour. Project-keyed
+pinned planes/cameras are bounded desktop preferences, outside project history.
+Layer ranges and event progress filter immutable replay ordinals rather than
+regenerate geometry or reinterpret emitted commands.
+
 ## Migration and alternatives
 
 The migration used complete operator-flow gates. Its legacy baseline is now

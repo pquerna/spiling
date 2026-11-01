@@ -125,6 +125,54 @@ checked centerlines. Camera orientation and fresh review preserve existing frami
 Fit and Fit source remain explicit actions. Review does not regenerate geometry
 when scrubbing or filtering.
 
+**Section Analysis…** opens the shared inspection tool from any workflow tab.
+Choose X/Y/Z or Free (azimuth/elevation), world/build or selected-part coordinates,
+and a position in millimetres. Center, the viewport plane handle, Flip side,
+Section only and Look normal support cutaways and orthographic sections. A selected
+native planar face can define the plane. Source scope can select one occurrence;
+actual-program material always retains job scope. An unavailable selected frame
+or occurrence disables the cut rather than reinterpreting its coordinates.
+
+Source, Actual beads and Compare share the same spatial plane. GPU winding caps
+are display approximations over admitted triangles and nominal bead envelopes;
+they are not new BREP faces and cannot be picked as native faces. Clipping retains
+the 0.001 mm projection limit. Existing bead admission/work limits still apply.
+Native contours use the geometry service after 250 ms of settled plane input.
+Refresh retries explicitly; Cancel native operation or Cancel contour transfer
+stops the relevant stage. Only the matching session/revision/plane is displayed.
+A native refusal does not disable approximate visual clipping. The bounded 2D
+preview shows sampled loop area/boundary and two-sample distances with endpoint
+sampling allowances; occurrence areas sum independently and can overlap. Raw
+sections, staged/active lines, GPU copies and contour previews share the display
+budget. Preview admission is limited to 65,536 samples.
+
+The right layer rail and Review controls support All, Through, Single and inclusive
+Range selections with one-based labels and physical Z intervals/heights. Wheel or
+Up/Down steps the focused rail; Shift adjusts the lower range handle. Trackpad
+fractions accumulate. Amber marks identify heights differing from the requested
+goal beyond command precision. **Inspect first adjusted layer** selects the layer
+and opens comparison with **Follow selected layer · build Z**. This follows the
+captured section height, not a guessed layer-index height. Moving the plane
+manually releases follow. **Commands in selection** scrubs checked replay events;
+startup/shutdown sentinel events remain outside selected body-layer windows.
+Role/tool filters compose with layer and progress filters in both centerline and
+bead views. **Pressure events** explicitly shows stationary retract/unretract
+markers; it starts off so full-job material inspection remains readable.
+
+**Construction at selected layer** exposes captured source/constructed/added areas
+and owning region coverage at that layer's section height. It is not an arbitrary
+constructed-solid section. Named pinned views retain the plane, representation,
+source scope and camera in bounded project-keyed desktop preferences; they do not
+retain engine sessions, grant fresh verification or enter project undo.
+
+For section acceptance, open the independent rounded housing, inspect its bore
+with a native contour and sampled distance, exercise principal/free/local planes,
+flip/normal/section-only and a pinned view. Compile and freshly verify, keep the
+plane across workflow tabs, compare nominal deposition and scrub single/ranged
+layers. Revise/undo/redo, observe stale-review invalidation, save/reopen, freshly
+verify/export and compare the CLI artifacts. Inspect a native-query refusal while
+keeping visual analysis usable, and observe awaited child exit.
+
 For actual-window acceptance, inspect an admitted wall/bridge and genuine H1
 physical intervals, switch layer/role/tool and centerline/bead views, and change a
 consumed width/process value. Observe old review invalidation, fresh output,

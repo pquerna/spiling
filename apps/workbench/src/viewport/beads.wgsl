@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
-struct Camera { matrix:mat4x4<f32>, selected:vec4<u32>, tool_color:vec4<f32> };
+struct Camera { matrix:mat4x4<f32>, selected:vec4<u32>, tool_color:vec4<f32>, plane:vec4<f32>, cut:vec4<f32> };
 @group(0) @binding(0) var<uniform> camera:Camera;
 struct Output {
     @builtin(position) position:vec4<f32>,
     @location(0) normal:vec3<f32>,
     @location(1) color:vec3<f32>,
+    @location(2) world:vec3<f32>,
 };
 // Two semicircles and explicit flat top/bottom edges. Elliptical bridge
 // envelopes collapse the flats; they do not assert substrate flattening or sag.
@@ -33,7 +34,9 @@ fn section(index:u32, facets:u32, width:f32, height:f32, elliptical:u32)->vec4<f
     let edge=vertex/12u; let slot=vertex%12u;
     let next=(edge+1u)%(facets+2u);
     // Two side triangles followed by one flat start and one flat end cap.
-    let corners=array<u32,12>(edge,next,edge, next,next,edge, edge,next,edge, edge,edge,next);
+    // Start cap runs clockwise viewed along the segment; end cap runs
+    // counterclockwise. Closed outward winding is required by section fills.
+    let corners=array<u32,12>(edge,next,edge, next,next,edge, next,edge,edge, edge,edge,next);
     let ends=array<u32,12>(0u,0u,1u, 0u,1u,1u, 0u,0u,0u, 1u,1u,1u);
     let center=slot==8u || slot==9u;
     let cross_section=section(corners[slot],facets,width,height,elliptical);
@@ -42,12 +45,14 @@ fn section(index:u32, facets:u32, width:f32, height:f32, elliptical:u32)->vec4<f
     let position=endpoint+vec3(sideways*offset.x,offset.y-height*0.5);
     let direction=vec3(sideways.y,-sideways.x,0.0);
     var out:Output;
+    out.world=position;
     out.position=camera.matrix*vec4(position,1.0);
     out.normal=select(vec3(sideways*cross_section.z,cross_section.w),select(-direction,direction,ends[slot]!=0u),slot>=6u);
     out.color=select(color,camera.tool_color.xyz,camera.tool_color.w>0.0);
     return out;
 }
 @fragment fn fs(input:Output)->@location(0) vec4<f32> {
+    if camera.cut.x>0.0 && dot(camera.plane,vec4(input.world,1.0))>0.000001 { discard; }
     let light=0.4+0.6*max(dot(input.normal/max(length(input.normal),1e-20),normalize(vec3(0.4,-0.5,0.8))),0.0);
     return vec4(input.color*light,1.0);
 }

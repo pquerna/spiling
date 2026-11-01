@@ -14,6 +14,7 @@ mod tests {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
+    Analysis,
     Library,
     New,
     Open,
@@ -40,6 +41,7 @@ pub enum Action {
 }
 impl Action {
     pub const ALL: &[Self] = &[
+        Self::Analysis,
         Self::Library,
         Self::New,
         Self::Open,
@@ -66,6 +68,7 @@ impl Action {
     ];
     pub fn label(self) -> &'static str {
         match self {
+            Self::Analysis => "Section Analysis…",
             Self::Library => "Materials and My library…",
             Self::New => "New project",
             Self::Open => "Open project…",
@@ -92,7 +95,7 @@ impl Action {
         }
     }
     pub fn disabled(self, state: &Snapshot) -> Option<&'static str> {
-        if matches!(self, Self::License | Self::Gallery) {
+        if matches!(self, Self::License | Self::Gallery | Self::Analysis) {
             return None;
         }
         if state.confirmation.is_some() {

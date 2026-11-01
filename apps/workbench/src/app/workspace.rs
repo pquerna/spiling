@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use super::{Command, Phase, Workbench, ui};
+use super::{Phase, Workbench, ui};
 use spiling_contracts::geometry::*;
 
 impl Workbench {
@@ -25,37 +25,13 @@ impl Workbench {
     }
     pub(super) fn tree_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Model");
-        ui.horizontal(|ui| {
-            ui.label("Section Z (mm)");
-            ui.add(egui::DragValue::new(&mut self.section_z).speed(0.1));
-        });
-        if ui
-            .add_enabled(
-                self.display_current() && !self.state.busy && !self.state.section_loading,
-                egui::Button::new("Native section"),
-            )
-            .clicked()
-            && let Some(scene) = &self.state.scene
-        {
-            self.queued_geometry = Some(GeometryCommand::StartSection {
-                session_id: scene.session_id.clone(),
-                base_revision: scene.revision,
-                plane: PlaneMm {
-                    origin_mm: [0.0, 0.0, self.section_z],
-                    normal: [0.0, 0.0, 1.0],
-                },
-            });
+        if ui.button("Section Analysis…").clicked() {
+            self.analysis.open = true;
         }
-        if self.state.section_loading {
-            ui.weak("Retrieving section…");
-            if ui.button("Cancel section transfer").clicked() {
-                self.queued_host = Some(Command::CancelSection);
-            }
-        }
-        if let Some(section) = &self.state.section {
+        if self.analysis.view.enabled {
             ui.weak(format!(
-                "{} native section loops",
-                section.summary.total_loop_count
+                "Section {:?} · {:.3} mm",
+                self.analysis.view.axis, self.analysis.view.offset_mm
             ));
         }
 
