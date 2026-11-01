@@ -10137,36 +10137,70 @@ mod tests {
             .unwrap();
             for (interval, z, endpoint) in [([0.0, 0.02], 0.01, 0), ([7.98, 8.0], 7.99, 1)] {
                 let analysis = ranged_slab(&source, pose, interval, z, 0, &mut work);
-                assert!(!analysis.has_transition_material(), "{name}");
-                assert!(analysis.invariance.is_none(), "{name}");
                 let actual = xy_candidate(&analysis, z);
                 assert_eq!(actual.iter().filter(|loop_| loop_.is_hole).count(), holes);
                 let leaf = source_leaf(&source, 11, pose, &analysis, &mut work);
                 assert!(leaf.critical_interfaces[endpoint], "{name}");
-                assert_eq!(
-                    leaf.native_endpoint_closure,
-                    std::array::from_fn(|side| side == endpoint),
-                    "{name}"
-                );
-                let mut missing_incidence = leaf.clone();
-                missing_incidence.native_endpoint_closure = [false; 2];
-                assert!(!same_leaf(&leaf, &missing_incidence));
-                let failure = super::certify_native_union(
-                    &[sampled_occurrence(
-                        &source,
-                        &analysis,
-                        &missing_incidence,
-                        None,
-                    )],
-                    &actual,
-                    policy(0.0),
-                    &mut work,
-                    &cancel,
-                )
-                .unwrap_err();
-                assert_eq!(failure.code, GeometryErrorCode::AnalysisIndeterminate);
-
-                let occurrence = sampled_occurrence(&source, &analysis, &leaf, None);
+                if analysis.has_critical_collar() {
+                    // The terminal cone uses the production closed-collar owner;
+                    // its one-sided sample leaf cannot close the cap by itself.
+                    assert!(leaf.closed_shape_error_mm().is_none());
+                    assert_eq!(leaf.native_endpoint_closure, [false; 2], "{name}");
+                } else {
+                    assert!(analysis.closed_shape_error_mm().is_some(), "{name}");
+                    assert_eq!(
+                        leaf.native_endpoint_closure,
+                        std::array::from_fn(|side| side == endpoint),
+                        "{name}"
+                    );
+                    let mut missing_incidence = leaf.clone();
+                    missing_incidence.native_endpoint_closure = [false; 2];
+                    assert!(!same_leaf(&leaf, &missing_incidence));
+                    let failure = super::certify_native_union(
+                        &[sampled_occurrence(
+                            &source,
+                            &analysis,
+                            &missing_incidence,
+                            None,
+                        )],
+                        &actual,
+                        policy(0.0),
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap_err();
+                    assert_eq!(failure.code, GeometryErrorCode::AnalysisIndeterminate);
+                }
+                let collar = collar_for(&source, &analysis, &leaf, &actual, &[], &mut work);
+                if let Some(collar) = &collar {
+                    let failure = super::certify_native_union(
+                        &[sampled_occurrence(&source, &analysis, &leaf, None)],
+                        &actual,
+                        policy(0.0),
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap_err();
+                    assert_eq!(failure.code, GeometryErrorCode::AnalysisIndeterminate);
+                    let foreign = source_leaf(&source, 12, pose, &analysis, &mut work);
+                    assert!(
+                        super::certify_native_union(
+                            &[sampled_occurrence(
+                                &source,
+                                &analysis,
+                                &foreign,
+                                Some(collar)
+                            )],
+                            &actual,
+                            policy(0.0),
+                            &mut work,
+                            &cancel,
+                        )
+                        .is_err(),
+                        "another occurrence cannot borrow the original cap incidence"
+                    );
+                }
+                let occurrence = sampled_occurrence(&source, &analysis, &leaf, collar.as_ref());
                 let pending = super::certify_native_union(
                     std::slice::from_ref(&occurrence),
                     &actual,
@@ -10174,8 +10208,8 @@ mod tests {
                     &mut work,
                     &cancel,
                 )
-                .expect("original incoming coface and regular closure bind actual source M");
-                assert!(pending.closed_shape_error_mm().is_some());
+                .expect("complete original cap ownership binds actual closed source M");
+                assert!(pending.achieved_shape_error_mm() <= leaf.native_shape_error_policy_mm());
                 assert_eq!(pending.material_component_count(), 1);
                 assert_eq!(pending.sources()[0].definition_id(), definition.id());
                 assert_eq!(pending.sources()[0].pose(), pose);
@@ -10186,6 +10220,22 @@ mod tests {
                 let completed = ledger.finalize(&mut work, &cancel).unwrap();
                 assert_eq!(completed.world_height_interval_mm(), interval);
                 assert_eq!(completed.slab_count(), 1);
+                assert!(completed.achieved_shape_error_mm() <= leaf.native_shape_error_policy_mm());
+                let mut changed = copy_loops(&actual);
+                for point in changed.iter_mut().flat_map(|loop_| &mut loop_.points_mm) {
+                    point[0] += 0.2;
+                }
+                assert!(
+                    super::certify_native_union(
+                        std::slice::from_ref(&occurrence),
+                        &changed,
+                        policy(0.0),
+                        &mut work,
+                        &cancel,
+                    )
+                    .is_err(),
+                    "cap ownership cannot authorize material moved from the native sample"
+                );
                 if holes != 0 {
                     let mut filled = copy_loops(&actual);
                     filled.retain(|loop_| !loop_.is_hole);

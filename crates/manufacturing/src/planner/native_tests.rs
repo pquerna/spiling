@@ -2960,7 +2960,6 @@ fn equivalent_analytic_and_rational_sources_preserve_sections_material_and_fresh
 #[test]
 fn new_native_families_use_one_material_planner_and_independent_replay() {
     use spiling_contracts::geometry::SurfaceFamily;
-    let cancel = AtomicBool::new(false);
     for (name, family, bed_translation, top) in [
         ("cone-frustum", SurfaceFamily::Cone, 0.0, 8.0),
         ("sphere-belt", SurfaceFamily::Sphere, 3.0, 6.0),
@@ -2977,103 +2976,162 @@ fn new_native_families_use_one_material_planner_and_independent_replay() {
         ),
         ("bspline-box", SurfaceFamily::BSpline, 0.0, 8.0),
     ] {
-        let source = native_test_source(name);
-        let scene = NativeScene::new(&source, &[translated(0.0, 0.0, bed_translation)]);
-        let native = &scene.definitions[&scene.occurrences[0].definition_id];
+        assert_native_family_compile_and_replay(name, family, bed_translation, top);
+    }
+}
+
+fn assert_native_family_compile_and_replay(
+    name: &str,
+    family: spiling_contracts::geometry::SurfaceFamily,
+    bed_translation: f64,
+    top: f64,
+) -> spiling_contracts::manufacturing::ManufacturingBundle {
+    use spiling_contracts::geometry::SurfaceFamily;
+    let cancel = AtomicBool::new(false);
+    let source = native_test_source(name);
+    let scene = NativeScene::new(&source, &[translated(0.0, 0.0, bed_translation)]);
+    let native = &scene.definitions[&scene.occurrences[0].definition_id];
+    assert!(
+        native
+            .faces()
+            .iter()
+            .any(|face| face.geometry.family == family),
+        "{name}"
+    );
+    let mut intent = intent(true);
+    intent.recipe.layer_height_mm = 0.2;
+    intent.recipe.native_shape_error_mm = 0.1;
+    let metadata = preflight(&scene.input(&intent), &cancel).unwrap();
+    assert_eq!(
+        metadata.disposition,
+        PreflightDisposition::Admitted,
+        "{name}: {metadata:?}"
+    );
+    assert!(
+        metadata
+            .checks
+            .iter()
+            .any(|check| !check.required && check.evidence == PreflightEvidence::NotEvaluated)
+    );
+    let bundle = compile(scene.input(&intent), &cancel)
+        .unwrap_or_else(|failure| panic!("{name}: {failure:?}"));
+    assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
+    assert!(
+        (bundle.plan.layers.last().unwrap().z_mm - top).abs() <= 0.000001,
+        "{name}"
+    );
+    let coverage = &bundle.plan.native_geometry;
+    assert_eq!(coverage.evidence, PreflightEvidence::Certified);
+    assert_eq!(
+        coverage.certified_layer_count,
+        bundle.plan.layers.len() as u32
+    );
+    assert_eq!(
+        coverage.height_analysis_count,
+        scene.occurrences.len() as u32
+    );
+    assert!(coverage.achieved_shape_error_mm <= coverage.requested_shape_error_mm);
+    assert!(coverage.slab_count > 0 && coverage.geometry_work > 0);
+    assert_eq!(
+        coverage.skin_coverage,
+        SkinCoverageScope::ScheduledMaterialDistance
+    );
+    assert_eq!(
+        coverage.support_clearance,
+        SupportClearanceScope::ContinuousTargetOuterOccupancy
+    );
+    let features = &coverage.source_feature_coverage;
+    assert_eq!(
+        features.disjoint_source_layer_count
+            + features.invariant_source_union_layer_count
+            + features.native_interface_complex_layer_count,
+        coverage.certified_layer_count,
+        "{name}"
+    );
+    assert_eq!(features.invariant_source_union_layer_count, 0, "{name}");
+    if matches!(
+        family,
+        SurfaceFamily::Cone | SurfaceFamily::Sphere | SurfaceFamily::Torus
+    ) {
         assert!(
-            native
-                .faces()
-                .iter()
-                .any(|face| face.geometry.family == family),
-            "{name}"
+            features.native_interface_complex_layer_count > 0,
+            "{name}: non-product critical cofaces require real native interface evidence"
         );
-        let mut intent = intent(true);
-        intent.recipe.layer_height_mm = 0.2;
-        intent.recipe.native_shape_error_mm = 0.1;
-        let metadata = preflight(&scene.input(&intent), &cancel).unwrap();
-        assert_eq!(
-            metadata.disposition,
-            PreflightDisposition::Admitted,
-            "{name}: {metadata:?}"
-        );
-        assert!(
-            metadata
-                .checks
-                .iter()
-                .any(|check| !check.required && check.evidence == PreflightEvidence::NotEvaluated)
-        );
-        let bundle = compile(scene.input(&intent), &cancel).unwrap();
-        assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
-        assert!(
-            (bundle.plan.layers.last().unwrap().z_mm - top).abs() <= 0.000001,
-            "{name}"
-        );
-        let coverage = &bundle.plan.native_geometry;
-        assert_eq!(coverage.evidence, PreflightEvidence::Certified);
-        assert_eq!(
-            coverage.certified_layer_count,
-            bundle.plan.layers.len() as u32
-        );
-        assert_eq!(
-            coverage.height_analysis_count,
-            scene.occurrences.len() as u32
-        );
-        assert!(coverage.achieved_shape_error_mm <= coverage.requested_shape_error_mm);
-        assert!(coverage.slab_count > 0 && coverage.geometry_work > 0);
-        assert_eq!(
-            coverage.skin_coverage,
-            SkinCoverageScope::ScheduledMaterialDistance
-        );
-        assert_eq!(
-            coverage.support_clearance,
-            SupportClearanceScope::ContinuousTargetOuterOccupancy
-        );
-        let features = &coverage.source_feature_coverage;
-        assert_eq!(
-            features.disjoint_source_layer_count
-                + features.invariant_source_union_layer_count
-                + features.native_interface_complex_layer_count,
-            coverage.certified_layer_count,
-            "{name}"
-        );
-        assert_eq!(features.invariant_source_union_layer_count, 0, "{name}");
-        if matches!(
-            family,
-            SurfaceFamily::Cone | SurfaceFamily::Sphere | SurfaceFamily::Torus
-        ) {
-            assert!(
-                features.native_interface_complex_layer_count > 0,
-                "{name}: non-product critical cofaces require real native interface evidence"
-            );
+    }
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.paths)
+            .any(|path| path.kind == DepositionKind::Perimeter)
+    );
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.paths)
+            .any(|path| matches!(
+                path.kind,
+                DepositionKind::BottomSkin | DepositionKind::TopSkin
+            ))
+    );
+    let encoded = serde_json::to_vec(&bundle).unwrap();
+    let reopened = decode_bundle(&encoded).unwrap();
+    let replay = crate::verify_bundle(&reopened, &cancel).unwrap();
+    assert!(replay.verified && replay.deposition_segments > 0, "{name}");
+    assert!(bundle.plan.layers.iter().all(|layer| {
+        (layer.region_coverage.section_area_mm2 - layer.region_coverage.source_section_area_mm2)
+            .abs()
+            < 1e-7
+    }));
+    bundle
+}
+
+#[test]
+fn cone_first_and_last_layers_preserve_closed_material_and_fresh_replay() {
+    let bundle = assert_native_family_compile_and_replay(
+        "cone-frustum",
+        spiling_contracts::geometry::SurfaceFamily::Cone,
+        0.0,
+        8.0,
+    );
+    let layers = &bundle.plan.layers;
+    assert_eq!(layers.first().unwrap().lower_z_mm, 0.0);
+    assert!(
+        layers
+            .first()
+            .unwrap()
+            .paths
+            .iter()
+            .any(|path| path.kind == DepositionKind::BottomSkin)
+    );
+    assert!(
+        layers
+            .last()
+            .unwrap()
+            .paths
+            .iter()
+            .any(|path| path.kind == DepositionKind::TopSkin)
+    );
+    for (index, layer) in layers.iter().enumerate() {
+        assert!(0.0 < layer.height_mm && layer.height_mm <= 0.2);
+        if index > 0 {
+            assert_eq!(layer.lower_z_mm, layers[index - 1].z_mm);
         }
+        // Independent analytic area of this frozen 5-to-3 mm, 8 mm cone.
+        // Check every realized layer, including the two terminal layers. A
+        // certified span may reuse a nearby native sample, so its full closed-
+        // layer shape bound owns this comparison, not the section chord error.
+        let radius = 5.0 - layer.section_z_mm / 4.0;
+        let expected = std::f64::consts::PI * radius * radius;
+        let error = bundle.plan.native_geometry.achieved_shape_error_mm;
+        let area_error = std::f64::consts::PI * (2.0 * radius * error + error * error);
         assert!(
-            bundle
-                .plan
-                .layers
-                .iter()
-                .flat_map(|layer| &layer.paths)
-                .any(|path| path.kind == DepositionKind::Perimeter)
+            (layer.region_coverage.source_section_area_mm2 - expected).abs() <= area_error,
+            "layer {index}: realized cone area must preserve the original radial law within its certified bound"
         );
-        assert!(
-            bundle
-                .plan
-                .layers
-                .iter()
-                .flat_map(|layer| &layer.paths)
-                .any(|path| matches!(
-                    path.kind,
-                    DepositionKind::BottomSkin | DepositionKind::TopSkin
-                ))
-        );
-        let encoded = serde_json::to_vec(&bundle).unwrap();
-        let reopened = decode_bundle(&encoded).unwrap();
-        let replay = crate::verify_bundle(&reopened, &cancel).unwrap();
-        assert!(replay.verified && replay.deposition_segments > 0, "{name}");
-        assert!(bundle.plan.layers.iter().all(|layer| {
-            (layer.region_coverage.section_area_mm2 - layer.region_coverage.source_section_area_mm2)
-                .abs()
-                < 1e-7
-        }));
     }
 }
 

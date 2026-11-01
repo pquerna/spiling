@@ -69,10 +69,21 @@ retains both literal endpoints. This preserves exactly constant nonzero chart
 coordinates without tolerance snapping or a query-side domain exception; real
 variation and supplied PCURVEs remain distinct. The existing lift-error checks
 still admit each constructed curve, and complete native coefficient containment
-still admits each query. The native bore cap regression exercises both endpoint
-slabs through source-leaf/union binding, missing-incidence refusal and protected
-hole retention. The combined box/bore/cone reference retains its separate cone
-transition-material assertion; that whole reference remains unqualified.
+still admits each query. The box/bore/cone cap consumer exercises both endpoint
+slabs through completed source-leaf/union binding. Regular endpoints retain exact
+native coface closure; the terminal cone instead binds its actual native collar
+and resolves its material dependencies through the union ledger. A one-sided
+sample alone cannot close that cap. Missing or foreign incidence, moved material
+and filled original bores refuse. `incoming_original_caps_close_first_and_last_actual_m_without_convexity`
+checks this consumer without requiring every source to select one proof route.
+The frozen `source-cone-frustum.step` additionally exercises full-height
+compilation and fresh program replay in
+`cone_first_and_last_layers_preserve_closed_material_and_fresh_replay`; realized
+layer areas are checked against the original analytic radial law under the full
+closed-layer shape bound, including valid native-sample reuse. The complete
+sparse-job CLI/native flow supports source-independent saved return and fresh
+verification/export. Tilted caps and composed-source contacts retain their
+separate qualification gates.
 The frozen [`bezier-extrusion-bore.step`](../../fixtures/manufacturing/native/bezier-extrusion-bore.step)
 also exercises complete sparse-job compilation, fresh emitted program
 verification/export and source-independent saved-project reopen through the CLI.
