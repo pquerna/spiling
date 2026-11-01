@@ -10,7 +10,6 @@ use spiling_core_ptac::{
     SnapshotInput,
 };
 use std::{
-    collections::BTreeSet,
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
 };
@@ -201,6 +200,56 @@ impl LibraryStore {
         };
         value.validate().map_err(invalid)?;
         Ok(value)
+    }
+    pub fn list_recipes(
+        &self,
+        query: &LibraryRecipeQuery,
+        cancel: &AtomicBool,
+    ) -> Result<LibraryRecipePage> {
+        query.validate().map_err(invalid)?;
+        let document = self.read(cancel)?;
+        check_expected(query.expected.as_ref(), document.as_ref())?;
+        let needle = query.query.to_lowercase();
+        let mut entries: Vec<_> = document
+            .as_ref()
+            .into_iter()
+            .flat_map(|d| &d.materials.recipes)
+            .filter(|r| r.definition.name.to_lowercase().contains(&needle))
+            .map(RecipeSummary::from)
+            .collect();
+        entries.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then(a.reference.id.cmp(&b.reference.id))
+        });
+        let total_matches = entries.len() as u32;
+        if query.offset > total_matches {
+            return Err(invalid("recipe page offset exceeds matching entries"));
+        }
+        let end = (query.offset as usize + MAX_LIBRARY_PAGE as usize).min(entries.len());
+        Ok(LibraryRecipePage {
+            identity: document.as_ref().map(identity),
+            entries: entries[query.offset as usize..end].to_vec(),
+            total_matches,
+            next_offset: (end < total_matches as usize).then_some(end as u32),
+        })
+    }
+    pub fn recipe(
+        &self,
+        library: &LibraryId,
+        reference: &RecipeRef,
+        cancel: &AtomicBool,
+    ) -> Result<RecipeTransfer> {
+        let document = self
+            .read(cancel)?
+            .ok_or_else(|| invalid("library is empty"))?;
+        if &document.id != library {
+            return Err(conflict());
+        }
+        document
+            .materials
+            .recipe_transfer(reference)
+            .map_err(invalid)
     }
     pub fn list_filaments(
         &self,
@@ -635,33 +684,9 @@ fn apply(document: &mut LibraryDocument, mutation: &LibraryMutation) -> Result<(
                 .ok_or_else(|| invalid("spool not found"))?;
             document.spools.remove(index);
         }
-        LibraryMutation::PutRecipe {
-            id,
-            expected,
-            definition,
-        } => {
-            let current = document
-                .materials
-                .recipes
-                .iter()
-                .find(|entry| &entry.id == id);
-            if current.map(|entry| &entry.revision) != expected.as_ref() {
-                return Err(conflict());
-            }
-            let entry = RecipeEntry {
-                id: id.clone(),
-                revision: definition.content_hash().map_err(invalid)?,
-                definition: definition.clone(),
-            };
-            match document
-                .materials
-                .recipes
-                .iter_mut()
-                .find(|entry| &entry.id == id)
-            {
-                Some(old) => *old = entry,
-                None => document.materials.recipes.push(entry),
-            }
+        LibraryMutation::PutRecipe { transfer, expected } => {
+            document.materials =
+                std::mem::take(&mut document.materials).with_recipe(transfer, expected.as_ref())?;
         }
         LibraryMutation::RemoveRecipe { id, expected } => {
             let index = document
@@ -689,24 +714,10 @@ fn apply(document: &mut LibraryDocument, mutation: &LibraryMutation) -> Result<(
     Ok(())
 }
 fn prune(document: &mut LibraryDocument) {
-    let needed: BTreeSet<_> = document
-        .materials
-        .entries
-        .iter()
-        .map(|entry| entry.current.clone())
-        .chain(document.spools.iter().map(|spool| spool.filament.clone()))
-        .chain(document.materials.recipes.iter().flat_map(|recipe| {
-            recipe
-                .definition
-                .ingredients
-                .iter()
-                .map(|i| i.filament.clone())
-        }))
-        .collect();
-    document
-        .materials
-        .revisions
-        .retain(|revision| needed.contains(&revision.reference));
+    crate::materials::prune_revisions(
+        &mut document.materials,
+        document.spools.iter().map(|s| s.filament.clone()),
+    );
 }
 
 #[cfg(test)]
@@ -998,5 +1009,120 @@ mod tests {
         assert_eq!(store.read(&cancel).unwrap().unwrap(), first.document);
         drop(writer);
         assert!(store.write(&request, &cancel).unwrap().replayed);
+    }
+    #[test]
+    fn recipe_publication_captures_dependencies_and_replays_without_duplicate_entries_or_stock() {
+        let temporary = Temporary::new();
+        let store = temporary.store();
+        let cancel = AtomicBool::new(false);
+        let filaments = (0..2)
+            .map(|i| {
+                let definition = definition(&format!("Ingredient {i}"));
+                FilamentRevision {
+                    reference: FilamentRef {
+                        id: FilamentId(uuid::Uuid::new_v4().to_string()),
+                        revision: definition.content_hash().unwrap(),
+                    },
+                    definition,
+                }
+            })
+            .collect();
+        let transfer = RecipeTransfer::from_declarations(
+            RecipeId(uuid::Uuid::new_v4().to_string()),
+            "Library recipe".into(),
+            filaments,
+            spiling_contracts::appearance::AppearanceColor::Srgb { channels: [0.4; 3] },
+            vec![0.2; 2],
+        )
+        .unwrap();
+        let stock_id = FilamentId(uuid::Uuid::new_v4().to_string());
+        let first_stock = write(
+            &store,
+            None,
+            LibraryMutation::PutFilament {
+                id: stock_id.clone(),
+                expected: None,
+                definition: definition("Stock revision one"),
+            },
+        );
+        let stock_ref = first_stock.document.materials.entries[0].current.clone();
+        let with_spool = write(
+            &store,
+            Some(&first_stock.document),
+            LibraryMutation::PutSpool {
+                spool: SpoolRecord {
+                    id: SpoolId(uuid::Uuid::new_v4().to_string()),
+                    filament: stock_ref.clone(),
+                    name: "Owned physical spool".into(),
+                    state: StockState::OnHand,
+                    quantity: None,
+                    lot: None,
+                    location: None,
+                },
+            },
+        );
+        let updated_stock = write(
+            &store,
+            Some(&with_spool.document),
+            LibraryMutation::PutFilament {
+                id: stock_id,
+                expected: Some(stock_ref.revision.clone()),
+                definition: definition("Stock revision two"),
+            },
+        );
+        let request = LibraryWrite {
+            library_id: Some(updated_stock.document.id.clone()),
+            base_revision: updated_stock.document.revision,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            mutation: LibraryMutation::PutRecipe {
+                transfer: transfer.clone(),
+                expected: None,
+            },
+        };
+        let first = store.write(&request, &cancel).unwrap();
+        let replay = store.write(&request, &cancel).unwrap();
+        assert!(replay.replayed);
+        assert_eq!(first.document, replay.document);
+        assert_eq!(first.document.materials.entries.len(), 3);
+        assert!(first.document.materials.resolve(&stock_ref).is_some());
+        assert_eq!(first.document.spools, updated_stock.document.spools);
+        assert_eq!(
+            store
+                .recipe(&first.document.id, &transfer.recipe.reference(), &cancel)
+                .unwrap(),
+            transfer
+        );
+        let stale = LibraryWrite {
+            library_id: Some(first.document.id.clone()),
+            base_revision: first.document.revision,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            mutation: request.mutation,
+        };
+        assert_eq!(
+            store.write(&stale, &cancel).unwrap_err().code,
+            LibraryErrorCode::StaleRevision
+        );
+        assert_eq!(store.read(&cancel).unwrap().unwrap(), first.document);
+        let page = store
+            .list_recipes(
+                &LibraryRecipeQuery {
+                    query: "LIBRARY".into(),
+                    ..Default::default()
+                },
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(page.total_matches, 1);
+        let removed = write(
+            &store,
+            Some(&first.document),
+            LibraryMutation::RemoveRecipe {
+                id: transfer.recipe.id,
+                expected: transfer.recipe.revision,
+            },
+        );
+        assert!(removed.document.materials.recipes.is_empty());
+        assert_eq!(removed.document.materials.entries.len(), 3);
+        assert_eq!(removed.document.spools, updated_stock.document.spools);
     }
 }

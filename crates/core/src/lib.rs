@@ -6,6 +6,7 @@
 pub mod materials;
 mod optical_construction;
 mod process;
+mod recipes;
 pub use optical_construction::{OpticalConstructionCandidate, prepare_optical_construction};
 pub mod library;
 pub mod storage;
@@ -231,6 +232,20 @@ pub struct Snapshot {
 }
 #[derive(Debug, Clone)]
 pub enum Edit {
+    PutRecipe {
+        transfer: spiling_contracts::library::RecipeTransfer,
+        expected: Option<SourceHash>,
+    },
+    LoadRecipeStudy {
+        reference: spiling_contracts::library::RecipeRef,
+        context: spiling_contracts::library::RecipeStudyContext,
+    },
+    CaptureRecipe {
+        id: spiling_contracts::library::RecipeId,
+        name: String,
+        ingredients: Vec<spiling_contracts::library::RecipeIngredient>,
+        expected: Option<SourceHash>,
+    },
     PutFilament {
         revision: spiling_contracts::library::FilamentRevision,
         origin: Option<spiling_contracts::library::LibraryOrigin>,
@@ -675,6 +690,50 @@ impl Project {
         }
         Ok(())
     }
+    fn install_palette(
+        &self,
+        snapshot: &mut Snapshot,
+        mut asset: Arc<PaletteAsset>,
+    ) -> Result<(), ProjectError> {
+        let staged = self
+            .staged_appearance
+            .lock()
+            .map_err(|_| error(ProjectErrorCode::Io, "appearance staging lock poisoned"))?;
+        let staged: Vec<_> = staged.iter().filter_map(Weak::upgrade).collect();
+        if let Some(retained) = std::iter::once(self.current.as_ref())
+            .chain(self.undo.iter().map(Arc::as_ref))
+            .chain(self.redo.iter().map(Arc::as_ref))
+            .chain(staged.iter().map(Arc::as_ref))
+            .find_map(|state| state.appearance_palettes.get(&asset.record.canonical_hash))
+        {
+            if retained.canonical.as_slice() != asset.canonical.as_slice() {
+                return Err(error(
+                    ProjectErrorCode::CorruptAsset,
+                    "conflicting canonical palette identity",
+                ));
+            }
+            asset = retained.clone();
+        }
+        snapshot.appearance_palettes.clear();
+        snapshot
+            .appearance_palettes
+            .insert(asset.record.canonical_hash.clone(), asset.clone());
+        let study = Arc::make_mut(&mut snapshot.appearance_study);
+        study.palette = Some(asset.record.clone());
+        study.report = None;
+        study.report_record = None;
+        study.selection = None;
+        if let Some(optical) = &mut study.optical {
+            if optical.request.validate_palette(asset.prepared()).is_err() {
+                study.optical = None;
+            } else {
+                optical.report = None;
+                optical.report_record = None;
+                optical.selection = None;
+            }
+        }
+        Ok(())
+    }
     pub fn prepare(&self, edit: Edit) -> Result<PreparedEdit, ProjectError> {
         self.writable()?;
         self.revision.next()?;
@@ -694,7 +753,10 @@ impl Project {
         // Invalidation is part of the same atomic edit; history keeps the coherent old pair.
         if !matches!(
             &edit,
-            Edit::PutFilament { .. }
+            Edit::PutRecipe { .. }
+                | Edit::LoadRecipeStudy { .. }
+                | Edit::CaptureRecipe { .. }
+                | Edit::PutFilament { .. }
                 | Edit::PublishManufacturing { .. }
                 | Edit::ImportAppearancePalette { .. }
                 | Edit::SetAppearanceTarget { .. }
@@ -705,6 +767,18 @@ impl Project {
             snapshot.manufacturing_artifact = None;
         }
         match edit {
+            Edit::PutRecipe { transfer, expected } => {
+                self.store_recipe(&mut snapshot, &transfer, expected.as_ref())?;
+            }
+            Edit::CaptureRecipe {
+                id,
+                name,
+                ingredients,
+                expected,
+            } => self.capture_recipe(&mut snapshot, id, name, ingredients, expected)?,
+            Edit::LoadRecipeStudy { reference, context } => {
+                self.load_recipe_study(&mut snapshot, reference, context)?
+            }
             Edit::PutFilament {
                 revision,
                 origin,
@@ -754,16 +828,7 @@ impl Project {
                 {
                     document.revisions.push(revision);
                 }
-                document.revisions.retain(|r| {
-                    document.entries.iter().any(|e| e.current == r.reference)
-                        || document.recipes.iter().any(|recipe| {
-                            recipe
-                                .definition
-                                .ingredients
-                                .iter()
-                                .any(|i| i.filament == r.reference)
-                        })
-                });
+                materials::prune_revisions(&mut document, []);
                 snapshot.materials = Some(Arc::new(materials::MaterialAsset::new(&document)?));
             }
             Edit::ApplyOpticalConstruction { candidate } => {
@@ -777,44 +842,8 @@ impl Project {
                 }
                 snapshot.manufacturing_intent = Some(candidate.intent);
             }
-            Edit::ImportAppearancePalette { mut asset } => {
-                let staged = self
-                    .staged_appearance
-                    .lock()
-                    .map_err(|_| error(ProjectErrorCode::Io, "appearance staging lock poisoned"))?;
-                let staged: Vec<_> = staged.iter().filter_map(Weak::upgrade).collect();
-                if let Some(retained) = std::iter::once(self.current.as_ref())
-                    .chain(self.undo.iter().map(Arc::as_ref))
-                    .chain(self.redo.iter().map(Arc::as_ref))
-                    .chain(staged.iter().map(Arc::as_ref))
-                    .find_map(|state| state.appearance_palettes.get(&asset.record.canonical_hash))
-                {
-                    if retained.canonical.as_slice() != asset.canonical.as_slice() {
-                        return Err(error(
-                            ProjectErrorCode::CorruptAsset,
-                            "conflicting canonical palette identity",
-                        ));
-                    }
-                    asset = retained.clone();
-                }
-                snapshot.appearance_palettes.clear();
-                snapshot
-                    .appearance_palettes
-                    .insert(asset.record.canonical_hash.clone(), asset.clone());
-                let study = Arc::make_mut(&mut snapshot.appearance_study);
-                study.palette = Some(asset.record.clone());
-                study.report = None;
-                study.report_record = None;
-                study.selection = None;
-                if let Some(optical) = &mut study.optical {
-                    if optical.request.validate_palette(asset.prepared()).is_err() {
-                        study.optical = None;
-                    } else {
-                        optical.report = None;
-                        optical.report_record = None;
-                        optical.selection = None;
-                    }
-                }
+            Edit::ImportAppearancePalette { asset } => {
+                self.install_palette(&mut snapshot, asset)?
             }
             Edit::SetAppearanceTarget { target, limits } => {
                 let study = Arc::make_mut(&mut snapshot.appearance_study);

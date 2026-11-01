@@ -79,16 +79,37 @@ pub async fn load_optical(
             session_id: session,
         })
         .await?;
-    if !matches!(status,ProjectResponse::Status{info} if info.project_id==project && info.revision==revision && info.appearance_study.optical.as_ref().is_some_and(|s|s.report.as_ref()==Some(&record)))
-    {
-        return Err(ClientError::InvalidRequest(
-            "Discarded optical report from changed study inputs".into(),
+    let ProjectResponse::Status { info } = status else {
+        return Err(ClientError::Protocol(
+            "expected project status for optical capture".into(),
         ));
-    }
-    Ok(Arc::new(OpticalCapture {
+    };
+    let capture = OpticalCapture {
         project,
         revision,
         record,
         report,
-    }))
+    };
+    if info.revision != revision || !capture.is_current(&info) {
+        return Err(ClientError::InvalidRequest(
+            "Discarded optical report from changed study inputs".into(),
+        ));
+    }
+    Ok(Arc::new(capture))
+}
+impl OpticalCapture {
+    /// A fresh comparison precedes acceptance. A retained report may survive the acceptance revision.
+    pub fn is_current(&self, info: &spiling_contracts::project::ProjectInfo) -> bool {
+        info.project_id == self.project
+            && info.appearance_study.optical.as_ref().is_some_and(|study| {
+                (info.revision == self.revision || study.report.as_ref() == Some(&self.record))
+                    && info
+                        .appearance_study
+                        .palette
+                        .as_ref()
+                        .is_some_and(|palette| {
+                            self.report.matches_inputs(palette, &study.request).is_ok()
+                        })
+            })
+    }
 }

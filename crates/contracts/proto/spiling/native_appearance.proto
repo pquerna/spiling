@@ -152,3 +152,8 @@ message AppearancePaletteRow {
   AppearanceUnknownEvidence unknown = 7;
  }
 }
+
+message AppearancePaletteDocument {
+ string name = 1; string source_url = 2; string source_revision = 3;
+ string license = 4; string conversion = 5; repeated AppearancePaletteRow rows = 6;
+}

@@ -10,6 +10,7 @@ use spiling_contracts::{
 };
 
 mod comparison;
+mod recipes;
 
 struct ProjectDefinitionDraft {
     capture: (ProjectId, ProjectRevision),
@@ -18,6 +19,7 @@ struct ProjectDefinitionDraft {
 #[derive(Default)]
 pub(super) struct LibraryUi {
     pub open: bool,
+    recipes: recipes::RecipeUi,
     personal: bool,
     query: String,
     on_hand: bool,
@@ -54,6 +56,17 @@ impl LibraryUi {
         self.queued = Some(LibraryAction::Write(request));
     }
     fn refresh(&mut self) {
+        if self.recipes.active {
+            self.queued = Some(LibraryAction::Recipe(
+                crate::host::recipes::RecipeAction::Refresh {
+                    query: LibraryRecipeQuery {
+                        query: self.query.clone(),
+                        ..Default::default()
+                    },
+                },
+            ));
+            return;
+        }
         self.queued = Some(LibraryAction::Refresh(LibraryFilamentQuery {
             query: self.query.clone(),
             on_hand_only: self.on_hand,
@@ -205,6 +218,20 @@ impl Workbench {
         if !self.library.open {
             return;
         }
+        if self.library.recipes.active
+            && self.state.phase == Phase::Running
+            && !self.state.busy
+            && self.awaiting_serial.is_none()
+        {
+            let current = self
+                .state
+                .project
+                .as_ref()
+                .map(|p| (p.project_id.clone(), p.revision));
+            if state.recipe_project != current {
+                self.library.refresh();
+            }
+        }
         if !self.library.initialized && self.state.phase == Phase::Running && !self.state.busy {
             self.library.initialized = true;
             self.library.personal = true;
@@ -225,8 +252,15 @@ impl Workbench {
         let writable = ready && self.state.project.as_ref().is_some_and(|p| !p.read_only);
         let personal_write = ready && state.status.is_some() && self.library.pending.is_none();
         ui.horizontal(|ui| {
+            let before = (self.library.personal, self.library.recipes.active);
             ui.selectable_value(&mut self.library.personal, true, "My library");
             ui.selectable_value(&mut self.library.personal, false, "Project");
+            ui.separator();
+            ui.selectable_value(&mut self.library.recipes.active, false, "Filaments");
+            ui.selectable_value(&mut self.library.recipes.active, true, "Recipes");
+            if before != (self.library.personal, self.library.recipes.active) {
+                self.library.refresh();
+            }
             if ui
                 .add_enabled(ready, egui::Button::new("Refresh"))
                 .clicked()
@@ -236,6 +270,11 @@ impl Workbench {
         });
         if self.library.personal {
             self.library_header(ui, state, ready);
+        }
+        if self.library.recipes.active {
+            self.recipes_content(ui, state, ready, writable, personal_write);
+            self.library_pending(ui, state, ready);
+            return;
         }
         self.library_rows(ui, state, ready);
         ui.separator();
@@ -313,8 +352,10 @@ impl Workbench {
         ui.horizontal(|ui| {
             ui.label("Search");
             ui.text_edit_singleline(&mut self.library.query);
-            ui.checkbox(&mut self.library.on_hand, "On hand");
-            ui.checkbox(&mut self.library.include_archived, "Include archived");
+            if !self.library.recipes.active {
+                ui.checkbox(&mut self.library.on_hand, "On hand");
+                ui.checkbox(&mut self.library.include_archived, "Include archived");
+            }
             if ui.add_enabled(ready, egui::Button::new("Search")).clicked() {
                 self.library.refresh();
             }
@@ -463,6 +504,11 @@ impl Workbench {
         writable: bool,
         personal_write: bool,
     ) {
+        self.recipe_ingredient(
+            ui,
+            selected,
+            self.state.phase == Phase::Running && !self.state.busy,
+        );
         ui.horizontal_wrapped(|ui| {
             if !personal {
                 if ui

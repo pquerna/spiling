@@ -15,6 +15,7 @@ mod optical;
 mod optical_construction;
 mod process;
 pub mod project;
+mod recipe;
 mod replay;
 mod storage;
 mod surface_inspection;

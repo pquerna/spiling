@@ -241,7 +241,12 @@ impl EngineRpc {
             ProjectCommand::Save {
                 target: Some(path), ..
             } => path.validate(),
-            ProjectCommand::PutFilament { .. }
+            ProjectCommand::PutRecipe { .. }
+            | ProjectCommand::GetRecipe { .. }
+            | ProjectCommand::ListRecipes { .. }
+            | ProjectCommand::LoadRecipeStudy { .. }
+            | ProjectCommand::CaptureRecipe { .. }
+            | ProjectCommand::PutFilament { .. }
             | ProjectCommand::GetFilament { .. }
             | ProjectCommand::ListFilaments { .. }
             | ProjectCommand::Get { .. }

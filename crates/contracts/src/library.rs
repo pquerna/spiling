@@ -13,6 +13,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use ts_rs::TS;
 
+mod recipes;
+pub use recipes::*;
+#[cfg(test)]
+mod recipe_tests;
+
 pub const LIBRARY_SCHEMA: u32 = 1;
 pub const MAX_FILAMENTS: usize = 256;
 pub const MAX_FILAMENT_REVISIONS: usize = 1024;
@@ -210,7 +215,9 @@ impl RecipeDefinition {
         text(&self.name, 256)?;
         self.palette.validate().map_err(|e| e.to_string())?;
         self.request.validate().map_err(|e| e.to_string())?;
-        if self.ingredients.len() != self.request.materials.len() {
+        if self.ingredients.len() != self.request.materials.len()
+            || self.palette.rows.len() != self.ingredients.len()
+        {
             return Err("recipe ingredient count differs from optical request".into());
         }
         let mut keys = BTreeSet::new();
@@ -447,10 +454,9 @@ pub enum LibraryMutation {
         id: SpoolId,
     },
     PutRecipe {
-        id: RecipeId,
+        transfer: RecipeTransfer,
         #[serde(deserialize_with = "required_option")]
         expected: Option<SourceHash>,
-        definition: RecipeDefinition,
     },
     RemoveRecipe {
         id: RecipeId,
@@ -483,10 +489,7 @@ impl LibraryWrite {
             LibraryMutation::ArchiveFilament { filament, .. } => filament.validate()?,
             LibraryMutation::PutSpool { spool } => spool.validate()?,
             LibraryMutation::RemoveSpool { id } => validate_library_uuid(&id.0)?,
-            LibraryMutation::PutRecipe { id, definition, .. } => {
-                validate_library_uuid(&id.0)?;
-                definition.content_hash()?;
-            }
+            LibraryMutation::PutRecipe { transfer, .. } => transfer.validate()?,
             LibraryMutation::RemoveRecipe { id, .. } => validate_library_uuid(&id.0)?,
         }
         Ok(())

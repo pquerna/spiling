@@ -14,6 +14,8 @@ service Libraries {
  rpc ListFilaments(LibraryListFilamentsRequest) returns (LibraryFilamentPage);
  rpc GetFilament(LibraryGetFilamentRequest) returns (LibraryFilamentRevision);
  rpc ListSpools(LibraryListSpoolsRequest) returns (LibrarySpoolPage);
+ rpc ListRecipes(LibraryListRecipesRequest) returns (LibraryRecipePage);
+ rpc GetRecipe(LibraryGetRecipeRequest) returns (LibraryRecipeTransfer);
  rpc Write(LibraryWriteRequest) returns (LibraryWriteReceipt);
 }
 message LibraryLocationRequest { NativePath location = 1; }
@@ -84,6 +86,8 @@ message LibraryWriteRequest {
   LibraryArchiveFilament archive_filament = 5;
   LibrarySpoolRecord put_spool = 6;
   string remove_spool = 7;
+  LibraryPutRecipe put_recipe = 8;
+  LibraryRecipeRef remove_recipe = 9;
  }
 }
 enum LibraryPublication {
@@ -94,3 +98,18 @@ message LibraryWriteReceipt {
  LibraryIdentity identity = 1; string request_id = 2; LibraryPublication publication = 3;
  bool replayed = 4; optional string message = 5;
 }
+
+message LibraryRecipeRef { string id = 1; string revision = 2; }
+message LibraryRecipeIngredient { LibraryFilamentRef filament = 1; string palette_key = 2; }
+message LibraryRecipeDefinition {
+ string name = 1; repeated LibraryRecipeIngredient ingredients = 2;
+ AppearancePaletteDocument palette = 3; OpticalRequest request = 4;
+}
+message LibraryRecipeEntry { string id = 1; string revision = 2; LibraryRecipeDefinition definition = 3; }
+message LibraryRecipeTransfer { LibraryRecipeEntry recipe = 1; repeated LibraryFilamentRevision filaments = 2; }
+message LibraryRecipeSummary { LibraryRecipeRef reference = 1; string name = 2; uint32 ingredient_count = 3; AppearanceColor target = 4; }
+message LibraryListRecipesRequest { LibraryIdentity expected = 1; string query = 2; uint32 offset = 3; }
+message LibraryRecipePage { LibraryIdentity identity = 1; repeated LibraryRecipeSummary entries = 2; uint32 total_matches = 3; optional uint32 next_offset = 4; }
+message LibraryGetRecipeRequest { string library_id = 1; LibraryRecipeRef reference = 2; }
+message LibraryPutRecipe { LibraryRecipeTransfer transfer = 1; optional string expected = 2; }
+message RecipeStudyContext { OpticalPatch patch = 1; double cycle_origin_z_mm = 2; }

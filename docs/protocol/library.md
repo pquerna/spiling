@@ -111,8 +111,9 @@ Initial hard bounds are 256 variants, 1,024 retained revisions, 512 physical
 spools, 128 recipe records, 16 associated profiles per variant and 16 MiB for a
 material collection. One filament definition is at most 32 KiB. Typed control
 messages remain at most 64 KiB, and list pages contain at most 20 entries.
-Recipe storage records do not by themselves expose recipe transfer or matching;
-those consuming workflows require their own bounded service admission.
+Complete RecipeTransfer values are limited to 48 KiB of canonical domain JSON;
+actual typed protobuf controls still have the independent 64 KiB bound. A closure
+that cannot fit refuses explicitly; it never drops profiles or evidence.
 
 LibraryWrite carries a canonical nonzero request UUID and complete request digest.
 The latest 64 receipts are retained. Repeating an identical retained request
@@ -128,6 +129,65 @@ not proof that those bytes committed. A typed rejected write can be refreshed an
 reviewed as a new request. Transport failure never authorizes silently generating
 a new spool ID. Receipt eviction is bounded: a very old retry may require explicit
 inspection and cannot claim automatic deduplication.
+
+## Reusable recipes
+
+A target specifies the desired numeric color. A recipe captures two or three
+exact, distinct filament variants, an exact palette evidence row per ingredient,
+the source/license/conversion metadata, the named optical model, observation,
+physical layer cycle and bounded search parameters. A cycle has ordered material
+slots with millimetre heights, phase and Z origin; it is not a percentage blend.
+Recipe identity is a UUID plus the hash of its complete definition. A transfer
+contains exactly its ingredient revisions, including associated profiles and
+appearance declarations; missing, duplicated or unrelated dependencies refuse.
+
+Libraries.ListRecipes/GetRecipe and Projects.ListRecipes/GetRecipe return bounded
+summaries and complete typed transfers. PutRecipe atomically merges the closure.
+Existing variants keep their current revision, archive state, origins and stock;
+a required earlier revision is retained independently. Recipe replacement requires
+the expected prior recipe hash plus the library CAS or persistent project base
+revision. Name/color matching never substitutes another ingredient. Explicit
+library removal is revision-bound. Project mutations use normal Undo/Redo,
+recovery and save; a copied recipe remains usable with no personal file.
+
+CaptureRecipe requires a complete assessed report and explicitly retained
+selection. It binds each evidence key to an exact project ingredient, retains
+only those evidence rows and preserves their source metadata. For a retained
+candidate it captures that candidate's actual physical cycle. The template stores
+no previous success claim, native face, occurrence, loaded tool assignment or
+machine program. Explicit ingredient/evidence mapping is operator attribution,
+not proof of material calibration.
+
+LoadRecipeStudy requires a project-owned exact recipe and explicit new upright
+build-frame patch and cycle-origin context. It installs the captured palette,
+rebases both requested and searched cycle origins, and clears comparison reports
+and selections. Importing, capturing or loading an unused recipe preserves
+manufacturing output. Recompare uses the existing optical service; acceptance and
+ApplyOpticalConstruction remain distinct explicit operations. Only the existing
+bounded fixed-dual construction can be applied, with two loaded declarations and
+source-bound construction independently admitted by manufacturing. Three-material
+recipes are reference studies, not executable three-tool support.
+
+The native Materials window separates Filaments and Recipes within My library
+and Project. Add variants from either scope to a retained ingredient draft. Create
+an unassessed declaration recipe directly in either scope; a new declaration
+palette uses explicit sRGB as catalog estimates and leaves absent/non-sRGB optical
+evidence unknown. Its source points here to identify the declaration conversion;
+complete ingredient definitions retain the original operator/imported source.
+No RGB averaging or measured evidence is invented. Inspecting a Project recipe
+exposes its exact ingredients, target, cycle, provenance and editable study
+context. Fresh comparison results are inspectable before acceptance and remain
+bound to exact study inputs and the captured revision. Accepted results may survive
+the acceptance revision; unrelated stale comparisons do not become current.
+
+Save a copy to My library creates a new recipe ID in one personal transaction.
+It leaves the project unchanged. Copy complete recipe to Project imports the
+reviewed immutable closure in one project transaction; it does not automatically
+load, reassess or apply it. Duplicate recipe IDs refuse rather than silently
+replace. Updating a template through the typed PutRecipe operation requires its
+expected revision. Personal edits never silently update earlier projects. Stock-
+wide target search, reference catalog ingestion, print calibration and privacy
+export are separate future consumers.
 
 ## Consumer surfaces and reproduction
 
@@ -151,13 +211,24 @@ spiling-cli library filaments --on-hand --library /absolute/My-library.spil
 spiling-cli library add-spool FILAMENT_UUID --grams 530 --library /absolute/My-library.spil
 spiling-cli project open Job.spil --library /absolute/My-library.spil --library-use FILAMENT_UUID --save
 spiling-cli project inspect Job.spil --project-materials
+spiling-cli library recipes --library /absolute/My-library.spil
+spiling-cli library recipe RECIPE_UUID --library /absolute/My-library.spil
+spiling-cli project open Job.spil --library /absolute/My-library.spil --recipe-use RECIPE_UUID --save
+spiling-cli project open Job.spil --recipe-study RECIPE_UUID context.json --optical-compare --optical-accept requested --save
+spiling-cli project inspect Job.spil --project-recipes --recipe-inspect RECIPE_UUID
+spiling-cli project open Job.spil --library /absolute/My-library.spil --recipe-save RECIPE_UUID
 ```
 
 `--project-material-profile FILAMENT_UUID PROFILE_ID REVISION SETUP_JSON` applies
 an exact project-owned profile against an explicit installed setup. Rich inventory
 edits use a bounded inert LibraryWrite JSON file with `library write REQUEST_JSON`;
 the client maps it into typed protobuf, never a JSON RPC tunnel. Retain its request
-UUID when resolving uncertainty. No stock operation confers machine readiness.
+UUID when resolving uncertainty. Recipe import accepts a bounded complete
+RecipeTransfer JSON file through `--recipe-import`. After explicit report
+acceptance, `--recipe-capture NAME ingredients.json` captures the chosen cycle;
+the file contains RecipeIngredient values in evidence order. `--recipe-study`
+uses a RecipeStudyContext JSON file with `patch` and `cycle_origin_z_mm`.
+No stock operation confers machine readiness.
 
 Exercise storage/domain regressions with `cargo test -p spiling-core-ptac` and
 `cargo test -p spiling-core`. Actual child coverage is

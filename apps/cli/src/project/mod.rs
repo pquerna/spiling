@@ -71,6 +71,10 @@ enum OpticalChoice {
     Best,
     Candidate(u32),
 }
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Bounded ordered controls retain complete recipe operands inline without per-operation boxing"
+)]
 enum Operation {
     StorageMaintenance(StorageMaintenanceAction, Option<NativePath>),
     AppearancePalette(NativePath),
@@ -117,6 +121,13 @@ enum Operation {
     LibraryLocation(NativePath),
     UseLibraryFilament(String),
     ProjectMaterials,
+    ProjectRecipes,
+    RecipeImport(spiling_contracts::library::RecipeTransfer),
+    RecipeUse(String),
+    RecipeStudy(String, spiling_contracts::library::RecipeStudyContext),
+    RecipeSave(String),
+    RecipeInspect(String),
+    RecipeCapture(String, Vec<spiling_contracts::library::RecipeIngredient>),
     ProjectMaterialProfile(String, String, String, MaterialToolSetup),
     MaterialReview(Box<MaterialReviewRequest>),
     MaterialSearch(String),
@@ -471,6 +482,33 @@ pub fn parse(
                 spiling_contracts::library::validate_library_uuid(&id)?;
                 operations.push(Operation::UseLibraryFilament(id));
             }
+            Some("--project-recipes") => operations.push(Operation::ProjectRecipes),
+            Some("--recipe-import") => {
+                let transfer: spiling_contracts::library::RecipeTransfer =
+                    appearance_json(&mut args, "--recipe-import")?;
+                transfer.validate()?;
+                operations.push(Operation::RecipeImport(transfer));
+            }
+            Some("--recipe-use" | "--recipe-save" | "--recipe-inspect" | "--recipe-study") => {
+                let id = text(&mut args, "recipe UUID")?;
+                spiling_contracts::library::validate_library_uuid(&id)?;
+                operations.push(match arg.to_str().expect("matched UTF-8 recipe flag") {
+                    "--recipe-use" => Operation::RecipeUse(id),
+                    "--recipe-save" => Operation::RecipeSave(id),
+                    "--recipe-inspect" => Operation::RecipeInspect(id),
+                    _ => {
+                        let context: spiling_contracts::library::RecipeStudyContext =
+                            appearance_json(&mut args, "--recipe-study")?;
+                        context.validate()?;
+                        Operation::RecipeStudy(id, context)
+                    }
+                });
+            }
+            Some("--recipe-capture") => {
+                let name = text(&mut args, "--recipe-capture NAME")?;
+                let ingredients = appearance_json(&mut args, "--recipe-capture INGREDIENTS_JSON")?;
+                operations.push(Operation::RecipeCapture(name, ingredients));
+            }
             Some("--project-materials") => operations.push(Operation::ProjectMaterials),
             Some("--project-material-profile") => {
                 let id = text(&mut args, "--project-material-profile FILAMENT_UUID")?;
@@ -630,6 +668,9 @@ pub fn parse(
                     operation,
                     Operation::LibraryLocation(_)
                         | Operation::ProjectMaterials
+                        | Operation::ProjectRecipes
+                        | Operation::RecipeInspect(_)
+                        | Operation::RecipeSave(_)
                         | Operation::StorageMaintenance(StorageMaintenanceAction::Stats, None)
                         | Operation::MaterialReview(_)
                         | Operation::MaterialSearch(_)
@@ -710,6 +751,64 @@ async fn info(client: &mut EngineClient) -> Result<ProjectInfo, Error> {
         _ => Err("unexpected project status response".into()),
     }
 }
+async fn project_recipes(
+    client: &mut EngineClient,
+) -> Result<Vec<spiling_contracts::library::RecipeSummary>, Error> {
+    let revision = info(client).await?.revision;
+    let session_id = client.hello().session_id.clone();
+    let mut rows = Vec::new();
+    let mut offset = 0;
+    loop {
+        match client
+            .project(ProjectCommand::ListRecipes {
+                session_id: session_id.clone(),
+                base_revision: revision,
+                offset,
+            })
+            .await?
+        {
+            ProjectResponse::Recipes {
+                entries,
+                next_offset,
+                ..
+            } => {
+                rows.extend(entries);
+                if let Some(next) = next_offset {
+                    offset = next;
+                } else {
+                    break;
+                }
+            }
+            ProjectResponse::Error { error } => return Err(error.into()),
+            _ => return Err("expected project recipes".into()),
+        }
+    }
+    Ok(rows)
+}
+async fn project_recipe(
+    client: &mut EngineClient,
+    id: &str,
+) -> Result<spiling_contracts::library::RecipeTransfer, Error> {
+    let reference = project_recipes(client)
+        .await?
+        .into_iter()
+        .find(|r| r.reference.id.0 == id)
+        .ok_or("project recipe absent")?
+        .reference;
+    let revision = info(client).await?.revision;
+    match client
+        .project(ProjectCommand::GetRecipe {
+            session_id: client.hello().session_id.clone(),
+            base_revision: revision,
+            reference,
+        })
+        .await?
+    {
+        ProjectResponse::Recipe { transfer } => Ok(transfer),
+        ProjectResponse::Error { error } => Err(error.into()),
+        _ => Err("expected complete project recipe".into()),
+    }
+}
 async fn project_materials(
     client: &mut EngineClient,
 ) -> Result<Vec<spiling_contracts::library::LibraryFilamentSummary>, Error> {
@@ -748,7 +847,10 @@ async fn project_materials(
 }
 async fn complete(client: &mut EngineClient, response: ProjectResponse) -> Result<(), Error> {
     match response {
-        ProjectResponse::Filaments { .. } | ProjectResponse::Filament { .. } => {
+        ProjectResponse::Filaments { .. }
+        | ProjectResponse::Recipe { .. }
+        | ProjectResponse::Recipes { .. }
+        | ProjectResponse::Filament { .. } => {
             Err("unexpected material query response to project edit".into())
         }
         ProjectResponse::SceneChanged { .. } | ProjectResponse::Status { .. } => Ok(()),
@@ -1005,6 +1107,129 @@ async fn execute(
             Operation::LibraryLocation(path) => {
                 label = "library_location";
                 client.rpc().library_set_location(path).await?;
+            }
+            Operation::ProjectRecipes => {
+                label = "project_recipes";
+                history.push(
+                    serde_json::json!({"step": label, "entries": project_recipes(client).await?}),
+                );
+            }
+            Operation::RecipeInspect(id) => {
+                label = "recipe_inspect";
+                history.push(serde_json::json!({"step": label, "transfer": project_recipe(client, &id).await?}));
+            }
+            Operation::RecipeImport(transfer) => {
+                label = "recipe_import";
+                let base_revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::PutRecipe {
+                        session_id: session.clone(),
+                        base_revision,
+                        transfer,
+                        expected: None,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
+            Operation::RecipeUse(id) => {
+                use spiling_contracts::library::*;
+                label = "recipe_use";
+                let identity = client
+                    .rpc()
+                    .library_status()
+                    .await?
+                    .identity
+                    .ok_or("My library is empty")?;
+                let mut query = LibraryRecipeQuery {
+                    expected: Some(identity.clone()),
+                    ..Default::default()
+                };
+                let reference = loop {
+                    let page = client.rpc().library_recipes(&query).await?;
+                    if let Some(row) = page.entries.into_iter().find(|r| r.reference.id.0 == id) {
+                        break row.reference;
+                    }
+                    if let Some(offset) = page.next_offset {
+                        query.offset = offset;
+                    } else {
+                        return Err("recipe absent from My library".into());
+                    }
+                };
+                let transfer = client
+                    .rpc()
+                    .library_recipe(&identity.id, &reference)
+                    .await?;
+                let base_revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::PutRecipe {
+                        session_id: session.clone(),
+                        base_revision,
+                        transfer,
+                        expected: None,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
+            Operation::RecipeStudy(id, context) => {
+                label = "recipe_study";
+                let transfer = project_recipe(client, &id).await?;
+                let base_revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::LoadRecipeStudy {
+                        session_id: session.clone(),
+                        base_revision,
+                        reference: transfer.recipe.reference(),
+                        context,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
+            Operation::RecipeCapture(name, ingredients) => {
+                label = "recipe_capture";
+                let base_revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::CaptureRecipe {
+                        session_id: session.clone(),
+                        base_revision,
+                        id: spiling_contracts::library::RecipeId(uuid::Uuid::new_v4().to_string()),
+                        name,
+                        ingredients,
+                        expected: None,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
+            Operation::RecipeSave(id) => {
+                use spiling_contracts::library::*;
+                label = "recipe_save";
+                let mut transfer = project_recipe(client, &id).await?;
+                transfer.recipe.id = RecipeId(uuid::Uuid::new_v4().to_string());
+                let status = client.rpc().library_status().await?;
+                let request = LibraryWrite {
+                    library_id: status.identity.as_ref().map(|i| i.id.clone()),
+                    base_revision: status.identity.as_ref().map_or(0, |i| i.revision),
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    mutation: LibraryMutation::PutRecipe {
+                        transfer: transfer.clone(),
+                        expected: None,
+                    },
+                };
+                history.push(serde_json::json!({"step":"recipe_save_request", "request": request}));
+                // Retain the exact authorized request if publication becomes uncertain.
+                let receipt = client.rpc().library_write(&request).await.map_err(|e| {
+                    format!(
+                        "{e}; resolve original request {}",
+                        serde_json::to_string(&request).unwrap_or_default()
+                    )
+                })?;
+                history.push(serde_json::json!({"step":label, "reference": transfer.recipe.reference(), "receipt":receipt}));
+                if receipt.publication != LibraryPublication::Confirmed {
+                    return Err(format!(
+                        "recipe publication uncertain; resolve original request {}",
+                        serde_json::to_string(&request)?
+                    )
+                    .into());
+                }
             }
             Operation::ProjectMaterials => {
                 label = "project_materials";

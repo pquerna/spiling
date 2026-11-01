@@ -287,3 +287,308 @@ async fn personal_inventory_is_shared_but_project_copies_reopen_without_it() {
     assert!(!workspace.0.join("Missing.spil").exists());
     reopened.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn complete_recipes_copy_atomically_reassess_and_reopen_without_personal_storage() {
+    use spiling_contracts::{appearance::AppearanceColor, optical::OpticalSelection};
+    let workspace = Workspace::new();
+    let mut client = spawn(&workspace.0, "recipe-one", "My library.spil").await;
+    assert!(
+        client
+            .rpc()
+            .library_recipes(&LibraryRecipeQuery::default())
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    assert!(!workspace.0.join("My library.spil").exists());
+    for count in [2usize, 3] {
+        let filaments = (0..count)
+            .map(|i| {
+                let mut definition = definition(format!("Recipe {count} ingredient {i}"));
+                definition.appearance = Some(DeclaredAppearance {
+                    color: AppearanceColor::Srgb {
+                        channels: [0.1 + i as f64 * 0.3, 0.3, 0.5],
+                    },
+                    source: DefinitionSource::Operator,
+                });
+                FilamentRevision {
+                    reference: FilamentRef {
+                        id: FilamentId(uuid::Uuid::new_v4().to_string()),
+                        revision: definition.content_hash().unwrap(),
+                    },
+                    definition,
+                }
+            })
+            .collect();
+        let transfer = RecipeTransfer::from_declarations(
+            RecipeId(uuid::Uuid::new_v4().to_string()),
+            format!("{count}-ingredient recipe"),
+            filaments,
+            AppearanceColor::Srgb { channels: [0.5; 3] },
+            vec![0.2; count],
+        )
+        .unwrap();
+        let request = write(
+            &client,
+            LibraryMutation::PutRecipe {
+                transfer: transfer.clone(),
+                expected: None,
+            },
+        )
+        .await;
+        assert!(client.rpc().library_write(&request).await.unwrap().replayed);
+        let identity = client
+            .rpc()
+            .library_status()
+            .await
+            .unwrap()
+            .identity
+            .unwrap();
+        assert_eq!(
+            client
+                .rpc()
+                .library_recipe(&identity.id, &transfer.recipe.reference())
+                .await
+                .unwrap(),
+            transfer
+        );
+        assert_eq!(
+            client
+                .rpc()
+                .library_spools(&LibrarySpoolQuery::default())
+                .await
+                .unwrap()
+                .total_matches,
+            0
+        );
+        let before = info(&client).await;
+        let session_id = client.hello().session_id.clone();
+        assert!(matches!(
+            client
+                .rpc()
+                .project(ProjectCommand::PutRecipe {
+                    session_id: session_id.clone(),
+                    base_revision: before.revision,
+                    transfer: transfer.clone(),
+                    expected: None
+                })
+                .await
+                .unwrap(),
+            ProjectResponse::Status { .. }
+        ));
+        let copied = info(&client).await;
+        assert_eq!(copied.revision.0, before.revision.0 + 1);
+        assert!(
+            copied.appearance_study.optical.is_none()
+                || copied
+                    .appearance_study
+                    .optical
+                    .as_ref()
+                    .unwrap()
+                    .report
+                    .is_some()
+        );
+        assert!(matches!(
+            client
+                .rpc()
+                .project(ProjectCommand::PutRecipe {
+                    session_id: session_id.clone(),
+                    base_revision: before.revision,
+                    transfer: transfer.clone(),
+                    expected: None
+                })
+                .await,
+            Err(ClientError::Project(ProjectError {
+                code: ProjectErrorCode::StaleRevision,
+                ..
+            }))
+        ));
+        assert_eq!(info(&client).await.revision, copied.revision);
+        let context = RecipeStudyContext {
+            patch: transfer.recipe.definition.request.patch,
+            cycle_origin_z_mm: 0.03,
+        };
+        assert!(matches!(
+            client
+                .rpc()
+                .project(ProjectCommand::LoadRecipeStudy {
+                    session_id: session_id.clone(),
+                    base_revision: copied.revision,
+                    reference: transfer.recipe.reference(),
+                    context: context.clone()
+                })
+                .await
+                .unwrap(),
+            ProjectResponse::Status { .. }
+        ));
+        let study_info = info(&client).await;
+        let study = study_info.appearance_study.optical.unwrap();
+        assert!(study.report.is_none() && study.selection.is_none());
+        assert_eq!(study.request.recipe.origin_z_mm, 0.03);
+        let ProjectResponse::OperationAccepted { operation } = client
+            .rpc()
+            .project(ProjectCommand::CompareOptical {
+                session_id: session_id.clone(),
+                base_revision: study_info.revision,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("compare")
+        };
+        let JobResult::OpticalCompared {
+            record, resource, ..
+        } = wait(&client, operation).await
+        else {
+            panic!("compared result")
+        };
+        let report = client
+            .fetch_optical_report(&record, &resource)
+            .await
+            .unwrap();
+        assert!(report.is_complete());
+        assert!(report.has_selection(&OpticalSelection::Requested));
+        assert!(matches!(
+            client
+                .rpc()
+                .project(ProjectCommand::AcceptOpticalReport {
+                    session_id: session_id.clone(),
+                    base_revision: study_info.revision,
+                    report_hash: record.hash,
+                    selection: Some(OpticalSelection::Requested)
+                })
+                .await
+                .unwrap(),
+            ProjectResponse::Status { .. }
+        ));
+        let current = info(&client).await;
+        assert!(
+            current
+                .appearance_study
+                .optical
+                .unwrap()
+                .selection
+                .is_some()
+        );
+        assert!(matches!(
+            client
+                .rpc()
+                .project(ProjectCommand::LoadRecipeStudy {
+                    session_id,
+                    base_revision: current.revision,
+                    reference: transfer.recipe.reference(),
+                    context
+                })
+                .await
+                .unwrap(),
+            ProjectResponse::Status { .. }
+        ));
+        assert!(
+            info(&client)
+                .await
+                .appearance_study
+                .optical
+                .unwrap()
+                .report
+                .is_none()
+        );
+        if count == 2 {
+            let current = info(&client).await;
+            let ProjectResponse::OperationAccepted { operation } = client
+                .rpc()
+                .project(ProjectCommand::CompareOptical {
+                    session_id: client.hello().session_id.clone(),
+                    base_revision: current.revision,
+                })
+                .await
+                .unwrap()
+            else {
+                panic!("compare")
+            };
+            let JobResult::OpticalCompared { record, .. } = wait(&client, operation).await else {
+                panic!("result")
+            };
+            client
+                .rpc()
+                .project(ProjectCommand::AcceptOpticalReport {
+                    session_id: client.hello().session_id.clone(),
+                    base_revision: current.revision,
+                    report_hash: record.hash,
+                    selection: Some(OpticalSelection::Requested),
+                })
+                .await
+                .unwrap();
+        }
+    }
+    let ProjectResponse::OperationAccepted { operation } = client
+        .rpc()
+        .project(ProjectCommand::Save {
+            session_id: client.hello().session_id.clone(),
+            base_revision: scene_revision(&client).await,
+            target: Some(native(&workspace.0.join("Recipes.spil"))),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("save")
+    };
+    wait(&client, operation).await;
+    client.shutdown().await.unwrap();
+    std::fs::rename(
+        workspace.0.join("My library.spil"),
+        workspace.0.join("Unavailable.spil"),
+    )
+    .unwrap();
+    let mut reopened = spawn(&workspace.0, "recipe-two", "Missing.spil").await;
+    let ProjectResponse::OperationAccepted { operation } = reopened
+        .rpc()
+        .project(ProjectCommand::Open {
+            session_id: reopened.hello().session_id.clone(),
+            base_revision: scene_revision(&reopened).await,
+            path: native(&workspace.0.join("Recipes.spil")),
+            read_only: true,
+            recover_previous: false,
+            discard_changes: false,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("open")
+    };
+    wait(&reopened, operation).await;
+    let current = info(&reopened).await;
+    assert!(current.read_only);
+    let ProjectResponse::Recipes { entries, total, .. } = reopened
+        .rpc()
+        .project(ProjectCommand::ListRecipes {
+            session_id: reopened.hello().session_id.clone(),
+            base_revision: current.revision,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("recipes")
+    };
+    assert_eq!(total, 2);
+    for entry in entries {
+        let ProjectResponse::Recipe { transfer } = reopened
+            .rpc()
+            .project(ProjectCommand::GetRecipe {
+                session_id: reopened.hello().session_id.clone(),
+                base_revision: current.revision,
+                reference: entry.reference,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("transfer")
+        };
+        assert_eq!(transfer.filaments.len(), entry.ingredient_count as usize);
+        transfer.validate().unwrap();
+    }
+    assert!(!workspace.0.join("Missing.spil").exists());
+    reopened.shutdown().await.unwrap();
+}

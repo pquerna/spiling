@@ -2254,3 +2254,268 @@ fn project_library_comparison_preserves_copies_and_rejects_stale_promotion() {
     assert!(wrong_project.project.as_ref().unwrap().materials.is_none());
     assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
 }
+
+#[test]
+#[ignore = "actual recipe engine services; requires SPILING_TEST_ENGINE"]
+fn recipe_library_copy_and_fresh_study_use_native_host_services() {
+    use super::recipes::RecipeAction;
+    use spiling_contracts::{appearance::AppearanceColor, library::*};
+    fn act(host: &Host, action: LibraryAction) -> Snapshot {
+        let serial = host.snapshot().serial;
+        host.library(action).unwrap();
+        idle_after(host, serial)
+    }
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    let initial = wait(&host, |s| s.phase != Phase::Starting);
+    assert_eq!(initial.phase, Phase::Running);
+    act(
+        &host,
+        LibraryAction::SetLocation(native(&root.path().join("My library.spil"))),
+    );
+    let filaments = (0..2)
+        .map(|i| {
+            let definition = FilamentDefinition {
+                name: format!("Host ingredient {i}"),
+                material: None,
+                color_name: None,
+                appearance: Some(DeclaredAppearance {
+                    color: AppearanceColor::Srgb {
+                        channels: [0.2 + i as f64 * 0.4, 0.4, 0.8],
+                    },
+                    source: DefinitionSource::Operator,
+                }),
+                profiles: vec![],
+                source: DefinitionSource::Operator,
+            };
+            FilamentRevision {
+                reference: FilamentRef {
+                    id: FilamentId(uuid::Uuid::new_v4().to_string()),
+                    revision: definition.content_hash().unwrap(),
+                },
+                definition,
+            }
+        })
+        .collect();
+    let transfer = RecipeTransfer::from_declarations(
+        RecipeId(uuid::Uuid::new_v4().to_string()),
+        "Native reusable recipe".into(),
+        filaments,
+        AppearanceColor::Srgb { channels: [0.5; 3] },
+        vec![0.2; 2],
+    )
+    .unwrap();
+    let saved = act(
+        &host,
+        LibraryAction::Write(LibraryWrite {
+            library_id: None,
+            base_revision: 0,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            mutation: LibraryMutation::PutRecipe {
+                transfer: transfer.clone(),
+                expected: None,
+            },
+        }),
+    );
+    assert_eq!(
+        saved.library.receipt.as_ref().unwrap().publication,
+        LibraryPublication::Confirmed
+    );
+    let refreshed = act(
+        &host,
+        LibraryAction::Recipe(RecipeAction::Refresh {
+            query: LibraryRecipeQuery::default(),
+        }),
+    );
+    assert_eq!(
+        refreshed
+            .library
+            .personal_recipes
+            .as_ref()
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    let inspected = act(
+        &host,
+        LibraryAction::Recipe(RecipeAction::Inspect {
+            personal: true,
+            reference: transfer.recipe.reference(),
+        }),
+    );
+    assert_eq!(
+        inspected
+            .library
+            .recipe_selection
+            .as_ref()
+            .unwrap()
+            .transfer,
+        transfer
+    );
+    let p = inspected.project.as_ref().unwrap();
+    let capture = (p.project_id.clone(), p.revision);
+    let copied = act(
+        &host,
+        LibraryAction::Recipe(RecipeAction::CopyToProject {
+            project: capture.clone(),
+            transfer: transfer.clone(),
+        }),
+    );
+    assert_eq!(
+        copied
+            .project
+            .as_ref()
+            .unwrap()
+            .materials
+            .as_ref()
+            .unwrap()
+            .recipe_count,
+        1
+    );
+    assert_eq!(
+        copied
+            .project
+            .as_ref()
+            .unwrap()
+            .materials
+            .as_ref()
+            .unwrap()
+            .filament_count,
+        2
+    );
+    assert!(
+        copied
+            .project
+            .as_ref()
+            .unwrap()
+            .appearance_study
+            .optical
+            .is_none()
+    );
+    let rejected = act(
+        &host,
+        LibraryAction::Recipe(RecipeAction::CopyToProject {
+            project: capture,
+            transfer: transfer.clone(),
+        }),
+    );
+    assert!(
+        rejected
+            .problems
+            .iter()
+            .any(|p| p.contains("project changed"))
+    );
+    let refreshed = act(
+        &host,
+        LibraryAction::Recipe(RecipeAction::Refresh {
+            query: LibraryRecipeQuery::default(),
+        }),
+    );
+    assert_eq!(refreshed.library.project_recipes.len(), 1);
+    let inspected = act(
+        &host,
+        LibraryAction::Recipe(RecipeAction::Inspect {
+            personal: false,
+            reference: transfer.recipe.reference(),
+        }),
+    );
+    assert!(
+        inspected
+            .library
+            .recipe_selection
+            .as_ref()
+            .unwrap()
+            .project
+            .is_some()
+    );
+    let serial = inspected.serial;
+    host.project(ProjectCommand::LoadRecipeStudy {
+        session_id: inspected.hello.as_ref().unwrap().session_id.clone(),
+        base_revision: inspected.project.as_ref().unwrap().revision,
+        reference: transfer.recipe.reference(),
+        context: RecipeStudyContext {
+            patch: transfer.recipe.definition.request.patch,
+            cycle_origin_z_mm: 0.03,
+        },
+    })
+    .unwrap();
+    let loaded = idle_after(&host, serial);
+    let study = loaded
+        .project
+        .as_ref()
+        .unwrap()
+        .appearance_study
+        .optical
+        .as_ref()
+        .unwrap();
+    assert!(study.report.is_none() && study.selection.is_none());
+    let serial = loaded.serial;
+    host.project(ProjectCommand::CompareOptical {
+        session_id: loaded.hello.as_ref().unwrap().session_id.clone(),
+        base_revision: loaded.project.as_ref().unwrap().revision,
+    })
+    .unwrap();
+    let report = wait(&host, |s| {
+        s.serial > serial
+            && !s.busy
+            && !s.active_operation
+            && !s.optical_loading
+            && s.optical_report.is_some()
+    });
+    let capture = report.optical_report.as_ref().unwrap();
+    assert!(capture.report.is_complete());
+    assert!(capture.is_current(report.project.as_ref().unwrap()));
+    assert!(
+        report
+            .project
+            .as_ref()
+            .unwrap()
+            .appearance_study
+            .optical
+            .as_ref()
+            .unwrap()
+            .report
+            .is_none(),
+        "fresh comparison must be available before acceptance"
+    );
+    let serial = report.serial;
+    host.project(ProjectCommand::AcceptOpticalReport {
+        session_id: report.hello.as_ref().unwrap().session_id.clone(),
+        base_revision: report.project.as_ref().unwrap().revision,
+        report_hash: capture.record.hash.clone(),
+        selection: Some(spiling_contracts::optical::OpticalSelection::Requested),
+    })
+    .unwrap();
+    let accepted = idle_after(&host, serial);
+    assert!(
+        accepted
+            .optical_report
+            .as_ref()
+            .unwrap()
+            .is_current(accepted.project.as_ref().unwrap())
+    );
+    assert!(
+        accepted
+            .project
+            .as_ref()
+            .unwrap()
+            .appearance_study
+            .optical
+            .as_ref()
+            .unwrap()
+            .selection
+            .is_some()
+    );
+    let closing = send(&host, Action::Close);
+    host.confirm(closing.confirmation.unwrap().id, true)
+        .unwrap();
+    wait(&host, |s| s.phase == Phase::Closed);
+}

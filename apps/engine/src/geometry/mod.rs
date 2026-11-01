@@ -1561,6 +1561,105 @@ impl Runtime {
     }
     fn project_control_inner(&mut self, command: ProjectCommand) -> Result<Reply, ProjectError> {
         match command {
+            ProjectCommand::PutRecipe {
+                session_id,
+                base_revision,
+                transfer,
+                expected,
+            } => {
+                self.metadata_base(&session_id, base_revision)?;
+                self.commit_metadata_edit(Edit::PutRecipe { transfer, expected })
+            }
+            ProjectCommand::LoadRecipeStudy {
+                session_id,
+                base_revision,
+                reference,
+                context,
+            } => {
+                self.metadata_base(&session_id, base_revision)?;
+                self.commit_metadata_edit(Edit::LoadRecipeStudy { reference, context })
+            }
+            ProjectCommand::CaptureRecipe {
+                session_id,
+                base_revision,
+                id,
+                name,
+                ingredients,
+                expected,
+            } => {
+                self.metadata_base(&session_id, base_revision)?;
+                self.commit_metadata_edit(Edit::CaptureRecipe {
+                    id,
+                    name,
+                    ingredients,
+                    expected,
+                })
+            }
+            ProjectCommand::GetRecipe {
+                session_id,
+                base_revision,
+                reference,
+            } => {
+                if session_id != self.session_id || base_revision != self.project.info().revision {
+                    return Err(project_error(
+                        ProjectErrorCode::StaleRevision,
+                        "project recipe query is stale",
+                    ));
+                }
+                let collection = self
+                    .project
+                    .snapshot()
+                    .materials
+                    .as_ref()
+                    .map(|a| a.document())
+                    .transpose()?
+                    .unwrap_or_default();
+                let transfer = collection
+                    .recipe_transfer(&reference)
+                    .map_err(|e| project_error(ProjectErrorCode::InvalidProject, &e))?;
+                Ok(Reply::Project(ProjectResponse::Recipe { transfer }))
+            }
+            ProjectCommand::ListRecipes {
+                session_id,
+                base_revision,
+                offset,
+            } => {
+                use spiling_contracts::library::*;
+                if session_id != self.session_id || base_revision != self.project.info().revision {
+                    return Err(project_error(
+                        ProjectErrorCode::StaleRevision,
+                        "project recipe query is stale",
+                    ));
+                }
+                let collection = self
+                    .project
+                    .snapshot()
+                    .materials
+                    .as_ref()
+                    .map(|a| a.document())
+                    .transpose()?
+                    .unwrap_or_default();
+                let total = collection.recipes.len() as u32;
+                if offset > total {
+                    return Err(project_error(
+                        ProjectErrorCode::InvalidProject,
+                        "recipe offset exceeds collection",
+                    ));
+                }
+                let entries = collection
+                    .recipes
+                    .iter()
+                    .skip(offset as usize)
+                    .take(MAX_LIBRARY_PAGE as usize)
+                    .map(RecipeSummary::from)
+                    .collect::<Vec<_>>();
+                let end = offset + entries.len() as u32;
+                Ok(Reply::Project(ProjectResponse::Recipes {
+                    entries,
+                    total,
+                    next_offset: (end < total).then_some(end),
+                }))
+            }
             ProjectCommand::PutFilament {
                 session_id,
                 base_revision,

@@ -168,6 +168,33 @@ impl rpc::libraries_server::Libraries for LibraryService {
                 .await?,
         )
     }
+    async fn list_recipes(
+        &self,
+        request: Request<rpc::LibraryListRecipesRequest>,
+    ) -> Result<Response<rpc::LibraryRecipePage>, Status> {
+        let query: LibraryRecipeQuery = request.into_inner().try_into().map_err(bad)?;
+        let store = self.store()?;
+        reply(
+            self.run(move |cancel| store.list_recipes(&query, cancel))
+                .await?,
+        )
+    }
+    async fn get_recipe(
+        &self,
+        request: Request<rpc::LibraryGetRecipeRequest>,
+    ) -> Result<Response<rpc::LibraryRecipeTransfer>, Status> {
+        let request = request.into_inner();
+        validate_library_uuid(&request.library_id).map_err(bad)?;
+        let reference: RecipeRef = native::required(request.reference, "recipe reference")
+            .and_then(TryInto::try_into)
+            .map_err(bad)?;
+        let library = LibraryId(request.library_id);
+        let store = self.store()?;
+        reply(
+            self.run(move |cancel| store.recipe(&library, &reference, cancel))
+                .await?,
+        )
+    }
     async fn write(
         &self,
         request: Request<rpc::LibraryWriteRequest>,

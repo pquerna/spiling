@@ -35,13 +35,18 @@ impl Workbench {
             self.study = StudyUi {
                 project: Some(project.project_id.clone()),
                 revision: Some(project.revision),
+                selection: project
+                    .appearance_study
+                    .optical
+                    .as_ref()
+                    .and_then(|s| s.selection),
                 ..Default::default()
             };
         }
         ui.heading("Retained optical study");
         ui.weak("Named reference estimates. Backing optics, calibration and physical color remain unqualified. Manufacturing independently admits every construction.");
         let Some(study) = &project.appearance_study.optical else {
-            ui.label("No retained optical study in this project. Studies and palette authoring are available through the shared CLI.");
+            ui.label("No retained optical study. In Materials > Recipes, create or copy a recipe, inspect it in Project, then load it with an explicit study context.");
             return;
         };
         ui.label(format!(
@@ -54,7 +59,7 @@ impl Workbench {
         ));
         if ui
             .add_enabled(
-                ready && !self.state.optical_loading,
+                ready && !self.state.optical_loading && study.report.is_some(),
                 egui::Button::new("Load retained reference report"),
             )
             .clicked()
@@ -79,7 +84,7 @@ impl Workbench {
         let Some(capture) = &self.state.optical_report else {
             return;
         };
-        if capture.project != project.project_id || study.report.as_ref() != Some(&capture.record) {
+        if !capture.is_current(&project) {
             return;
         }
         let status = match capture.report.status {
@@ -226,7 +231,11 @@ impl Workbench {
                     .construction
                     .filter(|i| *i < job.surface_constructions.len()),
             )
-            .zip(study.selection)
+            .zip(
+                study
+                    .selection
+                    .filter(|_| study.report.as_ref() == Some(&capture.record)),
+            )
             .map(|(((a, b), index), selection)| ApplyOpticalConstruction {
                 construction_index: index as u16,
                 report_hash: capture.record.hash.clone(),

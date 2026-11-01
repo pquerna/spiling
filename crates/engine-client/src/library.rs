@@ -164,6 +164,54 @@ impl EngineRpc {
         }
         Ok(result)
     }
+    pub async fn library_recipes(
+        &self,
+        query: &LibraryRecipeQuery,
+    ) -> Result<LibraryRecipePage, ClientError> {
+        let wire = query.clone().try_into().map_err(invalid)?;
+        let result: LibraryRecipePage = self
+            .libraries()
+            .list_recipes(self.request(checked(wire)?))
+            .await
+            .map_err(rpc_error)?
+            .into_inner()
+            .try_into()
+            .map_err(ClientError::Protocol)?;
+        page(
+            query.expected.as_ref(),
+            result.identity.as_ref(),
+            query.offset,
+            result.entries.len(),
+            result.total_matches,
+            result.next_offset,
+            MAX_LIBRARY_PAGE as usize,
+        )?;
+        Ok(result)
+    }
+    pub async fn library_recipe(
+        &self,
+        library: &LibraryId,
+        reference: &RecipeRef,
+    ) -> Result<RecipeTransfer, ClientError> {
+        validate_library_uuid(&library.0).map_err(invalid)?;
+        let result: RecipeTransfer = self
+            .libraries()
+            .get_recipe(self.request(checked(rpc::LibraryGetRecipeRequest {
+                library_id: library.0.clone(),
+                reference: Some(reference.clone().try_into().map_err(invalid)?),
+            })?))
+            .await
+            .map_err(rpc_error)?
+            .into_inner()
+            .try_into()
+            .map_err(ClientError::Protocol)?;
+        if result.recipe.reference() != *reference {
+            return Err(ClientError::Protocol(
+                "recipe reply differs from exact request".into(),
+            ));
+        }
+        Ok(result)
+    }
     pub async fn library_write(
         &self,
         request: &LibraryWrite,

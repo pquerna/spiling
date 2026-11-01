@@ -427,6 +427,20 @@ impl TryFrom<rpc::LibraryWriteRequest> for LibraryWrite {
                 spool: v.try_into()?,
             },
             M::RemoveSpool(id) => LibraryMutation::RemoveSpool { id: SpoolId(id) },
+            M::PutRecipe(v) => LibraryMutation::PutRecipe {
+                transfer: required(v.transfer, "recipe transfer")?.try_into()?,
+                expected: v
+                    .expected
+                    .map(|s| SourceHash::parse(s).map_err(|e| e.to_string()))
+                    .transpose()?,
+            },
+            M::RemoveRecipe(v) => {
+                let reference: RecipeRef = v.try_into()?;
+                LibraryMutation::RemoveRecipe {
+                    id: reference.id,
+                    expected: reference.revision,
+                }
+            }
         };
         let value = Self {
             library_id: v.library_id.map(LibraryId),
@@ -461,9 +475,19 @@ impl TryFrom<LibraryWrite> for rpc::LibraryWriteRequest {
             }
             LibraryMutation::PutSpool { spool } => M::PutSpool(spool.try_into()?),
             LibraryMutation::RemoveSpool { id } => M::RemoveSpool(id.0),
-            LibraryMutation::PutRecipe { .. } | LibraryMutation::RemoveRecipe { .. } => {
-                return Err("recipe transfers require the bounded recipe operation".into());
+            LibraryMutation::PutRecipe { transfer, expected } => {
+                M::PutRecipe(rpc::LibraryPutRecipe {
+                    transfer: Some(transfer.try_into()?),
+                    expected: expected.map(|h| h.as_str().into()),
+                })
             }
+            LibraryMutation::RemoveRecipe { id, expected } => M::RemoveRecipe(
+                RecipeRef {
+                    id,
+                    revision: expected,
+                }
+                .try_into()?,
+            ),
         };
         Ok(Self {
             library_id: v.library_id.map(|id| id.0),

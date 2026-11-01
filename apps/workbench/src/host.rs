@@ -5,6 +5,7 @@
 //! Native admission and the sole frontend owner of EngineClient. No engine domain logic lives here.
 use crate::manufacture;
 pub mod library;
+pub mod recipes;
 use crate::scene::{Scene, Section};
 pub use library::LibraryAction;
 use spiling_contracts::manufacturing::{ManufacturingCommand, ManufacturingResponse};
@@ -986,15 +987,12 @@ impl Actor {
         if changed {
             self.clear_review();
             self.state.bed_proposal = None;
-            if self.state.optical_report.as_ref().is_some_and(|r| {
-                r.project != project.project_id
-                    || info
-                        .appearance_study
-                        .optical
-                        .as_ref()
-                        .and_then(|s| s.report.as_ref())
-                        != Some(&r.record)
-            }) {
+            if self
+                .state
+                .optical_report
+                .as_ref()
+                .is_some_and(|report| !report.is_current(&project))
+            {
                 self.state.optical_report = None;
             }
             Arc::make_mut(&mut self.state.manufacturing).preflight = None;
@@ -1428,9 +1426,12 @@ impl Actor {
                         .await;
                 }
             }
-            Ok(ProjectResponse::Filament { .. } | ProjectResponse::Filaments { .. }) => {
-                self.problem("Unexpected material response to project action")
-            }
+            Ok(
+                ProjectResponse::Filament { .. }
+                | ProjectResponse::Filaments { .. }
+                | ProjectResponse::Recipe { .. }
+                | ProjectResponse::Recipes { .. },
+            ) => self.problem("Unexpected material response to project action"),
             Ok(ProjectResponse::Error { error }) => {
                 self.problem(error.to_string());
                 self.refresh_after_failure().await;
@@ -1589,9 +1590,9 @@ impl Actor {
                 Receipt::Project,
                 Some(JobResult::OpticalCompared {
                     project_id,
+                    captured_revision,
                     record,
                     resource,
-                    ..
                 }),
             ) if completed => {
                 self.refresh_after_failure().await;
@@ -1600,6 +1601,7 @@ impl Actor {
                 }
                 if let (Some(client), Some(project)) = (&self.client, &self.state.project)
                     && project.project_id == *project_id
+                    && project.revision == *captured_revision
                 {
                     self.optical_task = Some(tokio::spawn(crate::assets::load_optical(
                         client.rpc(),

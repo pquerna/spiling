@@ -4,7 +4,10 @@
 //! Immutable portable material bytes, shared by current, history and prepared snapshots.
 use crate::{Snapshot, invalid};
 use spiling_contracts::{geometry::SourceHash, library::*, project::ProjectError};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 pub const MAX_RETAINED_MATERIAL_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug)]
 pub struct MaterialAsset {
@@ -45,6 +48,27 @@ impl MaterialAsset {
     pub fn document(&self) -> Result<MaterialCollection, ProjectError> {
         MaterialCollection::decode(&self.bytes).map_err(invalid)
     }
+}
+/// Project entries/recipes and personal spools share one exact-revision reachability census.
+pub(crate) fn prune_revisions(
+    collection: &mut MaterialCollection,
+    external: impl IntoIterator<Item = FilamentRef>,
+) {
+    let needed: BTreeSet<_> = collection
+        .entries
+        .iter()
+        .map(|e| e.current.clone())
+        .chain(
+            collection
+                .recipes
+                .iter()
+                .flat_map(|r| r.definition.ingredients.iter().map(|i| i.filament.clone())),
+        )
+        .chain(external)
+        .collect();
+    collection
+        .revisions
+        .retain(|r| needed.contains(&r.reference));
 }
 pub(crate) fn retained_bytes<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> usize {
     let allocations: BTreeMap<_, _> = snapshots

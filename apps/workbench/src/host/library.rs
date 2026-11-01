@@ -5,6 +5,10 @@ use super::*;
 use spiling_contracts::{geometry::SourceHash, library::*};
 #[derive(Debug, Clone, Default)]
 pub struct State {
+    pub personal_recipes: Option<LibraryRecipePage>,
+    pub project_recipes: Vec<RecipeSummary>,
+    pub recipe_project: Option<(ProjectId, ProjectRevision)>,
+    pub recipe_selection: Option<super::recipes::Selection>,
     pub status: Option<LibraryStatus>,
     pub personal: Option<LibraryFilamentPage>,
     pub project: Vec<LibraryFilamentSummary>,
@@ -54,6 +58,7 @@ impl DefinitionComparison {
 }
 #[derive(Debug, Clone)]
 pub enum LibraryAction {
+    Recipe(super::recipes::RecipeAction),
     Refresh(LibraryFilamentQuery),
     Inspect {
         personal: bool,
@@ -78,6 +83,13 @@ pub enum LibraryAction {
 impl Host {
     pub fn library(&self, action: LibraryAction) -> Result<(), String> {
         match &action {
+            LibraryAction::Recipe(action) => match action {
+                super::recipes::RecipeAction::Refresh { query } => query.validate()?,
+                super::recipes::RecipeAction::Inspect { reference, .. } => reference.validate()?,
+                super::recipes::RecipeAction::CopyToProject { transfer, .. } => {
+                    transfer.validate()?
+                }
+            },
             LibraryAction::Write(request) => {
                 request.validate()?;
                 if serde_json::to_vec(request)
@@ -116,6 +128,7 @@ impl Actor {
     async fn library_inner(&mut self, action: LibraryAction) -> Result<(), ClientError> {
         let rpc = self.client.as_ref().expect("connected client").rpc();
         match action {
+            LibraryAction::Recipe(action) => self.recipe_action(action).await?,
             LibraryAction::Refresh(query) => {
                 // Project-owned content remains browsable even if personal storage fails.
                 let personal = async {

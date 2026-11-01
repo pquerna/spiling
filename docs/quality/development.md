@@ -642,3 +642,20 @@ spools, captures a profile into a native cube job, then deletes its original
 source/profile files and removes library access before fresh project replay/export.
 It checks all four exported artifacts. Use the existing native resource controls;
 these are software checks, not measured stock, color or machine qualification.
+
+`node tools/smoke-recipes.mjs` exercises a selected candidate captured from a real
+optical comparison, saves its complete closure to My library, copies it to another
+native project, and requires an explicit new patch assessment and loaded-material
+application. It removes the source file and personal library before fresh compile,
+independent replay and four-file export, then reopens and recompiles. G-code and
+verification must match byte-for-byte; normalized plans differ only in recorded
+query-work charge, and provenance only in the captured input revision of each
+compile. All other fields compare strictly. The runner retains both raw exports,
+observed differences, receipts and executable hashes under ignored `.cache/recipes-*`.
+The work counter records cache/refinement history; normalization does not change
+admission budgets or discard geometry/path evidence.
+
+Recipe host coverage is `SPILING_TEST_ENGINE=PATH cargo test -p spiling-workbench
+recipe_library_copy_and_fresh_study_use_native_host_services -- --ignored`.
+It exercises fresh comparison display before acceptance, explicit acceptance and
+stale project-copy refusal through the native host, separately from GUI rendering.

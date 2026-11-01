@@ -165,9 +165,12 @@ impl Actor {
             }
             Ok(ProjectResponse::Status { info }) => receipt = Some(info),
             Ok(ProjectResponse::SceneChanged { .. }) => {}
-            Ok(ProjectResponse::Filament { .. } | ProjectResponse::Filaments { .. }) => {
-                self.problem("Unexpected material query response to project edit")
-            }
+            Ok(
+                ProjectResponse::Filament { .. }
+                | ProjectResponse::Filaments { .. }
+                | ProjectResponse::Recipe { .. }
+                | ProjectResponse::Recipes { .. },
+            ) => self.problem("Unexpected material query response to project edit"),
             Ok(ProjectResponse::Error { error }) => self.problem(error.to_string()),
             Err(error) => self.failure(error).await,
         }

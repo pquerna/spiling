@@ -22,6 +22,84 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
     request_id(id)?;
     use rpc::project_request::Command as C;
     let (session_id, command) = match command {
+        ProjectCommand::PutRecipe {
+            session_id,
+            base_revision,
+            transfer,
+            expected,
+        } => (
+            session_id,
+            C::PutRecipe(rpc::ProjectPutRecipeRequest {
+                base_revision: base_revision.0,
+                transfer: Some(transfer.try_into()?),
+                expected: expected.map(|h| h.as_str().into()),
+            }),
+        ),
+        ProjectCommand::GetRecipe {
+            session_id,
+            base_revision,
+            reference,
+        } => (
+            session_id,
+            C::GetRecipe(rpc::ProjectGetRecipeRequest {
+                base_revision: base_revision.0,
+                reference: Some(reference.try_into()?),
+            }),
+        ),
+        ProjectCommand::ListRecipes {
+            session_id,
+            base_revision,
+            offset,
+        } => (
+            session_id,
+            C::ListRecipes(rpc::ProjectListRecipesRequest {
+                base_revision: base_revision.0,
+                offset,
+            }),
+        ),
+        ProjectCommand::LoadRecipeStudy {
+            session_id,
+            base_revision,
+            reference,
+            context,
+        } => (
+            session_id,
+            C::LoadRecipeStudy(rpc::ProjectLoadRecipeStudyRequest {
+                base_revision: base_revision.0,
+                reference: Some(reference.try_into()?),
+                context: Some(context.try_into()?),
+            }),
+        ),
+        ProjectCommand::CaptureRecipe {
+            session_id,
+            base_revision,
+            id,
+            name,
+            ingredients,
+            expected,
+        } => {
+            crate::library::validate_library_uuid(&id.0)?;
+            if name.trim().is_empty()
+                || name.len() > 256
+                || name.chars().any(char::is_control)
+                || !(2..=3).contains(&ingredients.len())
+            {
+                return Err("invalid captured recipe name/ingredients".into());
+            }
+            (
+                session_id,
+                C::CaptureRecipe(rpc::ProjectCaptureRecipeRequest {
+                    base_revision: base_revision.0,
+                    id: id.0,
+                    name,
+                    ingredients: ingredients
+                        .into_iter()
+                        .map(TryInto::try_into)
+                        .collect::<Result<_, _>>()?,
+                    expected: expected.map(|h| h.as_str().into()),
+                }),
+            )
+        }
         ProjectCommand::PutFilament {
             session_id,
             base_revision,
@@ -366,6 +444,56 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
         let session_id = session_parent(&v.parent)?;
         use rpc::project_request::Command as C;
         Ok(match required(v.command, "project command")? {
+            C::PutRecipe(v) => Self::PutRecipe {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                transfer: required(v.transfer, "recipe transfer")?.try_into()?,
+                expected: v
+                    .expected
+                    .map(|s| SourceHash::parse(s).map_err(|e| e.to_string()))
+                    .transpose()?,
+            },
+            C::GetRecipe(v) => Self::GetRecipe {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                reference: required(v.reference, "recipe reference")?.try_into()?,
+            },
+            C::ListRecipes(v) => Self::ListRecipes {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                offset: v.offset,
+            },
+            C::LoadRecipeStudy(v) => Self::LoadRecipeStudy {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                reference: required(v.reference, "recipe reference")?.try_into()?,
+                context: required(v.context, "recipe context")?.try_into()?,
+            },
+            C::CaptureRecipe(v) => {
+                crate::library::validate_library_uuid(&v.id)?;
+                if v.name.trim().is_empty()
+                    || v.name.len() > 256
+                    || v.name.chars().any(char::is_control)
+                    || !(2..=3).contains(&v.ingredients.len())
+                {
+                    return Err("invalid captured recipe name/ingredients".into());
+                }
+                Self::CaptureRecipe {
+                    session_id,
+                    base_revision: ProjectRevision(v.base_revision),
+                    id: crate::library::RecipeId(v.id),
+                    name: v.name,
+                    ingredients: v
+                        .ingredients
+                        .into_iter()
+                        .map(TryInto::try_into)
+                        .collect::<Result<_, _>>()?,
+                    expected: v
+                        .expected
+                        .map(|s| SourceHash::parse(s).map_err(|e| e.to_string()))
+                        .transpose()?,
+                }
+            }
             C::PutFilament(v) => Self::PutFilament {
                 session_id,
                 base_revision: ProjectRevision(v.base_revision),
@@ -687,6 +815,22 @@ impl TryFrom<rpc::ProjectReply> for ProjectResponse {
     fn try_from(v: rpc::ProjectReply) -> Result<Self, String> {
         use rpc::project_reply::Response as R;
         Ok(match required(v.response, "project reply")? {
+            R::Recipe(v) => Self::Recipe {
+                transfer: v.try_into()?,
+            },
+            R::Recipes(v) => {
+                let entries = v
+                    .entries
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<Vec<_>, _>>()?;
+                crate::library::validate_recipe_page(&entries, v.total, v.next_offset)?;
+                Self::Recipes {
+                    entries,
+                    total: v.total,
+                    next_offset: v.next_offset,
+                }
+            }
             R::Filament(v) => Self::Filament {
                 revision: v.try_into()?,
             },
@@ -724,6 +868,22 @@ impl TryFrom<ProjectResponse> for rpc::ProjectReply {
         use rpc::project_reply::Response as R;
         Ok(Self {
             response: Some(match v {
+                ProjectResponse::Recipe { transfer } => R::Recipe(transfer.try_into()?),
+                ProjectResponse::Recipes {
+                    entries,
+                    total,
+                    next_offset,
+                } => {
+                    crate::library::validate_recipe_page(&entries, total, next_offset)?;
+                    R::Recipes(rpc::ProjectRecipePage {
+                        entries: entries
+                            .into_iter()
+                            .map(TryInto::try_into)
+                            .collect::<Result<_, _>>()?,
+                        total,
+                        next_offset,
+                    })
+                }
                 ProjectResponse::Filament { revision } => R::Filament(revision.try_into()?),
                 ProjectResponse::Filaments {
                     entries,

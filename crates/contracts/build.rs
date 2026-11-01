@@ -3,12 +3,13 @@
 // Licensed under the Open Software License version 3.0
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Bind watched inputs to this checkout even when several worktrees share a target directory.
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut prost = tonic_prost_build::Config::new();
     prost.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);
     // Keep bounded protobuf control oneofs inline rather than adding per-call boxes.
     for oneof in [
         ".spiling.engine.ArtifactSummary.kind",
-        ".spiling.engine.LibraryWriteRequest.mutation",
         ".spiling.engine.ManufacturingRequest.command",
         ".spiling.engine.ManufacturingReply.result",
         ".spiling.engine.AppearancePaletteRow.evidence",
@@ -31,13 +32,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::path::PathBuf::from("proto/spiling/native_material.proto"),
             std::path::PathBuf::from("proto/vendor/google/longrunning/operations.proto"),
             std::path::PathBuf::from("proto/vendor/google/bytestream/bytestream.proto"),
-        ],
+        ]
+        .map(|path| manifest.join(path)),
         &[
-            std::path::PathBuf::from("proto/vendor"),
-            std::path::PathBuf::from("proto"),
+            manifest.join("proto/vendor"),
+            manifest.join("proto"),
             protoc_bin_vendored::include_path()?,
         ],
     )?;
-    println!("cargo:rerun-if-changed=proto");
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest.join("proto").display()
+    );
     Ok(())
 }

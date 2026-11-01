@@ -47,6 +47,11 @@ service Projects {
 message ProjectRequest {
  string parent = 1;
  oneof command {
+  ProjectPutRecipeRequest put_recipe = 17;
+  ProjectGetRecipeRequest get_recipe = 18;
+  ProjectListRecipesRequest list_recipes = 19;
+  ProjectLoadRecipeStudyRequest load_recipe_study = 20;
+  ProjectCaptureRecipeRequest capture_recipe = 21;
   ProjectPutFilamentRequest put_filament = 14;
   ProjectGetFilamentRequest get_filament = 15;
   ProjectListFilamentsRequest list_filaments = 16;
@@ -170,7 +175,7 @@ message SurfaceImageImportedResult { ProjectInfo info = 1; SurfaceImageRecord im
 message SurfaceImagePreparedResult { string project_id = 1; uint32 captured_revision = 2; SurfaceImageRecord record = 3; Artifact resource = 4; }
 message ProjectInfo {string project_id = 1; uint32 revision = 2; optional uint32 saved_revision = 3; optional string path_label = 4; bool dirty = 5; bool save_uncertain = 6; bool read_only = 7; bool recovered_previous = 8; bool can_undo = 9; bool can_redo = 10; SurfaceOverlays surface_overlays = 11; ProcessDocument process_document = 12; repeated ResolvedOccurrenceProcess resolved_process = 13; AppearanceStudyInfo appearance_study = 14; MaterialCollectionRecord materials = 15;}
 message ProjectSceneChanged {ProjectInfo info = 1; SceneSummary summary = 2;}
-message ProjectReply {oneof response {ProjectInfo status = 1; ProjectSceneChanged scene_changed = 2; ProjectFilamentPage filaments = 3; LibraryFilamentRevision filament = 4;}}
+message ProjectReply {oneof response {ProjectInfo status = 1; ProjectSceneChanged scene_changed = 2; ProjectFilamentPage filaments = 3; LibraryFilamentRevision filament = 4; LibraryRecipeTransfer recipe = 5; ProjectRecipePage recipes = 6;}}
 message ImportAppearancePaletteRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath source = 4; }
 message CompareAppearanceRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }
 message GetAppearanceReportRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }
@@ -206,3 +211,10 @@ message OpticalConstructionAppliedResult {
  ProjectInfo info = 1;
  uint32 construction_index = 2;
 }
+
+message ProjectPutRecipeRequest { uint32 base_revision = 1; LibraryRecipeTransfer transfer = 2; optional string expected = 3; }
+message ProjectGetRecipeRequest { uint32 base_revision = 1; LibraryRecipeRef reference = 2; }
+message ProjectListRecipesRequest { uint32 base_revision = 1; uint32 offset = 2; }
+message ProjectRecipePage { repeated LibraryRecipeSummary entries = 1; uint32 total = 2; optional uint32 next_offset = 3; }
+message ProjectLoadRecipeStudyRequest { uint32 base_revision = 1; LibraryRecipeRef reference = 2; RecipeStudyContext context = 3; }
+message ProjectCaptureRecipeRequest { uint32 base_revision = 1; string id = 2; string name = 3; repeated LibraryRecipeIngredient ingredients = 4; optional string expected = 5; }

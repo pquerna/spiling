@@ -5,7 +5,7 @@ use super::{Command, Error, Options, set_once};
 use spiling_contracts::{geometry::NativePath, library::*};
 use spiling_engine_client::EngineRpc;
 use std::{ffi::OsString, path::PathBuf};
-pub(super) const USAGE: &str = "library (status|filaments|spools|add-filament NAME|add-spool FILAMENT_UUID|write REQUEST_JSON) [--library ABSOLUTE_PATH] [--query TEXT] [--on-hand] [--hex RRGGBB] [--grams N] [--engine PATH]. Unknown color, quantity and manufacturing identity remain unspecified. Rich definitions and explicit revision-bound edits use bounded LibraryWrite JSON; repeat its request_id to resolve an uncertain publication.";
+pub(super) const USAGE: &str = "library (status|filaments|recipes|recipe RECIPE_UUID|spools|add-filament NAME|add-spool FILAMENT_UUID|write REQUEST_JSON) [--library ABSOLUTE_PATH] [--query TEXT] [--on-hand] [--hex RRGGBB] [--grams N] [--engine PATH]. Unknown color, quantity and manufacturing identity remain unspecified. Rich definitions and explicit revision-bound edits use bounded LibraryWrite JSON; repeat its request_id to resolve an uncertain publication.";
 pub(super) struct Workflow {
     location: Option<PathBuf>,
     action: Action,
@@ -14,6 +14,8 @@ enum Action {
     Status,
     Filaments(LibraryFilamentQuery),
     Spools,
+    Recipes(LibraryRecipeQuery),
+    Recipe(String),
     AddFilament(Box<FilamentDefinition>),
     AddSpool(String, Option<f64>),
     Write(Box<LibraryWrite>),
@@ -26,7 +28,7 @@ pub(super) fn parse(
     let action = args.next().ok_or(USAGE)?;
     let argument = if matches!(
         action.to_str(),
-        Some("add-filament" | "add-spool" | "write")
+        Some("add-filament" | "add-spool" | "write" | "recipe")
     ) {
         Some(args.next().ok_or(USAGE)?)
     } else {
@@ -110,6 +112,18 @@ pub(super) fn parse(
         Some("status") => Action::Status,
         Some("filaments") => Action::Filaments(query),
         Some("spools") => Action::Spools,
+        Some("recipes") => Action::Recipes(LibraryRecipeQuery {
+            query: query.query,
+            ..Default::default()
+        }),
+        Some("recipe") => {
+            let id = argument
+                .unwrap()
+                .into_string()
+                .map_err(|_| "recipe UUID requires UTF-8")?;
+            validate_library_uuid(&id)?;
+            Action::Recipe(id)
+        }
         Some("add-filament") => Action::AddFilament(Box::new(FilamentDefinition {
             name: argument
                 .unwrap()
@@ -178,6 +192,40 @@ pub(super) async fn execute(rpc: &EngineRpc, flow: Workflow) -> Result<serde_jso
                 }
             }
             serde_json::to_value(rows)?
+        }
+        Action::Recipes(mut query) => {
+            let mut rows = Vec::new();
+            loop {
+                let page = rpc.library_recipes(&query).await?;
+                rows.extend(page.entries);
+                if let Some(offset) = page.next_offset {
+                    query.expected = page.identity;
+                    query.offset = offset;
+                } else {
+                    break;
+                }
+            }
+            serde_json::to_value(rows)?
+        }
+        Action::Recipe(id) => {
+            let status = rpc.library_status().await?;
+            let identity = status.identity.ok_or("My library is empty")?;
+            let mut query = LibraryRecipeQuery {
+                expected: Some(identity.clone()),
+                ..Default::default()
+            };
+            let reference = loop {
+                let page = rpc.library_recipes(&query).await?;
+                if let Some(r) = page.entries.into_iter().find(|r| r.reference.id.0 == id) {
+                    break r.reference;
+                }
+                if let Some(offset) = page.next_offset {
+                    query.offset = offset;
+                } else {
+                    return Err("recipe is absent".into());
+                }
+            };
+            serde_json::to_value(rpc.library_recipe(&identity.id, &reference).await?)?
         }
         Action::Spools => {
             let mut rows = Vec::new();

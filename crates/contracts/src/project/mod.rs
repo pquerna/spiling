@@ -313,6 +313,36 @@ pub struct ProjectInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectCommand {
+    PutRecipe {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        transfer: crate::library::RecipeTransfer,
+        expected: Option<SourceHash>,
+    },
+    GetRecipe {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        reference: crate::library::RecipeRef,
+    },
+    ListRecipes {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        offset: u32,
+    },
+    LoadRecipeStudy {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        reference: crate::library::RecipeRef,
+        context: crate::library::RecipeStudyContext,
+    },
+    CaptureRecipe {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        id: crate::library::RecipeId,
+        name: String,
+        ingredients: Vec<crate::library::RecipeIngredient>,
+        expected: Option<SourceHash>,
+    },
     PutFilament {
         session_id: SessionId,
         base_revision: ProjectRevision,
@@ -458,6 +488,14 @@ pub enum ProjectCommand {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectResponse {
+    Recipe {
+        transfer: crate::library::RecipeTransfer,
+    },
+    Recipes {
+        entries: Vec<crate::library::RecipeSummary>,
+        total: u32,
+        next_offset: Option<u32>,
+    },
     Filaments {
         entries: Vec<crate::library::LibraryFilamentSummary>,
         total: u32,
