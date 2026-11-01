@@ -45,6 +45,14 @@ build is required. A suitable Vulkan driver must be installed separately.
 | `pnpm package`                    | Clean-source release binaries, source/notices, portable archive and Linux Debian package |
 | `node tools/run.mjs provenance`   | Collect native dependency and data-tool provenance/notices                               |
 
+`pnpm test` builds its matching engine prerequisite, then runs tooling tests,
+every Rust workspace test target (`--no-fail-fast`), the CLI smoke, TypeScript
+protocol tests and the independent G-code observer tests sequentially. Failures
+are summarized together and keep the overall command unsuccessful; later suites
+still run. A failed prerequisite build or an operator interruption stops the run.
+Keep the complete output when handing a failing gate to its owning module.
+`pnpm test:native` separately exercises the actual-child host regressions.
+
 Build the matching engine and workbench before real-surface acceptance. Do not
 replace binaries while their window/engine is live. Reuse one disk-backed target
 and honor `CARGO_TARGET_DIR`; development/test profiles disable debug information

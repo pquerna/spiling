@@ -75,6 +75,28 @@ export function run(command, args, options = {}) {
   });
 }
 
+// Test suites have independent acceptance surfaces. A failed suite must remain
+// fatal without hiding later evidence; interruption still stops new children.
+export async function runTestSuites(suites) {
+  const failures = [];
+  for (const [name, execute] of suites) {
+    if (stopping) throw new Error("Test run interrupted");
+    try {
+      await execute();
+    } catch (error) {
+      if (stopping) throw error;
+      failures.push({ name, error });
+      console.error(`Test suite ${name} failed: ${error.message}`);
+    }
+  }
+  if (failures.length) {
+    throw new AggregateError(
+      failures.map(({ error }) => error),
+      `Failed test suites:\n${failures.map(({ name, error }) => `  ${name}: ${error.message}`).join("\n")}`,
+    );
+  }
+}
+
 async function hostTriple() {
   const version = await run("rustc", ["-vV"], { capture: true });
   const host = /^host: (.+)$/m.exec(version)?.[1];
@@ -551,10 +573,22 @@ async function main() {
       break;
     case "test":
       await stageEngine();
-      await run("cargo", ["test", "--locked", "--workspace"], { env: testEnvironment });
-      await cliSmoke();
-      await run("pnpm", ["--filter", "@spiling/protocol", "test"]);
-      await run("node", ["--import", "tsx", "--test", "tools/gcode-parity/test.mjs"]);
+      await runTestSuites([
+        ["tooling", () => run("node", ["--test", "tools/run.test.mjs"])],
+        [
+          "Rust workspace",
+          () =>
+            run("cargo", ["test", "--locked", "--workspace", "--no-fail-fast"], {
+              env: testEnvironment,
+            }),
+        ],
+        ["CLI smoke", cliSmoke],
+        ["TypeScript protocol", () => run("pnpm", ["--filter", "@spiling/protocol", "test"])],
+        [
+          "G-code parity",
+          () => run("node", ["--import", "tsx", "--test", "tools/gcode-parity/test.mjs"]),
+        ],
+      ]);
       break;
     case "smoke:cli":
       await cliSmoke();
