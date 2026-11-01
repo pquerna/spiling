@@ -14,6 +14,30 @@ export type NativeOperationView = { name: string, session_id: SessionId, capture
 
 export type Hello = { instance_id: string, engine_build: string, kernel: string, geometry_capabilities: Array<string>, max_control_bytes: number, max_binary_bytes: number, pid: number, session_id: SessionId, kernel_identity: KernelIdentity, geometry_limits: GeometryLimits, manufacturing_capabilities: Array<string>, project_capabilities: Array<string>, };
 
+export type ColorNamingMode = "exact" | "nearest" | "descriptive";
+
+export type ColorModifier = "dark" | "light" | "muted" | "pale" | "vivid";
+
+export type ColorName = { label: string,
+/**
+ * Original xkcd survey spelling; a reference sample, not a material ID.
+ */
+reference_name: string, reference_srgb8: [number, number, number], modifier: ColorModifier | null, generated: boolean,
+/**
+ * Euclidean distance in normalized OKLab, not a calibrated confidence.
+ */
+distance_oklab: number, };
+
+export type NamedColor = { srgb8: [number, number, number], hex: string,
+/**
+ * Exact mode has no name when the input is absent from the pinned survey.
+ */
+name: ColorName | null, };
+
+export type ColorNamingRequest = { mode: ColorNamingMode, colors: Array<[number, number, number]>, };
+
+export type ColorNamingResponse = { algorithm_version: number, dataset_sha256: string, mode: ColorNamingMode, colors: Array<NamedColor>, };
+
 export type AppearanceColor = { "encoding": "srgb", channels: [number, number, number], } | { "encoding": "xyz_y1", channels: [number, number, number], } | { "encoding": "xyz_y100", channels: [number, number, number], } | { "encoding": "d65_lab", channels: [number, number, number], };
 
 export type AppearanceIlluminant = "d65" | "d50" | "unknown";

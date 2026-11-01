@@ -26,6 +26,7 @@ serde_json.workspace = true
 serde.workspace = true
 tokio.workspace = true
 spiling-contracts.workspace = true
+spiling-appearance.workspace = true
 spiling-engine-client.workspace = true
 
 [features]

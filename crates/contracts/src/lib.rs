@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub mod appearance;
+pub mod color_naming;
 pub mod display;
 pub mod geometry;
 pub mod manufacturing;
@@ -47,7 +48,7 @@ pub use spiling::engine as rpc;
 
 pub const ENGINE_BUILD_ID: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    ";project10;manufacturing11;surface3;planner53;emitter11;verifier17;splr6;fixed-dual2;optical-prusa-v7-007bb922-cycle2"
+    ";project10;manufacturing11;surface3;planner53;emitter11;verifier17;splr6;fixed-dual2;optical-prusa-v7-007bb922-cycle2;color-names1-xkcd450cca88"
 );
 pub const PROJECT_FORMAT_CAPABILITY: &str = "recoverable_projects_v10";
 pub const MANUFACTURING_SCHEMA_CAPABILITY: &str = "manufacturing_schema11";

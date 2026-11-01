@@ -380,6 +380,21 @@ impl Workbench {
                 ui.checkbox(&mut view.material, "Declared material tints");
             }
         });
+        if view.material
+            && let Some(colors) =
+                crate::replay::declared_tool_colors(&review.capture.provenance.workflow)
+        {
+            ui.collapsing("Declared tool-color legend", |ui| {
+                for (tool, rgba) in colors.iter().enumerate() {
+                    ui.label(format!("Tool T{tool} · catalog estimate"));
+                    ui::color_chip(
+                        ui,
+                        [rgba[0], rgba[1], rgba[2]].map(|c| (c * 255.0).round() as u8),
+                        None,
+                    );
+                }
+            });
+        }
         if let Some(display) = &review.display {
             if display.beads.is_err() {
                 view.beads = false;

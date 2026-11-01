@@ -226,6 +226,15 @@ async function provenance() {
   }
   const sourceComponents = [
     {
+      name: "xkcd-color-survey",
+      source: "https://xkcd.com/color/rgb.txt",
+      revision: "sha256:450cca88fa6fa9a1e79c969969e05e6900b41a94f0a3a5f134e3d0b79077f890",
+      license: "CC0-1.0",
+      path: "crates/appearance/data/xkcd-rgb.txt",
+      modifications:
+        "None; 949 original survey samples, names and source license declaration retained.",
+    },
+    {
       name: "prusa-fdm-mixer",
       source: "https://github.com/prusa3d/prusa-fdm-mixer",
       revision: "007bb922994cdf985c324cb734f6504e805f6790",
@@ -235,9 +244,21 @@ async function provenance() {
         "Allocation-free Rust port of the pinned TypeScript v7 reference functions; no measurement dataset imported.",
     },
   ];
-  await copyNotices(
-    join(root, "crates", "appearance"),
-    join(directory, "third-party", "source", "prusa-fdm-mixer-007bb922"),
+  const prusaNotices = join(directory, "third-party", "source", "prusa-fdm-mixer-007bb922");
+  await mkdir(prusaNotices, { recursive: true });
+  await copyFile(
+    join(root, "crates", "appearance", "LICENSE-prusa-fdm-mixer.txt"),
+    join(prusaNotices, "LICENSE-prusa-fdm-mixer.txt"),
+  );
+  const xkcdNotices = join(directory, "third-party", "source", "xkcd-color-survey-450cca88");
+  await mkdir(xkcdNotices, { recursive: true });
+  await copyFile(
+    join(root, "crates", "appearance", "LICENSE-xkcd-CC0.txt"),
+    join(xkcdNotices, "LICENSE-CC0.txt"),
+  );
+  await copyFile(
+    join(root, "crates", "appearance", "data", "xkcd-rgb.txt.license"),
+    join(xkcdNotices, "PROVENANCE.txt"),
   );
   await copyNoticeDirectory(
     join(root, "apps", "workbench", "licenses", "egui"),

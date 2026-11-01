@@ -11,7 +11,9 @@ impl eframe::App for Gallery {
             .fill(self.theme.tokens().canvas)
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
-                spiling_workbench::ui::gallery(ui, &mut self.theme);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    spiling_workbench::ui::gallery(ui, &mut self.theme);
+                });
             });
         if before != self.theme {
             self.theme.apply(ui.ctx());

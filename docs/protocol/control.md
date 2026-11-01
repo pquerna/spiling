@@ -34,6 +34,12 @@ An optional nonzero UUID `request_id` follows [AIP-155](https://google.aip.dev/1
 
 List uses bounded keyset pagination with parent-bound opaque tokens and default 20/max 50 items, following [AIP-158](https://google.aip.dev/158). A token is not a fixed historical snapshot: newly inserted operations can alter subsequent pages. Negative page sizes or wrong-parent tokens fail. Request parameters other than the token/page size must remain consistent.
 
+## Derived color names
+
+`Engine.NameColors` is an authenticated read-only unary query independent of project/session revision. It takes 1..64 explicitly encoded opaque sRGB8 samples and a required Exact, Nearest or Descriptive mode; unspecified/unknown modes and channels above 255 refuse. Ordered replies retain samples, uppercase hex, optional exact-match name, reference sample/name, optional single modifier, generated-label provenance and normalized OKLab distance. Exact misses return no name. The reply binds the naming algorithm version and pinned dataset digest; clients validate these plus requested mode/order/count. Distance is a numerical description, not a confidence probability or physical color qualification.
+
+The pure implementation is `spiling-appearance::naming`, shared with native presentation components. The complete unmodified xkcd CC0 survey supplies exact/nearest names; descriptive mode uses a deliberately smaller common vocabulary, compatible survey modifiers and deterministic lightness/chroma heuristics. Near-neutrals have no inferred hue. Names never replace declared material/product identity, modify color channels, alter optical ranking or invalidate manufacturing inputs. Survey and naming versions identify presentation semantics separately from planner/emitter/format identities. See the retained dataset provenance and [license guidance](../license.md).
+
 ## Lifecycle, progress and cancellation
 
 ```text

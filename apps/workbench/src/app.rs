@@ -63,6 +63,7 @@ pub struct Workbench {
     process: process::ProcessUi,
     surface: surface::SurfaceUi,
     study: study::StudyUi,
+    colors: ui::ColorInspector,
     queued_image: Option<crate::assets::ImageRequest>,
 }
 impl Workbench {
@@ -122,6 +123,7 @@ impl Workbench {
             process: process::ProcessUi::default(),
             surface: surface::SurfaceUi::default(),
             study: study::StudyUi::default(),
+            colors: ui::ColorInspector::default(),
             queued_image: None,
         }
     }

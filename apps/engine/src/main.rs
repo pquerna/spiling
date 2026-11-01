@@ -38,6 +38,19 @@ impl engine_server::Engine for Service {
     async fn get_engine_info(&self, _: Request<()>) -> Result<Response<EngineInfo>, Status> {
         Ok(Response::new(self.info.clone()))
     }
+    async fn name_colors(
+        &self,
+        req: Request<NameColorsRequest>,
+    ) -> Result<Response<NameColorsReply>, Status> {
+        let request =
+            spiling_contracts::color_naming::ColorNamingRequest::try_from(req.into_inner())
+                .map_err(Status::invalid_argument)?;
+        let reply =
+            spiling_appearance::naming::name_colors(&request).map_err(Status::invalid_argument)?;
+        Ok(Response::new(
+            NameColorsReply::try_from(&reply).map_err(Status::internal)?,
+        ))
+    }
     async fn shutdown(&self, _: Request<()>) -> Result<Response<()>, Status> {
         self.stop.send_replace(true);
         Ok(Response::new(()))

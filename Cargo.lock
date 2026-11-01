@@ -3842,6 +3842,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "spiling-contracts",
 ]
 
@@ -4007,6 +4008,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "spiling-appearance",
  "spiling-contracts",
  "spiling-engine-client",
  "tempfile",

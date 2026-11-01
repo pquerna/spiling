@@ -103,6 +103,32 @@ impl EngineRpc {
             .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
             .max_encoding_message_size(MAX_CONTROL_BYTES as usize)
     }
+    pub async fn name_colors(
+        &self,
+        request: &spiling_contracts::color_naming::ColorNamingRequest,
+    ) -> Result<spiling_contracts::color_naming::ColorNamingResponse, ClientError> {
+        let wire = spiling_contracts::rpc::NameColorsRequest::try_from(request)
+            .map_err(ClientError::Protocol)?;
+        let reply = self
+            .engine()
+            .name_colors(self.request(wire))
+            .await?
+            .into_inner();
+        let reply = spiling_contracts::color_naming::ColorNamingResponse::try_from(reply)
+            .map_err(ClientError::Protocol)?;
+        if reply.mode != request.mode
+            || reply
+                .colors
+                .iter()
+                .map(|v| v.srgb8)
+                .ne(request.colors.iter().copied())
+        {
+            return Err(ClientError::Protocol(
+                "color names do not match requested samples/mode".into(),
+            ));
+        }
+        Ok(reply)
+    }
     pub async fn info(&self) -> Result<EngineInfo, ClientError> {
         Ok(self
             .engine()

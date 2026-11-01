@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod color;
+pub use color::{ColorInspector, color_chip, color_details, color_summary, color_swatch};
+
 use egui::{Color32, RichText, Ui};
 use serde::{Deserialize, Serialize};
 
@@ -130,6 +133,20 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
         number(ui, "Inherited (mm)", &mut 0.4, 0.01);
     });
     ui.label("Inherited from definition · occurrence override · mixed values");
+    ui.separator();
+    let color_id = ui.make_persistent_id("gallery-color-reference");
+    let mut inspector = ui.data_mut(|d| d.get_temp::<ColorInspector>(color_id).unwrap_or_default());
+    inspector.show(ui);
+    ui.data_mut(|d| d.insert_temp(color_id, inspector));
+    for (rgb, declared) in [
+        ([255, 255, 255], None),
+        ([0, 0, 0], None),
+        ([127, 127, 127], None),
+        ([207, 82, 78], Some("Supplier coral")),
+    ] {
+        color_chip(ui, rgb, declared);
+    }
+    ui.separator();
     ui.colored_label(
         tokens.warning,
         "Draft conflict — reload current values before Apply",

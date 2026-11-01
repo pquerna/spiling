@@ -232,6 +232,12 @@ The `inspection` Cargo feature enables upstream development inspection tooling;
 it is off by default and must stay off in distributions. It is not a second
 mutation API or qualification of native dialogs. Upstream default fonts do not cover all CJK labels. Additional font/input/assistive combinations remain separately unqualified.
 
+## Color naming and shared components
+
+`spiling-cli color '#CF524E' '#C75C3C' --mode descriptive --engine /absolute/path/spiling-engine` queries the actual authenticated engine without a project. Modes are `exact`, `nearest`, and `descriptive`; up to 64 six-digit hex samples are allowed. Alpha/shorthand are explicit input errors. JSON retains numeric samples, exact-miss absence, reference color, modifier, OKLab distance, algorithm version and dataset identity. `cargo test --locked -p spiling-appearance` exercises the pinned corpus and naming boundaries; `SPILING_TEST_ENGINE=/absolute/path/spiling-engine cargo test --locked -p spiling-cli --test color -- --ignored --test-threads=1` exercises the actual CLI/engine path.
+
+The native Study pane exposes Color reference independently of project authoring. The same `ui::color` components render optical estimates and candidate summaries, declared-tool tint legends and the production component gallery. Enter an invalid/alpha value and verify it remains editable with an explicit error; compare all three modes; inspect reference/provenance details. Check black/white swatch outlines, declared-name precedence, keyboard access and narrow/scaled layouts in Graphite and Paper. Generated labels never change a declared supplier name or manufacture a stock color from a polymer/product string. Naming is presentation-only and does not change saved project state or optical/manufacturing authority.
+
 ## Material authority and qualification
 
 [ADR005](../adr/ADR005-native-first-development-geometry.md) adopts the implemented

@@ -11,6 +11,7 @@ use spiling_contracts::appearance::*;
 use spiling_contracts::project::{ProjectError, ProjectErrorCode};
 use std::f64::consts::PI;
 
+pub mod naming;
 pub mod optical;
 mod prusa_v7;
 

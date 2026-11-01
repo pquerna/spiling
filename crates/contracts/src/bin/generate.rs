@@ -7,8 +7,8 @@ use spiling_contracts::{
     TRIANGLE_HEADER_BYTES, TRIANGLE_INDEX_COUNT, TRIANGLE_SCHEMA_VERSION, TRIANGLE_VERTEX_COUNT,
 };
 use spiling_contracts::{
-    appearance::*, display::*, geometry::*, manufacturing::*, optical::*, process::*, project::*,
-    surface::*,
+    appearance::*, color_naming::*, display::*, geometry::*, manufacturing::*, optical::*,
+    process::*, project::*, surface::*,
 };
 use std::{env, fs, path::Path};
 use ts_rs::TS;
@@ -27,6 +27,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         OperationView::decl(&config),
         NativeOperationView::decl(&config),
         Hello::decl(&config),
+        ColorNamingMode::decl(&config),
+        ColorModifier::decl(&config),
+        ColorName::decl(&config),
+        NamedColor::decl(&config),
+        ColorNamingRequest::decl(&config),
+        ColorNamingResponse::decl(&config),
         AppearanceColor::decl(&config),
         AppearanceIlluminant::decl(&config),
         AppearanceObserver::decl(&config),

@@ -26,6 +26,8 @@ The two SolidCraft companion libraries under `vendor/solidcraft/` are third-part
 
 The in-tree Prusa v7 reference port in `crates/appearance/src/prusa_v7.rs` retains its original MIT copyright and full notice, separately from original OSL-3.0 study code. Keep `crates/appearance/LICENSE-prusa-fdm-mixer.txt` and the modification/source disclosure in [NOTICE.md](../NOTICE.md). Release provenance must collect this source component even though ordinary workspace packages are excluded from dependency notice collection. Model-code licensing does not grant rights to unrelated catalogs or measurement datasets.
 
+The xkcd survey under `crates/appearance/data/` retains its source-declared CC0-1.0 dedication, original bytes and provenance sidecar. Keep `LICENSE-xkcd-CC0.txt` and collect the dataset as an independent source component in release provenance. Its naming dictionary does not establish physical filament color. Original Spiling naming code remains OSL-3.0.
+
 ## Standard file header
 
 Use this three-line notice in the file's native comment syntax:

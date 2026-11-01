@@ -62,22 +62,22 @@ pub(super) fn assessment(ui: &mut egui::Ui, label: &str, value: &OpticalAssessme
             within_tolerance,
             ..
         } => {
-            ui.horizontal_wrapped(|ui| {
-                let color =
-                    egui::Color32::from_rgb(display_srgb8[0], display_srgb8[1], display_srgb8[2]);
-                ui.colored_label(color, "■");
-                ui.label(format!(
-                    "Reference sRGB {} / {} / {} · ΔE00 {:.3} · {}",
-                    display_srgb8[0],
-                    display_srgb8[1],
-                    display_srgb8[2],
-                    delta_e00,
-                    if *within_tolerance {
-                        "Within target"
-                    } else {
-                        "Outside target"
-                    }
-                ));
+            crate::ui::color_chip(ui, *display_srgb8, None);
+            ui.label(format!(
+                "Reference estimate · ΔE00 {:.3} · {}",
+                delta_e00,
+                if *within_tolerance {
+                    "Within target"
+                } else {
+                    "Outside target"
+                }
+            ));
+            ui.collapsing("Color-name details", |ui| {
+                let named = spiling_appearance::naming::describe(
+                    *display_srgb8,
+                    spiling_contracts::color_naming::ColorNamingMode::Descriptive,
+                );
+                crate::ui::color_details(ui, &named);
             });
             ui.label(format!(
                 "Nominal material exposure {}",
@@ -129,11 +129,13 @@ pub(super) fn assessment_label(value: &OpticalAssessment) -> String {
         OpticalAssessment::FilteredPhase => "Filtered phase".into(),
         OpticalAssessment::Unassessed { reason, .. } => format!("Unassessed: {reason:?}"),
         OpticalAssessment::Estimate {
+            display_srgb8,
             delta_e00,
             within_tolerance,
             ..
         } => format!(
-            "ΔE00 {:.3} · {}",
+            "{} · ΔE00 {:.3} · {}",
+            crate::ui::color_summary(*display_srgb8),
             delta_e00,
             if *within_tolerance {
                 "Within target"

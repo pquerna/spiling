@@ -18,6 +18,8 @@ pub(super) struct StudyUi {
 }
 impl Workbench {
     pub(super) fn study_ui(&mut self, ui: &mut egui::Ui) {
+        self.colors.show(ui);
+        ui.separator();
         let (Some(project), Some(hello)) = (self.state.project.clone(), self.state.hello.clone())
         else {
             return;

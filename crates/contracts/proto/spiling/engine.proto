@@ -17,6 +17,7 @@ import "spiling/native_manufacturing.proto";
 service Engine {
   rpc GetEngineInfo(google.protobuf.Empty) returns (EngineInfo);
   rpc Shutdown(google.protobuf.Empty) returns (google.protobuf.Empty);
+  rpc NameColors(NameColorsRequest) returns (NameColorsReply);
   rpc RunDiagnostic(RunDiagnosticRequest) returns (google.longrunning.Operation) {
     option (google.longrunning.operation_info) = {
       response_type: "DiagnosticResult"
@@ -126,4 +127,44 @@ message NativeOperationResult {
     OpticalComparedResult optical_compared = 12;
     OpticalConstructionAppliedResult optical_construction_applied = 13;
   }
+}
+
+// Presentation-only names. No project mutation, material assignment or color calibration.
+enum ColorNamingMode {
+  COLOR_NAMING_MODE_UNSPECIFIED = 0;
+  COLOR_NAMING_MODE_EXACT = 1;
+  COLOR_NAMING_MODE_NEAREST = 2;
+  COLOR_NAMING_MODE_DESCRIPTIVE = 3;
+}
+enum ColorModifier {
+  COLOR_MODIFIER_NONE = 0;
+  COLOR_MODIFIER_DARK = 1;
+  COLOR_MODIFIER_LIGHT = 2;
+  COLOR_MODIFIER_MUTED = 3;
+  COLOR_MODIFIER_PALE = 4;
+  COLOR_MODIFIER_VIVID = 5;
+}
+message ColorRgb8 { uint32 red = 1; uint32 green = 2; uint32 blue = 3; }
+message NameColorsRequest {
+  ColorNamingMode mode = 1;
+  repeated ColorRgb8 colors = 2; // 1..64; all channels must be <=255.
+}
+message ColorNameMatch {
+  string label = 1;
+  string reference_name = 2;
+  ColorRgb8 reference_srgb8 = 3;
+  ColorModifier modifier = 4;
+  bool generated = 5;
+  double distance_oklab = 6;
+}
+message NamedColorSample {
+  ColorRgb8 srgb8 = 1;
+  string hex = 2;
+  ColorNameMatch name = 3; // Absent only for an exact lookup miss.
+}
+message NameColorsReply {
+  uint32 algorithm_version = 1;
+  string dataset_sha256 = 2;
+  ColorNamingMode mode = 3;
+  repeated NamedColorSample colors = 4;
 }
