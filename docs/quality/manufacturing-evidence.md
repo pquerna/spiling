@@ -558,7 +558,7 @@ process edits, then author the lighter lower0.20/upper0.60 interior and centered
 plate without changing the ordinary axes:
 
 ```sh
-CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 RAYON_NUM_THREADS=1 target/debug/spiling-cli project create NEW_PROJECT \
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 RAYON_NUM_THREADS=1 target/debug/spiling-cli project create NEW_PROJECT.spil \
   --import OWNED_SOURCE.step --intent fixtures/manufacturing/housing-ordinary.intent.json --center-on-bed 1 \
   --process-set 1 definition 0.60 \
   --process-set-box 1 definition -1 -1 -1 25 19 5.03 0.20 horizontal-diaphragm:0.23 \
@@ -581,7 +581,7 @@ fixtures/manufacturing/housing-h1-combined.intent.ts NEW_INTENT.json`. Use an ow
 byte-identical source copy and exclusive output paths for that control:
 
 ```sh
-RAYON_NUM_THREADS=1 target/debug/spiling-cli project create NEW_PROJECT \
+RAYON_NUM_THREADS=1 target/debug/spiling-cli project create NEW_PROJECT.spil \
   --import OWNED_SOURCE.step --intent NEW_INTENT.json --center-on-bed 1 \
   --process-set 1 definition 0.20 \
   --process-set-box 1 definition -1 -1 -1 8 19 11 0.60 separator-wall \

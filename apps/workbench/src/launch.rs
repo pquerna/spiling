@@ -19,18 +19,18 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Option<Ope
             read_only = true;
         } else if arg == "--open" {
             if path.is_some() {
-                return Err("Specify one project directory".into());
+                return Err("Specify one .spil project file".into());
             }
-            path = Some(args.next().ok_or("--open needs a project directory")?);
+            path = Some(args.next().ok_or("--open needs a .spil project file")?);
         } else if arg.to_string_lossy().starts_with('-') {
-            return Err("Usage: spiling-workbench [--read-only] [--open] PROJECT_DIRECTORY".into());
+            return Err("Usage: spiling-workbench [--read-only] [--open] PROJECT.spil".into());
         } else if path.replace(arg).is_some() {
-            return Err("Specify one project directory".into());
+            return Err("Specify one .spil project file".into());
         }
     }
     let Some(path) = path else {
         if read_only {
-            return Err("--read-only needs a project directory".into());
+            return Err("--read-only needs a .spil project file".into());
         }
         return Ok(None);
     };

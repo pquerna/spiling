@@ -346,6 +346,8 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
     hello.engine_build = env!("CARGO_PKG_VERSION").into();
     assert!(super::validate_engine_cutover(&hello).is_err());
     hello.engine_build = spiling_contracts::ENGINE_BUILD_ID.into();
+    hello.project_capabilities[0] = "recoverable_projects_v10".into();
+    assert!(super::validate_engine_cutover(&hello).is_err());
     hello.project_capabilities[0] = "unsupported_project_format".into();
     assert!(super::validate_engine_cutover(&hello).is_err());
     hello.project_capabilities[0] = spiling_contracts::PROJECT_FORMAT_CAPABILITY.into();

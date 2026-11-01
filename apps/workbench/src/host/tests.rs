@@ -98,7 +98,7 @@ fn project_receipts_discard_read_only_restart_and_reap() {
     });
     assert_eq!(kept.project.as_ref().unwrap().project_id, project_id);
     assert!(kept.project.as_ref().unwrap().dirty);
-    let saved_path = root.path().join("Native project – 保存");
+    let saved_path = root.path().join("Native project – 保存.spil");
     let saved = send(
         &host,
         Action::Save {
@@ -110,9 +110,9 @@ fn project_receipts_discard_read_only_restart_and_reap() {
         "{:?}",
         saved.problems
     );
-    assert!(saved_path.join("manifest.json").is_file());
+    assert!(saved_path.is_file());
     // Failed Save As cannot replace the attached saved route.
-    let failed_path = root.path().join("not-a-directory");
+    let failed_path = root.path().join("occupied.spil");
     std::fs::write(&failed_path, b"occupied").unwrap();
     let failed = send(
         &host,
@@ -239,6 +239,143 @@ fn native_path_limit_and_problem_history_are_bounded() {
             .all(|p| p.len() <= PROBLEM_BYTES)
     );
     assert!(selected_action(Picker::Import, &PathBuf::from("a".repeat(100_000))).is_err());
+    actor.route = Some(Route {
+        path: native(&root.path().join("original.spil")),
+        read_only: false,
+        uncertain: false,
+    });
+    let attempted = native(&root.path().join("attempted.spil"));
+    actor.pending = Some(Pending {
+        name: "operations/unresolved-save".into(),
+        label: "Save",
+        receipt: Receipt::Save(Some(Route {
+            path: attempted.clone(),
+            read_only: false,
+            uncertain: false,
+        })),
+        paused: false,
+    });
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        actor
+            .disconnect("Unresolved save disconnected".into())
+            .await;
+        assert_eq!(actor.route.as_ref().unwrap().path, attempted);
+        assert!(actor.route.as_ref().unwrap().uncertain);
+        actor.reopen().await;
+    });
+    assert!(actor.pending.is_none());
+    assert!(actor.state.message.contains("explicitly inspect or reopen"));
+}
+
+#[test]
+#[ignore = "actual postpublication engine exit; requires SPILING_TEST_ENGINE"]
+#[cfg(unix)]
+fn unresolved_save_exit_suppresses_restart_reopen_for_save_and_save_as() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    for (stage, save_as) in [("after_commit", false), ("target_published", true)] {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("original.spil");
+        let seed = Host::new(
+            Config {
+                engine: engine(),
+                store: root.path().join("seed-operations"),
+            },
+            || {},
+        )
+        .unwrap();
+        wait(&seed, |snapshot| snapshot.phase == Phase::Running);
+        let imported = imported(&seed);
+        let project_id = imported.project.as_ref().unwrap().project_id.clone();
+        let saved = send(
+            &seed,
+            Action::Save {
+                target: Some(native(&original)),
+            },
+        );
+        assert!(
+            !saved.project.as_ref().unwrap().dirty,
+            "{:?}",
+            saved.problems
+        );
+        send(&seed, Action::Close);
+        drop(seed);
+
+        symlink(
+            engine().canonicalize().unwrap(),
+            root.path().join("real-engine"),
+        )
+        .unwrap();
+        let wrapper = root.path().join("fault-engine");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nexport SPILING_PROJECT_FAULT={stage}\nexec \"$(dirname \"$0\")/real-engine\" \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = Host::new(
+            Config {
+                engine: wrapper,
+                store: root.path().join("fault-operations"),
+            },
+            || {},
+        )
+        .unwrap();
+        wait(&host, |snapshot| snapshot.phase == Phase::Running);
+        let opened = send(
+            &host,
+            Action::Open {
+                path: native(&original),
+                read_only: false,
+                recover_previous: false,
+            },
+        );
+        assert_eq!(opened.project.as_ref().unwrap().project_id, project_id);
+        let display = displayed(&host).display.unwrap();
+        host.geometry(GeometryCommand::AddInstance {
+            session_id: display.summary.session_id.clone(),
+            base_revision: display.summary.revision,
+            definition_id: display.definitions[0].record.definition_id.clone(),
+            pose: RigidPoseMm::IDENTITY,
+        })
+        .unwrap();
+        wait(&host, |snapshot| {
+            !snapshot.busy
+                && snapshot
+                    .scene
+                    .as_ref()
+                    .is_some_and(|scene| scene.occurrence_count == 2)
+        });
+        let attempted = if save_as {
+            root.path().join("attempted.spil")
+        } else {
+            original
+        };
+        host.send(Request::Action(Action::Save {
+            target: save_as.then(|| native(&attempted)),
+        }))
+        .unwrap();
+        wait(&host, |snapshot| snapshot.phase == Phase::Interrupted);
+        assert!(attempted.is_file());
+        let restarted = send(&host, Action::Restart);
+        assert_eq!(restarted.phase, Phase::Running);
+        assert_ne!(restarted.project.as_ref().unwrap().project_id, project_id);
+        assert_eq!(restarted.scene.as_ref().unwrap().occurrence_count, 0);
+        assert!(restarted.message.contains("explicitly inspect or reopen"));
+        let inspected = send(
+            &host,
+            Action::Open {
+                path: native(&attempted),
+                read_only: true,
+                recover_previous: false,
+            },
+        );
+        assert_eq!(inspected.project.as_ref().unwrap().project_id, project_id);
+        assert_eq!(inspected.scene.as_ref().unwrap().occurrence_count, 2);
+        send(&host, Action::Close);
+    }
 }
 
 #[test]
@@ -902,7 +1039,7 @@ fn finish_layers_canonical_image_preview_and_recovery() {
     });
     let s = wait(&host, |s| s.image_preview.is_some());
     assert_eq!(s.image_preview.as_ref().unwrap().pixels.size, [2, 2]);
-    let saved = root.path().join("project");
+    let saved = root.path().join("project.spil");
     send(
         &host,
         Action::Save {
@@ -986,7 +1123,7 @@ fn retain_project(host: &Host, temporary_root: &std::path::Path, name: &str) {
     let s = send(
         host,
         Action::Save {
-            target: Some(native(&root.join(name))),
+            target: Some(native(&root.join(format!("{name}.spil")))),
         },
     );
     assert!(!s.project.as_ref().unwrap().dirty, "{:?}", s.problems);

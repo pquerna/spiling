@@ -7,7 +7,47 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
-import { run, runTestSuites } from "./run.mjs";
+import { copyNotices, run, runTestSuites } from "./run.mjs";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+test("native Zstandard sources retain separate upstream notices", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "spiling-native-notices-"));
+  try {
+    const source = join(temporary, "zstd-sys-test");
+    const output = join(temporary, "notices");
+    await mkdir(join(source, "zstd", "lib", "common"), { recursive: true });
+    await mkdir(join(source, "zstd", "lib", "dictBuilder"), { recursive: true });
+    await writeFile(join(source, "LICENSE"), "Rust binding license\n");
+    await writeFile(join(source, "zstd", "LICENSE"), "Native license\n");
+    await writeFile(join(source, "zstd", "COPYING"), "Alternative upstream license\n");
+    const hashNotice = "/* Copyright original hash author; upstream license reference. */";
+    const sortNotice = "/* Copyright original sort author; complete upstream license. */";
+    await writeFile(join(source, "zstd", "lib", "common", "xxhash.h"), `${hashNotice}\ncode`);
+    await writeFile(
+      join(source, "zstd", "lib", "dictBuilder", "divsufsort.c"),
+      `${sortNotice}\ncode`,
+    );
+    await copyNotices(source, output);
+    assert.equal(await readFile(join(output, "LICENSE"), "utf8"), "Rust binding license\n");
+    assert.equal(await readFile(join(output, "zstd", "LICENSE"), "utf8"), "Native license\n");
+    assert.equal(
+      await readFile(join(output, "zstd", "COPYING"), "utf8"),
+      "Alternative upstream license\n",
+    );
+    assert.equal(
+      await readFile(join(output, "zstd", "xxhash.h.notice"), "utf8"),
+      `${hashNotice}\n`,
+    );
+    assert.equal(
+      await readFile(join(output, "zstd", "divsufsort.c.notice"), "utf8"),
+      `${sortNotice}\n`,
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
 
 test("independent suites finish sequentially", async () => {
   const visits = [];

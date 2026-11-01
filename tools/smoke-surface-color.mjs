@@ -83,7 +83,7 @@ for (const [sourceName, mode] of cases) {
   if (modes.size && !modes.has(mode)) continue;
   const name = sourceName.replace(/\.step$/, "") + "-" + mode;
   const source = join(output, sourceName);
-  const project = join(output, `${name}.spiling`);
+  const project = join(output, `${name}.spil`);
   await copyFile(join(root, "fixtures", "geometry", sourceName), source);
   const created = await invoke([
     "project",

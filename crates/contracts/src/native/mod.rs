@@ -15,6 +15,7 @@ mod optical_construction;
 mod process;
 pub mod project;
 mod replay;
+mod storage;
 mod surface_inspection;
 pub use error::*;
 pub use geometry::*;

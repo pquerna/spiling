@@ -701,7 +701,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_committed_save_retains_its_own_uncertain_receipt_after_reconnect() {
+    async fn failed_save_retains_its_own_uncertain_receipt_after_reconnect() {
         use spiling_contracts::{
             geometry::{JobError as PublicError, JobResult as PublicResult, SceneRevision},
             project::{ProjectError, ProjectErrorCode, ProjectRevision},
@@ -717,15 +717,15 @@ mod tests {
         let mut receipt = spiling_core::Project::new().info();
         receipt.save_uncertain = true;
         receipt.dirty = true;
-        receipt.path_label = Some("committed-save-as-target".into());
+        receipt.path_label = Some("attempted-save-as-target.spil".into());
         let status = crate::native::terminal_error(
             crate::geometry::JobError::Project {
                 error: ProjectError::new(
                     ProjectErrorCode::Io,
-                    "manifest replaced; durability uncertain",
+                    "project publication outcome unknown",
                 ),
             },
-            Some(crate::geometry::JobResult::ProjectSaved {
+            Some(crate::geometry::JobResult::ProjectSaveUncertain {
                 info: receipt.clone(),
             }),
         )
@@ -739,8 +739,35 @@ mod tests {
         assert!(
             matches!(view.error,Some(PublicError::Project {error}) if error.code==ProjectErrorCode::Io)
         );
-        assert!(matches!(view.result,Some(PublicResult::ProjectSaved {info}) if info==receipt));
+        assert!(
+            matches!(view.result,Some(PublicResult::ProjectSaveUncertain {info}) if info==receipt)
+        );
         // A later session's Get cannot substitute for this captured save receipt.
         assert_ne!(receipt, spiling_core::Project::new().info());
+    }
+
+    #[test]
+    fn failed_save_cannot_carry_a_success_or_certain_receipt() {
+        use spiling_contracts::project::{ProjectError, ProjectErrorCode};
+        let failure = || crate::geometry::JobError::Project {
+            error: ProjectError::new(ProjectErrorCode::Io, "publication uncertain"),
+        };
+        let mut info = spiling_core::Project::new().info();
+        assert!(
+            crate::native::terminal_error(
+                failure(),
+                Some(crate::geometry::JobResult::ProjectSaveUncertain { info: info.clone() }),
+            )
+            .is_err()
+        );
+        info.dirty = true;
+        info.save_uncertain = true;
+        assert!(
+            crate::native::terminal_error(
+                failure(),
+                Some(crate::geometry::JobResult::ProjectSaved { info }),
+            )
+            .is_err()
+        );
     }
 }

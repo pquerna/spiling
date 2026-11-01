@@ -72,6 +72,7 @@ enum OpticalChoice {
     Candidate(u32),
 }
 enum Operation {
+    StorageMaintenance(StorageMaintenanceAction, Option<NativePath>),
     AppearancePalette(NativePath),
     AppearanceTarget(AppearanceTarget),
     AppearanceLimits(SearchLimits),
@@ -201,7 +202,7 @@ pub fn parse(
     ) {
         return Err("project requires create, edit, save, open, inspect or recover".into());
     }
-    let target = path(&mut args, &mode)?;
+    let target = path(&mut args, "project .spil file")?;
     let mut read_only = mode == "inspect";
     let mut operations = Vec::new();
     let mut plane = None;
@@ -567,6 +568,18 @@ pub fn parse(
             Some("--remove") => operations.push(Operation::Remove(OccurrenceId::new(
                 text(&mut args, "--remove")?.parse()?,
             )?)),
+            Some("--storage-stats") => operations.push(Operation::StorageMaintenance(
+                StorageMaintenanceAction::Stats,
+                None,
+            )),
+            Some("--collect-unreachable") => operations.push(Operation::StorageMaintenance(
+                StorageMaintenanceAction::CollectUnreachable,
+                None,
+            )),
+            Some("--compact-to") => operations.push(Operation::StorageMaintenance(
+                StorageMaintenanceAction::CompactToNew,
+                Some(path(&mut args, "--compact-to")?),
+            )),
             Some("--undo") => operations.push(Operation::Undo),
             Some("--redo") => operations.push(Operation::Redo),
             Some("--save") => operations.push(Operation::Save(None)),
@@ -584,7 +597,8 @@ pub fn parse(
             || operations.iter().any(|operation| {
                 !matches!(
                     operation,
-                    Operation::MaterialReview(_)
+                    Operation::StorageMaintenance(StorageMaintenanceAction::Stats, None)
+                        | Operation::MaterialReview(_)
                         | Operation::MaterialSearch(_)
                         | Operation::MaterialPage(_)
                         | Operation::Preflight
@@ -914,7 +928,35 @@ async fn execute(
         let base_revision = geometry::scene(client, &session).await?.revision;
         let label;
         let mut process_resolution = None;
+        let mut storage_maintenance = None;
         match operation {
+            Operation::StorageMaintenance(action, target) => {
+                label = "storage_maintenance";
+                let base_revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::StorageMaintenance {
+                        session_id: session.clone(),
+                        base_revision,
+                        action,
+                        target,
+                    })
+                    .await?;
+                let ProjectResponse::OperationAccepted { operation } = response else {
+                    return Err("storage maintenance requires a standard operation".into());
+                };
+                let result = geometry::wait_operation(client, &session, operation).await?;
+                let JobResult::ProjectStorageMaintained {
+                    action: completed,
+                    stats,
+                } = result
+                else {
+                    return Err("unexpected storage maintenance job result".into());
+                };
+                if completed != action {
+                    return Err("storage maintenance action differs from request".into());
+                }
+                storage_maintenance = Some(serde_json::json!({ "action": action, "stats": stats }));
+            }
             Operation::ApplyOptical(construction_index, bindings) => {
                 label = "apply_optical";
                 let captured = info(client).await?;
@@ -1812,6 +1854,7 @@ async fn execute(
         let project = info(client).await?;
         history.push(serde_json::json!({
             "operation": label, "project": project, "manufacturing": manufacturing,
+            "storage_maintenance": storage_maintenance,
             "preflight": if label == "preflight" { preflight_report.as_ref() } else { None },
             "process_resolution": process_resolution,
             "material_review": if label == "material_review" { material_review.as_ref() } else { None },
@@ -1915,6 +1958,34 @@ mod tests {
     use super::*;
     fn parse_args(args: &[&str]) -> Result<Option<Options>, Error> {
         parse(args.iter().map(OsString::from), None, None)
+    }
+    #[test]
+    fn storage_flags_are_ordered_and_stats_alone_is_read_only_safe() {
+        let options = parse_args(&[
+            "open",
+            "project.spil",
+            "--storage-stats",
+            "--collect-unreachable",
+            "--compact-to",
+            "new.spil",
+        ])
+        .unwrap()
+        .unwrap();
+        let Command::Project { workflow, .. } = options.command else {
+            panic!("project workflow")
+        };
+        assert!(matches!(
+            workflow.operations.as_slice(),
+            [
+                Operation::StorageMaintenance(StorageMaintenanceAction::Stats, None),
+                Operation::StorageMaintenance(StorageMaintenanceAction::CollectUnreachable, None),
+                Operation::StorageMaintenance(StorageMaintenanceAction::CompactToNew, Some(_)),
+            ]
+        ));
+        assert!(parse_args(&["inspect", "project.spil", "--storage-stats"]).is_ok());
+        assert!(parse_args(&["inspect", "project.spil", "--collect-unreachable"]).is_err());
+        assert!(parse_args(&["inspect", "project.spil", "--compact-to", "new.spil"]).is_err());
+        assert!(parse_args(&["open", "project.spil", "--compact-to"]).is_err());
     }
     #[test]
     fn appearance_readonly_flags_and_literal_selection_keys_are_ordered() {

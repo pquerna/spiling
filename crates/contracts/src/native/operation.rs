@@ -54,11 +54,13 @@ pub fn native_result(
             {
                 return Err("unexpected or oversized native result".into());
             }
-            Ok(Some(
-                rpc::NativeOperationResult::decode(any.value.as_slice())
-                    .map_err(|e| e.to_string())?
-                    .try_into()?,
-            ))
+            let result: JobResult = rpc::NativeOperationResult::decode(any.value.as_slice())
+                .map_err(|e| e.to_string())?
+                .try_into()?;
+            if matches!(result, JobResult::ProjectSaveUncertain { .. }) {
+                return Err("ProjectSaveUncertain is permitted only on failed operations".into());
+            }
+            Ok(Some(result))
         }
         Some(google::longrunning::operation::Result::Error(status)) => {
             let (_, receipt) = super::error::status_error_and_receipt(status)?;
@@ -261,7 +263,16 @@ pub fn native_operation_view(
         None => (None, None),
     };
     if let Some(result) = &result {
+        if matches!(result, JobResult::ProjectSaveUncertain { .. }) && status != JobStatus::Failed {
+            return Err("uncertain save receipt requires Failed state".into());
+        }
         match result {
+            JobResult::ProjectStorageMaintained { stats, .. } => {
+                stats.validate().map_err(|error| error.to_string())?;
+                if !meta.outputs.is_empty() {
+                    return Err("storage maintenance must not publish artifacts".into());
+                }
+            }
             JobResult::AppearancePaletteImported { info, palette } => {
                 if info.revision.0
                     != meta
@@ -531,9 +542,24 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
             R::SectionArtifactId(id) => Self::Section {
                 artifact_id: ArtifactId::new(id).map_err(|e| e.to_string())?,
             },
-            R::ProjectSaved(info) => Self::ProjectSaved {
-                info: info.try_into()?,
+            R::ProjectSaved(info) => {
+                let info: crate::project::ProjectInfo = info.try_into()?;
+                if info.save_uncertain {
+                    return Err("ProjectSaved requires confirmed publication".into());
+                }
+                Self::ProjectSaved { info }
+            }
+            R::ProjectStorageMaintained(value) => Self::ProjectStorageMaintained {
+                action: value.action.try_into()?,
+                stats: required(value.stats, "PTAC storage statistics")?.try_into()?,
             },
+            R::ProjectSaveUncertain(info) => {
+                let info: crate::project::ProjectInfo = info.try_into()?;
+                if !info.save_uncertain || !info.dirty {
+                    return Err("ProjectSaveUncertain requires uncertain dirty project info".into());
+                }
+                Self::ProjectSaveUncertain { info }
+            }
             R::SurfaceImageImported(v) => {
                 let info = required(v.info, "image import project info")?.try_into()?;
                 let image = required(v.image, "imported image metadata")?.try_into()?;
@@ -677,7 +703,24 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
             JobResult::BedPosePrepared { preparation } => {
                 R::BedPosePrepared(preparation.try_into()?)
             }
-            JobResult::ProjectSaved { info } => R::ProjectSaved(info.try_into()?),
+            JobResult::ProjectSaved { info } => {
+                if info.save_uncertain {
+                    return Err("ProjectSaved requires confirmed publication".into());
+                }
+                R::ProjectSaved(info.try_into()?)
+            }
+            JobResult::ProjectStorageMaintained { action, stats } => {
+                R::ProjectStorageMaintained(rpc::ProjectStorageMaintainedResult {
+                    action: rpc::StorageMaintenanceAction::from(action) as i32,
+                    stats: Some(stats.try_into()?),
+                })
+            }
+            JobResult::ProjectSaveUncertain { info } => {
+                if !info.save_uncertain || !info.dirty {
+                    return Err("ProjectSaveUncertain requires uncertain dirty project info".into());
+                }
+                R::ProjectSaveUncertain(info.try_into()?)
+            }
             JobResult::SurfaceImageImported {
                 info,
                 image,

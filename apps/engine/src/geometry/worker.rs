@@ -9,7 +9,7 @@ use spiling_contracts::{
     display::{EncodedSection, SectionChunkBuilder},
     geometry::*,
     manufacturing::*,
-    project::{ProjectError, ProjectErrorCode, StoredDefinition},
+    project::{ProjectError, ProjectErrorCode, StorageMaintenanceAction, StoredDefinition},
     surface::{SurfaceOverlays, SurfaceScope},
 };
 use spiling_core::{
@@ -95,6 +95,12 @@ pub struct CompileRequest {
     reason = "One bounded worker slot retains the captured save snapshot inline without per-job boxing"
 )]
 pub enum Work {
+    StorageMaintenance {
+        storage: Arc<Storage>,
+        action: StorageMaintenanceAction,
+        target: Option<NativePath>,
+        commit: crate::session::CommitToken,
+    },
     ApplyOpticalConstruction {
         snapshot: Arc<spiling_core::Snapshot>,
         base: spiling_contracts::project::ProjectRevision,
@@ -203,6 +209,7 @@ pub struct Imported {
     reason = "The single native worker returns bounded products without extra heap indirection"
 )]
 pub enum Product {
+    StorageMaintained(super::storage::MaintenanceProduct),
     OpticalConstruction(spiling_core::OpticalConstructionCandidate),
     Import(Imported),
     Open {
@@ -317,6 +324,13 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
         let mut pending = BTreeMap::new();
         let mut pending_records = BTreeMap::new();
         let result = match work {
+            Work::StorageMaintenance {
+                storage,
+                action,
+                target,
+                commit,
+            } => super::storage::maintain(storage, action, target, commit, &cancel)
+                .map(Product::StorageMaintained),
             Work::ApplyOpticalConstruction {
                 snapshot,
                 base,
@@ -745,7 +759,7 @@ fn import_surface_image(
         .map(Arc::new)
         .map_err(JobError::from)
 }
-fn project_path(path: NativePath) -> Result<PathBuf, ProjectError> {
+pub(super) fn project_path(path: NativePath) -> Result<PathBuf, ProjectError> {
     path.to_os_string()
         .map(PathBuf::from)
         .map_err(|e| ProjectError::new(ProjectErrorCode::Io, e.message))
@@ -894,7 +908,7 @@ fn save(
 ) -> Result<SaveReceipt, JobError> {
     let target = target.map(project_path).transpose()?;
     let receipt = storage::save(snapshot, existing, target, cancel, |stage| {
-        if matches!(stage, SaveStage::BeforeManifestReplace) && !commit.begin_commit() {
+        if matches!(stage, SaveStage::BeforeCommit) && !commit.begin_commit() {
             cancel.store(true, Ordering::Release);
             return;
         }
@@ -902,8 +916,6 @@ fn save(
             std::process::exit(86);
         }
     })?;
-    // No cancellation check here: once replacement starts, the core completes
-    // durability and returns the receipt even if the cooperative flag races.
     Ok(receipt)
 }
 fn section(

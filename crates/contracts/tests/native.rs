@@ -257,7 +257,7 @@ fn failed_committed_save_keeps_operation_specific_uncertain_receipt() {
         resolved_process: vec![],
         appearance_study: spiling_contracts::appearance::AppearanceStudy::default().info(),
     };
-    let result = JobResult::ProjectSaved { info: info.clone() };
+    let result = JobResult::ProjectSaveUncertain { info: info.clone() };
     let wire: rpc::NativeOperationResult = result.clone().try_into().unwrap();
     let receipt = prost_types::Any {
         type_url: NATIVE_RESULT_TYPE.into(),
@@ -286,6 +286,21 @@ fn failed_committed_save_keeps_operation_specific_uncertain_receipt() {
     assert_eq!(view.error, Some(error.clone()));
     assert_eq!(native_result(&op).unwrap(), Some(result));
     assert_eq!(domain_error(&status).unwrap(), error);
+
+    assert!(
+        rpc::NativeOperationResult::try_from(JobResult::ProjectSaved { info: info.clone() })
+            .is_err()
+    );
+    let mut successful = op.clone();
+    successful.result = Some(google::longrunning::operation::Result::Response(
+        receipt.clone(),
+    ));
+    let mut successful_meta = meta.clone();
+    successful_meta.state = rpc::NativeOperationState::NativeSucceeded as i32;
+    successful_meta.completed_units = successful_meta.total_units;
+    successful.metadata.as_mut().unwrap().value = successful_meta.encode_to_vec();
+    assert!(native_result(&successful).is_err());
+    assert!(native_operation_view(&successful).is_err());
 
     let reject = |details: Vec<prost_types::Any>| {
         let mut bad = status.clone();
@@ -334,7 +349,7 @@ fn failed_committed_save_keeps_operation_specific_uncertain_receipt() {
         ..Default::default()
     };
     let invalid_receipt = rpc::NativeOperationResult {
-        result: Some(rpc::native_operation_result::Result::ProjectSaved(
+        result: Some(rpc::native_operation_result::Result::ProjectSaveUncertain(
             invalid_info,
         )),
     };

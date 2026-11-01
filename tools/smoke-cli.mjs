@@ -6,7 +6,17 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { decodeTriangle } from "../packages/protocol/src/index.ts";
@@ -158,7 +168,7 @@ try {
   }
   const source = join(directory, "operator-source.step");
   await copyFile(resolve("fixtures/geometry/box-mm.step"), source);
-  const project = join(directory, "project");
+  const project = join(directory, "project.spil");
   const firstExport = join(directory, "first-export");
   const created = invoke([
     "project",
@@ -177,12 +187,16 @@ try {
   ]);
   assert.equal(created.status, 0, created.stderr);
   const createdReport = JSON.parse(created.stdout);
+  assert.equal((await stat(project)).isFile(), true);
+  assert.equal((await readFile(project)).subarray(0, 16).toString(), "SQLite format 3\0");
   await rm(source);
+  const movedProject = join(directory, "moved-project.spil");
+  await rename(project, movedProject);
   const freshExport = join(directory, "fresh-export");
   const reopened = invoke([
     "project",
     "inspect",
-    project,
+    movedProject,
     "--verify",
     "--manufacturing-out",
     freshExport,
@@ -196,10 +210,58 @@ try {
   assert.equal(reopenedReport.manufacturing_export.software_only, true);
   assert.equal(reopenedReport.manufacturing_export.not_machine_ready, true);
   assert.equal(reopenedReport.manufacturing_export.verification.verified, true);
+  const compactProject = join(directory, "compact.spil");
+  const maintained = invoke([
+    "project",
+    "open",
+    movedProject,
+    "--storage-stats",
+    "--collect-unreachable",
+    "--compact-to",
+    compactProject,
+    "--engine",
+    engine,
+  ]);
+  assert.equal(maintained.status, 0, maintained.stderr);
+  const maintainedReport = JSON.parse(maintained.stdout);
+  const maintenanceOperations = maintainedReport.operations.filter(
+    (operation) => operation.storage_maintenance,
+  );
+  assert.equal(maintenanceOperations.length, 3);
+  for (const [index, action] of ["stats", "collect_unreachable", "compact_to_new"].entries()) {
+    const receipt = maintenanceOperations[index].storage_maintenance;
+    assert.equal(receipt.action, action);
+    assert.equal(receipt.stats.limits.chunk_bytes, 262144);
+    assert.equal(maintenanceOperations[index].project.revision, createdReport.project.revision);
+    assert.equal(maintenanceOperations[index].project.dirty, false);
+  }
+  assert.equal((await stat(compactProject)).isFile(), true);
+  const compactReplay = invoke([
+    "project",
+    "inspect",
+    compactProject,
+    "--storage-stats",
+    "--verify",
+    "--engine",
+    engine,
+  ]);
+  assert.equal(compactReplay.status, 0, compactReplay.stderr);
+  const compactReport = JSON.parse(compactReplay.stdout);
+  assert.equal(compactReport.project.project_id, createdReport.project.project_id);
+  assert.deepEqual(compactReport.manufacturing.artifact, createdReport.manufacturing.artifact);
+  assert.equal(compactReport.manufacturing.verification.verified, true);
   assert.deepEqual(
     createdReport.definitions.map((d) => d.record.provenance),
     reopenedReport.definitions.map((d) => d.record.provenance),
   );
+  const legacy = join(directory, "legacy.spil");
+  await mkdir(legacy);
+  await writeFile(join(legacy, "manifest.json"), "{}");
+  const refusedDirectory = invoke(["project", "inspect", legacy, "--engine", engine]);
+  assert.notEqual(refusedDirectory.status, 0);
+  assert.equal(refusedDirectory.stdout, "");
+  assert.match(refusedDirectory.stderr, /unsupported_format/);
+  assert.equal(await readFile(join(legacy, "manifest.json"), "utf8"), "{}");
   for (const name of ["plan.json", "program.gcode", "verification.json", "provenance.json"]) {
     const before = await readFile(join(firstExport, name));
     const after = await readFile(join(freshExport, name));
@@ -214,7 +276,13 @@ try {
     reopenedReport.manufacturing_export.verification,
     "export must use the exact fresh replay result",
   );
-  for (const report of [geometryReport, createdReport, reopenedReport]) {
+  for (const report of [
+    geometryReport,
+    createdReport,
+    reopenedReport,
+    maintainedReport,
+    compactReport,
+  ]) {
     assert.throws(
       () => process.kill(report.hello.pid, 0),
       { code: "ESRCH" },

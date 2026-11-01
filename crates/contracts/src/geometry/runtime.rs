@@ -123,6 +123,10 @@ impl JobStatus {
     reason = "Bounded control results stay inline without per-observation heap indirection"
 )]
 pub enum JobResult {
+    ProjectStorageMaintained {
+        action: crate::project::StorageMaintenanceAction,
+        stats: crate::project::ProjectStorageStats,
+    },
     OpticalConstructionApplied {
         info: crate::project::ProjectInfo,
         construction_index: u16,
@@ -137,6 +141,9 @@ pub enum JobResult {
         preparation: BedPosePreparation,
     },
     ProjectSaved {
+        info: crate::project::ProjectInfo,
+    },
+    ProjectSaveUncertain {
         info: crate::project::ProjectInfo,
     },
     SurfaceImageImported {

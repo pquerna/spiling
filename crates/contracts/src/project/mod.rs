@@ -3,6 +3,8 @@
 // Licensed under the Open Software License version 3.0
 
 //! Persistent source-backed project contracts, independent of storage and BREP.
+mod recovery;
+mod storage;
 use crate::appearance::{AppearanceStudy, AppearanceStudyInfo, AppearanceTarget, SearchLimits};
 use crate::geometry::*;
 use crate::manufacturing::{
@@ -11,8 +13,10 @@ use crate::manufacturing::{
 use crate::optical::{OpticalRequest, OpticalSelection};
 use crate::process::*;
 use crate::surface::*;
+pub use recovery::ProjectRecoveryGuard;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc};
+pub use storage::{ProjectStorageLimits, ProjectStorageStats, StorageMaintenanceAction};
 use ts_rs::TS;
 
 pub const PROJECT_FORMAT_VERSION: u32 = 10;
@@ -303,6 +307,12 @@ pub struct ProjectInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectCommand {
+    StorageMaintenance {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        action: StorageMaintenanceAction,
+        target: Option<NativePath>,
+    },
     ApplyOpticalConstruction {
         session_id: SessionId,
         base_revision: ProjectRevision,

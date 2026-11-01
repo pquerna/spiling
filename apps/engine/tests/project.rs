@@ -13,6 +13,9 @@ use std::{
 };
 use tokio::{process::Command, time::timeout};
 
+mod support;
+use support::{copy_project, manifest, write_manifest};
+
 const ENGINE: &str = env!("CARGO_BIN_EXE_spiling-engine");
 
 struct Workspace(PathBuf);
@@ -931,42 +934,6 @@ async fn writer_lock_read_only_snapshot_and_killed_writer_have_actual_process_li
     contender.shutdown().await.unwrap();
 }
 
-fn copy_project(source: &Path, destination: &Path) {
-    std::fs::create_dir(destination).unwrap();
-    // Copy the complete engine-created checkpoint, including empty image and
-    // palette directories. An incomplete copy diagnoses missing layout before
-    // the deliberately corrupted manifest/source under test can be inspected.
-    for entry in std::fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let target = destination.join(entry.file_name());
-        let kind = entry.file_type().unwrap();
-        if kind.is_dir() {
-            copy_project(&entry.path(), &target);
-        } else {
-            assert!(
-                kind.is_file(),
-                "test checkpoints contain only regular files and directories"
-            );
-            std::fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
-fn manifest(path: &Path) -> ProjectManifest {
-    serde_json::from_slice(&std::fs::read(path.join("manifest.json")).unwrap()).unwrap()
-}
-fn write_manifest(path: &Path, manifest: &ProjectManifest) {
-    std::fs::write(
-        path.join("manifest.json"),
-        serde_json::to_vec(manifest).unwrap(),
-    )
-    .unwrap();
-}
-fn asset(path: &Path, manifest: &ProjectManifest) -> PathBuf {
-    path.join("sources").join(format!(
-        "{}.step",
-        manifest.definitions[0].provenance.source_hash.as_str()
-    ))
-}
 async fn failed_open_preserves(client: &mut EngineClient, path: &Path, code: ProjectErrorCode) {
     let before_scene = scene(client).await;
     let before_info = info(client).await;
@@ -1001,15 +968,15 @@ async fn invalid_manifests_assets_and_native_admission_preserve_the_entire_live_
         ("invalid-counter", ProjectErrorCode::InvalidProject),
         ("dangling-definition", ProjectErrorCode::InvalidProject),
         ("provenance-mismatch", ProjectErrorCode::InvalidProject),
-        ("missing-asset", ProjectErrorCode::MissingAsset),
-        ("corrupt-asset", ProjectErrorCode::CorruptAsset),
+        ("missing-asset", ProjectErrorCode::InvalidProject),
+        ("corrupt-asset", ProjectErrorCode::InvalidProject),
     ] {
         let path = workspace.path(name);
         copy_project(&valid, &path);
         let mut changed = baseline.clone();
         match name {
             "invalid-json" => {
-                std::fs::write(path.join("manifest.json"), b"{\"format_version\":").unwrap();
+                support::write_root(&path, b"{\"format_version\":", &[]);
             }
             "unsupported-format" => {
                 changed.format_version += 1;
@@ -1040,10 +1007,10 @@ async fn invalid_manifests_assets_and_native_admission_preserve_the_entire_live_
                 write_manifest(&path, &changed);
             }
             "missing-asset" => {
-                std::fs::remove_file(asset(&path, &changed)).unwrap();
+                support::remove_source_membership(&path);
             }
             "corrupt-asset" => {
-                std::fs::write(asset(&path, &changed), b"not the captured STEP bytes").unwrap();
+                support::corrupt_object(&path, &changed.definitions[0].provenance.source_hash);
             }
             _ => unreachable!(),
         }
@@ -1063,33 +1030,27 @@ async fn invalid_manifests_assets_and_native_admission_preserve_the_entire_live_
 
 #[cfg(unix)]
 #[tokio::test]
-async fn manifest_and_asset_symlinks_or_nonregular_files_are_not_project_inputs() {
+async fn project_file_symlinks_hardlinks_and_directories_are_not_project_inputs() {
     use std::os::unix::fs::symlink;
     let workspace = Workspace::new();
     let valid = workspace.path("valid");
     let mut client = spawn().await;
     import(&mut client, &fixture("box-mm.step"), RigidPoseMm::IDENTITY).await;
     save(&mut client, Some(&valid)).await;
-    for name in ["manifest-symlink", "asset-symlink", "asset-directory"] {
+    for name in ["project-symlink", "project-hardlink", "project-directory"] {
         let path = workspace.path(name);
-        copy_project(&valid, &path);
-        let target = if name == "manifest-symlink" {
-            path.join("manifest.json")
+        if name == "project-directory" {
+            std::fs::create_dir(&path).unwrap();
+            failed_open_preserves(&mut client, &path, ProjectErrorCode::UnsupportedFormat).await;
+        } else if name == "project-hardlink" {
+            let original = workspace.path("hardlink-original.spil");
+            copy_project(&valid, &original);
+            std::fs::hard_link(original, &path).unwrap();
+            failed_open_preserves(&mut client, &path, ProjectErrorCode::InvalidProject).await;
         } else {
-            asset(&path, &manifest(&path))
-        };
-        std::fs::remove_file(&target).unwrap();
-        if name == "asset-directory" {
-            std::fs::create_dir(&target).unwrap();
-        } else {
-            let original = if name == "manifest-symlink" {
-                valid.join("manifest.json")
-            } else {
-                asset(&valid, &manifest(&valid))
-            };
-            symlink(original, target).unwrap();
+            symlink(&valid, &path).unwrap();
+            failed_open_preserves(&mut client, &path, ProjectErrorCode::InvalidProject).await;
         }
-        failed_open_preserves(&mut client, &path, ProjectErrorCode::Io).await;
     }
     client.shutdown().await.unwrap();
 }
@@ -1273,18 +1234,22 @@ impl FaultChild {
 async fn actual_save_process_faults_publish_only_complete_current_or_explicit_previous_snapshots() {
     let workspace = Workspace::new();
     for stage in [
-        "after_assets",
-        "before_manifest_replace",
-        "after_manifest_replace",
+        "candidate_staged",
+        "rows_inserted",
+        "before_commit",
+        "after_commit",
     ] {
         let path = workspace.path(stage);
         let mut seed = spawn().await;
         import(&mut seed, &fixture("box-mm.step"), RigidPoseMm::IDENTITY).await;
         let original = native_snapshot(&mut seed).await;
-        let saved = save(&mut seed, Some(&path)).await;
-        // Ensure a valid identical previous checkpoint exists even before the next
-        // save reaches its checkpoint-publication stage.
-        save(&mut seed, None).await;
+        save(&mut seed, Some(&path)).await;
+        let occurrence = records(&mut seed).await.1[0].occurrence_id;
+        pose(&mut seed, occurrence, translated(5.0)).await;
+        pose(&mut seed, occurrence, RigidPoseMm::IDENTITY).await;
+        let saved = save(&mut seed, None).await;
+        let (_, current_root, previous_root) = support::heads(&path);
+        assert_ne!(Some(current_root), previous_root);
         seed.shutdown().await.unwrap();
         let mut fault = FaultChild::spawn(stage).await;
         fault.open(&path).await;
@@ -1296,7 +1261,7 @@ async fn actual_save_process_faults_publish_only_complete_current_or_explicit_pr
         let visible_info = info(&mut current).await;
         assert_eq!(visible_info.project_id, saved.project_id);
         assert!(!visible_info.dirty && !visible_info.recovered_previous);
-        if stage == "after_manifest_replace" {
+        if stage == "after_commit" {
             assert_eq!(visible.occurrence_count, 2);
             assert_eq!(visible_info.revision.get(), saved.revision.get() + 1);
             assert_analytic_sections(
@@ -1322,18 +1287,29 @@ async fn actual_save_process_faults_publish_only_complete_current_or_explicit_pr
         assert_eq!(native_snapshot(&mut recovered).await, original);
         assert_analytic_sections(&original, &section_areas(&mut recovered).await);
         recovered.shutdown().await.unwrap();
-        // Ordinary open cannot conceal a corrupt current manifest. Explicit
-        // recovery validates the previous file independently of current bytes.
-        std::fs::write(path.join("manifest.json"), b"broken current checkpoint").unwrap();
+        support::corrupt_root(&path, false);
         let mut live = spawn().await;
         import(&mut live, &fixture("cylinder.step"), translated(40.0)).await;
         failed_open_preserves(&mut live, &path, ProjectErrorCode::InvalidProject).await;
         open(&mut live, &path, false, true, true).await;
         assert!(info(&mut live).await.recovered_previous);
         assert_eq!(native_snapshot(&mut live).await, original);
+        let before = info(&mut live).await;
+        let operation = start_save(&mut live, None).await;
+        project_job_error(
+            &wait_job(&mut live, operation).await,
+            ProjectErrorCode::ResourceLimit,
+        );
+        assert_eq!(info(&mut live).await, before);
+        assert!(support::inspect_and_remove_interrupted_scratch(&workspace.0) > 0);
+        let recovery_saved = save(&mut live, None).await;
+        assert!(!recovery_saved.recovered_previous);
+        open(&mut live, &path, false, true, false).await;
+        assert!(info(&mut live).await.revision > recovery_saved.revision);
+        assert_eq!(native_snapshot(&mut live).await, original);
         let recovery_scene = scene(&mut live).await;
         let recovery_info = info(&mut live).await;
-        std::fs::write(path.join("previous.json"), b"broken previous checkpoint").unwrap();
+        support::corrupt_root(&path, true);
         let id = start_open(&mut live, &path, false, true, true).await;
         project_job_error(
             &wait_job(&mut live, id).await,
@@ -1350,24 +1326,36 @@ async fn actual_save_process_faults_publish_only_complete_current_or_explicit_pr
 async fn first_save_faults_do_not_strand_the_destination_or_overwrite_foreign_files() {
     let workspace = Workspace::new();
     for stage in [
-        "after_assets",
-        "before_manifest_replace",
-        "after_manifest_replace",
+        "candidate_staged",
+        "rows_inserted",
+        "after_commit",
+        "before_publish",
+        "before_commit",
+        "target_published",
     ] {
         let target = workspace.path(stage);
         let mut fault = FaultChild::spawn(stage).await;
         fault.import(&fixture("cylinder.step")).await;
         fault.crash_save(Some(&target)).await;
         let mut retry = spawn().await;
-        if stage == "after_manifest_replace" {
+        if stage == "target_published" {
             open(&mut retry, &target, false, false, false).await;
             assert_eq!(scene(&mut retry).await.occurrence_count, 1);
+            assert!(support::inspect_and_remove_interrupted_scratch(&workspace.0) > 0);
         } else {
             assert!(
                 !target.exists(),
                 "precommit first-save crash must not occupy the target"
             );
             import(&mut retry, &fixture("box-mm.step"), RigidPoseMm::IDENTITY).await;
+            let before = info(&mut retry).await;
+            let operation = start_save(&mut retry, Some(&target)).await;
+            project_job_error(
+                &wait_job(&mut retry, operation).await,
+                ProjectErrorCode::ResourceLimit,
+            );
+            assert_eq!(info(&mut retry).await, before);
+            assert!(support::inspect_and_remove_interrupted_scratch(&workspace.0) > 0);
             save(&mut retry, Some(&target)).await;
         }
         retry.shutdown().await.unwrap();
@@ -1380,15 +1368,259 @@ async fn first_save_faults_do_not_strand_the_destination_or_overwrite_foreign_fi
     let before = info(&mut client).await;
     let job_id = start_save(&mut client, Some(&foreign)).await;
     let job = wait_job(&mut client, job_id).await;
-    project_job_error(&job, ProjectErrorCode::InvalidProject);
+    project_job_error(&job, ProjectErrorCode::Io);
     assert_eq!(info(&mut client).await, before);
     assert_eq!(
         std::fs::read(foreign.join("keep")).unwrap(),
         b"foreign content"
     );
-    assert!(!foreign.join("manifest.json").exists());
+    assert_eq!(std::fs::read_dir(&foreign).unwrap().count(), 1);
+    let occupied = workspace.path("occupied.spil");
+    std::fs::write(&occupied, b"foreign file").unwrap();
+    let operation = start_save(&mut client, Some(&occupied)).await;
+    project_job_error(
+        &wait_job(&mut client, operation).await,
+        ProjectErrorCode::Io,
+    );
+    assert_eq!(info(&mut client).await, before);
+    assert_eq!(std::fs::read(occupied).unwrap(), b"foreign file");
     save(&mut client, Some(&workspace.path("retry"))).await;
     client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn directories_and_foreign_sqlite_files_are_refused_without_mutation() {
+    let workspace = Workspace::new();
+    let legacy = workspace.path("legacy.spil");
+    std::fs::create_dir(&legacy).unwrap();
+    std::fs::write(legacy.join("manifest.json"), b"{}").unwrap();
+    let foreign = workspace.path("foreign.spil");
+    let connection = rusqlite::Connection::open(&foreign).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE foreign_data(value TEXT); INSERT INTO foreign_data VALUES('keep')",
+        )
+        .unwrap();
+    drop(connection);
+    let foreign_bytes = std::fs::read(&foreign).unwrap();
+    let mut client = spawn().await;
+    import(&mut client, &fixture("box-mm.step"), RigidPoseMm::IDENTITY).await;
+    for path in [&legacy, &foreign] {
+        failed_open_preserves(&mut client, path, ProjectErrorCode::UnsupportedFormat).await;
+    }
+    assert_eq!(std::fs::read(&foreign).unwrap(), foreign_bytes);
+    assert_eq!(std::fs::read(legacy.join("manifest.json")).unwrap(), b"{}");
+    assert_eq!(std::fs::read_dir(legacy).unwrap().count(), 1);
+    client.shutdown().await.unwrap();
+}
+
+async fn maintain(
+    client: &mut EngineClient,
+    action: StorageMaintenanceAction,
+    target: Option<&Path>,
+) -> NativeOperationView {
+    let session_id = client.hello().session_id.clone();
+    let base_revision = info(client).await.revision;
+    let ProjectResponse::OperationAccepted { operation } = client
+        .project(ProjectCommand::StorageMaintenance {
+            session_id,
+            base_revision,
+            action,
+            target: target.map(native),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("maintenance must use Jobs");
+    };
+    wait_job(client, operation.name).await
+}
+
+fn maintenance_stats(
+    operation: NativeOperationView,
+    action: StorageMaintenanceAction,
+) -> ProjectStorageStats {
+    assert_eq!(operation.status, JobStatus::Completed, "{operation:?}");
+    assert!(operation.outputs.is_empty());
+    let Some(JobResult::ProjectStorageMaintained {
+        action: completed,
+        stats,
+    }) = operation.result
+    else {
+        panic!("missing typed maintenance result");
+    };
+    assert_eq!(completed, action);
+    stats.validate().unwrap();
+    stats
+}
+
+#[tokio::test]
+async fn storage_maintenance_preserves_live_history_scene_and_both_committed_roots() {
+    let workspace = Workspace::new();
+    let path = workspace.path("maintenance.spil");
+    let compact = workspace.path("compact.spil");
+    let mut client = spawn().await;
+    let session_id = client.hello().session_id.clone();
+    project_rejection(
+        &mut client,
+        ProjectCommand::StorageMaintenance {
+            session_id,
+            base_revision: ProjectRevision(0),
+            action: StorageMaintenanceAction::Stats,
+            target: None,
+        },
+        ProjectErrorCode::NoSavedPath,
+    )
+    .await;
+    import(&mut client, &fixture("box-mm.step"), RigidPoseMm::IDENTITY).await;
+    save(&mut client, Some(&path)).await;
+    let occurrence = records(&mut client).await.1[0].occurrence_id;
+    for offset in [1.0, 2.0] {
+        pose(&mut client, occurrence, translated(offset)).await;
+        save(&mut client, None).await;
+    }
+    pose(&mut client, occurrence, translated(3.0)).await;
+    let before = info(&mut client).await;
+    let before_scene = scene(&mut client).await;
+    let heads = support::heads(&path);
+    let stats = maintenance_stats(
+        maintain(&mut client, StorageMaintenanceAction::Stats, None).await,
+        StorageMaintenanceAction::Stats,
+    );
+    assert!(stats.snapshots > 2 && stats.unreachable_payload_bytes > 0);
+    assert_eq!(stats.retained_roots, 2);
+    assert_eq!(stats.limits.chunk_bytes, 262144);
+    assert_eq!(info(&mut client).await, before);
+    let collected = maintenance_stats(
+        maintain(
+            &mut client,
+            StorageMaintenanceAction::CollectUnreachable,
+            None,
+        )
+        .await,
+        StorageMaintenanceAction::CollectUnreachable,
+    );
+    assert_eq!(collected.snapshots, 2);
+    assert_eq!(collected.unreachable_payload_bytes, 0);
+    assert_eq!(support::heads(&path), heads);
+    let copied = maintenance_stats(
+        maintain(
+            &mut client,
+            StorageMaintenanceAction::CompactToNew,
+            Some(&compact),
+        )
+        .await,
+        StorageMaintenanceAction::CompactToNew,
+    );
+    assert_eq!(copied.snapshots, 2);
+    assert_eq!(copied.unreachable_payload_bytes, 0);
+    let compact_heads = support::heads(&compact);
+    assert_eq!((compact_heads.1, compact_heads.2), (heads.1, heads.2));
+    assert_eq!(support::guard(&compact), support::guard(&path));
+    assert!(compact.is_file());
+    assert_eq!(info(&mut client).await, before);
+    assert_eq!(scene(&mut client).await, before_scene);
+    let compact_bytes = std::fs::read(&compact).unwrap();
+    project_job_error(
+        &maintain(
+            &mut client,
+            StorageMaintenanceAction::CompactToNew,
+            Some(&compact),
+        )
+        .await,
+        ProjectErrorCode::Io,
+    );
+    assert_eq!(std::fs::read(&compact).unwrap(), compact_bytes);
+    assert_eq!(info(&mut client).await, before);
+    client
+        .project(ProjectCommand::Undo {
+            session_id: before_scene.session_id.clone(),
+            base_revision: before_scene.revision,
+        })
+        .await
+        .unwrap();
+    assert_eq!(records(&mut client).await.1[0].pose, translated(2.0));
+    client.shutdown().await.unwrap();
+    let mut observer = spawn().await;
+    open(&mut observer, &compact, true, false, false).await;
+    assert_eq!(records(&mut observer).await.1[0].pose, translated(2.0));
+    let read_only_info = info(&mut observer).await;
+    maintenance_stats(
+        maintain(&mut observer, StorageMaintenanceAction::Stats, None).await,
+        StorageMaintenanceAction::Stats,
+    );
+    for (action, target) in [
+        (StorageMaintenanceAction::CollectUnreachable, None),
+        (
+            StorageMaintenanceAction::CompactToNew,
+            Some(workspace.path("refused.spil")),
+        ),
+    ] {
+        let session_id = observer.hello().session_id.clone();
+        project_rejection(
+            &mut observer,
+            ProjectCommand::StorageMaintenance {
+                session_id,
+                base_revision: read_only_info.revision,
+                action,
+                target: target.as_deref().map(native),
+            },
+            ProjectErrorCode::ReadOnly,
+        )
+        .await;
+    }
+    assert_eq!(info(&mut observer).await, read_only_info);
+    open(&mut observer, &compact, true, true, false).await;
+    assert_eq!(records(&mut observer).await.1[0].pose, translated(1.0));
+    observer.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn retired_manifest_fault_hooks_are_not_accepted() {
+    for stage in [
+        "after_assets",
+        "before_manifest_replace",
+        "after_manifest_replace",
+    ] {
+        let store = tempfile::tempdir().unwrap();
+        let mut command = Command::new(ENGINE);
+        command.env("SPILING_PROJECT_FAULT", stage);
+        assert!(
+            EngineClient::spawn_command(command, store.path())
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn corrupt_recovery_guard_refuses_normal_and_previous_open_without_state_loss() {
+    let workspace = Workspace::new();
+    let path = workspace.path("guard.spil");
+    let mut seed = spawn().await;
+    import(&mut seed, &fixture("box-mm.step"), RigidPoseMm::IDENTITY).await;
+    save(&mut seed, Some(&path)).await;
+    let occurrence = records(&mut seed).await.1[0].occurrence_id;
+    pose(&mut seed, occurrence, translated(10.0)).await;
+    save(&mut seed, None).await;
+    seed.shutdown().await.unwrap();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute("UPDATE container SET guard=?1", [b"{}".as_slice()])
+        .unwrap();
+    let mut live = spawn().await;
+    import(&mut live, &fixture("cylinder.step"), RigidPoseMm::IDENTITY).await;
+    failed_open_preserves(&mut live, &path, ProjectErrorCode::InvalidProject).await;
+    let before = info(&mut live).await;
+    let before_native = native_snapshot(&mut live).await;
+    let operation = start_open(&mut live, &path, false, true, true).await;
+    project_job_error(
+        &wait_job(&mut live, operation).await,
+        ProjectErrorCode::InvalidProject,
+    );
+    assert_eq!(info(&mut live).await, before);
+    assert_eq!(native_snapshot(&mut live).await, before_native);
+    live.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1730,12 +1962,7 @@ async fn image_finish_atomic_history_and_fresh_read_only_asset_resource() {
 
     // Stored canonical bytes, including disabled/history-independent image
     // assets, are validated on fresh open before replacing the active state.
-    let stored = checkpoint
-        .join("images")
-        .join(format!("{}.pgm", image.image_hash.as_str()));
-    let mut corrupt = canonical.to_vec();
-    *corrupt.last_mut().unwrap() ^= 1;
-    std::fs::write(stored, corrupt).unwrap();
+    support::corrupt_object(&checkpoint, &image.image_hash);
     let mut fresh = spawn().await;
     let unchanged = info(&mut fresh).await;
     let id = start_open(&mut fresh, &checkpoint, true, false, false).await;

@@ -126,6 +126,8 @@ message NativeOperationResult {
     AppearanceComparedResult appearance_compared = 11;
     OpticalComparedResult optical_compared = 12;
     OpticalConstructionAppliedResult optical_construction_applied = 13;
+    ProjectInfo project_save_uncertain = 14;
+    ProjectStorageMaintainedResult project_storage_maintained = 15;
   }
 }
 

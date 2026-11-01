@@ -57,6 +57,10 @@ impl JobStatus {
 )]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum JobResult {
+    ProjectStorageMaintained {
+        action: StorageMaintenanceAction,
+        stats: ProjectStorageStats,
+    },
     OpticalConstructionApplied {
         info: ProjectInfo,
         construction_index: u16,
@@ -71,6 +75,9 @@ pub(crate) enum JobResult {
         preparation: BedPosePreparation,
     },
     ProjectSaved {
+        info: ProjectInfo,
+    },
+    ProjectSaveUncertain {
         info: ProjectInfo,
     },
     SurfaceImageImported {

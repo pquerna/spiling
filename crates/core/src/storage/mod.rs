@@ -2,122 +2,128 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Complete source-backed checkpoints; no automatic recovery or asset GC.
-mod os;
+//! Checked project meaning above the closed PTAC container representation.
 use super::{
     MAX_APPEARANCE_RETAINED_BYTES, MAX_RETAINED_SOURCE_BYTES, MAX_SOURCE_BYTES, ManufacturingAsset,
-    PaletteAsset, SaveSnapshot, Snapshot, SourceAsset, SurfaceImageAsset, error, invalid,
+    PaletteAsset, Project, SaveSnapshot, Snapshot, SourceAsset, SurfaceImageAsset, error, invalid,
     validate_snapshot,
 };
-use os::Directory;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use spiling_contracts::{
     appearance::{MAX_PALETTE_BYTES, PreparedPalette},
     geometry::{DefinitionId, SourceHash},
     manufacturing::{MAX_MANUFACTURING_BUNDLE_BYTES, MAX_MANUFACTURING_RETAINED_BYTES},
     project::*,
-    surface::{MAX_SURFACE_IMAGE_BYTES, MAX_SURFACE_IMAGE_RETAINED_BYTES, SurfaceImageRecord},
+    surface::{MAX_SURFACE_IMAGE_BYTES, MAX_SURFACE_IMAGE_RETAINED_BYTES},
 };
+use spiling_core_ptac::{
+    Capture, Container, Heads, Member, ObjectId, ObjectInput, ObjectRole, Selection, SnapshotId,
+    SnapshotInput,
+};
+pub use spiling_core_ptac::{PublicationOutcome, StorageStats};
 use std::{
-    collections::BTreeMap,
-    fs::File,
-    io::{Read, Write},
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-const CURRENT: &str = "manifest.json";
-const PREVIOUS: &str = "previous.json";
-const LOCK: &str = "writer.lock";
-const SOURCES: &str = "sources";
-const MANUFACTURING: &str = "manufacturing";
-const IMAGES: &str = "images";
-const PALETTE_ORIGINALS: &str = "palette-originals";
-const PALETTE_CANONICAL: &str = "palette-canonical";
+const SOURCE: u16 = 1;
+const MANUFACTURING: u16 = 2;
+const IMAGE: u16 = 3;
+const PALETTE_ORIGINAL: u16 = 4;
+const PALETTE_CANONICAL: u16 = 5;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveStage {
-    AssetsSynced,
-    BeforeManifestReplace,
-    AfterManifestReplace,
+    Staged,
+    RowsInserted,
+    BeforeCommit,
+    Committed,
+    BeforePublish,
+    Published,
 }
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecoveryRecord {
-    manifest: ProjectManifest,
-    revision_high_water: ProjectRevision,
-    next_occurrence_high_water: u32,
-    next_surface_layer_high_water: u32,
-    next_process_layer_high_water: u32,
-    next_process_operation_high_water: u32,
-}
+
 #[derive(Debug)]
 pub struct Storage {
-    path: PathBuf,
-    directory: Directory,
-    sources: Directory,
-    manufacturing: Directory,
-    images: Directory,
-    palette_originals: Directory,
-    palette_canonical: Directory,
-    // Never unlink/recreate this inode. File's OS lock is released by RAII.
-    _writer_lock: Option<File>,
-    operation: Mutex<()>,
+    container: Arc<Container>,
 }
 impl Storage {
     pub fn path(&self) -> &Path {
-        &self.path
+        self.container.path()
     }
     pub fn read_only(&self) -> bool {
-        self._writer_lock.is_none()
+        self.container.read_only()
     }
-    fn validate_attachment(&self) -> Result<(), ProjectError> {
-        self.directory.check_path().map_err(io)?;
-        if !self
-            .sources
-            .same(&self.directory.child(SOURCES).map_err(io)?)
-            .map_err(io)?
-        {
-            return Err(invalid("attached source directory was substituted"));
+    pub fn stats(&self, cancel: &AtomicBool) -> Result<StorageStats, ProjectError> {
+        self.container.stats(cancel).map_err(ptac_error)
+    }
+    pub fn collect_unreachable(
+        &self,
+        cancel: &AtomicBool,
+        decide: impl FnMut() -> bool,
+    ) -> Result<StorageStats, ProjectError> {
+        self.container
+            .collect_unreachable(cancel, decide)
+            .map_err(ptac_error)?;
+        self.stats(&AtomicBool::new(false))
+    }
+    pub fn compact_to_new(
+        &self,
+        target: &Path,
+        cancel: &AtomicBool,
+        mut observe: impl FnMut(SaveStage),
+    ) -> Result<StorageCopyReceipt, ProjectError> {
+        if self.read_only() {
+            return Err(error(
+                ProjectErrorCode::ReadOnly,
+                "read-only storage cannot be compacted",
+            ));
         }
-        if !self
-            .manufacturing
-            .same(&self.directory.child(MANUFACTURING).map_err(io)?)
-            .map_err(io)?
-        {
-            return Err(invalid("attached manufacturing directory was substituted"));
-        }
-        if !self
-            .images
-            .same(&self.directory.child(IMAGES).map_err(io)?)
-            .map_err(io)?
-        {
-            return Err(invalid("attached image directory was substituted"));
-        }
-        for (name, attached) in [
-            (PALETTE_ORIGINALS, &self.palette_originals),
-            (PALETTE_CANONICAL, &self.palette_canonical),
-        ] {
-            if !attached
-                .same(&self.directory.child(name).map_err(io)?)
-                .map_err(io)?
-            {
-                return Err(invalid(
-                    "attached appearance palette directory was substituted",
-                ));
-            }
-        }
-        if let Some(lock) = &self._writer_lock
-            && !self.directory.same_entry(LOCK, lock).map_err(io)?
-        {
-            return Err(invalid("writer lock inode was substituted"));
-        }
-        Ok(())
+        let publication = self
+            .container
+            .compact_to_new(target, cancel, |stage| {
+                observe_stage(stage, true, &mut observe);
+                stage_decision(stage, true, cancel)
+            })
+            .map_err(ptac_error)?;
+        let outcome = publication.outcome;
+        let durability_error = publication_error(outcome, publication.error);
+        let storage = Arc::new(Self {
+            container: publication.container,
+        });
+        let stats = if outcome == PublicationOutcome::PublishedConfirmed {
+            storage.stats(&AtomicBool::new(false)).ok()
+        } else {
+            None
+        };
+        Ok(StorageCopyReceipt {
+            storage,
+            outcome,
+            durability_error,
+            stats,
+        })
     }
 }
+
+#[derive(Debug)]
+pub struct StorageCopyReceipt {
+    pub storage: Arc<Storage>,
+    pub outcome: PublicationOutcome,
+    pub durability_error: Option<ProjectError>,
+    pub stats: Option<StorageStats>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StorageBinding {
+    container: Weak<Container>,
+    heads: Heads,
+    selected: SnapshotId,
+    selection: Selection,
+    guard: ProjectRecoveryGuard,
+}
+
 #[derive(Debug)]
 pub struct LoadedProject {
     pub manifest: ProjectManifest,
@@ -128,522 +134,19 @@ pub struct LoadedProject {
     pub appearance_palettes: BTreeMap<SourceHash, Arc<PaletteAsset>>,
     pub storage: Arc<Storage>,
     pub recovered_previous: bool,
+    pub(crate) binding: StorageBinding,
 }
+
 #[derive(Debug)]
 pub struct SaveReceipt {
     pub storage: Arc<Storage>,
     pub manifest: ProjectManifest,
+    pub outcome: PublicationOutcome,
     pub durability_error: Option<ProjectError>,
-}
-fn io(error_value: std::io::Error) -> ProjectError {
-    error(
-        if error_value.kind() == std::io::ErrorKind::FileTooLarge {
-            ProjectErrorCode::ResourceLimit
-        } else {
-            ProjectErrorCode::Io
-        },
-        error_value.to_string(),
-    )
-}
-fn cancelled(cancel: &AtomicBool) -> Result<(), ProjectError> {
-    if cancel.load(Ordering::Acquire) {
-        Err(error(
-            ProjectErrorCode::Cancelled,
-            "project operation cancelled before commit",
-        ))
-    } else {
-        Ok(())
-    }
-}
-fn bounded_read(
-    directory: &Directory,
-    name: &str,
-    max: usize,
-    missing: ProjectErrorCode,
-) -> Result<Vec<u8>, ProjectError> {
-    bounded_read_exact(directory, name, max, missing, None)
-}
-fn bounded_read_exact(
-    directory: &Directory,
-    name: &str,
-    max: usize,
-    missing: ProjectErrorCode,
-    exact_size: Option<usize>,
-) -> Result<Vec<u8>, ProjectError> {
-    let mut file = directory.read(name).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            error(missing, format!("missing project file {name}"))
-        } else {
-            io(e)
-        }
-    })?;
-    let size = file.metadata().map_err(io)?.len();
-    if size == 0 {
-        return Err(error(
-            if missing == ProjectErrorCode::MissingAsset {
-                ProjectErrorCode::CorruptAsset
-            } else {
-                ProjectErrorCode::InvalidProject
-            },
-            "project file is empty",
-        ));
-    }
-    if size > max as u64 {
-        return Err(error(
-            ProjectErrorCode::ResourceLimit,
-            format!("project file {name} exceeds size budget"),
-        ));
-    }
-    if exact_size.is_some_and(|expected| size != expected as u64) {
-        return Err(error(
-            ProjectErrorCode::CorruptAsset,
-            "immutable asset metadata length mismatch",
-        ));
-    }
-    // Capture only the admitted allocation, even if another process grows the file.
-    let mut bytes = vec![0; size as usize];
-    file.read_exact(&mut bytes).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            error(
-                ProjectErrorCode::CorruptAsset,
-                "project file shrank during capture",
-            )
-        } else {
-            io(e)
-        }
-    })?;
-    if file.read(&mut [0u8; 1]).map_err(io)? != 0 {
-        return Err(error(
-            ProjectErrorCode::ResourceLimit,
-            "project file grew during capture",
-        ));
-    }
-    Ok(bytes)
-}
-#[derive(Deserialize)]
-struct ManifestVersion {
-    format_version: u32,
-}
-#[derive(Deserialize)]
-struct RecoveryVersion {
-    manifest: ManifestVersion,
-}
-fn validate_format(bytes: &[u8], recovery: bool) -> Result<(), ProjectError> {
-    let version = if recovery {
-        serde_json::from_slice::<RecoveryVersion>(bytes)
-            .map(|record| record.manifest.format_version)
-    } else {
-        serde_json::from_slice::<ManifestVersion>(bytes).map(|record| record.format_version)
-    }
-    .map_err(|e| invalid(format!("invalid checkpoint version: {e}")))?;
-    if version != PROJECT_FORMAT_VERSION {
-        return Err(error(
-            ProjectErrorCode::UnsupportedFormat,
-            format!("only project format {PROJECT_FORMAT_VERSION} is supported"),
-        ));
-    }
-    Ok(())
-}
-fn parse_manifest(bytes: &[u8]) -> Result<ProjectManifest, ProjectError> {
-    validate_format(bytes, false)?;
-    let mut manifest: ProjectManifest =
-        serde_json::from_slice(bytes).map_err(|e| invalid(format!("invalid manifest: {e}")))?;
-    manifest.validate()?;
-    share_optical_request(&mut manifest);
-    Ok(manifest)
-}
-fn parse_recovery(bytes: &[u8]) -> Result<RecoveryRecord, ProjectError> {
-    validate_format(bytes, true)?;
-    let mut record: RecoveryRecord = serde_json::from_slice(bytes)
-        .map_err(|e| invalid(format!("invalid recovery checkpoint: {e}")))?;
-    record.manifest.validate()?;
-    share_optical_request(&mut record.manifest);
-    if record.next_occurrence_high_water < record.manifest.next_occurrence
-        || record.revision_high_water < record.manifest.revision
-        || record.next_surface_layer_high_water < record.manifest.next_surface_layer
-        || record.next_process_layer_high_water < record.manifest.next_process_layer
-        || record.next_process_operation_high_water < record.manifest.next_process_operation
-    {
-        return Err(invalid(
-            "recovery high-water is below checkpoint identity counters",
-        ));
-    }
-    Ok(record)
+    pub(crate) binding: Option<StorageBinding>,
 }
 
-// Equality and the complete report/input binding were checked before sharing.
-// The persisted request appears twice in JSON, but is one immutable allocation
-// in live project/history state after reconstruction.
-fn share_optical_request(manifest: &mut ProjectManifest) {
-    if let Some(optical) = &mut manifest.appearance_study.optical
-        && let Some(report) = &mut optical.report
-        && let Some(report) = Arc::get_mut(report)
-    {
-        report.request = optical.request.clone();
-    }
-}
-fn durability_failure(e: std::io::Error) -> ProjectError {
-    error(
-        ProjectErrorCode::Io,
-        format!(
-            "Checkpoint was published, but durability confirmation failed: {e}. Crash durability is uncertain; inspect project status before retrying."
-        ),
-    )
-}
-fn load_sources(
-    manifest: &ProjectManifest,
-    sources: &Directory,
-    source_budget: usize,
-    cancel: &AtomicBool,
-) -> Result<BTreeMap<DefinitionId, Arc<SourceAsset>>, ProjectError> {
-    let source_budget = source_budget.min(MAX_RETAINED_SOURCE_BYTES);
-    let mut result = BTreeMap::new();
-    let mut total = 0usize;
-    for record in &manifest.definitions {
-        cancelled(cancel)?;
-        let name = format!("{}.step", record.provenance.source_hash.as_str());
-        let bytes = bounded_read(
-            sources,
-            &name,
-            MAX_SOURCE_BYTES.min(source_budget - total),
-            ProjectErrorCode::MissingAsset,
-        )?;
-        total += bytes.len(); // bounded_read admits at most the remaining budget.
-        let source = Arc::new(SourceAsset::new(record.clone(), bytes)?);
-        result.insert(record.definition_id.clone(), source);
-    }
-    Ok(result)
-}
-fn load_images(
-    manifest: &ProjectManifest,
-    directory: &Directory,
-    budget: usize,
-    cancel: &AtomicBool,
-) -> Result<BTreeMap<SourceHash, Arc<SurfaceImageAsset>>, ProjectError> {
-    let budget = budget.min(MAX_SURFACE_IMAGE_RETAINED_BYTES);
-    let mut result = BTreeMap::new();
-    let mut total = 0usize;
-    for record in &manifest.surface_overlays.images {
-        cancelled(cancel)?;
-        let bytes = bounded_read_exact(
-            directory,
-            &format!("{}.pgm", record.image_hash.as_str()),
-            MAX_SURFACE_IMAGE_BYTES.min(budget - total),
-            ProjectErrorCode::MissingAsset,
-            Some(record.byte_count as usize),
-        )?;
-        total += bytes.capacity();
-        result.insert(
-            record.image_hash.clone(),
-            Arc::new(SurfaceImageAsset::new(record.clone(), bytes)?),
-        );
-    }
-    Ok(result)
-}
-fn validate_stored_images(
-    manifest: &ProjectManifest,
-    directory: &Directory,
-    cancel: &AtomicBool,
-) -> Result<(), ProjectError> {
-    for record in &manifest.surface_overlays.images {
-        validate_stored_image(directory, record, None, cancel)?;
-    }
-    Ok(())
-}
-fn validate_stored_image(
-    directory: &Directory,
-    record: &SurfaceImageRecord,
-    expected: Option<&[u8]>,
-    cancel: &AtomicBool,
-) -> Result<(), ProjectError> {
-    cancelled(cancel)?;
-    let name = format!("{}.pgm", record.image_hash.as_str());
-    let mut file = directory.read(&name).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            error(ProjectErrorCode::MissingAsset, "missing immutable image")
-        } else {
-            io(e)
-        }
-    })?;
-    let size = file.metadata().map_err(io)?.len();
-    if size != record.byte_count || size > MAX_SURFACE_IMAGE_BYTES as u64 {
-        return Err(error(
-            ProjectErrorCode::CorruptAsset,
-            "stored image length differs from record",
-        ));
-    }
-    // Validate existing content without a second retained heap allocation.
-    let mut buffer = [0u8; MAX_SURFACE_IMAGE_BYTES];
-    let bytes = &mut buffer[..size as usize];
-    file.read_exact(bytes).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            error(
-                ProjectErrorCode::CorruptAsset,
-                "stored image shrank during validation",
-            )
-        } else {
-            io(e)
-        }
-    })?;
-    if file.read(&mut [0u8; 1]).map_err(io)? != 0 {
-        return Err(error(
-            ProjectErrorCode::CorruptAsset,
-            "stored image grew during validation",
-        ));
-    }
-    record.validate_content(bytes)?;
-    if expected.is_some_and(|expected| expected != bytes) {
-        return Err(error(
-            ProjectErrorCode::CorruptAsset,
-            "stored image differs from captured content",
-        ));
-    }
-    Ok(())
-}
-fn load_manufacturing(
-    manifest: &ProjectManifest,
-    directory: &Directory,
-    budget: usize,
-    cancel: &AtomicBool,
-) -> Result<Option<Arc<ManufacturingAsset>>, ProjectError> {
-    let Some(record) = &manifest.manufacturing_artifact else {
-        return Ok(None);
-    };
-    cancelled(cancel)?;
-    let bytes = bounded_read_exact(
-        directory,
-        &format!("{}.json", record.hash.as_str()),
-        (MAX_MANUFACTURING_BUNDLE_BYTES as usize)
-            .min(budget.min(MAX_MANUFACTURING_RETAINED_BYTES as usize)),
-        ProjectErrorCode::MissingAsset,
-        Some(record.byte_count as usize),
-    )?;
-    Ok(Some(Arc::new(ManufacturingAsset::new(
-        record.clone(),
-        bytes,
-    )?)))
-}
-fn validate_stored_manufacturing(
-    manifest: &ProjectManifest,
-    directory: &Directory,
-    cancel: &AtomicBool,
-) -> Result<(), ProjectError> {
-    if let Some(asset) = load_manufacturing(
-        manifest,
-        directory,
-        MAX_MANUFACTURING_BUNDLE_BYTES as usize,
-        cancel,
-    )? {
-        // Compare semantic input without capturing source bytes a second time.
-        let bundle = asset.validate()?;
-        let provenance = &bundle.provenance;
-        if provenance.project_id != manifest.project_id
-            || provenance.input_revision > manifest.revision
-            || provenance.intent
-                != *manifest
-                    .manufacturing_intent
-                    .as_deref()
-                    .ok_or_else(|| invalid("artifact has no intent"))?
-            || provenance.surface_overlays != manifest.surface_overlays
-            || provenance.process_document != manifest.process_document
-            || provenance.definitions.len() != manifest.definitions.len()
-            || provenance.occurrences.len() != manifest.occurrences.len()
-            || provenance
-                .definitions
-                .iter()
-                .any(|r| !manifest.definitions.contains(r))
-            || provenance
-                .occurrences
-                .iter()
-                .any(|r| !manifest.occurrences.contains(r))
-        {
-            return Err(error(
-                ProjectErrorCode::CorruptAsset,
-                "stored manufacturing provenance differs from checkpoint",
-            ));
-        }
-    }
-    Ok(())
-}
-fn validate_root(directory: &Directory) -> Result<(), ProjectError> {
-    for name in directory.entries(32).map_err(io)? {
-        match name.as_str() {
-            CURRENT | PREVIOUS | LOCK => {
-                directory.read(&name).map_err(io)?;
-            }
-            SOURCES | MANUFACTURING | IMAGES | PALETTE_ORIGINALS | PALETTE_CANONICAL => {
-                directory.child(&name).map_err(io)?;
-            }
-            _ if temporary_name(&name) => match directory.read(&name) {
-                Ok(file) => {
-                    if file.metadata().map_err(io)?.len() > MAX_PROJECT_MANIFEST_BYTES as u64 {
-                        return Err(error(
-                            ProjectErrorCode::ResourceLimit,
-                            "temporary manifest exceeds 1 MiB",
-                        ));
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                Err(e) => return Err(io(e)),
-            },
-            _ => return Err(invalid("unexpected entry in project directory")),
-        }
-    }
-    Ok(())
-}
-fn temporary_name(name: &str) -> bool {
-    name.strip_prefix(".tmp-").is_some_and(|id| {
-        uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id)
-    })
-}
-fn asset_name(name: &str, suffix: &str) -> bool {
-    name.strip_suffix(suffix).is_some_and(|hash| {
-        hash.len() == 64
-            && hash
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    })
-}
-fn asset_budget(
-    sources: &Directory,
-    suffix: &str,
-    max_asset_bytes: usize,
-) -> Result<(usize, u64, u64), ProjectError> {
-    let mut count = 0;
-    let mut total = 0u64;
-    let mut scratch_count = 0;
-    let mut scratch_bytes = 0u64;
-    for name in sources.entries(MAX_PROJECT_STORED_ASSETS + 8).map_err(io)? {
-        let temporary = temporary_name(&name);
-        if !asset_name(&name, suffix) && !temporary {
-            return Err(invalid("unexpected immutable asset entry"));
-        }
-        let file = match sources.read(&name) {
-            Ok(file) => file,
-            Err(e) if temporary && e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(io(e)),
-        };
-        let size = file.metadata().map_err(io)?.len();
-        if size == 0 && !temporary {
-            return Err(error(
-                ProjectErrorCode::CorruptAsset,
-                "immutable asset is empty",
-            ));
-        }
-        if size > max_asset_bytes as u64 {
-            return Err(error(
-                ProjectErrorCode::ResourceLimit,
-                "stored asset exceeds byte limit",
-            ));
-        }
-        if temporary {
-            scratch_count += 1;
-            scratch_bytes += size;
-        } else {
-            total += size;
-            count += 1;
-        }
-    }
-    if count > MAX_PROJECT_STORED_ASSETS
-        || total > MAX_PROJECT_STORED_SOURCE_BYTES
-        || scratch_count > 8
-        || scratch_bytes > max_asset_bytes as u64
-    {
-        return Err(error(
-            ProjectErrorCode::ResourceLimit,
-            "persisted asset/scratch budget exhausted",
-        ));
-    }
-    Ok((count, total, scratch_bytes))
-}
-fn validate_stored_source(
-    sources: &Directory,
-    record: &StoredDefinition,
-    expected: Option<&[u8]>,
-    cancel: &AtomicBool,
-) -> Result<(), ProjectError> {
-    let name = format!("{}.step", record.provenance.source_hash.as_str());
-    let mut file = sources.read(&name).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            error(ProjectErrorCode::MissingAsset, "missing immutable source")
-        } else {
-            io(e)
-        }
-    })?;
-    let size = file.metadata().map_err(io)?.len();
-    if size == 0 {
-        return Err(error(
-            ProjectErrorCode::CorruptAsset,
-            "immutable source is empty",
-        ));
-    }
-    if size > MAX_SOURCE_BYTES as u64 {
-        return Err(error(
-            ProjectErrorCode::ResourceLimit,
-            "immutable source exceeds 16 MiB",
-        ));
-    }
-    let mut hash = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    let mut offset = 0usize;
-    loop {
-        cancelled(cancel)?;
-        let count = file.read(&mut buffer).map_err(io)?;
-        if count == 0 {
-            break;
-        }
-        let end = offset
-            .checked_add(count)
-            .ok_or_else(|| invalid("source size overflow"))?;
-        if end > MAX_SOURCE_BYTES {
-            return Err(error(
-                ProjectErrorCode::ResourceLimit,
-                "immutable source grew beyond 16 MiB",
-            ));
-        }
-        if expected.is_some_and(|bytes| bytes.get(offset..end) != Some(&buffer[..count])) {
-            return Err(error(
-                ProjectErrorCode::CorruptAsset,
-                "immutable source differs from captured bytes",
-            ));
-        }
-        if expected.is_none() {
-            hash.update(&buffer[..count]);
-        }
-        offset = end;
-    }
-    if expected.is_some_and(|bytes| offset != bytes.len()) {
-        return Err(error(
-            ProjectErrorCode::CorruptAsset,
-            "immutable source length mismatch",
-        ));
-    }
-    if expected.is_none() {
-        let digest: [u8; 32] = hash.finalize().into();
-        if SourceHash::from_digest(&digest) != record.provenance.source_hash {
-            return Err(error(
-                ProjectErrorCode::CorruptAsset,
-                "immutable source hash mismatch",
-            ));
-        }
-    }
-    Ok(())
-}
-fn writer_lock(directory: &Directory) -> Result<File, ProjectError> {
-    // Opening an existing inode does not truncate it. Read-only never creates it.
-    let file = directory.lock_file(LOCK).map_err(io)?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(std::fs::TryLockError::WouldBlock) => Err(error(
-            ProjectErrorCode::ProjectLocked,
-            "project is held by another writer",
-        )),
-        Err(std::fs::TryLockError::Error(e)) => Err(io(e)),
-    }
-}
-/// Remaining incoming allocation capacity while the caller retains its live state.
-/// Each asset class is admitted independently before allocating its contents.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct LoadBudgets {
     pub source_bytes: usize,
     pub manufacturing_bytes: usize,
@@ -658,6 +161,309 @@ impl LoadBudgets {
         appearance_bytes: MAX_APPEARANCE_RETAINED_BYTES,
     };
 }
+
+fn ptac_error(value: spiling_core_ptac::Error) -> ProjectError {
+    use spiling_core_ptac::Error;
+    let code = match &value {
+        Error::Unsupported(_) => ProjectErrorCode::UnsupportedFormat,
+        Error::Invalid(_) | Error::NoPrevious => ProjectErrorCode::InvalidProject,
+        Error::ResourceLimit(_) => ProjectErrorCode::ResourceLimit,
+        Error::Locked => ProjectErrorCode::ProjectLocked,
+        Error::ReadOnly => ProjectErrorCode::ReadOnly,
+        Error::Conflict => ProjectErrorCode::StaleRevision,
+        Error::Cancelled => ProjectErrorCode::Cancelled,
+        Error::Io(_) | Error::Sqlite(_) => ProjectErrorCode::Io,
+    };
+    error(code, value.to_string())
+}
+
+fn cancelled(cancel: &AtomicBool) -> Result<(), ProjectError> {
+    if cancel.load(Ordering::Acquire) {
+        Err(error(
+            ProjectErrorCode::Cancelled,
+            "project operation cancelled before publication",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn publication_error(
+    outcome: PublicationOutcome,
+    value: Option<spiling_core_ptac::Error>,
+) -> Option<ProjectError> {
+    if outcome == PublicationOutcome::PublishedConfirmed {
+        None
+    } else {
+        Some(error(
+            ProjectErrorCode::Io,
+            format!(
+                "save publication is {outcome:?}; inspect/reopen before retrying: {}",
+                value.map_or_else(
+                    || "publication could not be confirmed".to_owned(),
+                    |value| value.to_string()
+                )
+            ),
+        ))
+    }
+}
+
+fn observe_stage(
+    stage: spiling_core_ptac::SaveStage,
+    is_new: bool,
+    observe: &mut impl FnMut(SaveStage),
+) {
+    use spiling_core_ptac::SaveStage as Stage;
+    match stage {
+        Stage::Staged => observe(SaveStage::Staged),
+        Stage::BeforeCommit => {
+            observe(SaveStage::RowsInserted);
+            if !is_new {
+                observe(SaveStage::BeforeCommit);
+            }
+        }
+        Stage::Committed => observe(SaveStage::Committed),
+        Stage::BeforePublish => {
+            observe(SaveStage::BeforePublish);
+            if is_new {
+                observe(SaveStage::BeforeCommit);
+            }
+        }
+        Stage::Published => observe(SaveStage::Published),
+    }
+}
+
+fn stage_decision(stage: spiling_core_ptac::SaveStage, is_new: bool, cancel: &AtomicBool) -> bool {
+    stage == spiling_core_ptac::SaveStage::Published
+        || (!is_new && stage == spiling_core_ptac::SaveStage::Committed)
+        || !cancel.load(Ordering::Acquire)
+}
+
+fn parse_manifest(bytes: &[u8]) -> Result<ProjectManifest, ProjectError> {
+    if bytes.is_empty() || bytes.len() > MAX_PROJECT_MANIFEST_BYTES as usize {
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "project root exceeds its byte envelope",
+        ));
+    }
+    #[derive(serde::Deserialize)]
+    struct Format {
+        format_version: u32,
+    }
+    let format: Format = serde_json::from_slice(bytes)
+        .map_err(|value| invalid(format!("invalid project root version: {value}")))?;
+    if format.format_version != PROJECT_FORMAT_VERSION {
+        return Err(error(
+            ProjectErrorCode::UnsupportedFormat,
+            "unsupported project root format",
+        ));
+    }
+    let mut manifest: ProjectManifest = serde_json::from_slice(bytes)
+        .map_err(|value| invalid(format!("invalid project root: {value}")))?;
+    manifest.validate()?;
+    if let Some(optical) = &mut manifest.appearance_study.optical
+        && let Some(report) = &mut optical.report
+        && let Some(report) = Arc::get_mut(report)
+    {
+        report.request = optical.request.clone();
+    }
+    Ok(manifest)
+}
+
+fn parse_guard(bytes: &[u8]) -> Result<ProjectRecoveryGuard, ProjectError> {
+    if bytes.is_empty() || bytes.len() > spiling_core_ptac::MAX_GUARD_BYTES {
+        return Err(invalid("recovery guard exceeds its byte envelope"));
+    }
+    let guard: ProjectRecoveryGuard = serde_json::from_slice(bytes)
+        .map_err(|value| invalid(format!("invalid recovery guard: {value}")))?;
+    guard.validate()?;
+    Ok(guard)
+}
+
+fn object_id(hash: &SourceHash) -> ObjectId {
+    let mut bytes = [0; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hash.as_str()[index * 2..index * 2 + 2], 16)
+            .expect("SourceHash is checked lowercase SHA-256");
+    }
+    ObjectId::from_bytes(bytes)
+}
+
+fn member(role: u16, hash: &SourceHash) -> Member {
+    Member {
+        role: ObjectRole::new(role).expect("closed nonzero project role"),
+        object: object_id(hash),
+    }
+}
+
+fn expected_members(manifest: &ProjectManifest) -> BTreeSet<Member> {
+    let mut result = BTreeSet::new();
+    for definition in &manifest.definitions {
+        result.insert(member(SOURCE, &definition.provenance.source_hash));
+    }
+    if let Some(artifact) = &manifest.manufacturing_artifact {
+        result.insert(member(MANUFACTURING, &artifact.hash));
+    }
+    for image in &manifest.surface_overlays.images {
+        result.insert(member(IMAGE, &image.image_hash));
+    }
+    if let Some(palette) = &manifest.appearance_study.palette {
+        result.insert(member(PALETTE_ORIGINAL, &palette.original_hash));
+        result.insert(member(PALETTE_CANONICAL, &palette.canonical_hash));
+    }
+    result
+}
+
+fn validate_closure(manifest: &ProjectManifest, capture: &Capture<'_>) -> Result<(), ProjectError> {
+    let expected = expected_members(manifest);
+    if capture.members.len() != expected.len()
+        || capture.members.iter().copied().collect::<BTreeSet<_>>() != expected
+    {
+        return Err(invalid(
+            "project snapshot membership is not the exact declared role closure",
+        ));
+    }
+    Ok(())
+}
+
+fn read_asset(
+    capture: &Capture<'_>,
+    hash: &SourceHash,
+    budget: usize,
+    exact: Option<usize>,
+    cancel: &AtomicBool,
+) -> Result<Vec<u8>, ProjectError> {
+    cancelled(cancel)?;
+    let id = object_id(hash);
+    if exact.is_some_and(|size| capture.object_length(id).is_ok_and(|actual| actual != size)) {
+        return Err(error(
+            ProjectErrorCode::CorruptAsset,
+            "asset length differs from project metadata",
+        ));
+    }
+    let bytes = capture
+        .read_object(id, budget, cancel)
+        .map_err(ptac_error)?;
+    if bytes.capacity() > budget {
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "captured asset allocation exceeds remaining budget",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn load_assets(
+    manifest: &ProjectManifest,
+    capture: &Capture<'_>,
+    budgets: LoadBudgets,
+    cancel: &AtomicBool,
+) -> Result<Snapshot, ProjectError> {
+    validate_closure(manifest, capture)?;
+    let mut snapshot = Snapshot {
+        occurrences: manifest
+            .occurrences
+            .iter()
+            .map(|record| (record.occurrence_id, record.clone()))
+            .collect(),
+        manufacturing_intent: manifest.manufacturing_intent.clone(),
+        surface_overlays: Arc::new(manifest.surface_overlays.clone()),
+        process_document: Arc::new(manifest.process_document.clone()),
+        appearance_study: Arc::new(manifest.appearance_study.clone()),
+        ..Snapshot::default()
+    };
+    let mut source_budget = budgets.source_bytes.min(MAX_RETAINED_SOURCE_BYTES);
+    for record in &manifest.definitions {
+        let bytes = read_asset(
+            capture,
+            &record.provenance.source_hash,
+            source_budget.min(MAX_SOURCE_BYTES),
+            None,
+            cancel,
+        )?;
+        source_budget -= bytes.capacity();
+        snapshot.sources.insert(
+            record.definition_id.clone(),
+            Arc::new(SourceAsset::new(record.clone(), bytes)?),
+        );
+    }
+    let mut image_budget = budgets.image_bytes.min(MAX_SURFACE_IMAGE_RETAINED_BYTES);
+    for record in &manifest.surface_overlays.images {
+        let bytes = read_asset(
+            capture,
+            &record.image_hash,
+            image_budget.min(MAX_SURFACE_IMAGE_BYTES),
+            Some(record.byte_count as usize),
+            cancel,
+        )?;
+        image_budget -= bytes.capacity();
+        snapshot.surface_images.insert(
+            record.image_hash.clone(),
+            Arc::new(SurfaceImageAsset::new(record.clone(), bytes)?),
+        );
+    }
+    if let Some(record) = &manifest.manufacturing_artifact {
+        let bytes = read_asset(
+            capture,
+            &record.hash,
+            budgets
+                .manufacturing_bytes
+                .min(MAX_MANUFACTURING_RETAINED_BYTES as usize)
+                .min(MAX_MANUFACTURING_BUNDLE_BYTES as usize),
+            Some(record.byte_count as usize),
+            cancel,
+        )?;
+        snapshot.manufacturing_artifact =
+            Some(Arc::new(ManufacturingAsset::new(record.clone(), bytes)?));
+    }
+    let metadata = super::appearance_bytes_with_incoming(std::iter::once(&snapshot), None, None)?;
+    let mut appearance_budget = budgets
+        .appearance_bytes
+        .min(MAX_APPEARANCE_RETAINED_BYTES)
+        .checked_sub(metadata)
+        .ok_or_else(|| {
+            error(
+                ProjectErrorCode::ResourceLimit,
+                "incoming appearance metadata exceeds budget",
+            )
+        })?;
+    if let Some(record) = &manifest.appearance_study.palette {
+        appearance_budget = appearance_budget
+            .checked_sub(record.allocated_bytes())
+            .ok_or_else(|| {
+                error(
+                    ProjectErrorCode::ResourceLimit,
+                    "incoming palette metadata exceeds budget",
+                )
+            })?;
+        let original = read_asset(
+            capture,
+            &record.original_hash,
+            appearance_budget.min(MAX_PALETTE_BYTES),
+            Some(record.original_bytes as usize),
+            cancel,
+        )?;
+        appearance_budget -= original.capacity();
+        let canonical = read_asset(
+            capture,
+            &record.canonical_hash,
+            appearance_budget.min(MAX_PALETTE_BYTES),
+            Some(record.canonical_bytes as usize),
+            cancel,
+        )?;
+        appearance_budget -= canonical.capacity();
+        record.validate_hashes(&original, &canonical)?;
+        let prepared = PreparedPalette::decode_bounded(&original, &canonical, appearance_budget)?;
+        let asset =
+            PaletteAsset::from_checked_prepared(record.clone(), original, canonical, prepared)?;
+        snapshot
+            .appearance_palettes
+            .insert(record.canonical_hash.clone(), Arc::new(asset));
+    }
+    validate_snapshot(&snapshot, manifest)?;
+    Ok(snapshot)
+}
+
 pub fn open(
     path: &Path,
     read_only: bool,
@@ -673,8 +479,7 @@ pub fn open(
         LoadBudgets::MAXIMUM,
     )
 }
-/// Same-path staged writer reopen retains the original lock until publication.
-/// The incoming byte budget excludes allocations still retained by the caller.
+
 pub fn open_reusing(
     path: &Path,
     read_only: bool,
@@ -684,223 +489,182 @@ pub fn open_reusing(
     budgets: LoadBudgets,
 ) -> Result<LoadedProject, ProjectError> {
     cancelled(cancel)?;
-    let directory = Directory::open(path).map_err(io)?;
-    let canonical = directory.path().to_path_buf();
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+        return Err(error(
+            ProjectErrorCode::UnsupportedFormat,
+            "projects must be PTAC .spil files; directory projects are unsupported",
+        ));
+    }
     let storage = match existing {
-        Some(storage) if !read_only && !storage.read_only() && storage.path == canonical => {
-            if !storage.directory.same(&directory).map_err(io)? {
-                return Err(invalid("attached project directory was substituted"));
-            }
+        Some(storage)
+            if !read_only
+                && !storage.read_only()
+                && storage.container.matches_path(path).map_err(ptac_error)? =>
+        {
+            storage.container.reopen().map_err(ptac_error)?;
             storage
         }
-        _ => {
-            validate_root(&directory)?;
-            directory.read(LOCK).map_err(io)?;
-            let lock = if read_only {
-                None
-            } else {
-                Some(writer_lock(&directory)?)
-            };
-            let version_bytes = bounded_read(
-                &directory,
-                if recover_previous { PREVIOUS } else { CURRENT },
-                MAX_PROJECT_MANIFEST_BYTES as usize,
-                ProjectErrorCode::InvalidProject,
-            )?;
-            validate_format(&version_bytes, recover_previous)?;
-            let sources = directory.child(SOURCES).map_err(io)?;
-            let manufacturing = directory.child(MANUFACTURING).map_err(io)?;
-            let images = directory.child(IMAGES).map_err(io)?;
-            let palette_originals = directory.child(PALETTE_ORIGINALS).map_err(io)?;
-            let palette_canonical = directory.child(PALETTE_CANONICAL).map_err(io)?;
-            Arc::new(Storage {
-                path: canonical,
-                directory,
-                sources,
-                manufacturing,
-                images,
-                palette_originals,
-                palette_canonical,
-                _writer_lock: lock,
-                operation: Mutex::new(()),
-            })
-        }
+        _ => Arc::new(Storage {
+            container: Container::open_existing(path, read_only).map_err(ptac_error)?,
+        }),
     };
-    let operation = storage
-        .operation
-        .lock()
-        .map_err(|_| error(ProjectErrorCode::Io, "storage operation lock poisoned"))?;
-    storage.validate_attachment()?;
-    validate_root(&storage.directory)?;
-    asset_budget(&storage.sources, ".step", MAX_SOURCE_BYTES)?;
-    asset_budget(
-        &storage.manufacturing,
-        ".json",
-        MAX_MANUFACTURING_BUNDLE_BYTES as usize,
-    )?;
-    asset_budget(&storage.images, ".pgm", MAX_SURFACE_IMAGE_BYTES)?;
-    asset_budget(&storage.palette_originals, ".json", MAX_PALETTE_BYTES)?;
-    asset_budget(&storage.palette_canonical, ".json", MAX_PALETTE_BYTES)?;
-    let bytes = bounded_read(
-        &storage.directory,
-        if recover_previous { PREVIOUS } else { CURRENT },
-        MAX_PROJECT_MANIFEST_BYTES as usize,
-        ProjectErrorCode::InvalidProject,
-    )?;
-    let (manifest, saved_revision) = if recover_previous {
-        let record = parse_recovery(&bytes)?;
-        let saved_revision = record.manifest.revision;
-        let mut manifest = record.manifest;
-        manifest.revision = manifest.revision.max(record.revision_high_water).next()?;
-        manifest.next_occurrence = manifest
-            .next_occurrence
-            .max(record.next_occurrence_high_water);
-        manifest.next_surface_layer = manifest
-            .next_surface_layer
-            .max(record.next_surface_layer_high_water);
-        manifest.next_process_layer = manifest
-            .next_process_layer
-            .max(record.next_process_layer_high_water);
-        manifest.next_process_operation = manifest
-            .next_process_operation
-            .max(record.next_process_operation_high_water);
-        (manifest, saved_revision)
+    let selection = if recover_previous {
+        Selection::Previous
     } else {
-        let manifest = parse_manifest(&bytes)?;
-        let saved_revision = manifest.revision;
-        (manifest, saved_revision)
+        Selection::Current
     };
-    let sources = load_sources(&manifest, &storage.sources, budgets.source_bytes, cancel)?;
-    let surface_images = load_images(&manifest, &storage.images, budgets.image_bytes, cancel)?;
-    let appearance_palettes = load_palettes(
-        &manifest,
-        &storage.palette_originals,
-        &storage.palette_canonical,
-        budgets.appearance_bytes,
-        cancel,
-    )?;
-    let manufacturing_artifact = load_manufacturing(
-        &manifest,
-        &storage.manufacturing,
-        budgets.manufacturing_bytes,
-        cancel,
-    )?;
-    let snapshot = Snapshot {
-        sources: sources.clone(),
-        occurrences: manifest
-            .occurrences
-            .iter()
-            .map(|r| (r.occurrence_id, r.clone()))
-            .collect(),
-        manufacturing_intent: manifest.manufacturing_intent.clone(),
-        manufacturing_artifact: manufacturing_artifact.clone(),
-        surface_overlays: Arc::new(manifest.surface_overlays.clone()),
-        process_document: Arc::new(manifest.process_document.clone()),
-        surface_images: surface_images.clone(),
-        appearance_study: Arc::new(manifest.appearance_study.clone()),
-        appearance_palettes: appearance_palettes.clone(),
+    let capture = storage
+        .container
+        .capture(selection, cancel)
+        .map_err(ptac_error)?;
+    let mut manifest = parse_manifest(&capture.root)?;
+    let guard = parse_guard(&capture.guard)?;
+    guard.dominates(&manifest)?;
+    let snapshot = load_assets(&manifest, &capture, budgets, cancel)?;
+    let binding = StorageBinding {
+        container: Arc::downgrade(&storage.container),
+        heads: capture.heads,
+        selected: capture.selected,
+        selection,
+        guard: guard.clone(),
     };
-    validate_snapshot(&snapshot, &manifest)?;
-    cancelled(cancel)?;
+    drop(capture);
+    validate_other_root(&storage.container, &binding, cancel)?;
+    let saved_revision = manifest.revision;
+    guard.apply_to(&mut manifest)?;
+    if recover_previous {
+        manifest.revision = manifest.revision.next()?;
+    }
     manifest.validate()?;
-    drop(operation);
+    cancelled(cancel)?;
     Ok(LoadedProject {
         manifest,
         saved_revision,
-        sources,
-        manufacturing_artifact,
-        surface_images,
-        appearance_palettes,
+        sources: snapshot.sources,
+        manufacturing_artifact: snapshot.manufacturing_artifact,
+        surface_images: snapshot.surface_images,
+        appearance_palettes: snapshot.appearance_palettes,
         storage,
         recovered_previous: recover_previous,
+        binding,
     })
 }
-struct Temporary<'a> {
-    directory: &'a Directory,
-    name: String,
-    file: File,
-    published: bool,
-}
-impl<'a> Temporary<'a> {
-    fn write(directory: &'a Directory, bytes: &[u8]) -> Result<Self, ProjectError> {
-        let name = format!(".tmp-{}", uuid::Uuid::new_v4());
-        let file = directory.create(&name).map_err(io)?;
-        let mut temporary = Self {
-            directory,
-            name,
-            file,
-            published: false,
-        };
-        temporary.file.write_all(bytes).map_err(io)?;
-        os::sync_file(&temporary.file).map_err(io)?;
-        Ok(temporary)
-    }
-    fn replace(mut self, destination: &str) -> Result<(), ProjectError> {
-        self.directory
-            .replace(&self.name, destination)
-            .map_err(io)?;
-        self.published = true;
-        Ok(())
-    }
-    fn publish_asset(mut self, destination: &str) -> Result<(), ProjectError> {
-        self.directory
-            .publish_file(&self.name, destination)
-            .map_err(io)?;
-        self.published = true;
-        Ok(())
-    }
-}
-impl Drop for Temporary<'_> {
-    fn drop(&mut self) {
-        if !self.published {
-            let _ = self.directory.remove_owned(&self.name, &self.file);
-            self.directory.forget_owned(&self.name);
+
+fn validate_other_root(
+    container: &Container,
+    binding: &StorageBinding,
+    cancel: &AtomicBool,
+) -> Result<(), ProjectError> {
+    let other = match binding.selection {
+        Selection::Current if binding.heads.previous().is_some() => Selection::Previous,
+        Selection::Current => return Ok(()),
+        Selection::Previous => Selection::Current,
+    };
+    cancelled(cancel)?;
+    if let Ok(capture) = container.capture(other, cancel) {
+        if capture.heads != binding.heads {
+            return Err(error(
+                ProjectErrorCode::StaleRevision,
+                "container heads changed during project admission",
+            ));
+        }
+        if let Ok(manifest) = parse_manifest(&capture.root) {
+            binding.guard.dominates(&manifest)?;
         }
     }
+    cancelled(cancel)
 }
-// Failure leaves at most an exclusively named sibling stage. Cleanup never
-// recursively traverses it and never removes a substituted directory or entry.
-struct Stage {
-    directory: Directory,
-    sources: Directory,
-    manufacturing: Option<Directory>,
-    images: Option<Directory>,
-    palette_originals: Option<Directory>,
-    palette_canonical: Option<Directory>,
-    parent: Directory,
-    name: String,
-    published: bool,
-}
-impl Drop for Stage {
-    fn drop(&mut self) {
-        if self.published {
-            return;
-        }
-        let _ = self.sources.clean_owned();
-        if let Some(manufacturing) = &self.manufacturing {
-            let _ = manufacturing.clean_owned();
-            let _ = self
-                .directory
-                .remove_child_owned(MANUFACTURING, manufacturing);
-        }
-        if let Some(images) = &self.images {
-            let _ = images.clean_owned();
-            let _ = self.directory.remove_child_owned(IMAGES, images);
-        }
-        for (name, directory) in [
-            (PALETTE_ORIGINALS, self.palette_originals.as_ref()),
-            (PALETTE_CANONICAL, self.palette_canonical.as_ref()),
-        ] {
-            if let Some(directory) = directory {
-                let _ = directory.clean_owned();
-                let _ = self.directory.remove_child_owned(name, directory);
-            }
-        }
-        let _ = self.directory.clean_owned();
-        let _ = self.directory.remove_child_owned(SOURCES, &self.sources);
-        let _ = self.parent.remove_child_owned(&self.name, &self.directory);
+
+fn snapshot_objects(snapshot: &Snapshot) -> BTreeMap<Member, Arc<Vec<u8>>> {
+    let mut objects = BTreeMap::new();
+    for asset in snapshot.sources.values() {
+        objects.insert(
+            member(SOURCE, &asset.record.provenance.source_hash),
+            asset.bytes.clone(),
+        );
     }
+    if let Some(asset) = &snapshot.manufacturing_artifact {
+        objects.insert(
+            member(MANUFACTURING, &asset.record.hash),
+            asset.bytes.clone(),
+        );
+    }
+    for asset in snapshot.surface_images.values() {
+        objects.insert(
+            member(IMAGE, &asset.record().image_hash),
+            asset.bytes().clone(),
+        );
+    }
+    for asset in snapshot.appearance_palettes.values() {
+        objects.insert(
+            member(PALETTE_ORIGINAL, &asset.record().original_hash),
+            asset.original().clone(),
+        );
+        objects.insert(
+            member(PALETTE_CANONICAL, &asset.record().canonical_hash),
+            asset.canonical().clone(),
+        );
+    }
+    objects
 }
+
+fn inputs(objects: &BTreeMap<Member, Arc<Vec<u8>>>) -> Vec<ObjectInput<'_>> {
+    objects
+        .iter()
+        .map(|(member, bytes)| ObjectInput {
+            role: member.role,
+            bytes: bytes.as_slice(),
+        })
+        .collect()
+}
+
+pub(crate) fn remaining_budgets(project: &Project) -> Result<LoadBudgets, ProjectError> {
+    let staged: Vec<_> = {
+        let staged = project.staged_appearance.lock().map_err(|_| {
+            error(
+                ProjectErrorCode::Io,
+                "prepared snapshot accounting lock poisoned",
+            )
+        })?;
+        staged.iter().filter_map(Weak::upgrade).collect()
+    };
+    let mut sources = BTreeMap::new();
+    let mut manufacturing = BTreeMap::new();
+    for snapshot in std::iter::once(&project.current)
+        .chain(project.undo.iter())
+        .chain(project.redo.iter())
+        .chain(staged.iter())
+    {
+        for asset in snapshot.sources.values() {
+            sources.insert(Arc::as_ptr(&asset.bytes), asset.bytes.capacity());
+        }
+        if let Some(asset) = &snapshot.manufacturing_artifact {
+            manufacturing.insert(Arc::as_ptr(&asset.bytes), asset.bytes.capacity());
+        }
+    }
+    Ok(LoadBudgets {
+        source_bytes: MAX_RETAINED_SOURCE_BYTES
+            .saturating_sub(allocation_sum(sources.values().copied())?),
+        manufacturing_bytes: (MAX_MANUFACTURING_RETAINED_BYTES as usize)
+            .saturating_sub(allocation_sum(manufacturing.values().copied())?),
+        image_bytes: MAX_SURFACE_IMAGE_RETAINED_BYTES
+            .saturating_sub(project.retained_surface_image_bytes()?),
+        appearance_bytes: MAX_APPEARANCE_RETAINED_BYTES
+            .saturating_sub(project.retained_appearance_bytes()?),
+    })
+}
+
+fn allocation_sum(mut values: impl Iterator<Item = usize>) -> Result<usize, ProjectError> {
+    values.try_fold(0usize, |total, value| {
+        total.checked_add(value).ok_or_else(|| {
+            error(
+                ProjectErrorCode::ResourceLimit,
+                "retained allocation arithmetic overflow",
+            )
+        })
+    })
+}
+
 pub fn save(
     snapshot: SaveSnapshot,
     existing: Option<Arc<Storage>>,
@@ -909,623 +673,176 @@ pub fn save(
     mut observe: impl FnMut(SaveStage),
 ) -> Result<SaveReceipt, ProjectError> {
     cancelled(cancel)?;
-    if existing.as_ref().is_some_and(|s| s.read_only()) {
+    if existing.as_ref().is_some_and(|storage| storage.read_only()) {
         return Err(error(
             ProjectErrorCode::ReadOnly,
             "read-only storage cannot be saved",
         ));
     }
     validate_snapshot(&snapshot.snapshot, &snapshot.manifest)?;
-    let bytes =
-        serde_json::to_vec_pretty(&snapshot.manifest).map_err(|e| invalid(e.to_string()))?;
-    if bytes.len() > MAX_PROJECT_MANIFEST_BYTES as usize {
+    let root = serde_json::to_vec_pretty(&snapshot.manifest)
+        .map_err(|value| invalid(value.to_string()))?;
+    if root.len() > MAX_PROJECT_MANIFEST_BYTES as usize {
         return Err(error(
             ProjectErrorCode::ResourceLimit,
             "manifest exceeds 1 MiB",
         ));
     }
     let destination = target
-        .or_else(|| existing.as_ref().map(|s| s.path.clone()))
+        .or_else(|| {
+            existing
+                .as_ref()
+                .map(|storage| storage.path().to_path_buf())
+        })
         .ok_or_else(|| {
             error(
                 ProjectErrorCode::NoSavedPath,
-                "first save requires a new directory target",
+                "first save requires a new .spil target",
             )
         })?;
-    let same = existing
-        .as_ref()
-        .filter(|s| std::fs::canonicalize(&destination).is_ok_and(|p| p == s.path));
-    if let Some(storage) = same {
-        let storage = storage.clone();
-        let operation = storage
-            .operation
-            .lock()
-            .map_err(|_| error(ProjectErrorCode::Io, "storage operation lock poisoned"))?;
-        validate_root(&storage.directory)?;
-        storage.validate_attachment()?;
-        let current = bounded_read(
-            &storage.directory,
-            CURRENT,
-            MAX_PROJECT_MANIFEST_BYTES as usize,
-            ProjectErrorCode::InvalidProject,
-        )
-        .and_then(|bytes| parse_manifest(&bytes));
-        if current
-            .as_ref()
-            .is_ok_and(|manifest| manifest.project_id != snapshot.manifest.project_id)
+    let same = match &existing {
+        Some(storage)
+            if storage
+                .container
+                .matches_path(&destination)
+                .map_err(ptac_error)? =>
+        {
+            Some(storage)
+        }
+        _ => None,
+    };
+    let mut guard = ProjectRecoveryGuard::from_manifest(&snapshot.manifest);
+    let objects = snapshot_objects(&snapshot.snapshot);
+    if objects.keys().copied().collect::<BTreeSet<_>>() != expected_members(&snapshot.manifest) {
+        return Err(invalid("captured assets differ from declared role closure"));
+    }
+    let mut previous_root = None;
+    let mut previous_objects = BTreeMap::new();
+    let mut base = None;
+    if let Some(storage) = &existing {
+        let binding = snapshot.storage_binding.as_ref().ok_or_else(|| {
+            error(
+                ProjectErrorCode::Busy,
+                "save attachment requires explicit inspect/reopen after an uncertain outcome",
+            )
+        })?;
+        if !binding
+            .container
+            .upgrade()
+            .is_some_and(|container| Arc::ptr_eq(&storage.container, &container))
         {
             return Err(invalid(
-                "save cannot replace a different project's manifest",
+                "save snapshot belongs to another storage attachment",
             ));
         }
-        let current = current.and_then(|manifest| {
-            for record in &manifest.definitions {
-                validate_stored_source(&storage.sources, record, None, cancel)?;
-            }
-            validate_stored_images(&manifest, &storage.images, cancel)?;
-            validate_stored_manufacturing(&manifest, &storage.manufacturing, cancel)?;
-            validate_stored_palettes(
-                &manifest,
-                &storage.palette_originals,
-                &storage.palette_canonical,
-                cancel,
-            )?;
-            Ok(manifest)
-        });
-        let old_manifest = match current {
-            Ok(manifest) => manifest,
-            Err(e) if snapshot.recovered_previous && e.code != ProjectErrorCode::Cancelled => {
-                let bytes = bounded_read(
-                    &storage.directory,
-                    PREVIOUS,
-                    MAX_PROJECT_MANIFEST_BYTES as usize,
-                    ProjectErrorCode::InvalidProject,
-                )?;
-                let manifest = parse_recovery(&bytes)?.manifest;
-                for record in &manifest.definitions {
-                    validate_stored_source(&storage.sources, record, None, cancel)?;
-                }
-                validate_stored_images(&manifest, &storage.images, cancel)?;
-                validate_stored_manufacturing(&manifest, &storage.manufacturing, cancel)?;
-                validate_stored_palettes(
-                    &manifest,
-                    &storage.palette_originals,
-                    &storage.palette_canonical,
-                    cancel,
-                )?;
-                manifest
-            }
-            Err(e) => return Err(e),
-        };
-        if old_manifest.project_id != snapshot.manifest.project_id {
-            return Err(invalid(
-                "recovery cannot replace a different project's manifest",
-            ));
-        }
-        let recovery = RecoveryRecord {
-            revision_high_water: snapshot.manifest.revision.max(old_manifest.revision),
-            next_occurrence_high_water: snapshot
-                .manifest
-                .next_occurrence
-                .max(old_manifest.next_occurrence),
-            next_surface_layer_high_water: snapshot
-                .manifest
-                .next_surface_layer
-                .max(old_manifest.next_surface_layer),
-            next_process_layer_high_water: snapshot
-                .manifest
-                .next_process_layer
-                .max(old_manifest.next_process_layer),
-            next_process_operation_high_water: snapshot
-                .manifest
-                .next_process_operation
-                .max(old_manifest.next_process_operation),
-            manifest: old_manifest,
-        };
-        let previous = serde_json::to_vec_pretty(&recovery).map_err(|e| invalid(e.to_string()))?;
-        if previous.len() > MAX_PROJECT_MANIFEST_BYTES as usize {
+        let capture = storage
+            .container
+            .capture(binding.selection, cancel)
+            .map_err(ptac_error)?;
+        if capture.heads != binding.heads || capture.selected != binding.selected {
             return Err(error(
-                ProjectErrorCode::ResourceLimit,
-                "recovery checkpoint exceeds 1 MiB",
+                ProjectErrorCode::StaleRevision,
+                "save/recovery publication binding is stale",
             ));
         }
-        save_assets(&snapshot.snapshot, &storage.sources, cancel)?;
-        save_manufacturing(&snapshot.snapshot, &storage.manufacturing, cancel)?;
-        save_images(&snapshot.snapshot, &storage.images, cancel)?;
-        save_palettes(
-            &snapshot.snapshot,
-            &storage.palette_originals,
-            &storage.palette_canonical,
-            cancel,
-        )?;
-        observe(SaveStage::AssetsSynced);
-        cancelled(cancel)?;
-        if storage.directory.exists(PREVIOUS).map_err(io)? {
-            let prior = bounded_read(
-                &storage.directory,
-                PREVIOUS,
-                MAX_PROJECT_MANIFEST_BYTES as usize,
-                ProjectErrorCode::InvalidProject,
-            )?;
-            let prior = parse_recovery(&prior)?;
-            if prior.manifest.project_id != snapshot.manifest.project_id {
-                return Err(invalid(
-                    "existing recovery checkpoint belongs to a different project",
-                ));
-            }
-            for record in &prior.manifest.definitions {
-                validate_stored_source(&storage.sources, record, None, cancel)?;
-            }
-            validate_stored_images(&prior.manifest, &storage.images, cancel)?;
-            validate_stored_manufacturing(&prior.manifest, &storage.manufacturing, cancel)?;
-            validate_stored_palettes(
-                &prior.manifest,
-                &storage.palette_originals,
-                &storage.palette_canonical,
-                cancel,
-            )?;
+        let durable_guard = parse_guard(&capture.guard)?;
+        if durable_guard != binding.guard {
+            return Err(invalid(
+                "durable guard changed without its bound publication",
+            ));
         }
-        let temporary = Temporary::write(&storage.directory, &bytes)?;
-        Temporary::write(&storage.directory, &previous)?.replace(PREVIOUS)?;
-        storage.directory.sync().map_err(io)?;
-        observe(SaveStage::BeforeManifestReplace);
-        storage.validate_attachment()?;
-        cancelled(cancel)?;
-        // Commit decision: cancellation is ignored from here through receipt.
-        temporary.replace(CURRENT)?;
-        observe(SaveStage::AfterManifestReplace);
-        let durability_error = storage.directory.sync().err().map(durability_failure);
-        drop(operation);
-        Ok(SaveReceipt {
-            storage,
-            manifest: snapshot.manifest,
-            durability_error,
-        })
+        capture.verify_all(cancel).map_err(ptac_error)?;
+        guard.merge(&durable_guard)?;
+        base = Some((binding.heads, binding.selection));
+        if same.is_none() {
+            let mut available = BTreeMap::new();
+            for state in &snapshot.retained {
+                available.extend(snapshot_objects(state));
+            }
+            let mut budgets = snapshot.remaining_budgets.clone()?;
+            for member in &capture.members {
+                let bytes = if let Some(bytes) = available.get(member) {
+                    bytes.clone()
+                } else {
+                    let budget = match member.role.get() {
+                        SOURCE => &mut budgets.source_bytes,
+                        MANUFACTURING => &mut budgets.manufacturing_bytes,
+                        IMAGE => &mut budgets.image_bytes,
+                        PALETTE_ORIGINAL | PALETTE_CANONICAL => &mut budgets.appearance_bytes,
+                        _ => return Err(invalid("unknown retained project object role")),
+                    };
+                    let bytes = capture
+                        .read_object(member.object, *budget, cancel)
+                        .map_err(ptac_error)?;
+                    *budget = budget.checked_sub(bytes.capacity()).ok_or_else(|| {
+                        error(
+                            ProjectErrorCode::ResourceLimit,
+                            "Save As retained asset budget exceeded",
+                        )
+                    })?;
+                    Arc::new(bytes)
+                };
+                previous_objects.insert(*member, bytes);
+            }
+            previous_root = Some(capture.root.clone());
+        }
+    } else if snapshot.storage_binding.is_some() {
+        return Err(invalid(
+            "attached save snapshot requires its storage attachment",
+        ));
+    }
+    let guard_bytes = serde_json::to_vec(&guard).map_err(|value| invalid(value.to_string()))?;
+    let object_inputs = inputs(&objects);
+    let input = SnapshotInput {
+        root: &root,
+        objects: &object_inputs,
+        guard: &guard_bytes,
+    };
+    let is_new = same.is_none();
+    let mut observer = |stage| {
+        observe_stage(stage, is_new, &mut observe);
+        stage_decision(stage, is_new, cancel)
+    };
+    let publication = if let Some(storage) = same {
+        let (heads, selection) = base.expect("attached save has a validated base");
+        storage
+            .container
+            .publish(heads, selection, input, cancel, &mut observer)
+    } else if let Some(previous_root) = &previous_root {
+        let previous_inputs = inputs(&previous_objects);
+        let previous = SnapshotInput {
+            root: previous_root,
+            objects: &previous_inputs,
+            guard: &guard_bytes,
+        };
+        Container::create_new_retaining(&destination, input, previous, cancel, &mut observer)
     } else {
-        let name = destination
-            .file_name()
-            .ok_or_else(|| invalid("save target needs a directory basename"))?
-            .to_owned();
-        let parent_path = destination
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let parent = Directory::open(parent_path).map_err(io)?;
-        if parent.exists_native(&name).map_err(io)? {
-            return Err(invalid("new save destination must not exist"));
-        }
-        let stage_name = format!(".spiling-stage-{}", uuid::Uuid::new_v4());
-        let directory = parent.create_child(&stage_name).map_err(io)?;
-        let sources = match directory.create_child(SOURCES) {
-            Ok(sources) => sources,
-            Err(e) => {
-                let _ = parent.remove_child_owned(&stage_name, &directory);
-                return Err(io(e));
-            }
-        };
-        let mut stage = Stage {
-            directory,
-            sources,
-            manufacturing: None,
-            images: None,
-            palette_originals: None,
-            palette_canonical: None,
-            parent,
-            name: stage_name,
-            published: false,
-        };
-        stage.manufacturing = Some(stage.directory.create_child(MANUFACTURING).map_err(io)?);
-        stage.images = Some(stage.directory.create_child(IMAGES).map_err(io)?);
-        stage.palette_originals = Some(
-            stage
-                .directory
-                .create_child(PALETTE_ORIGINALS)
-                .map_err(io)?,
-        );
-        stage.palette_canonical = Some(
-            stage
-                .directory
-                .create_child(PALETTE_CANONICAL)
-                .map_err(io)?,
-        );
-        let lock = writer_lock(&stage.directory)?;
-        let path = stage.parent.path().join(&name);
-        let directory = stage.directory.relocated(path.clone()).map_err(io)?;
-        let sources = stage.sources.relocated(path.join(SOURCES)).map_err(io)?;
-        let staged_manufacturing = stage.manufacturing.as_ref().expect("created directory");
-        let manufacturing = staged_manufacturing
-            .relocated(path.join(MANUFACTURING))
-            .map_err(io)?;
-        let staged_images = stage.images.as_ref().expect("created directory");
-        let images = staged_images.relocated(path.join(IMAGES)).map_err(io)?;
-        let staged_originals = stage.palette_originals.as_ref().expect("created directory");
-        let staged_canonical = stage.palette_canonical.as_ref().expect("created directory");
-        let palette_originals = staged_originals
-            .relocated(path.join(PALETTE_ORIGINALS))
-            .map_err(io)?;
-        let palette_canonical = staged_canonical
-            .relocated(path.join(PALETTE_CANONICAL))
-            .map_err(io)?;
-        save_assets(&snapshot.snapshot, &stage.sources, cancel)?;
-        save_manufacturing(&snapshot.snapshot, staged_manufacturing, cancel)?;
-        save_images(&snapshot.snapshot, staged_images, cancel)?;
-        save_palettes(
-            &snapshot.snapshot,
-            staged_originals,
-            staged_canonical,
-            cancel,
-        )?;
-        observe(SaveStage::AssetsSynced);
-        cancelled(cancel)?;
-        let temporary = Temporary::write(&stage.directory, &bytes)?;
-        observe(SaveStage::BeforeManifestReplace);
-        stage.parent.check_path().map_err(io)?;
-        if !stage
-            .parent
-            .child(&stage.name)
-            .map_err(io)?
-            .same(&stage.directory)
-            .map_err(io)?
-            || !stage
-                .directory
-                .child(SOURCES)
-                .map_err(io)?
-                .same(&stage.sources)
-                .map_err(io)?
-            || !stage
-                .directory
-                .child(MANUFACTURING)
-                .map_err(io)?
-                .same(staged_manufacturing)
-                .map_err(io)?
-            || !stage
-                .directory
-                .child(IMAGES)
-                .map_err(io)?
-                .same(staged_images)
-                .map_err(io)?
-            || !stage
-                .directory
-                .child(PALETTE_ORIGINALS)
-                .map_err(io)?
-                .same(staged_originals)
-                .map_err(io)?
-            || !stage
-                .directory
-                .child(PALETTE_CANONICAL)
-                .map_err(io)?
-                .same(staged_canonical)
-                .map_err(io)?
-        {
-            return Err(invalid(
-                "owned first-save staging directory was substituted",
-            ));
-        }
-        cancelled(cancel)?;
-        temporary.replace(CURRENT)?;
-        stage.directory.sync().map_err(io)?;
-        stage
-            .parent
-            .publish_directory(&stage.name, &name)
-            .map_err(io)?;
-        stage.published = true;
-        observe(SaveStage::AfterManifestReplace);
-        let durability_error = stage.parent.sync().err().map(durability_failure);
-        let storage = Arc::new(Storage {
-            path,
-            directory,
-            sources,
-            manufacturing,
-            images,
-            palette_originals,
-            palette_canonical,
-            _writer_lock: Some(lock),
-            operation: Mutex::new(()),
-        });
-        Ok(SaveReceipt {
-            storage,
-            manifest: snapshot.manifest,
-            durability_error,
+        Container::create_new(&destination, input, cancel, &mut observer)
+    }
+    .map_err(ptac_error)?;
+    let outcome = publication.outcome;
+    let binding = if outcome == PublicationOutcome::OutcomeUnknown {
+        None
+    } else {
+        Some(StorageBinding {
+            container: Arc::downgrade(&publication.container),
+            heads: publication.heads,
+            selected: publication.heads.current(),
+            selection: Selection::Current,
+            guard,
         })
-    }
-}
-fn save_assets(
-    snapshot: &Snapshot,
-    sources: &Directory,
-    cancel: &AtomicBool,
-) -> Result<(), ProjectError> {
-    let (mut count, mut total, scratch_bytes) = asset_budget(sources, ".step", MAX_SOURCE_BYTES)?;
-    for asset in snapshot.sources.values() {
-        cancelled(cancel)?;
-        let name = format!("{}.step", asset.record.provenance.source_hash.as_str());
-        if sources.exists(&name).map_err(io)? {
-            validate_stored_source(sources, &asset.record, Some(asset.bytes.as_slice()), cancel)?;
-        } else {
-            count += 1;
-            total += asset.bytes.len() as u64;
-            if count > MAX_PROJECT_STORED_ASSETS
-                || total > MAX_PROJECT_STORED_SOURCE_BYTES
-                || scratch_bytes + asset.bytes.len() as u64 > MAX_SOURCE_BYTES as u64
-            {
-                return Err(error(
-                    ProjectErrorCode::ResourceLimit,
-                    "persisted asset/scratch budget exhausted",
-                ));
-            }
-            Temporary::write(sources, asset.bytes.as_slice())?.publish_asset(&name)?;
-        }
-    }
-    sources.sync().map_err(io)
-}
-fn save_manufacturing(
-    snapshot: &Snapshot,
-    directory: &Directory,
-    cancel: &AtomicBool,
-) -> Result<(), ProjectError> {
-    let (count, total, scratch_bytes) =
-        asset_budget(directory, ".json", MAX_MANUFACTURING_BUNDLE_BYTES as usize)?;
-    if let Some(asset) = &snapshot.manufacturing_artifact {
-        cancelled(cancel)?;
-        let name = format!("{}.json", asset.record.hash.as_str());
-        if directory.exists(&name).map_err(io)? {
-            let bytes = bounded_read_exact(
-                directory,
-                &name,
-                MAX_MANUFACTURING_BUNDLE_BYTES as usize,
-                ProjectErrorCode::MissingAsset,
-                Some(asset.record.byte_count as usize),
-            )?;
-            if bytes.as_slice() != asset.bytes.as_slice() {
-                return Err(error(
-                    ProjectErrorCode::CorruptAsset,
-                    "immutable manufacturing bytes differ from capture",
-                ));
-            }
-        } else {
-            if count + 1 > MAX_PROJECT_STORED_ASSETS
-                || total + asset.bytes.len() as u64 > MAX_PROJECT_STORED_SOURCE_BYTES
-                || scratch_bytes + asset.bytes.len() as u64 > MAX_MANUFACTURING_BUNDLE_BYTES as u64
-            {
-                return Err(error(
-                    ProjectErrorCode::ResourceLimit,
-                    "persisted manufacturing asset/scratch budget exhausted",
-                ));
-            }
-            Temporary::write(directory, asset.bytes.as_slice())?.publish_asset(&name)?;
-        }
-    }
-    directory.sync().map_err(io)
-}
-fn save_images(
-    snapshot: &Snapshot,
-    directory: &Directory,
-    cancel: &AtomicBool,
-) -> Result<(), ProjectError> {
-    let (mut count, mut total, scratch_bytes) =
-        asset_budget(directory, ".pgm", MAX_SURFACE_IMAGE_BYTES)?;
-    for asset in snapshot.surface_images.values() {
-        cancelled(cancel)?;
-        let name = format!("{}.pgm", asset.record().image_hash.as_str());
-        if directory.exists(&name).map_err(io)? {
-            validate_stored_image(
-                directory,
-                asset.record(),
-                Some(asset.bytes().as_slice()),
-                cancel,
-            )?;
-        } else {
-            count += 1;
-            total += asset.bytes().len() as u64;
-            if count > MAX_PROJECT_STORED_ASSETS
-                || total > MAX_PROJECT_STORED_SOURCE_BYTES
-                || scratch_bytes + asset.bytes().len() as u64 > MAX_SURFACE_IMAGE_BYTES as u64
-            {
-                return Err(error(
-                    ProjectErrorCode::ResourceLimit,
-                    "persisted image asset/scratch budget exhausted",
-                ));
-            }
-            Temporary::write(directory, asset.bytes().as_slice())?.publish_asset(&name)?;
-        }
-    }
-    directory.sync().map_err(io)
+    };
+    let durability_error = publication_error(outcome, publication.error);
+    Ok(SaveReceipt {
+        storage: Arc::new(Storage {
+            container: publication.container,
+        }),
+        manifest: snapshot.manifest,
+        outcome,
+        durability_error,
+        binding,
+    })
 }
 
-fn load_palettes(
-    manifest: &ProjectManifest,
-    originals: &Directory,
-    canonical: &Directory,
-    budget: usize,
-    cancel: &AtomicBool,
-) -> Result<BTreeMap<SourceHash, Arc<PaletteAsset>>, ProjectError> {
-    let mut assets = BTreeMap::new();
-    let budget = budget.min(MAX_APPEARANCE_RETAINED_BYTES);
-    let metadata = manifest.appearance_study.allocated_bytes()
-        + manifest
-            .appearance_study
-            .report
-            .as_ref()
-            .map_or(0, |report| report.allocated_bytes())
-        + manifest
-            .appearance_study
-            .optical
-            .as_ref()
-            .map_or(0, |optical| {
-                optical.request.allocated_bytes()
-                    + optical
-                        .report
-                        .as_ref()
-                        .map_or(0, |report| report.allocated_bytes())
-            });
-    if metadata > budget {
-        return Err(error(
-            ProjectErrorCode::ResourceLimit,
-            "incoming appearance metadata budget exceeded",
-        ));
-    }
-    let budget = budget - metadata;
-    if let Some(record) = &manifest.appearance_study.palette {
-        record.validate()?;
-        let budget = budget
-            .checked_sub(record.allocated_bytes())
-            .ok_or_else(|| {
-                error(
-                    ProjectErrorCode::ResourceLimit,
-                    "incoming palette metadata budget exceeded",
-                )
-            })?;
-        cancelled(cancel)?;
-        let size = record.original_bytes as usize + record.canonical_bytes as usize;
-        if size > budget {
-            return Err(error(
-                ProjectErrorCode::ResourceLimit,
-                "incoming appearance allocation budget exceeded",
-            ));
-        }
-        let original = bounded_read_exact(
-            originals,
-            &format!("{}.json", record.original_hash.as_str()),
-            MAX_PALETTE_BYTES.min(budget),
-            ProjectErrorCode::MissingAsset,
-            Some(record.original_bytes as usize),
-        )?;
-        let canonical = bounded_read_exact(
-            canonical,
-            &format!("{}.json", record.canonical_hash.as_str()),
-            MAX_PALETTE_BYTES.min(budget.saturating_sub(original.capacity())),
-            ProjectErrorCode::MissingAsset,
-            Some(record.canonical_bytes as usize),
-        )?;
-        record.validate_hashes(&original, &canonical)?;
-        let remaining = budget
-            .saturating_sub(original.capacity())
-            .saturating_sub(canonical.capacity());
-        let prepared = PreparedPalette::decode_bounded(&original, &canonical, remaining)?;
-        let asset = Arc::new(PaletteAsset::from_checked_prepared(
-            record.clone(),
-            original,
-            canonical,
-            prepared,
-        )?);
-        assets.insert(record.canonical_hash.clone(), asset);
-    }
-    Ok(assets)
-}
-
-fn validate_stored_palette_bytes(
-    directory: &Directory,
-    hash: &SourceHash,
-    size: usize,
-    expected: Option<&[u8]>,
-    cancel: &AtomicBool,
-) -> Result<(), ProjectError> {
-    let name = format!("{}.json", hash.as_str());
-    let mut file = directory.read(&name).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            error(ProjectErrorCode::MissingAsset, "palette asset missing")
-        } else {
-            io(e)
-        }
-    })?;
-    if size > MAX_PALETTE_BYTES || file.metadata().map_err(io)?.len() != size as u64 {
-        return Err(error(
-            ProjectErrorCode::CorruptAsset,
-            "palette byte count differs from metadata",
-        ));
-    }
-    let mut digest = Sha256::new();
-    let mut buffer = [0u8; 8192];
-    let mut offset = 0;
-    loop {
-        cancelled(cancel)?;
-        let count = file.read(&mut buffer).map_err(io)?;
-        if count == 0 {
-            break;
-        }
-        if offset + count > size
-            || expected
-                .is_some_and(|bytes| bytes.get(offset..offset + count) != Some(&buffer[..count]))
-        {
-            return Err(error(
-                ProjectErrorCode::CorruptAsset,
-                "palette bytes differ from immutable content",
-            ));
-        }
-        digest.update(&buffer[..count]);
-        offset += count;
-    }
-    let actual: [u8; 32] = digest.finalize().into();
-    if offset != size || SourceHash::from_digest(&actual) != *hash {
-        return Err(error(
-            ProjectErrorCode::CorruptAsset,
-            "palette content hash differs",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_stored_palettes(
-    manifest: &ProjectManifest,
-    originals: &Directory,
-    canonical: &Directory,
-    cancel: &AtomicBool,
-) -> Result<(), ProjectError> {
-    if let Some(record) = &manifest.appearance_study.palette {
-        record.validate()?;
-        validate_stored_palette_bytes(
-            originals,
-            &record.original_hash,
-            record.original_bytes as usize,
-            None,
-            cancel,
-        )?;
-        validate_stored_palette_bytes(
-            canonical,
-            &record.canonical_hash,
-            record.canonical_bytes as usize,
-            None,
-            cancel,
-        )?;
-    }
-    Ok(())
-}
-
-fn save_palettes(
-    snapshot: &Snapshot,
-    originals: &Directory,
-    canonical: &Directory,
-    cancel: &AtomicBool,
-) -> Result<(), ProjectError> {
-    for (directory, original) in [(originals, true), (canonical, false)] {
-        let (mut count, mut total, scratch) = asset_budget(directory, ".json", MAX_PALETTE_BYTES)?;
-        for asset in snapshot.appearance_palettes.values() {
-            cancelled(cancel)?;
-            let (hash, bytes) = if original {
-                (&asset.record().original_hash, asset.original())
-            } else {
-                (&asset.record().canonical_hash, asset.canonical())
-            };
-            let name = format!("{}.json", hash.as_str());
-            if directory.exists(&name).map_err(io)? {
-                validate_stored_palette_bytes(directory, hash, bytes.len(), Some(bytes), cancel)?;
-            } else {
-                count += 1;
-                total += bytes.len() as u64;
-                if count > MAX_PROJECT_STORED_ASSETS
-                    || total > MAX_PROJECT_STORED_SOURCE_BYTES
-                    || scratch + bytes.len() as u64 > MAX_PALETTE_BYTES as u64
-                {
-                    return Err(error(
-                        ProjectErrorCode::ResourceLimit,
-                        "persisted palette asset/scratch budget exhausted",
-                    ));
-                }
-                Temporary::write(directory, bytes)?.publish_asset(&name)?;
-            }
-        }
-        directory.sync().map_err(io)?;
-    }
-    Ok(())
-}
 #[cfg(test)]
 mod tests;

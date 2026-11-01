@@ -68,10 +68,121 @@ const POSE: &str =
 const MOVED: &str = r#"{"translation_mm":[60,0,0],"rotation_xyzw":[0,0,0,1]}"#;
 
 #[test]
+#[ignore = "actual native CLI maintenance; requires SPILING_TEST_ENGINE"]
+fn storage_maintenance_uses_real_saved_file_and_preserves_committed_identity() {
+    let root = root();
+    let project = root.join("maintenance.spil");
+    let compact = root.join("compact.spil");
+    report(
+        cli("create", &project)
+            .arg("--import")
+            .arg(fixture("box-mm.step"))
+            .output()
+            .unwrap(),
+    );
+    let checkpoint = report(
+        cli("edit", &project)
+            .args(["--pose", "1", POSE])
+            .output()
+            .unwrap(),
+    );
+    let saved = report(
+        cli("edit", &project)
+            .args(["--pose", "1", MOVED])
+            .output()
+            .unwrap(),
+    );
+    let before = report(
+        cli("inspect", &project)
+            .arg("--storage-stats")
+            .output()
+            .unwrap(),
+    );
+    let stats = &before["operations"][1]["storage_maintenance"]["stats"];
+    assert!(stats["snapshots"].as_u64().unwrap() > 2);
+    assert!(stats["unreachable_payload_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(stats["retained_roots"], 2);
+    assert_eq!(stats["limits"]["chunk_bytes"], 262144);
+    let maintained = report(
+        cli("open", &project)
+            .args(["--storage-stats", "--collect-unreachable", "--compact-to"])
+            .arg(&compact)
+            .output()
+            .unwrap(),
+    );
+    let operations: Vec<_> = maintained["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|operation| !operation["storage_maintenance"].is_null())
+        .collect();
+    assert_eq!(operations.len(), 3);
+    for (operation, action) in
+        operations
+            .iter()
+            .zip(["stats", "collect_unreachable", "compact_to_new"])
+    {
+        assert_eq!(operation["storage_maintenance"]["action"], action);
+        assert_eq!(
+            operation["project"]["revision"],
+            saved["project"]["revision"]
+        );
+        assert_eq!(operation["project"]["dirty"], false);
+        assert_eq!(
+            operation["project"]["path_label"],
+            maintained["project"]["path_label"]
+        );
+    }
+    assert_eq!(
+        operations[1]["storage_maintenance"]["stats"]["snapshots"],
+        2
+    );
+    assert_eq!(
+        operations[1]["storage_maintenance"]["stats"]["unreachable_payload_bytes"],
+        0
+    );
+    assert!(compact.is_file());
+    let copied = report(
+        cli("inspect", &compact)
+            .arg("--storage-stats")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        copied["project"]["project_id"],
+        saved["project"]["project_id"]
+    );
+    assert_eq!(copied["project"]["revision"], saved["project"]["revision"]);
+    assert_eq!(copied["occurrences"], saved["occurrences"]);
+    let previous = report(cli("recover", &compact).output().unwrap());
+    assert_eq!(
+        previous["occurrences"][0]["pose"],
+        checkpoint["occurrences"][0]["pose"]
+    );
+    let bytes = std::fs::read(&compact).unwrap();
+    failure(
+        cli("open", &project)
+            .arg("--compact-to")
+            .arg(&compact)
+            .output()
+            .unwrap(),
+        "io",
+    );
+    assert_eq!(std::fs::read(&compact).unwrap(), bytes);
+    let rejected = cli("inspect", &project)
+        .arg("--collect-unreachable")
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("read-only"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 #[ignore = "actual native CLI regression; requires SPILING_TEST_ENGINE"]
 fn durable_operator_roundtrip_undo_checkpoints_source_removal_and_native_sections() {
     let root = root();
-    let project = root.join("project");
+    let project = root.join("project.spil");
     let box_source = root.join("box.step");
     let cylinder_source = root.join("cylinder.step");
     std::fs::copy(fixture("box-mm.step"), &box_source).unwrap();
@@ -88,6 +199,11 @@ fn durable_operator_roundtrip_undo_checkpoints_source_removal_and_native_section
     assert_eq!(created["scene"]["occurrence_count"], 2);
     assert_eq!(created["project"]["dirty"], false);
     assert_eq!(created["project"]["can_undo"], true);
+    assert!(project.is_file());
+    assert_eq!(
+        &std::fs::read(&project).unwrap()[..16],
+        b"SQLite format 3\0"
+    );
     let definition = created["occurrences"][0]["definition_id"].as_str().unwrap();
     let edited = report(
         cli("edit", &project)
@@ -122,6 +238,9 @@ fn durable_operator_roundtrip_undo_checkpoints_source_removal_and_native_section
     }
     std::fs::remove_file(box_source).unwrap();
     std::fs::remove_file(cylinder_source).unwrap();
+    let moved = root.join("moved.spil");
+    std::fs::rename(&project, &moved).unwrap();
+    let project = moved;
     let reopened = report(
         cli("inspect", &project)
             .args(["--section", "0,0,4:0,0,1"])
@@ -221,16 +340,41 @@ fn durable_operator_roundtrip_undo_checkpoints_source_removal_and_native_section
     let hash = reopened["definitions"][0]["record"]["provenance"]["source_hash"]
         .as_str()
         .unwrap();
-    let asset = project.join("sources").join(format!("{hash}.step"));
-    let source_bytes = std::fs::read(&asset).unwrap();
-    std::fs::remove_file(&asset).unwrap();
-    failure(cli("open", &project).output().unwrap(), "missing_asset");
-    std::fs::write(&asset, b"not the original STEP bytes").unwrap();
-    failure(cli("open", &project).output().unwrap(), "corrupt_asset");
-    std::fs::write(&asset, source_bytes).unwrap();
-    let manifest = project.join("manifest.json");
-    let manifest_bytes = std::fs::read(&manifest).unwrap();
-    std::fs::write(&manifest, b"{invalid").unwrap();
+    let project_bytes = std::fs::read(&project).unwrap();
+    {
+        let connection = rusqlite::Connection::open(&project).unwrap();
+        connection
+            .execute(
+                "DELETE FROM object_chunks WHERE lower(hex(object_id))=?1",
+                [hash],
+            )
+            .unwrap();
+    }
+    failure(cli("open", &project).output().unwrap(), "invalid_project");
+    std::fs::write(&project, &project_bytes).unwrap();
+    {
+        let connection = rusqlite::Connection::open(&project).unwrap();
+        connection
+            .execute(
+                "UPDATE chunks SET data=zeroblob(length(data)) WHERE chunk_id IN
+                 (SELECT chunk_id FROM object_chunks WHERE lower(hex(object_id))=?1)",
+                [hash],
+            )
+            .unwrap();
+    }
+    failure(cli("open", &project).output().unwrap(), "invalid_project");
+    std::fs::write(&project, &project_bytes).unwrap();
+    {
+        let connection = rusqlite::Connection::open(&project).unwrap();
+        connection
+            .execute_batch(
+                "UPDATE chunks SET data=zeroblob(length(data)) WHERE chunk_id IN (
+                     SELECT chunk_id FROM object_chunks WHERE object_id=(
+                         SELECT root_object FROM snapshots WHERE snapshot_id=(
+                             SELECT current_snapshot FROM container)))",
+            )
+            .unwrap();
+    }
     failure(cli("open", &project).output().unwrap(), "invalid_project");
     let recovered = report(cli("recover", &project).output().unwrap());
     assert_eq!(recovered["project"]["recovered_previous"], true);
@@ -240,9 +384,8 @@ fn durable_operator_roundtrip_undo_checkpoints_source_removal_and_native_section
         reopened["project"]["project_id"]
     );
     assert_eq!(recovered["occurrences"], reopened["occurrences"]);
-    // Explicit recovery does not silently repair or overwrite the broken current manifest.
     failure(cli("open", &project).output().unwrap(), "invalid_project");
-    std::fs::write(&manifest, manifest_bytes).unwrap();
+    std::fs::write(&project, project_bytes).unwrap();
     // This exclusive test tree contains only names created by this test/native service.
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -253,7 +396,7 @@ fn durable_operator_roundtrip_undo_checkpoints_source_removal_and_native_section
 fn native_non_utf8_project_and_source_paths_roundtrip() {
     use std::os::unix::ffi::OsStringExt;
     let root = root();
-    let project = root.join(std::ffi::OsString::from_vec(b"project-\xff".to_vec()));
+    let project = root.join(std::ffi::OsString::from_vec(b"project-\xff.spil".to_vec()));
     let source = root.join(std::ffi::OsString::from_vec(b"source-\xfe.step".to_vec()));
     std::fs::copy(fixture("box-mm.step"), &source).unwrap();
     let created = report(
@@ -761,13 +904,19 @@ fn manufacturing_errors_leave_no_export_or_success_and_preserve_checkpoint() {
     let read_only_failure =
         terminal_error(cli("inspect", &project).arg("--compile").output().unwrap());
     assert_eq!(read_only_failure["domain"], "input_or_output");
-    let asset = project
-        .join("manufacturing")
-        .join(format!("{}.json", artifact["hash"].as_str().unwrap()));
-    let original = std::fs::read(&asset).unwrap();
-    let mut corrupt: Value = serde_json::from_slice(&original).unwrap();
-    corrupt["program"] = serde_json::json!("G21\nG90\nM82\nG92 E0\nG1 X999 Y999 Z999 E999 F999\n");
-    std::fs::write(&asset, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+    let original = std::fs::read(&project).unwrap();
+    let connection = rusqlite::Connection::open(&project).unwrap();
+    assert!(
+        connection
+            .execute(
+                "UPDATE chunks SET data=zeroblob(length(data)) WHERE chunk_id IN (
+            SELECT chunk_id FROM object_chunks WHERE lower(hex(object_id))=?1)",
+                [artifact["hash"].as_str().unwrap()],
+            )
+            .unwrap()
+            > 0
+    );
+    drop(connection);
     let corrupt_output = root.join("corrupt-export");
     let corrupt_replay = root.join("corrupt.splr");
     terminal_error(
@@ -781,7 +930,7 @@ fn manufacturing_errors_leave_no_export_or_success_and_preserve_checkpoint() {
     );
     assert!(!corrupt_output.exists());
     assert!(!corrupt_replay.exists());
-    std::fs::write(&asset, original).unwrap();
+    std::fs::write(&project, original).unwrap();
     assert_eq!(
         report(cli("inspect", &project).arg("--verify").output().unwrap())["manufacturing"]["artifact"],
         artifact

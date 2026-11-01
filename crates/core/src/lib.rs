@@ -317,7 +317,9 @@ impl PreparedEdit {
 pub struct SaveSnapshot {
     pub manifest: ProjectManifest,
     pub snapshot: Arc<Snapshot>,
-    pub(crate) recovered_previous: bool,
+    pub(crate) storage_binding: Option<storage::StorageBinding>,
+    pub(crate) retained: Vec<Arc<Snapshot>>,
+    pub(crate) remaining_budgets: Result<storage::LoadBudgets, ProjectError>,
 }
 #[derive(Debug, Clone, PartialEq)]
 struct Content {
@@ -396,6 +398,7 @@ pub struct Project {
     staged_appearance: Mutex<Vec<Weak<Snapshot>>>,
     saved: Option<(ProjectRevision, Content)>,
     storage: Option<Arc<Storage>>,
+    storage_binding: Option<storage::StorageBinding>,
     recovered_previous: bool,
     save_uncertain: bool,
 }
@@ -422,6 +425,7 @@ impl Project {
             staged_appearance: Mutex::new(Vec::new()),
             saved: None,
             storage: None,
+            storage_binding: None,
             recovered_previous: false,
             save_uncertain: false,
         }
@@ -458,6 +462,7 @@ impl Project {
         ));
         project.current = Arc::new(snapshot);
         project.storage = Some(loaded.storage);
+        project.storage_binding = Some(loaded.binding);
         project.recovered_previous = loaded.recovered_previous;
         Ok(project)
     }
@@ -616,7 +621,11 @@ impl Project {
             self.next_process_operation = self
                 .next_process_operation
                 .max(previous.next_process_operation);
-            self.revision = self.revision.max(previous.revision);
+            self.revision = if self.recovered_previous {
+                self.revision.max(previous.revision.next()?)
+            } else {
+                self.revision.max(previous.revision)
+            };
             if previous.save_uncertain
                 && self
                     .storage
@@ -1151,7 +1160,7 @@ impl Project {
         {
             staged.push(Arc::downgrade(&bytes));
         }
-        let mut candidate = self.capture().manifest;
+        let mut candidate = self.manifest();
         candidate.revision = self.revision.next()?;
         candidate.next_occurrence = next_occurrence;
         candidate.next_surface_layer = next_surface_layer;
@@ -1252,37 +1261,46 @@ impl Project {
         self.revision = revision;
         Ok(())
     }
+    fn manifest(&self) -> ProjectManifest {
+        ProjectManifest {
+            format_version: PROJECT_FORMAT_VERSION,
+            project_id: self.project_id.clone(),
+            revision: self.revision,
+            units: ProjectUnits::Millimetres,
+            frame: ProjectFrame::RightHanded,
+            next_occurrence: self.next_occurrence,
+            next_surface_layer: self.next_surface_layer,
+            surface_overlays: (*self.current.surface_overlays).clone(),
+            process_document: (*self.current.process_document).clone(),
+            appearance_study: (*self.current.appearance_study).clone(),
+            next_process_layer: self.next_process_layer,
+            next_process_operation: self.next_process_operation,
+            definitions: self
+                .current
+                .sources
+                .values()
+                .map(|s| s.record.clone())
+                .collect(),
+            occurrences: self.current.occurrences.values().cloned().collect(),
+            manufacturing_intent: self.current.manufacturing_intent.clone(),
+            manufacturing_artifact: self
+                .current
+                .manufacturing_artifact
+                .as_ref()
+                .map(|a| a.record.clone()),
+        }
+    }
     pub fn capture(&self) -> SaveSnapshot {
         SaveSnapshot {
-            manifest: ProjectManifest {
-                format_version: PROJECT_FORMAT_VERSION,
-                project_id: self.project_id.clone(),
-                revision: self.revision,
-                units: ProjectUnits::Millimetres,
-                frame: ProjectFrame::RightHanded,
-                next_occurrence: self.next_occurrence,
-                next_surface_layer: self.next_surface_layer,
-                surface_overlays: (*self.current.surface_overlays).clone(),
-                process_document: (*self.current.process_document).clone(),
-                appearance_study: (*self.current.appearance_study).clone(),
-                next_process_layer: self.next_process_layer,
-                next_process_operation: self.next_process_operation,
-                definitions: self
-                    .current
-                    .sources
-                    .values()
-                    .map(|s| s.record.clone())
-                    .collect(),
-                occurrences: self.current.occurrences.values().cloned().collect(),
-                manufacturing_intent: self.current.manufacturing_intent.clone(),
-                manufacturing_artifact: self
-                    .current
-                    .manufacturing_artifact
-                    .as_ref()
-                    .map(|a| a.record.clone()),
-            },
+            manifest: self.manifest(),
             snapshot: self.current.clone(),
-            recovered_previous: self.recovered_previous,
+            storage_binding: self.storage_binding.clone(),
+            retained: std::iter::once(&self.current)
+                .chain(self.undo.iter())
+                .chain(self.redo.iter())
+                .cloned()
+                .collect(),
+            remaining_budgets: storage::remaining_budgets(self),
         }
     }
     pub fn mark_saved(&mut self, receipt: SaveReceipt) -> Result<(), ProjectError> {
@@ -1306,7 +1324,8 @@ impl Project {
                 "save receipt does not belong to this project",
             ));
         }
-        self.save_uncertain = receipt.durability_error.is_some();
+        self.save_uncertain = receipt.outcome != storage::PublicationOutcome::PublishedConfirmed
+            || receipt.durability_error.is_some();
         if !self.save_uncertain {
             self.saved = Some((
                 receipt.manifest.revision,
@@ -1321,6 +1340,7 @@ impl Project {
             self.saved = None;
         }
         self.storage = Some(receipt.storage);
+        self.storage_binding = receipt.binding;
         Ok(())
     }
 }
@@ -1509,27 +1529,6 @@ fn validate_manifest_size(manifest: &ProjectManifest) -> Result<(), ProjectError
     // nine decimal digits. Reserve this without cloning project documents.
     const MAX_COUNTER_GROWTH: usize = 5 * 9;
     serde_json::to_writer_pretty(BoundedWriter(MAX_COUNTER_GROWTH), manifest)
-        .map_err(|e| error(ProjectErrorCode::ResourceLimit, e.to_string()))?;
-    // Mirror storage::RecoveryRecord's exact envelope, including nested pretty
-    // indentation. A valid accepted study must remain checkpoint-saveable.
-    #[derive(serde::Serialize)]
-    struct RecoveryCapacity<'a> {
-        manifest: &'a ProjectManifest,
-        revision_high_water: ProjectRevision,
-        next_occurrence_high_water: u32,
-        next_surface_layer_high_water: u32,
-        next_process_layer_high_water: u32,
-        next_process_operation_high_water: u32,
-    }
-    let recovery = RecoveryCapacity {
-        manifest,
-        revision_high_water: ProjectRevision(u32::MAX),
-        next_occurrence_high_water: u32::MAX,
-        next_surface_layer_high_water: u32::MAX,
-        next_process_layer_high_water: u32::MAX,
-        next_process_operation_high_water: u32::MAX,
-    };
-    serde_json::to_writer_pretty(BoundedWriter(MAX_COUNTER_GROWTH), &recovery)
         .map_err(|e| error(ProjectErrorCode::ResourceLimit, e.to_string()))
 }
 fn add_occurrence(

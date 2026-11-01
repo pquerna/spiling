@@ -291,13 +291,16 @@ fn validate_capture(
 ) -> Result<(), Status> {
     if matches!(
         command,
-        Control::Project(spiling_contracts::project::ProjectCommand::Save { .. })
+        Control::Project(
+            spiling_contracts::project::ProjectCommand::Save { .. }
+                | spiling_contracts::project::ProjectCommand::StorageMaintenance { .. }
+        )
     ) && runtime.revisions().1 != captured_project
     {
         return Err(domain_tonic(
             spiling_contracts::project::ProjectError::new(
                 spiling_contracts::project::ProjectErrorCode::StaleRevision,
-                "save project revision changed after durable admission",
+                "project storage operation revision changed after durable admission",
             )
             .into(),
         ));
@@ -310,21 +313,21 @@ pub(crate) fn terminal_error(
     result: Option<geometry::JobResult>,
 ) -> Result<spiling_contracts::google::rpc::Status, Status> {
     use prost::Message;
-    let committed_save = matches!(&error, geometry::JobError::Project { error } if error.code == spiling_contracts::project::ProjectErrorCode::Io);
+    let uncertain_save = matches!(&error, geometry::JobError::Project { error } if error.code == spiling_contracts::project::ProjectErrorCode::Io);
     let mut status = spiling_contracts::domain_status(&public_error(error));
     if let Some(result) = result {
-        let geometry::JobResult::ProjectSaved { info } = result else {
+        let geometry::JobResult::ProjectSaveUncertain { info } = result else {
             return Err(Status::internal(
-                "failed native result is not a committed save receipt",
+                "failed native result is not an uncertain save receipt",
             ));
         };
-        if !committed_save || !info.save_uncertain {
+        if !uncertain_save || !info.save_uncertain {
             return Err(Status::internal(
-                "failed save receipt lacks committed uncertainty",
+                "failed save receipt lacks publication uncertainty",
             ));
         }
         let result = spiling_contracts::rpc::NativeOperationResult::try_from(
-            spiling_contracts::geometry::JobResult::ProjectSaved { info },
+            spiling_contracts::geometry::JobResult::ProjectSaveUncertain { info },
         )
         .map_err(crate::jobs::internal)?;
         status.details.push(prost_types::Any {
@@ -464,6 +467,7 @@ fn publish_terminal(
         geometry::JobResult::ManufacturingPreflight { .. }
             | geometry::JobResult::BedPosePrepared { .. }
             | geometry::JobResult::OpticalConstructionApplied { .. }
+            | geometry::JobResult::ProjectStorageMaintained { .. }
     ) {
         let result = public_result(private, resources, None)?;
         jobs.native_finish(name, Ok(result), vec![])?;
@@ -666,6 +670,14 @@ fn public_result(
             Public::BedPosePrepared { preparation }
         }
         geometry::JobResult::ProjectSaved { info } => Public::ProjectSaved { info },
+        geometry::JobResult::ProjectStorageMaintained { action, stats } => {
+            Public::ProjectStorageMaintained { action, stats }
+        }
+        geometry::JobResult::ProjectSaveUncertain { .. } => {
+            return Err(Status::internal(
+                "uncertain save receipt cannot publish native success",
+            ));
+        }
         geometry::JobResult::OpticalCompared { .. } => {
             return Err(Status::internal(
                 "optical report requires ACK-bound blob publication",

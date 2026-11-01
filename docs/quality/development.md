@@ -150,17 +150,19 @@ expects `spiling-engine` beside `spiling-workbench`. Debug builds alone allow an
 absolute `SPILING_ENGINE_PATH` override. Startup validates the existing exact
 engine identity, kernel and capability contract; no mixed-build negotiation exists.
 
-The native binary also accepts `--read-only --open PROJECT_DIRECTORY`; paths
+The native binary also accepts `--read-only --open PROJECT.spil`; paths
 preserve native encoding and use the same guarded Open as the picker. License
 assent still precedes engine/project admission. One process supervises one project;
 Core's writer lock remains authoritative.
 
-First save chooses a **new project directory name** through the native Save
-dialog; Core creates it. Open/read-only/recovery choose an existing project
-directory. Ordinary Save checkpoints the attached route. A failed Save As does not
-attach its destination. A receipt-owned uncertain save can attach a route and is
+First save chooses a **new `.spil` file** through the native Save dialog;
+Core exclusively publishes the complete PTAC container. Open/read-only/recovery
+choose an existing `.spil` file. No legacy directory reader/converter exists.
+Ordinary Save checkpoints the attached route. A proven unpublished Save As does not
+attach its destination. A receipt-owned uncertain save retains its attempted route and is
 shown explicitly; a prior uncertainty flag cannot attach a later failed action.
-Restart reopens only a route attached by an observed Open/Save receipt. Undo/Redo
+Restart reopens only a certain route attached by an observed Open/Save receipt;
+uncertain publication requires explicit inspection/Open/Save, never automatic retry. Undo/Redo
 and dirty replacement retain engine authority. Preferences store only local
 license assent, theme and eframe window state.
 
@@ -169,7 +171,7 @@ engine. Launch in the real graphical session, accept the offline license, select
 the project through the parented native picker and inspect its path, revisions,
 native definition/occurrence counts and expanded build/session/PID. Import an owned
 admitted STEP copy to make it dirty, cancel New/Open/close discard and verify the
-same project/revision remains. Save to a new directory, then checkpoint that route.
+same project/revision remains. Save to a new `.spil` file, then checkpoint that route.
 Reopen read-only, inspect state, close and observe that the child PID has exited.
 Exercise picker cancellation, engine death/restart and startup mismatch separately;
 accepted operations must have bounded visible progress/errors and explicit
@@ -178,7 +180,7 @@ actual window/GPU or platform packaging acceptance. Preserve run output and
 producer/environment identities in ignored artifacts or PR verification notes.
 
 When automating a GTK chooser in an unmanaged X11 session, switch from Recent to a
-filesystem location (such as Home) before entering an absolute directory. Focus the
+filesystem location (such as Home) before entering an absolute file path. Focus the
 location entry, submit it, and confirm the resulting engine Open receipt. Populated
 chooser text alone is not an opened project.
 
@@ -418,8 +420,8 @@ CLI="$PWD/target/debug/spiling-cli"
 ENGINE="$PWD/target/debug/spiling-engine"
 "$CLI" geometry --scene fixtures/geometry/scenes/realistic-native.scene.json \
   --section 0,0,4:0,0,1 --engine "$ENGINE"
-"$CLI" project create NEW_PROJECT --import fixtures/geometry/box-mm.step --save --engine "$ENGINE"
-"$CLI" project inspect NEW_PROJECT --engine "$ENGINE"
+"$CLI" project create NEW_PROJECT.spil --import fixtures/geometry/box-mm.step --save --engine "$ENGINE"
+"$CLI" project inspect NEW_PROJECT.spil --engine "$ENGINE"
 ```
 
 Geometry scenes are import/placement recipes, not saved projects. Native face IDs
@@ -443,10 +445,10 @@ For manufacturing, author trusted TypeScript only outside the engine, or use the
 checked-in inert JSON. Desktop/engine load bounded JSON; they do not execute profiles:
 
 ```sh
-"$CLI" project create NEW_PRINT_PROJECT --import fixtures/geometry/box-mm.step \
+"$CLI" project create NEW_PRINT_PROJECT.spil --import fixtures/geometry/box-mm.step \
   --intent fixtures/manufacturing/solid-fill.intent.json --center-on-bed 1 --preflight --compile --verify \
   --manufacturing-out NEW_EXPORT --replay-out NEW_MOTION.splr --save --engine "$ENGINE"
-"$CLI" project inspect NEW_PRINT_PROJECT --preflight --verify \
+"$CLI" project inspect NEW_PRINT_PROJECT.spil --preflight --verify \
   --manufacturing-out NEW_REOPENED_EXPORT --replay-out NEW_REOPENED_MOTION.splr --engine "$ENGINE"
 ```
 
@@ -468,13 +470,13 @@ Use two upright occurrences of the same committed box, not a global layer-color
 instruction. The first receipt supplies the immutable definition ID for `--add`:
 
 ```sh
-"$CLI" project create NEW_DUAL_PROJECT --import fixtures/geometry/box-mm.step \
+"$CLI" project create NEW_DUAL_PROJECT.spil --import fixtures/geometry/box-mm.step \
   --pose 1 '{"translation_mm":[20,20,0],"rotation_xyzw":[0,0,0,1]}' --engine "$ENGINE"
-"$CLI" project edit NEW_DUAL_PROJECT \
+"$CLI" project edit NEW_DUAL_PROJECT.spil \
   --add DEFINITION_ID_FROM_CREATE '{"translation_mm":[120,20,0],"rotation_xyzw":[0,0,0,1]}' \
   --intent fixtures/manufacturing/fixed-dual.intent.json --preflight --compile --verify \
   --manufacturing-out NEW_DUAL_EXPORT --save --engine "$ENGINE"
-"$CLI" project inspect NEW_DUAL_PROJECT --verify \
+"$CLI" project inspect NEW_DUAL_PROJECT.spil --verify \
   --manufacturing-out NEW_DUAL_FRESH_EXPORT --replay-out NEW_DUAL.splr --engine "$ENGINE"
 ```
 

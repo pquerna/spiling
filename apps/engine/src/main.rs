@@ -352,6 +352,28 @@ impl geometry_server::Geometry for Service {
 }
 #[tonic::async_trait]
 impl projects_server::Projects for Service {
+    async fn storage_maintenance(
+        &self,
+        req: Request<StorageMaintenanceRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Projects.StorageMaintenance", &req);
+        let command = req.try_into().map_err(|error: String| {
+            request_error(spiling_contracts::native::project_request_status(&error))
+        })?;
+        let input = jobs::NativeAdmission {
+            parent,
+            request_id: id,
+            digest,
+            command: Control::Project(command),
+            reservation: 0,
+        };
+        Ok(Response::new(
+            self.jobs.start_native(self.native.clone(), input).await?,
+        ))
+    }
     async fn execute(
         &self,
         req: Request<ProjectRequest>,
@@ -708,18 +730,24 @@ impl manufacturing_server::Manufacturing for Service {
 
 #[derive(Clone, Copy)]
 pub(crate) enum ProjectFault {
-    AfterAssets,
-    BeforeManifestReplace,
-    AfterManifestReplace,
+    CandidateStaged,
+    RowsInserted,
+    BeforeCommit,
+    AfterCommit,
+    BeforePublish,
+    TargetPublished,
 }
 impl ProjectFault {
     fn from_env() -> Result<Option<Self>, Box<dyn std::error::Error>> {
         match std::env::var("SPILING_PROJECT_FAULT") {
             Err(std::env::VarError::NotPresent) => Ok(None),
             Ok(value) => match value.as_str() {
-                "after_assets" => Ok(Some(Self::AfterAssets)),
-                "before_manifest_replace" => Ok(Some(Self::BeforeManifestReplace)),
-                "after_manifest_replace" => Ok(Some(Self::AfterManifestReplace)),
+                "candidate_staged" => Ok(Some(Self::CandidateStaged)),
+                "rows_inserted" => Ok(Some(Self::RowsInserted)),
+                "before_commit" => Ok(Some(Self::BeforeCommit)),
+                "after_commit" => Ok(Some(Self::AfterCommit)),
+                "before_publish" => Ok(Some(Self::BeforePublish)),
+                "target_published" => Ok(Some(Self::TargetPublished)),
                 _ => Err("unknown SPILING_PROJECT_FAULT stage".into()),
             },
             Err(error) => Err(error.into()),
@@ -729,14 +757,23 @@ impl ProjectFault {
         matches!(
             (self, stage),
             (
-                Self::AfterAssets,
-                spiling_core::storage::SaveStage::AssetsSynced
+                Self::CandidateStaged,
+                spiling_core::storage::SaveStage::Staged
             ) | (
-                Self::BeforeManifestReplace,
-                spiling_core::storage::SaveStage::BeforeManifestReplace
+                Self::RowsInserted,
+                spiling_core::storage::SaveStage::RowsInserted
             ) | (
-                Self::AfterManifestReplace,
-                spiling_core::storage::SaveStage::AfterManifestReplace
+                Self::BeforeCommit,
+                spiling_core::storage::SaveStage::BeforeCommit
+            ) | (
+                Self::AfterCommit,
+                spiling_core::storage::SaveStage::Committed
+            ) | (
+                Self::BeforePublish,
+                spiling_core::storage::SaveStage::BeforePublish
+            ) | (
+                Self::TargetPublished,
+                spiling_core::storage::SaveStage::Published
             )
         )
     }

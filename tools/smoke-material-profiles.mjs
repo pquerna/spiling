@@ -175,7 +175,7 @@ try {
     retractedFilamentMm: decoded.retractedFilamentMm,
     recoveredFilamentMm: decoded.recoveredFilamentMm,
   });
-  const project = join(output, "project.spiling");
+  const project = join(output, "project.spil");
   const first = await run("create-a", [
     "create",
     project,
@@ -271,7 +271,7 @@ try {
   await save("label-only.json", labelOnly);
   await run("label-only", [
     "create",
-    join(output, "label-only.spiling"),
+    join(output, "label-only.spil"),
     "--import",
     join(output, "cube.step"),
     "--intent",
@@ -295,7 +295,7 @@ try {
   await save("bridge-accepted.json", bridgeAccepted);
   await run("bridge-accepted", [
     "create",
-    join(output, "bridge-accepted.spiling"),
+    join(output, "bridge-accepted.spil"),
     "--import",
     join(output, "cube.step"),
     "--intent",
@@ -318,7 +318,7 @@ try {
     "bridge-rejected",
     [
       "create",
-      join(output, "bridge-rejected.spiling"),
+      join(output, "bridge-rejected.spil"),
       "--import",
       join(output, "cube.step"),
       "--intent",

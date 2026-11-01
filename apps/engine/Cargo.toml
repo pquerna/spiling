@@ -27,7 +27,7 @@ prost-types.workspace = true
 tokio-stream.workspace = true
 uuid.workspace = true
 sha2.workspace = true
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
+rusqlite.workspace = true
 fs2 = "=0.4.3"
 
 [target.'cfg(unix)'.dependencies]

@@ -348,9 +348,9 @@ pub(super) fn status_error_and_receipt(
                         ..
                     }
                 }
-            ) || !matches!(&result,JobResult::ProjectSaved{info} if info.save_uncertain)
+            ) || !matches!(&result,JobResult::ProjectSaveUncertain{info} if info.save_uncertain)
             {
-                return Err("receipt requires uncertain ProjectSaved with project Io error".into());
+                return Err("receipt requires ProjectSaveUncertain with project Io error".into());
             }
             Ok(result)
         })

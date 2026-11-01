@@ -2939,7 +2939,7 @@ fn appearance_distinct_assets_and_reports_are_retained_across_undo_redo_and_stag
 }
 
 #[test]
-fn manifest_capacity_guard_reserves_recovery_envelope_and_counter_growth() {
+fn manifest_capacity_guard_reserves_counter_growth_not_a_nested_recovery_document() {
     // Isolate the serialization guard from domain validation with one variable
     // string; real report admission is exercised by the aggregate-budget test.
     let mut manifest = Project::new().capture().manifest;
@@ -2950,11 +2950,11 @@ fn manifest_capacity_guard_reserves_recovery_envelope_and_counter_growth() {
     assert!(
         serde_json::to_vec_pretty(&manifest).unwrap().len() < MAX_PROJECT_MANIFEST_BYTES as usize
     );
+    assert!(validate_manifest_size(&manifest).is_ok());
+    manifest.appearance_study.selection =
+        Some("x".repeat(MAX_PROJECT_MANIFEST_BYTES as usize - base - 44));
     assert_eq!(
         validate_manifest_size(&manifest).unwrap_err().code,
         ProjectErrorCode::ResourceLimit
     );
-    manifest.appearance_study.selection =
-        Some("x".repeat(MAX_PROJECT_MANIFEST_BYTES as usize - base - 8192));
-    assert!(validate_manifest_size(&manifest).is_ok());
 }

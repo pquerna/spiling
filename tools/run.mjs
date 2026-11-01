@@ -130,7 +130,7 @@ async function stageEngine(release = false) {
   return join(cargoTarget, release ? "release" : "debug", `spiling-engine${binSuffix}`);
 }
 
-async function copyNotices(packageRoot, output) {
+export async function copyNotices(packageRoot, output) {
   await mkdir(output, { recursive: true });
   // License texts are copied from the resolved dependency, never relabeled.
   const entries = await readdir(packageRoot, { withFileTypes: true });
@@ -155,6 +155,17 @@ async function copyNotices(packageRoot, output) {
         await mkdir(join(output, "fonts"), { recursive: true });
         await copyFile(join(fonts, entry), join(output, "fonts", entry));
       }
+    }
+  }
+  if (/^zstd-sys-/.test(packageRoot.split(/[\\/]/).at(-1))) {
+    const nativeRoot = join(packageRoot, "zstd");
+    const nativeOutput = join(output, "zstd");
+    await copyNotices(nativeRoot, nativeOutput);
+    for (const source of ["lib/common/xxhash.h", "lib/dictBuilder/divsufsort.c"]) {
+      const text = await readFile(join(nativeRoot, source), "utf8");
+      const notice = text.match(/^\/\*[\s\S]*?\*\//)?.[0];
+      if (!notice?.includes("Copyright")) throw new Error(`Missing native notice: ${source}`);
+      await writeFile(join(nativeOutput, `${source.split("/").at(-1)}.notice`), `${notice}\n`);
     }
   }
 }

@@ -4,7 +4,7 @@
 
 //! Deliberate deep checks against a built native engine, not a simulated pipe peer.
 use super::*;
-use spiling_contracts::project::{ProjectCommand, ProjectResponse};
+use spiling_contracts::project::{ProjectCommand, ProjectResponse, StorageMaintenanceAction};
 use spiling_contracts::{
     display::{validate_mesh_chunk, validate_mesh_manifest},
     project::ProjectErrorCode,
@@ -437,7 +437,7 @@ async fn project_writer_lock_read_only_rejections_and_kill_release_are_recoverab
         SessionId::new().as_str()
     ));
     std::fs::create_dir(&root).unwrap();
-    let path = root.join("project");
+    let path = root.join("project.spil");
     let mut writer = EngineClient::spawn(engine()).await.unwrap();
     assert_eq!(
         import(&mut writer, &fixture("box-mm.step")).await.status,
@@ -476,6 +476,23 @@ async fn project_writer_lock_read_only_rejections_and_kill_release_are_recoverab
     else {
         panic!("read-only project status");
     };
+    let response = reader
+        .project(ProjectCommand::StorageMaintenance {
+            session_id: readonly.session_id.clone(),
+            base_revision: info.revision,
+            action: StorageMaintenanceAction::Stats,
+            target: None,
+        })
+        .await
+        .unwrap();
+    let JobResult::ProjectStorageMaintained { action, stats } =
+        project_job(&mut reader, response).await.unwrap()
+    else {
+        panic!("typed storage stats");
+    };
+    assert_eq!(action, StorageMaintenanceAction::Stats);
+    stats.validate().unwrap();
+    assert_eq!(stats.retained_roots, 1);
     for command in [
         GeometryCommand::AddInstance {
             session_id: readonly.session_id.clone(),
@@ -522,6 +539,18 @@ async fn project_writer_lock_read_only_rejections_and_kill_release_are_recoverab
         reader.ping().await.unwrap();
     }
     for command in [
+        ProjectCommand::StorageMaintenance {
+            session_id: readonly.session_id.clone(),
+            base_revision: info.revision,
+            action: StorageMaintenanceAction::CollectUnreachable,
+            target: None,
+        },
+        ProjectCommand::StorageMaintenance {
+            session_id: readonly.session_id.clone(),
+            base_revision: info.revision,
+            action: StorageMaintenanceAction::CompactToNew,
+            target: Some(NativePath::from_os_str(root.join("refused.spil").as_os_str()).unwrap()),
+        },
         ProjectCommand::Save {
             session_id: readonly.session_id.clone(),
             base_revision: readonly.revision,
@@ -710,7 +739,7 @@ async fn manufacturing_bundle_survives_save_restart_and_source_removal() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source-box.step");
     std::fs::copy(fixture("box-mm.step"), &source).unwrap();
-    let project = root.path().join("project");
+    let project = root.path().join("project.spil");
     let mut client = EngineClient::spawn(engine()).await.unwrap();
     assert_eq!(
         import(&mut client, &source).await.status,
@@ -827,6 +856,10 @@ async fn manufacturing_bundle_survives_save_restart_and_source_removal() {
     );
     client.shutdown().await.unwrap();
     std::fs::remove_file(source).unwrap();
+    assert!(project.is_file());
+    let moved = root.path().join("moved.spil");
+    std::fs::rename(&project, &moved).unwrap();
+    let project = moved;
     let mut reopened = EngineClient::spawn(engine()).await.unwrap();
     assert_ne!(reopened.hello().session_id, session);
     open_project(&mut reopened, &project, false).await.unwrap();

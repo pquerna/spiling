@@ -65,6 +65,20 @@ async fn actual_child_diagnostics_and_clean_shutdown() {
     assert!(
         client
             .hello()
+            .project_capabilities
+            .iter()
+            .any(|capability| capability == "ptac_projects_v1")
+    );
+    assert!(
+        client
+            .hello()
+            .project_capabilities
+            .iter()
+            .all(|capability| capability != "recoverable_projects_v10")
+    );
+    assert!(
+        client
+            .hello()
             .geometry_capabilities
             .iter()
             .any(|capability| capability == "step_native_trimmed_v2")

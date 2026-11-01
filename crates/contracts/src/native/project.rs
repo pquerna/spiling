@@ -5,6 +5,7 @@ use super::{request_id, required, session_parent};
 use crate::{geometry::*, project::*, rpc, surface::*};
 
 pub enum ProjectCall {
+    StorageMaintenance(rpc::StorageMaintenanceRequest),
     ApplyOpticalConstruction(rpc::ApplyOpticalConstructionRequest),
     Execute(rpc::ProjectRequest),
     Open(rpc::OpenProjectRequest),
@@ -21,6 +22,25 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
     request_id(id)?;
     use rpc::project_request::Command as C;
     let (session_id, command) = match command {
+        ProjectCommand::StorageMaintenance {
+            session_id,
+            base_revision,
+            action,
+            target,
+        } => {
+            if (action == StorageMaintenanceAction::CompactToNew) != target.is_some() {
+                return Err("only compact-to-new requires a new target file".into());
+            }
+            return Ok(ProjectCall::StorageMaintenance(
+                rpc::StorageMaintenanceRequest {
+                    parent: format!("sessions/{}", session_id.as_str()),
+                    request_id: id.into(),
+                    base_revision: base_revision.0,
+                    action: rpc::StorageMaintenanceAction::from(action) as i32,
+                    target: target.map(TryInto::try_into).transpose()?,
+                },
+            ));
+        }
         ProjectCommand::ApplyOpticalConstruction {
             session_id,
             base_revision,

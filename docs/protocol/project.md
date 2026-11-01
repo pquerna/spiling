@@ -10,28 +10,17 @@ The executable storage schema is `spiling-contracts::project`; state and storage
 
 Format evolution and the initial release compatibility boundary follow the [canonical pre-release format policy](../../AGENTS.md#pre-release-format-evolution).
 
-## Directory and records
+## Container and records
 
 ```text
-<project-directory>/
-  writer.lock                  stable, regular OS writer-lock inode
-  manifest.json                current committed ProjectManifest
-  previous.json                optional single RecoveryRecord
-  sources/
-    <source_sha256>.step        immutable exact imported source bytes
-  manufacturing/
-    <bundle_sha256>.json        immutable exact compact manufacturing bundle bytes
-  images/
-    <image_sha256>.pgm          immutable canonical Gray8 height images
-  palette-originals/
-    <original_sha256>.json      immutable exact imported palette JSON
-  palette-canonical/
-    <canonical_sha256>.json     immutable canonical palette JSON
+<name>.spil                    closed Spiling PTAC SQLite profile
+<name>.spil.lock               stable lifetime writer lease, not project content
+<name>.spil-journal            SQLite rollback state; may be required after a crash
 ```
 
-The initial successful save has no previous checkpoint. Root/assets must be regular, not symlinks/reparse points; asset directories must be real directories. Unknown entries are rejected except bounded internal scratch. No external source paths, session IDs, native objects, display artifacts or undo records are serialized. Manufacturing bundles are durable immutable derived assets, not persisted printer execution. `source_name` is a captured display basename, never a filesystem reference; its retained value participates in manufacturing provenance/fingerprints.
+The project is one ordinary SQLite file with a closed, six-table schema, immutable exact-byte objects and exactly current plus optional previous saved snapshots. The independently testable `spiling-core-ptac` owns SQLite, filesystem admission, chunks and publication; Core owns project meaning. See [the physical storage contract](project-storage.md) and [ADR007](../adr/007-ptac-project-storage.md). Existing project directories are refused without readers, converters, migrations or compatibility defaults. Recreate development projects through original source imports.
 
-`manifest.json` is strict UTF-8 JSON, at most 1,048,576 bytes. Duplicate object fields, unknown fields, trailing JSON, invalid checked IDs, invalid poses and unsupported versions are errors. Its exact fields are:
+The root object is strict UTF-8 `ProjectManifest` JSON, at most 1,048,576 bytes. Duplicate object fields, unknown fields, trailing JSON, invalid checked IDs, invalid poses and unsupported versions are errors. No external lookup paths, native objects, session IDs, display artifacts or undo records are persisted. `source_name` remains a captured display basename and manufacturing provenance, never a lookup path. Its exact fields are:
 
 - `format_version`: `10` (strict cutover; no compatibility reader).
 - `project_id`: canonical lowercase, nonnil UUID string.
@@ -60,7 +49,7 @@ Import accepts bounded PNG or canonical PGM source bytes, at most1MiB. PNG decod
 
 An asset contains 1..16 MiB of exact original imported bytes, not normalized or regenerated STEP. Its filename is the SHA-256 of those bytes. `definition_id` is SHA-256 of the byte sequence `spiling:definition:step-native-trimmed-v2\0` followed by the 32 raw source-hash bytes. Hash/identity/reference/provenance mismatches fail before publication. Source bytes enter one `Arc<Vec<u8>>` without copying the captured Vec allocation; every snapshot/history entry shares the same canonical source asset. Reimporting identical bytes from another basename keeps the first retained source label; differing source units/uncertainty are conflicting native provenance, not a new definition.
 
-Each immutable asset directory is limited to128 files and256MiB, including complete unreferenced assets left by earlier saves; image files additionally remain at most65,551 bytes each. There is **no asset garbage collection**: a concurrent reader may still hold a manifest referring to an old immutable asset. Exhaustion is an explicit resource error, not permission to delete old assets. Scratch permits at most eight entries, with aggregate bytes capped at16MiB for source/manufacturing directories and65,551 bytes for the image directory. Root entries are limited to32 and each temporary manifest to1MiB. A save refuses to exceed scratch capacity, including crash leftovers. These are storage bounds, not certification of arbitrary externally modified directories. First-save crash staging directories live beside the destination and are not published projects.
+Core requires exact equality between the root's referenced assets and snapshot membership: roles 1 source STEP, 2 manufacturing bundle, 3 canonical image, 4 original palette and 5 canonical palette. Unknown, missing and extra roles/members refuse. Shared content retains one exact-byte identity across roles. Domain budgets remain independent of the container's row/disk bounds; storage capacity is not permission to capture more live/history/prepared data. Explicit reachability collection and compact-to-new never collect Core's session history or reinterpret a corrupt project.
 
 Manufacturing records bind project identity, source/occurrence records, explicit intent and complete ordered finish/process documents, including disabled/shadowed operations. Manufacturing schema11 captures these inputs, required deposition limits/sparse/top-skin policies, typed permanent construction and bounded canonical image content. Format10 refuses older manifests/checkpoints without missing-field defaults. Bundles remain capped at16MiB under Core's separate64MiB retained/staged/history allowance. Load checks exact bytes/hash, strict schema, full input/provenance/content agreement and summary. Engine independently replays stored program bytes; persisted `verified` is descriptive. See [manufacturing.md](manufacturing.md).
 
@@ -105,17 +94,17 @@ The CLI is the current consumed workflow; no appearance workbench form is implie
 ```sh
 work="$(mktemp -d)"
 cp fixtures/appearance/palette.json "$work/allowed-palette.json"
-target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project create "$work/study" \
+target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project create "$work/study.spil" \
   --appearance-palette "$work/allowed-palette.json" \
   --appearance-target fixtures/appearance/target-orange.json --appearance-compare \
   --appearance-accept 261ae7e7-20d9-5969-9ed5-dd82eea29bcf/catalog-rgb \
   --save --appearance-target fixtures/appearance/target-red.json --undo --redo --undo --save
 rm "$work/allowed-palette.json"  # This newly created owned input only.
-target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project inspect "$work/study" \
+target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project inspect "$work/study.spil" \
   --appearance-report "$work/reopened-report.json" --appearance-compare
 ```
 
-`--appearance-accept-report` explicitly accepts a complete report without selecting a candidate; it is not a reserved candidate-key sentinel. `--appearance-limits FILE` supplies strict `max_visited`/`max_alternatives` JSON after a target. Exports use the shared exclusive output transaction and commit only after observed child reap. Inspect opens fresh read-only and uses captured assets after source deletion. Project10/manufacturing11/process3/surface3/SPLR5 remain unchanged; current manufacturing producer freshness uses planner25/emitter7/verifier9.
+`--appearance-accept-report` explicitly accepts a complete report without selecting a candidate; it is not a reserved candidate-key sentinel. `--appearance-limits FILE` supplies strict `max_visited`/`max_alternatives` JSON after a target. Exports use the shared exclusive output transaction and commit only after observed child reap. Inspect opens fresh read-only and uses captured assets after source deletion. Storage keeps project10/manufacturing11/process3/surface3 and the current packed-format/producer freshness checks unchanged.
 
 ## Optical reference construction studies
 
@@ -139,11 +128,11 @@ The CLI consumes real engine computation, not a local predictor:
 work="$(mktemp -d)"
 cp fixtures/appearance/palette.json "$work/palette.json"
 cp fixtures/appearance/optical-layer-cycle.json "$work/request.json"
-target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project create "$work/study" \
+target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project create "$work/study.spil" \
   --appearance-palette "$work/palette.json" --optical-study "$work/request.json" \
   --optical-compare --optical-accept requested --save --undo --redo
 rm "$work/palette.json" "$work/request.json"  # Only these newly owned external inputs.
-target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project inspect "$work/study" \
+target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project inspect "$work/study.spil" \
   --optical-report "$work/reopened-report.json" --optical-compare
 ```
 
@@ -151,55 +140,30 @@ The example's target is the pinned model's synthetic reference result, not a mea
 
 ## Writer ownership and reader snapshots
 
-A writer holds an exclusive OS `File` lock on `writer.lock` for the entire retained `Storage` lifetime. It never unlinks/recreates that lock. Concurrent writers fail with `ProjectLocked`; process exit releases OS ownership. The storage directory, source directory and lock inode are checked for substitution. A same-writer staged reopen uses `storage::open_reusing` and retains the existing lock until successful engine publication. Failure/cancellation cannot destroy the old live project or lock.
+The stable separate `<name>.spil.lock` lease lasts for the retained writable Storage lifetime. Competing writers fail with `ProjectLocked`; a read-only attachment uses an actual read-only SQLite connection and never secretly recovers writable. Same-writer staged reopen reuses its ownership. Main file, sidecars, lock and ancestry are checked for substitutions and hard links. Raw main-file descriptors are never opened/closed while any in-process SQLite connection owns that identity.
 
-A read-only open never acquires the writer lock. It captures one complete manifest then loads every referenced immutable source, canonical image (including disabled layers), manufacturing asset and original/canonical palette pair. Writer replacements cannot mix newer records with older assets. The loaded project owns its bytes without reopening external source/image/palette files. No eager deletion may invalidate concurrently captured snapshots.
-
-The engine passes the remaining old/current/history byte capacity to `storage::open_reusing` before source capture. The loader bounds each incoming file by the remaining caller budget before allocating its buffer. Old and staged captured allocations coexist through native ACK, even for identical definition IDs; their combined envelope is 64 MiB. Insufficient capacity fails with `ResourceLimit` without first dropping the old state or temporarily capturing a second full budget.
-
-Manufacturing open likewise receives the remaining retained/staged manufacturing budget before allocation, so the old complete project and incoming bundles coexist within 64 MiB through ACK, not old64+incoming64 transient overshoot.
-
-Image open likewise receives the remaining4MiB retained/staged image budget before capture, including live prepared candidates. Hash/header/dimensions/record mismatches, missing or substituted image files fail before publication. Assets are written and synchronized before atomic manifest replacement, and current/previous recovery candidates each validate their complete image graph.
+A short read transaction captures one selected snapshot and its guard; all source/image/palette/bundle bytes are verified before they become Core assets. Old and incoming prepared allocations coexist through native ACK, charged against the same 64 MiB source, 64 MiB manufacturing, 4 MiB image and existing appearance budgets. Identical IDs do not authorize temporary double-budget capture. No original external input is reopened. SQLite reader locks and lifetime-owned Core Arcs prevent mixed snapshots and collection from invalidating captured assets.
 
 ## Save publication, cancellation and errors
 
-Ordinary save to attached storage:
+Core captures and validates an immutable snapshot without advancing authoring revision or clearing undo. PTAC stages bounded encoded bytes outside the write transaction, verifies reused content, compares generation/root identities and inserts the complete candidate under `BEGIN IMMEDIATE`. Roots, membership and independent guard publish together. Prior rows remain unreachable until explicit maintenance, not implicit cancelled-save cleanup.
 
-1. Validate captured manifest/snapshot and previous committed content/references. Write missing immutable source and manufacturing assets to exclusively created temporary files; synchronize bytes; publish final hash filenames without replacing existing assets. Validate reused assets against exact captured bytes. Synchronize asset directories before any manifest publication.
-2. Emit `AssetsSynced`. Write and synchronize a temporary current manifest.
-3. If a previous checkpoint already exists, validate its schema, project identity and source references rather than silently repairing/replacing corrupt or foreign checkpoint data. Write and synchronize the one recovery record; atomically replace `previous.json`; synchronize the project directory. This checkpoint publication precedes current replacement. Saving a recovered project uses valid current content as its previous checkpoint when available; only explicit recovery intent permits using the independently validated recovery record in place of corrupt current content.
-4. Emit `BeforeManifestReplace`. Recheck cancellation **after** the observer returns and before starting replacement. Cancellation wins here and earlier; current manifest remains complete and unchanged. A failed save can leave complete unreferenced assets and can refresh the recovery checkpoint, but never publishes partial source references.
-5. Make the commit decision and atomically replace `manifest.json`. Ignore subsequent cancellation. Emit `AfterManifestReplace`, then synchronize the project directory and return a truthful receipt.
+Existing-file cancellation remains effective through insertion and immediately before COMMIT. First save/Save As builds and independently checks a complete private database, closes every connection and flushes it before the decision immediately before atomic exclusive/no-replace rename. Never use hard-link-plus-unlink publication or replace a live database. Save As retains the independently admitted last saved snapshot as previous when distinct. Parent/staging directory sync failures after rename are post-publication outcomes.
 
-A first save or different-target save must not replace any existing destination, even an empty directory. It builds an exclusively named sibling `.spiling-stage-<uuid>` directory with its own held writer lock and complete synchronized assets/manifest. At the same cancellation boundary it verifies ownership, synchronizes the staged directory, and publishes the entire directory using an exclusive/no-replace OS rename. For first save, `AfterManifestReplace` means the complete directory has reached the final destination; it is not emitted for the earlier private manifest rename. Parent-directory synchronization completes durability. Before-publication failure leaves the destination absent and safely retryable. Rollback only unlinks known owned file identities and removes matching empty directory identities; it never recursively deletes substituted/foreign paths. Process exit may leave an unpublished sibling stage; no automatic recursive orphan cleanup is performed.
+`SaveReceipt` distinguishes confirmed publication, observed but durability-unconfirmed publication, and unknown commit outcomes. Pre-publication errors leave the prior saved baseline. An unconfirmed/unknown receipt retains target ownership, sets sticky `save_uncertain` and dirty, and never fabricates a confirmed saved revision. Unknown outcomes stop writes pending explicit reopen/inspection. Undo, Get and same-session reopen do not erase uncertainty; only a confirmed Save clears it. Failed operations carry the checked failed-only `ProjectSaveUncertain` result, not a successful `ProjectSaved`. The native host keeps the caller-authorized attempted route but never automatically retries or restart-reopens an uncertain save.
 
-Errors before current publication return `Err(ProjectError)` and do not attach storage/change live content. Once publication succeeds, a failure of its final directory synchronization cannot be described as cancellation or as though nothing was saved. `SaveReceipt.durability_error` carries typed `Io` alongside the actual published storage/manifest. The engine must attach the receipt before reporting the failed job. Core keeps the prior confirmed saved baseline/revision for the same attached target, sets `save_uncertain=true`, and forces `dirty=true`; a newly attached unconfirmed target has no confirmed saved revision. Undo does not clear uncertainty, and a same-session reopen does not erase it. A later fully successful save clears uncertainty. No successful `ProjectSaved` result may be emitted for an unconfirmed durability receipt. Inspect status and the explicit error before deciding whether to retry.
+`SaveStage::BeforeCommit` is the engine's actual irreversible decision; the other hooks expose staging, inserted rows, COMMIT returned, and target namespace publication. `SPILING_PROJECT_FAULT` terminates only disposable actual-child workflows at the named transitions described by the owning engine tests. Process termination tests are not electrical power-loss certification.
 
-The failed Google operation preserves this particular save's attachment receipt in a typed Status detail: one NativeOperationResult containing checked ProjectSaved info with `save_uncertain=true`, alongside the project Io error. Its status remains failed; it is not a successful response. The shell may attach the actual published Save As route using that receipt. A later Get's sticky uncertainty is not proof that the observed operation published a target. Duplicate, malformed, wrong-domain or certain receipts are rejected.
+## Explicit previous-save recovery and guard
 
-`SaveStage` observers are real transition hooks, not simulated crash success. Engine `SPILING_PROJECT_FAULT=after_assets|before_manifest_replace|after_manifest_replace` exits the actual child at the corresponding hook. A process crash before publication leaves the prior complete current (or no first-save target); a crash after publication leaves a complete new current with synchronized sources. Power-loss guarantees depend on the filesystem/device successfully honoring synchronization, and are **not** proved by process-crash tests.
+`container.guard` contains independently hashed, strict JSON `ProjectRecoveryGuard`: project ID, revision high-water and the four occurrence/surface-layer/process-layer/process-operation allocator high-waters. It must dominate every admitted retained root and agree on project identity. It detects accidental corruption, not maliciously recomputed hashes or authenticity.
 
-## Explicit recovery and high-water checkpoint
+Every ordinary open also initializes live revision/allocators from the maximum of selected root, guard and same-project live high-water. The root's actual saved revision/content remain separate, so raising floors alone does not make content dirty. Revisions/IDs lost with an unsaved process are outside restart guarantees.
 
-`previous.json` is strict JSON, at most 1 MiB, containing exactly:
-
-```text
-RecoveryRecord {
-  manifest: ProjectManifest,             // previous committed semantic content
-  revision_high_water: ProjectRevision, // at least candidate/current revision
-  next_occurrence_high_water: u32,      // at least candidate/current next counter
-  next_surface_layer_high_water: u32,   // at least candidate/current surface counter
-  next_process_layer_high_water: u32,
-  next_process_operation_high_water: u32
-}
-```
-
-All high-water fields must be at least their embedded manifest values. Recovery independently validates the complete saved graph, restores semantic content, takes each allocator's maximum recorded counter and allocates a fresh revision above the recorded high-water. It cannot reuse IDs published by an interrupted candidate. Exhaustion refuses. Saved revision describes the confirmed embedded checkpoint; recovered/dirty state remains until confirmed Save.
+Explicit previous recovery validates that root's complete graph and guard independently of current payload validity, allocates a fresh revision above all admitted floors, and forces dirty. Missing/bad guard, unreadable physical structure, unavailable previous or exhaustion refuse; no automatic fallback occurs. Confirmed recovery Save retains its bound validated previous source rather than the damaged current. The two roots share one database and are not independent media backups.
 
 ## Platform and evidence boundaries
 
-- Linux: anchored `openat`/`O_NOFOLLOW` regular-file IO, stable OS file locking, file/directory `fsync`, atomic `renameat` replacement, and `renameat2(RENAME_NOREPLACE)` initial publication. Unsupported exclusive rename/filesystem synchronization returns typed error; no check-then-overwrite fallback.
-- macOS: the corresponding anchored IO, atomic replacement, `renameatx_np(RENAME_EXCL)` publication, directory `fsync`, and file `F_FULLFSYNC` after `sync_all`. These primitives are implemented but unverified on macOS in this wave.
-- Windows: checked non-reparse file/directory handles, OS file locking, `MoveFileExW` with write-through and replacement only where required, exclusive initial move, and explicit directory flushing. Directory flush/access and atomic/durability behavior remain unverified on Windows in this wave. A filesystem/permission configuration refusing directory flushing yields typed `Io` (before publication, or an uncertain receipt after publication), **not** silently weakened durable success.
+The filesystem adapter currently admits Unix paths and uses anchored no-follow ancestry, separate OS leases, SQLite's pinned standard VFS with the mandatory recovery namespace guard, and atomic no-replace rename. Linux is the local test surface. macOS code is not exercised durability evidence; non-Unix admission explicitly refuses rather than silently weakening safety. Network/cloud-synchronized filesystems, hostile concurrent namespace changes, cross-platform packaging and power-loss behavior remain unqualified.
 
-No cross-platform power-loss certification is claimed. Network/cloud-synchronized filesystems and hostile concurrent mutation outside the cooperative writer protocol are not certified. `cargo test -p spiling-core` exercises deterministic public behavior including revision/dirty/history/source pins, lock/reuse/read-only snapshots, corruption, cancellation boundaries, recovery high-water, foreign-target ownership and postpublication durability uncertainty. Actual-engine crash/concurrency/native reconstruction evidence and platform evidence are separate acceptance surfaces owned by engine/integration.
+See [storage conformance and reproduction](../quality/authoring-evidence.md), `cargo test -p spiling-core-ptac` and `cargo test -p spiling-core`. Native geometry reconstruction, independently decoded actual-program replay and physical printability have separate owning gates.

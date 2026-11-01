@@ -231,6 +231,9 @@ impl EngineRpc {
             request.validate()?;
         }
         match &command {
+            ProjectCommand::StorageMaintenance { target, .. } => {
+                target.as_ref().map_or(Ok(()), |path| path.validate())
+            }
             ProjectCommand::Open { path, .. } => path.validate(),
             ProjectCommand::ImportSurfaceImageFinish { source, .. }
             | ProjectCommand::ImportAppearancePalette { source, .. } => source.validate(),
@@ -264,6 +267,17 @@ impl EngineRpc {
             .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
             .max_encoding_message_size(MAX_CONTROL_BYTES as usize);
         match call {
+            ProjectCall::StorageMaintenance(request) => {
+                let operation = client
+                    .storage_maintenance(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
+                Ok(ProjectResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
+                })
+            }
             ProjectCall::ApplyOpticalConstruction(request) => {
                 let operation = client
                     .apply_optical_construction(self.request(bounded(request)?))

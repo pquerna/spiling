@@ -192,10 +192,10 @@ pub enum Picker {
 impl Picker {
     fn title(self) -> &'static str {
         match self {
-            Self::Open => "Open Spiling project directory",
-            Self::OpenReadOnly => "Open project read-only",
-            Self::Recover => "Recover previous committed checkpoint",
-            Self::Save => "Choose a new project directory name",
+            Self::Open => "Open Spiling project (.spil)",
+            Self::OpenReadOnly => "Open Spiling project read-only (.spil)",
+            Self::Recover => "Recover previous save from a Spiling project (.spil)",
+            Self::Save => "Save Spiling project to a new .spil file",
             Self::Import => "Import a native STEP part",
             Self::Image => "Import height image PNG or canonical PGM",
             Self::Intent => "Load inert manufacturing intent JSON",
@@ -464,18 +464,17 @@ impl Host {
                 as std::pin::Pin<
                     Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>,
                 >
-        } else if matches!(picker, Picker::Save | Picker::Export) {
+        } else if picker == Picker::Save {
             Box::pin(
                 dialog
-                    .set_file_name(if picker == Picker::Export {
-                        "Spiling Export"
-                    } else {
-                        "Spiling Project"
-                    })
+                    .add_filter("Spiling project", &["spil"])
+                    .set_file_name("Spiling Project.spil")
                     .save_file(),
             )
+        } else if picker == Picker::Export {
+            Box::pin(dialog.set_file_name("Spiling Export").save_file())
         } else {
-            Box::pin(dialog.pick_folder())
+            Box::pin(dialog.add_filter("Spiling project", &["spil"]).pick_file())
         };
         self.runtime
             .as_ref()
@@ -546,6 +545,7 @@ fn selected_action(picker: Picker, path: &std::path::Path) -> Result<Action, Str
 struct Route {
     path: NativePath,
     read_only: bool,
+    uncertain: bool,
 }
 enum Receipt {
     Open(Route),
@@ -815,7 +815,14 @@ impl Actor {
         match client.status().await {
             Ok(true) => {}
             Ok(false) => {
-                let message = if self.route.is_some() {
+                let message = if self.route.as_ref().is_some_and(|route| route.uncertain)
+                    || self
+                        .pending
+                        .as_ref()
+                        .is_some_and(|pending| matches!(&pending.receipt, Receipt::Save(_)))
+                {
+                    "Native engine exited after an uncertain save. Restart starts a new session; explicitly inspect or reopen the attempted .spil target."
+                } else if self.route.is_some() {
                     "Native engine exited; unsaved changes are unavailable. Restart reopens the attached saved checkpoint."
                 } else {
                     "Native engine exited; unsaved changes are unavailable. Restart starts a new project."
@@ -864,13 +871,15 @@ impl Actor {
         }
     }
     async fn disconnect(&mut self, reason: String) {
+        if let Some(pending) = self.pending.take() {
+            self.retain_unresolved_save(pending.receipt);
+        }
         self.cancel_display();
         self.clear_review();
         self.state.bed_proposal = None;
         if let Some(mut client) = self.client.take() {
             let _ = client.terminate().await;
         }
-        self.pending = None;
         if let Some(task) = self.diagnostic_task.take() {
             task.abort();
         }
@@ -883,6 +892,12 @@ impl Actor {
         self.state.phase = Phase::Interrupted;
         self.state.hello = None;
         self.problem(reason);
+    }
+    fn retain_unresolved_save(&mut self, receipt: Receipt) {
+        if let Receipt::Save(Some(mut route)) = receipt {
+            route.uncertain = true;
+            self.route = Some(route);
+        }
     }
     async fn failure(&mut self, error: ClientError) {
         if error.is_fatal() {
@@ -1313,6 +1328,7 @@ impl Actor {
                 receipt = Some(Receipt::Open(Route {
                     path: path.clone(),
                     read_only,
+                    uncertain: false,
                 }));
                 ProjectCommand::Open {
                     session_id,
@@ -1330,6 +1346,7 @@ impl Actor {
                         .map(|path| Route {
                             path,
                             read_only: false,
+                            uncertain: false,
                         })
                         .or_else(|| self.route.clone()),
                 ));
@@ -1401,12 +1418,23 @@ impl Actor {
                 self.refresh_after_failure().await;
             }
             Err(error) => {
+                if error.is_fatal()
+                    && let Some(receipt) = receipt
+                {
+                    self.retain_unresolved_save(receipt);
+                }
                 self.failure(error).await;
                 self.refresh_after_failure().await;
             }
         }
     }
     async fn reopen(&mut self) {
+        if self.route.as_ref().is_some_and(|route| route.uncertain) {
+            self.problem(
+                "The previous save outcome is uncertain; explicitly inspect or reopen the attempted .spil target",
+            );
+            return;
+        }
         if self.client.is_some()
             && let Some(route) = self.route.clone()
         {
@@ -1483,11 +1511,21 @@ impl Actor {
                 self.route = Some(route.clone());
                 let _ = summary;
             }
-            (Receipt::Save(route), Some(JobResult::ProjectSaved { info }))
-                if completed || info.save_uncertain =>
+            (Receipt::Save(route), Some(JobResult::ProjectSaved { info })) if completed => {
+                if let Some(route) = route {
+                    let mut route = route.clone();
+                    route.uncertain = false;
+                    self.route = Some(route);
+                }
+                self.state.project = Some(Arc::new(info.clone()));
+            }
+            (Receipt::Save(route), Some(JobResult::ProjectSaveUncertain { info }))
+                if operation.status == JobStatus::Failed && info.save_uncertain =>
             {
                 if let Some(route) = route {
-                    self.route = Some(route.clone());
+                    let mut route = route.clone();
+                    route.uncertain = true;
+                    self.route = Some(route);
                 }
                 self.state.project = Some(Arc::new(info.clone()));
             }

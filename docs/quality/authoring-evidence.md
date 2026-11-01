@@ -34,7 +34,7 @@ Durable operation publication and cancellation ownership are mapped in [engine o
 
 ## Open, read-only and source independence
 
-`storage::open_reusing` captures one committed manifest and its complete immutable asset graph. A writer retains the stable `writer.lock` inode for the Storage lifetime; a competing writer fails. Same-writer reopen reuses held storage. Read-only captures a committed snapshot without taking the writer lock.
+`storage::open_reusing` captures one PTAC saved root, complete immutable object graph and independent guard. A writer retains the stable separate `<name>.spil.lock` inode for the Storage lifetime; a competing writer fails. Same-writer reopen reuses held storage. Actual read-only SQLite captures a committed snapshot without taking the lifetime writer lease; it never secretly reopens writable for recovery. Every normal load consumes guard floors without manufacturing semantic dirtiness or a false saved revision. See [physical storage](../protocol/project-storage.md).
 
 Worker `open` then rebuilds or reuses native definitions from captured project bytes, independently checks provenance, and validates every stored surface target, including disabled layers, against the actual source face table. Original STEP/PNG paths are not dependencies after a successful save.
 
@@ -46,18 +46,18 @@ A display refusal is independent of source admission: a definition can retain na
 
 ## Save commit and failure paths
 
-`Project::capture` supplies an immutable checkpoint. `storage::save` validates it, synchronizes immutable source/manufacturing/image assets, publishes the validated previous checkpoint, then atomically publishes current content. First save/Save As builds an owned sibling staging directory and uses exclusive publication: even an existing empty target must not be overwritten.
+`Project::capture` supplies an immutable checkpoint. `storage::save` validates strict domain closure; PTAC stages bounded content, verifies reuse and publishes current, previous and guard together under one SQLite transaction. First save/Save As builds and checks an owned private database, closes its handles, flushes it and uses atomic no-replace rename: no existing target is overwritten, and no two-link main-file intermediate is created.
 
-- Before publication, cancellation or IO failure leaves current content intact and does not attach the proposed destination. Complete unreferenced assets or owned staging remnants can remain; cleanup never deletes substituted or foreign entries.
-- Worker `save` calls `CommitToken::begin_commit` at `SaveStage::BeforeManifestReplace`. Once replacement wins, cancellation cannot claim rollback. The runtime must deliver the actual receipt through ACK and `Project::mark_saved`.
+- Before publication, cancellation or proven nonpublication leaves current content intact and does not attach the proposed destination. Owned staging remnants can remain; cleanup never recursively deletes substituted or foreign entries.
+- Worker `save` calls `CommitToken::begin_commit` at `SaveStage::BeforeCommit`, immediately before existing-file COMMIT or new-target namespace rename, after cancellable validation/insertion. Later cancellation cannot claim rollback. The runtime delivers the actual receipt through ACK and `Project::mark_saved`.
 - A final directory-sync failure yields published storage plus `SaveReceipt.durability_error`. Core attaches that storage, sets `save_uncertain=true` and stays dirty. An existing target retains its prior confirmed baseline; a newly attached unconfirmed target has no confirmed saved revision.
-- The operation still fails with typed project IO. Its own checked `ProjectSaved` receipt travels in Status details through [native `terminal_error`](../../apps/engine/src/native.rs). Sticky uncertainty observed by a later Get is not evidence that a different failed Save As published its destination.
+- The operation still fails with typed project IO. Its checked failed-only `ProjectSaveUncertain` receipt travels in Status details through [native `terminal_error`](../../apps/engine/src/native.rs), never successful `ProjectSaved`. Unknown COMMIT outcomes preserve the attempted lease/journal and freeze writes pending explicit reopen. Sticky uncertainty observed by a later Get is not evidence that a different failed Save As published its destination.
 - Undo and same-session reopen cannot clear uncertainty. A fully confirmed save clears it. Clients reconcile authoritative state without silently retrying a failed save.
-- Immutable assets are not garbage-collected while readers can hold old manifests. Storage/source/history/scratch exhaustion is a typed refusal, never permission to drop history pins early, truncate output or delete old assets.
+- Explicit idle collection verifies both retained roots and atomically removes only unreachable container rows; compact-to-new preserves those roots/guard/bytes without replacing the live file. Captured Core Arcs remain valid. Source/history/staging exhaustion is a typed refusal, never permission to drop history pins, truncate output or silently run maintenance.
 
 ## Recovery and fresh replay
 
-Normal open never falls back from corrupt current content. Explicit recovery reads and independently validates `previous.json` and its assets. It restores previous semantic content with a fresh revision above recorded high-water and preserves both allocators. `recovered_previous=true` remains dirty until a confirmed save. Recovery is not autosave or replay of arbitrary unsaved edits.
+Normal open never falls back from corrupt current content. Explicit recovery independently validates the previous PTAC root and intact allocator guard even when current payload is corrupt. It restores previous semantic content with a fresh revision above every recorded/live high-water and all allocator maxima. `recovered_previous=true` remains dirty until a confirmed save. Its bound recovery Save retains the validated previous source, never the damaged current. Recovery is not autosave, old-format conversion or replay of unsaved edits; corrupt guard/physical structure refuses.
 
 Saved manufacturing bundles are exact immutable assets, but stored `verified` reports are descriptive. Worker `open` calls `inspect_asset` before project promotion. [Manufacturing `inspect_bundle` / `validate_inspection_bundle`](../../crates/manufacturing/src/lib.rs) require current producer/kernel identities and independently replay the actual program. A former producer cannot acquire current verification authority merely because its bundle JSON validates. Incompatible producers refuse; no compatibility reader or automatic recompilation repairs them.
 
@@ -72,16 +72,17 @@ CLI="$PWD/target/debug/spiling-cli"
 ENGINE="$PWD/target/debug/spiling-engine"
 scratch=$(mktemp -d)
 cp fixtures/geometry/box-mm.step "$scratch/source.step"
-"$CLI" project create "$scratch/project" --import "$scratch/source.step" --engine "$ENGINE"
-"$CLI" project edit "$scratch/project" --pose 1 '{"translation_mm":[40,0,0],"rotation_xyzw":[0,0,0,1]}' --save --undo --redo --engine "$ENGINE"
+"$CLI" project create "$scratch/project.spil" --import "$scratch/source.step" --engine "$ENGINE"
+"$CLI" project edit "$scratch/project.spil" --pose 1 '{"translation_mm":[40,0,0],"rotation_xyzw":[0,0,0,1]}' --save --undo --redo --engine "$ENGINE"
 rm -- "$scratch/source.step"
-"$CLI" project inspect "$scratch/project" --section 0,0,4:0,0,1 --engine "$ENGINE"
+mv -- "$scratch/project.spil" "$scratch/moved.spil"
+"$CLI" project inspect "$scratch/moved.spil" --section 0,0,4:0,0,1 --engine "$ENGINE"
 ```
 
 Flags execute left-to-right; create/edit checkpoint final content, while inspect is read-only. Compare authoritative project/occurrence/provenance output across processes, not session handles. The edit's intermediate save must retain history; undo/redo after it must remain coherent. `project recover PROJECT --engine "$ENGINE"` explicitly inspects previous content; add ordered `--save` only when publishing that recovered state is intended.
 
-[Core storage regressions](../../crates/core/src/storage/tests.rs), [Core transaction regressions](../../crates/core/src/tests.rs), [engine project integration](../../apps/engine/tests/project.rs) and [CLI project integration](../../apps/cli/tests/project.rs) own corruption, locks, source removal, recovery, uncertainty and process cleanup scenarios. `SPILING_PROJECT_FAULT=after_assets|before_manifest_replace|after_manifest_replace` terminates an actual engine at storage transitions; use only owned disposable projects. Process-crash behavior does not certify filesystem/device power loss.
+[Container conformance](../../crates/core-ptac/src/adversarial_tests.rs), [Core storage regressions](../../crates/core/src/storage/tests.rs), [Core transaction regressions](../../crates/core/src/tests.rs), [engine project integration](../../apps/engine/tests/project.rs) and [CLI project integration](../../apps/cli/tests/project.rs) own corruption, locks, source removal, recovery, uncertainty and process cleanup. Run `cargo test -p spiling-core-ptac` independently of Core/kernel for fixed identity/catalog vectors, bounded mutations/model sequences, indexed real VFS write/sync/truncate/delete/lock faults and subprocess COMMIT kills. Engine fault names are `staged`, `rows_inserted`, `before_commit`, `committed`, `before_publish`, `published` (plus explicit postpublication error hooks); use only disposable projects. Process-crash/fault evidence does not certify power loss, macOS/Windows durability, network/cloud filesystems or physical manufacturing.
 
 ## Support boundaries
 
-No restart-persistent undo, automatic unsaved-edit recovery, asset GC, general CAD/topology editing or automatic operation resumption is promised. Network/cloud-synchronized filesystems and hostile external mutation are not certified. Platform storage primitives and their qualification limits are specified in the project contract. CLI/native bridge behavior alone does not establish packaged desktop, real-dialog, physical GPU or printer acceptance.
+No restart-persistent undo, automatic unsaved-edit recovery, background GC, general CAD/topology editing or automatic operation resumption is promised. Explicit idle collection/compact-to-new are storage operations, not project edits. Network/cloud-synchronized filesystems and hostile external mutation are not certified. Platform storage primitives and their qualification limits are specified in the project contract. CLI/native bridge behavior alone does not establish packaged desktop, real-dialog, physical GPU or printer acceptance.

@@ -4,6 +4,14 @@
 
 use crate::host::{Phase, Snapshot};
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn save_as_names_the_project_file_not_a_directory() {
+        assert_eq!(super::Action::SaveAs.label(), "Save As .spil…");
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     New,
@@ -61,7 +69,7 @@ impl Action {
             Self::OpenReadOnly => "Open read-only…",
             Self::Recover => "Recover previous checkpoint…",
             Self::Save => "Save",
-            Self::SaveAs => "Save to new directory…",
+            Self::SaveAs => "Save As .spil…",
             Self::Import => "Import STEP…",
             Self::LoadIntent => "Load intent JSON…",
             Self::LoadMaterial => "Load material profile…",

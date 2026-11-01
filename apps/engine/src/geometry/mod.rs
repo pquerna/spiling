@@ -9,6 +9,7 @@ mod manufacturing;
 mod optical;
 mod placement;
 mod source;
+mod storage;
 mod surface_image;
 mod worker;
 pub(crate) use execution::{Control, EngineJob, JobError, JobId, JobResult, JobStatus, Reply};
@@ -20,7 +21,7 @@ use spiling_contracts::surface::{
     ImageReliefParameters, SurfaceImageRecord, SurfaceLayerId, SurfaceScope, SurfaceScopeKind,
 };
 use spiling_contracts::{display::EncodedSection, geometry::*};
-use spiling_core::storage::SaveReceipt;
+use spiling_core::storage::{PublicationOutcome, SaveReceipt, SaveStage, Storage};
 use spiling_core::{Edit, PreparedEdit, Project};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -119,6 +120,7 @@ enum Purpose {
     PrepareBedPose,
     Open,
     Save,
+    StorageMaintenance,
     Compile,
     Preflight,
     Verify,
@@ -156,6 +158,7 @@ enum PublicationKind {
         revision: SceneRevision,
     },
     Save(SaveReceipt),
+    StorageMaintenance(storage::MaintenanceProduct),
     SurfaceImageImported {
         edit: PreparedEdit,
         image: SurfaceImageRecord,
@@ -204,6 +207,7 @@ pub struct Runtime {
     revision: SceneRevision,
     definitions: BTreeMap<DefinitionId, DefinitionState>,
     project: Project,
+    uncertain_copy: Option<Arc<Storage>>,
     retained_source_bytes: u32,
     artifacts: BTreeMap<ArtifactId, Artifact>,
     // One <=16 MiB replay allocation is staged by the sole worker, then borrowed
@@ -239,6 +243,7 @@ impl Runtime {
             revision: SceneRevision::ZERO,
             definitions: BTreeMap::new(),
             project: Project::new(),
+            uncertain_copy: None,
             retained_source_bytes: 0,
             artifacts: BTreeMap::new(),
             replay_publication: None,
@@ -378,9 +383,8 @@ impl Runtime {
                     active.purpose,
                     Purpose::CompareAppearance | Purpose::CompareOptical
                 );
-                // A durable save receipt has already crossed its disk commit point.
-                // It must reach core even if cancellation arrived after replacement.
-                let durable = matches!(&result, Ok(Product::Saved(_)));
+                let durable = matches!(&result, Ok(Product::Saved(_)))
+                    || matches!(&result, Ok(Product::StorageMaintained(product)) if product.action != StorageMaintenanceAction::Stats);
                 let publication =
                     if !durable && !report_only && active.cancel.load(Ordering::Acquire) {
                         Err(cancelled(&active.purpose))
@@ -520,17 +524,55 @@ impl Runtime {
                             })
                         }
                         PublicationKind::Save(receipt) => {
+                            let outcome = receipt.outcome;
                             let durability_error = receipt.durability_error.clone();
                             self.project
                                 .mark_saved(receipt)
                                 .map_err(|e| format!("durable save ACK invariant: {e}"))?;
-                            if let Some(error) = durability_error {
+                            if outcome != PublicationOutcome::PublishedConfirmed {
+                                let error = durability_error.unwrap_or_else(|| {
+                                    ProjectError::new(
+                                        ProjectErrorCode::Io,
+                                        "project save publication is uncertain; inspect or reopen explicitly before retrying",
+                                    )
+                                });
                                 active.failure = Some(error.into());
+                                Some(JobResult::ProjectSaveUncertain {
+                                    info: self.project.info(),
+                                })
+                            } else {
+                                Some(JobResult::ProjectSaved {
+                                    info: self.project.info(),
+                                })
                             }
-                            // The receipt proves publication even when durability failed.
-                            Some(JobResult::ProjectSaved {
-                                info: self.project.info(),
-                            })
+                        }
+                        PublicationKind::StorageMaintenance(product) => {
+                            if let Some(receipt) = product.copy {
+                                if receipt.outcome != PublicationOutcome::PublishedConfirmed {
+                                    self.uncertain_copy = Some(receipt.storage);
+                                    active.failure = Some(receipt.durability_error.unwrap_or_else(|| project_error(
+                                        ProjectErrorCode::Io,
+                                        "compact publication is uncertain; inspect target explicitly before retrying",
+                                    )).into());
+                                    None
+                                } else if let Some(stats) = product.stats {
+                                    Some(JobResult::ProjectStorageMaintained {
+                                        action: product.action,
+                                        stats,
+                                    })
+                                } else {
+                                    active.failure = Some(project_error(ProjectErrorCode::Io,
+                                        "compact target publication is confirmed but statistics could not be read; inspect target explicitly").into());
+                                    None
+                                }
+                            } else {
+                                Some(JobResult::ProjectStorageMaintained {
+                                    action: product.action,
+                                    stats: product
+                                        .stats
+                                        .ok_or("storage maintenance has no statistics")?,
+                                })
+                            }
                         }
                         PublicationKind::SurfaceImageImported {
                             edit,
@@ -845,6 +887,10 @@ impl Runtime {
                 kind: PublicationKind::Save(receipt),
                 artifact: None,
             }),
+            (Purpose::StorageMaintenance, Product::StorageMaintained(product)) => Ok(Publication {
+                kind: PublicationKind::StorageMaintenance(product),
+                artifact: None,
+            }),
             (Purpose::Compile, Product::Compiled(asset)) => {
                 let record = asset.record.clone();
                 let edit = self
@@ -1009,7 +1055,11 @@ impl Runtime {
             return Err(stale());
         }
         if self.active.as_ref().is_some_and(|active| {
-            active.deciding || matches!(active.purpose, Purpose::Open | Purpose::Save)
+            active.deciding
+                || matches!(
+                    active.purpose,
+                    Purpose::Open | Purpose::Save | Purpose::StorageMaintenance
+                )
         }) {
             return Err(busy());
         }
@@ -1442,7 +1492,11 @@ impl Runtime {
             ));
         }
         if self.active.as_ref().is_some_and(|active| {
-            active.deciding || matches!(active.purpose, Purpose::Open | Purpose::Save)
+            active.deciding
+                || matches!(
+                    active.purpose,
+                    Purpose::Open | Purpose::Save | Purpose::StorageMaintenance
+                )
         }) {
             return Err(project_error(
                 ProjectErrorCode::Busy,
@@ -1469,7 +1523,11 @@ impl Runtime {
             ));
         }
         if self.active.as_ref().is_some_and(|active| {
-            active.deciding || matches!(active.purpose, Purpose::Open | Purpose::Save)
+            active.deciding
+                || matches!(
+                    active.purpose,
+                    Purpose::Open | Purpose::Save | Purpose::StorageMaintenance
+                )
         }) {
             return Err(project_error(
                 ProjectErrorCode::Busy,
@@ -1503,6 +1561,12 @@ impl Runtime {
     }
     fn project_control_inner(&mut self, command: ProjectCommand) -> Result<Reply, ProjectError> {
         match command {
+            ProjectCommand::StorageMaintenance {
+                session_id,
+                base_revision,
+                action,
+                target,
+            } => self.maintain_storage(&session_id, base_revision, action, target),
             ProjectCommand::ImportAppearancePalette {
                 session_id,
                 base_revision,
@@ -1822,6 +1886,7 @@ impl Runtime {
             Purpose::PrepareBedPose => "preparing_native_bed_pose",
             Purpose::Open => "opening",
             Purpose::Save => "saving",
+            Purpose::StorageMaintenance => "maintaining_storage",
             Purpose::Compile => "compiling_manufacturing",
             Purpose::Preflight => "preflighting_manufacturing",
             Purpose::Verify => "verifying_manufacturing",
@@ -1934,6 +1999,7 @@ fn cancelled(purpose: &Purpose) -> JobError {
         .into(),
         Purpose::Open
         | Purpose::Save
+        | Purpose::StorageMaintenance
         | Purpose::ImportSurfaceImage { .. }
         | Purpose::ImportAppearancePalette
         | Purpose::CompareAppearance

@@ -9,6 +9,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[allow(dead_code)]
+mod support;
+
 const ENGINE: &str = env!("CARGO_BIN_EXE_spiling-engine");
 struct Workspace(PathBuf);
 impl Workspace {
@@ -778,39 +781,34 @@ async fn reopen_rejects_hash_corruption_and_hashed_program_tampering_without_rep
     let mut bundle = fetch_bundle(&mut client, &record).await.unwrap();
     save(&mut client, &checkpoint).await;
     client.shutdown().await.unwrap();
-    let asset = checkpoint
-        .join("manufacturing")
-        .join(format!("{}.json", record.hash.as_str()));
-    let original = std::fs::read(&asset).unwrap();
-    std::fs::write(&asset, b"corrupt").unwrap();
+    let intact = work.0.join("intact.spil");
+    support::copy_project(&checkpoint, &intact);
+    support::corrupt_object(&checkpoint, &record.hash);
     let mut reader = spawn().await;
     let before = scene(&mut reader).await;
     let corrupt = open(&mut reader, &checkpoint, true).await;
     assert_eq!(corrupt.status, JobStatus::Failed, "{corrupt:?}");
     assert!(
         matches!(&corrupt.error, Some(JobError::Project { error })
-        if error.code == ProjectErrorCode::CorruptAsset),
+        if error.code == ProjectErrorCode::InvalidProject),
         "{corrupt:?}"
     );
     assert_eq!(scene(&mut reader).await, before);
     reader.ping().await.unwrap();
-    std::fs::write(&asset, original).unwrap();
+    std::fs::remove_file(&checkpoint).unwrap();
+    support::copy_project(&intact, &checkpoint);
     bundle.program = bundle.program.replacen("G1 ", "G0 ", 1);
     let bytes = serde_json::to_vec(&bundle).unwrap();
     let hash = SourceHash::from_bytes(&bytes);
-    std::fs::write(
-        checkpoint
-            .join("manufacturing")
-            .join(format!("{}.json", hash.as_str())),
-        &bytes,
-    )
-    .unwrap();
-    let manifest_path = checkpoint.join("manifest.json");
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-    manifest["manufacturing_artifact"]["hash"] = serde_json::json!(hash);
-    manifest["manufacturing_artifact"]["byte_count"] = serde_json::json!(bytes.len());
-    std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let mut manifest = support::manifest(&checkpoint);
+    let artifact = manifest.manufacturing_artifact.as_mut().unwrap();
+    artifact.hash = hash;
+    artifact.byte_count = bytes.len() as u32;
+    support::write_root(
+        &checkpoint,
+        &serde_json::to_vec(&manifest).unwrap(),
+        &[(record.hash.clone(), bytes)],
+    );
     let tampered = open(&mut reader, &checkpoint, true).await;
     assert_eq!(tampered.status, JobStatus::Failed, "{tampered:?}");
     assert!(
@@ -823,7 +821,7 @@ async fn reopen_rejects_hash_corruption_and_hashed_program_tampering_without_rep
 }
 
 #[tokio::test]
-async fn queued_save_rejects_intent_only_revision_change_before_snapshot_or_manifest_replace() {
+async fn queued_save_rejects_intent_only_revision_change_before_snapshot_or_commit() {
     use spiling_contracts::{
         metadata,
         rpc::{DiagnosticState, RunDiagnosticRequest},
@@ -834,7 +832,7 @@ async fn queued_save_rejects_intent_only_revision_change_before_snapshot_or_mani
     set_intent(&mut client, intent()).await;
     let checkpoint = work.0.join("queued-save");
     save(&mut client, &checkpoint).await;
-    let manifest_before = std::fs::read(checkpoint.join("manifest.json")).unwrap();
+    let heads_before = support::heads(&checkpoint);
     let captured = status(&mut client).await.0;
     let captured_scene = scene(&mut client).await;
     let diagnostic = client
@@ -892,9 +890,9 @@ async fn queued_save_rejects_intent_only_revision_change_before_snapshot_or_mani
         matches!(result.error,Some(JobError::Project {error}) if error.code==ProjectErrorCode::StaleRevision)
     );
     assert_eq!(
-        std::fs::read(checkpoint.join("manifest.json")).unwrap(),
-        manifest_before,
-        "stale queued save must not replace the manifest"
+        support::heads(&checkpoint),
+        heads_before,
+        "stale queued save must not commit new roots"
     );
     assert_eq!(
         status(&mut client).await.0,

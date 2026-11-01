@@ -7,6 +7,7 @@ use crate::{
     Edit, Project,
     tests::{asset, image_asset, image_edit, imported},
 };
+use sha2::{Digest, Sha256};
 use spiling_contracts::geometry::{OccurrenceId, RigidPoseMm};
 use std::{fs, sync::atomic::Ordering};
 struct Sandbox(PathBuf);
@@ -17,7 +18,7 @@ impl Sandbox {
         Self(path)
     }
     fn target(&self) -> PathBuf {
-        self.0.join("project")
+        self.0.join("project.spil")
     }
 }
 impl Drop for Sandbox {
@@ -149,235 +150,6 @@ fn os_writer_lock_readonly_snapshot_and_reused_writer_are_independent() {
     assert!(open(&sandbox.target(), false, false, &flag()).is_ok());
 }
 #[test]
-fn readonly_open_during_writer_commit_captures_one_complete_manifest() {
-    let sandbox = Sandbox::new();
-    let mut writer = imported();
-    save_project(&mut writer, Some(sandbox.target()));
-    let before = writer.capture().manifest;
-    pose(&mut writer, 10.0);
-    let after = writer.capture().manifest;
-    let mut observed = Vec::new();
-    let receipt = save(writer.capture(), writer.storage(), None, &flag(), |_| {
-        observed.push(
-            open(&sandbox.target(), true, false, &flag())
-                .unwrap()
-                .manifest,
-        );
-    })
-    .unwrap();
-    writer.mark_saved(receipt).unwrap();
-    assert_eq!(observed, vec![before.clone(), before, after]);
-}
-#[test]
-fn cancellation_wins_before_replacement_and_loses_after_publication() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    save_project(&mut project, Some(sandbox.target()));
-    let old = project.capture().manifest;
-    pose(&mut project, 7.0);
-    for stage in [SaveStage::AssetsSynced, SaveStage::BeforeManifestReplace] {
-        let cancel = flag();
-        let failure = save(
-            project.capture(),
-            project.storage(),
-            None,
-            &cancel,
-            |seen| {
-                if seen == stage {
-                    cancel.store(true, Ordering::Release);
-                }
-            },
-        )
-        .unwrap_err();
-        assert_eq!(failure.code, ProjectErrorCode::Cancelled);
-        assert_eq!(
-            open(&sandbox.target(), true, false, &flag())
-                .unwrap()
-                .manifest,
-            old
-        );
-    }
-    let cancel = flag();
-    let receipt = save(
-        project.capture(),
-        project.storage(),
-        None,
-        &cancel,
-        |stage| {
-            if stage == SaveStage::AfterManifestReplace {
-                cancel.store(true, Ordering::Release);
-            }
-        },
-    )
-    .unwrap();
-    assert!(receipt.durability_error.is_none());
-    project.mark_saved(receipt).unwrap();
-    assert!(!project.info().dirty);
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap()
-            .manifest,
-        project.capture().manifest
-    );
-}
-#[test]
-fn first_save_cancel_is_retryable_and_cleans_only_owned_stage() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    for wanted in [SaveStage::AssetsSynced, SaveStage::BeforeManifestReplace] {
-        let cancel = flag();
-        assert_eq!(
-            save(
-                project.capture(),
-                None,
-                Some(sandbox.target()),
-                &cancel,
-                |stage| {
-                    if stage == wanted {
-                        cancel.store(true, Ordering::Release);
-                    }
-                }
-            )
-            .unwrap_err()
-            .code,
-            ProjectErrorCode::Cancelled
-        );
-        assert!(!sandbox.target().exists());
-        assert_eq!(fs::read_dir(&sandbox.0).unwrap().count(), 0);
-    }
-    save_project(&mut project, Some(sandbox.target()));
-    assert!(!project.info().dirty);
-}
-#[test]
-fn racing_foreign_destination_is_never_overwritten_or_cleaned() {
-    let sandbox = Sandbox::new();
-    let project = imported();
-    let failure = save(
-        project.capture(),
-        None,
-        Some(sandbox.target()),
-        &flag(),
-        |stage| {
-            if stage == SaveStage::BeforeManifestReplace {
-                fs::create_dir(sandbox.target()).unwrap();
-                fs::write(sandbox.target().join("foreign"), b"do not delete").unwrap();
-            }
-        },
-    )
-    .unwrap_err();
-    assert_eq!(failure.code, ProjectErrorCode::Io);
-    assert_eq!(
-        fs::read(sandbox.target().join("foreign")).unwrap(),
-        b"do not delete"
-    );
-    assert_eq!(fs::read_dir(&sandbox.0).unwrap().count(), 1);
-    assert_eq!(
-        save(
-            project.capture(),
-            None,
-            Some(sandbox.target()),
-            &flag(),
-            |_| {}
-        )
-        .unwrap_err()
-        .code,
-        ProjectErrorCode::InvalidProject
-    );
-}
-#[cfg(unix)]
-#[test]
-fn substituted_stage_path_is_not_recursively_deleted() {
-    let sandbox = Sandbox::new();
-    let project = imported();
-    let cancel = flag();
-    let failure = save(
-        project.capture(),
-        None,
-        Some(sandbox.target()),
-        &cancel,
-        |stage| {
-            if stage == SaveStage::AssetsSynced {
-                let path = fs::read_dir(&sandbox.0)
-                    .unwrap()
-                    .next()
-                    .unwrap()
-                    .unwrap()
-                    .path();
-                fs::rename(&path, sandbox.0.join("original-owned-stage")).unwrap();
-                fs::create_dir(&path).unwrap();
-                fs::write(path.join("foreign"), b"foreign marker").unwrap();
-                cancel.store(true, Ordering::Release);
-            }
-        },
-    )
-    .unwrap_err();
-    assert_eq!(failure.code, ProjectErrorCode::Cancelled);
-    let foreign = fs::read_dir(&sandbox.0)
-        .unwrap()
-        .filter_map(Result::ok)
-        .find(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with(".spiling-stage-")
-        })
-        .unwrap()
-        .path();
-    assert_eq!(
-        fs::read(foreign.join("foreign")).unwrap(),
-        b"foreign marker"
-    );
-    assert!(!sandbox.target().exists());
-}
-#[test]
-fn recovery_is_explicit_independent_and_never_reuses_published_ids() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    save_project(&mut project, Some(sandbox.target()));
-    let prior = project.capture().manifest;
-    let definition_id = prior.definitions[0].definition_id.clone();
-    let prepared = project
-        .prepare(Edit::Add {
-            definition_id: definition_id.clone(),
-            pose: RigidPoseMm::IDENTITY,
-        })
-        .unwrap();
-    project.commit(prepared).unwrap();
-    save_project(&mut project, None);
-    let newer = project.capture().manifest;
-    drop(project);
-    fs::write(sandbox.target().join(CURRENT), b"broken current JSON").unwrap();
-    assert_eq!(
-        open(&sandbox.target(), false, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::InvalidProject
-    );
-    let loaded = open(&sandbox.target(), false, true, &flag()).unwrap();
-    assert_eq!(loaded.manifest.definitions, prior.definitions);
-    assert_eq!(loaded.manifest.occurrences, prior.occurrences);
-    assert!(loaded.manifest.revision > newer.revision);
-    assert_eq!(loaded.manifest.next_occurrence, newer.next_occurrence);
-    let mut recovered = Project::from_loaded(loaded).unwrap();
-    assert!(recovered.info().dirty && recovered.info().recovered_previous);
-    assert_eq!(recovered.info().saved_revision, Some(prior.revision));
-    let prepared = recovered
-        .prepare(Edit::Add {
-            definition_id,
-            pose: RigidPoseMm::IDENTITY,
-        })
-        .unwrap();
-    recovered.commit(prepared).unwrap();
-    assert!(
-        recovered
-            .snapshot()
-            .occurrences
-            .contains_key(&OccurrenceId::new(newer.next_occurrence).unwrap())
-    );
-    save_project(&mut recovered, None);
-    assert!(!recovered.info().dirty && !recovered.info().recovered_previous);
-    assert!(open(&sandbox.target(), true, false, &flag()).is_ok());
-}
-#[test]
 fn same_writer_reopen_keeps_live_identity_high_water_without_dirty_revision_comparison() {
     let sandbox = Sandbox::new();
     let mut project = imported();
@@ -421,308 +193,6 @@ fn same_writer_reopen_keeps_live_identity_high_water_without_dirty_revision_comp
     );
 }
 #[test]
-fn corrupt_missing_schema_reference_pose_and_identity_fail_typed() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    save_project(&mut project, Some(sandbox.target()));
-    let manifest = project.capture().manifest;
-    drop(project);
-    let current = sandbox.target().join(CURRENT);
-    let original = fs::read(&current).unwrap();
-    for (field, value, code) in [
-        (
-            "format_version",
-            serde_json::json!(1),
-            ProjectErrorCode::UnsupportedFormat,
-        ),
-        (
-            "next_occurrence",
-            serde_json::json!(1),
-            ProjectErrorCode::InvalidProject,
-        ),
-        (
-            "unexpected",
-            serde_json::json!(true),
-            ProjectErrorCode::InvalidProject,
-        ),
-    ] {
-        let mut json: serde_json::Value = serde_json::from_slice(&original).unwrap();
-        json[field] = value;
-        fs::write(&current, serde_json::to_vec(&json).unwrap()).unwrap();
-        assert_eq!(
-            open(&sandbox.target(), false, false, &flag())
-                .unwrap_err()
-                .code,
-            code
-        );
-    }
-    for field in ["definition_id", "pose"] {
-        let mut json: serde_json::Value = serde_json::from_slice(&original).unwrap();
-        json["occurrences"][0][field] = if field == "definition_id" {
-            serde_json::json!(asset(vec![99], "other").record.definition_id.as_str())
-        } else {
-            serde_json::json!({"translation_mm":[0,0,0],"rotation_xyzw":[0,0,0,2]})
-        };
-        fs::write(&current, serde_json::to_vec(&json).unwrap()).unwrap();
-        assert_eq!(
-            open(&sandbox.target(), false, false, &flag())
-                .unwrap_err()
-                .code,
-            ProjectErrorCode::InvalidProject
-        );
-    }
-    fs::write(&current, &original).unwrap();
-    let source = sandbox.target().join(SOURCES).join(format!(
-        "{}.step",
-        manifest.definitions[0].provenance.source_hash.as_str()
-    ));
-    let bytes = fs::read(&source).unwrap();
-    fs::write(&source, b"corrupt bytes").unwrap();
-    assert_eq!(
-        open(&sandbox.target(), false, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::CorruptAsset
-    );
-    fs::remove_file(&source).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), false, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::MissingAsset
-    );
-    fs::write(source, bytes).unwrap();
-    assert!(open(&sandbox.target(), false, false, &flag()).is_ok());
-}
-#[cfg(unix)]
-#[test]
-fn symlink_nonregular_and_substituted_lock_are_rejected() {
-    use std::os::unix::fs::symlink;
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    save_project(&mut project, Some(sandbox.target()));
-    let current = sandbox.target().join(CURRENT);
-    let original = fs::read(&current).unwrap();
-    fs::remove_file(&current).unwrap();
-    fs::write(sandbox.0.join("foreign.json"), &original).unwrap();
-    symlink(sandbox.0.join("foreign.json"), &current).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::Io
-    );
-    fs::remove_file(&current).unwrap();
-    fs::create_dir(&current).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::Io
-    );
-    fs::remove_dir(&current).unwrap();
-    fs::write(&current, original).unwrap();
-    let lock = sandbox.target().join(LOCK);
-    fs::rename(&lock, sandbox.target().join("replaced-lock")).unwrap();
-    fs::write(&lock, b"foreign lock").unwrap();
-    assert!(save(project.capture(), project.storage(), None, &flag(), |_| {}).is_err());
-    assert_eq!(fs::read(&lock).unwrap(), b"foreign lock");
-}
-#[test]
-fn failure_before_replace_preserves_complete_current_and_owned_temporary_cleanup() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    save_project(&mut project, Some(sandbox.target()));
-    let old = project.capture().manifest;
-    pose(&mut project, 3.0);
-    let before = project.info();
-    let failure = save(
-        project.capture(),
-        project.storage(),
-        None,
-        &flag(),
-        |stage| {
-            if stage == SaveStage::AssetsSynced {
-                fs::create_dir(sandbox.target().join(PREVIOUS)).unwrap();
-            }
-        },
-    )
-    .unwrap_err();
-    assert_eq!(failure.code, ProjectErrorCode::Io);
-    assert_eq!(project.info(), before);
-    fs::remove_dir(sandbox.target().join(PREVIOUS)).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap()
-            .manifest,
-        old
-    );
-    assert!(
-        !fs::read_dir(sandbox.target())
-            .unwrap()
-            .filter_map(Result::ok)
-            .any(|entry| temporary_name(&entry.file_name().to_string_lossy()))
-    );
-}
-#[test]
-fn postcommit_durability_failure_attaches_uncertain_dirty_state_and_keeps_confirmed_save() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    let receipt = save(
-        project.capture(),
-        None,
-        Some(sandbox.target()),
-        &flag(),
-        |stage| {
-            if stage == SaveStage::AfterManifestReplace {
-                os::fail_next_directory_sync();
-            }
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        receipt.durability_error.as_ref().unwrap().code,
-        ProjectErrorCode::Io
-    );
-    project.mark_saved(receipt).unwrap();
-    assert!(project.info().save_uncertain && project.info().dirty);
-    assert!(project.info().path_label.is_some());
-    assert!(project.info().saved_revision.is_none());
-    assert!(project.info().can_undo);
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap()
-            .manifest,
-        project.capture().manifest
-    );
-    save_project(&mut project, None);
-    let confirmed_revision = project.info().saved_revision;
-    pose(&mut project, 11.0);
-    let receipt = save(
-        project.capture(),
-        project.storage(),
-        None,
-        &flag(),
-        |stage| {
-            if stage == SaveStage::AfterManifestReplace {
-                os::fail_next_directory_sync();
-            }
-        },
-    )
-    .unwrap();
-    assert!(receipt.durability_error.is_some());
-    project.mark_saved(receipt).unwrap();
-    assert_eq!(project.info().saved_revision, confirmed_revision);
-    assert!(project.info().save_uncertain && project.info().dirty);
-    project.undo().unwrap();
-    assert!(
-        project.info().dirty,
-        "uncertainty cannot become clean by undo"
-    );
-    save_project(&mut project, None);
-    assert!(!project.info().save_uncertain && !project.info().dirty);
-    assert!(project.info().can_redo);
-}
-#[test]
-fn immutable_asset_budget_exhaustion_is_explicit_not_garbage_collection() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    save_project(&mut project, Some(sandbox.target()));
-    let source_directory = sandbox.target().join(SOURCES);
-    for i in 0..128 {
-        let bytes = format!("unreferenced complete source {i}").into_bytes();
-        let hash = SourceHash::from_bytes(&bytes);
-        fs::write(
-            source_directory.join(format!("{}.step", hash.as_str())),
-            bytes,
-        )
-        .unwrap();
-    }
-    assert_eq!(
-        save(project.capture(), project.storage(), None, &flag(), |_| {})
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::ResourceLimit
-    );
-    assert_eq!(fs::read_dir(source_directory).unwrap().count(), 129);
-}
-
-#[cfg(unix)]
-#[test]
-fn native_nonunicode_directory_basename_roundtrips_without_path_loss() {
-    use std::os::unix::ffi::OsStringExt;
-    let sandbox = Sandbox::new();
-    let path = sandbox.0.join(std::ffi::OsString::from_vec(
-        b"native-project-\xff".to_vec(),
-    ));
-    let mut project = imported();
-    save_project(&mut project, Some(path.clone()));
-    assert_eq!(project.storage().unwrap().path(), path);
-    drop(project);
-    assert!(open(&path, false, false, &flag()).is_ok());
-}
-
-#[cfg(unix)]
-#[test]
-fn source_symlink_and_nonregular_files_are_rejected_before_publication() {
-    use std::os::unix::fs::symlink;
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    save_project(&mut project, Some(sandbox.target()));
-    let hash = project.capture().manifest.definitions[0]
-        .provenance
-        .source_hash
-        .clone();
-    drop(project);
-    let path = sandbox
-        .target()
-        .join(SOURCES)
-        .join(format!("{}.step", hash.as_str()));
-    fs::remove_file(&path).unwrap();
-    fs::write(sandbox.0.join("outside.step"), b"immutable STEP source").unwrap();
-    symlink(sandbox.0.join("outside.step"), &path).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::Io
-    );
-    fs::remove_file(&path).unwrap();
-    fs::create_dir(&path).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::Io
-    );
-}
-
-#[test]
-fn source_and_persisted_byte_limits_are_checked_before_read_allocations() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    save_project(&mut project, Some(sandbox.target()));
-    let source_directory = sandbox.target().join(SOURCES);
-    for index in 0..17 {
-        let hash = SourceHash::from_bytes(format!("sparse budget entry {index}").as_bytes());
-        let file = File::create(source_directory.join(format!("{}.step", hash.as_str()))).unwrap();
-        file.set_len(MAX_SOURCE_BYTES as u64).unwrap();
-    }
-    assert_eq!(
-        save(project.capture(), project.storage(), None, &flag(), |_| {})
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::ResourceLimit
-    );
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::ResourceLimit
-    );
-}
-
-#[test]
 fn cancelled_open_and_unattached_save_have_typed_nonmutating_failures() {
     let sandbox = Sandbox::new();
     let mut project = imported();
@@ -754,73 +224,6 @@ fn cancelled_open_and_unattached_save_have_typed_nonmutating_failures() {
             .unwrap_err()
             .code,
         ProjectErrorCode::ProjectLocked
-    );
-}
-
-#[test]
-fn same_session_reopen_cannot_clear_known_durability_uncertainty() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    let receipt = save(
-        project.capture(),
-        None,
-        Some(sandbox.target()),
-        &flag(),
-        |stage| {
-            if stage == SaveStage::AfterManifestReplace {
-                os::fail_next_directory_sync();
-            }
-        },
-    )
-    .unwrap();
-    project.mark_saved(receipt).unwrap();
-    let loaded = open_reusing(
-        &sandbox.target(),
-        false,
-        false,
-        &flag(),
-        project.storage(),
-        LoadBudgets::MAXIMUM,
-    )
-    .unwrap();
-    let mut reopened = Project::from_loaded(loaded).unwrap();
-    reopened.retain_high_water(&project).unwrap();
-    assert!(reopened.info().save_uncertain && reopened.info().dirty);
-    assert!(reopened.info().saved_revision.is_none());
-    save_project(&mut reopened, None);
-    assert!(!reopened.info().save_uncertain && !reopened.info().dirty);
-}
-
-#[test]
-fn existing_corrupt_checkpoint_is_not_silently_repaired_by_save() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    save_project(&mut project, Some(sandbox.target()));
-    save_project(&mut project, None);
-    let before = fs::read(sandbox.target().join(CURRENT)).unwrap();
-    fs::write(
-        sandbox.target().join(PREVIOUS),
-        b"foreign or corrupt checkpoint",
-    )
-    .unwrap();
-    pose(&mut project, 2.0);
-    assert_eq!(
-        save(project.capture(), project.storage(), None, &flag(), |_| {})
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::InvalidProject
-    );
-    assert_eq!(fs::read(sandbox.target().join(CURRENT)).unwrap(), before);
-    assert_eq!(
-        fs::read(sandbox.target().join(PREVIOUS)).unwrap(),
-        b"foreign or corrupt checkpoint"
-    );
-    assert!(open(&sandbox.target(), true, false, &flag()).is_ok());
-    assert_eq!(
-        open(&sandbox.target(), true, true, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::InvalidProject
     );
 }
 
@@ -869,159 +272,6 @@ fn staged_open_enforces_remaining_source_budget_without_releasing_live_writer() 
     )
     .unwrap();
     assert_eq!(loaded.manifest, project.capture().manifest);
-}
-
-#[test]
-fn manufacturing_assets_precede_first_normal_and_saveas_checkpoints() {
-    let sandbox = Sandbox::new();
-    let mut project = crate::tests::manufactured();
-    let asset = project.snapshot().manufacturing_artifact.clone().unwrap();
-    let filename = format!("{}.json", asset.record.hash.as_str());
-    let first = sandbox.target();
-    let receipt = save(
-        project.capture(),
-        None,
-        Some(first.clone()),
-        &flag(),
-        |stage| {
-            if stage == SaveStage::AssetsSynced || stage == SaveStage::BeforeManifestReplace {
-                assert!(!first.exists());
-            }
-            if stage == SaveStage::AfterManifestReplace {
-                assert_eq!(
-                    fs::read(first.join(MANUFACTURING).join(&filename)).unwrap(),
-                    *asset.bytes
-                );
-            }
-        },
-    )
-    .unwrap();
-    project.mark_saved(receipt).unwrap();
-    assert!(!project.info().dirty && project.info().can_undo);
-    let old = project.capture().manifest;
-    let prepared = project
-        .prepare(Edit::SetManufacturingIntent {
-            intent: (crate::tests::manufacturing_intent()).into(),
-        })
-        .unwrap();
-    project.commit(prepared).unwrap();
-    let next_asset = crate::tests::bundle_asset(&crate::tests::manufacturing_bundle(&project));
-    let prepared = project
-        .prepare(Edit::PublishManufacturing {
-            asset: next_asset.clone(),
-        })
-        .unwrap();
-    project.commit(prepared).unwrap();
-    let next_name = format!("{}.json", next_asset.record.hash.as_str());
-    let receipt = save(
-        project.capture(),
-        project.storage(),
-        None,
-        &flag(),
-        |stage| {
-            if stage == SaveStage::AssetsSynced {
-                assert_eq!(
-                    fs::read(first.join(MANUFACTURING).join(&next_name)).unwrap(),
-                    *next_asset.bytes
-                );
-                assert_eq!(open(&first, true, false, &flag()).unwrap().manifest, old);
-            }
-        },
-    )
-    .unwrap();
-    project.mark_saved(receipt).unwrap();
-    let recovered = Project::from_loaded(open(&first, true, true, &flag()).unwrap()).unwrap();
-    assert_eq!(
-        recovered
-            .snapshot()
-            .manufacturing_artifact
-            .as_ref()
-            .unwrap()
-            .record,
-        asset.record
-    );
-    assert!(recovered.info().recovered_previous && recovered.info().dirty);
-    let second = sandbox.0.join("save-as");
-    save_project(&mut project, Some(second.clone()));
-    assert_eq!(
-        fs::read(second.join(MANUFACTURING).join(next_name)).unwrap(),
-        *next_asset.bytes
-    );
-    drop(project);
-    let reopened = Project::from_loaded(open(&second, true, false, &flag()).unwrap()).unwrap();
-    assert_eq!(
-        reopened
-            .snapshot()
-            .manufacturing_artifact
-            .as_ref()
-            .unwrap()
-            .record,
-        next_asset.record
-    );
-    assert!(!reopened.info().dirty);
-}
-#[test]
-fn strict_recipe_policy_checkpoint_admission_has_no_prior_format_or_policy_defaults() {
-    let manifest = crate::tests::manufactured().capture().manifest;
-    let original = serde_json::to_value(&manifest).unwrap();
-    assert_eq!(
-        parse_manifest(&serde_json::to_vec(&original).unwrap()).unwrap(),
-        manifest
-    );
-    for field in ["seam_policy", "rectilinear_axis"] {
-        let mut missing = original.clone();
-        missing["manufacturing_intent"]["recipe"]
-            .as_object_mut()
-            .unwrap()
-            .remove(field);
-        assert_eq!(
-            parse_manifest(&serde_json::to_vec(&missing).unwrap())
-                .unwrap_err()
-                .code,
-            ProjectErrorCode::InvalidProject
-        );
-    }
-    for (field, policy) in [
-        (
-            "seam_policy",
-            serde_json::json!({"kind":"preferred_build_direction","xy":[2.0,0.0]}),
-        ),
-        ("seam_policy", serde_json::json!({"kind":"unknown"})),
-        ("rectilinear_axis", serde_json::json!("unknown")),
-    ] {
-        let mut invalid = original.clone();
-        invalid["manufacturing_intent"]["recipe"][field] = policy;
-        assert_eq!(
-            parse_manifest(&serde_json::to_vec(&invalid).unwrap())
-                .unwrap_err()
-                .code,
-            ProjectErrorCode::InvalidProject
-        );
-    }
-    let mut legacy = original;
-    legacy["format_version"] = serde_json::json!(5);
-    legacy["manufacturing_intent"]["printer"]["schema_version"] = serde_json::json!(6);
-    legacy["manufacturing_intent"]["recipe"]
-        .as_object_mut()
-        .unwrap()
-        .remove("seam_policy");
-    legacy["manufacturing_intent"]["recipe"]
-        .as_object_mut()
-        .unwrap()
-        .remove("rectilinear_axis");
-    assert_eq!(
-        parse_manifest(&serde_json::to_vec(&legacy).unwrap())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::UnsupportedFormat
-    );
-    let recovery = serde_json::json!({"manifest":legacy});
-    assert_eq!(
-        parse_recovery(&serde_json::to_vec(&recovery).unwrap())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::UnsupportedFormat
-    );
 }
 
 #[test]
@@ -1201,650 +451,6 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
     );
 }
 #[test]
-fn manufacturing_missing_corrupt_metadata_unknown_schema_and_stale_provenance_fail() {
-    let sandbox = Sandbox::new();
-    let mut project = crate::tests::manufactured();
-    save_project(&mut project, Some(sandbox.target()));
-    let captured = project.capture();
-    let asset = captured.snapshot.manufacturing_artifact.as_ref().unwrap();
-    let path = sandbox
-        .target()
-        .join(MANUFACTURING)
-        .join(format!("{}.json", asset.record.hash.as_str()));
-    fs::remove_file(&path).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::MissingAsset
-    );
-    fs::write(&path, &asset.bytes[..asset.bytes.len() - 1]).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::CorruptAsset
-    );
-    let mut corrupt = asset.bytes.as_ref().clone();
-    corrupt[0] = b'[';
-    fs::write(&path, corrupt).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::CorruptAsset
-    );
-    fs::write(&path, asset.bytes.as_slice()).unwrap();
-    let mut manifest = captured.manifest.clone();
-    manifest.format_version = 1;
-    fs::write(
-        sandbox.target().join(CURRENT),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::UnsupportedFormat
-    );
-    manifest = captured.manifest.clone();
-    manifest.occurrences[0].pose.translation_mm[0] = 2.0;
-    fs::write(
-        sandbox.target().join(CURRENT),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
-    assert!(open(&sandbox.target(), true, false, &flag()).is_err());
-    fs::write(
-        sandbox.target().join(CURRENT),
-        serde_json::to_vec(&captured.manifest).unwrap(),
-    )
-    .unwrap();
-    let mut object = serde_json::to_value(crate::tests::manufacturing_bundle(&project)).unwrap();
-    object["unexpected"] = serde_json::json!("rejected");
-    let bytes = serde_json::to_vec(&object).unwrap();
-    let digest: [u8; 32] = Sha256::digest(&bytes).into();
-    let hash = SourceHash::from_digest(&digest);
-    fs::write(
-        sandbox
-            .target()
-            .join(MANUFACTURING)
-            .join(format!("{}.json", hash.as_str())),
-        &bytes,
-    )
-    .unwrap();
-    let mut manifest = captured.manifest.clone();
-    let record = manifest.manufacturing_artifact.as_mut().unwrap();
-    record.hash = hash;
-    record.byte_count = bytes.len() as u32;
-    fs::write(
-        sandbox.target().join(CURRENT),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::CorruptAsset
-    );
-}
-#[test]
-fn manufacturing_invalidation_dirty_undo_save_and_uncertain_receipt_preserve_semantics() {
-    let sandbox = Sandbox::new();
-    let mut project = crate::tests::manufactured();
-    save_project(&mut project, Some(sandbox.target()));
-    let confirmed = project.info().saved_revision;
-    let record = project
-        .snapshot()
-        .manufacturing_artifact
-        .as_ref()
-        .unwrap()
-        .record
-        .clone();
-    pose(&mut project, 5.0);
-    assert!(project.info().dirty && project.snapshot().manufacturing_artifact.is_none());
-    project.undo().unwrap();
-    assert!(!project.info().dirty);
-    assert_eq!(
-        project
-            .snapshot()
-            .manufacturing_artifact
-            .as_ref()
-            .unwrap()
-            .record,
-        record
-    );
-    let receipt = save(
-        project.capture(),
-        project.storage(),
-        None,
-        &flag(),
-        |stage| {
-            if stage == SaveStage::AfterManifestReplace {
-                os::fail_next_directory_sync();
-            }
-        },
-    )
-    .unwrap();
-    assert!(receipt.durability_error.is_some());
-    project.mark_saved(receipt).unwrap();
-    assert!(project.info().dirty && project.info().save_uncertain && project.info().can_redo);
-    assert_eq!(project.info().saved_revision, confirmed);
-    project.redo().unwrap();
-    project.undo().unwrap();
-    assert!(project.info().save_uncertain);
-    save_project(&mut project, None);
-    assert!(!project.info().dirty && !project.info().save_uncertain && project.info().can_redo);
-}
-#[test]
-fn manufacturing_cancelled_normal_save_keeps_previous_complete_bundle() {
-    let sandbox = Sandbox::new();
-    let mut project = crate::tests::manufactured();
-    save_project(&mut project, Some(sandbox.target()));
-    let old = project.capture().manifest;
-    pose(&mut project, 1.0);
-    let cancel = flag();
-    assert_eq!(
-        save(
-            project.capture(),
-            project.storage(),
-            None,
-            &cancel,
-            |stage| {
-                if stage == SaveStage::BeforeManifestReplace {
-                    cancel.store(true, Ordering::Release);
-                }
-            }
-        )
-        .unwrap_err()
-        .code,
-        ProjectErrorCode::Cancelled
-    );
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap()
-            .manifest,
-        old
-    );
-    assert!(
-        Project::from_loaded(open(&sandbox.target(), true, true, &flag()).unwrap())
-            .unwrap()
-            .snapshot()
-            .manufacturing_artifact
-            .is_some()
-    );
-}
-
-#[test]
-fn manufacturing_file_budget_and_unexpected_entries_fail_before_capture() {
-    let sandbox = Sandbox::new();
-    let mut project = crate::tests::manufactured();
-    save_project(&mut project, Some(sandbox.target()));
-    let asset = project.snapshot().manufacturing_artifact.clone().unwrap();
-    let path = sandbox
-        .target()
-        .join(MANUFACTURING)
-        .join(format!("{}.json", asset.record.hash.as_str()));
-    fs::OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .unwrap()
-        .set_len(MAX_MANUFACTURING_BUNDLE_BYTES as u64 + 1)
-        .unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::ResourceLimit
-    );
-    fs::write(&path, asset.bytes.as_slice()).unwrap();
-    fs::write(
-        sandbox.target().join(MANUFACTURING).join("foreign.json"),
-        b"foreign",
-    )
-    .unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::InvalidProject
-    );
-}
-#[cfg(unix)]
-#[test]
-fn manufacturing_symlink_asset_and_substituted_attached_directory_are_rejected() {
-    use std::os::unix::fs::symlink;
-    let sandbox = Sandbox::new();
-    let mut project = crate::tests::manufactured();
-    save_project(&mut project, Some(sandbox.target()));
-    let asset = project.snapshot().manufacturing_artifact.clone().unwrap();
-    let directory = sandbox.target().join(MANUFACTURING);
-    let path = directory.join(format!("{}.json", asset.record.hash.as_str()));
-    let foreign = sandbox.0.join("foreign-bundle");
-    fs::write(&foreign, asset.bytes.as_slice()).unwrap();
-    fs::remove_file(&path).unwrap();
-    symlink(&foreign, &path).unwrap();
-    assert!(open(&sandbox.target(), true, false, &flag()).is_err());
-    fs::remove_file(&path).unwrap();
-    fs::write(&path, asset.bytes.as_slice()).unwrap();
-    fs::rename(&directory, sandbox.0.join("original-manufacturing")).unwrap();
-    fs::create_dir(&directory).unwrap();
-    fs::write(directory.join("foreign"), b"retained").unwrap();
-    assert!(save(project.capture(), project.storage(), None, &flag(), |_| {}).is_err());
-    assert_eq!(fs::read(directory.join("foreign")).unwrap(), b"retained");
-}
-
-#[test]
-fn surface_save_open_dirty_history_read_only_and_recovery_preserve_document_and_ids() {
-    use spiling_contracts::{geometry::FaceId, surface::*};
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
-    let add = |project: &mut Project| {
-        let prepared = project
-            .prepare(Edit::AddSurfaceFinish {
-                scope: SurfaceScope::Definition {
-                    definition_id: definition_id.clone(),
-                },
-                face_id: FaceId::from_step_entity(7).unwrap(),
-                finish: SurfaceFinish::CylindricalRibs {
-                    depth_mm: 0.1,
-                    rib_count: 16,
-                    phase_fraction: 0.25,
-                },
-            })
-            .unwrap();
-        project.commit(prepared).unwrap();
-    };
-    add(&mut project);
-    save_project(&mut project, Some(sandbox.target()));
-    let first = project.capture().manifest;
-    let id = first.surface_overlays.layers[0].layer_id;
-    let prepared = project
-        .prepare(Edit::SetSurfaceFinishEnabled {
-            layer_id: id,
-            enabled: false,
-        })
-        .unwrap();
-    project.commit(prepared).unwrap();
-    assert!(project.info().dirty);
-    project.undo().unwrap();
-    assert!(!project.info().dirty);
-    project.redo().unwrap();
-    add(&mut project);
-    save_project(&mut project, None);
-    let current = project.capture().manifest;
-    let read_only =
-        Project::from_loaded(open(&sandbox.target(), true, false, &flag()).unwrap()).unwrap();
-    assert_eq!(read_only.info().surface_overlays, current.surface_overlays);
-    assert_eq!(
-        read_only
-            .prepare(Edit::RemoveSurfaceFinish { layer_id: id })
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::ReadOnly
-    );
-    assert_eq!(read_only.capture().manifest, current);
-    drop(read_only);
-    drop(project);
-    let reopened =
-        Project::from_loaded(open(&sandbox.target(), false, false, &flag()).unwrap()).unwrap();
-    assert!(!reopened.info().dirty);
-    assert_eq!(reopened.capture().manifest, current);
-    drop(reopened);
-    fs::write(sandbox.target().join(CURRENT), b"broken").unwrap();
-    let mut recovered =
-        Project::from_loaded(open(&sandbox.target(), false, true, &flag()).unwrap()).unwrap();
-    assert_eq!(recovered.info().surface_overlays, first.surface_overlays);
-    assert_eq!(
-        recovered.capture().manifest.next_surface_layer,
-        current.next_surface_layer
-    );
-    add(&mut recovered);
-    assert_eq!(
-        recovered
-            .info()
-            .surface_overlays
-            .layers
-            .last()
-            .unwrap()
-            .layer_id
-            .get(),
-        current.next_surface_layer
-    );
-    save_project(&mut recovered, None);
-    assert!(!recovered.info().dirty);
-}
-
-#[test]
-fn surface_manifest_rejects_structurally_corrupt_targets_and_old_format() {
-    use spiling_contracts::{geometry::FaceId, surface::*};
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
-    let prepared = project
-        .prepare(Edit::AddSurfaceFinish {
-            scope: SurfaceScope::Occurrence {
-                occurrence_id: OccurrenceId::new(1).unwrap(),
-                expected_definition_id: definition_id,
-            },
-            face_id: FaceId::from_step_entity(7).unwrap(),
-            finish: SurfaceFinish::Smooth,
-        })
-        .unwrap();
-    project.commit(prepared).unwrap();
-    save_project(&mut project, Some(sandbox.target()));
-    let value = serde_json::to_value(project.capture().manifest).unwrap();
-    drop(project);
-    for (pointer, replacement) in [
-        (
-            "/surface_overlays/layers/0/scope/occurrence_id",
-            serde_json::json!(99),
-        ),
-        (
-            "/surface_overlays/layers/0/scope/expected_definition_id",
-            serde_json::json!(
-                spiling_contracts::geometry::DefinitionId::from_source_sha256(&[1; 32])
-            ),
-        ),
-        ("/next_surface_layer", serde_json::json!(1)),
-        ("/format_version", serde_json::json!(2)),
-        ("/surface_overlays/schema_version", serde_json::json!(1)),
-    ] {
-        let mut corrupt = value.clone();
-        *corrupt.pointer_mut(pointer).unwrap() = replacement;
-        fs::write(
-            sandbox.target().join(CURRENT),
-            serde_json::to_vec(&corrupt).unwrap(),
-        )
-        .unwrap();
-        assert!(open(&sandbox.target(), true, false, &flag()).is_err());
-    }
-}
-
-fn add_image(project: &mut Project, image: Arc<SurfaceImageAsset>) {
-    let prepared = project.prepare(image_edit(project, image)).unwrap();
-    project.commit(prepared).unwrap();
-}
-
-#[test]
-fn image_save_open_and_readonly_capture_do_not_need_original_files() {
-    let sandbox = Sandbox::new();
-    let source_path = sandbox.0.join("owned.step");
-    let image_path = sandbox.0.join("owned.pgm");
-    fs::write(&source_path, b"independently captured STEP").unwrap();
-    fs::write(&image_path, b"P5\n2 2\n255\n\x00\x40\x80\xff").unwrap();
-    let mut project = Project::new();
-    let prepared = project
-        .prepare(Edit::Import {
-            source: asset(fs::read(&source_path).unwrap(), "owned.step"),
-            pose: RigidPoseMm::IDENTITY,
-        })
-        .unwrap();
-    project.commit(prepared).unwrap();
-    let bytes = fs::read(&image_path).unwrap();
-    let record = SurfaceImageRecord {
-        image_hash: SourceHash::from_bytes(&bytes),
-        width: 2,
-        height: 2,
-        byte_count: bytes.len() as u64,
-        source_hash: SourceHash::from_bytes(&bytes),
-        source_name: "owned.pgm".into(),
-    };
-    let image = Arc::new(SurfaceImageAsset::new(record.clone(), bytes).unwrap());
-    add_image(&mut project, image.clone());
-    save_project(&mut project, Some(sandbox.target()));
-    let manifest = project.capture().manifest;
-    fs::remove_file(source_path).unwrap();
-    fs::remove_file(image_path).unwrap();
-    let stored = sandbox
-        .target()
-        .join(IMAGES)
-        .join(format!("{}.pgm", record.image_hash.as_str()));
-    assert_eq!(fs::read(stored).unwrap(), *image.bytes().as_ref());
-    let mut reader =
-        Project::from_loaded(open(&sandbox.target(), true, false, &flag()).unwrap()).unwrap();
-    assert_eq!(reader.capture().manifest, manifest);
-    assert_eq!(
-        reader.surface_images()[&record.image_hash].record(),
-        &record
-    );
-    assert_eq!(
-        reader.surface_images()[&record.image_hash]
-            .bytes()
-            .as_slice(),
-        image.bytes().as_slice()
-    );
-    let before = reader.info();
-    assert_eq!(
-        reader.prepare(image_edit(&reader, image)).unwrap_err().code,
-        ProjectErrorCode::ReadOnly
-    );
-    assert_eq!(reader.undo().unwrap_err().code, ProjectErrorCode::ReadOnly);
-    assert_eq!(reader.info(), before);
-    drop(reader);
-    drop(project);
-    let reopened =
-        Project::from_loaded(open(&sandbox.target(), false, false, &flag()).unwrap()).unwrap();
-    assert_eq!(reopened.capture().manifest, manifest);
-    assert_eq!(
-        reopened.surface_images()[&record.image_hash].record(),
-        &record
-    );
-}
-
-#[test]
-fn images_are_durable_before_manifest_and_cancellation_preserves_complete_snapshots() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    save_project(&mut project, Some(sandbox.target()));
-    let old = project.capture().manifest;
-    let image = image_asset([0, 40, 80, 255], "boundary.pgm");
-    add_image(&mut project, image.clone());
-    let current = project.capture().manifest;
-    let stored = sandbox
-        .target()
-        .join(IMAGES)
-        .join(format!("{}.pgm", image.record().image_hash.as_str()));
-    for stop in [SaveStage::AssetsSynced, SaveStage::BeforeManifestReplace] {
-        let cancel = flag();
-        let failure = save(
-            project.capture(),
-            project.storage(),
-            None,
-            &cancel,
-            |stage| {
-                assert_eq!(fs::read(&stored).unwrap(), *image.bytes().as_ref());
-                if stage == stop {
-                    cancel.store(true, Ordering::Release);
-                }
-            },
-        )
-        .unwrap_err();
-        assert_eq!(failure.code, ProjectErrorCode::Cancelled);
-        let loaded = open(&sandbox.target(), true, false, &flag()).unwrap();
-        assert_eq!(loaded.manifest, old);
-        assert!(loaded.surface_images.is_empty());
-    }
-    let cancel = flag();
-    let receipt = save(
-        project.capture(),
-        project.storage(),
-        None,
-        &cancel,
-        |stage| {
-            if stage == SaveStage::AfterManifestReplace {
-                cancel.store(true, Ordering::Release);
-            }
-        },
-    )
-    .unwrap();
-    project.mark_saved(receipt).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap()
-            .manifest,
-        current
-    );
-    let save_as = sandbox.0.join("copy");
-    let receipt = save(
-        project.capture(),
-        project.storage(),
-        Some(save_as.clone()),
-        &flag(),
-        |_| {},
-    )
-    .unwrap();
-    assert_eq!(
-        fs::read(
-            save_as
-                .join(IMAGES)
-                .join(format!("{}.pgm", image.record().image_hash.as_str()))
-        )
-        .unwrap(),
-        *image.bytes().as_ref()
-    );
-    assert_eq!(receipt.manifest, current);
-}
-
-#[test]
-fn disabled_image_corruption_and_metadata_disagreement_never_open_smooth() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    let image = image_asset([1, 33, 127, 255], "disabled.pgm");
-    add_image(&mut project, image.clone());
-    let layer_id = project.info().surface_overlays.layers[0].layer_id;
-    project
-        .commit(
-            project
-                .prepare(Edit::SetSurfaceFinishEnabled {
-                    layer_id,
-                    enabled: false,
-                })
-                .unwrap(),
-        )
-        .unwrap();
-    save_project(&mut project, Some(sandbox.target()));
-    let original_manifest = fs::read(sandbox.target().join(CURRENT)).unwrap();
-    let path = sandbox
-        .target()
-        .join(IMAGES)
-        .join(format!("{}.pgm", image.record().image_hash.as_str()));
-    for bytes in [
-        b"P5\n2 2\n255\n\x01\x21\x7f\xfe".to_vec(),
-        b"P5\n3 2\n255\n\x01\x21\x7f\xff".to_vec(),
-        b"P5\n2 2\n255\n\x01\x21\x7f".to_vec(),
-    ] {
-        fs::write(&path, bytes).unwrap();
-        assert_eq!(
-            open(&sandbox.target(), true, false, &flag())
-                .unwrap_err()
-                .code,
-            ProjectErrorCode::CorruptAsset
-        );
-    }
-    fs::remove_file(&path).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::MissingAsset
-    );
-    fs::write(&path, image.bytes().as_slice()).unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&original_manifest).unwrap();
-    for (pointer, replacement) in [
-        ("/surface_overlays/images/0/width", serde_json::json!(3)),
-        (
-            "/surface_overlays/images/0/image_hash",
-            serde_json::json!(SourceHash::from_bytes(b"foreign image")),
-        ),
-        ("/surface_overlays/images", serde_json::json!([])),
-        (
-            "/surface_overlays/layers/0/finish",
-            serde_json::json!({"kind":"smooth"}),
-        ),
-    ] {
-        let mut corrupt = value.clone();
-        *corrupt.pointer_mut(pointer).unwrap() = replacement;
-        fs::write(
-            sandbox.target().join(CURRENT),
-            serde_json::to_vec(&corrupt).unwrap(),
-        )
-        .unwrap();
-        assert!(open(&sandbox.target(), true, false, &flag()).is_err());
-    }
-    fs::write(sandbox.target().join(CURRENT), original_manifest).unwrap();
-    assert!(open(&sandbox.target(), true, false, &flag()).is_ok());
-}
-
-#[test]
-fn previous_checkpoint_keeps_image_bytes_and_artifact_coherently_after_pruning() {
-    let sandbox = Sandbox::new();
-    let mut project = crate::tests::manufactured();
-    let image = image_asset([0, 127, 255, 44], "recovery.pgm");
-    add_image(&mut project, image.clone());
-    let artifact = crate::tests::bundle_asset(&crate::tests::manufacturing_bundle(&project));
-    project
-        .commit(
-            project
-                .prepare(Edit::PublishManufacturing {
-                    asset: artifact.clone(),
-                })
-                .unwrap(),
-        )
-        .unwrap();
-    save_project(&mut project, Some(sandbox.target()));
-    let previous = project.capture().manifest;
-    let layer_id = project.info().surface_overlays.layers[0].layer_id;
-    project
-        .commit(
-            project
-                .prepare(Edit::RemoveSurfaceFinish { layer_id })
-                .unwrap(),
-        )
-        .unwrap();
-    save_project(&mut project, None);
-    let current = project.capture().manifest;
-    assert!(current.surface_overlays.images.is_empty());
-    let path = sandbox
-        .target()
-        .join(IMAGES)
-        .join(format!("{}.pgm", image.record().image_hash.as_str()));
-    assert_eq!(fs::read(&path).unwrap(), *image.bytes().as_ref());
-    drop(project);
-    fs::write(sandbox.target().join(CURRENT), b"corrupt current").unwrap();
-    assert!(open(&sandbox.target(), false, false, &flag()).is_err());
-    let recovered =
-        Project::from_loaded(open(&sandbox.target(), false, true, &flag()).unwrap()).unwrap();
-    assert_eq!(recovered.info().surface_overlays, previous.surface_overlays);
-    assert_eq!(
-        recovered.surface_images()[&image.record().image_hash]
-            .bytes()
-            .as_slice(),
-        image.bytes().as_slice()
-    );
-    assert_eq!(
-        recovered
-            .snapshot()
-            .manufacturing_artifact
-            .as_ref()
-            .unwrap()
-            .record,
-        artifact.record
-    );
-    assert!(recovered.info().revision > current.revision);
-    assert_eq!(
-        recovered.capture().manifest.next_surface_layer,
-        current.next_surface_layer
-    );
-    drop(recovered);
-    fs::write(path, b"corrupt image").unwrap();
-    assert!(open(&sandbox.target(), false, true, &flag()).is_err());
-}
-
-#[test]
 fn staged_image_open_checks_remaining_allocation_before_releasing_live_state() {
     let sandbox = Sandbox::new();
     let mut project = imported();
@@ -1895,236 +501,6 @@ fn staged_image_open_checks_remaining_allocation_before_releasing_live_state() {
     assert_eq!(
         loaded.surface_images.values().next().unwrap().bytes().len(),
         size
-    );
-}
-
-#[test]
-fn image_file_directory_and_scratch_budgets_are_not_bypassed_by_unreferenced_files() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    save_project(&mut project, Some(sandbox.target()));
-    let directory = sandbox.target().join(IMAGES);
-    let oversized = directory.join(format!(
-        "{}.pgm",
-        SourceHash::from_bytes(b"oversized").as_str()
-    ));
-    File::create(&oversized)
-        .unwrap()
-        .set_len(MAX_SURFACE_IMAGE_BYTES as u64 + 1)
-        .unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::ResourceLimit
-    );
-    fs::remove_file(oversized).unwrap();
-    let first = directory.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
-    let second = directory.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
-    File::create(&first)
-        .unwrap()
-        .set_len(MAX_SURFACE_IMAGE_BYTES as u64)
-        .unwrap();
-    fs::write(&second, b"x").unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::ResourceLimit
-    );
-    fs::remove_file(first).unwrap();
-    fs::remove_file(second).unwrap();
-    for tag in 0..MAX_PROJECT_STORED_ASSETS {
-        fs::write(
-            directory.join(format!(
-                "{}.pgm",
-                SourceHash::from_bytes(format!("stored-{tag}").as_bytes()).as_str()
-            )),
-            b"x",
-        )
-        .unwrap();
-    }
-    let image = image_asset([1, 2, 3, 4], "new.pgm");
-    add_image(&mut project, image);
-    let before = project.info();
-    assert_eq!(
-        save(project.capture(), project.storage(), None, &flag(), |_| {})
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::ResourceLimit
-    );
-    assert_eq!(project.info(), before);
-    assert_eq!(
-        fs::read_dir(&directory).unwrap().count(),
-        MAX_PROJECT_STORED_ASSETS
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn image_symlinks_nonregular_files_and_attached_directory_substitution_fail_closed() {
-    use std::os::unix::fs::symlink;
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    let image = image_asset([0, 32, 128, 255], "owned.pgm");
-    add_image(&mut project, image.clone());
-    save_project(&mut project, Some(sandbox.target()));
-    let directory = sandbox.target().join(IMAGES);
-    let path = directory.join(format!("{}.pgm", image.record().image_hash.as_str()));
-    let foreign = sandbox.0.join("foreign.pgm");
-    fs::write(&foreign, image.bytes().as_slice()).unwrap();
-    fs::remove_file(&path).unwrap();
-    symlink(&foreign, &path).unwrap();
-    assert!(open(&sandbox.target(), true, false, &flag()).is_err());
-    fs::remove_file(&path).unwrap();
-    fs::create_dir(&path).unwrap();
-    assert!(open(&sandbox.target(), true, false, &flag()).is_err());
-    fs::remove_dir(&path).unwrap();
-    fs::write(&path, image.bytes().as_slice()).unwrap();
-    fs::rename(&directory, sandbox.0.join("original-images")).unwrap();
-    fs::create_dir(&directory).unwrap();
-    fs::write(directory.join("foreign"), b"retained").unwrap();
-    assert!(save(project.capture(), project.storage(), None, &flag(), |_| {}).is_err());
-    assert_eq!(fs::read(&foreign).unwrap(), *image.bytes().as_ref());
-    assert_eq!(fs::read(directory.join("foreign")).unwrap(), b"retained");
-}
-
-#[test]
-fn old_project_without_image_directory_is_explicitly_refused() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    save_project(&mut project, Some(sandbox.target()));
-    let mut old = serde_json::to_value(project.capture().manifest).unwrap();
-    drop(project);
-    old["format_version"] = serde_json::json!(3);
-    old["surface_overlays"]["schema_version"] = serde_json::json!(2);
-    old["surface_overlays"]
-        .as_object_mut()
-        .unwrap()
-        .remove("images");
-    fs::remove_dir(sandbox.target().join(IMAGES)).unwrap();
-    fs::write(
-        sandbox.target().join(CURRENT),
-        serde_json::to_vec(&old).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::UnsupportedFormat
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn first_save_checks_image_directory_identity_and_never_cleans_a_substitute() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    add_image(&mut project, image_asset([1, 2, 3, 4], "stage.pgm"));
-    let mut substituted = None;
-    let failure = save(
-        project.capture(),
-        None,
-        Some(sandbox.target()),
-        &flag(),
-        |stage| {
-            if stage == SaveStage::AssetsSynced {
-                let owned_stage = fs::read_dir(&sandbox.0)
-                    .unwrap()
-                    .next()
-                    .unwrap()
-                    .unwrap()
-                    .path();
-                let images = owned_stage.join(IMAGES);
-                fs::rename(&images, sandbox.0.join("original-images")).unwrap();
-                fs::create_dir(&images).unwrap();
-                fs::write(images.join("foreign"), b"foreign marker").unwrap();
-                substituted = Some(images);
-            }
-        },
-    )
-    .unwrap_err();
-    assert_eq!(failure.code, ProjectErrorCode::InvalidProject);
-    assert_eq!(
-        fs::read(substituted.unwrap().join("foreign")).unwrap(),
-        b"foreign marker"
-    );
-    assert!(!sandbox.target().exists());
-}
-
-#[test]
-fn first_image_save_cancellation_leaves_no_published_project_and_can_retry() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    let image = image_asset([10, 20, 30, 40], "cancelled.pgm");
-    add_image(&mut project, image.clone());
-    let before = project.info();
-    let cancel = flag();
-    assert_eq!(
-        save(
-            project.capture(),
-            None,
-            Some(sandbox.target()),
-            &cancel,
-            |stage| {
-                if stage == SaveStage::AssetsSynced {
-                    cancel.store(true, Ordering::Release);
-                }
-            }
-        )
-        .unwrap_err()
-        .code,
-        ProjectErrorCode::Cancelled
-    );
-    assert!(!sandbox.target().exists());
-    assert_eq!(fs::read_dir(&sandbox.0).unwrap().count(), 0);
-    assert_eq!(project.info(), before);
-    save_project(&mut project, Some(sandbox.target()));
-    let loaded = open(&sandbox.target(), true, false, &flag()).unwrap();
-    assert_eq!(
-        loaded.surface_images.values().next().unwrap().record(),
-        image.record()
-    );
-}
-
-#[test]
-fn removing_current_image_cannot_publish_over_a_corrupt_recovery_dependency() {
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    let image = image_asset([0, 3, 9, 27], "checkpoint.pgm");
-    add_image(&mut project, image.clone());
-    save_project(&mut project, Some(sandbox.target()));
-    let committed = fs::read(sandbox.target().join(CURRENT)).unwrap();
-    let layer_id = project.info().surface_overlays.layers[0].layer_id;
-    project
-        .commit(
-            project
-                .prepare(Edit::RemoveSurfaceFinish { layer_id })
-                .unwrap(),
-        )
-        .unwrap();
-    assert!(project.surface_images().is_empty());
-    let before = project.info();
-    let path = sandbox
-        .target()
-        .join(IMAGES)
-        .join(format!("{}.pgm", image.record().image_hash.as_str()));
-    fs::remove_file(&path).unwrap();
-    assert_eq!(
-        save(project.capture(), project.storage(), None, &flag(), |_| {})
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::MissingAsset
-    );
-    assert_eq!(project.info(), before);
-    assert_eq!(fs::read(sandbox.target().join(CURRENT)).unwrap(), committed);
-    fs::write(&path, image.bytes().as_slice()).unwrap();
-    save_project(&mut project, None);
-    let recovered = open(&sandbox.target(), true, true, &flag()).unwrap();
-    assert_eq!(
-        recovered.surface_images.values().next().unwrap().record(),
-        image.record()
     );
 }
 
@@ -2255,148 +631,6 @@ fn process_durable_source_deleted_readonly_reopen_preserves_inheritance_reset_an
         layer.operations[0].operation_id.get(),
         saved.next_process_operation
     );
-}
-
-#[test]
-fn process_disabled_targets_and_required_counters_are_strict_on_fresh_reopen() {
-    use spiling_contracts::{process::*, surface::SurfaceScope};
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
-    let prepared = project
-        .prepare(Edit::Process {
-            edit: ProcessEdit::AddLayer {
-                scope: SurfaceScope::Occurrence {
-                    occurrence_id: OccurrenceId::new(1).unwrap(),
-                    expected_definition_id: definition_id,
-                },
-                selector: ProcessSelector::WholeOwnedVolume,
-                interface: None,
-                action: ProcessAction::Replace {
-                    value: ProcessValue::SparseFraction { fraction: 0.5 },
-                },
-            },
-        })
-        .unwrap();
-    project.commit(prepared).unwrap();
-    let layer_id = project.info().process_document.layers[0].layer_id;
-    let prepared = project
-        .prepare(Edit::Process {
-            edit: ProcessEdit::SetLayerEnabled {
-                layer_id,
-                enabled: false,
-            },
-        })
-        .unwrap();
-    project.commit(prepared).unwrap();
-    save_project(&mut project, Some(sandbox.target()));
-    let valid = serde_json::to_value(project.capture().manifest).unwrap();
-    drop(project);
-    for (pointer, replacement) in [
-        (
-            "/process_document/layers/0/scope/occurrence_id",
-            serde_json::json!(99),
-        ),
-        (
-            "/process_document/layers/0/scope/expected_definition_id",
-            serde_json::json!(
-                spiling_contracts::geometry::DefinitionId::from_source_sha256(&[1; 32])
-            ),
-        ),
-        (
-            "/process_document/layers/0/operations/0/action/value/fraction",
-            serde_json::json!(0),
-        ),
-        ("/next_process_layer", serde_json::json!(1)),
-        ("/next_process_operation", serde_json::json!(1)),
-        (
-            "/format_version",
-            serde_json::json!(spiling_contracts::project::PROJECT_FORMAT_VERSION - 1),
-        ),
-        ("/process_document/schema_version", serde_json::json!(0)),
-    ] {
-        let mut corrupt = valid.clone();
-        *corrupt.pointer_mut(pointer).unwrap() = replacement;
-        fs::write(
-            sandbox.target().join(CURRENT),
-            serde_json::to_vec(&corrupt).unwrap(),
-        )
-        .unwrap();
-        assert!(open(&sandbox.target(), true, false, &flag()).is_err());
-    }
-    for field in [
-        "process_document",
-        "next_process_layer",
-        "next_process_operation",
-    ] {
-        let mut corrupt = valid.clone();
-        corrupt.as_object_mut().unwrap().remove(field);
-        fs::write(
-            sandbox.target().join(CURRENT),
-            serde_json::to_vec(&corrupt).unwrap(),
-        )
-        .unwrap();
-        assert!(open(&sandbox.target(), true, false, &flag()).is_err());
-    }
-}
-
-#[test]
-fn process_recovery_preserves_newer_layer_and_operation_allocator_high_water() {
-    use spiling_contracts::{process::*, surface::SurfaceScope};
-    let sandbox = Sandbox::new();
-    let mut project = imported();
-    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
-    let scope = SurfaceScope::Definition { definition_id };
-    let add = |project: &mut Project, fraction| {
-        let prepared = project
-            .prepare(Edit::Process {
-                edit: ProcessEdit::AddLayer {
-                    scope: scope.clone(),
-                    selector: ProcessSelector::WholeOwnedVolume,
-                    interface: None,
-                    action: ProcessAction::Replace {
-                        value: ProcessValue::SparseFraction { fraction },
-                    },
-                },
-            })
-            .unwrap();
-        project.commit(prepared).unwrap();
-    };
-    add(&mut project, 0.3);
-    save_project(&mut project, Some(sandbox.target()));
-    let previous = project.capture().manifest;
-    add(&mut project, 0.4);
-    add(&mut project, 0.6);
-    save_project(&mut project, None);
-    let current = project.capture().manifest;
-    drop(project);
-    fs::write(sandbox.target().join(CURRENT), b"interrupted manifest").unwrap();
-    let mut recovered =
-        Project::from_loaded(open(&sandbox.target(), false, true, &flag()).unwrap()).unwrap();
-    assert_eq!(recovered.info().process_document, previous.process_document);
-    assert_eq!(
-        recovered.capture().manifest.next_process_layer,
-        current.next_process_layer
-    );
-    assert_eq!(
-        recovered.capture().manifest.next_process_operation,
-        current.next_process_operation
-    );
-    add(&mut recovered, 0.7);
-    let latest = recovered
-        .info()
-        .process_document
-        .layers
-        .last()
-        .unwrap()
-        .clone();
-    assert_eq!(latest.layer_id.get(), current.next_process_layer);
-    assert_eq!(
-        latest.operations[0].operation_id.get(),
-        current.next_process_operation
-    );
-    save_project(&mut recovered, None);
-    assert!(!recovered.info().dirty);
 }
 
 #[test]
@@ -2592,144 +826,6 @@ fn appearance_original_source_deletion_reopen_and_readonly_preserve_artifact() {
 }
 
 #[test]
-fn appearance_assets_precede_manifest_and_save_preserves_semantic_history() {
-    let sandbox = Sandbox::new();
-    let (mut project, asset) = appearance_project();
-    save_project(&mut project, Some(sandbox.target()));
-    let saved = project.capture().manifest;
-    let mut target = crate::tests::appearance_target();
-    target.delta_e00_tolerance = 4.0;
-    crate::tests::commit_appearance(
-        &mut project,
-        Edit::SetAppearanceTarget {
-            target,
-            limits: spiling_contracts::appearance::SearchLimits::default(),
-        },
-    );
-    let next = project.capture().manifest;
-    let receipt = save(
-        project.capture(),
-        project.storage(),
-        None,
-        &flag(),
-        |stage| {
-            if stage == SaveStage::AssetsSynced {
-                assert_eq!(
-                    fs::read(
-                        sandbox
-                            .target()
-                            .join(PALETTE_ORIGINALS)
-                            .join(format!("{}.json", asset.record().original_hash.as_str()))
-                    )
-                    .unwrap(),
-                    *asset.original().as_ref()
-                );
-                assert_eq!(
-                    fs::read(
-                        sandbox
-                            .target()
-                            .join(PALETTE_CANONICAL)
-                            .join(format!("{}.json", asset.record().canonical_hash.as_str()))
-                    )
-                    .unwrap(),
-                    *asset.canonical().as_ref()
-                );
-                assert_eq!(
-                    open(&sandbox.target(), true, false, &flag())
-                        .unwrap()
-                        .manifest,
-                    saved
-                );
-            }
-        },
-    )
-    .unwrap();
-    project.mark_saved(receipt).unwrap();
-    assert!(!project.info().dirty && project.info().can_undo);
-    project.undo().unwrap();
-    assert!(project.info().dirty);
-    assert_eq!(
-        project.appearance_study().selection.as_deref(),
-        Some("red/catalog")
-    );
-    project.redo().unwrap();
-    assert!(!project.info().dirty);
-    assert_eq!(
-        project.capture().manifest.appearance_study,
-        next.appearance_study
-    );
-    let recovered =
-        Project::from_loaded(open(&sandbox.target(), true, true, &flag()).unwrap()).unwrap();
-    assert_eq!(recovered.appearance_study(), &saved.appearance_study);
-    assert!(recovered.info().dirty && recovered.info().recovered_previous);
-    assert_eq!(
-        recovered
-            .snapshot()
-            .manufacturing_artifact
-            .as_ref()
-            .unwrap()
-            .record,
-        saved.manufacturing_artifact.unwrap()
-    );
-}
-
-#[test]
-fn appearance_storage_rejects_corruption_missing_assets_and_producer_mismatch() {
-    for original in [true, false] {
-        let sandbox = Sandbox::new();
-        let (mut project, asset) = appearance_project();
-        save_project(&mut project, Some(sandbox.target()));
-        let (directory, hash) = if original {
-            (PALETTE_ORIGINALS, &asset.record().original_hash)
-        } else {
-            (PALETTE_CANONICAL, &asset.record().canonical_hash)
-        };
-        let path = sandbox
-            .target()
-            .join(directory)
-            .join(format!("{}.json", hash.as_str()));
-        let bytes = fs::read(&path).unwrap();
-        let mut bad = bytes.clone();
-        bad[0] ^= 1;
-        fs::write(&path, bad).unwrap();
-        assert_eq!(
-            open(&sandbox.target(), true, false, &flag())
-                .unwrap_err()
-                .code,
-            ProjectErrorCode::CorruptAsset
-        );
-        assert_eq!(
-            save(project.capture(), project.storage(), None, &flag(), |_| {})
-                .unwrap_err()
-                .code,
-            ProjectErrorCode::CorruptAsset
-        );
-        fs::write(&path, bytes).unwrap();
-        fs::remove_file(&path).unwrap();
-        assert_eq!(
-            open(&sandbox.target(), true, false, &flag())
-                .unwrap_err()
-                .code,
-            ProjectErrorCode::MissingAsset
-        );
-    }
-    let sandbox = Sandbox::new();
-    let (mut project, _) = appearance_project();
-    save_project(&mut project, Some(sandbox.target()));
-    let path = sandbox.target().join(CURRENT);
-    let bytes = fs::read(&path).unwrap();
-    let mut manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    manifest["appearance_study"]["report"]["producer"] = "foreign".into();
-    fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::InvalidProject
-    );
-}
-
-#[test]
 fn appearance_staged_open_enforces_remaining_budget_without_releasing_writer() {
     let sandbox = Sandbox::new();
     let (mut project, _) = appearance_project();
@@ -2757,113 +853,6 @@ fn appearance_staged_open_enforces_remaining_budget_without_releasing_writer() {
             .unwrap_err()
             .code,
         ProjectErrorCode::ProjectLocked
-    );
-}
-
-#[test]
-fn appearance_directory_attachment_and_exclusive_assets_are_preserved() {
-    for directory in [PALETTE_ORIGINALS, PALETTE_CANONICAL] {
-        let sandbox = Sandbox::new();
-        let (mut project, _) = appearance_project();
-        save_project(&mut project, Some(sandbox.target()));
-        let detached = sandbox.0.join("detached");
-        fs::rename(sandbox.target().join(directory), &detached).unwrap();
-        fs::create_dir(sandbox.target().join(directory)).unwrap();
-        let before = fs::read(sandbox.target().join(CURRENT)).unwrap();
-        assert!(save(project.capture(), project.storage(), None, &flag(), |_| {}).is_err());
-        assert_eq!(fs::read(sandbox.target().join(CURRENT)).unwrap(), before);
-        assert!(detached.exists());
-    }
-}
-
-#[test]
-fn appearance_storage_rejects_hash_valid_original_canonical_semantic_disagreement() {
-    let sandbox = Sandbox::new();
-    let (mut project, asset) = appearance_project();
-    save_project(&mut project, Some(sandbox.target()));
-    let mut document = asset.document().clone();
-    document.rows[0].name = "Different original evidence record".into();
-    let original = serde_json::to_vec(&document).unwrap();
-    let hash = SourceHash::from_bytes(&original);
-    fs::write(
-        sandbox
-            .target()
-            .join(PALETTE_ORIGINALS)
-            .join(format!("{}.json", hash.as_str())),
-        &original,
-    )
-    .unwrap();
-    let path = sandbox.target().join(CURRENT);
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    manifest["appearance_study"]["palette"]["original_hash"] = hash.as_str().into();
-    manifest["appearance_study"]["palette"]["original_bytes"] = original.len().into();
-    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::InvalidProject
-    );
-}
-
-#[test]
-fn appearance_save_never_collects_palette_assets_needed_by_previous_or_history() {
-    let sandbox = Sandbox::new();
-    let (mut project, first) = appearance_project();
-    save_project(&mut project, Some(sandbox.target()));
-    let mut document = first.document().clone();
-    document.name = "Second palette".into();
-    let canonical = document.canonical_bytes().unwrap();
-    let original = serde_json::to_vec_pretty(&document).unwrap();
-    let record = spiling_contracts::appearance::PaletteRecord::new(
-        &document,
-        &original,
-        &canonical,
-        "second.json".into(),
-    )
-    .unwrap();
-    let second =
-        Arc::new(PaletteAsset::from_document(record, original, canonical, document).unwrap());
-    crate::tests::commit_appearance(
-        &mut project,
-        Edit::ImportAppearancePalette {
-            asset: second.clone(),
-        },
-    );
-    save_project(&mut project, None);
-    for asset in [&first, &second] {
-        assert_eq!(
-            fs::read(
-                sandbox
-                    .target()
-                    .join(PALETTE_ORIGINALS)
-                    .join(format!("{}.json", asset.record().original_hash.as_str()))
-            )
-            .unwrap(),
-            *asset.original().as_ref(),
-        );
-        assert_eq!(
-            fs::read(
-                sandbox
-                    .target()
-                    .join(PALETTE_CANONICAL)
-                    .join(format!("{}.json", asset.record().canonical_hash.as_str()))
-            )
-            .unwrap(),
-            *asset.canonical().as_ref(),
-        );
-    }
-    let previous =
-        Project::from_loaded(open(&sandbox.target(), true, true, &flag()).unwrap()).unwrap();
-    assert_eq!(
-        previous.appearance_study().palette.as_ref().unwrap(),
-        first.record()
-    );
-    project.undo().unwrap();
-    assert_eq!(
-        project.appearance_study().palette.as_ref().unwrap(),
-        first.record()
     );
 }
 
@@ -2958,65 +947,926 @@ fn optical_reports_reconstruct_source_independently_readonly_with_exact_bytes_an
     );
 }
 
-#[test]
-fn optical_recovery_preserves_accepted_report_and_rejects_forged_palette_evidence_closure() {
-    let sandbox = Sandbox::new();
-    let (mut project, _, report) = crate::optical_tests::optical_project();
-    save_project(&mut project, Some(sandbox.target()));
-    let first = project.capture().manifest;
-    let mut request = crate::optical_tests::optical_request();
-    request.patch.width_mm = 3.0;
-    crate::tests::commit_appearance(&mut project, Edit::SetOpticalStudy { request });
-    save_project(&mut project, None);
-    let recovered =
-        Project::from_loaded(open(&sandbox.target(), true, true, &flag()).unwrap()).unwrap();
-    assert_eq!(recovered.appearance_study(), &first.appearance_study);
-    assert_eq!(
-        recovered
-            .appearance_study()
-            .optical
-            .as_ref()
-            .unwrap()
-            .report
-            .as_ref()
-            .unwrap()
-            .encode()
-            .unwrap(),
-        report.encode().unwrap()
-    );
-    assert!(recovered.info().recovered_previous && recovered.info().dirty);
+fn add_image(project: &mut Project, image: Arc<SurfaceImageAsset>) {
+    let prepared = project.prepare(image_edit(project, image)).unwrap();
+    project.commit(prepared).unwrap();
+}
 
-    // A fresh descriptor hash is not authority to change the retained evidence.
-    let path = sandbox.target().join(CURRENT);
-    let mut forged = first;
-    let optical = forged.appearance_study.optical.as_mut().unwrap();
-    let changed = Arc::make_mut(optical.report.as_mut().unwrap());
-    changed.material_evidence_hashes[0] = SourceHash::from_bytes(b"foreign material evidence");
-    optical.report_record = Some(changed.canonical_record().unwrap());
-    forged.validate().unwrap();
-    fs::write(&path, serde_json::to_vec(&forged).unwrap()).unwrap();
-    assert_eq!(
-        open(&sandbox.target(), true, false, &flag())
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::CorruptAsset
-    );
-    let changed = Arc::make_mut(
-        forged
-            .appearance_study
-            .optical
-            .as_mut()
-            .unwrap()
-            .report
-            .as_mut()
-            .unwrap(),
-    );
-    changed.producer = "unrecognized-optical-model".into();
-    fs::write(path, serde_json::to_vec(&forged).unwrap()).unwrap();
+fn connection(path: &Path) -> rusqlite::Connection {
+    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .unwrap()
+}
+
+fn replace_guard(path: &Path, guard: &ProjectRecoveryGuard) {
+    let bytes = serde_json::to_vec(guard).unwrap();
+    connection(path)
+        .execute(
+            "UPDATE container SET guard=?1,guard_hash=?2",
+            rusqlite::params![bytes, &Sha256::digest(&bytes)[..]],
+        )
+        .unwrap();
+}
+
+fn corrupt_root(path: &Path, previous: bool) {
+    let selected = if previous {
+        "previous_snapshot"
+    } else {
+        "current_snapshot"
+    };
+    connection(path).execute(&format!(
+        "UPDATE chunks SET codec=0,data=zeroblob(raw_length) WHERE chunk_id IN (SELECT chunk_id FROM object_chunks WHERE object_id=(SELECT root_object FROM snapshots WHERE snapshot_id=(SELECT {selected} FROM container)))"
+    ), []).unwrap();
+}
+
+fn rewrite_current(path: &Path, root: &[u8], members: &[Member]) {
+    let mut connection = connection(path);
+    let transaction = connection.transaction().unwrap();
+    let root_id = ObjectId::of(root);
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO objects VALUES(?1,?2,?3)",
+            rusqlite::params![
+                root_id.as_bytes(),
+                i64::try_from(root.len()).unwrap(),
+                i64::try_from(root.len().div_ceil(spiling_core_ptac::CHUNK_BYTES)).unwrap()
+            ],
+        )
+        .unwrap();
+    for (ordinal, chunk) in root.chunks(spiling_core_ptac::CHUNK_BYTES).enumerate() {
+        let chunk_id = ObjectId::of(chunk);
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO chunks VALUES(?1,?2,0,?3)",
+                rusqlite::params![
+                    chunk_id.as_bytes(),
+                    i64::try_from(chunk.len()).unwrap(),
+                    chunk
+                ],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO object_chunks VALUES(?1,?2,?3)",
+                rusqlite::params![
+                    root_id.as_bytes(),
+                    i64::try_from(ordinal).unwrap(),
+                    chunk_id.as_bytes()
+                ],
+            )
+            .unwrap();
+    }
+    let mut members = members.to_vec();
+    members.sort_unstable();
+    let mut digest = Sha256::new();
+    digest.update(b"spiling:ptac:snapshot:v1\0");
+    digest.update(root_id.as_bytes());
+    digest.update(u32::try_from(members.len()).unwrap().to_le_bytes());
+    for member in &members {
+        digest.update(member.role.get().to_le_bytes());
+        digest.update(member.object.as_bytes());
+    }
+    let snapshot: [u8; 32] = digest.finalize().into();
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO snapshots VALUES(?1,?2)",
+            rusqlite::params![&snapshot, root_id.as_bytes()],
+        )
+        .unwrap();
+    for member in members {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO snapshot_objects VALUES(?1,?2,?3)",
+                rusqlite::params![&snapshot, member.role.get(), member.object.as_bytes()],
+            )
+            .unwrap();
+    }
+    transaction
+        .execute(
+            "UPDATE container SET current_snapshot=?1",
+            rusqlite::params![&snapshot],
+        )
+        .unwrap();
+    transaction.commit().unwrap();
+}
+
+fn captured_root(path: &Path) -> (Vec<u8>, Vec<Member>) {
+    let container = Container::open_existing(path, true).unwrap();
+    let cancel = flag();
+    let capture = container.capture(Selection::Current, &cancel).unwrap();
+    (capture.root.clone(), capture.members.clone())
+}
+
+#[test]
+fn container_role_closure_refuses_missing_extra_and_unknown_members() {
+    for change in 0..3 {
+        let sandbox = Sandbox::new();
+        let mut project = imported();
+        save_project(&mut project, Some(sandbox.target()));
+        let (root, mut members) = captured_root(&sandbox.target());
+        match change {
+            0 => {
+                members.clear();
+            }
+            1 => {
+                members.push(Member {
+                    role: ObjectRole::new(IMAGE).unwrap(),
+                    object: members[0].object,
+                });
+            }
+            _ => {
+                members[0].role = ObjectRole::new(99).unwrap();
+            }
+        }
+        drop(project);
+        rewrite_current(&sandbox.target(), &root, &members);
+        assert_eq!(
+            open(&sandbox.target(), true, false, &flag())
+                .unwrap_err()
+                .code,
+            ProjectErrorCode::InvalidProject
+        );
+    }
+}
+
+#[test]
+fn ordinary_and_readonly_load_consume_every_guard_floor_without_false_dirty() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    save_project(&mut project, Some(sandbox.target()));
+    let saved_revision = project.info().revision;
+    let mut guard = ProjectRecoveryGuard::from_manifest(&project.capture().manifest);
+    guard.revision_high_water = ProjectRevision(100);
+    guard.next_occurrence_high_water = 200;
+    guard.next_surface_layer_high_water = 300;
+    guard.next_process_layer_high_water = 400;
+    guard.next_process_operation_high_water = 500;
+    drop(project);
+    replace_guard(&sandbox.target(), &guard);
+    for read_only in [true, false] {
+        let mut project =
+            Project::from_loaded(open(&sandbox.target(), read_only, false, &flag()).unwrap())
+                .unwrap();
+        assert!(!project.info().dirty);
+        assert_eq!(project.info().saved_revision, Some(saved_revision));
+        let manifest = project.capture().manifest;
+        assert_eq!(manifest.revision, ProjectRevision(100));
+        assert_eq!(manifest.next_occurrence, 200);
+        assert_eq!(manifest.next_surface_layer, 300);
+        assert_eq!(manifest.next_process_layer, 400);
+        assert_eq!(manifest.next_process_operation, 500);
+        if !read_only {
+            let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
+            let edit = project
+                .prepare(Edit::Add {
+                    definition_id,
+                    pose: RigidPoseMm::IDENTITY,
+                })
+                .unwrap();
+            project.commit(edit).unwrap();
+            assert!(
+                project
+                    .snapshot()
+                    .occurrences
+                    .contains_key(&OccurrenceId::new(200).unwrap())
+            );
+            assert_eq!(project.info().revision, ProjectRevision(101));
+        }
+    }
+}
+
+#[test]
+fn corrupt_current_recovery_is_dirty_fresh_and_retains_valid_previous_on_save() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    add_image(&mut project, image_asset([0, 80, 160, 255], "recovery.png"));
+    let previous = project.capture().manifest;
+    save_project(&mut project, Some(sandbox.target()));
+    pose(&mut project, 9.0);
+    save_project(&mut project, None);
+    let mut guard = ProjectRecoveryGuard::from_manifest(&project.capture().manifest);
+    guard.revision_high_water = ProjectRevision(100);
+    guard.next_occurrence_high_water = 200;
+    guard.next_surface_layer_high_water = 300;
+    guard.next_process_layer_high_water = 400;
+    guard.next_process_operation_high_water = 500;
+    drop(project);
+    replace_guard(&sandbox.target(), &guard);
+    corrupt_root(&sandbox.target(), false);
     assert_eq!(
         open(&sandbox.target(), true, false, &flag())
             .unwrap_err()
             .code,
         ProjectErrorCode::InvalidProject
     );
+    let mut recovered =
+        Project::from_loaded(open(&sandbox.target(), false, true, &flag()).unwrap()).unwrap();
+    assert!(recovered.info().dirty && recovered.info().recovered_previous);
+    assert_eq!(recovered.info().saved_revision, Some(previous.revision));
+    assert_eq!(recovered.info().revision, ProjectRevision(101));
+    assert_eq!(recovered.capture().manifest.next_surface_layer, 300);
+    assert_eq!(recovered.capture().manifest.next_process_layer, 400);
+    assert_eq!(recovered.capture().manifest.next_process_operation, 500);
+    let source = recovered
+        .snapshot()
+        .sources
+        .values()
+        .next()
+        .unwrap()
+        .bytes
+        .clone();
+    let image = recovered
+        .snapshot()
+        .surface_images
+        .values()
+        .next()
+        .unwrap()
+        .bytes()
+        .clone();
+    save_project(&mut recovered, None);
+    assert!(!recovered.info().dirty && !recovered.info().recovered_previous);
+    assert!(Arc::ptr_eq(
+        &source,
+        &recovered.snapshot().sources.values().next().unwrap().bytes
+    ));
+    assert!(Arc::ptr_eq(
+        &image,
+        recovered
+            .snapshot()
+            .surface_images
+            .values()
+            .next()
+            .unwrap()
+            .bytes()
+    ));
+    let previous = open(&sandbox.target(), true, true, &flag()).unwrap();
+    assert_eq!(previous.saved_revision, ProjectRevision(2));
+    assert_eq!(previous.manifest.occurrences[0].pose.translation_mm[0], 0.0);
+}
+
+#[test]
+fn damaged_previous_does_not_block_current_but_bad_guard_blocks_both() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    save_project(&mut project, Some(sandbox.target()));
+    pose(&mut project, 3.0);
+    save_project(&mut project, None);
+    let manifest = project.capture().manifest;
+    drop(project);
+    corrupt_root(&sandbox.target(), true);
+    assert!(open(&sandbox.target(), true, false, &flag()).is_ok());
+    assert!(open(&sandbox.target(), true, true, &flag()).is_err());
+    let mut guard = ProjectRecoveryGuard::from_manifest(&manifest);
+    guard.revision_high_water = ProjectRevision::ZERO;
+    replace_guard(&sandbox.target(), &guard);
+    assert_eq!(
+        open(&sandbox.target(), true, false, &flag())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::InvalidProject
+    );
+}
+
+#[test]
+fn malformed_mismatched_and_each_insufficient_guard_refuse_every_load() {
+    for field in 0..8 {
+        let sandbox = Sandbox::new();
+        let mut project = imported();
+        save_project(&mut project, Some(sandbox.target()));
+        pose(&mut project, 3.0);
+        save_project(&mut project, None);
+        let mut guard = ProjectRecoveryGuard::from_manifest(&project.capture().manifest);
+        guard.next_occurrence_high_water = 10;
+        guard.next_surface_layer_high_water = 10;
+        guard.next_process_layer_high_water = 10;
+        guard.next_process_operation_high_water = 10;
+        let (root, members) = captured_root(&sandbox.target());
+        let mut manifest = parse_manifest(&root).unwrap();
+        manifest.next_surface_layer = 10;
+        manifest.next_occurrence = 10;
+        manifest.next_process_layer = 10;
+        manifest.next_process_operation = 10;
+        drop(project);
+        rewrite_current(
+            &sandbox.target(),
+            &serde_json::to_vec(&manifest).unwrap(),
+            &members,
+        );
+        match field {
+            0 => {
+                guard.project_id = ProjectId::new();
+            }
+            1 => {
+                guard.revision_high_water = ProjectRevision::ZERO;
+            }
+            2 => {
+                guard.next_occurrence_high_water = 1;
+            }
+            3 => {
+                guard.next_surface_layer_high_water = 1;
+            }
+            4 => {
+                guard.next_process_layer_high_water = 1;
+            }
+            5 => {
+                guard.next_process_operation_high_water = 1;
+            }
+            _ => {}
+        }
+        replace_guard(&sandbox.target(), &guard);
+        if field == 6 {
+            let bytes = b"{}";
+            connection(&sandbox.target())
+                .execute(
+                    "UPDATE container SET guard=?1,guard_hash=?2",
+                    rusqlite::params![bytes.as_slice(), &Sha256::digest(bytes)[..]],
+                )
+                .unwrap();
+        } else if field == 7 {
+            connection(&sandbox.target())
+                .execute("UPDATE container SET guard_hash=zeroblob(32)", [])
+                .unwrap();
+        }
+        assert_eq!(
+            open(&sandbox.target(), true, false, &flag())
+                .unwrap_err()
+                .code,
+            ProjectErrorCode::InvalidProject
+        );
+        assert_eq!(
+            open(&sandbox.target(), true, true, &flag())
+                .unwrap_err()
+                .code,
+            ProjectErrorCode::InvalidProject
+        );
+    }
+}
+
+#[test]
+fn recovery_binding_refuses_intervening_publication_and_preserves_live_highwater() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    save_project(&mut project, Some(sandbox.target()));
+    pose(&mut project, 2.0);
+    save_project(&mut project, None);
+    pose(&mut project, 3.0);
+    let loaded = open_reusing(
+        &sandbox.target(),
+        false,
+        true,
+        &flag(),
+        project.storage(),
+        LoadBudgets::MAXIMUM,
+    )
+    .unwrap();
+    let mut recovered = Project::from_loaded(loaded).unwrap();
+    recovered.retain_high_water(&project).unwrap();
+    assert!(recovered.info().revision > project.info().revision);
+    save_project(&mut project, None);
+    assert_eq!(
+        save(
+            recovered.capture(),
+            recovered.storage(),
+            None,
+            &flag(),
+            |_| {}
+        )
+        .unwrap_err()
+        .code,
+        ProjectErrorCode::StaleRevision
+    );
+}
+
+#[test]
+fn recovery_revision_exhaustion_refuses_and_normal_open_stays_clean() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    save_project(&mut project, Some(sandbox.target()));
+    pose(&mut project, 2.0);
+    save_project(&mut project, None);
+    let mut guard = ProjectRecoveryGuard::from_manifest(&project.capture().manifest);
+    guard.revision_high_water = ProjectRevision(u32::MAX);
+    drop(project);
+    replace_guard(&sandbox.target(), &guard);
+    let project =
+        Project::from_loaded(open(&sandbox.target(), true, false, &flag()).unwrap()).unwrap();
+    assert!(!project.info().dirty);
+    assert_eq!(
+        open(&sandbox.target(), true, true, &flag())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ResourceLimit
+    );
+}
+
+#[test]
+fn cancellation_is_late_for_existing_commit_and_new_target_publication() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    for stop in [
+        SaveStage::Staged,
+        SaveStage::RowsInserted,
+        SaveStage::Committed,
+        SaveStage::BeforePublish,
+        SaveStage::BeforeCommit,
+    ] {
+        let cancel = flag();
+        let failure = save(
+            project.capture(),
+            None,
+            Some(sandbox.target()),
+            &cancel,
+            |stage| {
+                if stage == stop {
+                    cancel.store(true, Ordering::Release);
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, ProjectErrorCode::Cancelled);
+        assert!(!sandbox.target().exists());
+    }
+    save_project(&mut project, Some(sandbox.target()));
+    let original = project.capture().manifest;
+    pose(&mut project, 4.0);
+    for stop in [
+        SaveStage::Staged,
+        SaveStage::RowsInserted,
+        SaveStage::BeforeCommit,
+    ] {
+        let cancel = flag();
+        assert_eq!(
+            save(
+                project.capture(),
+                project.storage(),
+                None,
+                &cancel,
+                |stage| {
+                    if stage == stop {
+                        cancel.store(true, Ordering::Release);
+                    }
+                }
+            )
+            .unwrap_err()
+            .code,
+            ProjectErrorCode::Cancelled
+        );
+        assert_eq!(
+            open(&sandbox.target(), true, false, &flag())
+                .unwrap()
+                .manifest,
+            original
+        );
+    }
+    let cancel = flag();
+    let receipt = save(
+        project.capture(),
+        project.storage(),
+        None,
+        &cancel,
+        |stage| {
+            if stage == SaveStage::Committed {
+                cancel.store(true, Ordering::Release);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(receipt.outcome, PublicationOutcome::PublishedConfirmed);
+    project.mark_saved(receipt).unwrap();
+    assert!(!project.info().dirty);
+}
+
+#[test]
+fn save_callbacks_expose_one_actual_publication_decision() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    let cancel = flag();
+    let mut stages = Vec::new();
+    let receipt = save(
+        project.capture(),
+        None,
+        Some(sandbox.target()),
+        &cancel,
+        |stage| {
+            stages.push(stage);
+            if stage == SaveStage::Published {
+                cancel.store(true, Ordering::Release);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(receipt.outcome, PublicationOutcome::PublishedConfirmed);
+    assert_eq!(
+        stages,
+        [
+            SaveStage::Staged,
+            SaveStage::RowsInserted,
+            SaveStage::Committed,
+            SaveStage::BeforePublish,
+            SaveStage::BeforeCommit,
+            SaveStage::Published,
+        ]
+    );
+    project.mark_saved(receipt).unwrap();
+    pose(&mut project, 4.0);
+    stages.clear();
+    let receipt = save(
+        project.capture(),
+        project.storage(),
+        None,
+        &flag(),
+        |stage| stages.push(stage),
+    )
+    .unwrap();
+    assert_eq!(receipt.outcome, PublicationOutcome::PublishedConfirmed);
+    assert_eq!(
+        stages,
+        [
+            SaveStage::Staged,
+            SaveStage::RowsInserted,
+            SaveStage::BeforeCommit,
+            SaveStage::Committed,
+        ]
+    );
+}
+
+#[test]
+fn saveas_is_exclusive_selfcontained_and_retains_last_independent_save() {
+    let sandbox = Sandbox::new();
+    let (mut project, _) = appearance_project();
+    add_image(&mut project, image_asset([0, 80, 160, 255], "copy.png"));
+    save_project(&mut project, Some(sandbox.target()));
+    let previous_revision = project.info().saved_revision.unwrap();
+    pose(&mut project, 6.0);
+    let copy = sandbox.0.join("copy.spil");
+    save_project(&mut project, Some(copy.clone()));
+    assert_eq!(project.storage().unwrap().path(), copy);
+    let recovery = open(&copy, true, true, &flag()).unwrap();
+    assert_eq!(recovery.saved_revision, previous_revision);
+    assert!(recovery.manufacturing_artifact.is_none());
+    assert!(!recovery.surface_images.is_empty());
+    assert!(!recovery.appearance_palettes.is_empty());
+    let foreign = sandbox.0.join("foreign.spil");
+    fs::write(&foreign, b"foreign").unwrap();
+    assert!(
+        save(
+            project.capture(),
+            project.storage(),
+            Some(foreign.clone()),
+            &flag(),
+            |_| {}
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(foreign).unwrap(), b"foreign");
+    drop(recovery);
+    drop(project);
+    let moved = sandbox.0.join("moved.spil");
+    fs::rename(copy, &moved).unwrap();
+    assert!(open(&moved, false, false, &flag()).is_ok());
+}
+
+#[test]
+fn old_directories_and_foreign_files_are_refused_without_conversion() {
+    let sandbox = Sandbox::new();
+    fs::create_dir(sandbox.target()).unwrap();
+    fs::write(sandbox.target().join("manifest.json"), b"old directory").unwrap();
+    assert_eq!(
+        open(&sandbox.target(), false, false, &flag())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::UnsupportedFormat
+    );
+    assert_eq!(
+        fs::read(sandbox.target().join("manifest.json")).unwrap(),
+        b"old directory"
+    );
+}
+
+#[test]
+fn uncertainty_receipts_keep_confirmed_baseline_and_block_unknown_writes_until_reopen() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    save_project(&mut project, Some(sandbox.target()));
+    let baseline = project.info().saved_revision;
+    pose(&mut project, 4.0);
+    let mut receipt = save(project.capture(), project.storage(), None, &flag(), |_| {}).unwrap();
+    receipt.outcome = PublicationOutcome::OutcomeUnknown;
+    receipt.binding = None;
+    receipt.durability_error = Some(error(
+        ProjectErrorCode::Io,
+        "injected unknown receipt classification",
+    ));
+    project.mark_saved(receipt).unwrap();
+    assert!(project.info().save_uncertain && project.info().dirty);
+    assert_eq!(project.info().saved_revision, baseline);
+    project.undo().unwrap();
+    assert!(project.info().save_uncertain && project.info().dirty);
+    assert_eq!(
+        save(project.capture(), project.storage(), None, &flag(), |_| {})
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::Busy
+    );
+    let loaded = open_reusing(
+        &sandbox.target(),
+        false,
+        false,
+        &flag(),
+        project.storage(),
+        LoadBudgets::MAXIMUM,
+    )
+    .unwrap();
+    let mut reopened = Project::from_loaded(loaded).unwrap();
+    reopened.retain_high_water(&project).unwrap();
+    assert!(reopened.info().save_uncertain && reopened.info().dirty);
+    assert_eq!(reopened.info().saved_revision, baseline);
+    save_project(&mut reopened, None);
+    assert!(!reopened.info().save_uncertain && !reopened.info().dirty);
+}
+
+#[test]
+fn maintenance_preserves_project_and_reader_arcs_and_compact_keeps_two_roots() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    save_project(&mut project, Some(sandbox.target()));
+    for value in [2.0, 3.0, 4.0] {
+        pose(&mut project, value);
+        save_project(&mut project, None);
+    }
+    let reader =
+        Project::from_loaded(open(&sandbox.target(), true, false, &flag()).unwrap()).unwrap();
+    let source = reader
+        .snapshot()
+        .sources
+        .values()
+        .next()
+        .unwrap()
+        .bytes
+        .clone();
+    let info = project.info();
+    let storage = project.storage().unwrap();
+    let before = storage.stats(&flag()).unwrap();
+    assert!(storage.collect_unreachable(&flag(), || false).is_err());
+    assert_eq!(storage.stats(&flag()).unwrap(), before);
+    let after = storage.collect_unreachable(&flag(), || true).unwrap();
+    assert!(after.snapshots < before.snapshots);
+    assert_eq!(project.info(), info);
+    assert_eq!(source.as_slice(), b"immutable STEP source");
+    let copy = sandbox.0.join("compact.spil");
+    let receipt = storage.compact_to_new(&copy, &flag(), |_| {}).unwrap();
+    assert_eq!(receipt.outcome, PublicationOutcome::PublishedConfirmed);
+    assert!(receipt.stats.is_some());
+    assert_eq!(project.info(), info);
+    let original_heads = storage
+        .container
+        .capture(Selection::Current, &flag())
+        .unwrap()
+        .heads;
+    let copy_heads = receipt
+        .storage
+        .container
+        .capture(Selection::Current, &flag())
+        .unwrap()
+        .heads;
+    assert_eq!(original_heads.current(), copy_heads.current());
+    assert_eq!(original_heads.previous(), copy_heads.previous());
+    assert_eq!(
+        open(&copy, true, false, &flag()).unwrap().manifest,
+        project.capture().manifest
+    );
+    assert_eq!(
+        reader
+            .snapshot()
+            .sources
+            .values()
+            .next()
+            .unwrap()
+            .bytes
+            .as_slice(),
+        source.as_slice()
+    );
+    assert!(
+        storage
+            .compact_to_new(storage.path(), &flag(), |_| {})
+            .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn samewriter_symlink_aliases_are_never_reused_for_open_or_save() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    save_project(&mut project, Some(sandbox.target()));
+    let before = project.info();
+    let alias = sandbox.0.join("alias.spil");
+    std::os::unix::fs::symlink(sandbox.target(), &alias).unwrap();
+    let directory_alias = sandbox.0.join("directory-alias");
+    std::os::unix::fs::symlink(&sandbox.0, &directory_alias).unwrap();
+    for path in [alias.clone(), directory_alias.join("project.spil")] {
+        assert!(
+            open_reusing(
+                &path,
+                false,
+                false,
+                &flag(),
+                project.storage(),
+                LoadBudgets::MAXIMUM
+            )
+            .is_err()
+        );
+        assert!(
+            save(
+                project.capture(),
+                project.storage(),
+                Some(path),
+                &flag(),
+                |_| {}
+            )
+            .is_err()
+        );
+        assert_eq!(project.info(), before);
+    }
+    assert!(
+        fs::symlink_metadata(alias)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        open(&sandbox.target(), true, false, &flag())
+            .unwrap()
+            .manifest,
+        project.capture().manifest
+    );
+}
+
+#[test]
+fn unconfirmed_saveas_attaches_target_without_claiming_a_confirmed_saved_revision() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    save_project(&mut project, Some(sandbox.target()));
+    pose(&mut project, 3.0);
+    let target = sandbox.0.join("uncertain-copy.spil");
+    let mut receipt = save(
+        project.capture(),
+        project.storage(),
+        Some(target.clone()),
+        &flag(),
+        |_| {},
+    )
+    .unwrap();
+    receipt.outcome = PublicationOutcome::PublishedUnconfirmed;
+    receipt.durability_error = Some(error(
+        ProjectErrorCode::Io,
+        "injected unconfirmed receipt classification",
+    ));
+    project.mark_saved(receipt).unwrap();
+    assert_eq!(project.storage().unwrap().path(), target);
+    assert!(project.info().save_uncertain && project.info().dirty);
+    assert_eq!(project.info().saved_revision, None);
+    save_project(&mut project, None);
+    assert!(!project.info().save_uncertain && !project.info().dirty);
+    assert_eq!(project.info().saved_revision, Some(project.info().revision));
+}
+
+#[test]
+fn saveas_capture_budget_includes_uncommitted_prepared_source_allocations() {
+    let project = imported();
+    let before = remaining_budgets(&project).unwrap();
+    let incoming = asset(vec![7; MAX_SOURCE_BYTES], "prepared.step");
+    let prepared = project
+        .prepare(Edit::Import {
+            source: incoming.clone(),
+            pose: RigidPoseMm::IDENTITY,
+        })
+        .unwrap();
+    let during = remaining_budgets(&project).unwrap();
+    assert_eq!(
+        before.source_bytes - during.source_bytes,
+        incoming.bytes.capacity()
+    );
+    drop(prepared);
+    assert_eq!(
+        remaining_budgets(&project).unwrap().source_bytes,
+        before.source_bytes
+    );
+}
+
+#[test]
+fn canonical_image_metadata_is_checked_beyond_container_hash_and_role_integrity() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    let bytes = b"P5\n2 3\n255\n\x00\x30\x60\x90\xc0\xff".to_vec();
+    let mut record = image_asset([0, 80, 160, 255], "metadata.png")
+        .record()
+        .clone();
+    record.image_hash = SourceHash::from_bytes(&bytes);
+    record.height = 3;
+    record.byte_count = u64::try_from(bytes.len()).unwrap();
+    add_image(
+        &mut project,
+        Arc::new(SurfaceImageAsset::new(record, bytes).unwrap()),
+    );
+    save_project(&mut project, Some(sandbox.target()));
+    let (root, members) = captured_root(&sandbox.target());
+    let mut manifest = parse_manifest(&root).unwrap();
+    manifest.surface_overlays.images[0].width = 3;
+    manifest.surface_overlays.images[0].height = 2;
+    manifest.validate().unwrap();
+    drop(project);
+    rewrite_current(
+        &sandbox.target(),
+        &serde_json::to_vec(&manifest).unwrap(),
+        &members,
+    );
+    assert_eq!(
+        open(&sandbox.target(), true, false, &flag())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::CorruptAsset
+    );
+}
+
+#[test]
+fn manufacturing_metadata_is_checked_beyond_container_hash_and_role_integrity() {
+    let sandbox = Sandbox::new();
+    let mut project = crate::tests::manufactured();
+    save_project(&mut project, Some(sandbox.target()));
+    let (root, members) = captured_root(&sandbox.target());
+    let mut manifest = parse_manifest(&root).unwrap();
+    manifest.manufacturing_artifact.as_mut().unwrap().byte_count += 1;
+    manifest.validate().unwrap();
+    drop(project);
+    rewrite_current(
+        &sandbox.target(),
+        &serde_json::to_vec(&manifest).unwrap(),
+        &members,
+    );
+    assert_eq!(
+        open(&sandbox.target(), true, false, &flag())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::CorruptAsset
+    );
+}
+
+#[test]
+fn root_parsing_is_strict_without_legacy_or_missing_field_defaults() {
+    let manifest = imported().capture().manifest;
+    let original = serde_json::to_value(&manifest).unwrap();
+    for missing in [
+        "appearance_study",
+        "next_surface_layer",
+        "next_process_layer",
+        "next_process_operation",
+        "manufacturing_intent",
+        "manufacturing_artifact",
+    ] {
+        let mut value = original.clone();
+        value.as_object_mut().unwrap().remove(missing);
+        assert_eq!(
+            parse_manifest(&serde_json::to_vec(&value).unwrap())
+                .unwrap_err()
+                .code,
+            ProjectErrorCode::InvalidProject
+        );
+    }
+    let mut unknown = original.clone();
+    unknown["unknown"] = serde_json::json!(true);
+    assert_eq!(
+        parse_manifest(&serde_json::to_vec(&unknown).unwrap())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::InvalidProject
+    );
+    let duplicate = serde_json::to_string(&manifest)
+        .unwrap()
+        .replace("{", "{\"revision\":1,");
+    assert_eq!(
+        parse_manifest(duplicate.as_bytes()).unwrap_err().code,
+        ProjectErrorCode::InvalidProject
+    );
+    let mut old = original;
+    old["format_version"] = serde_json::json!(5);
+    assert_eq!(
+        parse_manifest(&serde_json::to_vec(&old).unwrap())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::UnsupportedFormat
+    );
+}
+
+#[test]
+fn empty_project_has_a_complete_first_snapshot_and_zero_saved_revision() {
+    let sandbox = Sandbox::new();
+    let mut project = Project::new();
+    save_project(&mut project, Some(sandbox.target()));
+    assert_eq!(project.info().saved_revision, Some(ProjectRevision::ZERO));
+    drop(project);
+    let reopened =
+        Project::from_loaded(open(&sandbox.target(), false, false, &flag()).unwrap()).unwrap();
+    assert!(!reopened.info().dirty);
+    assert!(reopened.snapshot().sources.is_empty());
+    assert_eq!(reopened.info().saved_revision, Some(ProjectRevision::ZERO));
 }

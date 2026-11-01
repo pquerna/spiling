@@ -88,6 +88,7 @@ B0 establishes contracts and a shared `crates/engine-client` used by the CLI and
 | `crates/contracts/`                            | IDs, revisions, commands, events, errors, manifest schemas                               |
 | `crates/engine-client/`                        | Shared protocol client, child-process lifecycle, request deadlines                       |
 | `crates/core/`                                 | Project transactions, undo, persistence/recovery, artifacts, jobs                        |
+| `crates/core-ptac/`                            | Closed SQLite container, checked immutable objects, filesystem admission and publication |
 | `crates/geometry/`                             | Kernel adapter, import, tessellation, sections, capability contract                      |
 | `crates/surface-fields/`                       | Bounded image normalization and shared source-frame scalar-grid evaluation               |
 | `crates/appearance/`                           | D65 colorimetry, bounded palette matching and optical reference construction studies     |
@@ -100,7 +101,7 @@ B0 establishes contracts and a shared `crates/engine-client` used by the CLI and
 Dependencies flow inward:
 
 - Contracts have no desktop runtime, kernel or renderer dependencies.
-- Core depends on contracts; geometry depends on contracts and SolidCore through its kernel adapter.
+- Core depends on contracts and core-ptac. Core-ptac owns container bytes and publication, with no domain, engine or kernel dependency; Core owns semantic admission. Geometry depends on contracts and SolidCore through its kernel adapter.
 - Surface-fields depends on contracts, not Core, geometry, renderer or planner. Core owns canonical immutable image storage; engine enables the optional image codec; manufacturing consumes borrowed scalar fields and geometry services. Engine composes these services with Core.
 - Appearance depends only on contracts: no Core, kernel, manufacturing, UI or GPU dependency. Core owns immutable original/canonical palettes, prepared identity caches and Arc-owned studies/reports; engine composes typed Projects/Operations/ByteStream for engine-client and CLI. Named reference-model math stays separate from unclipped target colorimetry and does not confer calibration or routing authority. See [appearance contracts](docs/protocol/project.md#optical-reference-construction-studies).
 - Shell and CLI are protocol clients, not owners of geometry or planning logic.
@@ -117,7 +118,7 @@ Keep backend, packager, connector interfaces, and verifier as distinct logical m
 - Mutations carry base revisions. Jobs carry input revisions and cancellation. Stale results may populate immutable caches but cannot replace the active plan or preview.
 - BREP geometry, units, frames, tolerances, and source identity remain authoritative. Display meshes are disposable approximations with declared bounds.
 - No kernel object or pointer crosses IPC. Session handles expire on engine restart; persistent references identify immutable assets and revisions.
-- Persistence uses a versioned manifest, immutable assets, content-addressed derived artifacts, and bounded recovery checkpoints. Commit validates references; save writes assets before atomic manifest replacement with platform-appropriate durability.
+- Persistence uses a `.spil` PTAC SQLite container with a strict typed root, exact-byte immutable objects, current/previous saved snapshots and an independent allocator guard. Core validates domain closure; core-ptac owns guarded SQLite/OS admission and atomic publication. No legacy project-storage compatibility is supported.
 - Undo/redo is bounded session transaction history; save does not clear it. Camera and playback state are outside project undo. A drag commits once on release.
 - Recovery yields a complete committed state, never a mixed manifest. Restart never automatically replays printer operations.
 

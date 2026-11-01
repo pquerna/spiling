@@ -66,7 +66,11 @@ impl Runtime {
             ));
         }
         if self.active.as_ref().is_some_and(|active| {
-            active.deciding || matches!(active.purpose, Purpose::Open | Purpose::Save)
+            active.deciding
+                || matches!(
+                    active.purpose,
+                    Purpose::Open | Purpose::Save | Purpose::StorageMaintenance
+                )
         }) {
             return Err(ManufacturingError::new(
                 ManufacturingErrorCode::Busy,
