@@ -185,6 +185,7 @@ pub enum Picker {
     Import,
     Intent,
     Material,
+    MaterialCatalog,
     Export,
     Image,
 }
@@ -199,6 +200,7 @@ impl Picker {
             Self::Image => "Import height image PNG or canonical PGM",
             Self::Intent => "Load inert manufacturing intent JSON",
             Self::Material => "Select material and setup profile JSON",
+            Self::MaterialCatalog => "Browse material catalog JSON",
             Self::Export => "Choose a new manufacturing export directory name",
         }
     }
@@ -219,6 +221,7 @@ enum Action {
     Import(NativePath),
     LoadIntent(NativePath),
     LoadMaterial(NativePath),
+    LoadMaterialCatalog(NativePath),
     ImportImage {
         source: NativePath,
         request: Box<crate::assets::ImageRequest>,
@@ -239,6 +242,7 @@ impl Action {
             Self::ImportImage { .. } => "Import image and apply relief",
             Self::LoadIntent(_) => "Load manufacturing intent",
             Self::LoadMaterial(_) => "Load material profile",
+            Self::LoadMaterialCatalog(_) => "Load material catalog",
             Self::Export(_) => "Export verified program",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
@@ -358,6 +362,9 @@ impl Host {
         if let ManufacturingCommand::ApplyMaterialProfile { selection, .. } = &command {
             selection.validate().map_err(|e| e.to_string())?;
         }
+        if let ManufacturingCommand::ReviewMaterials { request, .. } = &command {
+            request.validate().map_err(|e| e.to_string())?;
+        }
         if serde_json::to_vec(&command)
             .map_err(|e| e.to_string())?
             .len()
@@ -423,7 +430,11 @@ impl Host {
             Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>,
         > = if matches!(
             picker,
-            Picker::Import | Picker::Intent | Picker::Material | Picker::Image
+            Picker::Import
+                | Picker::Intent
+                | Picker::Material
+                | Picker::MaterialCatalog
+                | Picker::Image
         ) {
             // Both branches return different opaque future types, so erase only this OS boundary.
             Box::pin(
@@ -433,6 +444,8 @@ impl Host {
                             "STEP"
                         } else if picker == Picker::Image {
                             "Height image PNG / PGM"
+                        } else if picker == Picker::MaterialCatalog {
+                            "Material catalog JSON"
                         } else if picker == Picker::Material {
                             "Material profile selection JSON"
                         } else {
@@ -516,6 +529,7 @@ fn selected_action(picker: Picker, path: &std::path::Path) -> Result<Action, Str
         Picker::Import => Action::Import(path),
         Picker::Intent => Action::LoadIntent(path),
         Picker::Material => Action::LoadMaterial(path),
+        Picker::MaterialCatalog => Action::LoadMaterialCatalog(path),
         Picker::Export => Action::Export(path),
         Picker::Image => {
             return Err("Height image selection requires captured mapping intent".into());
@@ -967,6 +981,7 @@ impl Actor {
         {
             m.loaded = None;
             m.loaded_material = None;
+            m.loaded_catalog = None;
         }
         m.revision = Some((project.project_id.clone(), project.revision));
         m.intent = intent;
@@ -1254,7 +1269,10 @@ impl Actor {
         }
         if matches!(
             action,
-            Action::LoadIntent(_) | Action::LoadMaterial(_) | Action::Export(_)
+            Action::LoadIntent(_)
+                | Action::LoadMaterial(_)
+                | Action::LoadMaterialCatalog(_)
+                | Action::Export(_)
         ) {
             self.file_action(action).await;
             return;
@@ -1354,6 +1372,7 @@ impl Actor {
             | Action::Restart
             | Action::LoadIntent(_)
             | Action::LoadMaterial(_)
+            | Action::LoadMaterialCatalog(_)
             | Action::Export(_)
             | Action::ImportImage { .. } => {
                 unreachable!()

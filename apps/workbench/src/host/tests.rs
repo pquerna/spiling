@@ -1363,7 +1363,12 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
             },
         }
     });
-    let report = reviewed.manufacturing.material_review.as_ref().unwrap();
+    let report = &reviewed
+        .manufacturing
+        .material_review
+        .as_ref()
+        .unwrap()
+        .report;
     assert_eq!(report.input_revision, accepted_revision);
     assert_eq!(
         reviewed.project.as_ref().unwrap().revision,
@@ -1468,4 +1473,204 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     assert_eq!(reopened.manufacturing.intent.as_deref(), Some(&draft));
     send(&host, Action::Close);
     wait(&host, |s| s.phase == Phase::Closed);
+}
+
+#[test]
+#[ignore = "actual supervised material catalog engine; requires SPILING_TEST_ENGINE"]
+fn catalog_review_is_nonmutating_bound_and_available_read_only() {
+    use spiling_contracts::manufacturing::*;
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("ops"),
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&host, |s| s.phase == Phase::Running);
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/manufacturing");
+    let intent =
+        decode_intent(&std::fs::read(fixtures.join("complete-sparse.intent.json")).unwrap())
+            .unwrap();
+    let before = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::SetIntent {
+            session_id,
+            base_revision,
+            intent: Arc::new(intent),
+        }
+    });
+    let selection: MaterialProfileSelection =
+        serde_json::from_slice(&std::fs::read(fixtures.join("material-profile-a.json")).unwrap())
+            .unwrap();
+    let catalog = MaterialCatalog {
+        setup: selection.setup.clone(),
+        profiles: (0..6)
+            .map(|i| {
+                let mut profile = selection.profile.clone();
+                profile.id = format!("catalog-{i}");
+                if i == 5 {
+                    profile.printer_revision = "incompatible-printer".into();
+                }
+                profile
+            })
+            .collect(),
+    };
+    let path = root.path().join("Matériaux Ω.json");
+    std::fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    let loaded = send(&host, Action::LoadMaterialCatalog(native(&path)));
+    assert_eq!(
+        loaded.project.as_ref().unwrap().revision,
+        before.project.as_ref().unwrap().revision
+    );
+    assert_eq!(loaded.manufacturing.intent, before.manufacturing.intent);
+    assert_eq!(
+        loaded.manufacturing.loaded_catalog.as_ref().unwrap().label,
+        "Matériaux Ω.json"
+    );
+    let invalid = root.path().join("invalid-catalog.json");
+    std::fs::write(&invalid, b"{unexpected}").unwrap();
+    let failed = send(&host, Action::LoadMaterialCatalog(native(&invalid)));
+    assert_eq!(
+        failed
+            .manufacturing
+            .loaded_catalog
+            .as_ref()
+            .unwrap()
+            .catalog
+            .as_ref(),
+        &catalog
+    );
+    assert_eq!(
+        failed.project.as_ref().unwrap().revision,
+        loaded.project.as_ref().unwrap().revision
+    );
+    assert!(!failed.problems.is_empty());
+    host.command(Command::DismissProblems).unwrap();
+    idle_after(&host, failed.serial);
+    let reviewed = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::ReviewMaterials {
+            session_id,
+            base_revision,
+            request: MaterialReviewRequest {
+                catalog: Some(catalog.clone()),
+                query: "catalog".into(),
+                offset: 0,
+            },
+        }
+    });
+    let review = reviewed.manufacturing.material_review.as_ref().unwrap();
+    assert!(review.current(
+        reviewed.project.as_ref().unwrap(),
+        &reviewed.hello.as_ref().unwrap().session_id
+    ));
+    assert_eq!(review.request.catalog.as_ref(), Some(&catalog));
+    assert_eq!(review.report.matching_profiles, 6);
+    assert_eq!(review.report.candidates.len(), MATERIAL_REVIEW_PAGE_SIZE);
+    assert_eq!(
+        reviewed.project.as_ref().unwrap().revision,
+        before.project.as_ref().unwrap().revision
+    );
+    assert_eq!(reviewed.manufacturing.intent, before.manufacturing.intent);
+    let candidate = review.report.candidates[0].clone();
+    assert!(candidate.issues.is_empty());
+    assert_eq!(candidate.settings.len(), MaterialSettingField::ALL.len());
+    let last = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::ReviewMaterials {
+            session_id,
+            base_revision,
+            request: MaterialReviewRequest {
+                catalog: Some(catalog.clone()),
+                query: "catalog".into(),
+                offset: MATERIAL_REVIEW_PAGE_SIZE as u32,
+            },
+        }
+    });
+    let report = &last.manufacturing.material_review.as_ref().unwrap().report;
+    assert_eq!(report.candidates.len(), 2);
+    assert!(!report.candidates[1].issues.is_empty());
+    assert_eq!(report.candidates[1].input_changed, None);
+    assert!(report.candidates[1].settings.is_empty());
+    let applied = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::ApplyMaterialProfile {
+            session_id,
+            base_revision,
+            selection: candidate.selection,
+        }
+    });
+    assert!(applied.problems.is_empty(), "{:?}", applied.problems);
+    assert_eq!(
+        applied.project.as_ref().unwrap().revision.0,
+        before.project.as_ref().unwrap().revision.0 + 1
+    );
+    assert!(applied.manufacturing.material_review.is_none());
+    assert!(!review.current(
+        applied.project.as_ref().unwrap(),
+        &applied.hello.as_ref().unwrap().session_id
+    ));
+    assert!(applied.manufacturing.loaded_catalog.is_some());
+    host.manufacturing(ManufacturingCommand::ReviewMaterials {
+        session_id: applied.hello.as_ref().unwrap().session_id.clone(),
+        base_revision: review.report.input_revision,
+        request: (*review.request).clone(),
+    })
+    .unwrap();
+    let stale = idle_after(&host, applied.serial);
+    assert!(!stale.problems.is_empty());
+    assert!(stale.manufacturing.material_review.is_none());
+    assert_eq!(
+        stale.project.as_ref().unwrap().revision,
+        applied.project.as_ref().unwrap().revision
+    );
+    host.command(Command::DismissProblems).unwrap();
+    idle_after(&host, stale.serial);
+    let saved = send(
+        &host,
+        Action::Save {
+            target: Some(native(&root.path().join("captured"))),
+        },
+    );
+    assert!(!saved.project.as_ref().unwrap().dirty);
+    let old_session = saved.hello.as_ref().unwrap().session_id.clone();
+    let restarted = send(&host, Action::Restart);
+    assert_ne!(restarted.hello.as_ref().unwrap().session_id, old_session);
+    assert!(restarted.manufacturing.loaded_catalog.is_none());
+    assert!(restarted.manufacturing.material_review.is_none());
+    assert_eq!(restarted.manufacturing.intent, applied.manufacturing.intent);
+    let opened = send(
+        &host,
+        Action::Open {
+            path: native(&root.path().join("captured")),
+            read_only: true,
+            recover_previous: false,
+        },
+    );
+    assert!(opened.project.as_ref().unwrap().read_only);
+    assert!(
+        crate::commands::Action::LoadMaterialCatalog
+            .disabled(&opened)
+            .is_none()
+    );
+    std::fs::remove_file(&path).unwrap();
+    let readonly = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::ReviewMaterials {
+            session_id,
+            base_revision,
+            request: MaterialReviewRequest {
+                catalog: None,
+                query: String::new(),
+                offset: 0,
+            },
+        }
+    });
+    let current = readonly.manufacturing.material_review.as_ref().unwrap();
+    assert!(current.current(
+        readonly.project.as_ref().unwrap(),
+        &readonly.hello.as_ref().unwrap().session_id
+    ));
+    assert_eq!(current.report.candidates[0].input_changed, Some(false));
+    assert_eq!(readonly.manufacturing.intent, applied.manufacturing.intent);
+    assert!(!readonly.project.as_ref().unwrap().dirty);
+    assert!(readonly.problems.is_empty(), "{:?}", readonly.problems);
+    assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
 }

@@ -163,9 +163,12 @@ selection) and resets the offset; `--material-page OFFSET` reviews another page;
 applies an issue-free candidate from the latest reviewed page using that report's
 revision. Selection requires writable mode. Other review operations allow
 read-only inspection and retain revision/preview freshness in the JSON report.
-A saved selection can be inspected after source/catalog deletion. Foreign slicer
-preset translation, bundled production libraries and native library browsing are
-not supplied by this typed catalog format.
+A saved selection can be inspected after source/catalog deletion. The native
+workbench loads bounded catalog JSON through a parented picker, consumes engine
+search and compatibility reports, and stages a selected profile for explicit
+Apply. Review remains available read-only and without the original catalog.
+Foreign slicer preset translation and bundled production libraries are not
+supplied by this typed catalog format.
 
 `pnpm test:materials` exercises declaration discovery, search/pagination,
 nonmutation, effective-value origins, rejected incompatible/stale selections,

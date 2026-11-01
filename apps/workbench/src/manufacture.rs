@@ -28,6 +28,28 @@ pub struct LoadedMaterial {
     pub selection: MaterialProfileSelection,
 }
 #[derive(Debug, Clone)]
+pub struct LoadedCatalog {
+    pub nonce: u64,
+    pub label: String,
+    pub project: spiling_contracts::project::ProjectId,
+    pub session: SessionId,
+    pub catalog: Arc<MaterialCatalog>,
+}
+#[derive(Debug, Clone)]
+pub struct MaterialReview {
+    pub project: spiling_contracts::project::ProjectId,
+    pub session: SessionId,
+    pub request: Arc<MaterialReviewRequest>,
+    pub report: MaterialReviewReport,
+}
+impl MaterialReview {
+    pub fn current(&self, project: &ProjectInfo, session: &SessionId) -> bool {
+        self.project == project.project_id
+            && self.session == *session
+            && self.report.input_revision == project.revision
+    }
+}
+#[derive(Debug, Clone)]
 pub struct Capture {
     pub nonce: u64,
     pub session: SessionId,
@@ -56,8 +78,9 @@ pub struct State {
     pub resource: Option<ArtifactView>,
     pub loaded: Option<Arc<LoadedIntent>>,
     pub loaded_material: Option<Arc<LoadedMaterial>>,
+    pub loaded_catalog: Option<Arc<LoadedCatalog>>,
     pub preflight: Option<Arc<PreflightReport>>,
-    pub material_review: Option<Arc<MaterialReviewReport>>,
+    pub material_review: Option<Arc<MaterialReview>>,
     pub capture: Option<Arc<Capture>>,
     pub review: Option<Arc<Review>>,
     pub retired_display_bytes: usize,
@@ -130,6 +153,13 @@ pub fn read_material(path: &NativePath) -> Result<(MaterialProfileSelection, Str
         .map_err(|e| format!("Invalid material profile selection: {e}"))?;
     selection.validate().map_err(|e| e.to_string())?;
     Ok((selection, label))
+}
+pub fn read_catalog(path: &NativePath) -> Result<(Arc<MaterialCatalog>, String), String> {
+    let (bytes, label) = read_declaration(path)?;
+    let catalog: MaterialCatalog =
+        serde_json::from_slice(&bytes).map_err(|e| format!("Invalid material catalog: {e}"))?;
+    catalog.validate().map_err(|e| e.to_string())?;
+    Ok((Arc::new(catalog), label))
 }
 pub async fn check_current(rpc: &EngineRpc, capture: &Capture) -> Result<(), ClientError> {
     capture.provenance.validate_for_record(&capture.record)?;

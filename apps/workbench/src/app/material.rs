@@ -13,6 +13,7 @@ pub(super) struct MaterialUi {
     identity: Option<(ProjectId, SessionId)>,
     ignored_nonce: Option<u64>,
     draft: Option<MaterialDraft>,
+    catalog: catalog::CatalogUi,
 }
 struct MaterialDraft {
     revision: ProjectRevision,
@@ -60,7 +61,7 @@ impl MaterialUi {
     }
 }
 impl Workbench {
-    pub(super) fn material_ui(&mut self, ui: &mut egui::Ui, writable: bool) {
+    pub(super) fn material_ui(&mut self, ui: &mut egui::Ui, ready: bool, writable: bool) {
         let (Some(project), Some(hello)) = (self.state.project.clone(), self.state.hello.clone())
         else {
             return;
@@ -79,14 +80,19 @@ impl Workbench {
             captured,
         );
         ui.heading("Material and setup");
-        self.button(ui, Action::LoadMaterial);
+        self.button(ui, Action::LoadMaterialCatalog);
+        ui.collapsing("Load a single profile", |ui| {
+            self.button(ui, Action::LoadMaterial);
+        });
+        self.catalog_ui(ui, &project, &hello.session_id, ready);
+
         let pending_intent =
             m.loaded.is_some() || self.manufacturing.has_intent_draft(&project.project_id);
         if pending_intent {
             ui.weak("Apply or reload the full intent draft before applying a material profile.");
         }
         let Some(d) = &mut self.material.draft else {
-            ui.weak("Select an explicit profile JSON. No material or setup is inferred.");
+            ui.weak("Browse a material catalog or load an explicit profile. No material or setup is inferred.");
             return;
         };
         if let Some(l) = &m.loaded_material
@@ -423,3 +429,5 @@ mod tests {
         assert_eq!(state.draft.as_ref().unwrap().value, captured);
     }
 }
+
+mod catalog;

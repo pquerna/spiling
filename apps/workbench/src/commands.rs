@@ -15,6 +15,7 @@ pub enum Action {
     Import,
     LoadIntent,
     LoadMaterial,
+    LoadMaterialCatalog,
     Preflight,
     Compile,
     Verify,
@@ -41,6 +42,7 @@ impl Action {
         Self::Redo,
         Self::LoadIntent,
         Self::LoadMaterial,
+        Self::LoadMaterialCatalog,
         Self::Preflight,
         Self::Compile,
         Self::Verify,
@@ -63,6 +65,7 @@ impl Action {
             Self::Import => "Import STEP…",
             Self::LoadIntent => "Load intent JSON…",
             Self::LoadMaterial => "Load material profile…",
+            Self::LoadMaterialCatalog => "Browse material catalog…",
             Self::Preflight => "Preflight current inputs",
             Self::Compile => "Compile current inputs",
             Self::Verify => "Fresh Verify and load motion",
@@ -120,7 +123,7 @@ impl Action {
         }
         let m = &state.manufacturing;
         match self {
-            Self::LoadMaterial
+            Self::LoadMaterial | Self::LoadMaterialCatalog
                 if !m.intent.as_ref().is_some_and(|i| {
                     matches!(
                         i.printer.workflow,

@@ -191,6 +191,7 @@ impl Workbench {
             Action::Import => host.choose(frame, ctx, Picker::Import),
             Action::LoadIntent => host.choose(frame, ctx, Picker::Intent),
             Action::LoadMaterial => host.choose(frame, ctx, Picker::Material),
+            Action::LoadMaterialCatalog => host.choose(frame, ctx, Picker::MaterialCatalog),
             Action::Export => host.choose(frame, ctx, Picker::Export),
             Action::Preflight | Action::Compile | Action::Verify => {
                 use spiling_contracts::manufacturing::{ManufacturingCommand, VerificationOutput};
@@ -589,6 +590,7 @@ impl eframe::App for Workbench {
                     for action in [
                         Action::LoadIntent,
                         Action::LoadMaterial,
+                        Action::LoadMaterialCatalog,
                         Action::Preflight,
                         Action::Compile,
                         Action::Verify,

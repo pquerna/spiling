@@ -83,15 +83,26 @@ needs no original catalog. `pnpm test:materials` exercises the real engine/CLI,
 independent commands, rejected/stale choices and recovery; it honors
 `CARGO_TARGET_DIR`. See the [material review contract](../protocol/manufacturing.md#material-discovery-and-process-review).
 
-Prepare selects bounded inert material/setup profile JSON through a parented native
-picker. Loading is transient; **Apply material profile** uses the existing engine
-transaction. Explicit temperature, speed, flow and whole-process overrides retain
-their provenance separately from profile values. Selected setup and source remain inspectable; **Applied engine values** shows
-the committed process values and effective machine/material flow ceiling. Conflicting
-or stale edits retain their drafts; **Reload captured profile** explicitly discards
-them. Material-bound recipe fields are edited through these overrides. Complete
-single-tool Marlin intent is required; synthetic declarations and imported
-recommendations are not calibration.
+Prepare's **Browse material catalog…** uses a parented native picker for a bounded
+inert catalog. **Search catalog** asks the engine for a four-entry page; search and
+pagination never mutate the project. Select an entry to inspect incompatibility
+reasons or current/proposed thermal, speed, flow and process settings. Expand
+**All process settings and origins** for the resolved values and winning limits.
+**Use this profile** stages that reviewed selection in the existing material editor;
+**Apply material profile** commits through the ordinary engine transaction. Search
+results bind the project/session, input revision and exact catalog/query/page.
+Edits invalidate comparisons; search again against the new revision. Read-only
+projects allow catalog/current-setting review but cannot apply selections.
+
+**Load a single profile** retains the explicit profile/setup JSON route. Explicit
+temperature, speed, flow and whole-process overrides keep their own provenance;
+catalog comparisons show profile defaults, not proposed overrides. **Review captured
+settings** inspects the committed overrides and effective limits through the engine.
+Selected setup/source and **Applied engine values** remain inspectable. Conflicting
+or stale edits retain their drafts; **Reload captured profile** discards them.
+Material-bound recipe fields have one editor. Complete single-tool Marlin intent
+is required; declarations and imported recommendations are not calibration. The
+saved selection is self-contained; catalogs are transient, not persisted authority.
 Review switches between actual centerlines and nominal bead surfaces, with layer,
 event, role and tool filters. Visible width/height ranges follow the current
 selection; cached statistics bind the immutable display identity. A layer schedule
@@ -188,15 +199,18 @@ save, close/reap, delete only the owned external STEP copy, reopen read-only in 
 fresh engine, then freshly Verify/replay/export again. Compare program bytes and
 captured identities. This is software workflow evidence, never machine readiness.
 
-For native material acceptance, load a matching explicit single-tool intent, select
-a profile/setup JSON through **Load material profile…**, and inspect its source
-and hardware declarations before Apply. Enable a temperature/speed override,
-apply and inspect **Applied engine values**; Undo/Redo must restore the complete
-capture. Attempt an incompatible profile and a stale draft: neither may replace
-the committed intent. Save, close/reap, remove only the owned external profile,
-reopen and inspect the captured values, then Preflight/Compile/freshly Verify and
-exclusively export. Compare emitted bytes and captured values with the CLI on
-that saved project. Clearing an override restores inheritance only after Apply.
+For native material acceptance, open an admitted mechanical job with a matching
+explicit single-tool intent. Use **Browse material catalog…** and the parented picker,
+search/page through declarations and inspect a compatible entry's proposed changes
+and an incompatible entry's reasons. Stage the compatible profile, inspect its
+setup/source, Apply and compile/freshly Verify; Undo/Redo must invalidate review and
+restore the complete capture. Exercise **Review captured settings**, including a
+temperature/speed override and winning flow/bead limits. Rejected loads and stale
+drafts must retain the committed intent. Save, close/reap, remove only owned external
+source/catalog/profile copies, reopen and inspect captured values, then
+Preflight/Compile/freshly Verify and exclusively export. Compare all four artifacts
+with fresh CLI inspection of the saved project. Read-only inspection allows review
+but disables Apply; clearing an override restores inheritance only after Apply.
 
 The host separates request acknowledgements from background display publications.
 Review/export workers retain captured identities and recheck the active record;

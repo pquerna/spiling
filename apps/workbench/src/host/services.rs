@@ -70,6 +70,18 @@ impl Actor {
                 | ManufacturingCommand::ApplyMaterialProfile { .. }
         );
         let material = matches!(&command, ManufacturingCommand::ApplyMaterialProfile { .. });
+        let review_request = match &command {
+            ManufacturingCommand::ReviewMaterials {
+                session_id,
+                base_revision,
+                request,
+            } => Some((
+                session_id.clone(),
+                *base_revision,
+                Arc::new(request.clone()),
+            )),
+            _ => None,
+        };
         let result = self
             .client
             .as_ref()
@@ -91,8 +103,29 @@ impl Actor {
                 self.refresh_after_failure().await;
             }
             Ok(ManufacturingResponse::MaterialReview { report }) => {
-                Arc::make_mut(&mut self.state.manufacturing).material_review =
-                    Some(Arc::new(report))
+                if let Some((session, revision, request)) = review_request
+                    && let Some(project) = &self.state.project
+                    && self
+                        .state
+                        .hello
+                        .as_ref()
+                        .is_some_and(|h| h.session_id == session)
+                    && project.revision == revision
+                    && report.input_revision == revision
+                    && report.query == request.query
+                    && report.offset == request.offset
+                {
+                    Arc::make_mut(&mut self.state.manufacturing).material_review =
+                        Some(Arc::new(manufacture::MaterialReview {
+                            project: project.project_id.clone(),
+                            session,
+                            request,
+                            report,
+                        }));
+                    self.state.message = "Material review ready; project unchanged".into();
+                } else {
+                    self.problem("Material review no longer matches the current project/request");
+                }
             }
             Ok(ManufacturingResponse::Preflight { report }) => {
                 Arc::make_mut(&mut self.state.manufacturing).preflight = Some(Arc::new(report))
@@ -241,6 +274,32 @@ impl Actor {
                         self.state.message =
                             "Material profile loaded for review; Apply commits through the engine"
                                 .into();
+                    }
+                    Ok(Err(error)) => self.problem(error),
+                    Err(error) => self.problem(error.to_string()),
+                }
+            }
+            Action::LoadMaterialCatalog(path) => {
+                let Some(project) = self.state.project.clone() else {
+                    return;
+                };
+                let Some(hello) = self.state.hello.clone() else {
+                    return;
+                };
+                match tokio::task::spawn_blocking(move || manufacture::read_catalog(&path)).await {
+                    Ok(Ok((catalog, label))) => {
+                        self.nonce += 1;
+                        let m = Arc::make_mut(&mut self.state.manufacturing);
+                        m.loaded_catalog = Some(Arc::new(manufacture::LoadedCatalog {
+                            nonce: self.nonce,
+                            label,
+                            project: project.project_id.clone(),
+                            session: hello.session_id.clone(),
+                            catalog,
+                        }));
+                        m.material_review = None;
+                        self.state.message =
+                            "Catalog loaded; Search reviews declarations through the engine".into();
                     }
                     Ok(Err(error)) => self.problem(error),
                     Err(error) => self.problem(error.to_string()),
