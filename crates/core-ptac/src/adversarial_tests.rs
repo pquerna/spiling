@@ -1206,19 +1206,6 @@ fn subprocess_worker() {
     #[cfg(target_os = "linux")]
     if mode == "stage-emfile" {
         let parent = crate::storage_os::Parent::open(&path).unwrap();
-        let highest = fs::read_dir("/proc/self/fd")
-            .unwrap()
-            .map(|entry| {
-                entry
-                    .unwrap()
-                    .file_name()
-                    .to_str()
-                    .unwrap()
-                    .parse::<u64>()
-                    .unwrap()
-            })
-            .max()
-            .unwrap();
         let mut original = libc::rlimit {
             rlim_cur: 0,
             rlim_max: 0,
@@ -1228,17 +1215,40 @@ fn subprocess_worker() {
             0
         );
         let limited = libc::rlimit {
-            rlim_cur: highest + 3,
+            rlim_cur: original.rlim_cur.min(64),
             rlim_max: original.rlim_max,
         };
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limited) }, 0);
+        // Cargo and launchers can leave sparse inherited descriptors. A maximum
+        // descriptor number cannot establish how many open slots remain. Fill
+        // the bounded table, then leave exactly two slots: staging can create
+        // its directory, but cannot attach its complete ancestor chain.
+        let mut occupied = Vec::new();
+        loop {
+            match fs::File::open("/dev/null") {
+                Ok(file) => occupied.push(file),
+                Err(error) => {
+                    assert_eq!(error.raw_os_error(), Some(libc::EMFILE));
+                    break;
+                }
+            }
+        }
+        assert!(
+            occupied.len() >= 2,
+            "descriptor fixture needs two free slots"
+        );
+        drop(occupied.pop());
+        drop(occupied.pop());
         let result = crate::storage_os::Stage::new(&parent);
         assert_eq!(
             unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &original) },
             0
         );
+        drop(occupied);
         assert!(
-            matches!(result, Err(Error::Io(ref error)) if error.raw_os_error() == Some(libc::EMFILE))
+            matches!(&result, Err(Error::Io(error)) if error.raw_os_error() == Some(libc::EMFILE)),
+            "staging attachment must exhaust descriptors, got {:?}",
+            result.as_ref().map(|_| ())
         );
         assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
         drop(crate::storage_os::Stage::new(&parent).unwrap());
