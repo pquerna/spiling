@@ -77,6 +77,10 @@ enum OpticalChoice {
     reason = "Bounded ordered controls retain complete recipe operands inline without per-operation boxing"
 )]
 enum Operation {
+    StockMatch(spiling_contracts::stock::StockQuery),
+    StockKeepPair(usize, String),
+    StockKeepSingle(usize),
+    StockStudy,
     StorageMaintenance(StorageMaintenanceAction, Option<NativePath>),
     AppearancePalette(NativePath),
     AppearanceTarget(AppearanceTarget),
@@ -233,6 +237,23 @@ pub fn parse(
     let mut inspections = Vec::new();
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--stock-match") => {
+                let query = appearance_json::<spiling_contracts::stock::StockQuery>(
+                    &mut args,
+                    "--stock-match",
+                )?;
+                query.validate()?;
+                operations.push(Operation::StockMatch(query));
+            }
+            Some("--stock-keep-recipe") => {
+                let index = text(&mut args, "--stock-keep-recipe index")?.parse::<usize>()?;
+                let name = text(&mut args, "--stock-keep-recipe name")?;
+                operations.push(Operation::StockKeepPair(index, name));
+            }
+            Some("--stock-keep-filament") => operations.push(Operation::StockKeepSingle(
+                text(&mut args, "--stock-keep-filament index")?.parse::<usize>()?,
+            )),
+            Some("--stock-study") => operations.push(Operation::StockStudy),
             Some("--optical-study") => {
                 operations.push(Operation::OpticalStudy(optical_json(&mut args)?))
             }
@@ -711,6 +732,7 @@ pub fn parse(
                         | Operation::ExportReplay
                         | Operation::ExportSurfaceImage(_)
                         | Operation::ProcessResolve(_)
+                        | Operation::StockMatch(_)
                         | Operation::AppearanceCompare
                         | Operation::AppearanceReport
                         | Operation::OpticalCompare
@@ -1132,12 +1154,150 @@ async fn execute(
     let mut optical_comparison: Option<(ProjectRevision, OpticalReportRecord, OpticalReport)> =
         None;
     let mut optical_evidence = Vec::new();
+    let mut stock_comparison: Option<(
+        ProjectId,
+        ProjectRevision,
+        spiling_contracts::stock::StockMatchReport,
+    )> = None;
+    let mut stock_saved = None;
+    let mut stock_evidence = Vec::new();
     for operation in workflow.operations {
         let base_revision = geometry::scene(client, &session).await?.revision;
         let label;
         let mut process_resolution = None;
         let mut storage_maintenance = None;
         match operation {
+            Operation::StockMatch(query) => {
+                label = "stock_match";
+                let captured = info(client).await?;
+                let ProjectResponse::OperationAccepted { operation } = client
+                    .project(ProjectCommand::MatchStock {
+                        session_id: session.clone(),
+                        base_revision: captured.revision,
+                        query: query.clone(),
+                    })
+                    .await?
+                else {
+                    return Err("stock search did not return an operation".into());
+                };
+                let JobResult::StockMatched {
+                    project_id,
+                    captured_revision,
+                    record,
+                    resource,
+                } = geometry::wait_operation(client, &session, operation).await?
+                else {
+                    return Err("stock search result missing".into());
+                };
+                if project_id != captured.project_id || captured_revision != captured.revision {
+                    return Err("stock search project capture differs".into());
+                }
+                let report = client.rpc().fetch_stock_report(&record, &resource).await?;
+                if report.query != query {
+                    return Err("stock search query differs".into());
+                }
+                stock_evidence.push(serde_json::to_value(&report)?);
+                stock_comparison = Some((project_id, captured_revision, report));
+                stock_saved = None;
+            }
+            Operation::StockKeepPair(index, name) => {
+                label = "stock_keep_recipe";
+                let captured = info(client).await?;
+                let (project, revision, report) = stock_comparison
+                    .as_ref()
+                    .ok_or("search stock before keeping a recipe")?;
+                if project != &captured.project_id || *revision != captured.revision {
+                    return Err("stock results are stale; search again".into());
+                }
+                let pair = report
+                    .pairs
+                    .get(index)
+                    .ok_or("stock recipe index is absent")?;
+                let mut filaments = Vec::with_capacity(2);
+                for n in pair.candidates {
+                    filaments.push(
+                        client
+                            .rpc()
+                            .stock_filament(report, usize::from(n), &session, *revision)
+                            .await?,
+                    );
+                }
+                let transfer = report.recipe(
+                    index,
+                    spiling_contracts::library::RecipeId(uuid::Uuid::new_v4().to_string()),
+                    name,
+                    filaments,
+                )?;
+                stock_saved = Some((
+                    transfer.recipe.reference(),
+                    spiling_contracts::library::RecipeStudyContext {
+                        patch: report.query.patch,
+                        cycle_origin_z_mm: report.query.patch.origin_mm[2],
+                    },
+                ));
+                let response = client
+                    .project(ProjectCommand::PutRecipe {
+                        session_id: session.clone(),
+                        base_revision: *revision,
+                        transfer,
+                        expected: None,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
+            Operation::StockKeepSingle(index) => {
+                label = "stock_keep_filament";
+                let captured = info(client).await?;
+                let (project, revision, report) = stock_comparison
+                    .as_ref()
+                    .ok_or("search stock before keeping a filament")?;
+                if project != &captured.project_id || *revision != captured.revision {
+                    return Err("stock results are stale; search again".into());
+                }
+                let single = report
+                    .singles
+                    .get(index)
+                    .ok_or("stock filament index is absent")?;
+                let candidate = &report.candidates[usize::from(single.candidate)];
+                let filament = client
+                    .rpc()
+                    .stock_filament(report, usize::from(single.candidate), &session, *revision)
+                    .await?;
+                if !candidate.in_project {
+                    let origin = report.library.as_ref().map(|l| {
+                        spiling_contracts::library::LibraryOrigin {
+                            library_id: l.id.clone(),
+                            filament: filament.reference.clone(),
+                        }
+                    });
+                    let response = client
+                        .project(ProjectCommand::PutFilament {
+                            session_id: session.clone(),
+                            base_revision: *revision,
+                            revision: filament,
+                            expected: None,
+                            origin,
+                        })
+                        .await?;
+                    complete(client, response).await?;
+                }
+            }
+            Operation::StockStudy => {
+                label = "stock_study";
+                let (reference, context) = stock_saved
+                    .clone()
+                    .ok_or("keep a stock recipe before opening its study")?;
+                let revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::LoadRecipeStudy {
+                        session_id: session.clone(),
+                        base_revision: revision,
+                        reference,
+                        context,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
             Operation::LibraryLocation(path) => {
                 label = "library_location";
                 client.rpc().library_set_location(path).await?;
@@ -2470,6 +2630,7 @@ async fn execute(
     }
     report["appearance"] = serde_json::json!(appearance_evidence);
     report["optical"] = serde_json::json!(optical_evidence);
+    report["stock_matches"] = serde_json::json!(stock_evidence);
     Ok(report)
 }
 

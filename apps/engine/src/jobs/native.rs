@@ -234,6 +234,7 @@ impl Jobs {
             Control::Project(
                 spiling_contracts::project::ProjectCommand::CompareAppearance { .. }
                     | spiling_contracts::project::ProjectCommand::CompareOptical { .. }
+                    | spiling_contracts::project::ProjectCommand::MatchStock { .. }
             )
         );
         let permit = loop {

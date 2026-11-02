@@ -49,10 +49,19 @@ pub struct NativeHost {
     sender: mpsc::SyncSender<Command>,
 }
 impl NativeHost {
+    #[cfg(test)]
     pub fn new(jobs: Jobs, fault: Option<crate::ProjectFault>) -> Self {
+        Self::with_library(jobs, fault, None)
+    }
+    pub fn with_library(
+        jobs: Jobs,
+        fault: Option<crate::ProjectFault>,
+        library: Option<crate::geometry::stock::LibraryLocation>,
+    ) -> Self {
         let (sender, receiver) = mpsc::sync_channel(8);
         std::thread::Builder::new().name("native-session".into()).spawn(move || {
             let mut runtime = Runtime::new(fault);
+            runtime.stock_library=library;
             let mut resources = BTreeMap::<String,Artifact>::new();
             let mut pending: Option<(String, geometry::JobId)> = None;
             loop {
@@ -111,6 +120,7 @@ impl NativeHost {
                                 ).unwrap_or_else(|error| Reply::Project(
                                     spiling_contracts::project::ProjectResponse::Error { error }
                                 )),
+                                Control::Project(spiling_contracts::project::ProjectCommand::MatchStock {session_id,base_revision,query}) if initially_cancelled => runtime.match_stock(&session_id,base_revision,query,true).unwrap_or_else(|error|Reply::Project(spiling_contracts::project::ProjectResponse::Error {error})),
                                 Control::Project(spiling_contracts::project::ProjectCommand::CompareOptical {
                                     session_id, base_revision,
                                 }) if initially_cancelled => runtime.compare_optical_with_initial_cancel(
@@ -192,6 +202,7 @@ impl NativeHost {
                     ..
                 }
                 | spiling_contracts::project::ProjectCommand::CompareOptical { .. }
+                | spiling_contracts::project::ProjectCommand::MatchStock { .. }
                 | spiling_contracts::project::ProjectCommand::ApplyOpticalConstruction {
                     ..
                 }
@@ -364,6 +375,33 @@ fn publish_terminal(
     let private = job
         .result
         .ok_or_else(|| Status::internal("native terminal result missing"))?;
+    if let geometry::JobResult::StockMatched {
+        project_id,
+        captured_revision,
+        record,
+    } = &private
+    {
+        let report = runtime
+            .stock_publication(id)
+            .ok_or_else(|| Status::internal("ACK stock report missing"))?;
+        if &report.record != record {
+            return Err(Status::data_loss("ACK stock report metadata mismatch"));
+        }
+        let artifact = jobs.describe_native_artifact(
+            &report.bytes,
+            spiling_contracts::stock::STOCK_REPORT_MIME,
+            spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
+        )?;
+        let result = spiling_contracts::geometry::JobResult::StockMatched {
+            project_id: project_id.clone(),
+            captured_revision: *captured_revision,
+            record: record.clone(),
+            resource: view(&artifact)?,
+        };
+        jobs.native_finish(name, Ok(result), vec![(artifact, report.bytes.as_slice())])?;
+        runtime.release_stock_publication(id);
+        return Ok(true);
+    }
     if let geometry::JobResult::OpticalCompared {
         project_id,
         captured_revision,
@@ -678,7 +716,7 @@ fn public_result(
                 "uncertain save receipt cannot publish native success",
             ));
         }
-        geometry::JobResult::OpticalCompared { .. } => {
+        geometry::JobResult::StockMatched { .. } | geometry::JobResult::OpticalCompared { .. } => {
             return Err(Status::internal(
                 "optical report requires ACK-bound blob publication",
             ));

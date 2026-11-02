@@ -24,6 +24,15 @@ impl Workbench {
                 self.manufacturing.panel = 0;
             }
         });
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut self.stock.matching, true, "Match target");
+            ui.selectable_value(&mut self.stock.matching, false, "Construction study");
+        });
+        ui.separator();
+        if self.stock.matching {
+            self.stock_page(ui);
+            return;
+        }
         egui::ScrollArea::vertical()
             .id_salt("study-page")
             .show(ui, |ui| self.study_ui(ui));

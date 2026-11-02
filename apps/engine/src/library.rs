@@ -38,6 +38,9 @@ impl LibraryService {
             catalog: Arc::new(std::sync::OnceLock::new()),
         }
     }
+    pub(crate) fn location(&self) -> Arc<RwLock<Option<PathBuf>>> {
+        self.location.clone()
+    }
     fn store(&self) -> Result<LibraryStore, Status> {
         let path = self
             .location

@@ -214,6 +214,7 @@ fn native_path_limit_and_problem_history_are_bounded() {
         nonce: 0,
         executing: false,
         optical_task: None,
+        stock_task: None,
         diagnostic_task: None,
         diagnostic_paused: false,
         image_task: None,

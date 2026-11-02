@@ -581,6 +581,32 @@ impl projects_server::Projects for Service {
                 .await?,
         ))
     }
+    async fn match_stock(
+        &self,
+        req: Request<MatchStockRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Projects.MatchStock", &req);
+        let command = req.try_into().map_err(|error: String| {
+            request_error(spiling_contracts::native::project_request_status(&error))
+        })?;
+        Ok(Response::new(
+            self.jobs
+                .start_native(
+                    self.native.clone(),
+                    jobs::NativeAdmission {
+                        parent,
+                        request_id: id,
+                        digest,
+                        command: Control::Project(command),
+                        reservation: spiling_contracts::stock::MAX_STOCK_REPORT_BYTES as u64,
+                    },
+                )
+                .await?,
+        ))
+    }
     async fn compare_optical(
         &self,
         req: Request<CompareOpticalRequest>,
@@ -834,7 +860,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let capability = String::from_utf8(capability[..64].to_vec())?;
     let jobs = Jobs::open(&store)?;
-    let native = NativeHost::new(jobs.clone(), ProjectFault::from_env()?);
+    let native = NativeHost::with_library(
+        jobs.clone(),
+        ProjectFault::from_env()?,
+        Some(library.location()),
+    );
     let (session_id, _, _) = native.capture().await?;
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let instance_id = Uuid::new_v4().to_string();

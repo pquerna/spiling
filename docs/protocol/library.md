@@ -270,3 +270,51 @@ the acquisition/editor flow. Copy to project is a separate action. Project
 hardware can add a known/manual printer or configure a selected incomplete
 instance, then return to project selection. Saving personal inventory does not
 apply project hardware or material/process settings.
+
+## Match a target against saved stock
+
+`Projects.MatchStock` is a read-only standard Operation on the existing native
+worker. Its typed query names Project, My library or both, an explicit on-hand
+filter, D65 target/goal, finite upright observation patch, uniform physical slot
+height and evaluation budget. It requires no source geometry or writable project.
+Project captures work without personal storage; private inventory is read only
+when its scope or the on-hand filter requires it. Search never writes stock,
+recipes, process settings or manufacturing output.
+
+The engine captures current nonarchived definitions, deduplicating exact
+`FilamentRef` revisions across scopes while retaining their source membership.
+Different products with equal names/colors remain distinct. Two revisions of one
+variant cannot become two ingredients in a pair. On-hand counts refer to distinct
+physical spool records for the variant; unknown quantity is not zero and spool
+counts do not create optical ingredients. Counts and private inventory stay out
+of kept recipe closures.
+
+`appearance::stock` composes the existing D65 single-color and Prusa v7 finite-cycle
+reference evaluators. Every eligible pair uses the disclosed grid: two contiguous
+runs of 1–4 equal-height slots, with either material first. There is no hidden
+shortlist based on single-color distance. At most 512 exact candidate revisions,
+65,536 cycle evaluations and 16 ranked results per group are admitted. Complete
+pair grids consume the budget; a limit/cancellation yields an explicitly incomplete
+best-found report. Missing/unsupported optical declarations remain unassessed.
+HueForge TD is retained and disclosed but is not used by this RGB reference model.
+Neither ranking nor a goal miss grants or removes manufacturing authority.
+
+A `StockMatched` terminal result binds project/revision and a producer/input/hash/
+completion record to an immutable <=1 MiB ByteStream artifact. Checked clients
+bind the output descriptor, exact bytes, query/candidate identity, coverage and
+cycle/exposure structure before presentation. Stale project results cannot be
+kept. A kept pair becomes an ordinary complete `RecipeTransfer` from the exact
+reviewed immutable ingredient revisions; it does not follow newer library values.
+Keep, Load study, fresh Compare/Accept and Apply construction remain distinct
+transactions. Existing project save/reopen, personal recipe reuse and mandatory
+actual-program replay/export apply without a new storage format or planner.
+
+Native Study → Match target provides grouped individual/layered results, a focused
+review, visible Keep/Open study actions and a stable return to the workbench.
+The ordered CLI equivalents are `--stock-match QUERY.json`,
+`--stock-keep-recipe INDEX NAME`, `--stock-keep-filament INDEX` and `--stock-study`.
+Search results and completeness are retained in the command's `stock_matches`
+evidence; subsequent authoring does not make that historical evidence current.
+Run `cargo test -p spiling-engine --test stock` for the actual-child search,
+cancellation/staleness, portable reassessment and supported fresh replay/export
+journeys under the documented native resource controls.

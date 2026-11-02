@@ -15,7 +15,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
     let id = ui.make_persistent_id("gallery-category");
     let mut category = ui.data_mut(|d| d.get_temp::<u8>(id).unwrap_or(0));
     ui.horizontal_wrapped(|ui| {
-        for (index, title) in ["Panels", "Fields", "Color", "Acquisition"]
+        for (index, title) in ["Panels", "Fields", "Color", "Acquisition", "Matching"]
             .iter()
             .enumerate()
         {
@@ -35,6 +35,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
             match category {
                 0 => panel(ui),
                 1 => fields(ui, theme.tokens()),
+                4 => matching(ui),
                 _ => colors(ui),
             }
         });
@@ -305,4 +306,125 @@ fn acquisition(ui: &mut Ui) {
         }
     }
     ui.data_mut(|d| d.insert_temp(id, state));
+}
+
+/// Frozen illustrative values exercise shared presentation, never the evaluator.
+fn matching(ui: &mut Ui) {
+    use spiling_contracts::{
+        appearance::*, geometry::SourceHash, library::*, optical::*, stock::*,
+    };
+    let target_id = ui.make_persistent_id("matching-target");
+    let mut hex = ui.data_mut(|d| d.get_temp::<String>(target_id).unwrap_or("#667FCC".into()));
+    stock_target(ui, &mut hex);
+    ui.data_mut(|d| d.insert_temp(target_id, hex));
+    let query = StockQuery {
+        scope: StockScope::Project,
+        on_hand_only: false,
+        target: OpticalTarget {
+            color: AppearanceColor::Srgb {
+                channels: [0.4, 0.5, 0.8],
+            },
+            delta_e00_tolerance: 2.0,
+            lightness_tolerance: None,
+        },
+        patch: OpticalPatch {
+            origin_mm: [0.0; 3],
+            normal_xy: [0.0, -1.0],
+            width_mm: 10.0,
+            height_mm: 10.0,
+        },
+        slot_height_mm: 0.2,
+        max_evaluations: 65536,
+    };
+    let candidates = [
+        ("Ocean blue", Some([0.1, 0.3, 0.9])),
+        ("White", Some([1.0; 3])),
+        ("Unmeasured PLA", None),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (name, rgb))| StockCandidate {
+        filament: FilamentRef {
+            id: FilamentId(format!("00000000-0000-4000-a000-{i:012}")),
+            revision: SourceHash::from_bytes(name.as_bytes()),
+        },
+        name: name.into(),
+        appearance: rgb.map(|channels| DeclaredAppearance {
+            color: AppearanceColor::Srgb { channels },
+            source: DefinitionSource::Operator,
+        }),
+        hueforge_td_mm: None,
+        in_project: true,
+        in_library: false,
+        on_hand_spools: 0,
+        profile_count: 0,
+    })
+    .collect::<Vec<_>>();
+    let cycle = LayerCycle {
+        slots: vec![
+            OpticalSlot {
+                material: 0,
+                height_mm: 0.2,
+            },
+            OpticalSlot {
+                material: 1,
+                height_mm: 0.2,
+            },
+        ],
+        phase_slot: 0,
+        origin_z_mm: 0.0,
+    };
+    let report = StockMatchReport {
+        producer: STOCK_PRODUCER.into(),
+        input_hash: StockMatchReport::input_hash(&query, &None, &candidates).unwrap(),
+        query,
+        library: None,
+        candidates,
+        singles: vec![
+            StockSingle {
+                candidate: 0,
+                delta_e00: 12.4,
+                within_tolerance: false,
+            },
+            StockSingle {
+                candidate: 1,
+                delta_e00: 35.8,
+                within_tolerance: false,
+            },
+        ],
+        pairs: vec![StockPair {
+            candidates: [0, 1],
+            cycle,
+            assessment: OpticalAssessment::Estimate {
+                exposure: CycleExposure {
+                    period_mm: 0.4,
+                    phase_at_patch_mm: 0.0,
+                    complete_periods: 25,
+                    exposed_height_mm: [5.0, 5.0, 0.0],
+                    fractions: [0.5, 0.5, 0.0],
+                },
+                predicted_lab: [55.0, 10.0, -30.0],
+                display_srgb8: [109, 132, 202],
+                delta_e00: 3.2,
+                delta_lightness: 1.0,
+                within_tolerance: false,
+            },
+        }],
+        unassessed_singles: 1,
+        unassessed_pairs: 2,
+        total_pairs: 3,
+        visited_pairs: 3,
+        evaluations: 96,
+        status: StockSearchStatus::Complete,
+    };
+    let selection_id = ui.make_persistent_id("matching-selection");
+    let mut selected = ui.data_mut(|d| d.get_temp::<Option<StockChoice>>(selection_id).flatten());
+    stock_results(ui, &report, &mut selected);
+    ui.data_mut(|d| d.insert_temp(selection_id, selected));
+    ui.separator();
+    primary(
+        ui,
+        "Keep recipe",
+        Some("Illustrative reference estimates · no project changes"),
+    );
 }

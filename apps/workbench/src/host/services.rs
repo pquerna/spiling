@@ -148,6 +148,9 @@ impl Actor {
         }
     }
     pub(super) async fn project_edit(&mut self, command: ProjectCommand) -> Option<ProjectInfo> {
+        if matches!(command, ProjectCommand::MatchStock { .. }) {
+            self.state.stock = super::stock::State::default();
+        }
         if !self.control_ready() {
             return None;
         }

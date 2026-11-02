@@ -9,8 +9,10 @@ pub use catalog_review::{CatalogReviewAction, catalog_review};
 pub use catalog_search::{CatalogChoice, CatalogSearch};
 mod gallery;
 pub use gallery::gallery;
+mod stock;
 mod surfaces;
 pub use color::{ColorDensity, ColorInspector, ColorMeaning, ColorPresentation};
+pub use stock::{stock_results, stock_target};
 pub use surfaces::{close, group, help, pane_header, primary, problem};
 
 use egui::{Color32, RichText, Ui};

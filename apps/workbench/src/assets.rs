@@ -113,3 +113,33 @@ impl OpticalCapture {
             })
     }
 }
+
+#[derive(Debug)]
+pub struct StockCapture {
+    pub project: ProjectId,
+    pub revision: ProjectRevision,
+    pub record: spiling_contracts::stock::StockMatchRecord,
+    pub report: spiling_contracts::stock::StockMatchReport,
+}
+pub async fn load_stock(
+    rpc: EngineRpc,
+    session: SessionId,
+    project: ProjectId,
+    revision: ProjectRevision,
+    record: spiling_contracts::stock::StockMatchRecord,
+    resource: ArtifactView,
+) -> Result<Arc<StockCapture>, ClientError> {
+    let report = rpc.fetch_stock_report(&record, &resource).await?;
+    if !matches!(rpc.project(ProjectCommand::Get{session_id:session}).await?,ProjectResponse::Status{info} if info.project_id==project && info.revision==revision)
+    {
+        return Err(ClientError::InvalidRequest(
+            "Discarded stock results from a changed project".into(),
+        ));
+    }
+    Ok(Arc::new(StockCapture {
+        project,
+        revision,
+        record,
+        report,
+    }))
+}

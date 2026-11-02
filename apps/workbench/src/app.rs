@@ -77,6 +77,7 @@ pub struct Workbench {
     process: process::ProcessUi,
     surface: surface::SurfaceUi,
     study: study::StudyUi,
+    stock: stock::StockUi,
     colors: ui::ColorInspector,
     library: library::LibraryUi,
     queued_image: Option<crate::assets::ImageRequest>,
@@ -147,6 +148,7 @@ impl Workbench {
             process: process::ProcessUi::default(),
             surface: surface::SurfaceUi::default(),
             study: study::StudyUi::default(),
+            stock: stock::StockUi::default(),
             colors: ui::ColorInspector::default(),
             library: library::LibraryUi::default(),
             queued_image: None,
@@ -562,6 +564,7 @@ mod navigation;
 mod policies;
 mod process;
 mod review;
+mod stock;
 mod study;
 mod surface;
 mod workspace;

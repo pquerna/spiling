@@ -12,7 +12,7 @@ use spiling_contracts::{
         AabbMm, ArtifactChunkMetadata, ArtifactSummary, BedPosePreparation, GeometryCommand,
         GeometryError, GeometryErrorCode, GeometryResponse, JOB_CANCEL_AFTER_MS,
         JOB_CANCEL_GRACE_MS, JobError, JobResult, MAX_GEOMETRY_CHUNK_BYTES, OccurrenceRecord,
-        SECTION_PLANE_TOLERANCE_MM, SceneSummary,
+        SECTION_PLANE_TOLERANCE_MM, SceneSummary, SessionId,
     },
     manufacturing::{
         MAX_MANUFACTURING_BUNDLE_BYTES, MAX_REPLAY_DISPLAY_BYTES, ManufacturingArtifactRecord,
@@ -265,6 +265,7 @@ impl EngineRpc {
             | ProjectCommand::GetAppearanceReport { .. }
             | ProjectCommand::SetOpticalStudy { .. }
             | ProjectCommand::CompareOptical { .. }
+            | ProjectCommand::MatchStock { .. }
             | ProjectCommand::GetOpticalReport { .. }
             | ProjectCommand::AcceptOpticalReport { .. }
             | ProjectCommand::RemoveSurfaceFinish { .. }
@@ -379,6 +380,17 @@ impl EngineRpc {
             ProjectCall::GetAppearanceReport(request) => {
                 let operation = client
                     .get_appearance_report(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
+                Ok(ProjectResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
+                })
+            }
+            ProjectCall::MatchStock(request) => {
+                let operation = client
+                    .match_stock(self.request(bounded(request)?))
                     .await
                     .map_err(rpc_error)?
                     .into_inner();
@@ -601,6 +613,59 @@ impl EngineRpc {
         Ok(preparation)
     }
 
+    pub async fn fetch_stock_report(
+        &self,
+        record: &spiling_contracts::stock::StockMatchRecord,
+        descriptor: &ArtifactView,
+    ) -> Result<spiling_contracts::stock::StockMatchReport, ClientError> {
+        native::stock::validate_report_resource(record, descriptor)
+            .map_err(ClientError::Protocol)?;
+        let bytes = self
+            .read_bounded_artifact(
+                &descriptor.name,
+                record.byte_count,
+                &descriptor.sha256,
+                spiling_contracts::stock::MAX_STOCK_REPORT_BYTES as u64,
+            )
+            .await?;
+        record.validate_bytes(&bytes).map_err(ClientError::Protocol)
+    }
+    /// Capture the exact reviewed revision; never replace it with a current same-name product.
+    pub async fn stock_filament(
+        &self,
+        report: &spiling_contracts::stock::StockMatchReport,
+        index: usize,
+        session: &SessionId,
+        revision: ProjectRevision,
+    ) -> Result<spiling_contracts::library::FilamentRevision, ClientError> {
+        report.validate().map_err(ClientError::InvalidRequest)?;
+        let candidate = report
+            .candidates
+            .get(index)
+            .ok_or_else(|| ClientError::InvalidRequest("stock candidate is absent".into()))?;
+        if candidate.in_project {
+            match self
+                .project(ProjectCommand::GetFilament {
+                    session_id: session.clone(),
+                    base_revision: revision,
+                    reference: candidate.filament.clone(),
+                })
+                .await?
+            {
+                ProjectResponse::Filament { revision } => Ok(revision),
+                ProjectResponse::Error { error } => Err(error.into()),
+                _ => Err(ClientError::Protocol(
+                    "expected captured project filament".into(),
+                )),
+            }
+        } else {
+            let library = report.library.as_ref().ok_or_else(|| {
+                ClientError::InvalidRequest("stock library identity missing".into())
+            })?;
+            self.library_filament(&library.id, &candidate.filament)
+                .await
+        }
+    }
     /// Immutable ByteStream retrieval followed by checked packed-layout validation.
     pub async fn read_geometry_chunk(
         &self,

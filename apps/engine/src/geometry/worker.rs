@@ -128,6 +128,11 @@ pub enum Work {
     GetAppearanceReport {
         report: Arc<spiling_contracts::appearance::AppearanceReport>,
     },
+    MatchStock {
+        materials: Option<Arc<spiling_core::materials::MaterialAsset>>,
+        library: Option<PathBuf>,
+        query: spiling_contracts::stock::StockQuery,
+    },
     CompareOptical {
         asset: Arc<spiling_core::PaletteAsset>,
         request: Arc<spiling_contracts::optical::OpticalRequest>,
@@ -222,6 +227,7 @@ pub enum Product {
     AppearancePalette(Arc<spiling_core::PaletteAsset>),
     AppearanceReport(Arc<super::appearance::ReportPublication>),
     OpticalReport(Arc<super::optical::OpticalReportPublication>),
+    StockReport(Arc<super::stock::StockPublication>),
     Section(EncodedSection),
     Compiled(Arc<ManufacturingAsset>),
     Preflight(PreflightReport),
@@ -359,6 +365,14 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
                 .and_then(|()| super::appearance::ReportPublication::new(report))
                 .map(Arc::new)
                 .map(Product::AppearanceReport)
+                .map_err(JobError::from),
+            Work::MatchStock {
+                materials,
+                library,
+                query,
+            } => super::stock::compare(materials, library, query, &cancel)
+                .map(Arc::new)
+                .map(Product::StockReport)
                 .map_err(JobError::from),
             Work::CompareOptical { asset, request } => {
                 super::optical::compare_palette(asset, request, &cancel)

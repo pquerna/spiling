@@ -9,6 +9,7 @@ mod manufacturing;
 mod optical;
 mod placement;
 mod source;
+pub(crate) mod stock;
 mod storage;
 mod surface_image;
 mod worker;
@@ -133,6 +134,7 @@ enum Purpose {
     ImportAppearancePalette,
     CompareAppearance,
     GetAppearanceReport,
+    MatchStock,
     CompareOptical,
     GetOpticalReport,
     ApplyOpticalConstruction,
@@ -171,6 +173,7 @@ enum PublicationKind {
     },
     AppearanceCompared(Arc<appearance::ReportPublication>),
     OpticalCompared(Arc<optical::OpticalReportPublication>),
+    StockMatched(Arc<stock::StockPublication>),
     OpticalConstructionApplied {
         edit: PreparedEdit,
         construction_index: u16,
@@ -221,6 +224,8 @@ pub struct Runtime {
         Arc<appearance::ReportPublication>,
     )>,
     optical_publication: Option<(JobId, Arc<optical::OpticalReportPublication>)>,
+    pub(crate) stock_library: Option<stock::LibraryLocation>,
+    stock_publication: Option<(JobId, Arc<stock::StockPublication>)>,
     optical_comparison: Option<(
         ProjectId,
         ProjectRevision,
@@ -252,6 +257,8 @@ impl Runtime {
             appearance_publication: None,
             appearance_comparison: None,
             optical_publication: None,
+            stock_library: None,
+            stock_publication: None,
             optical_comparison: None,
             jobs: BTreeMap::new(),
             terminal: VecDeque::new(),
@@ -381,7 +388,7 @@ impl Runtime {
                 // cancelled traversal must still deliver its incomplete report.
                 let report_only = matches!(
                     active.purpose,
-                    Purpose::CompareAppearance | Purpose::CompareOptical
+                    Purpose::CompareAppearance | Purpose::CompareOptical | Purpose::MatchStock
                 );
                 let durable = matches!(&result, Ok(Product::Saved(_)))
                     || matches!(&result, Ok(Product::StorageMaintained(product)) if product.action != StorageMaintenanceAction::Stats);
@@ -401,6 +408,7 @@ impl Runtime {
                                 | Purpose::CompareAppearance
                                 | Purpose::GetAppearanceReport
                                 | Purpose::CompareOptical
+                                | Purpose::MatchStock
                                 | Purpose::GetOpticalReport
                                 | Purpose::ApplyOpticalConstruction
                         ) && active.project_base != self.project.info().revision)
@@ -649,6 +657,18 @@ impl Runtime {
                                 construction_index,
                             })
                         }
+                        PublicationKind::StockMatched(report) => {
+                            if self.stock_publication.is_some() {
+                                return Err("unreleased stock publication".into());
+                            }
+                            let record = report.record.clone();
+                            self.stock_publication = Some((job, report));
+                            Some(JobResult::StockMatched {
+                                project_id: self.project.info().project_id,
+                                captured_revision: active.project_base,
+                                record,
+                            })
+                        }
                         PublicationKind::OpticalCompared(report) => {
                             if self.optical_publication.is_some() {
                                 return Err("unreleased optical report publication".into());
@@ -751,6 +771,10 @@ impl Runtime {
     }
     fn prepare(&mut self, active: &Active, product: Product) -> Result<Publication, JobError> {
         match (&active.purpose, product) {
+            (Purpose::MatchStock, Product::StockReport(report)) => Ok(Publication {
+                kind: PublicationKind::StockMatched(report),
+                artifact: None,
+            }),
             (Purpose::ApplyOpticalConstruction, Product::OpticalConstruction(candidate)) => {
                 let construction_index = candidate.construction_index();
                 let edit = self
@@ -1561,6 +1585,11 @@ impl Runtime {
     }
     fn project_control_inner(&mut self, command: ProjectCommand) -> Result<Reply, ProjectError> {
         match command {
+            ProjectCommand::MatchStock {
+                session_id,
+                base_revision,
+                query,
+            } => self.match_stock(&session_id, base_revision, query, false),
             ProjectCommand::PutRecipe {
                 session_id,
                 base_revision,
@@ -2111,6 +2140,7 @@ impl Runtime {
             Purpose::ImportAppearancePalette => "importing_appearance_palette",
             Purpose::CompareAppearance => "comparing_appearance",
             Purpose::GetAppearanceReport => "preparing_appearance_report",
+            Purpose::MatchStock => "matching_stock",
             Purpose::CompareOptical => "comparing_optical",
             Purpose::GetOpticalReport => "preparing_optical_report",
             Purpose::ApplyOpticalConstruction => "applying_optical_construction",
@@ -2221,6 +2251,7 @@ fn cancelled(purpose: &Purpose) -> JobError {
         | Purpose::CompareAppearance
         | Purpose::GetAppearanceReport
         | Purpose::CompareOptical
+        | Purpose::MatchStock
         | Purpose::GetOpticalReport
         | Purpose::GetSurfaceImage
         | Purpose::ApplyOpticalConstruction => project_error(

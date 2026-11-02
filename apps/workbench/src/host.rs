@@ -7,6 +7,7 @@ use crate::manufacture;
 pub mod hardware;
 pub mod library;
 pub mod recipes;
+pub mod stock;
 use crate::scene::{Scene, Section};
 pub use library::LibraryAction;
 use spiling_contracts::manufacturing::{ManufacturingCommand, ManufacturingResponse};
@@ -84,6 +85,7 @@ pub struct Snapshot {
     pub image_loading: bool,
     pub optical_report: Option<Arc<crate::assets::OpticalCapture>>,
     pub optical_loading: bool,
+    pub stock: stock::State,
     pub bed_proposal: Option<Arc<spiling_contracts::geometry::BedPosePreparation>>,
     pub busy: bool,
     pub active_operation: bool,
@@ -116,6 +118,7 @@ impl Default for Snapshot {
             image_loading: false,
             optical_report: None,
             optical_loading: false,
+            stock: stock::State::default(),
             bed_proposal: None,
             busy: true,
             active_operation: false,
@@ -328,6 +331,7 @@ impl Host {
             section_task: None,
             section_cancel: Arc::new(AtomicBool::new(false)),
             optical_task: None,
+            stock_task: None,
             diagnostic_task: None,
             diagnostic_paused: false,
             image_task: None,
@@ -595,6 +599,7 @@ struct Actor {
     nonce: u64,
     executing: bool,
     optical_task: Option<JoinHandle<Result<Arc<crate::assets::OpticalCapture>, ClientError>>>,
+    stock_task: Option<JoinHandle<Result<Arc<crate::assets::StockCapture>, ClientError>>>,
     diagnostic_task:
         Option<JoinHandle<Result<(spiling_contracts::OperationView, bool), ClientError>>>,
     diagnostic_paused: bool,
@@ -609,6 +614,7 @@ struct Actor {
 impl Actor {
     fn publish(&mut self) {
         self.state.optical_loading = self.optical_task.is_some();
+        self.state.stock.loading = self.stock_task.is_some();
         self.state.image_loading = self.image_task.is_some();
         self.state.section_loading = self.section_task.is_some();
         self.state.display_loading = self.display_task.is_some();
@@ -664,6 +670,22 @@ impl Actor {
                         Ok(Ok(job)) => self.observe(job).await,
                         Ok(Err(error)) => { if let Some(pending) = &mut self.pending { pending.paused = true; } self.failure(error).await; }
                         Err(error) => self.problem(format!("Operation observer failed: {error}")),
+                    }
+                },
+                result = async {
+                    match &mut self.stock_task {
+                        Some(task) => task.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.stock_task = None;
+                    match result {
+                        Ok(Ok(report)) if self.state.project.as_ref().is_some_and(|p|
+                            p.project_id == report.project && p.revision == report.revision
+                        ) => self.state.stock.capture = Some(report),
+                        Ok(Ok(_)) => {},
+                        Ok(Err(error)) => self.failure(error).await,
+                        Err(error) => self.problem(error.to_string()),
                     }
                 },
                 result=async{match &mut self.optical_task{Some(task)=>task.await,None=>std::future::pending().await}}=>{
@@ -866,6 +888,11 @@ impl Actor {
             task.abort();
             let _ = task.await;
         }
+        if let Some(task) = self.stock_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.state.stock = stock::State::default();
         self.state.optical_report = None;
         if let Some(task) = self.diagnostic_task.take() {
             task.abort();
@@ -1616,6 +1643,33 @@ impl Actor {
                     | JobResult::OpticalConstructionApplied { .. },
                 ),
             ) if completed => {}
+            (
+                Receipt::Project,
+                Some(JobResult::StockMatched {
+                    project_id,
+                    captured_revision,
+                    record,
+                    resource,
+                }),
+            ) if completed => {
+                self.refresh_after_failure().await;
+                if let Some(task) = self.stock_task.take() {
+                    task.abort();
+                }
+                if let (Some(client), Some(project)) = (&self.client, &self.state.project)
+                    && project.project_id == *project_id
+                    && project.revision == *captured_revision
+                {
+                    self.stock_task = Some(tokio::spawn(crate::assets::load_stock(
+                        client.rpc(),
+                        client.hello().session_id.clone(),
+                        project_id.clone(),
+                        *captured_revision,
+                        record.clone(),
+                        resource.clone(),
+                    )));
+                }
+            }
             (
                 Receipt::Project,
                 Some(JobResult::OpticalCompared {

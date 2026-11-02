@@ -97,6 +97,7 @@ fn native_artifact_limit(media: &str) -> Result<u64, String> {
         crate::appearance::APPEARANCE_REPORT_MIME => {
             Ok(crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)
         }
+        crate::stock::STOCK_REPORT_MIME => Ok(crate::stock::MAX_STOCK_REPORT_BYTES as u64),
         crate::optical::OPTICAL_REPORT_MIME => {
             Ok(crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)
         }
@@ -322,6 +323,25 @@ pub fn native_operation_view(
                     return Err("applied optical construction revision/output mismatch".into());
                 }
             }
+            JobResult::StockMatched {
+                captured_revision,
+                record,
+                resource,
+                ..
+            } => {
+                super::stock::validate_report_resource(record, resource)?;
+                if captured_revision.0 != meta.captured_project_revision
+                    || meta.outputs.len() != 1
+                    || !meta.outputs.iter().any(|output| {
+                        output.name == resource.name
+                            && output.sha256 == resource.sha256
+                            && output.size_bytes == record.byte_count
+                            && output.media_type == resource.media_type
+                    })
+                {
+                    return Err("optical report captured revision or outputs mismatch".into());
+                }
+            }
             JobResult::OpticalCompared {
                 captured_revision,
                 record,
@@ -522,6 +542,21 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
                     construction_index,
                 }
             }
+            R::StockMatched(value) => {
+                let record = required(value.record, "optical report record")?.try_into()?;
+                let resource = artifact_to_view(
+                    required(value.resource, "optical report resource")?,
+                    crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
+                )?;
+                super::stock::validate_report_resource(&record, &resource)?;
+                Self::StockMatched {
+                    project_id: ProjectId::parse(value.project_id)
+                        .map_err(|error| error.to_string())?,
+                    captured_revision: ProjectRevision(value.captured_revision),
+                    record,
+                    resource,
+                }
+            }
             R::OpticalCompared(value) => {
                 let record = required(value.record, "optical report record")?.try_into()?;
                 let resource = artifact_to_view(
@@ -680,6 +715,23 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
                 R::OpticalConstructionApplied(rpc::OpticalConstructionAppliedResult {
                     info: Some(info.try_into()?),
                     construction_index: u32::from(construction_index),
+                })
+            }
+            JobResult::StockMatched {
+                project_id,
+                captured_revision,
+                record,
+                resource,
+            } => {
+                super::stock::validate_report_resource(&record, &resource)?;
+                R::StockMatched(rpc::StockMatchedResult {
+                    project_id: project_id.as_str().into(),
+                    captured_revision: captured_revision.0,
+                    record: Some(record.try_into()?),
+                    resource: Some(artifact_from_view(
+                        resource,
+                        crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
+                    )?),
                 })
             }
             JobResult::OpticalCompared {

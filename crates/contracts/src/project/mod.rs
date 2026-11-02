@@ -329,6 +329,11 @@ pub struct ProjectInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectCommand {
+    MatchStock {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        query: crate::stock::StockQuery,
+    },
     SetHardware {
         session_id: SessionId,
         base_revision: ProjectRevision,

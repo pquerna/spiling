@@ -10,6 +10,9 @@ import "spiling/native_appearance.proto";
 import "spiling/native_library.proto";
 import "spiling/native_hardware.proto";
 service Projects {
+ rpc MatchStock(MatchStockRequest) returns (google.longrunning.Operation) {
+  option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
+ }
  rpc StorageMaintenance(StorageMaintenanceRequest) returns (google.longrunning.Operation) {
   option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
  }
@@ -221,3 +224,9 @@ message ProjectListRecipesRequest { uint32 base_revision = 1; uint32 offset = 2;
 message ProjectRecipePage { repeated LibraryRecipeSummary entries = 1; uint32 total = 2; optional uint32 next_offset = 3; }
 message ProjectLoadRecipeStudyRequest { uint32 base_revision = 1; LibraryRecipeRef reference = 2; RecipeStudyContext context = 3; }
 message ProjectCaptureRecipeRequest { uint32 base_revision = 1; string id = 2; string name = 3; repeated LibraryRecipeIngredient ingredients = 4; optional string expected = 5; }
+
+enum StockScope { STOCK_SCOPE_UNSPECIFIED=0; STOCK_PROJECT=1; STOCK_MY_LIBRARY=2; STOCK_BOTH=3; }
+message StockQuery {StockScope scope=1;bool on_hand_only=2;OpticalTarget target=3;OpticalPatch patch=4;double slot_height_mm=5;uint32 max_evaluations=6;}
+message MatchStockRequest {string parent=1;string request_id=2;uint32 base_revision=3;StockQuery query=4;}
+message StockMatchRecord {string hash=1;uint64 byte_count=2;string input_hash=3;string producer=4;bool complete=5;}
+message StockMatchedResult {string project_id=1;uint32 captured_revision=2;StockMatchRecord record=3;Artifact resource=4;}

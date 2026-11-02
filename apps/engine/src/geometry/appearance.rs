@@ -119,6 +119,16 @@ impl Runtime {
         command: &ProjectCommand,
     ) -> Result<(), ProjectError> {
         match command {
+            ProjectCommand::MatchStock {
+                session_id,
+                base_revision,
+                query,
+            } => {
+                self.appearance_base(session_id, *base_revision)?;
+                query
+                    .validate()
+                    .map_err(|e| project_error(ProjectErrorCode::InvalidProject, &e))
+            }
             ProjectCommand::ImportAppearancePalette {
                 session_id,
                 base_revision,

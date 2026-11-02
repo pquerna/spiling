@@ -94,6 +94,12 @@ Catalog update checks are read-only; source differences open an explicit draft.
 Back to project selection retains the acquisition destination, and requires saved
 or discarded edits. Declared products can lack printable process profiles; show
 that requirement at the action that needs it.
+Match target separates closest individual filaments from layered reference recipes.
+Selection opens a focused review with exact ingredients, goal difference, physical
+cycle and missing process requirements. Keep captures a project result; Open study
+then offers fresh comparison and explicit construction application. Search limits,
+cancellation and unassessed evidence stay visible. A color goal miss is inspectable
+and selectable best effort; process/geometry admission remains independent.
 Private credentials clear on leaving their view; hiding details never implies a
 connection was used. Unconfirmed library publications retain their original request
 and require reconciliation before the application closes.

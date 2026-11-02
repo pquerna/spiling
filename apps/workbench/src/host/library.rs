@@ -68,6 +68,7 @@ impl DefinitionComparison {
 }
 #[derive(Debug, Clone)]
 pub enum LibraryAction {
+    KeepStock(super::stock::Keep),
     LookupCatalog(spiling_contracts::catalog::CatalogKey),
     SearchCatalog(spiling_contracts::catalog::CatalogQuery),
     Hardware(super::hardware::HardwareAction),
@@ -143,6 +144,7 @@ impl Actor {
     async fn library_inner(&mut self, action: LibraryAction) -> Result<(), ClientError> {
         let rpc = self.client.as_ref().expect("connected client").rpc();
         match action {
+            LibraryAction::KeepStock(keep) => self.keep_stock(keep).await?,
             LibraryAction::LookupCatalog(key) => {
                 let result = rpc.catalog_record(&key).await.map_err(|e| e.to_string());
                 Arc::make_mut(&mut self.state.library).catalog_lookup =

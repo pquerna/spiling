@@ -6,6 +6,7 @@ use super::{request_id, required, session_parent};
 use crate::{geometry::*, project::*, rpc, surface::*};
 
 pub enum ProjectCall {
+    MatchStock(rpc::MatchStockRequest),
     StorageMaintenance(rpc::StorageMaintenanceRequest),
     ApplyOpticalConstruction(rpc::ApplyOpticalConstructionRequest),
     Execute(Box<rpc::ProjectRequest>),
@@ -23,6 +24,18 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
     request_id(id)?;
     use rpc::project_request::Command as C;
     let (session_id, command) = match command {
+        ProjectCommand::MatchStock {
+            session_id,
+            base_revision,
+            query,
+        } => {
+            return Ok(ProjectCall::MatchStock(rpc::MatchStockRequest {
+                parent: format!("sessions/{}", session_id.as_str()),
+                request_id: id.into(),
+                base_revision: base_revision.0,
+                query: Some(query.try_into()?),
+            }));
+        }
         ProjectCommand::PutRecipe {
             session_id,
             base_revision,

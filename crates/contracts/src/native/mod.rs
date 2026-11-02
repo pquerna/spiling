@@ -18,6 +18,7 @@ mod process;
 pub mod project;
 mod recipe;
 mod replay;
+pub mod stock;
 mod storage;
 mod surface_inspection;
 pub use error::*;

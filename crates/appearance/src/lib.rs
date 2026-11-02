@@ -353,3 +353,5 @@ pub fn select_single(
     report.validate()?;
     Ok(report)
 }
+
+pub mod stock;
