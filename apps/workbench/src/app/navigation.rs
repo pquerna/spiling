@@ -9,6 +9,7 @@ pub(super) enum Navigation {
     Face(FaceRef),
     Occurrence(OccurrenceId),
     InfillScope(bool, bool),
+    ClearSelection,
 }
 impl Workbench {
     fn project_drafts(&self) -> bool {
@@ -67,6 +68,9 @@ impl Workbench {
         if self.navigation.is_none() {
             return;
         }
+        if self.navigation_focus.is_none() {
+            self.navigation_focus = ctx.memory(|m| m.focused());
+        }
         let mut discard = false;
         let mut keep = false;
         let modal = egui::Modal::new(egui::Id::unique("draft-navigation")).show(ctx, |ui| {
@@ -79,7 +83,13 @@ impl Workbench {
         });
         if keep || modal.should_close() {
             self.navigation = None;
+            if let Some(id) = self.navigation_focus.take() {
+                ctx.memory_mut(|m| m.request_focus(id));
+            }
         } else if discard && let Some(next) = self.navigation.take() {
+            if let Some(id) = self.navigation_focus.take() {
+                ctx.memory_mut(|m| m.request_focus(id));
+            }
             self.surface.discard();
             self.process.discard();
             self.pose_revision = None;
@@ -101,6 +111,7 @@ impl Workbench {
                 }
                 Navigation::Face(reference) => self.select_face(reference),
                 Navigation::Occurrence(id) => self.choose_occurrence(id),
+                Navigation::ClearSelection => self.clear_selection(),
                 Navigation::InfillScope(definition, boxed) => {
                     self.process.set_scope(definition, boxed)
                 }

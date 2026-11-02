@@ -11,6 +11,7 @@ pub(super) struct HardwareUi {
     query: String,
     names: [String; 3],
     submitted_add: Option<(usize, String)>,
+    submitted_connection: Option<(String, String)>,
     machine_detail: bool,
     plate_detail: bool,
     connections: bool,
@@ -47,7 +48,15 @@ impl HardwareUi {
             || !self.identity.is_empty()
             || !self.secret.is_empty()
     }
-    pub(super) fn confirmed_add(&mut self) {
+    pub(super) fn confirmed_write(&mut self) {
+        if let Some((endpoint, identity)) = self.submitted_connection.take() {
+            if self.endpoint == endpoint {
+                self.endpoint.clear();
+            }
+            if self.identity == identity {
+                self.identity.clear();
+            }
+        }
         if let Some((index, value)) = self.submitted_add.take()
             && self.names[index] == value
         {
@@ -95,6 +104,12 @@ impl Workbench {
             self.local_problem = Some(e);
             return;
         }
+        if hardware.routes.len() > personal.hardware.routes.len() {
+            self.library.hardware.submitted_connection = Some((
+                self.library.hardware.endpoint.clone(),
+                self.library.hardware.identity.clone(),
+            ));
+        }
         if hardware.machines.len() > personal.hardware.machines.len() {
             self.library.hardware.submitted_add = Some((0, self.library.hardware.names[0].clone()));
         } else if hardware.plates.len() > personal.hardware.plates.len() {
@@ -116,13 +131,14 @@ impl Workbench {
         ready: bool,
         writable: bool,
     ) {
-        ui.set_max_width(850.0);
+        ui.set_max_width(ui.available_width().min(850.0));
         let personal = state.hardware.personal.clone();
         let catalog = state.hardware.catalog.clone();
         if !self.library.personal {
             self.project_hardware(ui, state, ready, writable);
             return;
         }
+        let previous_tab = self.library.hardware.tab;
         ui.horizontal(|ui| {
             for (index, name) in ["Machines", "Build plates", "Accessories", "Catalog"]
                 .iter()
@@ -131,6 +147,9 @@ impl Workbench {
                 ui.selectable_value(&mut self.library.hardware.tab, index as u8, *name);
             }
         });
+        if previous_tab != self.library.hardware.tab {
+            self.library.hardware.clear_secret();
+        }
         if let Some(error) = &state.hardware.error {
             ui.label(format!("Local hardware unavailable: {error}"));
         }
@@ -777,6 +796,7 @@ impl Workbench {
                         self.library.hardware.credential_route = Some(route.id.clone());
                     }
                     if self.library.hardware.credential_route.as_deref() == Some(route.id.as_str()) {
+                        ui.label("Leaving this view clears unsubmitted credentials.");
                         let l = ui.label("Credential");
                         ui.add(egui::TextEdit::singleline(&mut *self.library.hardware.secret).password(true).char_limit(8192))
                             .labelled_by(l.id);
@@ -1054,6 +1074,7 @@ impl Workbench {
             ));
         }
         if ui.button("Choose hardware").clicked() {
+            self.library.detail = 0;
             self.library.open = true;
             self.library.personal = false;
             self.library.hardware.active = true;

@@ -21,6 +21,7 @@ struct ProjectDefinitionDraft {
 pub(super) struct LibraryUi {
     pub open: bool,
     detail: u8,
+    comparison_destination: Option<bool>,
     recipes: recipes::RecipeUi,
     hardware: hardware::HardwareUi,
     personal: bool,
@@ -211,7 +212,21 @@ impl LibraryUi {
     }
 }
 impl Workbench {
+    pub(super) fn open_profile_catalog(&mut self, ctx: &egui::Context) {
+        if !self.library.open {
+            self.surface_focus[1] = ctx.memory(|m| m.focused());
+        }
+        self.library.hardware.clear_secret();
+        self.library.open = true;
+        self.library.detail = 6;
+    }
+    pub(super) fn finish_profile_selection(&mut self, ctx: &egui::Context) {
+        self.close_library(ctx);
+        self.show_prepare(1);
+    }
     pub(super) fn choose_recipe(&mut self) {
+        self.library.hardware.clear_secret();
+        self.library.detail = 0;
         self.library.open = true;
         self.library.personal = false;
         self.library.recipes.active = true;
@@ -244,7 +259,7 @@ impl Workbench {
                     self.library.detail = 0;
                 }
                 LibraryMutation::ReplaceHardware { .. } => {
-                    self.library.hardware.confirmed_add();
+                    self.library.hardware.confirmed_write();
                 }
                 LibraryMutation::PutSpool { .. } => {
                     self.library.spool_edit = None;
@@ -331,7 +346,13 @@ impl Workbench {
             self.library.refresh();
         }
     }
-    pub(super) fn close_library(&mut self) {
+    pub(super) fn suspend_library(&mut self) {
+        self.library.hardware.clear_secret();
+    }
+    pub(super) fn close_library(&mut self, ctx: &egui::Context) {
+        if let Some(id) = self.surface_focus[1].take() {
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
         self.library.open = false;
         self.library.hardware.clear_secret();
     }
@@ -339,11 +360,45 @@ impl Workbench {
         let state = self.state.library.clone();
         ui.horizontal(|ui| {
             ui.heading("Library");
-            if ui::close(ui, "Back to workbench") {
-                self.close_library();
+            if ui::close(
+                ui,
+                if self.library.detail == 6 {
+                    "Back to Material"
+                } else {
+                    "Back to workbench"
+                },
+            ) {
+                self.close_library(ui.ctx());
             }
             ui.weak("Project copies and My library are independent");
         });
+        if self.library.detail == 6 {
+            ui::pane_header(
+                ui,
+                "Material profiles",
+                "Project setup · compare before staging a draft",
+            );
+            let ready = self.state.phase == Phase::Running
+                && !self.state.busy
+                && !self.state.picker_open
+                && self.awaiting_serial.is_none();
+            if self.state.manufacturing.loaded_catalog.is_none() {
+                self.primary_button(ui, Action::LoadMaterialCatalog);
+            } else {
+                self.button(ui, Action::LoadMaterialCatalog);
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("profile-catalog-page")
+                .show(ui, |ui| {
+                    ui.set_max_width(ui.available_width().min(900.0));
+                    if let (Some(project), Some(hello)) =
+                        (self.state.project.clone(), self.state.hello.clone())
+                    {
+                        self.catalog_ui(ui, &project, &hello.session_id, ready);
+                    }
+                });
+            return;
+        }
         self.library_content(ui, &state);
     }
     fn library_content(&mut self, ui: &mut egui::Ui, state: &State) {
@@ -352,7 +407,9 @@ impl Workbench {
             && !self.state.picker_open
             && self.state.confirmation.is_none()
             && self.awaiting_serial.is_none();
-        let writable = ready && self.state.project.as_ref().is_some_and(|p| !p.read_only);
+        let writable = ready
+            && self.library.pending.is_none()
+            && self.state.project.as_ref().is_some_and(|p| !p.read_only);
         let personal_write = ready && state.status.is_some() && self.library.pending.is_none();
         ui.horizontal(|ui| {
             let before = (
@@ -396,6 +453,7 @@ impl Workbench {
                     self.library.hardware.active,
                 )
             {
+                self.library.hardware.clear_secret();
                 self.library.detail = 0;
                 self.library.refresh();
             }
@@ -434,16 +492,30 @@ impl Workbench {
             || !self.library.hex.is_empty()
             || !self.library.color_name.is_empty();
         ui.horizontal_wrapped(|ui| {
-            if self.library.personal
-                && ui
-                    .button(if definition_draft {
-                        "Resume filament draft"
-                    } else {
-                        "Create filament"
-                    })
-                    .clicked()
+            let no_selection = state
+                .selected
+                .as_ref()
+                .is_none_or(|(personal, _)| *personal != self.library.personal);
+            let label = if definition_draft {
+                "Resume filament draft"
+            } else {
+                "Create filament"
+            };
+            if self.library.personal {
+                let open = if self.library.detail == 0 && no_selection {
+                    ui::primary(ui, label, None)
+                } else {
+                    ui.button(label).clicked()
+                };
+                if open {
+                    self.library.detail = 1;
+                }
+            } else if self.library.detail == 0
+                && no_selection
+                && ui::primary(ui, "Choose from My library", None)
             {
-                self.library.detail = 1;
+                self.library.personal = true;
+                self.library.refresh();
             }
             if self.library.detail != 0 && ui::close(ui, "Back to filaments") {
                 self.library.detail = 0;
@@ -711,7 +783,7 @@ impl Workbench {
                 {
                     self.library.queued = Some(LibraryAction::ReviewProfile(profile.clone()));
                     self.show_prepare(1);
-                    self.close_library();
+                    self.close_library(ui.ctx());
                 }
             }
         }
@@ -946,45 +1018,35 @@ impl Workbench {
             "Add another spool of this variant"
         });
         let state_value = self.library.spool_state.get_or_insert(StockState::OnHand);
-        egui::ComboBox::from_label("Stock state")
-            .selected_text(stock_label(*state_value))
-            .show_ui(ui, |ui| {
-                for state in [
-                    StockState::OnHand,
-                    StockState::Ordered,
-                    StockState::Empty,
-                    StockState::Archived,
-                ] {
-                    ui.selectable_value(state_value, state, stock_label(state));
-                }
-            });
-        ui.horizontal(|ui| {
-            ui.label("Name");
-            ui.text_edit_singleline(&mut self.library.spool_name);
+        ui.add_enabled_ui(writable, |ui| {
+            egui::ComboBox::from_label("Stock state")
+                .selected_text(stock_label(*state_value))
+                .show_ui(ui, |ui| {
+                    for state in [
+                        StockState::OnHand,
+                        StockState::Ordered,
+                        StockState::Empty,
+                        StockState::Archived,
+                    ] {
+                        ui.selectable_value(state_value, state, stock_label(state));
+                    }
+                });
         });
-        ui.horizontal(|ui| {
-            ui.label("Remaining g (optional)");
-            ui.text_edit_singleline(&mut self.library.grams);
+        ui.add_enabled_ui(writable, |ui| {
+            ui::text(ui, "Name", &mut self.library.spool_name);
+            ui::text(ui, "Remaining (g, optional)", &mut self.library.grams);
+            ui::text(ui, "Lot", &mut self.library.lot);
+            ui::text(ui, "Location", &mut self.library.location);
         });
-        ui.horizontal(|ui| {
-            ui.label("Lot");
-            ui.text_edit_singleline(&mut self.library.lot);
-        });
-        ui.horizontal(|ui| {
-            ui.label("Location");
-            ui.text_edit_singleline(&mut self.library.location);
-        });
-        if ui
-            .add_enabled(
-                writable,
-                egui::Button::new(if self.library.spool_edit.is_some() {
-                    "Save spool"
-                } else {
-                    "Add spool"
-                }),
-            )
-            .clicked()
-        {
+        if ui::primary(
+            ui,
+            if self.library.spool_edit.is_some() {
+                "Save spool"
+            } else {
+                "Add spool"
+            },
+            (!writable).then_some("Wait for the current library operation"),
+        ) {
             match self.library.spool_mutation(&selected.reference) {
                 Ok(mutation) => self.library.mutation(state.status.as_ref(), mutation),
                 Err(error) => self.local_problem = Some(error),
@@ -1040,7 +1102,7 @@ impl Workbench {
         }
     }
     fn library_definition_editor(&mut self, ui: &mut egui::Ui, state: &State, writable: bool) {
-        ui.set_max_width(650.0);
+        ui.set_max_width(ui.available_width().min(650.0));
         ui.add_enabled_ui(writable, |ui| {
             ui::text(ui, "Name", &mut self.library.name);
             ui::text(ui, "Supplier color name", &mut self.library.color_name);

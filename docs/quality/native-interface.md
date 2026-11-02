@@ -14,11 +14,15 @@ transactions and observed receipts retain mutation authority.
 ## Surface anatomy
 
 Every surface has a title, subject/scope, grouped body, one clear next action and a
-visible close/back path. Pane titles are subordinate to page/dialog titles; group
+visible close/back path. The persistent workbench home is the return destination,
+not another temporary dialog. Clear selection ends contextual part inspection. Pane titles are subordinate to page/dialog titles; group
 labels are subordinate to pane titles. Preserve Graphite/Paper, readable secondary
-text and the canvas. Use aligned fields and whitespace before adding containers.
+text and the canvas. Use aligned fields and whitespace before adding containers. Cap a form to the
+lesser of its reading width and available space; setting a fixed maximum must
+never expand a narrow parent. Preserve field identities across reflow and state
+changes.
 
-Use shared `pane_header`, `group`, `number`, `primary`, `help` and `problem`
+Use shared `pane_header`, `group`, `text`, `number`, `percent`, `primary`, `help` and `problem`
 components with their real consumers. Primary actions use the common blue/white
 treatment; unavailable primary actions show their reason without requiring hover.
 Do not infer readiness or duplicate engine validation to choose a visual action.
@@ -65,12 +69,16 @@ Back to Inspect hides an ordinary draft; replacing its source face/part or infil
 scope asks whether to keep editing or discard. Project replacement still uses the
 engine's independent dirty-state confirmation after resolving local drafts.
 
-Library and Color study use focused pages with a stable Back to workbench action.
+Library, Color study and long reference content (gallery/license) use focused pages with a stable Back to workbench action.
 Filament/spool/recipe and hardware editors have explicit return routes. Ordinary
 Back retains draft values and their destination; selecting a different edited
 subject cannot silently replace them. Copy to project, Load study, Compare, Accept
 selection and Apply construction remain distinct native operations. Short names
 are the normal reading layer; exact identities and declarations remain inspectable.
+Material catalog review has its own Library page: Use profile stages a draft,
+then returns to Material for Apply profile. A catalogue selection is not a write. Its staged draft captures project/session
+identity even when Material has not been visited. Apply or explicitly discard a
+changed draft before selecting another profile or loading another intent.
 Private credentials clear on leaving their view; hiding details never implies a
 connection was used. Unconfirmed library publications retain their original request
 and require reconciliation before the application closes.
@@ -83,8 +91,9 @@ rather than becoming an incidental search default.
 
 ## Exercising a change
 
-Use the production gallery's complete panel specimen in each theme, including its
-ready, changed, blocked, pending and uncertain states. Inspect narrow/normal panes,
+Use the production gallery's Panels, Fields and Color categories in each theme.
+The complete panel specimen includes ready, changed, blocked, pending, uncertain,
+invalid, read-only and stale states; its close/reopen path is interactive. Inspect narrow/normal panes,
 long names and scaled text. Test keyboard help, primary-action reasons, Escape,
 focus restoration and uninterrupted numeric typing. Gallery values are illustrative
 and cannot mutate a project.

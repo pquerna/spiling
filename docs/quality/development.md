@@ -91,13 +91,13 @@ needs no original catalog. `pnpm test:materials` exercises the real engine/CLI,
 independent commands, rejected/stale choices and recovery; it honors
 `CARGO_TARGET_DIR`. See the [material review contract](../protocol/manufacturing.md#material-discovery-and-process-review).
 
-Prepare's **Browse material catalog…** uses a parented native picker for a bounded
-inert catalog. **Search catalog** asks the engine for a four-entry page; search and
+Prepare → Material → **Browse material catalog…** opens a focused Library page
+and a parented native picker for a bounded inert catalog. **Search catalog** asks the engine for a four-entry page; search and
 pagination never mutate the project. Select an entry to inspect incompatibility
 reasons or current/proposed thermal, speed, flow and process settings. Expand
 **All process settings and origins** for the resolved values and winning limits.
-**Use this profile** stages that reviewed selection in the existing material editor;
-**Apply material profile** commits through the ordinary engine transaction. Search
+**Use profile** stages that reviewed selection in the existing material editor;
+**Apply profile** commits through the ordinary engine transaction. Search
 results bind the project/session, input revision and exact catalog/query/page.
 Edits invalidate comparisons; search again against the new revision. Read-only
 projects allow catalog/current-setting review but cannot apply selections.
@@ -138,7 +138,7 @@ are display approximations over admitted triangles and nominal bead envelopes;
 they are not new BREP faces and cannot be picked as native faces. Clipping retains
 the 0.001 mm projection limit. Existing bead admission/work limits still apply.
 Native contours use the geometry service after 250 ms of settled plane input.
-Refresh retries explicitly; Cancel native operation or Cancel contour transfer
+Refresh retries explicitly; Cancel operation or Cancel contour transfer
 stops the relevant stage. Only the matching session/revision/plane is displayed.
 A native refusal does not disable approximate visual clipping. The bounded 2D
 preview shows sampled loop area/boundary and two-sample distances with endpoint
@@ -247,7 +247,7 @@ measurement or general STEP qualification.
 For the manufacturing journey, import an unchanged admitted housing from an owned
 copy and load a full intent JSON through its native file picker. Apply a consumed
 sparse value, select the occurrence, prepare and review native placement, explicitly
-Apply, then Preflight and Compile. Review requires **Fresh Verify and load motion**;
+Apply, then **Check setup** and **Compile program**. Review requires **Verify program**;
 stored verification alone cannot enable Export. Exercise source-hidden replay,
 true layer intervals, event/travel controls and the independent report's coverage
 and limitations. Export selects a **new directory name**, writing plan.json,

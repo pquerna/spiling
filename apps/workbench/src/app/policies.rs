@@ -26,13 +26,13 @@ pub(super) fn prepared(value: &ManufacturingIntent) -> Result<ManufacturingInten
     Ok(result)
 }
 pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
-    ui.collapsing("Native accuracy and material",|ui|{
+    egui::CollapsingHeader::new(format!("Wall limits · {:.2}–{:.2} mm", intent.printer.deposition_limits.min_bead_width_mm, intent.printer.deposition_limits.max_bead_width_mm)).id_salt("wall-limits").show(ui,|ui|{
         ui.add_enabled_ui(intent.material_profile.is_none(), |ui| { ui::number(ui,"Filament diameter (mm)",&mut intent.recipe.filament_diameter_mm,0.01); });
         ui::number(ui,"Minimum wall width (mm)",&mut intent.printer.deposition_limits.min_bead_width_mm,0.01);
         ui::number(ui,"Maximum wall width (mm)",&mut intent.printer.deposition_limits.max_bead_width_mm,0.01);
         ui.weak("Declared software limits; native admission and actual-program verification remain mandatory.");
     });
-    ui.collapsing("Sparse band policy",|ui|{
+    egui::CollapsingHeader::new(format!("Infill bands · {}", if matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Fine) { "Fine" } else { "Combined" })).id_salt("infill-bands").show(ui,|ui|{
         let mut combine=matches!(intent.recipe.sparse_infill,SparseInfillPolicy::CombineEligible{..});
         if ui.checkbox(&mut combine,"Combine eligible sparse interiors").changed(){intent.recipe.sparse_infill=if combine{SparseInfillPolicy::CombineEligible{max_height_mm:0.0}}else{SparseInfillPolicy::Fine};}
         if let SparseInfillPolicy::CombineEligible{max_height_mm}=&mut intent.recipe.sparse_infill {ui::number(ui,"Maximum physical height (mm)",max_height_mm,0.01);}
@@ -43,7 +43,16 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
             process_fields(ui, &mut intent.recipe.process)
         });
     });
-    ui.collapsing("Bed-rooted breakaway supports", |ui| {
+    egui::CollapsingHeader::new(format!(
+        "Supports · {}",
+        if matches!(intent.recipe.supports, SupportPolicy::Disabled) {
+            "Off"
+        } else {
+            "Breakaway"
+        }
+    ))
+    .id_salt("support-policy")
+    .show(ui, |ui| {
         let mut enabled = matches!(intent.recipe.supports, SupportPolicy::Breakaway { .. });
         if ui
             .checkbox(&mut enabled, "Enable breakaway supports")
@@ -67,8 +76,8 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
             interface_thickness_mm,
         } = &mut intent.recipe.supports
         {
+            ui::percent(ui, "Support density (%)", density);
             for (label, value) in [
-                ("Support fraction", density),
                 ("XY clearance (mm)", xy_clearance_mm),
                 ("Z gap (mm)", z_gap_mm),
                 ("Interface thickness (mm)", interface_thickness_mm),
@@ -77,7 +86,7 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
             }
         }
     });
-    ui.collapsing("Seam and build-axis policies",|ui|{
+    egui::CollapsingHeader::new(format!("Seam · {}", if matches!(intent.recipe.seam_policy, SeamPolicy::Nearest) { "Nearest" } else { "Preferred direction" })).id_salt("seam-policy").show(ui,|ui|{
         let mut preferred=matches!(intent.recipe.seam_policy,SeamPolicy::PreferredBuildDirection{..});
         if ui.checkbox(&mut preferred,"Preferred build/machine XY seam direction").changed(){intent.recipe.seam_policy=if preferred{SeamPolicy::PreferredBuildDirection{xy:[0.0,0.0]}}else{SeamPolicy::Nearest};}
         if let SeamPolicy::PreferredBuildDirection{xy}=&mut intent.recipe.seam_policy{ui::number(ui,"Build X direction",&mut xy[0],0.1);ui::number(ui,"Build Y direction",&mut xy[1],0.1);ui.weak("Apply normalizes a finite nonzero direction. It selects existing perimeter vertices; bridge/support orientation remains native.");}
@@ -89,7 +98,12 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
 
 /// Shared controls for explicit recipe policy or one captured profile override.
 pub(super) fn process_fields(ui: &mut egui::Ui, p: &mut ProcessPolicy) {
-    ui.collapsing("First layer, cooling and bridges", |ui| {
+    egui::CollapsingHeader::new(format!(
+        "Cooling and bridges · {} PWM",
+        p.fan_after_first_layers
+    ))
+    .id_salt("cooling-bridges")
+    .show(ui, |ui| {
         for (label, value) in [
             ("First layer speed factor", &mut p.first_layer_speed_factor),
             ("First layer flow factor", &mut p.first_layer_flow_factor),
@@ -104,13 +118,19 @@ pub(super) fn process_fields(ui: &mut egui::Ui, p: &mut ProcessPolicy) {
             ("Later-layer fan PWM", &mut p.fan_after_first_layers),
             ("Bridge fan PWM", &mut p.bridge_fan_pwm),
         ] {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(label);
-                ui.add(egui::DragValue::new(value));
-            });
+            ui::number(ui, label, value, 1.0);
         }
     });
-    ui.collapsing("Retraction", |ui| {
+    egui::CollapsingHeader::new(format!(
+        "Retraction · {}",
+        if matches!(p.retraction, RetractionPolicy::Disabled) {
+            "Off"
+        } else {
+            "On"
+        }
+    ))
+    .id_salt("retraction-policy")
+    .show(ui, |ui| {
         let mut enabled = matches!(p.retraction, RetractionPolicy::Enabled { .. });
         if ui
             .checkbox(&mut enabled, "External absolute-E retraction")

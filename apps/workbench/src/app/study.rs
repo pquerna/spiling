@@ -29,7 +29,7 @@ impl Workbench {
             .show(ui, |ui| self.study_ui(ui));
     }
     pub(super) fn study_ui(&mut self, ui: &mut egui::Ui) {
-        ui.set_max_width(850.0);
+        ui.set_max_width(ui.available_width().min(850.0));
         ui.collapsing("Color reference", |ui| self.colors.show(ui));
         ui.separator();
         let (Some(project), Some(hello)) = (self.state.project.clone(), self.state.hello.clone())
@@ -60,7 +60,13 @@ impl Workbench {
             "Reference study",
             "Project · estimates, not calibrated color",
         );
-        ui.weak("Named reference estimates. Backing optics, calibration and physical color remain unqualified. Manufacturing independently admits every construction.");
+        ui.label("Physical color is unqualified");
+        ui::help(
+            ui,
+            "reference-scope",
+            "Reference estimates",
+            "Backing optics and calibration are unmodelled. Manufacturing independently admits every construction; accepting a reference estimate does not qualify physical color.",
+        );
         let Some(study) = &project.appearance_study.optical else {
             ui::pane_header(
                 ui,

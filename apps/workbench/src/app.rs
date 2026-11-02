@@ -49,6 +49,8 @@ pub struct Workbench {
     show_commands: bool,
     show_feedback: bool,
     command_selection: Option<usize>,
+    command_return_focus: Option<egui::Id>,
+    surface_focus: [Option<egui::Id>; 4],
     command_query: String,
     command_focus: bool,
     compact_tree: bool,
@@ -62,6 +64,7 @@ pub struct Workbench {
     pose: [f64; 6],
     pose_original: [f64; 6],
     navigation: Option<navigation::Navigation>,
+    navigation_focus: Option<egui::Id>,
     pose_revision: Option<SceneRevision>,
     analysis: analysis::AnalysisUi,
     queued_geometry: Option<GeometryCommand>,
@@ -117,6 +120,8 @@ impl Workbench {
             show_commands: false,
             show_feedback: false,
             command_selection: None,
+            command_return_focus: None,
+            surface_focus: [None; 4],
             command_query: String::new(),
             command_focus: false,
             compact_tree: false,
@@ -129,6 +134,7 @@ impl Workbench {
             pose: [0.0; 6],
             pose_original: [0.0; 6],
             navigation: None,
+            navigation_focus: None,
             pose_revision: None,
             analysis: analysis::AnalysisUi::default(),
             queued_geometry: None,
@@ -160,6 +166,26 @@ impl Workbench {
         }
     }
     fn disabled(&self, action: Action) -> Option<&'static str> {
+        if let Some(project) = &self.state.project {
+            if action == Action::LoadMaterial
+                && self.material.has_changes(
+                    &project.project_id,
+                    self.state.manufacturing.intent.as_deref(),
+                )
+            {
+                return Some("Apply or discard the Material draft before loading another profile");
+            }
+            if action == Action::LoadIntent
+                && (self.manufacturing.has_intent_draft(
+                    &project.project_id,
+                    self.state.manufacturing.intent.as_deref(),
+                ) || self
+                    .manufacturing
+                    .pending_loaded(self.state.manufacturing.loaded.as_deref()))
+            {
+                return Some("Apply or discard the Settings draft before loading another intent");
+            }
+        }
         if self.awaiting_serial.is_some()
             && !matches!(action, Action::Gallery | Action::License | Action::Analysis)
         {
@@ -186,22 +212,48 @@ impl Workbench {
         if self.guard_action(action) {
             return;
         }
+        if action != Action::Gallery && self.show_gallery {
+            self.show_gallery = false;
+            if let Some(id) = self.surface_focus[3].take() {
+                ctx.memory_mut(|m| m.request_focus(id));
+            }
+        }
+        if action != Action::License && self.show_license {
+            self.show_license = false;
+            if let Some(id) = self.surface_focus[2].take() {
+                ctx.memory_mut(|m| m.request_focus(id));
+            }
+        }
         match action {
             Action::Analysis => {
-                self.close_library();
+                self.close_library(ctx);
+                if !self.analysis.open {
+                    self.surface_focus[0] = ctx.memory(|m| m.focused());
+                }
                 self.analysis.open = true;
                 self.analysis.view.enabled = true;
                 return;
             }
             Action::Library => {
+                if !self.library.open {
+                    self.surface_focus[1] = ctx.memory(|m| m.focused());
+                }
                 self.library.open = true;
                 return;
             }
             Action::License => {
+                self.suspend_library();
+                if !self.show_license {
+                    self.surface_focus[2] = ctx.memory(|m| m.focused());
+                }
                 self.show_license = true;
                 return;
             }
             Action::Gallery => {
+                self.suspend_library();
+                if !self.show_gallery {
+                    self.surface_focus[3] = ctx.memory(|m| m.focused());
+                }
                 self.show_gallery = true;
                 return;
             }
@@ -209,7 +261,11 @@ impl Workbench {
         }
         match action {
             Action::LoadIntent => self.show_prepare(2),
-            Action::LoadMaterial | Action::LoadMaterialCatalog => self.show_prepare(1),
+            Action::LoadMaterial => self.show_prepare(1),
+            Action::LoadMaterialCatalog => {
+                self.show_prepare(1);
+                self.open_profile_catalog(ctx);
+            }
             _ => {}
         }
         let Some(host) = &mut self.host else {
@@ -302,12 +358,24 @@ impl Workbench {
         {
             if self.show_gallery {
                 self.show_gallery = false;
+                if let Some(id) = self.surface_focus[3].take() {
+                    ctx.memory_mut(|m| m.request_focus(id));
+                }
             } else if self.show_license {
                 self.show_license = false;
+                if let Some(id) = self.surface_focus[2].take() {
+                    ctx.memory_mut(|m| m.request_focus(id));
+                }
             } else if self.library.open {
-                self.close_library();
+                self.close_library(ctx);
             } else if self.analysis.open {
-                self.close_analysis();
+                self.close_analysis(ctx);
+            } else if self.show_feedback {
+                self.show_feedback = false;
+            } else if self.manufacturing.panel != 0 {
+                self.manufacturing.panel = 0;
+            } else if self.selected.is_some() || self.occurrence.is_some() {
+                self.clear_selection();
             }
             return;
         }
@@ -370,8 +438,10 @@ impl Workbench {
             "Save outcome uncertain"
         } else if p.dirty {
             "Unsaved changes"
+        } else if p.path_label.is_some() {
+            "Saved"
         } else {
-            "Committed state"
+            "Not saved"
         };
         ui::property(ui, "State", status, tokens);
         ui.collapsing("Saved revisions", |ui| {
@@ -428,6 +498,11 @@ impl Workbench {
             self.button(ui, Action::Cancel);
             self.button(ui, Action::Resume);
         });
+        ui.add(
+            egui::Label::new(&self.state.message)
+                .wrap()
+                .selectable(true),
+        );
         ui.columns(2, |columns| {
             ui::group(&mut columns[0], "Jobs");
             if let Some(d) = &self.state.diagnostic {
@@ -745,7 +820,7 @@ impl eframe::App for Workbench {
                         .clicked()
                         && self.library.open
                     {
-                        self.close_library();
+                        self.close_library(&ctx);
                     }
                 }
                 ui.separator();
@@ -786,7 +861,32 @@ impl eframe::App for Workbench {
                 .max_size((ui.available_height() * 0.5).max(100.0))
                 .show(ui, |ui| self.feedback(ui));
         }
-        if self.library.open {
+        if self.show_gallery {
+            egui::CentralPanel::default_margins().show(ui, |ui| {
+                if ui::close(ui, "Back to workbench") {
+                    self.show_gallery = false;
+                    if let Some(id) = self.surface_focus[3].take() {
+                        ctx.memory_mut(|m| m.request_focus(id));
+                    }
+                }
+                ui::gallery(ui, &mut self.prefs.theme);
+            });
+        } else if self.show_license {
+            egui::CentralPanel::default_margins().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("License · OSL-3.0");
+                    if ui::close(ui, "Back to workbench") {
+                        self.show_license = false;
+                        if let Some(id) = self.surface_focus[2].take() {
+                            ctx.memory_mut(|m| m.request_focus(id));
+                        }
+                    }
+                });
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.add(egui::Label::new(LICENSE).wrap().selectable(true));
+                });
+            });
+        } else if self.library.open {
             egui::CentralPanel::default_margins().show(ui, |ui| self.library_page(ui));
         } else if self.manufacturing.panel == 4 {
             egui::CentralPanel::default_margins().show(ui, |ui| self.study_page(ui));
@@ -972,6 +1072,9 @@ impl eframe::App for Workbench {
                 });
         }
         if self.show_commands {
+            if self.command_focus {
+                self.command_return_focus = ctx.memory(|m| m.focused());
+            }
             let modal = egui::Modal::new(egui::Id::unique("command-palette")).show(&ctx, |ui| {
                 ui.set_width(360.0);
                 ui.horizontal(|ui| {
@@ -1048,6 +1151,11 @@ impl eframe::App for Workbench {
             if modal.should_close() {
                 self.show_commands = false;
             }
+            if !self.show_commands
+                && let Some(id) = self.command_return_focus.take()
+            {
+                ctx.memory_mut(|m| m.request_focus(id));
+            }
         }
         self.navigation_dialog(&ctx);
         if let Some(confirmation) = &self.state.confirmation {
@@ -1066,34 +1174,6 @@ impl eframe::App for Workbench {
                 self.confirmation = Some((id, false));
             }
         }
-        egui::Window::new("License · OSL-3.0")
-            .open(&mut self.show_license)
-            .vscroll(true)
-            .show(&ctx, |ui| {
-                if ui::close(ui, "Close license") {
-                    ui.close();
-                }
-                ui.label(LICENSE);
-            })
-            .inspect(|r| {
-                if r.response.should_close() {
-                    self.show_license = false;
-                }
-            });
-        egui::Window::new("Component gallery")
-            .open(&mut self.show_gallery)
-            .vscroll(true)
-            .show(&ctx, |ui| {
-                if ui::close(ui, "Close gallery") {
-                    ui.close();
-                }
-                ui::gallery(ui, &mut self.prefs.theme);
-            })
-            .inspect(|r| {
-                if r.response.should_close() {
-                    self.show_gallery = false;
-                }
-            });
         if previous_theme != self.prefs.theme {
             self.prefs.theme.apply(&ctx);
         }

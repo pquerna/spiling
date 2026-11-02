@@ -22,6 +22,24 @@ struct MaterialDraft {
     value: MaterialProfileSelection,
 }
 impl MaterialUi {
+    fn stage_reviewed(
+        &mut self,
+        project: ProjectId,
+        session: SessionId,
+        revision: ProjectRevision,
+        ignored_nonce: Option<u64>,
+        selection: MaterialProfileSelection,
+    ) {
+        self.identity = Some((project, session));
+        self.ignored_nonce = ignored_nonce;
+        self.draft = Some(MaterialDraft {
+            revision,
+            nonce: 0,
+            original: selection.clone(),
+            value: selection,
+        });
+    }
+
     pub(super) fn discard(&mut self, nonce: Option<u64>) {
         self.ignored_nonce = nonce;
         self.draft = None;
@@ -130,7 +148,7 @@ impl Workbench {
             self.material.draft = None;
         }
     }
-    pub(super) fn material_ui(&mut self, ui: &mut egui::Ui, ready: bool, writable: bool) {
+    pub(super) fn material_ui(&mut self, ui: &mut egui::Ui, writable: bool) {
         let (Some(project), Some(hello)) = (self.state.project.clone(), self.state.hello.clone())
         else {
             return;
@@ -153,7 +171,6 @@ impl Workbench {
         ui.collapsing("Load a single profile", |ui| {
             self.button(ui, Action::LoadMaterial);
         });
-        self.catalog_ui(ui, &project, &hello.session_id, ready);
 
         let pending_intent = self.manufacturing.pending_loaded(m.loaded.as_deref())
             || self
@@ -337,6 +354,27 @@ mod tests {
     }
     fn ids() -> (ProjectId, SessionId) {
         (ProjectId::new(), SessionId::new())
+    }
+    #[test]
+    fn catalog_first_selection_survives_return_to_material_and_stays_project_bound() {
+        let (project, session) = ids();
+        let selected = selection();
+        let mut ui = MaterialUi::default();
+        ui.stage_reviewed(
+            project.clone(),
+            session.clone(),
+            ProjectRevision(7),
+            None,
+            selected.clone(),
+        );
+        ui.sync(&project, &session, ProjectRevision(7), None, None);
+        assert_eq!(ui.draft.as_ref().map(|d| &d.value), Some(&selected));
+        assert!(ui.has_changes(&project, None));
+        ui.sync(&ProjectId::new(), &session, ProjectRevision(7), None, None);
+        assert!(
+            ui.draft.is_none(),
+            "a different project cannot inherit the staged profile"
+        );
     }
     #[test]
     fn rejected_and_stale_drafts_preserve_overrides_until_reload() {

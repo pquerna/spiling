@@ -236,15 +236,15 @@ impl Workbench {
                 "Process inputs changed while editing. Reload before applying this draft.",
             );
         }
-        if ui.button("Reload process values").clicked() {
-            p.identity = None;
+        if ui.button("Discard infill draft").clicked() {
+            p.discard();
         }
         ui.add_enabled_ui(writable && !conflict,|ui|{
             let mut changed=false;
             changed |= ui::percent(ui, "Infill (%)", &mut p.fraction).changed();
             if p.boxed{
                 ui.label("Immutable definition-local mm: min inclusive, max exclusive.");
-                for (label,values) in [("Minimum",&mut p.min),("Maximum",&mut p.max)] {ui.label(label);ui.horizontal(|ui|{for (axis,value) in values.iter_mut().enumerate(){changed|=ui.add(egui::DragValue::new(value).speed(0.1).prefix(format!("{} ",["X","Y","Z"][axis]))).changed();}});}
+                for (label,values) in [("Minimum",&mut p.min),("Maximum",&mut p.max)] { for (axis,value) in values.iter_mut().enumerate() { changed |= ui::number(ui, &format!("{label} {} (mm)", ["X", "Y", "Z"][axis]), value, 0.1).changed(); } }
                 changed|=ui.checkbox(&mut p.permission,"Authorize permanent deposited interface").changed();
                 if p.permission{
                     ui.horizontal_wrapped(|ui|{changed|=ui.selectable_value(&mut p.plate,false,"X/Y separator wall").changed();changed|=ui.selectable_value(&mut p.plate,true,"Source-Z plate").changed();});
@@ -262,8 +262,10 @@ impl Workbench {
             .find(|r| r.occurrence_id == o.occurrence_id)
         {
             ui.label(format!(
-                "Whole-owned base {:.4} · definition inheritance {:.4} · recipe {:.4}",
-                r.value.fraction, r.inherited.fraction, r.global_fraction
+                "Part {:.1}% · definition {:.1}% · recipe {:.1}%",
+                r.value.fraction * 100.0,
+                r.inherited.fraction * 100.0,
+                r.global_fraction * 100.0
             ));
             ui.weak("These are engine-resolved base values; boxes can vary spatial density.");
         }

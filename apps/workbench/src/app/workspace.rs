@@ -6,6 +6,16 @@ use super::{Phase, Workbench, ui};
 use spiling_contracts::geometry::*;
 
 impl Workbench {
+    pub(super) fn clear_selection(&mut self) {
+        if self.subject_drafts() {
+            self.navigation = Some(super::navigation::Navigation::ClearSelection);
+        } else {
+            self.selected = None;
+            self.occurrence = None;
+            self.pose_revision = None;
+        }
+    }
+
     pub(super) fn display_current(&self) -> bool {
         self.state.phase == Phase::Running
             && self.state.display.as_ref().is_some_and(|d| {
@@ -115,6 +125,10 @@ impl Workbench {
         };
         let current = self.display_current() && !self.state.busy;
         ui::pane_header(ui, "Selection", "Source occurrence");
+        if ui::close(ui, "Clear selection") {
+            self.clear_selection();
+            return;
+        }
         if self.pose_revision != Some(scene.summary.revision) {
             self.pose[..3].copy_from_slice(&occurrence.pose.translation_mm);
             let (x, y, z) = glam::DQuat::from_array(occurrence.pose.rotation_xyzw)
@@ -151,9 +165,12 @@ impl Workbench {
                         rotation_xyzw: rotation.to_array(),
                     };
                     let valid = pose.validate().is_ok();
-                    if ui
-                        .add_enabled(valid, egui::Button::new("Apply pose"))
-                        .clicked()
+                    if self.pose != self.pose_original
+                        && ui::primary(
+                            ui,
+                            "Apply pose",
+                            (!valid).then_some("Enter a finite position and rotation"),
+                        )
                         && let Some(project) = &self.state.project
                     {
                         self.queued_geometry = Some(GeometryCommand::SetInstancePose {
@@ -165,7 +182,7 @@ impl Workbench {
                         });
                     }
                     if ui
-                        .add_enabled(valid, egui::Button::new("Add copy at edited pose"))
+                        .add_enabled(valid, egui::Button::new("Add posed copy"))
                         .clicked()
                     {
                         self.queued_geometry = Some(GeometryCommand::AddInstance {

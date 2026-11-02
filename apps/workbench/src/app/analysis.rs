@@ -36,7 +36,10 @@ pub(super) struct AnalysisUi {
     contour_key: Option<(std::sync::Weak<crate::scene::Section>, Option<OccurrenceId>)>,
 }
 impl Workbench {
-    pub(super) fn close_analysis(&mut self) {
+    pub(super) fn close_analysis(&mut self, ctx: &egui::Context) {
+        if let Some(id) = self.surface_focus[0].take() {
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
         self.analysis.open = false;
         self.analysis.view.enabled = false;
         self.analysis.follow_layer = false;
@@ -104,7 +107,7 @@ impl Workbench {
             "Transient inspection · no project edits",
         );
         if ui::close(ui, "Close analysis") {
-            self.close_analysis();
+            self.close_analysis(ui.ctx());
             ctx.request_repaint();
             return;
         }

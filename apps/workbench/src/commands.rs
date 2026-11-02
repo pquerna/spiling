@@ -88,7 +88,7 @@ impl Action {
             Self::Redo => "Redo",
             Self::Restart => "Restart engine",
             Self::Close => "Close Spiling",
-            Self::Cancel => "Cancel native operation",
+            Self::Cancel => "Cancel operation",
             Self::Resume => "Resume observation",
             Self::License => "License",
             Self::Gallery => "Component gallery",

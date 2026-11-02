@@ -14,7 +14,7 @@ pub(super) struct CatalogUi {
 }
 
 impl Workbench {
-    pub(super) fn catalog_ui(
+    pub(in crate::app) fn catalog_ui(
         &mut self,
         ui: &mut egui::Ui,
         project: &ProjectInfo,
@@ -66,11 +66,19 @@ impl Workbench {
             let valid =
                 search.len() <= MAX_MATERIAL_SEARCH_BYTES && !search.chars().any(char::is_control);
             let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui
-                .add_enabled(ready && valid, egui::Button::new("Search catalog"))
-                .clicked()
-                || (ready && valid && enter)
-            {
+            let reason = if !ready {
+                Some("Wait for pending operations")
+            } else if !valid {
+                Some("Use at most 128 bytes without control characters")
+            } else {
+                None
+            };
+            let search_clicked = if self.material.catalog.preview.is_none() {
+                ui::primary(ui, "Search catalog", reason)
+            } else {
+                ui::action(ui, "Search catalog", reason)
+            };
+            if search_clicked || (ready && valid && enter) {
                 request = Some(MaterialReviewRequest {
                     catalog: Some((*loaded.catalog).clone()),
                     query: search.clone(),
@@ -131,22 +139,19 @@ impl Workbench {
                                 "Already captured; no input change."
                             } else { "Applying changes the manufacturing input and invalidates its review." });
                             settings(ui, &candidate.settings, false);
-                            if self.material.draft.as_ref().is_some_and(|d| d.value != d.original) {
-                                ui.weak("Using this profile replaces the current material draft, including overrides.");
-                            }
-                            if ui.add_enabled(ready, egui::Button::new("Use this profile")).clicked() {
-                                self.material.ignored_nonce = m.loaded_material.as_ref().map(|l| l.nonce);
+                            let pending_draft = self.material.has_changes(&project.project_id, m.intent.as_deref());
+                            let reason = if !ready { Some("Wait for pending operations") } else if pending_draft { Some("Back to Material: apply or discard its draft before choosing another profile") } else { None };
+                            if ui::primary(ui, "Use profile", reason) {
+                                self.material.stage_reviewed(project.project_id.clone(), session.clone(), report.input_revision, m.loaded_material.as_ref().map(|l| l.nonce), candidate.selection.clone());
                                 self.material.catalog.show = false;
-                                self.material.draft = Some(MaterialDraft {
-                                    revision: report.input_revision, nonce: 0,
-                                    original: candidate.selection.clone(), value: candidate.selection.clone(),
-                                });
+                                self.finish_profile_selection(ui.ctx());
                             }
                         } else {
                             for issue in &candidate.issues {
                                 ui.colored_label(self.prefs.theme.tokens().warning, &issue.message);
                             }
                             ui.weak("This declaration cannot be applied unchanged.");
+                            if ui::primary(ui, "Back to results", None) { self.material.catalog.preview = None; }
                         }
                     }
                 });
@@ -221,7 +226,7 @@ fn settings(ui: &mut egui::Ui, rows: &[MaterialSettingReview], captured: bool) {
     ui.weak(if captured {
         "Captured effective values, including explicit overrides."
     } else {
-        "Current input compared with profile defaults. Draft overrides below are applied separately."
+        "Current input compared with profile defaults. Review overrides in Material before Apply."
     });
     egui::Grid::new("material-settings-summary")
         .num_columns(if captured { 2 } else { 3 })

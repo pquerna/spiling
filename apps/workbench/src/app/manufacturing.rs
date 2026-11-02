@@ -160,6 +160,9 @@ impl Workbench {
             }
             2 => {
                 if let Some(d) = &mut self.manufacturing.draft {
+                    if d.project != project.project_id {
+                        return;
+                    }
                     let prepared = super::policies::prepared(&d.value);
                     let changed = m.intent.as_deref() != Some(&d.value);
                     let reason = if !ready {
@@ -189,6 +192,10 @@ impl Workbench {
                     }
                 }
             }
+            3 => {
+                self.placement_actions(ui);
+                return;
+            }
             4 if self.process.has_changes() => {
                 self.process_actions(ui);
                 return;
@@ -203,6 +210,66 @@ impl Workbench {
             }
         } else if draft {
             ui.label("Apply or discard in the changed section");
+        }
+    }
+    fn placement_actions(&mut self, ui: &mut egui::Ui) {
+        let (Some(project), Some(hello), Some(scene)) = (
+            self.state.project.clone(),
+            self.state.hello.clone(),
+            self.state.display.clone(),
+        ) else {
+            return;
+        };
+        let Some(intent) = self.state.manufacturing.intent.as_ref() else {
+            self.primary_button(ui, Action::LoadIntent);
+            return;
+        };
+        let occurrence = scene
+            .occurrences
+            .iter()
+            .find(|o| Some(o.occurrence_id) == self.occurrence);
+        let ready = self.state.phase == Phase::Running
+            && !self.state.busy
+            && !self.state.picker_open
+            && self.awaiting_serial.is_none()
+            && !project.read_only
+            && self.display_current();
+        let reason = if !ready {
+            Some("Open a writable project and wait for pending operations")
+        } else if occurrence.is_none() {
+            Some("Select a part in the model tree")
+        } else {
+            None
+        };
+        let proposal = self.state.bed_proposal.as_ref().filter(|p| {
+            p.session_id == hello.session_id
+                && p.project_revision == project.revision
+                && p.scene_revision == scene.summary.revision
+                && Some(p.occurrence_id) == self.occurrence
+        });
+        if let Some(proposal) = proposal {
+            if ui::primary(ui, "Apply placement", reason) {
+                self.queued_geometry = Some(GeometryCommand::SetInstancePose {
+                    session_id: proposal.session_id.clone(),
+                    base_revision: proposal.scene_revision,
+                    project_revision: proposal.project_revision,
+                    occurrence_id: proposal.occurrence_id,
+                    pose: proposal.pose,
+                });
+            }
+        } else if ui::primary(ui, "Review bed placement", reason) {
+            let o = occurrence.expect("checked selection");
+            self.queued_geometry = Some(GeometryCommand::PrepareBedPose {
+                session_id: hello.session_id.clone(),
+                base_revision: scene.summary.revision,
+                project_revision: project.revision,
+                occurrence_id: o.occurrence_id,
+                expected_definition_id: o.definition_id.clone(),
+                expected_pose: o.pose,
+                envelope_mm: intent.printer.build_envelope,
+                center_xy: true,
+                contact_tolerance_mm: SECTION_PLANE_TOLERANCE_MM,
+            });
         }
     }
     pub(super) fn manufacturing_ui(&mut self, ui: &mut egui::Ui) {
@@ -235,7 +302,7 @@ impl Workbench {
                 self.button(ui, Action::Library);
             }
             if section == 1 {
-                self.material_ui(ui, ready, writable);
+                self.material_ui(ui, writable);
             }
             if section == 2 {
                 ui::group(ui, "Construction");
@@ -340,35 +407,6 @@ impl Workbench {
             }
             if section == 3 {
                 ui::group(ui, "Placement");
-                if let Some(scene) = self.state.display.clone()
-                    && let Some(o) = scene
-                        .occurrences
-                        .iter()
-                        .find(|o| Some(o.occurrence_id) == self.occurrence)
-                {
-                    if let Some(intent) = &m.intent
-                        && ui
-                            .add_enabled(
-                                writable && self.display_current(),
-                                egui::Button::new("Review bed placement"),
-                            )
-                            .clicked()
-                    {
-                        self.queued_geometry = Some(GeometryCommand::PrepareBedPose {
-                            session_id: hello.session_id.clone(),
-                            base_revision: scene.summary.revision,
-                            project_revision: project.revision,
-                            occurrence_id: o.occurrence_id,
-                            expected_definition_id: o.definition_id.clone(),
-                            expected_pose: o.pose,
-                            envelope_mm: intent.printer.build_envelope,
-                            center_xy: true,
-                            contact_tolerance_mm: SECTION_PLANE_TOLERANCE_MM,
-                        });
-                    }
-                } else {
-                    ui.weak("Select an occurrence in the model tree.");
-                }
                 if let Some(proposal) = &self.state.bed_proposal {
                     let current = proposal.session_id == hello.session_id
                         && proposal.project_revision == project.revision
@@ -392,17 +430,8 @@ impl Workbench {
                     ui.collapsing("Native support and envelope evidence", |ui| {
                         ui.label(format!("{proposal:#?}"));
                     });
-                    if ui
-                        .add_enabled(writable && current, egui::Button::new("Apply placement"))
-                        .clicked()
-                    {
-                        self.queued_geometry = Some(GeometryCommand::SetInstancePose {
-                            session_id: proposal.session_id.clone(),
-                            base_revision: proposal.scene_revision,
-                            project_revision: proposal.project_revision,
-                            occurrence_id: proposal.occurrence_id,
-                            pose: proposal.pose,
-                        });
+                    if !current {
+                        ui.label("Placement proposal is out of date");
                     }
                 }
             }
@@ -725,14 +754,9 @@ impl Workbench {
             }
         }
         self.manufacturing.layers.controls(ui, view, &review);
-        if compact {
-            ui.collapsing("Event and model details", |ui| {
-                ui.label(BEAD_MODEL);
-                event_controls(ui, view, &review, descriptor);
-            });
-        } else {
+        ui.collapsing("Command playback", |ui| {
             event_controls(ui, view, &review, descriptor);
-        }
+        });
     }
 }
 

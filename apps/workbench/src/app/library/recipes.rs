@@ -73,7 +73,7 @@ impl Workbench {
         personal_write: bool,
     ) {
         let personal = self.library.personal;
-        ui.set_max_width(800.0);
+        ui.set_max_width(ui.available_width().min(800.0));
         ui::help(
             ui,
             "recipe-definition",
@@ -87,14 +87,25 @@ impl Workbench {
             self.recipe_composer(ui, state, writable, personal_write);
             return;
         }
-        if ui
-            .button(if self.library.recipes.destination.is_some() {
-                "Resume recipe draft"
-            } else {
-                "Create recipe"
-            })
-            .clicked()
-        {
+        let empty = if personal {
+            state
+                .personal_recipes
+                .as_ref()
+                .is_none_or(|p| p.entries.is_empty())
+        } else {
+            state.project_recipes.is_empty()
+        };
+        let label = if self.library.recipes.destination.is_some() {
+            "Resume recipe draft"
+        } else {
+            "Create recipe"
+        };
+        let compose = if empty && self.library.detail == 0 {
+            ui::primary(ui, label, None)
+        } else {
+            ui.button(label).clicked()
+        };
+        if compose {
             self.library.recipes.destination.get_or_insert(personal);
             self.library.detail = 3;
         }
@@ -119,50 +130,61 @@ impl Workbench {
         if entries.is_empty() {
             ui.label("No recipes in this scope. Add ingredients from Filaments, or capture a retained study selection below.");
         }
-        for recipe in entries {
-            ui.push_id(&recipe.reference.id.0, |ui| {
+        if self.library.detail != 5 {
+            for recipe in entries {
+                ui.push_id(&recipe.reference.id.0, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "{} · {} filaments",
+                            recipe.name, recipe.ingredient_count
+                        ));
+                        if ui
+                            .add_enabled(
+                                ready && !context_dirty,
+                                egui::Button::new("Inspect recipe"),
+                            )
+                            .clicked()
+                        {
+                            self.library.detail = 5;
+                            self.library.queued =
+                                Some(LibraryAction::Recipe(RecipeAction::Inspect {
+                                    personal,
+                                    reference: recipe.reference.clone(),
+                                }));
+                        }
+                    });
+                });
+            }
+            if personal && let Some(page) = &state.personal_recipes {
                 ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "{} · {} filaments",
-                        recipe.name, recipe.ingredient_count
-                    ));
                     if ui
-                        .add_enabled(ready && !context_dirty, egui::Button::new("Inspect recipe"))
+                        .add_enabled(ready, egui::Button::new("First page"))
                         .clicked()
                     {
-                        self.library.queued = Some(LibraryAction::Recipe(RecipeAction::Inspect {
-                            personal,
-                            reference: recipe.reference.clone(),
+                        self.library.refresh();
+                    }
+                    if let Some(offset) = page.next_offset
+                        && ui
+                            .add_enabled(ready, egui::Button::new("Next recipes"))
+                            .clicked()
+                    {
+                        self.library.queued = Some(LibraryAction::Recipe(RecipeAction::Refresh {
+                            query: LibraryRecipeQuery {
+                                expected: page.identity.clone(),
+                                query: self.library.query.clone(),
+                                offset,
+                            },
                         }));
                     }
                 });
-            });
+            }
         }
-        if personal && let Some(page) = &state.personal_recipes {
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(ready, egui::Button::new("First page"))
-                    .clicked()
-                {
-                    self.library.refresh();
-                }
-                if let Some(offset) = page.next_offset
-                    && ui
-                        .add_enabled(ready, egui::Button::new("Next recipes"))
-                        .clicked()
-                {
-                    self.library.queued = Some(LibraryAction::Recipe(RecipeAction::Refresh {
-                        query: LibraryRecipeQuery {
-                            expected: page.identity.clone(),
-                            query: self.library.query.clone(),
-                            offset,
-                        },
-                    }));
-                }
-            });
+        if self.library.detail == 5 && ui::close(ui, "Back to recipes") {
+            self.library.detail = 0;
         }
         if let Some(selected) = &state.recipe_selection
             && selected.personal == personal
+            && self.library.detail == 5
         {
             let current = self
                 .state
@@ -289,7 +311,7 @@ impl Workbench {
                     if let Err(error) = context.request(&transfer.recipe.definition) { ui.colored_label(ui.visuals().error_fg_color, error); }
                     let validation = context.request(&transfer.recipe.definition).err();
                     if ui::primary(ui, "Load study", if !writable { Some("Open a writable project and wait for pending operations") } else { validation.as_deref() }) && let Some(h) = &self.state.hello {
-                        self.library.open = false; self.manufacturing.panel = 4;
+                        self.library.hardware.clear_secret(); self.library.open = false; self.manufacturing.panel = 4;
                         self.queued_project = Some(ProjectCommand::LoadRecipeStudy { session_id: h.session_id.clone(), base_revision: current.as_ref().expect("current").1, reference: reference.clone(), context: context.clone() });
                     }
                 });
@@ -326,7 +348,9 @@ impl Workbench {
             self.library.detail = 0;
             return;
         }
-        ui.vertical(|ui| {
+        let enabled = (if personal { personal_write } else { writable })
+            && self.library.recipes.submission.is_none();
+        ui.add_enabled_ui(enabled, |ui| {
             let draft = &mut self.library.recipes;
             ui.weak("Add 2–3 variants from Filaments in either scope. Declared sRGB is an estimate; missing color evidence stays unknown.");
             ui::text(ui, "Recipe name", &mut draft.name);
