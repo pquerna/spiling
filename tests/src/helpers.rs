@@ -213,8 +213,7 @@ pub fn assert_mesh_source_coverage(definition: &Definition, mesh: &MeshArtifact)
     );
 }
 
-/// Standalone precision tests use the native contact-query 20M work envelope.
-/// No production limit is changed; aggregate bounds charge all axes together.
+/// Bounded positive controls for tests that explicitly select their own work.
 pub const POSITIVE_QUERY_WORK: u64 = 20_000_000;
 
 pub fn precision_axis(
@@ -226,7 +225,7 @@ pub fn precision_axis(
         def,
         axis,
         tolerance_mm,
-        &mut spiling_geometry::GeometryWorkBudget::new(POSITIVE_QUERY_WORK),
+        &mut spiling_geometry::GeometryWorkBudget::query(),
     )
 }
 
@@ -241,8 +240,14 @@ fn precision_axis_with_work(
     let policy = spiling_geometry::BoundsPolicy {
         maximum_endpoint_uncertainty_mm: tolerance_mm * 0.5,
     };
-    let bounds =
-        spiling_geometry::projected_bounds(def, direction, policy, work, &AtomicBool::new(false))?;
+    let bounds = spiling_geometry::material_projected_bounds(
+        def,
+        direction,
+        policy,
+        work,
+        &AtomicBool::new(false),
+    )?
+    .bounds();
     assert!(
         bounds.achieved_uncertainty_mm.is_finite()
             && bounds.achieved_uncertainty_mm <= policy.maximum_endpoint_uncertainty_mm
@@ -262,7 +267,7 @@ pub fn precision_bounds(
     def: &Definition,
     tolerance_mm: f64,
 ) -> Result<spiling_contracts::geometry::AabbMm, GeometryError> {
-    let mut work = spiling_geometry::GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
+    let mut work = spiling_geometry::GeometryWorkBudget::query();
     let mut result = spiling_contracts::geometry::AabbMm {
         min: [0.0; 3],
         max: [0.0; 3],

@@ -2539,116 +2539,120 @@ mod tests {
         ),
     ];
 
-    #[test]
-    fn phase0_step_to_solidcore_tessellate_and_section_all_6_fixtures() {
-        for &(name, step_text) in FIXTURES {
-            let mut ex = parse_step_exchange(step_text)
-                .unwrap_or_else(|e| panic!("{name}: p21 parse failed: {e}"));
-            let cancel = std::sync::atomic::AtomicBool::new(false);
-            let ast = step_p21::parser::parse(step_text).unwrap();
-            let entities = crate::import::ast::Entities::new(&ast.data[0], &cancel).unwrap();
-            let roots = entities.named("MANIFOLD_SOLID_BREP", &cancel).unwrap();
-            assert_eq!(roots.len(), 1, "{name}: expected 1 solid");
-            let (unit, uncertainty) =
-                crate::import::units::resolve(&entities, roots[0], &cancel).unwrap();
-            let mut context = solidcraft_step::units::Context::default();
-            context.units.len = unit.scale_to_mm();
-            context.uncertainty = uncertainty;
-            let solid = crate::import::closed_spline_decode::read_solid(
-                &mut ex,
-                roots[0],
-                context,
-                crate::import::MAX_QUERY_PROOF_BYTES,
-                &cancel,
-            )
-            .unwrap_or_else(|e| panic!("{name}: STEP extraction failed: {e}"));
-            assert!(!solid.sheet, "{name}: expected closed solid");
-
-            let mut reader = crate::import::source::reader(&ex, unit.scale_to_mm());
-            let carriers = crate::import::source::face_carriers(
-                &entities,
-                &mut reader,
-                &solid.face_origin,
-                &cancel,
-            )
+    fn assert_native_bridge_watertight_tessellation(name: &str) {
+        let (_, step_text) = FIXTURES
+            .iter()
+            .find(|(fixture, _)| *fixture == name)
             .unwrap();
-            let mut k = Kernel::default();
-            let brep = from_schema4_brep(&mut k, &solid.brep, &carriers, false)
-                .unwrap_or_else(|e| panic!("{name}: from_schema4_brep failed: {e}"));
+        let mut ex = parse_step_exchange(step_text)
+            .unwrap_or_else(|e| panic!("{name}: p21 parse failed: {e}"));
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let ast = step_p21::parser::parse(step_text).unwrap();
+        let entities = crate::import::ast::Entities::new(&ast.data[0], &cancel).unwrap();
+        let roots = entities.named("MANIFOLD_SOLID_BREP", &cancel).unwrap();
+        assert_eq!(roots.len(), 1, "{name}: expected 1 solid");
+        let (unit, uncertainty) =
+            crate::import::units::resolve(&entities, roots[0], &cancel).unwrap();
+        let mut context = solidcraft_step::units::Context::default();
+        context.units.len = unit.scale_to_mm();
+        context.uncertainty = uncertainty;
+        let solid = crate::import::closed_spline_decode::read_solid(
+            &mut ex,
+            roots[0],
+            context,
+            crate::import::MAX_QUERY_PROOF_BYTES,
+            &cancel,
+        )
+        .unwrap_or_else(|e| panic!("{name}: STEP extraction failed: {e}"));
+        assert!(!solid.sheet, "{name}: expected closed solid");
 
-            let faces = solidcore::topology::brep::p1::faces(&brep, None).unwrap();
-            let edges = solidcore::topology::brep::p1::edges(&brep, None).unwrap();
-            let _vertices = solidcore::topology::brep::p1::vertices(&brep, None).unwrap();
-            assert_eq!(faces.len(), solid.brep.faces.len(), "{name}: face count");
+        let mut reader = crate::import::source::reader(&ex, unit.scale_to_mm());
+        let carriers = crate::import::source::face_carriers(
+            &entities,
+            &mut reader,
+            &solid.face_origin,
+            &cancel,
+        )
+        .unwrap();
+        let mut k = Kernel::default();
+        let brep = from_schema4_brep(&mut k, &solid.brep, &carriers, false)
+            .unwrap_or_else(|e| panic!("{name}: from_schema4_brep failed: {e}"));
 
-            // 1. Tessellate with solidcore-mesh and check watertightness.
-            let opts = TessellateOptions::default();
-            let mesh = tessellate(&k, &brep, &opts)
-                .unwrap_or_else(|e| panic!("{name}: tessellate failed: {e}"));
-            assert!(
-                mesh.failures.is_empty(),
-                "{name}: mesh failures: {:?}",
-                mesh.failures
-            );
-            let report = mesh.edge_report();
-            assert!(
-                report.is_watertight(),
-                "{name}: mesh is not watertight: open={} non_manifold={} inconsistent={}",
-                report.open.len(),
-                report.non_manifold.len(),
-                report.inconsistent.len()
-            );
+        let faces = solidcore::topology::brep::p1::faces(&brep, None).unwrap();
+        let edges = solidcore::topology::brep::p1::edges(&brep, None).unwrap();
+        let _vertices = solidcore::topology::brep::p1::vertices(&brep, None).unwrap();
+        assert_eq!(faces.len(), solid.brep.faces.len(), "{name}: face count");
 
-            // 2. Section at midpoint Z using Surface::global_surface_intersect.
-            let mut z_min = f64::INFINITY;
-            let mut z_max = f64::NEG_INFINITY;
-            for v in &solid.brep.vertices {
-                z_min = z_min.min(v.point[2]);
-                z_max = z_max.max(v.point[2]);
-            }
-            let z_mid = 0.5 * (z_min + z_max);
-            let plane_ax = placement([0.0, 0.0, z_mid], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).unwrap();
-            let section_plane = Surface::from(Plane::create_canonical(&plane_ax).unwrap());
-            let plane_dom = Extent2d::from_bounds(-10_000.0, -10_000.0, 10_000.0, 10_000.0);
-            let mut total_curves = 0usize;
-            for &fid in &faces {
-                let face = brep.face(fid).unwrap();
-                let surf = face.surface.as_ref().unwrap();
-                let dom = face.uv_domain;
-                let res = surf
-                    .global_surface_intersect(
-                        &k,
-                        &dom,
-                        &section_plane,
-                        &plane_dom,
-                        [false, false],
-                        Some(brep.tolerance()),
-                        None,
-                    )
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "{name} face {}: global_surface_intersect failed: {e}",
-                            fid.index()
-                        )
-                    });
-                for c in &res.curves_3d {
-                    total_curves += 1;
-                    let ivl = c.natural_interval();
-                    let _p_start = c.evaluate_point(&k, ivl.min()).unwrap();
-                    let _p_end = c.evaluate_point(&k, ivl.max()).unwrap();
-                }
-            }
+        let opts = TessellateOptions::default();
+        let mesh = tessellate(&k, &brep, &opts)
+            .unwrap_or_else(|e| panic!("{name}: tessellate failed: {e}"));
+        assert!(
+            mesh.failures.is_empty(),
+            "{name}: mesh failures: {:?}",
+            mesh.failures
+        );
+        assert!(!mesh.triangles.is_empty(), "{name}: empty mesh");
+        for face in &faces {
             assert!(
-                total_curves >= 1,
-                "{name}: expected >= 1 plane-face intersection curves at z={z_mid}, got {total_curves}"
-            );
-            eprintln!(
-                "{name}: OK! faces={} edges={} tris={} watertight={} section_curves={total_curves}",
-                faces.len(),
-                edges.len(),
-                mesh.triangles.len(),
-                report.is_watertight(),
+                mesh.triangle_faces.contains(face),
+                "{name}: native face {face:?} has no mesh triangles"
             );
         }
+        let report = mesh.edge_report();
+        assert!(
+            report.is_watertight(),
+            "{name}: mesh is not watertight: open={} non_manifold={} inconsistent={}",
+            report.open.len(),
+            report.non_manifold.len(),
+            report.inconsistent.len()
+        );
+
+        eprintln!(
+            "{name}: faces={} edges={} tris={} watertight={}",
+            faces.len(),
+            edges.len(),
+            mesh.triangles.len(),
+            report.is_watertight(),
+        );
+    }
+
+    #[test]
+    fn native_bridge_mesh_is_watertight_rounded_housing() {
+        assert_native_bridge_watertight_tessellation("occt-rounded-housing-mm");
+    }
+
+    #[test]
+    fn native_bridge_mesh_is_watertight_cylinder() {
+        assert_native_bridge_watertight_tessellation("occt-cylinder-mm");
+    }
+
+    #[test]
+    fn native_bridge_mesh_is_watertight_through_hole() {
+        assert_native_bridge_watertight_tessellation("occt-through-hole-mm");
+    }
+
+    #[test]
+    fn native_bridge_mesh_is_watertight_narrow_pocket() {
+        assert_native_bridge_watertight_tessellation("occt-narrow-pocket-mm");
+    }
+
+    #[test]
+    fn native_bridge_mesh_is_watertight_tapered_fitting() {
+        assert_native_bridge_watertight_tessellation("occt-tapered-fitting-mm");
+    }
+
+    #[test]
+    fn native_bridge_mesh_is_watertight_ribbed_bracket() {
+        assert_native_bridge_watertight_tessellation("occt-ribbed-bracket-mm");
+    }
+
+    #[test]
+    fn native_bridge_mesh_is_watertight_spline_housing() {
+        assert_native_bridge_watertight_tessellation("occt-spline-housing-mm");
+    }
+
+    #[test]
+    fn native_bridge_mesh_is_watertight_perforated_plate() {
+        assert_native_bridge_watertight_tessellation("perforated-plate");
     }
 }

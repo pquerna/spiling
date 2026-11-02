@@ -1796,7 +1796,7 @@ fn torus_stationary_values(
     let o = p.origin();
     let offset = vertex_height([o.x, o.y, o.z], frame);
     let amplitude = tight_mul(c, Interval::point(torus.minor_radius()));
-    // The literal STEP torus chart has its meridional sine on V. No
+    // The native STEP torus chart has its degree-valued meridional sine on V. No
     // descriptive family or NURBS parameter inversion establishes this index.
     Some((
         [
@@ -1819,6 +1819,22 @@ fn native_step_operand(mut surface: &Surface) -> Option<&Surface> {
         }
     }
     None
+}
+fn native_torus_stationary_branches(
+    bounds: [f64; 2],
+    event: usize,
+) -> Result<impl Iterator<Item = Interval>, GeometryError> {
+    let phase = Interval::point(if event == 0 { 90.0 } else { 270.0 });
+    let first = ((bounds[0] - phase.hi) / 360.0).floor() as i32;
+    let last = ((bounds[1] - phase.lo) / 360.0).ceil() as i32;
+    if last.saturating_sub(first) > 8 {
+        return Err(indeterminate(
+            "periodic critical-height branch ownership is unbounded",
+        ));
+    }
+    Ok((first..=last)
+        .map(move |turn| phase.add(Interval::point(360.0 * f64::from(turn))))
+        .filter(move |lifted| lifted.lo >= bounds[0] && lifted.hi <= bounds[1]))
 }
 fn cross(a: [Interval; 3], b: [Interval; 3]) -> [Interval; 3] {
     [
@@ -2268,7 +2284,6 @@ fn analyze_height_functional(
                 };
                 if h.lo > h.hi { continue; }
                 if let Some((values, phase_axis)) = torus_values {
-                    let pi = Interval { lo: down(std::f64::consts::PI), hi: up(std::f64::consts::PI) };
                     for (event, value) in values.into_iter().enumerate() {
                         if !overlaps(value, [h.lo, h.hi]) { continue; }
                         torus_candidates[event] = true;
@@ -2276,14 +2291,8 @@ fn analyze_height_functional(
                         // One feasible strip is an existence witness for this
                         // critical circle. Artificial periodic seams need not
                         // themselves be classified as physical boundaries.
-                        let phase = pi.mul(Interval::point(if event == 0 { 0.5 } else { 1.5 }));
                         let bounds = domain.uv_domain()[phase_axis];
-                        let first = ((bounds[0] - phase.hi) / std::f64::consts::TAU).floor() as i32;
-                        let last = ((bounds[1] - phase.lo) / std::f64::consts::TAU).ceil() as i32;
-                        if last.saturating_sub(first) > 8 { return Err(indeterminate("periodic critical-height branch ownership is unbounded")); }
-                        for turn in first..=last {
-                            let lifted = phase.add(pi.mul(Interval::point(2.0 * f64::from(turn))));
-                            if lifted.lo < bounds[0] || lifted.hi > bounds[1] { continue; }
+                        for lifted in native_torus_stationary_branches(bounds, event)? {
                             let other = 1 - phase_axis;
                             let mid = uv[other][0] * 0.5 + uv[other][1] * 0.5;
                             let mut root = [[mid, mid]; 2];
@@ -6062,6 +6071,36 @@ mod tests {
     }
 
     #[test]
+    fn native_torus_stationary_branches_use_degrees_and_owned_periodic_lifts() {
+        for (bounds, expected) in [
+            ([0.0, 360.0], [90.0, 270.0]),
+            ([360.0, 720.0], [450.0, 630.0]),
+            ([-360.0, 0.0], [-270.0, -90.0]),
+        ] {
+            for (event, phase) in expected.into_iter().enumerate() {
+                let branches: Vec<_> = native_torus_stationary_branches(bounds, event)
+                    .unwrap()
+                    .collect();
+                assert_eq!(branches.len(), 1);
+                assert!(branches[0].contains(phase));
+                assert!(branches[0].width() < 1.0e-10);
+            }
+        }
+        for event in 0..2 {
+            assert_eq!(
+                native_torus_stationary_branches([100.0, 200.0], event)
+                    .unwrap()
+                    .count(),
+                0
+            );
+            let error = native_torus_stationary_branches([0.0, 3600.0], event)
+                .err()
+                .unwrap();
+            assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate);
+        }
+    }
+
+    #[test]
     fn unchanged_bracket_closed_cut_after_coheight_keeps_native_material() {
         let cancel = AtomicBool::new(false);
         let definition = crate::from_step_bytes_with_cancel(
@@ -7504,26 +7543,30 @@ mod tests {
         }
     }
 
+    fn assert_no_exact_vertical_reuse(name: &str) {
+        let definition = parity_definition(name);
+        let mut work = GeometryWorkBudget::new(30_000_000);
+        assert!(
+            narrow_invariance(
+                &definition,
+                frame(),
+                [1.0, 2.0],
+                &mut work,
+                &AtomicBool::new(false)
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
     #[test]
-    fn vertical_flow_does_not_snap_a_revolution_or_torus_into_exact_reuse() {
-        for name in [
-            "native-parity-revolution.step",
-            "native-parity-nurbs-torus.step",
-        ] {
-            let definition = parity_definition(name);
-            let mut work = GeometryWorkBudget::new(30_000_000);
-            assert!(
-                narrow_invariance(
-                    &definition,
-                    frame(),
-                    [1.0, 2.0],
-                    &mut work,
-                    &AtomicBool::new(false)
-                )
-                .unwrap()
-                .is_none()
-            );
-        }
+    fn vertical_flow_does_not_snap_a_revolution_into_exact_reuse() {
+        assert_no_exact_vertical_reuse("native-parity-revolution.step");
+    }
+
+    #[test]
+    fn vertical_flow_does_not_snap_a_torus_into_exact_reuse() {
+        assert_no_exact_vertical_reuse("native-parity-nurbs-torus.step");
     }
     #[test]
     fn original_blind_floor_is_closed_stratum_not_the_ring_core_metric() {
@@ -7943,25 +7986,37 @@ mod tests {
                     .any(|event| event[0] <= critical && critical <= event[1])
             );
         }
+    }
+
+    #[test]
+    fn native_height_census_honors_cancellation_before_scratch_admission() {
+        let cancel = AtomicBool::new(false);
+        let definition = parity_definition("native-parity-ring-torus.step");
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let prepared = super::super::material_source::prepare_solid(
+            &definition,
+            MAX_SLAB_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let before = work.consumed();
         let error = analyze_height_domain_with_scratch_limit(
-            super::super::material_source::prepare_solid(
-                &definition,
-                MAX_SLAB_SCRATCH_BYTES,
-                &mut work,
-                &cancel,
-            )
-            .unwrap()
-            .source_view()
-            .unwrap(),
+            prepared.source_view().unwrap(),
             frame(),
             [-2.1, 2.1],
-            policy,
+            AnalysisPolicy {
+                maximum_height_uncertainty_mm: 0.01,
+                maximum_shape_error_mm: 0.1,
+            },
             0,
             &mut work,
             &AtomicBool::new(true),
         )
         .unwrap_err();
         assert_eq!(error.code, GeometryErrorCode::Cancelled);
+        assert!(work.consumed() - before <= 1);
+        assert_eq!(work.consumed() + work.remaining(), 20_000_000);
     }
     #[test]
     fn native_sample_height_band_covers_plane_tube_and_origin_relative_direction_drift() {
@@ -8882,7 +8937,7 @@ mod tests {
         let request = SlabRequest {
             frame: frame(),
             height_interval_mm: [4.999, 5.001],
-            sample_height_mm: 4.999001,
+            sample_height_mm: 4.99901,
             native_shape_error_mm: 0.02,
         };
         let result = analyze_slab(
@@ -8895,21 +8950,81 @@ mod tests {
         .unwrap();
         assert!(result.boundary_motion_bound_mm <= 0.02);
         assert!(result.critical.is_some());
+        let proof = result.critical.as_ref().unwrap();
+        assert_eq!(proof.definition_id(), definition.id());
+        assert_eq!(proof.request().frame, request.frame);
+        assert_eq!(
+            proof.request().height_interval_mm,
+            request.height_interval_mm
+        );
+        assert_eq!(proof.request().sample_height_mm, request.sample_height_mm);
+        assert_eq!(
+            proof.request().native_shape_error_mm,
+            request.native_shape_error_mm
+        );
+        assert_eq!(proof.material_component_count(), 1);
+        assert_eq!(proof.bounded_void_count(), 0);
+        assert_eq!(proof.tunnel_cycle_count(), 0);
+        let (face_cells, coedge_cells) = proof.covered_cells();
+        assert!(face_cells > 0 && coedge_cells > 0);
         assert!(
             result
-                .critical
-                .as_ref()
-                .unwrap()
-                .has_native_convex_section_topology_proof(),
-            "the complete original affine sphere is a proved convex source"
+                .closed_shape_error_mm()
+                .is_some_and(|bound| bound <= request.native_shape_error_mm)
         );
         assert_eq!(result.request().sample_height_mm, request.sample_height_mm);
         assert_eq!(result.section.loops.len(), 1);
+        let radius = (25.0 - request.sample_height_mm.powi(2)).sqrt();
+        let sampling_error = result.section.achieved_chord_error_mm();
+        let circle_area = std::f64::consts::PI * radius.powi(2);
+        let area_bound = 2.0 * std::f64::consts::PI * radius * sampling_error
+            + std::f64::consts::PI * sampling_error.powi(2);
+        let sampled_area = result.section.loops[0]
+            .points_mm
+            .windows(2)
+            .map(|edge| edge[0][0] * edge[1][1] - edge[1][0] * edge[0][1])
+            .sum::<f64>()
+            .abs()
+            * 0.5;
+        assert!((sampled_area - circle_area).abs() <= area_bound);
         assert!(
             result
                 .occupied
                 .as_ref()
                 .is_some_and(|occupied| !occupied.is_native_intersection())
+        );
+    }
+
+    #[test]
+    fn sphere_terminal_cap_refuses_sample_inside_native_coincidence_zone() {
+        let cancel = AtomicBool::new(false);
+        let definition = parity_definition("native-parity-full-sphere.step");
+        let mut work = GeometryWorkBudget::new(30_000_000);
+        let prepared = super::super::material_source::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let error = analyze_slab(
+            &prepared,
+            SlabRequest {
+                frame: frame(),
+                height_interval_mm: [4.999, 5.001],
+                sample_height_mm: 4.999001,
+                native_shape_error_mm: 0.02,
+            },
+            crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes(),
+            &mut work,
+            &cancel,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate);
+        assert!(
+            error
+                .message
+                .contains("native coincidence zone meets a closed sample-support cut")
         );
     }
     #[test]

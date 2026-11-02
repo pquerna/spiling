@@ -216,8 +216,10 @@ it neither invokes the native tight-box solver nor substitutes a vertex hull.
 Whole carrier rectangles include the decoder's UV padding and can over-enclose
 even planar trimmed faces. These bounds are not precision measurements, source
 uncertainty claims or material receipts. Physical-extent controls use certified
-`projected_bounds` on literal native trims at their declared endpoint uncertainty;
-placement and manufacturing retain their independent source-material queries.
+`material_projected_bounds` on the native material at their declared endpoint
+uncertainty, matching placement and manufacturing authority. The separate
+`projected_bounds` authoring-chart query additionally requires exact literal UV
+endpoint identity; its refusal is not a native-material dimensional failure.
 
 [`parametric.rs`](../../crates/geometry/src/parametric.rs) and its providers own
 bounded native surface/curve evaluation and separate original-operand queries.
@@ -405,6 +407,12 @@ check whole-triangle carriers, normals, native trim/triangle coverage and packed
 output. Candidate deviation estimates and generated UV curves are not original
 STEP declarations or manufacturing authority. Unqualified collapsed/singular
 coverage refuses display rather than dropping triangles or publishing an empty mesh.
+
+The independent bridge fixtures each require a nonempty, all-face, watertight
+mesh (`cargo test --locked -p spiling-geometry native_bridge_mesh`). Native
+section contracts are exercised separately in `section/tests.rs`, through the
+production section service; raw kernel surface-intersection port coverage is
+not the application's section contract.
 
 Singular-chart publication binds actual native vertex/edge-use ownership to the
 exact coefficient collapse law and one-sided coefficient normals. Missing curved
@@ -626,6 +634,9 @@ is cumulative across retries/subdivision. Prepared sources, pinned proofs,
 coexisting query scratch and output have separate retained-capacity accounting;
 a packed-output allowance cannot fund native preparation. Packed admission uses the SPLS codec's complete-loop chunk sizes; retained native curve receipts stay in the shared native pool rather than consuming the wire-byte quota. These are not RSS
 limits: native intermediate objects also require host-process memory bounds.
+Storage controls check unused native receipt capacity independently of packed
+size and require typed refusal under insufficient native admission. A packed-byte
+target is not a native-retention oracle for exact spans and chord receipts.
 Resource exhaustion, cancellation, unavailable parameter correspondence,
 conditioning, unsupported operations and invalid geometry remain distinct failures.
 No partial proof, stale job or failed display grants successful material authority.

@@ -12398,9 +12398,9 @@ mod tests {
                 translation_mm: translation,
                 ..RigidPoseMm::IDENTITY
             };
-            // Include a REAL original cap collar, not only regular middle samples:
+            // Include a REAL original cap, not only regular middle samples:
             // the diagonal projection must bind ALL native material in the slab.
-            for (domain, layers, critical) in [
+            for (domain, layers, touches_cap) in [
                 (
                     [3.98, 4.02],
                     [([3.98, 4.0], 3.99), ([4.0, 4.02], 4.01)],
@@ -12421,6 +12421,7 @@ mod tests {
                     ([2, 3, 1], [2, 0, 1]),
                 ] {
                     let mut ledger = NativeUnionBindingLedger::new(domain, MAX_SCRATCH).unwrap();
+                    let mut expected_critical_ownerships = 0;
                     for (layer, (interval, z)) in layers.into_iter().enumerate() {
                         let a = ranged_slab(
                             &boxes_source,
@@ -12473,9 +12474,46 @@ mod tests {
                         );
                         let cc =
                             collar_for(&cone_source, &c, &cl, &xy_candidate(&c, z), &[], &mut work);
-                        if critical && layer == 0 {
-                            assert!(cc.is_some());
+                        if touches_cap && layer == 0 {
+                            assert!(cl.critical_interfaces[0]);
+                            if cc.is_some() {
+                                assert!(c.has_critical_collar());
+                                assert!(cl.closed_shape_error_mm().is_none());
+                                assert!(c.closed_shape_error_mm().is_none());
+                                assert_eq!(cl.native_endpoint_closure, [false; 2]);
+                            } else {
+                                assert!(!c.has_critical_collar());
+                                assert!(c.closed_shape_error_mm().is_some());
+                                assert_eq!(cl.native_endpoint_closure, [true, false]);
+                                let mut missing_incidence = cl.clone();
+                                missing_incidence.native_endpoint_closure = [false; 2];
+                                assert!(!same_leaf(&cl, &missing_incidence));
+                                let missing_occurrences = order.map(|index| match index {
+                                    0 => sampled_occurrence(&boxes_source, &a, &al, ac.as_ref()),
+                                    1 => sampled_occurrence(&boxes_source, &b, &bl, bc.as_ref()),
+                                    _ => sampled_occurrence(
+                                        &cone_source,
+                                        &c,
+                                        &missing_incidence,
+                                        None,
+                                    ),
+                                });
+                                let mut actual = actual_box_union(dx, dy, z);
+                                actual.extend(xy_candidate(&c, z));
+                                let failure = super::certify_native_union(
+                                    &missing_occurrences,
+                                    &actual,
+                                    policy(0.0),
+                                    &mut work,
+                                    &cancel,
+                                )
+                                .unwrap_err();
+                                assert_eq!(failure.code, GeometryErrorCode::AnalysisIndeterminate);
+                            }
                         }
+                        expected_critical_ownerships += usize::from(ac.is_some())
+                            + usize::from(bc.is_some())
+                            + usize::from(cc.is_some());
                         let mut actual = actual_box_union(dx, dy, z);
                         actual.extend(xy_candidate(&c, z));
                         let occurrences = order.map(|i| match i {
@@ -12491,12 +12529,7 @@ mod tests {
                             &cancel,
                         )
                         .unwrap();
-                        if critical && layer == 0 {
-                            // Current-plane/directed evidence is NOT the reverse
-                            // authority: the actual native bottom cap has radius 5,
-                            // larger than the strictly interior sampled cone profile.
-                            assert!(cl.closed_shape_error_mm().is_none());
-                            assert!(c.closed_shape_error_mm().is_none());
+                        if touches_cap && layer == 0 {
                             let cone_envelope = target_envelope(
                                 &pending.target_envelopes,
                                 cl.occurrence_id(),
@@ -12562,7 +12595,10 @@ mod tests {
                     let completed = ledger.finalize(&mut work, &cancel).unwrap();
                     assert_eq!(completed.slab_count(), 2);
                     assert_eq!(completed.sources().len(), 3);
-                    assert_eq!(completed.owned_critical_slab_count() > 0, critical);
+                    assert_eq!(
+                        completed.owned_critical_slab_count(),
+                        expected_critical_ownerships
+                    );
                 }
             }
         }

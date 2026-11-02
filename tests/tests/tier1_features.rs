@@ -1938,15 +1938,20 @@ fn test_f39_material_projected_bounds() {
 }
 
 #[test]
-fn test_f39_projected_bounds_cylinder() {
+fn test_f39_material_projected_bounds_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let mut work = GeometryWorkBudget::new(POSITIVE_QUERY_WORK);
     let cancel = AtomicBool::new(false);
     let policy = BoundsPolicy {
         maximum_endpoint_uncertainty_mm: 1e-6,
     };
-    let p = projected_bounds(&def, [1.0, 0.0, 0.0], policy, &mut work, &cancel).unwrap();
-    assert_close(p.maximum[0], 5.0, 1e-4, "cylinder projected X");
+    let receipt =
+        material_projected_bounds(&def, [1.0, 0.0, 0.0], policy, &mut work, &cancel).unwrap();
+    assert_eq!(receipt.definition_id(), def.id());
+    let bounds = receipt.bounds();
+    assert!(bounds.minimum[0] <= -5.0 && -5.0 <= bounds.minimum[1]);
+    assert!(bounds.maximum[0] <= 5.0 && 5.0 <= bounds.maximum[1]);
+    assert!(bounds.achieved_uncertainty_mm <= policy.maximum_endpoint_uncertainty_mm);
     assert!(work.consumed() > 0 && work.consumed() <= POSITIVE_QUERY_WORK);
     assert_eq!(work.consumed() + work.remaining(), POSITIVE_QUERY_WORK);
 }

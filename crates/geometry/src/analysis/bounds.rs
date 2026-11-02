@@ -842,6 +842,61 @@ mod tests {
     }
 
     #[test]
+    fn native_plate_support_does_not_require_exact_authoring_chart_closure() {
+        let definition = crate::from_step_bytes(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/geometry/perforated-plate.step"
+        )))
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        let policy = BoundsPolicy {
+            maximum_endpoint_uncertainty_mm: 0.00005,
+        };
+        let authored = projected_bounds(
+            &definition,
+            [1.0, 0.0, 0.0],
+            policy,
+            &mut GeometryWorkBudget::query(),
+            &cancel,
+        )
+        .expect_err("literal chart endpoint identity remains a separate obligation");
+        assert_eq!(
+            authored.code,
+            GeometryErrorCode::ParameterCorrespondenceUnavailable
+        );
+        assert!(
+            authored
+                .message
+                .contains("native chart C0 identity unproved")
+        );
+        let mut work = GeometryWorkBudget::query();
+        let prepared = super::super::prepare_solid(
+            &definition,
+            MAX_SCRATCH_ALLOCATION_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        for (axis, maximum) in [1640.0, 840.0, 20.0].into_iter().enumerate() {
+            let mut direction = [0.0; 3];
+            direction[axis] = 1.0;
+            let receipt = prepared
+                .material_bounds(
+                    direction,
+                    policy,
+                    MAX_SCRATCH_ALLOCATION_BYTES,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+            let bounds = receipt.bounds();
+            assert!(bounds.minimum[0] <= 0.0 && 0.0 <= bounds.minimum[1]);
+            assert!(bounds.maximum[0] <= maximum && maximum <= bounds.maximum[1]);
+            assert!(bounds.achieved_uncertainty_mm <= policy.maximum_endpoint_uncertainty_mm);
+        }
+    }
+
+    #[test]
     fn original_plane_without_pcurves_has_tight_support_within_placement_work_limit() {
         let definition = crate::from_step_bytes(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),

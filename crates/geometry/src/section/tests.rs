@@ -78,6 +78,50 @@ fn assert_provenance(definition: &Definition, result: &NativeSection) {
 }
 
 #[test]
+fn retained_native_receipt_capacity_is_counted_separately_from_wire_bytes() {
+    let definition = fixture("box-mm.step");
+    let mut result = query(&definition, 4.0, [0.0, 0.0, 1.0]);
+    let original_wire_bytes = spiling_contracts::display::packed_section_size(
+        result
+            .loops()
+            .iter()
+            .map(|boundary| boundary.points_mm.len()),
+        spiling_contracts::geometry::MAX_GEOMETRY_CHUNK_BYTES,
+    )
+    .unwrap();
+    let mut expected_native_bytes = result.retained_bytes();
+    let original_capacity = result.loop_chord_errors_mm[0].capacity();
+    result.loop_chord_errors_mm[0]
+        .try_reserve_exact(17)
+        .unwrap();
+    expected_native_bytes += (result.loop_chord_errors_mm[0].capacity() - original_capacity)
+        * std::mem::size_of::<f64>();
+    assert_eq!(result.retained_bytes(), expected_native_bytes);
+    let original_capacity = result.loop_chord_tangents[0].capacity();
+    result.loop_chord_tangents[0].try_reserve_exact(17).unwrap();
+    expected_native_bytes += (result.loop_chord_tangents[0].capacity() - original_capacity)
+        * std::mem::size_of::<[crate::Interval; 3]>();
+    assert_eq!(result.retained_bytes(), expected_native_bytes);
+    let previous_curve_bytes = result.loop_spans[0][0].curve.allocated_bytes();
+    let charts = Vec::with_capacity(17);
+    expected_native_bytes += charts.capacity() * std::mem::size_of::<SectionGraphChart>();
+    expected_native_bytes -= previous_curve_bytes;
+    result.loop_spans[0][0].curve = SectionCurve::SurfacePlaneAtlas { charts };
+    assert_eq!(result.retained_bytes(), expected_native_bytes);
+    assert_eq!(
+        spiling_contracts::display::packed_section_size(
+            result
+                .loops()
+                .iter()
+                .map(|boundary| boundary.points_mm.len()),
+            spiling_contracts::geometry::MAX_GEOMETRY_CHUNK_BYTES,
+        )
+        .unwrap(),
+        original_wire_bytes
+    );
+}
+
+#[test]
 fn prepared_position_receipts_reject_foreign_native_owner_and_stricter_reuse() {
     let definition = fixture("box-mm.step");
     let foreign_definition = fixture("box-mm.step");

@@ -1131,10 +1131,13 @@ pub(crate) fn revolution() -> SourceBrep {
         .faces
         .iter()
         .enumerate()
-        .map(|(i, _)| {
+        .map(|(i, face)| {
+            if i < 2 {
+                return topology::surface(&face.surface)
+                    .expect("original annular planar cap")
+                    .0;
+            }
             let (start, end) = match i {
-                0 => ([5., 0., 0.], [2., 0., 0.]),
-                1 => ([3., 0., 8.], [2., 0., 8.]),
                 2 | 3 => ([5., 0., 0.], [3., 0., 8.]),
                 _ => ([2., 0., 0.], [2., 0., 8.]),
             };

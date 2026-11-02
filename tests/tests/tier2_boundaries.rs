@@ -737,12 +737,14 @@ fn test_f16_corner_spline_housing_tessellation() {
 }
 
 #[test]
-fn test_f16_corner_spline_housing_bounds_exactness() {
+fn test_f16_corner_spline_housing_bounds_use_native_material() {
     let def = import_test_step(&fixture_bytes(
         "independent-exporters/occt-spline-housing-mm.step",
     ))
     .unwrap();
-    assert_close(def.bounds_mm().min[2], 0.0, 1e-4, "min Z");
+    assert_fixture_enclosure(&def, "independent-exporters/occt-spline-housing-mm.step");
+    let bounds = precision_axis(&def, 2, 1e-4).expect("certified physical Z support");
+    assert_close(bounds.minimum[0], 0.0, 1e-4, "min Z");
 }
 
 // =========================================================================
@@ -1439,7 +1441,7 @@ fn test_f32_corner_retained_bytes_reasonable() {
 }
 
 #[test]
-fn test_f32_corner_plate_retained_bytes() {
+fn test_f32_corner_plate_native_and_wire_storage_admission() {
     let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
     let sec = section_at_z(&def, 10.0).unwrap();
     assert_eq!(sec.loops().len(), 513);
@@ -1459,12 +1461,43 @@ fn test_f32_corner_plate_retained_bytes() {
         packed_bytes < 10_000_000,
         "packed section: {packed_bytes} bytes"
     );
-    assert!(sec.retained_bytes() <= MAX_PREPARED_SECTION_BYTES);
+    let native_point_bytes: usize = sec
+        .loops()
+        .iter()
+        .map(|boundary| boundary.points_mm.capacity() * std::mem::size_of::<[f64; 3]>())
+        .sum();
+    assert!(sec.retained_bytes() >= native_point_bytes);
     assert!(
-        sec.retained_bytes() < 10_000_000,
+        sec.retained_bytes() <= MAX_PREPARED_SECTION_BYTES,
         "native section: {} bytes; packed section: {packed_bytes} bytes",
         sec.retained_bytes(),
     );
+    let expected_area = 1640.0 * 840.0 - 512.0 * std::f64::consts::PI * 20.0_f64.powi(2);
+    let perimeter = 2.0 * (1640.0 + 840.0) + 512.0 * 2.0 * std::f64::consts::PI * 20.0;
+    let chord_error = sec.achieved_chord_error_mm();
+    let area_bound = perimeter * chord_error + 513.0 * std::f64::consts::PI * chord_error.powi(2);
+    let mut actual_area = 0.0;
+    for boundary in sec.loops() {
+        assert_eq!(boundary.points_mm.first(), boundary.points_mm.last());
+        let signed_area = loop_area(&sec, boundary);
+        assert_eq!(signed_area < 0.0, boundary.is_hole);
+        actual_area += signed_area;
+    }
+    assert_close(
+        actual_area,
+        expected_area,
+        area_bound,
+        "plate material area",
+    );
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::query();
+    let prepared =
+        prepare_section_source(&def, MAX_PREPARED_SECTION_SOURCE_BYTES, &cancel, &mut work)
+            .unwrap();
+    let error = prepared
+        .section_with_byte_limit(sec.plane(), &cancel, 1, &mut work)
+        .unwrap_err();
+    assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
 }
 
 // =========================================================================
