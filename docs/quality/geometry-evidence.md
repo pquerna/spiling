@@ -307,7 +307,19 @@ the native definition. Reuse binds those owners directly. The section's normaliz
 projection frame and the literal captured height functional can have distinct
 floating-point coefficients; axis-coefficient equality is not ownership authority.
 Actual dual/covector, complete fiber degree, vertex zones and cap clearance remain
-independent obligations.
+independent. Native vertex fans may subdivide a wide planar corner only through
+the actual single closed coedge of one bounded planar face. Exact homogeneous
+coefficients must identify the complete lifted UV trace with its spatial curve
+in the same gauge. Independent strict native-chart preparation proves exact C0,
+regular endpoint germs and complete nonincident separation; certified winding
+selects the material side. A strict negative physical tangent dot product then
+places the oriented normal-cross-boundary interior ray inside the actual sector. The
+expanded cycle retains strict projected determinants and winding one, with
+charged capacity and unchanged whole-vertex-zone metric gates. Fitted proximity,
+chart correction bridges and an antipodal ray pair alone grant no subdivision.
+The unchanged one-degree independent cylinder terminal-slab regression exercises
+this narrow construction; it does not qualify arbitrary planar corners or all
+tilted manufacturing workflows.
 
 Trim winding may prove closed-boundary contact from a continuous curve whose
 whole image fits one query-coordinate strip and whose endpoint enclosures span

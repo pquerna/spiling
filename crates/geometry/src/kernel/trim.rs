@@ -1840,6 +1840,38 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         Ok(TrimClassification::Boundary)
     }
 
+    pub(crate) fn exact_single_loop_orientation(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<bool>, GeometryError> {
+        work.charge(1, cancel)?;
+        if self.is_native_material()
+            || self.original_surface.is_some()
+            || self.loops.len() != 1
+            || self.coedges.len() != 1
+            || !self.native_bridges.is_empty()
+        {
+            return Ok(None);
+        }
+        let point = self.domain.map(|range| range[0] * 0.5 + range[1] * 0.5);
+        for shear in [0.0, 1.0, -1.0, 2.0, -2.0] {
+            match self.boundary_winding(
+                BoundaryCurve::Coedge(0),
+                point.map(|value| [value; 2]),
+                point,
+                shear,
+                work,
+                cancel,
+            )? {
+                BoundaryWinding::Count(1) => return Ok(Some(true)),
+                BoundaryWinding::Count(-1) => return Ok(Some(false)),
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
     fn boundary_winding(
         &self,
         boundary: BoundaryCurve,

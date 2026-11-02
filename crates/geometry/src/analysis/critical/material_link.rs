@@ -14,6 +14,7 @@ use crate::parametric::{CurveEnclosure, SurfaceFirstEnclosure};
 mod atlas;
 mod coverage;
 mod fiber;
+mod planar_corner;
 mod radial_product;
 mod vertex_fan;
 #[cfg(test)]

@@ -212,7 +212,8 @@ pub(in crate::analysis) fn qualify_native_vertex(
             source, incidence, vertex, count, remaining, work, cancel,
         );
     }
-    let bytes = count
+    let capacity = count.checked_mul(2).ok_or_else(resource)?;
+    let bytes = capacity
         .checked_mul(std::mem::size_of::<[Interval; 2]>())
         .ok_or_else(resource)?;
     let available = remaining
@@ -223,7 +224,7 @@ pub(in crate::analysis) fn qualify_native_vertex(
         .native_vertex_point(vertex, work, cancel)?;
     let tolerance = source.trim_source().effective_tolerance_mm();
     let mut rays = Vec::new();
-    rays.try_reserve_exact(count).map_err(|_| resource())?;
+    rays.try_reserve_exact(capacity).map_err(|_| resource())?;
     if rays
         .capacity()
         .saturating_mul(std::mem::size_of::<[Interval; 2]>())
@@ -271,6 +272,11 @@ pub(in crate::analysis) fn qualify_native_vertex(
                 },
             )?;
             rays.push(rows.map(|row| dot(row, tangent)));
+            if let Some(interior) =
+                planar_corner::interior_ray(source, use_, endpoint, available, work, cancel)?
+            {
+                rays.push(rows.map(|row| dot(row, interior)));
+            }
             Ok(())
         },
     )?;
@@ -282,4 +288,51 @@ pub(in crate::analysis) fn qualify_native_vertex(
     }
     rays.reverse();
     projected_vertex_fan(&rays, work, cancel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn straight_sector_requires_owned_side_and_complete_degree_one_cycle() {
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(10_000);
+        let original = [[0.0, -1.0], [-1.0, 0.0], [0.0, 1.0]].map(|ray| ray.map(Interval::point));
+        assert!(!projected_vertex_fan(&original, &mut work, &cancel).unwrap());
+        for (interior, accepted) in [
+            ([1.0, 0.0], true),
+            ([-1.0, 0.0], false),
+            ([0.0, 0.0], false),
+        ] {
+            let expanded = [
+                interior.map(Interval::point),
+                original[2],
+                original[1],
+                original[0],
+            ];
+            assert_eq!(
+                projected_vertex_fan(&expanded, &mut work, &cancel).unwrap(),
+                accepted
+            );
+        }
+        let doubled = [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+            [0.0, -1.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+            [0.0, -1.0],
+        ]
+        .map(|ray| ray.map(Interval::point));
+        assert!(!projected_vertex_fan(&doubled, &mut work, &cancel).unwrap());
+        assert_eq!(
+            projected_vertex_fan(&doubled, &mut work, &AtomicBool::new(true))
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::Cancelled
+        );
+    }
 }
