@@ -1756,6 +1756,7 @@ impl Runtime {
                             .resolve(&entry.current)
                             .expect("validated collection closure");
                         LibraryFilamentSummary {
+                            declaration: definition.declaration.clone(),
                             entry: entry.clone(),
                             name: definition.name.clone(),
                             material: definition.material.clone(),
