@@ -1905,6 +1905,82 @@ fn cylinder_layer(scene: &NativeScene, phase: f64) -> spiling_contracts::surface
 }
 
 #[test]
+fn finish_metadata_shares_native_work_across_faces_and_occurrences() {
+    let cancel = AtomicBool::new(false);
+    let intent = intent(false);
+    for cylindrical in [false, true] {
+        let mut scene = NativeScene::new(
+            if cylindrical { FULL_CYLINDER } else { BOX },
+            &[RigidPoseMm::IDENTITY, translated(50.0, 0.0, 0.0)],
+        );
+        let native = &scene.definitions[&scene.occurrences[0].definition_id];
+        let bounds = preflight::admit(&scene.input(&intent), &cancel)
+            .unwrap()
+            .0
+            .native_bounds[&scene.occurrences[0].occurrence_id];
+        let first = if cylindrical {
+            cylinder_layer(&scene, 0.0)
+        } else {
+            rib_layer(&scene, 1)
+        };
+        if !cylindrical {
+            let mut second = first.clone();
+            second.layer_id = spiling_contracts::surface::SurfaceLayerId::new(2).unwrap();
+            second.face_id = native
+                .faces()
+                .iter()
+                .find(|face| {
+                    face.face_id != first.face_id
+                        && native.vertical_wall_face(&face.face_id).is_ok()
+                })
+                .unwrap()
+                .face_id
+                .clone();
+            scene.surface_overlays.layers.push(second);
+        }
+        scene.surface_overlays.layers.push(first);
+        let mut measured = spiling_geometry::GeometryWorkBudget::compile();
+        let fields = surface::metadata(
+            &scene.input(&intent),
+            &scene.occurrences[0],
+            bounds,
+            MAX_DEPOSITION_SEGMENTS as usize / 4,
+            &mut measured,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(fields.len(), if cylindrical { 1 } else { 2 });
+        assert!(measured.consumed() > 0);
+        let mut limited = spiling_geometry::GeometryWorkBudget::new(measured.consumed());
+        surface::metadata(
+            &scene.input(&intent),
+            &scene.occurrences[0],
+            bounds,
+            MAX_DEPOSITION_SEGMENTS as usize / 4,
+            &mut limited,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(limited.remaining(), 0);
+        let mut placed = bounds;
+        placed.min[0] += 50.0;
+        placed.max[0] += 50.0;
+        let failure = surface::metadata(
+            &scene.input(&intent),
+            &scene.occurrences[1],
+            placed,
+            MAX_DEPOSITION_SEGMENTS as usize / 4,
+            &mut limited,
+            &cancel,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
+        assert_eq!(limited.consumed(), measured.consumed());
+    }
+}
+
+#[test]
 fn independent_cylindrical_ribs_change_ordinary_walls_accounting_and_actual_replay() {
     use crate::{inspect_bundle, verify_bundle};
     use spiling_contracts::geometry::SourceHash;
@@ -2107,6 +2183,7 @@ fn cylindrical_native_partial_resource_precision_and_cancel_are_explicit_refusal
             &scene.occurrences[0],
             AabbMm::new([-5.0, -5.0, 0.0], [5.0, 5.0, 8.0]).unwrap(),
             1,
+            &mut spiling_geometry::GeometryWorkBudget::compile(),
             &cancel
         )
         .err()

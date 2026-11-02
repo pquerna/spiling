@@ -49,6 +49,7 @@ pub(super) fn capture(
     retained_points: usize,
     owned_bytes: usize,
     work: &mut usize,
+    geometry_work: &mut spiling_geometry::GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Construction, ManufacturingError> {
     let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow else {
@@ -91,7 +92,7 @@ pub(super) fn capture(
         for face in &construction.faces {
             check_cancel(cancel)?;
             let cert = definition
-                .vertical_wall_face_with_cancel(&face.face_id, cancel)
+                .vertical_wall_face_with_work(&face.face_id, geometry_work, cancel)
                 .map_err(|e| super::native_error(e, "surface native-face certificate"))?;
             surface::admit_extrusion(
                 input,

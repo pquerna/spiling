@@ -106,7 +106,7 @@ impl PreparedSectionSource<'_> {
     /// Intersect the actual placed native source with an arbitrary world plane.
     /// The query allowance excludes every retained source and other coexisting
     /// buffer. Direct native intersection owns its proof/output admission;
-    /// the 64 MiB query and packed 16 MiB output caps remain independent.
+    /// `MAX_PREPARED_SECTION_BYTES` and the packed 16 MiB output cap remain independent.
     pub fn section_placed_with_work(
         &self,
         pose: spiling_contracts::geometry::RigidPoseMm,
