@@ -21,6 +21,14 @@ pub(super) struct SurfaceUi {
     submitted: Option<u64>,
     texture: Option<(SourceHash, egui::TextureHandle)>,
 }
+impl SurfaceUi {
+    pub(super) fn has_changes(&self) -> bool {
+        self.dirty
+    }
+    pub(super) fn discard(&mut self) {
+        *self = Self::default();
+    }
+}
 impl Default for SurfaceUi {
     fn default() -> Self {
         Self {
@@ -74,9 +82,128 @@ impl Workbench {
             _ => {}
         }
     }
+    pub(super) fn finish_pane(&mut self, ui: &mut egui::Ui) {
+        ui::pane_header(
+            ui,
+            "Surface finish",
+            "Selected source face · additive construction",
+        );
+        if ui::close(ui, "Back to Inspect") {
+            self.manufacturing.panel = 0;
+        }
+        self.finish_actions(ui);
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt("finish-body")
+            .show(ui, |ui| self.surface_ui(ui));
+    }
+    fn finish_actions(&mut self, ui: &mut egui::Ui) {
+        let (Some(project), Some(hello)) = (self.state.project.clone(), self.state.hello.clone())
+        else {
+            return;
+        };
+        let Some(inspection) = self
+            .state
+            .inspection
+            .as_ref()
+            .filter(|i| Some(&i.reference) == self.selected.as_ref())
+        else {
+            ui.label("Select a source face to add a finish");
+            return;
+        };
+        let reference = inspection.reference.clone();
+        let plane = matches!(
+            inspection.face.geometry.analytic,
+            Some(AnalyticSurfaceDescription::Plane { .. })
+        );
+        let cylinder = matches!(
+            inspection.face.geometry.analytic,
+            Some(AnalyticSurfaceDescription::Cylinder { .. })
+        );
+        let ready = self.state.phase == Phase::Running
+            && !self.state.busy
+            && !self.state.picker_open
+            && self.awaiting_serial.is_none()
+            && self.state.confirmation.is_none()
+            && self.display_current();
+        let s = &mut self.surface;
+        if s.dirty {
+            ui.label("Unapplied finish draft");
+        }
+        let reason = if !ready {
+            Some("Wait for the current native operation")
+        } else if project.read_only {
+            Some("Project is read-only")
+        } else if s.revision != Some(project.revision) {
+            Some("Reload this draft against the current project revision")
+        } else if !match s.kind {
+            0 => true,
+            1 => plane,
+            2 => cylinder,
+            _ => plane || cylinder,
+        } {
+            Some("This finish requires a native plane or cylinder")
+        } else {
+            None
+        };
+        if s.kind == 3 && s.stored.is_none() {
+            let validation = s.image.validate().err().map(|e| e.to_string());
+            if ui::primary(
+                ui,
+                "Choose and apply image…",
+                reason.or(validation.as_deref()),
+            ) {
+                s.submitted = Some(self.state.serial);
+                self.queued_image = Some(crate::assets::ImageRequest {
+                    session: hello.session_id.clone(),
+                    revision: s.revision.expect("captured finish revision"),
+                    reference,
+                    scope: s.scope,
+                    parameters: s.image.clone(),
+                });
+            }
+        } else {
+            let finish = match s.kind {
+                0 => SurfaceFinish::Smooth,
+                1 => SurfaceFinish::VerticalRibs {
+                    depth_mm: s.ribs[0],
+                    pitch_mm: s.ribs[1],
+                    edge_margin_mm: s.ribs[2],
+                    phase_mm: s.ribs[3],
+                },
+                2 => SurfaceFinish::CylindricalRibs {
+                    depth_mm: s.ribs[0],
+                    rib_count: s.cylinder_count,
+                    phase_fraction: s.ribs[3],
+                },
+                _ => SurfaceFinish::ImageRelief {
+                    image_hash: s.stored.clone().expect("selected canonical image"),
+                    parameters: s.image.clone(),
+                },
+            };
+            let validation = finish.validate().err().map(|e| e.to_string());
+            if ui::primary(ui, "Add finish", reason.or(validation.as_deref())) {
+                s.submitted = Some(self.state.serial);
+                self.queued_project = Some(ProjectCommand::AddSurfaceFinish {
+                    session_id: hello.session_id.clone(),
+                    base_revision: s.revision.expect("captured finish revision"),
+                    face_ref: reference,
+                    scope: s.scope,
+                    finish,
+                });
+            }
+        }
+        if s.dirty && ui.button("Discard finish draft").clicked() {
+            s.discard();
+        }
+    }
     pub(super) fn surface_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Source-face finish");
-        ui.label("Additive source construction. Display mesh stays the original BREP; freshly compiled actual motion shows the result.");
+        ui::help(
+            ui,
+            "finish-display",
+            "Finish construction",
+            "Source display remains the original BREP. Compile and freshly verify the program to inspect additive construction.",
+        );
         let (Some(project), Some(hello)) = (self.state.project.clone(), self.state.hello.clone())
         else {
             return;
@@ -146,25 +273,25 @@ impl Workbench {
                     else{changed|=ui.add(egui::DragValue::new(&mut s.cylinder_count).prefix("Rib count ").range(2..=256)).changed();changed|=numeric(ui,"Phase (cycle fraction)",&mut s.ribs[3],0.01);}
                 }
                 if s.kind==3{
-                    ui.label("Pixel-node bilinear mapping, periodic U / source Z; image top points toward +source Z. Cylinder U starts at source +X with source +Z axis; planar U uses the canonical native tangent.");
+                    ui::help(ui,"image-frame","Image coordinates","Pixel nodes use bilinear mapping with periodic U and source Z. Image top points toward +source Z. Cylinder U begins at source +X; planes use the canonical native tangent.");
                     let before=s.stored.clone();egui::ComboBox::from_id_salt("canonical image").selected_text(s.stored.as_ref().and_then(|hash|project.surface_overlays.images.iter().find(|i|&i.image_hash==hash)).map_or("Import a new PNG / PGM",|i|i.source_name.as_str())).show_ui(ui,|ui|{ui.selectable_value(&mut s.stored,None,"Import a new PNG / PGM");for image in &project.surface_overlays.images{ui.selectable_value(&mut s.stored,Some(image.image_hash.clone()),&image.source_name);}});s.dirty|=before!=s.stored;
                     for(label,value)in[("Maximum additive depth (mm)",&mut s.image.depth_mm),("U phase (cycle fraction)",&mut s.image.u_phase_fraction),("Source-Z period (mm)",&mut s.image.z_period_mm),("Source-Z phase (mm)",&mut s.image.z_phase_mm),("Protected edge margin (mm; cylinder 0)",&mut s.image.edge_margin_mm),("Vertical displacement error (mm)",&mut s.image.vertical_error_mm)]{changed|=numeric(ui,label,value,0.01);}
                     changed|=ui.add(egui::DragValue::new(&mut s.image.u_repeats).range(1..=256).prefix("U repeats ")).changed();
                     if let Err(error)=s.image.validate(){ui.colored_label(self.prefs.theme.tokens().warning,error.to_string());}
-                    if s.stored.is_none() && ui.add_enabled(supported && s.image.validate().is_ok(),egui::Button::new("Choose image and apply relief…")).clicked(){s.submitted=Some(self.state.serial);self.queued_image=Some(crate::assets::ImageRequest{session:hello.session_id.clone(),revision:s.revision.expect("captured finish revision"),reference:reference.clone(),scope:s.scope,parameters:s.image.clone()});}
                 }
                 s.dirty|=changed;
-                let finish=match s.kind{0=>Some(SurfaceFinish::Smooth),1=>Some(SurfaceFinish::VerticalRibs{depth_mm:s.ribs[0],pitch_mm:s.ribs[1],edge_margin_mm:s.ribs[2],phase_mm:s.ribs[3]}),2=>Some(SurfaceFinish::CylindricalRibs{depth_mm:s.ribs[0],rib_count:s.cylinder_count,phase_fraction:s.ribs[3]}),_=>s.stored.as_ref().map(|hash|SurfaceFinish::ImageRelief{image_hash:hash.clone(),parameters:s.image.clone()})};
-                if let Some(finish)=finish{
-                    let valid=finish.validate();if let Err(error)=&valid{ui.colored_label(self.prefs.theme.tokens().warning,error.to_string());}
-                    if ui.add_enabled(supported && valid.is_ok(),egui::Button::new("Append finish layer")).clicked(){s.submitted=Some(self.state.serial);self.queued_project=Some(ProjectCommand::AddSurfaceFinish{session_id:hello.session_id.clone(),base_revision:s.revision.expect("captured finish revision"),face_ref:reference.clone(),scope:s.scope,finish});}
-                }
             });
         } else {
             ui.weak("Select a source face by click or the keyboard-accessible face list.");
         }
         ui.separator();
-        ui.label("Enabled definition layers precede occurrence layers. The last matching layer wins; Smooth can override lower layers.");
+        ui::group(ui, "Finish layers");
+        ui::help(
+            ui,
+            "finish-layers",
+            "Layer precedence",
+            "Enabled definition layers precede occurrence layers. The last matching layer wins; Smooth can override lower layers.",
+        );
         for layer in &project.surface_overlays.layers {
             ui.push_id(layer.layer_id, |ui| {
                 let scope = match &layer.scope {
@@ -210,7 +337,7 @@ impl Workbench {
             });
         }
         ui.separator();
-        ui.heading("Captured canonical images");
+        ui::group(ui, "Stored images");
         for image in &project.surface_overlays.images {
             ui.label(format!(
                 "{} · {} × {} nodes",
@@ -241,11 +368,7 @@ impl Workbench {
     }
 }
 fn numeric(ui: &mut egui::Ui, label: &str, value: &mut f64, speed: f64) -> bool {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(label);
-        ui.add(egui::DragValue::new(value).speed(speed)).changed()
-    })
-    .inner
+    ui::number(ui, label, value, speed).changed()
 }
 
 fn finish_label(finish: &SurfaceFinish) -> &'static str {

@@ -51,6 +51,17 @@ impl ManufacturingUi {
     }
 }
 impl Workbench {
+    pub(super) fn show_prepare(&mut self, section: u8) {
+        self.manufacturing.panel = 1;
+        self.manufacturing.prepare_section = section;
+    }
+
+    pub(super) fn discard_preparation_drafts(&mut self) {
+        self.manufacturing.ignored_nonce =
+            self.state.manufacturing.loaded.as_ref().map(|l| l.nonce);
+        self.manufacturing.draft = None;
+    }
+
     pub(super) fn manufacturing_current(&self) -> bool {
         self.state.phase == Phase::Running
             && self
@@ -64,6 +75,135 @@ impl Workbench {
                         .current_capture(p, &h.session_id)
                         .is_some()
                 })
+    }
+    pub(super) fn manufacturing_pane(&mut self, ui: &mut egui::Ui) {
+        let prepare = self.manufacturing.panel == 1;
+        ui::pane_header(
+            ui,
+            if prepare { "Prepare" } else { "Program review" },
+            "Project · committed inputs and explicit drafts",
+        );
+        if ui::close(ui, "Back to Inspect") {
+            self.manufacturing.panel = 0;
+        }
+        if prepare {
+            ui.horizontal_wrapped(|ui| {
+                for (index, label) in ["Setup", "Material", "Settings", "Placement", "Infill"]
+                    .iter()
+                    .enumerate()
+                {
+                    ui.selectable_value(
+                        &mut self.manufacturing.prepare_section,
+                        index as u8,
+                        *label,
+                    );
+                }
+            });
+        } else {
+            ui.colored_label(self.prefs.theme.tokens().warning, "NOT MACHINE READY");
+            ui::help(
+                ui,
+                "verification-scope",
+                "Software verification",
+                "Independent replay checks the emitted program. Physical printability, collisions and machine execution remain unqualified.",
+            );
+        }
+        // Keep the action strip outside the body's single scroll owner.
+        self.manufacturing_actions(ui);
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt((
+                "manufacturing-body",
+                self.manufacturing.panel,
+                self.manufacturing.prepare_section,
+            ))
+            .show(ui, |ui| self.manufacturing_ui(ui));
+    }
+    fn manufacturing_actions(&mut self, ui: &mut egui::Ui) {
+        let (Some(project), Some(hello)) = (self.state.project.clone(), self.state.hello.clone())
+        else {
+            return;
+        };
+        let m = self.state.manufacturing.clone();
+        if self.manufacturing.panel == 2 {
+            if self.manufacturing_current() {
+                self.button(ui, Action::Verify);
+                self.primary_button(ui, Action::Export);
+            } else {
+                self.primary_button(ui, Action::Verify);
+            }
+            return;
+        }
+        let ready = self.state.phase == Phase::Running
+            && !self.state.busy
+            && !self.state.picker_open
+            && self.state.confirmation.is_none()
+            && self.awaiting_serial.is_none();
+        let draft = self
+            .manufacturing
+            .has_intent_draft(&project.project_id, m.intent.as_deref())
+            || self.manufacturing.pending_loaded(m.loaded.as_deref())
+            || self
+                .material
+                .has_changes(&project.project_id, m.intent.as_deref())
+            || self.process.has_changes();
+        if draft {
+            ui.label("Unapplied changes · compile uses committed settings");
+        }
+        match self.manufacturing.prepare_section {
+            1 if self
+                .material
+                .has_changes(&project.project_id, m.intent.as_deref()) =>
+            {
+                self.material_actions(ui);
+                return;
+            }
+            2 => {
+                if let Some(d) = &mut self.manufacturing.draft {
+                    let prepared = super::policies::prepared(&d.value);
+                    let changed = m.intent.as_deref() != Some(&d.value);
+                    let reason = if !ready {
+                        Some("Wait for the current operation")
+                    } else if project.read_only {
+                        Some("Project is read-only")
+                    } else if d.revision != project.revision {
+                        Some("Project changed. Discard this draft and reload current settings.")
+                    } else {
+                        prepared.as_ref().err().map(String::as_str)
+                    };
+                    if changed && ui::primary(ui, "Apply settings", reason) {
+                        let value = prepared.expect("validated intent");
+                        d.value = value.clone();
+                        self.queued_manufacturing = Some(ManufacturingCommand::SetIntent {
+                            session_id: hello.session_id.clone(),
+                            base_revision: d.revision,
+                            intent: Arc::new(value),
+                        });
+                    }
+                    if changed {
+                        if ui.button("Discard settings draft").clicked() {
+                            self.manufacturing.ignored_nonce = m.loaded.as_ref().map(|l| l.nonce);
+                            self.manufacturing.draft = None;
+                        }
+                        return;
+                    }
+                }
+            }
+            4 if self.process.has_changes() => {
+                self.process_actions(ui);
+                return;
+            }
+            _ => {}
+        }
+        if !draft && m.intent.is_some() {
+            if self.disabled(Action::Compile).is_none() {
+                self.primary_button(ui, Action::Compile);
+            } else {
+                self.primary_button(ui, Action::Preflight);
+            }
+        } else if draft {
+            ui.label("Apply or discard in the changed section");
+        }
     }
     pub(super) fn manufacturing_ui(&mut self, ui: &mut egui::Ui) {
         let Some(project) = self.state.project.clone() else {
@@ -80,24 +220,6 @@ impl Workbench {
         let writable = ready && !project.read_only;
         let m = self.state.manufacturing.clone();
         if self.manufacturing.panel == 1 {
-            ui::pane_header(
-                ui,
-                "Prepare",
-                "Project · committed settings and explicit drafts",
-            );
-            ui.horizontal_wrapped(|ui| {
-                for (index, label) in ["Setup", "Material", "Settings", "Placement", "Infill"]
-                    .iter()
-                    .enumerate()
-                {
-                    ui.selectable_value(
-                        &mut self.manufacturing.prepare_section,
-                        index as u8,
-                        *label,
-                    );
-                }
-            });
-            ui.separator();
             if project.read_only {
                 ui.label("Read-only project");
             }
@@ -205,26 +327,7 @@ impl Workbench {
                         );
                     });
                     super::policies::fields(ui, &mut d.value);
-                    let valid = super::policies::prepared(&d.value);
-                    if let Err(error) = &valid {
-                        ui.colored_label(self.prefs.theme.tokens().warning, error.to_string());
-                    }
-                    let changed = m.intent.as_deref() != Some(&d.value);
-                    if changed && ui::primary(ui, "Apply settings", valid.as_ref().err().map(String::as_str))
-                    {
-                        let value = valid.expect("validated complete intent");
-                        d.value = value.clone();
-                        self.queued_manufacturing = Some(ManufacturingCommand::SetIntent {
-                            session_id: hello.session_id.clone(),
-                            base_revision: d.revision,
-                            intent: Arc::new(value),
-                        });
-                    }
                 });
-                    if ui.button("Discard settings draft").clicked() {
-                        self.manufacturing.ignored_nonce = m.loaded.as_ref().map(|l| l.nonce);
-                        self.manufacturing.draft = None;
-                    }
                     ui.collapsing("Complete declaration", |ui| {
                         ui.label(serde_json::to_string_pretty(&source).unwrap_or_default());
                     });
@@ -303,28 +406,6 @@ impl Workbench {
                     }
                 }
             }
-            let draft = self
-                .manufacturing
-                .has_intent_draft(&project.project_id, m.intent.as_deref())
-                || self.manufacturing.pending_loaded(m.loaded.as_deref())
-                || self
-                    .material
-                    .has_changes(&project.project_id, m.intent.as_deref())
-                || self.process.has_changes();
-            ui.separator();
-            if draft {
-                ui.label("Unapplied changes · Apply or discard in the owning section");
-            }
-            if !draft && m.intent.is_some() {
-                if self.disabled(Action::Compile).is_none() {
-                    self.primary_button(ui, Action::Compile);
-                } else {
-                    self.primary_button(ui, Action::Preflight);
-                }
-            } else {
-                self.button(ui, Action::Preflight);
-            }
-
             if let Some(preflight) = &m.preflight {
                 ui.label(format!(
                     "Preflight: {:?} · revision {}",
@@ -339,24 +420,7 @@ impl Workbench {
                     }
                 });
             }
-            if draft {
-                self.button(ui, Action::Compile);
-            }
         } else if self.manufacturing.panel == 2 {
-            ui::pane_header(ui, "Program review", "Current compiled output");
-            ui.colored_label(self.prefs.theme.tokens().warning, "NOT MACHINE READY");
-            ui::help(
-                ui,
-                "verification-scope",
-                "Software verification",
-                "Independent replay checks the emitted program. Physical printability, collisions and machine execution remain unqualified.",
-            );
-            if self.manufacturing_current() {
-                self.button(ui, Action::Verify);
-                self.primary_button(ui, Action::Export);
-            } else {
-                self.primary_button(ui, Action::Verify);
-            }
             if m.loading {
                 ui.spinner();
                 ui.label("Retrieving checked actual output…");

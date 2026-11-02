@@ -25,11 +25,98 @@ pub(super) struct ProcessUi {
     submitted: Option<u64>,
 }
 impl ProcessUi {
+    pub(super) fn discard(&mut self) {
+        self.dirty = false;
+        self.identity = None;
+    }
+    pub(super) fn set_scope(&mut self, definition: bool, boxed: bool) {
+        self.definition = definition;
+        self.boxed = boxed;
+        self.identity = None;
+    }
+
     pub(super) fn has_changes(&self) -> bool {
         self.dirty
     }
 }
 impl Workbench {
+    pub(super) fn process_actions(&mut self, ui: &mut egui::Ui) {
+        let (Some(project), Some(hello), Some(scene)) = (
+            self.state.project.clone(),
+            self.state.hello.clone(),
+            self.state.display.clone(),
+        ) else {
+            return;
+        };
+        let Some(o) = scene
+            .occurrences
+            .iter()
+            .find(|o| Some(o.occurrence_id) == self.occurrence)
+        else {
+            return;
+        };
+        let writable = self.state.phase == Phase::Running
+            && !self.state.busy
+            && !self.state.picker_open
+            && self.awaiting_serial.is_none()
+            && !project.read_only
+            && self.display_current();
+        let p = &mut self.process;
+        let scope = if p.definition {
+            SurfaceScope::Definition {
+                definition_id: o.definition_id.clone(),
+            }
+        } else {
+            SurfaceScope::Occurrence {
+                occurrence_id: o.occurrence_id,
+                expected_definition_id: o.definition_id.clone(),
+            }
+        };
+        if !writable || p.revision != Some(project.revision) {
+            ui.label("Infill draft retained · reload after the project changes");
+        }
+        ui.add_enabled_ui(writable && p.revision == Some(project.revision), |ui| {
+            let edit = if p.boxed {
+                ProcessEdit::SetBoxSparseFraction {
+                    scope: scope.clone(),
+                    min: p.min,
+                    max: p.max,
+                    fraction: p.fraction,
+                    interface: if !p.permission {
+                        None
+                    } else if p.plate {
+                        Some(ProcessInterfacePermission::HorizontalDiaphragm {
+                            thickness_mm: p.thickness,
+                        })
+                    } else {
+                        Some(ProcessInterfacePermission::SeparatorWall)
+                    },
+                }
+            } else {
+                ProcessEdit::SetSparseFraction {
+                    scope: scope.clone(),
+                    fraction: p.fraction,
+                }
+            };
+            let validity = edit.validate();
+            if let Err(error) = &validity {
+                ui.colored_label(self.prefs.theme.tokens().warning, error.to_string());
+            }
+            let validation_problem = validity.as_ref().err().map(ToString::to_string);
+            if p.dirty && ui::primary(ui, "Apply infill", validation_problem.as_deref()) {
+                p.submitted = Some(self.state.serial);
+                self.queued_project = Some(ProjectCommand::EditProcess {
+                    session_id: hello.session_id.clone(),
+                    base_revision: p.revision.expect("captured process revision"),
+                    edit,
+                });
+            }
+        });
+        if ui.button("Discard infill draft").clicked() {
+            p.dirty = false;
+            p.identity = None;
+        }
+    }
     pub(super) fn process_ui(&mut self, ui: &mut egui::Ui, writable: bool) {
         let (Some(project), Some(hello), Some(scene)) = (
             self.state.project.clone(),
@@ -47,6 +134,7 @@ impl Workbench {
         };
         let p = &mut self.process;
         ui::group(ui, "Infill");
+        let before_scope = (p.definition, p.boxed);
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut p.definition, false, "Occurrence");
             ui.selectable_value(&mut p.definition, true, "Shared definition");
@@ -55,6 +143,13 @@ impl Workbench {
             ui.selectable_value(&mut p.boxed, false, "Whole part");
             ui.selectable_value(&mut p.boxed, true, "Source box");
         });
+        if before_scope != (p.definition, p.boxed) && p.dirty {
+            self.navigation = Some(super::navigation::Navigation::InfillScope(
+                p.definition,
+                p.boxed,
+            ));
+            (p.definition, p.boxed) = before_scope;
+        }
         let identity = (
             project.project_id.clone(),
             o.occurrence_id,
@@ -159,10 +254,6 @@ impl Workbench {
                 ui.weak("Permanent material, not removable support or a strength qualification.");
             }
             p.dirty|=changed;
-            let edit=if p.boxed{ProcessEdit::SetBoxSparseFraction{scope:scope.clone(),min:p.min,max:p.max,fraction:p.fraction,interface:if !p.permission{None}else if p.plate{Some(ProcessInterfacePermission::HorizontalDiaphragm{thickness_mm:p.thickness})}else{Some(ProcessInterfacePermission::SeparatorWall)}}}else{ProcessEdit::SetSparseFraction{scope:scope.clone(),fraction:p.fraction}};
-            let validity=edit.validate();if let Err(error)=&validity{ui.colored_label(self.prefs.theme.tokens().warning,error.to_string());}
-            let validation_problem=validity.as_ref().err().map(ToString::to_string);
-            if p.dirty && ui::primary(ui, "Apply infill", validation_problem.as_deref()){p.submitted=Some(self.state.serial);self.queued_project=Some(ProjectCommand::EditProcess{session_id:hello.session_id.clone(),base_revision:p.revision.expect("captured process revision"),edit});}
             if ui.button("Reset this scope to inherit").clicked(){p.submitted=Some(self.state.serial);self.queued_project=Some(ProjectCommand::EditProcess{session_id:hello.session_id.clone(),base_revision:project.revision,edit:ProcessEdit::Reset{scope:scope.clone()}});}
         });
         if let Some(r) = project

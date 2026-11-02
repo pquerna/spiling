@@ -16,6 +16,10 @@ impl Workbench {
             })
     }
     pub(super) fn select_face(&mut self, reference: FaceRef) {
+        if self.selected.as_ref() != Some(&reference) && self.subject_drafts() {
+            self.navigation = Some(super::navigation::Navigation::Face(reference));
+            return;
+        }
         if self.occurrence != Some(reference.occurrence_id) {
             self.pose_revision = None;
         }
@@ -24,7 +28,7 @@ impl Workbench {
         self.queued_geometry = Some(GeometryCommand::InspectFace { reference });
     }
     pub(super) fn tree_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Model");
+        ui::pane_header(ui, "Model", "Source parts and faces");
         self.button(ui, crate::commands::Action::Analysis);
         if self.analysis.view.enabled {
             ui.weak(format!(
@@ -60,8 +64,7 @@ impl Workbench {
                                 )
                                 .clicked()
                             {
-                                self.occurrence = Some(occurrence.occurrence_id);
-                                self.pose_revision = None;
+                                self.choose_occurrence(occurrence.occurrence_id);
                             }
                             if let DefinitionDisplay::Unavailable { error } =
                                 &definition.record.display
@@ -111,12 +114,13 @@ impl Workbench {
             return;
         };
         let current = self.display_current() && !self.state.busy;
-        ui.heading("Selection");
+        ui::pane_header(ui, "Selection", "Source occurrence");
         if self.pose_revision != Some(scene.summary.revision) {
             self.pose[..3].copy_from_slice(&occurrence.pose.translation_mm);
             let (x, y, z) = glam::DQuat::from_array(occurrence.pose.rotation_xyzw)
                 .to_euler(glam::EulerRot::XYZ);
             self.pose[3..].copy_from_slice(&[x.to_degrees(), y.to_degrees(), z.to_degrees()]);
+            self.pose_original = self.pose;
             self.pose_revision = Some(scene.summary.revision);
         }
         ui.add_enabled_ui(
@@ -134,10 +138,7 @@ impl Workbench {
                     .iter()
                     .enumerate()
                     {
-                        ui.horizontal(|ui| {
-                            ui.label(*label);
-                            ui.add(egui::DragValue::new(&mut self.pose[i]).speed(0.1));
-                        });
+                        ui::number(ui, label, &mut self.pose[i], 0.1);
                     }
                     let rotation = glam::DQuat::from_euler(
                         glam::EulerRot::XYZ,

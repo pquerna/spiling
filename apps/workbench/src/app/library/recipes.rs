@@ -13,7 +13,31 @@ pub(super) struct RecipeUi {
     heights: Vec<f64>,
     context_for: Option<RecipeRef>,
     context: Option<RecipeStudyContext>,
+    context_original: Option<RecipeStudyContext>,
+    destination: Option<bool>,
+    pub(super) submission: Option<(bool, Option<ProjectId>, RecipeRef)>,
     error: Option<String>,
+}
+impl RecipeUi {
+    pub(super) fn has_changes(&self) -> bool {
+        !self.ingredients.is_empty()
+            || !self.name.is_empty()
+            || !self.target.is_empty()
+            || self.context != self.context_original
+    }
+    pub(super) fn discard_context(&mut self) {
+        self.context = self.context_original.clone();
+    }
+
+    pub(super) fn clear_composer(&mut self) {
+        self.ingredients.clear();
+        self.name.clear();
+        self.target.clear();
+        self.heights.clear();
+        self.destination = None;
+        self.submission = None;
+        self.error = None;
+    }
 }
 impl Workbench {
     pub(super) fn recipe_ingredient(
@@ -49,7 +73,40 @@ impl Workbench {
         personal_write: bool,
     ) {
         let personal = self.library.personal;
-        ui.weak("Recipes capture a target, exact filament snapshots, evidence and a physical layer cycle. New geometry requires a fresh assessment and explicit application.");
+        ui.set_max_width(800.0);
+        ui::help(
+            ui,
+            "recipe-definition",
+            "Recipes",
+            "A recipe captures a target, filament snapshots, evidence and a physical layer cycle. Geometry requires a fresh study and explicit construction binding.",
+        );
+        if self.library.detail == 3 {
+            if ui::close(ui, "Back to recipes") {
+                self.library.detail = 0;
+            }
+            self.recipe_composer(ui, state, writable, personal_write);
+            return;
+        }
+        if ui
+            .button(if self.library.recipes.destination.is_some() {
+                "Resume recipe draft"
+            } else {
+                "Create recipe"
+            })
+            .clicked()
+        {
+            self.library.recipes.destination.get_or_insert(personal);
+            self.library.detail = 3;
+        }
+        let context_dirty = self.library.recipes.context != self.library.recipes.context_original;
+        if context_dirty {
+            ui.label(
+                "Study context draft retained. Finish or discard before choosing another recipe.",
+            );
+            if ui.button("Discard study context").clicked() {
+                self.library.recipes.context = self.library.recipes.context_original.clone();
+            }
+        }
         let entries = if personal {
             state
                 .personal_recipes
@@ -70,7 +127,7 @@ impl Workbench {
                         recipe.name, recipe.ingredient_count
                     ));
                     if ui
-                        .add_enabled(ready, egui::Button::new("Inspect recipe"))
+                        .add_enabled(ready && !context_dirty, egui::Button::new("Inspect recipe"))
                         .clicked()
                     {
                         self.library.queued = Some(LibraryAction::Recipe(RecipeAction::Inspect {
@@ -132,12 +189,7 @@ impl Workbench {
                     .iter()
                     .find(|f| f.reference == ingredient.filament)
                 {
-                    ui.label(format!(
-                        "{}: {} · {}",
-                        ingredient.palette_key,
-                        f.definition.name,
-                        &f.reference.revision.as_str()[..12]
-                    ));
+                    ui.label(&f.definition.name);
                 }
             }
             ui.label(format!(
@@ -153,19 +205,20 @@ impl Workbench {
                     .collect::<Vec<_>>()
                     .join("; ")
             ));
-            ui.weak(format!(
-                "Evidence: {} · {}",
-                transfer.recipe.definition.palette.source_revision,
-                transfer.recipe.definition.palette.license
-            ));
+            ui.collapsing("Recipe provenance", |ui| {
+                ui.add(
+                    egui::Label::new(format!("{:#?}", transfer.recipe.definition))
+                        .wrap()
+                        .selectable(true),
+                );
+            });
             if personal {
-                if ui
-                    .add_enabled(
-                        writable,
-                        egui::Button::new("Copy complete recipe to Project"),
-                    )
-                    .clicked()
-                    && let Some(project) = current
+                if ui::primary(
+                    ui,
+                    "Copy to project",
+                    (!writable)
+                        .then_some("Open a writable project and wait for pending operations"),
+                ) && let Some(project) = current
                 {
                     self.library.queued =
                         Some(LibraryAction::Recipe(RecipeAction::CopyToProject {
@@ -176,8 +229,10 @@ impl Workbench {
             } else if fresh {
                 if ui
                     .add_enabled(
-                        ready,
-                        egui::Button::new("Use these ingredients for selection capture"),
+                        ready
+                            && self.library.recipes.ingredients.is_empty()
+                            && self.library.recipes.name.is_empty(),
+                        egui::Button::new("Use ingredients"),
                     )
                     .clicked()
                 {
@@ -221,25 +276,30 @@ impl Workbench {
                         patch: transfer.recipe.definition.request.patch,
                         cycle_origin_z_mm: transfer.recipe.definition.request.recipe.origin_z_mm,
                     });
+                    self.library.recipes.context_original = self.library.recipes.context.clone();
                 }
-                ui.collapsing("Study context for this project", |ui| {
+                ui::group(ui, "Study context");
+                ui.vertical(|ui| {
                     let context = self.library.recipes.context.as_mut().expect("context initialized");
                     ui.weak("Enter the upright patch in build coordinates. This does not bind a source face or assign tools.");
-                    ui.horizontal(|ui| { ui.label("Origin XYZ (mm)"); for value in &mut context.patch.origin_mm { ui.add(egui::DragValue::new(value).speed(0.1)); } });
-                    ui.horizontal(|ui| { ui.label("Unit outward normal XY"); for value in &mut context.patch.normal_xy { ui.add(egui::DragValue::new(value).speed(0.01)); } });
-                    ui.horizontal(|ui| { ui.label("Width / height (mm)"); ui.add(egui::DragValue::new(&mut context.patch.width_mm).speed(0.1)); ui.add(egui::DragValue::new(&mut context.patch.height_mm).speed(0.1)); });
-                    ui.horizontal(|ui| { ui.label("Cycle origin Z (mm)"); ui.add(egui::DragValue::new(&mut context.cycle_origin_z_mm).speed(0.1)); });
+                    for (axis, value) in context.patch.origin_mm.iter_mut().enumerate() { ui::number(ui, ["Origin X (mm)", "Origin Y (mm)", "Origin Z (mm)"][axis], value, 0.1); }
+                    for (axis, value) in context.patch.normal_xy.iter_mut().enumerate() { ui::number(ui, ["Normal X", "Normal Y"][axis], value, 0.01); }
+                    ui::number(ui, "Width (mm)", &mut context.patch.width_mm, 0.1); ui::number(ui, "Height (mm)", &mut context.patch.height_mm, 0.1);
+                    ui::number(ui, "Cycle origin Z (mm)", &mut context.cycle_origin_z_mm, 0.1);
                     if let Err(error) = context.request(&transfer.recipe.definition) { ui.colored_label(ui.visuals().error_fg_color, error); }
-                    if ui.add_enabled(writable && context.request(&transfer.recipe.definition).is_ok(), egui::Button::new("Load as new unassessed study")).clicked() && let Some(h) = &self.state.hello {
+                    let validation = context.request(&transfer.recipe.definition).err();
+                    if ui::primary(ui, "Load study", if !writable { Some("Open a writable project and wait for pending operations") } else { validation.as_deref() }) && let Some(h) = &self.state.hello {
+                        self.library.open = false; self.manufacturing.panel = 4;
                         self.queued_project = Some(ProjectCommand::LoadRecipeStudy { session_id: h.session_id.clone(), base_revision: current.as_ref().expect("current").1, reference: reference.clone(), context: context.clone() });
                     }
                 });
-                ui.weak("Continue in Optical study: Recompare, accept a selection, then bind two loaded declarations and Apply. Three-filament recipes support reference studies only.");
+                ui.label(
+                    "Loads an unassessed study. Three-filament recipes remain reference-only.",
+                );
             } else {
                 ui.weak("Project changed. Refresh and inspect this recipe again.");
             }
         }
-        self.recipe_composer(ui, state, writable, personal_write);
         if !personal {
             self.recipe_capture(ui, writable);
         }
@@ -251,24 +311,38 @@ impl Workbench {
         writable: bool,
         personal_write: bool,
     ) {
-        let personal = self.library.personal;
-        ui.separator();
-        ui.collapsing("Create recipe from filament declarations", |ui| {
+        let personal = self
+            .library
+            .recipes
+            .destination
+            .unwrap_or(self.library.personal);
+        ui::pane_header(
+            ui,
+            "Create recipe",
+            if personal { "My library" } else { "Project" },
+        );
+        if ui.button("Discard recipe draft").clicked() {
+            self.library.recipes.clear_composer();
+            self.library.detail = 0;
+            return;
+        }
+        ui.vertical(|ui| {
             let draft = &mut self.library.recipes;
             ui.weak("Add 2–3 variants from Filaments in either scope. Declared sRGB is an estimate; missing color evidence stays unknown.");
-            ui.horizontal(|ui| { ui.label("Recipe name"); ui.text_edit_singleline(&mut draft.name); });
-            ui.horizontal(|ui| { ui.label("Target hex"); ui.text_edit_singleline(&mut draft.target); });
+            ui::text(ui, "Recipe name", &mut draft.name);
+            ui::text(ui, "Target hex", &mut draft.target);
             let mut remove = None;
             for (i, filament) in draft.ingredients.iter().enumerate() {
                 ui.horizontal(|ui| { ui.label(format!("{} · {}", i + 1, filament.definition.name)); ui.add(egui::DragValue::new(&mut draft.heights[i]).speed(0.01).suffix(" mm")); if ui.small_button("Remove").clicked() { remove = Some(i); } });
             }
             if let Some(i) = remove { draft.ingredients.remove(i); draft.heights.remove(i); }
             let enabled = if personal { personal_write } else { writable };
-            if ui.add_enabled(enabled && (2..=3).contains(&draft.ingredients.len()), egui::Button::new(if personal { "Create in My library" } else { "Create in Project" })).clicked() {
+            if ui::primary(ui, "Create recipe", if !enabled { Some("Wait for pending operations or choose a writable scope") } else if !(2..=3).contains(&draft.ingredients.len()) { Some("Add two or three ingredients from Filaments") } else { None }) {
                 let result = spiling_contracts::color_naming::parse_srgb8_hex(draft.target.trim()).and_then(|rgb| RecipeTransfer::from_declarations(RecipeId(uuid::Uuid::new_v4().to_string()), draft.name.trim().into(), draft.ingredients.clone(), AppearanceColor::Srgb { channels: rgb.map(|v| f64::from(v) / 255.0) }, draft.heights.clone()));
                 match result {
                     Ok(transfer) => {
                         draft.error = None;
+                        draft.submission = Some((personal, self.state.project.as_ref().map(|p| p.project_id.clone()), transfer.recipe.reference()));
                         if personal { self.library.mutation(state.status.as_ref(), LibraryMutation::PutRecipe { transfer, expected: None }); }
                         else if let Some(p) = &self.state.project { self.library.queued = Some(LibraryAction::Recipe(RecipeAction::CopyToProject { project: (p.project_id.clone(), p.revision), transfer })); }
                     }

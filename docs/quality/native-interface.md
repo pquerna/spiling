@@ -60,6 +60,21 @@ committed inputs; unapplied drafts stay labelled. Review promotes Verify program
 then Export after current passing inspection. Qualification and stale state remain
 visible beside the action.
 
+Inspectors keep task navigation and their action strip outside the body scroll.
+Back to Inspect hides an ordinary draft; replacing its source face/part or infill
+scope asks whether to keep editing or discard. Project replacement still uses the
+engine's independent dirty-state confirmation after resolving local drafts.
+
+Library and Color study use focused pages with a stable Back to workbench action.
+Filament/spool/recipe and hardware editors have explicit return routes. Ordinary
+Back retains draft values and their destination; selecting a different edited
+subject cannot silently replace them. Copy to project, Load study, Compare, Accept
+selection and Apply construction remain distinct native operations. Short names
+are the normal reading layer; exact identities and declarations remain inspectable.
+Private credentials clear on leaving their view; hiding details never implies a
+connection was used. Unconfirmed library publications retain their original request
+and require reconciliation before the application closes.
+
 Activity details are dismissible. Closing the drawer never cancels work; cancellation
 and resumed observation remain separately named actions. The status strip retains
 problem counts and uncertain-save state. Commands show a selected result; Enter

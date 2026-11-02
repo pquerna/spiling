@@ -273,6 +273,30 @@ pub fn percent(ui: &mut Ui, label: &str, fraction: &mut f64) -> egui::Response {
     response
 }
 
+/// Text editing uses the same stable owning-label scope as numeric fields.
+pub fn text(ui: &mut Ui, label: &str, value: &mut String) -> egui::Response {
+    let scope = ui.make_persistent_id(("text", label));
+    ui.scope_builder(egui::UiBuilder::new().scope_id(scope), |ui| {
+        if ui.available_width() < 340.0 {
+            let label = ui.label(label);
+            ui.add(egui::TextEdit::singleline(value).desired_width(360.0))
+                .labelled_by(label.id)
+        } else {
+            ui.horizontal(|ui| {
+                let width = (ui.available_width() * 0.32).clamp(100.0, 200.0);
+                let label = ui.add_sized(
+                    [width, 28.0],
+                    egui::Label::new(label).wrap().halign(egui::Align::Min),
+                );
+                ui.add(egui::TextEdit::singleline(value).desired_width(360.0))
+                    .labelled_by(label.id)
+            })
+            .inner
+        }
+    })
+    .inner
+}
+
 /// A local draft field; project mutation occurs only on its form's explicit Apply.
 pub fn number(ui: &mut Ui, label: &str, value: &mut f64, speed: f64) -> egui::Response {
     // Draft warnings can insert siblings while the user is typing. DragValue's
@@ -286,8 +310,11 @@ pub fn number(ui: &mut Ui, label: &str, value: &mut f64, speed: f64) -> egui::Re
                 .labelled_by(label.id)
         } else {
             ui.horizontal(|ui| {
-                let width = (ui.available_width() - 98.0).max(80.0);
-                let label = ui.add_sized([width, 28.0], egui::Label::new(label).wrap());
+                let width = (ui.available_width() - 98.0).clamp(80.0, 380.0);
+                let label = ui.add_sized(
+                    [width, 28.0],
+                    egui::Label::new(label).wrap().halign(egui::Align::Min),
+                );
                 ui.add_sized([80.0, 28.0], egui::DragValue::new(value).speed(speed))
                     .labelled_by(label.id)
             })

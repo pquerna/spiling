@@ -60,6 +60,8 @@ pub struct Workbench {
     selected: Option<FaceRef>,
     occurrence: Option<OccurrenceId>,
     pose: [f64; 6],
+    pose_original: [f64; 6],
+    navigation: Option<navigation::Navigation>,
     pose_revision: Option<SceneRevision>,
     analysis: analysis::AnalysisUi,
     queued_geometry: Option<GeometryCommand>,
@@ -125,6 +127,8 @@ impl Workbench {
             selected: None,
             occurrence: None,
             pose: [0.0; 6],
+            pose_original: [0.0; 6],
+            navigation: None,
             pose_revision: None,
             analysis: analysis::AnalysisUi::default(),
             queued_geometry: None,
@@ -179,8 +183,12 @@ impl Workbench {
         if self.disabled(action).is_some() {
             return;
         }
+        if self.guard_action(action) {
+            return;
+        }
         match action {
             Action::Analysis => {
+                self.close_library();
                 self.analysis.open = true;
                 self.analysis.view.enabled = true;
                 return;
@@ -197,6 +205,11 @@ impl Workbench {
                 self.show_gallery = true;
                 return;
             }
+            _ => {}
+        }
+        match action {
+            Action::LoadIntent => self.show_prepare(2),
+            Action::LoadMaterial | Action::LoadMaterialCatalog => self.show_prepare(1),
             _ => {}
         }
         let Some(host) = &mut self.host else {
@@ -275,9 +288,13 @@ impl Workbench {
         }
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.navigation.is_some() {
+            return;
+        }
         // Route Escape once, from the topmost surface. Popups and modal decisions
         // retain their own Escape; an edit gets its first opportunity to finish.
         if !self.show_commands
+            && self.navigation.is_none()
             && self.state.confirmation.is_none()
             && !egui::Popup::is_any_open(ctx)
             && !ctx.text_edit_focused()
@@ -288,7 +305,7 @@ impl Workbench {
             } else if self.show_license {
                 self.show_license = false;
             } else if self.library.open {
-                // The library owns its draft-aware exit.
+                self.close_library();
             } else if self.analysis.open {
                 self.close_analysis();
             }
@@ -466,6 +483,7 @@ mod analysis;
 mod library;
 mod manufacturing;
 mod material;
+mod navigation;
 mod policies;
 mod process;
 mod review;
@@ -643,6 +661,7 @@ impl eframe::App for Workbench {
             }
             return;
         }
+        self.library_sync();
         let compact = ui.available_width() < 900.0;
         egui::Panel::top("commands").show(ui, |ui| {
             let wide = ui.available_width() >= 900.0;
@@ -721,7 +740,13 @@ impl eframe::App for Workbench {
                     .into_iter()
                     .enumerate()
                 {
-                    ui.selectable_value(&mut self.manufacturing.panel, index, label);
+                    if ui
+                        .selectable_value(&mut self.manufacturing.panel, index, label)
+                        .clicked()
+                        && self.library.open
+                    {
+                        self.close_library();
+                    }
                 }
                 ui.separator();
                 self.button(ui, Action::Open);
@@ -761,169 +786,191 @@ impl eframe::App for Workbench {
                 .max_size((ui.available_height() * 0.5).max(100.0))
                 .show(ui, |ui| self.feedback(ui));
         }
-        if self.analysis.open || !compact || !self.compact_tree {
-            egui::Panel::right("project")
-                .resizable(true)
-                .default_size(if compact { 250.0 } else { 340.0 })
-                .min_size(210.0)
-                // A pasted numeric draft or long source label must retain a canvas.
-                .max_size((ui.available_width() * 0.5).max(210.0))
+        if self.library.open {
+            egui::CentralPanel::default_margins().show(ui, |ui| self.library_page(ui));
+        } else if self.manufacturing.panel == 4 {
+            egui::CentralPanel::default_margins().show(ui, |ui| self.study_page(ui));
+        } else {
+            if self.analysis.open || !compact || !self.compact_tree {
+                egui::Panel::right("project")
+                    .resizable(true)
+                    .default_size(if compact { 250.0 } else { 340.0 })
+                    .min_size(210.0)
+                    // A pasted numeric draft or long source label must retain a canvas.
+                    .max_size((ui.available_width() * 0.5).max(210.0))
+                    .show(ui, |ui| {
+                        if self.analysis.open {
+                            self.analysis_ui(ui);
+                            return;
+                        }
+                        if self.manufacturing.panel == 3 {
+                            self.finish_pane(ui);
+                            return;
+                        }
+                        if matches!(self.manufacturing.panel, 1 | 2) {
+                            self.manufacturing_pane(ui);
+                            return;
+                        }
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            if self.manufacturing.panel == 0 {
+                                self.selection_ui(ui);
+                                self.project(ui);
+                            } else if self.manufacturing.panel == 3 {
+                                self.surface_ui(ui);
+                            } else if self.manufacturing.panel == 4 {
+                                self.study_ui(ui);
+                            } else {
+                                self.manufacturing_ui(ui);
+                            }
+                        });
+                    });
+            }
+            if !compact || (self.compact_tree && !self.analysis.open) {
+                egui::Panel::left("model-tree")
+                    .resizable(true)
+                    .default_size(210.0)
+                    .min_size(140.0)
+                    .show(ui, |ui| self.tree_ui(ui));
+            }
+            egui::CentralPanel::default_margins()
+                .frame(
+                    egui::Frame::central_panel(ui.style()).fill(self.prefs.theme.tokens().canvas),
+                )
                 .show(ui, |ui| {
-                    if self.analysis.open {
-                        self.analysis_ui(ui);
-                        return;
+                    if self.state.display_loading {
+                        ui.label("Updating source display · previous revision retained");
+                        if ui.button("Pause transfer").clicked() {
+                            self.queued_host = Some(Command::PauseDisplay);
+                        }
                     }
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        if self.manufacturing.panel == 0 {
-                            self.selection_ui(ui);
-                            self.project(ui);
-                        } else if self.manufacturing.panel == 3 {
-                            self.surface_ui(ui);
-                        } else if self.manufacturing.panel == 4 {
-                            self.study_ui(ui);
-                        } else {
-                            self.manufacturing_ui(ui);
+                    if self.state.display_paused {
+                        ui.colored_label(
+                            self.prefs.theme.tokens().warning,
+                            "Source display paused · previous revision retained",
+                        );
+                        if ui.button("Resume transfer").clicked() {
+                            self.queued_host = Some(Command::ResumeDisplay);
+                        }
+                    }
+                    self.replay_controls(ui);
+                    let current = self.display_current();
+                    if !current && self.state.display.is_some() {
+                        ui.colored_label(
+                            self.prefs.theme.tokens().warning,
+                            "Displayed source is stale · picking and edits disabled",
+                        );
+                    }
+                    if self
+                        .state
+                        .display
+                        .as_ref()
+                        .is_none_or(|s| s.occurrences.is_empty())
+                    {
+                        ui::pane_header(
+                            ui,
+                            "No source geometry",
+                            "Import a STEP part or open a saved project",
+                        );
+                        self.primary_button(ui, Action::Import);
+                    }
+                    let review = if self.manufacturing_current() {
+                        self.state.manufacturing.review.clone()
+                    } else {
+                        None
+                    };
+                    let mut view = if review.is_some() {
+                        self.manufacturing.replay
+                    } else {
+                        crate::replay::View {
+                            source: true,
+                            visible: false,
+                            ..Default::default()
+                        }
+                    };
+                    let plane = self.analysis_plane();
+                    let mut analysis = self.analysis.view.clone();
+                    analysis.enabled &= analysis.valid()
+                        && (!analysis.local_frame || self.analysis_pose().is_some())
+                        && (!analysis.selected_only || self.occurrence.is_some());
+                    if analysis.enabled {
+                        match self.analysis.view.representation {
+                            crate::analysis::Representation::Source => {
+                                view.source = true;
+                                view.visible = false;
+                            }
+                            crate::analysis::Representation::Actual => {
+                                view.source = false;
+                                view.visible = review.is_some();
+                            }
+                            crate::analysis::Representation::Compare => {
+                                view.source = true;
+                                view.visible = review.is_some();
+                            }
+                        }
+                    }
+                    let mut picked = None;
+                    ui.horizontal_top(|ui| {
+                        let rail = if review.is_some() { 84.0 } else { 0.0 };
+                        let size = egui::vec2(
+                            (ui.available_width() - rail).max(1.0),
+                            ui.available_height(),
+                        );
+                        ui.allocate_ui_with_layout(
+                            size,
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                picked = self.viewport.show(
+                                    ui,
+                                    crate::viewport::Input {
+                                        scene: if review.is_some() && !current {
+                                            None
+                                        } else {
+                                            self.state.display.clone()
+                                        },
+                                        section: self.state.section.clone().filter(|s| {
+                                            self.analysis.view.enabled
+                                                && (DVec3::from_array(s.summary.plane.normal)
+                                                    - DVec3::from_array(plane.normal))
+                                                .length()
+                                                    < 1e-10
+                                                && DVec3::from_array(plane.normal)
+                                                    .dot(
+                                                        DVec3::from_array(
+                                                            s.summary.plane.origin_mm,
+                                                        ) - DVec3::from_array(plane.origin_mm),
+                                                    )
+                                                    .abs()
+                                                    < 1e-9
+                                        }),
+                                        review: review.clone(),
+                                        view,
+                                        selected: self.selected.as_ref(),
+                                        interactive: current,
+                                        analysis: &mut analysis,
+                                        plane,
+                                        scope: self.occurrence,
+                                    },
+                                    frame,
+                                );
+                            },
+                        );
+                        if let Some(review) = &review {
+                            self.manufacturing.layers.rail(
+                                ui,
+                                &mut self.manufacturing.replay,
+                                review,
+                            );
                         }
                     });
-                });
-        }
-        if !compact || (self.compact_tree && !self.analysis.open) {
-            egui::Panel::left("model-tree")
-                .resizable(true)
-                .default_size(210.0)
-                .min_size(140.0)
-                .show(ui, |ui| self.tree_ui(ui));
-        }
-        egui::CentralPanel::default_margins()
-            .frame(egui::Frame::central_panel(ui.style()).fill(self.prefs.theme.tokens().canvas))
-            .show(ui, |ui| {
-                if self.state.display_loading {
-                    ui.label("Updating source display · previous revision retained");
-                    if ui.button("Pause transfer").clicked() {
-                        self.queued_host = Some(Command::PauseDisplay);
+                    if analysis.enabled && self.analysis.view.offset_mm != analysis.offset_mm {
+                        self.analysis.follow_layer = false;
+                        self.analysis.view.offset_mm = analysis.offset_mm;
                     }
-                }
-                if self.state.display_paused {
-                    ui.colored_label(
-                        self.prefs.theme.tokens().warning,
-                        "Source display paused · previous revision retained",
-                    );
-                    if ui.button("Resume transfer").clicked() {
-                        self.queued_host = Some(Command::ResumeDisplay);
-                    }
-                }
-                self.replay_controls(ui);
-                let current = self.display_current();
-                if !current && self.state.display.is_some() {
-                    ui.colored_label(
-                        self.prefs.theme.tokens().warning,
-                        "Displayed source is stale · picking and edits disabled",
-                    );
-                }
-                if self
-                    .state
-                    .display
-                    .as_ref()
-                    .is_none_or(|s| s.occurrences.is_empty())
-                {
-                    ui.label(
-                        "Import STEP or open a saved project to inspect native source geometry.",
-                    );
-                }
-                let review = if self.manufacturing_current() {
-                    self.state.manufacturing.review.clone()
-                } else {
-                    None
-                };
-                let mut view = if review.is_some() {
-                    self.manufacturing.replay
-                } else {
-                    crate::replay::View {
-                        source: true,
-                        visible: false,
-                        ..Default::default()
-                    }
-                };
-                let plane = self.analysis_plane();
-                let mut analysis = self.analysis.view.clone();
-                analysis.enabled &= analysis.valid()
-                    && (!analysis.local_frame || self.analysis_pose().is_some())
-                    && (!analysis.selected_only || self.occurrence.is_some());
-                if analysis.enabled {
-                    match self.analysis.view.representation {
-                        crate::analysis::Representation::Source => {
-                            view.source = true;
-                            view.visible = false;
-                        }
-                        crate::analysis::Representation::Actual => {
-                            view.source = false;
-                            view.visible = review.is_some();
-                        }
-                        crate::analysis::Representation::Compare => {
-                            view.source = true;
-                            view.visible = review.is_some();
-                        }
-                    }
-                }
-                let mut picked = None;
-                ui.horizontal_top(|ui| {
-                    let rail = if review.is_some() { 84.0 } else { 0.0 };
-                    let size = egui::vec2(
-                        (ui.available_width() - rail).max(1.0),
-                        ui.available_height(),
-                    );
-                    ui.allocate_ui_with_layout(
-                        size,
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            picked = self.viewport.show(
-                                ui,
-                                crate::viewport::Input {
-                                    scene: if review.is_some() && !current {
-                                        None
-                                    } else {
-                                        self.state.display.clone()
-                                    },
-                                    section: self.state.section.clone().filter(|s| {
-                                        self.analysis.view.enabled
-                                            && (DVec3::from_array(s.summary.plane.normal)
-                                                - DVec3::from_array(plane.normal))
-                                            .length()
-                                                < 1e-10
-                                            && DVec3::from_array(plane.normal)
-                                                .dot(
-                                                    DVec3::from_array(s.summary.plane.origin_mm)
-                                                        - DVec3::from_array(plane.origin_mm),
-                                                )
-                                                .abs()
-                                                < 1e-9
-                                    }),
-                                    review: review.clone(),
-                                    view,
-                                    selected: self.selected.as_ref(),
-                                    interactive: current,
-                                    analysis: &mut analysis,
-                                    plane,
-                                    scope: self.occurrence,
-                                },
-                                frame,
-                            );
-                        },
-                    );
-                    if let Some(review) = &review {
-                        self.manufacturing
-                            .layers
-                            .rail(ui, &mut self.manufacturing.replay, review);
+                    if let Some(reference) = picked {
+                        self.select_face(reference);
                     }
                 });
-                if analysis.enabled && self.analysis.view.offset_mm != analysis.offset_mm {
-                    self.analysis.follow_layer = false;
-                    self.analysis.view.offset_mm = analysis.offset_mm;
-                }
-                if let Some(reference) = picked {
-                    self.select_face(reference);
-                }
-            });
+        }
         if self.show_commands {
             let modal = egui::Modal::new(egui::Id::unique("command-palette")).show(&ctx, |ui| {
                 ui.set_width(360.0);
@@ -1002,6 +1049,7 @@ impl eframe::App for Workbench {
                 self.show_commands = false;
             }
         }
+        self.navigation_dialog(&ctx);
         if let Some(confirmation) = &self.state.confirmation {
             let id = confirmation.id;
             let modal = egui::Modal::new(egui::Id::unique("discard-project")).show(&ctx,|ui| {
@@ -1049,7 +1097,7 @@ impl eframe::App for Workbench {
         if previous_theme != self.prefs.theme {
             self.prefs.theme.apply(&ctx);
         }
-        self.library_window(&ctx);
+
         // Side effects execute once in logic(), even if egui lays out the UI in multiple passes.
         if self.queued.is_some()
             || self.confirmation.is_some()
