@@ -37,7 +37,7 @@ responsiveness remains a separate obligation:
 
 | Envelope | Default |
 | --- | --- |
-| one interactive query or explicit section | `QUERY_WORK_UNITS` = 1B cumulative work |
+| one interactive query or explicit section | `QUERY_WORK_UNITS` = 4B cumulative work |
 | one complete compile | `COMPILE_WORK_UNITS` = 8B cumulative work |
 | prepared-section pool | `MAX_PREPARED_SECTION_BYTES` = 512 MiB live |
 | import query proof | `MAX_QUERY_PROOF_BYTES` = 256 MiB live |
@@ -78,10 +78,14 @@ proof allowance into import. The 256 MiB standalone proof ceiling does not
 override that reservation. Packed output, source residency, native proof
 scratch and renderer/GPU limits retain distinct owners.
 
-The 512-hole plate remains a diagnosed cost problem: it exhausts a 10B
-diagnostic envelope and does not finish by lifting the query cap alone. It
-needs its own repeated-preparation/root-search diagnosis and optimization, not
-another blanket increase.
+Section polygon certification uses a conservative outward-error-expanded grid
+before the unchanged exact interval proof. Its projected chords and sorted
+cell entries share source/output admission; all setup, sorting and pair scans
+remain charged and cancellable. Each ordinary candidate is checked once;
+wide or unindexable chords retain all-pairs checks. The 512-hole plate motivates
+the query default, not a per-fixture exception or a promise that every large
+section fits. Preparation cost and full-engine resource qualification remain
+separate obligations.
 
 These are software resource defaults, not measured hardware requirements,
 universal GPU/platform qualification, printability or machine readiness.

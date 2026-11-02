@@ -257,6 +257,13 @@ reversing chains and different loops retain the separation requirement. Rotation
 loop sorting and actual affine pose transport preserve derivative/chord pairing;
 no tiny chord is removed and no distance tolerance supplies ordering.
 Conservative slab envelopes retain their separate uniform polygon certificate.
+Returned section polygons are certified disjoint through a conservative
+outward-error-expanded grid broad phase. Deterministically sorted cell entries
+select each candidate chord pair once for the unchanged whole-interval
+separation/touch proof; wide or unindexable chords retain all-pairs checks.
+Projected chords and cell entries share live admission with source/output
+storage, and projection, insertion, sorting and candidate scans debit the same
+cancellable work guard. The broad phase cannot prune touching error tubes.
 All owned capacities coexist under the native query budget; packed SPLS bytes
 and its existing layout are unchanged. A raw intersection alone is not
 closed-slab occupancy, and envelopes cannot be promoted to manufactured layers.
