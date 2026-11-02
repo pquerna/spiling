@@ -32,7 +32,8 @@ Keep three contracts separate:
   overflow/allocation refusal and cancellation;
 - responsiveness, including worker isolation, stage reporting and cancellation.
 
-Default envelopes protect the third while allowing valid work to finish:
+Default envelopes bound resource admission while allowing valid work to finish;
+responsiveness remains a separate obligation:
 
 | Envelope | Default |
 | --- | --- |
@@ -45,10 +46,16 @@ Default envelopes protect the third while allowing valid work to finish:
 
 Work is cumulative per operation and charged through one guard; a retry, cache
 reuse, layer or API boundary does not reset it. Byte limits are live bounds for
-the owner named by each constant, not additive process-RSS promises. Callers
-may always narrow an allowance with an explicit smaller limit. Deliberate
-exhaustion, overflow, cancellation and stale-result tests keep their narrow
+the owner named by each constant, not additive process-RSS promises. Existing
+borrowed-work and explicit byte-limit APIs permit narrower caller limits;
+convenience APIs choose fixed defaults and do not expose every allowance.
+Deliberate exhaustion, overflow, cancellation and stale-result tests keep their narrow
 selectors; ordinary positive tests use the default policy.
+
+Manufacturing passes its captured guard into planar/cylindrical finish and
+surface-color face certification as well as native material queries. The
+standalone face-certificate convenience wrappers are separate queries and
+must not be used to reset work within a compile.
 
 A refusal remains a typed `ResourceLimit`. It is not invalid or unsupported
 geometry, and it must not be converted into an empty success, a mesh repair or
@@ -63,6 +70,13 @@ progress, and remain cancellable; consumed allowance divided by the maximum is
 not progress. A later engine-owned aggregate reservation still has to account
 for coexisting definitions, jobs, meshes and outputs rather than summing these
 independent maxima.
+
+These are geometry-library ceilings, not new engine residency limits. Engine
+import still reserves incoming sources and retained proof/index allocations
+against the remaining 64 MiB source/history envelope; it passes that smaller
+proof allowance into import. The 256 MiB standalone proof ceiling does not
+override that reservation. Packed output, source residency, native proof
+scratch and renderer/GPU limits retain distinct owners.
 
 Section polygon certification uses a conservative outward-error-expanded grid
 before the unchanged exact interval proof. Its projected chords and sorted

@@ -12,8 +12,9 @@
 //!
 //! Work units are cumulative per operation and are charged from one guard for
 //! the whole operation. Each byte limit is a simultaneous-live bound for the
-//! owner named by that constant, not an additive process-RSS promise. Callers
-//! may always narrow an allowance with an explicit smaller value. Deliberate
+//! owner named by that constant, not an additive process-RSS promise. Existing
+//! borrowed-work and byte-limit entry points permit narrower caller limits;
+//! convenience entry points select fixed defaults, not a host policy. Deliberate
 //! refusal, overflow and cancellation tests keep their narrow selectors; only
 //! ordinary positive work uses these defaults.
 

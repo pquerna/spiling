@@ -909,6 +909,7 @@ fn admit_schedule<'model>(
         retained_points,
         construction_owned_bytes,
         surface_work,
+        &mut admission.geometry_work,
         cancel,
     )?;
     retained_points += construction.points;

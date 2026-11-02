@@ -387,6 +387,7 @@ pub(super) fn metadata(
     occurrence: &OccurrenceRecord,
     source_bounds: AabbMm,
     sample_limit: usize,
+    work: &mut spiling_geometry::GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Vec<PreparedFinish>, ManufacturingError> {
     let native = &input.definitions[&occurrence.definition_id];
@@ -460,6 +461,7 @@ pub(super) fn metadata(
                     source_bounds,
                     layer.expect("effective layer"),
                     sample_limit.saturating_sub(samples),
+                    work,
                     cancel,
                 )?;
                 samples += field.samples;
@@ -485,6 +487,7 @@ pub(super) fn metadata(
                 source_bounds,
                 layer.expect("effective layer"),
                 sample_limit.saturating_sub(samples),
+                work,
                 cancel,
             )?;
             samples += field.samples;
@@ -527,7 +530,7 @@ pub(super) fn metadata(
             ));
         }
         let cert = native
-            .vertical_wall_face_with_cancel(&face.face_id, cancel)
+            .vertical_wall_face_with_work(&face.face_id, work, cancel)
             .map_err(|e| {
                 error(
                     match e.code {

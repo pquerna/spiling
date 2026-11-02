@@ -394,6 +394,7 @@ pub(super) fn admit<'a>(
                 occurrence,
                 placed,
                 (MAX_DEPOSITION_SEGMENTS as usize / 4).saturating_sub(surface_samples),
+                &mut result.geometry_work,
                 cancel,
             ) {
                 Ok(fields) => {
