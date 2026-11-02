@@ -343,6 +343,7 @@ pub(super) fn intersect(
                 scale,
                 plane,
                 dependent_sign,
+                use_scalar_bounds: false,
             };
             let mut endpoints_qualified = true;
             for event in &events {
@@ -438,6 +439,7 @@ pub(super) fn intersect(
                 scale,
                 plane,
                 dependent_sign,
+                use_scalar_bounds: false,
             };
             let mut achieved = [0.0_f64; 2];
             let endpoint_errors = [a, b].map(|event| -> Result<f64, GeometryError> {
@@ -1192,8 +1194,50 @@ pub(super) struct Graph<'a> {
     pub(super) scale: f64,
     pub(super) plane: PlaneMm,
     pub(super) dependent_sign: i8,
+    pub(super) use_scalar_bounds: bool,
+}
+fn intersect_projection(
+    values: &mut [Interval; 3],
+    direction: [f64; 3],
+    projection: Interval,
+) -> Result<(), GeometryError> {
+    for axis in 0..3 {
+        if direction[axis] == 0.0 {
+            continue;
+        }
+        let mut remaining = projection;
+        for other in 0..3 {
+            if other != axis {
+                remaining = remaining.sub(values[other].mul(Interval::point(direction[other])));
+            }
+        }
+        values[axis] = values[axis].intersect(remaining.div(Interval::point(direction[axis]))?)?;
+    }
+    Ok(())
 }
 impl Graph<'_> {
+    fn jet(
+        &self,
+        uv: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<SurfaceEnclosure, GeometryError> {
+        let mut jet = surface_jet(self.surface, uv, self.scale, work, cancel)?;
+        if !self.use_scalar_bounds {
+            return Ok(jet);
+        }
+        let scalar =
+            super::atlas::first_jet(self.surface, uv, self.scale, self.plane, work, cancel)?;
+        let offset = dot(self.plane.origin_mm.map(Interval::point), self.plane.normal);
+        intersect_projection(
+            &mut jet.position,
+            self.plane.normal,
+            scalar.position.add(offset),
+        )?;
+        intersect_projection(&mut jet.du, self.plane.normal, scalar.du)?;
+        intersect_projection(&mut jet.dv, self.plane.normal, scalar.dv)?;
+        Ok(jet)
+    }
     fn box_uv(&self, x: [f64; 2], y: Interval) -> [[f64; 2]; 2] {
         let mut uv = self.domain;
         uv[1 - self.axis] = x;
@@ -1210,20 +1254,8 @@ impl Graph<'_> {
     ) -> Result<(Interval, SurfaceEnclosure), GeometryError> {
         work.charge(1, cancel)?;
         let mut y = Interval::new(self.domain[self.axis][0], self.domain[self.axis][1])?;
-        let a = surface_jet(
-            self.surface,
-            self.box_uv(x, Interval::point(y.lo)),
-            self.scale,
-            work,
-            cancel,
-        )?;
-        let b = surface_jet(
-            self.surface,
-            self.box_uv(x, Interval::point(y.hi)),
-            self.scale,
-            work,
-            cancel,
-        )?;
+        let a = self.jet(self.box_uv(x, Interval::point(y.lo)), work, cancel)?;
+        let b = self.jet(self.box_uv(x, Interval::point(y.hi)), work, cancel)?;
         let fa = functional(a.position, self.plane);
         let fb = functional(b.position, self.plane);
         let nonpositive = |v: Interval| v.hi <= 0.0;
@@ -1240,7 +1272,7 @@ impl Graph<'_> {
             )));
         }
         for _ in 0..64 {
-            let jet = surface_jet(self.surface, self.box_uv(x, y), self.scale, work, cancel)?;
+            let jet = self.jet(self.box_uv(x, y), work, cancel)?;
             let derivative = dot(
                 if self.axis == 0 { jet.du } else { jet.dv },
                 self.plane.normal,
@@ -1251,13 +1283,7 @@ impl Graph<'_> {
                 ));
             }
             let mid = y.mid();
-            let at = surface_jet(
-                self.surface,
-                self.box_uv(x, Interval::point(mid)),
-                self.scale,
-                work,
-                cancel,
-            )?;
+            let at = self.jet(self.box_uv(x, Interval::point(mid)), work, cancel)?;
             let next = y.intersect(
                 Interval::point(mid).sub(functional(at.position, self.plane).div(derivative)?),
             )?;
@@ -1266,10 +1292,7 @@ impl Graph<'_> {
             }
             y = next;
         }
-        Ok((
-            y,
-            surface_jet(self.surface, self.box_uv(x, y), self.scale, work, cancel)?,
-        ))
+        Ok((y, self.jet(self.box_uv(x, y), work, cancel)?))
     }
     fn point(
         &self,
@@ -1395,7 +1418,7 @@ impl Graph<'_> {
                     let displacement = Interval::new(x[0], x[1])?.sub(Interval::point(mid));
                     y = y.intersect(at.add(slope.mul(displacement)))?;
                     uv = self.box_uv(x, y);
-                    jet = surface_jet(self.surface, uv, self.scale, work, cancel)?;
+                    jet = self.jet(uv, work, cancel)?;
                     smooth = self.single_knot_cell(uv, work, cancel)?
                         || p::surface_parameter_span_smooth(self.surface, uv, work, cancel)?;
                 }
@@ -2405,6 +2428,24 @@ type BoundaryJet = ([Interval; 3], [Interval; 3], [Interval; 2], [Interval; 2]);
 #[cfg(test)]
 mod correspondence_tests {
     use super::*;
+
+    #[test]
+    fn scalar_projection_intersection_preserves_axes_and_oblique_enclosures() {
+        let mut axis_values = [Interval::new(-1.0, 1.0).unwrap(); 3];
+        intersect_projection(&mut axis_values, [0.0, 0.0, 1.0], Interval::point(0.25)).unwrap();
+        assert_eq!(axis_values[0], Interval::new(-1.0, 1.0).unwrap());
+        assert_eq!(axis_values[1], Interval::new(-1.0, 1.0).unwrap());
+        assert!(axis_values[2].contains(0.25) && axis_values[2].width() < 1e-12);
+        let mut oblique = [Interval::new(-2.0, 3.0).unwrap(); 3];
+        intersect_projection(&mut oblique, [0.5, -0.25, 0.0], Interval::point(1.0)).unwrap();
+        for point in [[1.0, -2.0, 2.0], [3.0, 2.0, -1.0]] {
+            assert!((0..3).all(|axis| oblique[axis].contains(point[axis])));
+        }
+        let mut inconsistent = [Interval::point(0.0); 3];
+        assert!(
+            intersect_projection(&mut inconsistent, [0.0, 0.0, 1.0], Interval::point(1.0)).is_err()
+        );
+    }
     use solidcore::nurbs::{
         b_spline_curve::BSplineCurve,
         b_spline_surface::BSplineSurface,

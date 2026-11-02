@@ -1226,6 +1226,71 @@ async fn frozen_plate_transfers_real_bounded_chunks_and_releases_the_lease() {
 }
 
 #[tokio::test]
+async fn native_rational_torus_near_terminal_section_retains_hole_and_refuses_critical_cut() {
+    let mut client = EngineClient::spawn(ENGINE).await.unwrap();
+    let before = import(
+        &mut client,
+        "../manufacturing/native/source-nurbs-torus.step",
+        RigidPoseMm::IDENTITY,
+    )
+    .await;
+    let revision = project_revision(&client).await;
+    let height = 1.99901_f64;
+    let completed = section(
+        &mut client,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, height],
+            normal: [0.0, 0.0, 1.0],
+        },
+    )
+    .await;
+    assert_eq!(completed.status, JobStatus::Completed, "{completed:?}");
+    let Some(JobResult::Section { artifact_id }) = completed.result else {
+        panic!("expected native section artifact");
+    };
+    let (metadata, loops) = section_loops(&mut client, artifact_id).await;
+    assert_eq!(metadata.revision, before.revision);
+    assert_eq!(loops.len(), 2);
+    assert_eq!(
+        loops
+            .iter()
+            .filter(|(boundary, _)| boundary.is_hole)
+            .count(),
+        1
+    );
+    let expected_area = 24.0 * std::f64::consts::PI * (4.0 - height.powi(2)).sqrt();
+    let mut measured_area = 0.0;
+    for (boundary, points) in &loops {
+        assert_eq!(points.first(), points.last());
+        let signed = area(points, metadata.frame);
+        assert_eq!(signed < 0.0, boundary.is_hole);
+        measured_area += signed;
+    }
+    let error = metadata.sampling_tolerance_mm + metadata.boolean_tolerance_mm;
+    assert!(
+        (measured_area - expected_area).abs()
+            <= 24.0 * std::f64::consts::PI * error + 2.0 * std::f64::consts::PI * error.powi(2)
+    );
+    let critical = section(
+        &mut client,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 2.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+    )
+    .await;
+    assert_eq!(critical.status, JobStatus::Failed, "{critical:?}");
+    assert!(critical.outputs.is_empty());
+    assert_eq!(
+        geometry_job_error(critical),
+        GeometryErrorCode::AnalysisIndeterminate
+    );
+    assert_eq!(scene(&mut client).await, before);
+    assert_eq!(project_revision(&client).await, revision);
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn native_plate_section_preserves_all_holes_and_cancellation_keeps_scene() {
     let mut client = EngineClient::spawn(ENGINE).await.unwrap();
     let before = import(&mut client, "perforated-plate.step", RigidPoseMm::IDENTITY).await;

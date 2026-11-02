@@ -251,6 +251,15 @@ also retains its independently bounded native-curve error, including endpoint
 uncertainty. Reversal, point rotation, loop sorting and actual-pose transport
 preserve its point-pair association. Nonadjacent error tubes use the sum of the
 two local errors; missing, malformed or nonfinite native receipts refuse.
+Atlas root exclusion and graph contraction project the actual scaled plane
+functional into homogeneous coefficients before quotient evaluation. Sampling
+uses the same scalar position/gradient bounds to intersect Cartesian jet
+components by their linear projection constraint. Complete C0 coverage, strict
+root brackets, nonzero dependent derivatives and independent chord/plane bounds
+remain mandatory; a tighter scalar enclosure grants no critical-height or
+whole-slab authority. Near-terminal rational-torus sections retain both annulus
+boundaries through the native service; their closed terminal-slab proof remains
+an independent unqualified operation.
 A same-loop overlap of conservative tubes can instead use retained whole-native
 derivative intervals over the complete incidence-assembled chain. A floating
 bisector only proposes the scalar direction; every native interval and literal

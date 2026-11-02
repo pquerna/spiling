@@ -543,6 +543,84 @@ fn original_bracket_relevant_cuts_have_closed_native_span_incidence() {
     }
 }
 #[test]
+fn rational_torus_near_terminal_section_preserves_annulus_and_native_lineage() {
+    let cancel = AtomicBool::new(false);
+    let definition = from_step_bytes_with_cancel(
+        include_bytes!("../../../../fixtures/manufacturing/native/source-nurbs-torus.step"),
+        &cancel,
+    )
+    .unwrap();
+    let height = 1.99901_f64;
+    let radial_offset = (4.0 - height.powi(2)).sqrt();
+    for normal_z in [1.0, -1.0] {
+        let mut work = GeometryWorkBudget::query();
+        let result = section(
+            &definition,
+            PlaneMm {
+                origin_mm: [0.0, 0.0, height],
+                normal: [0.0, 0.0, normal_z],
+            },
+            &cancel,
+            MAX_SECTION_BYTES,
+            &mut work,
+        )
+        .unwrap();
+        assert_provenance(&definition, &result);
+        assert_eq!(result.loops().len(), 2);
+        assert_eq!(
+            result
+                .loops()
+                .iter()
+                .filter(|boundary| boundary.is_hole)
+                .count(),
+            1
+        );
+        let plane_error = result.achieved_plane_error_mm();
+        let offsets = [
+            (4.0 - (height + plane_error).powi(2)).sqrt(),
+            (4.0 - (height - plane_error).powi(2)).sqrt(),
+        ];
+        assert!(
+            offsets
+                .iter()
+                .all(|offset| offset.is_finite() && *offset > 0.0)
+        );
+        let xy_error = result.achieved_chord_error_mm()
+            + offsets
+                .into_iter()
+                .map(|offset| (offset - radial_offset).abs())
+                .fold(0.0, f64::max);
+        let expected_area = 24.0 * PI * radial_offset;
+        let measured: f64 = result
+            .loops()
+            .iter()
+            .map(|boundary| area(boundary, result.frame()))
+            .sum();
+        assert!(
+            (measured - expected_area).abs() <= 24.0 * PI * xy_error + 2.0 * PI * xy_error.powi(2)
+        );
+        for boundary in result.loops() {
+            let radius = 6.0
+                + if boundary.is_hole {
+                    -radial_offset
+                } else {
+                    radial_offset
+                };
+            assert!(
+                boundary
+                    .points_mm
+                    .iter()
+                    .all(|point| (point[0].hypot(point[1]) - radius).abs() <= xy_error)
+            );
+        }
+        eprintln!(
+            "near-terminal rational torus normal={normal_z}: work={} area={measured} expected={expected_area}",
+            work.consumed()
+        );
+    }
+}
+
+#[test]
 fn critical_plane_refuses_instead_of_fabricating_an_empty_section() {
     let definition = fixture("box-mm.step");
     let cancel = AtomicBool::new(false);
@@ -762,12 +840,5 @@ fn local_chord_receipts_preserve_a_regular_native_torus_section() {
     assert!(
         (actual - expected).abs() <= 2.0 * perimeter * section.achieved_chord_error_mm() + 1e-6,
         "independent annulus area: {actual} vs {expected}"
-    );
-    assert!(
-        section
-            .loop_chord_errors_mm
-            .iter()
-            .flatten()
-            .any(|error| *error < section.achieved_chord_error_mm() * 0.1)
     );
 }

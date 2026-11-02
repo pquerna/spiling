@@ -131,6 +131,7 @@ fn graph<'a>(surface: &'a Surface, cell: &GraphCell, scale: f64, plane: PlaneMm)
         scale,
         plane,
         dependent_sign: cell.dependent_sign,
+        use_scalar_bounds: true,
     }
 }
 

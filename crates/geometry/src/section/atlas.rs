@@ -9,7 +9,7 @@
 use super::{Admission, cuts::CutInventory, indeterminate, roots::sign};
 use crate::{
     GeometryError, GeometryWorkBudget, PlaneMm,
-    parametric::{self as p, Interval, SurfaceFirstEnclosure},
+    parametric::{self as p, Interval, SurfaceFunctional, SurfaceFunctionalEnclosure},
 };
 use solidcore::surface::surface::Surface;
 use spiling_contracts::geometry::GeometryErrorCode;
@@ -44,34 +44,35 @@ fn dot(row: [Interval; 3], direction: [f64; 3]) -> Interval {
     })
 }
 
-fn height(position: [Interval; 3], plane: PlaneMm) -> Interval {
-    dot(
-        std::array::from_fn(|axis| position[axis].sub(Interval::point(plane.origin_mm[axis]))),
-        plane.normal,
-    )
-}
-
-fn first_jet(
+pub(super) fn first_jet(
     surface: &Surface,
     domain: [[f64; 2]; 2],
     scale: f64,
+    plane: PlaneMm,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<SurfaceFirstEnclosure, GeometryError> {
+) -> Result<SurfaceFunctionalEnclosure, GeometryError> {
     // The native first-enclosure helper proves coefficient C0 continuity over
     // this entire box, not just the original face rectangle. In particular its
     // check also covers any sampling overlap beyond that rectangle.
-    let mut jet = p::surface_piecewise_first_enclosure(surface, domain, work, cancel)?;
-    for row in [&mut jet.position, &mut jet.du, &mut jet.dv] {
-        for value in row {
-            *value = value.mul(Interval::point(scale));
-        }
-    }
-    Ok(jet)
+    let [scalar] = p::surface_functional_enclosures(
+        surface,
+        domain,
+        &[SurfaceFunctional {
+            direction: plane
+                .normal
+                .map(|value| Interval::point(value).mul(Interval::point(scale))),
+            origin: [Interval::point(0.0); 3],
+            offset: dot(plane.origin_mm.map(Interval::point), plane.normal).neg(),
+        }],
+        work,
+        cancel,
+    )?;
+    Ok(scalar)
 }
 
-fn partial(jet: &SurfaceFirstEnclosure, axis: usize, plane: PlaneMm) -> Interval {
-    dot(if axis == 0 { jet.du } else { jet.dv }, plane.normal)
+fn partial(jet: &SurfaceFunctionalEnclosure, axis: usize) -> Interval {
+    if axis == 0 { jet.du } else { jet.dv }
 }
 
 /// Exhaust original native knot rectangles, not a fitted or sampled chart.
@@ -167,18 +168,18 @@ fn visit(
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
     work.charge(1, cancel)?;
-    let jet = match first_jet(surface, cell, scale, work, cancel) {
+    let jet = match first_jet(surface, cell, scale, plane, work, cancel) {
         Ok(jet) => Some(jet),
         Err(error) if error.code == GeometryErrorCode::AnalysisIndeterminate => None,
         Err(error) => return Err(error),
     };
     let mut candidates = [None; 2];
     if let Some(jet) = jet {
-        if sign(height(jet.position, plane)) != 0 {
+        if sign(jet.position) != 0 {
             return Ok(());
         }
         for (index, axis) in [1, 0].into_iter().enumerate() {
-            let derivative = partial(&jet, axis, plane);
+            let derivative = partial(&jet, axis);
             let dependent_sign = sign(derivative);
             if dependent_sign == 0 {
                 continue;
@@ -188,9 +189,8 @@ fn visit(
             let midpoint = cell[axis][0] * 0.5 + cell[axis][1] * 0.5;
             let mut middle = cell;
             middle[axis] = [midpoint; 2];
-            let position = p::surface_position_enclosure(surface, middle, work, cancel)?
-                .map(|value| value.mul(Interval::point(scale)));
-            let necessary = Interval::point(midpoint).sub(height(position, plane).div(derivative)?);
+            let position = first_jet(surface, middle, scale, plane, work, cancel)?.position;
+            let necessary = Interval::point(midpoint).sub(position.div(derivative)?);
             let low = necessary.lo.max(cell[axis][0]);
             let high = necessary.hi.min(cell[axis][1]);
             if low > high {
@@ -252,14 +252,15 @@ fn visit(
                 {
                     continue;
                 }
-                let neighborhood = match first_jet(surface, graph_domain, scale, work, cancel) {
-                    Ok(jet) => jet,
-                    Err(error) if error.code == GeometryErrorCode::AnalysisIndeterminate => {
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-                if sign(partial(&neighborhood, axis, plane)) != candidate.dependent_sign {
+                let neighborhood =
+                    match first_jet(surface, graph_domain, scale, plane, work, cancel) {
+                        Ok(jet) => jet,
+                        Err(error) if error.code == GeometryErrorCode::AnalysisIndeterminate => {
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                if sign(partial(&neighborhood, axis)) != candidate.dependent_sign {
                     continue;
                 }
                 if !brackets_cut_roots(
@@ -417,8 +418,8 @@ fn brackets_cut_roots(
                     let mut uv = graph_domain;
                     uv[1 - axis] = independent;
                     uv[axis] = [graph_domain[axis][endpoint]; 2];
-                    let position = match p::surface_position_enclosure(surface, uv, work, cancel) {
-                        Ok(position) => position.map(|value| value.mul(Interval::point(scale))),
+                    let position = match first_jet(surface, uv, scale, plane, work, cancel) {
+                        Ok(jet) => jet.position,
                         Err(error) if error.code == GeometryErrorCode::AnalysisIndeterminate => {
                             return Ok(false);
                         }
@@ -429,7 +430,7 @@ fn brackets_cut_roots(
                     } else {
                         dependent_sign
                     };
-                    if sign(height(position, plane)) != expected {
+                    if sign(position) != expected {
                         return Ok(false);
                     }
                 }
