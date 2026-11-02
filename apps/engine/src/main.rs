@@ -22,9 +22,15 @@ use spiling_contracts::{
 use std::io::{BufRead, Read};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Semaphore, mpsc, watch};
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
-use tonic::{Request, Response, Status};
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Request, Response, Status, transport::server::TcpIncoming};
 use uuid::Uuid;
+
+fn grpc_incoming(listener: tokio::net::TcpListener) -> TcpIncoming {
+    // Custom incoming streams bypass Server's socket options. Disable Nagle
+    // here so small HTTP/2 replies do not wait for delayed acknowledgements.
+    TcpIncoming::from(listener).with_nodelay(Some(true))
+}
 
 #[derive(Clone)]
 struct Service {
@@ -1011,7 +1017,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .max_encoding_message_size(MAX_CONTROL_BYTES as usize),
             authenticate,
         ))
-        .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
+        .serve_with_incoming_shutdown(grpc_incoming(listener), async move {
             if !*stopping.borrow() {
                 let _ = stopping.changed().await;
             }
@@ -1040,5 +1046,29 @@ async fn main() -> std::process::ExitCode {
             );
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::grpc_incoming;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_stream::StreamExt;
+
+    #[tokio::test]
+    async fn accepted_grpc_socket_disables_nagle() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut incoming = grpc_incoming(listener);
+            let (client, accepted) = tokio::join!(TcpStream::connect(address), incoming.next());
+            let _client = client.unwrap();
+            let accepted = accepted.unwrap().unwrap();
+            assert!(accepted.nodelay().unwrap());
+        })
+        .await
+        .expect("loopback connection timed out");
     }
 }
