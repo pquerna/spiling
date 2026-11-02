@@ -253,3 +253,20 @@ physical color, printer or cross-platform packaging qualification.
 `Libraries.SearchCatalog` accepts a typed kind, bounded query and snapshot-bound offset, returning at most twenty checked records. Engine search uses an immutable index of the bundled source snapshots; it does not depend on personal storage or the network. Sources remain distinct even when their names match. Native live search coalesces edits and hides results from a different query before selection; the CLI exposes `library catalog --kind filament --query TEXT` and `library add-reference RECORD.json`.
 
 A filament definition retains required nullable brand, marketed material, nominal diameter and HueForge TD declarations separately from a typed material/process profile. Unknown values remain unknown. Catalog capture preserves the exact original row and source/content identity alongside editable current declarations. RGB and TD are source declarations, not optical calibration or manufacturing authority. Personal edits create a new revision; project copies stay self-contained and do not follow catalog or personal-library changes. Existing spools prevent reinterpretation of known brand, material, diameter and provider-local product identity. TD updates do not silently turn a product into a different stock item.
+
+`Libraries.GetCatalogRecord` reads the latest bundled record by exact kind,
+provider and source-local ID. A missing record leaves the captured definition
+intact. Checking never writes: native Catalog updates shows changed source values
+and identities, then Review update opens the ordinary editor. A filament proposal
+updates only fields still equal to the original source declaration; local names,
+diameter, appearance edits, material and process profiles remain intact. The
+original personal revision remains the expected CAS operand until an explicit
+Save is confirmed. Printer review updates retained source evidence without
+changing the installed configuration. Catalog refresh cannot migrate project
+copies, reinterpret existing spools or establish new machine capabilities.
+
+Prepare's Choose filament opens project materials; Choose from My library reuses
+the acquisition/editor flow. Copy to project is a separate action. Project
+hardware can add a known/manual printer or configure a selected incomplete
+instance, then return to project selection. Saving personal inventory does not
+apply project hardware or material/process settings.

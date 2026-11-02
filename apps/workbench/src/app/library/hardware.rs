@@ -49,6 +49,7 @@ impl HardwareUi {
             || !self.endpoint.is_empty()
             || !self.identity.is_empty()
             || !self.secret.is_empty()
+            || !self.mounting_interface.is_empty()
     }
     pub(super) fn begin_printer(
         &mut self,
@@ -62,9 +63,13 @@ impl HardwareUi {
                 model: String::new(),
                 catalog_origin: None,
             });
-        let nickname = format!("{} {}", identity.manufacturer, identity.model)
-            .trim()
-            .to_owned();
+        let nickname = if identity.model.starts_with(&identity.manufacturer) {
+            identity.model.clone()
+        } else {
+            format!("{} {}", identity.manufacturer, identity.model)
+                .trim()
+                .to_owned()
+        };
         self.machine = Some(OwnedMachine {
             id: uuid::Uuid::new_v4().to_string(),
             nickname,
@@ -85,6 +90,7 @@ impl HardwareUi {
         {
             self.machine = None;
             self.machine_detail = false;
+            self.mounting_interface.clear();
         }
         if let Some((endpoint, identity)) = self.submitted_connection.take() {
             if self.endpoint == endpoint {
@@ -182,14 +188,16 @@ impl Workbench {
             return;
         }
         let previous_tab = self.library.hardware.tab;
-        ui.horizontal(|ui| {
-            for (index, name) in ["Machines", "Build plates", "Accessories", "Catalog"]
-                .iter()
-                .enumerate()
-            {
-                ui.selectable_value(&mut self.library.hardware.tab, index as u8, *name);
-            }
-        });
+        if !self.library.hardware.machine_detail {
+            ui.horizontal(|ui| {
+                for (index, name) in ["Machines", "Build plates", "Accessories", "Catalog"]
+                    .iter()
+                    .enumerate()
+                {
+                    ui.selectable_value(&mut self.library.hardware.tab, index as u8, *name);
+                }
+            });
+        }
         if previous_tab != self.library.hardware.tab {
             self.library.hardware.clear_secret();
         }
@@ -676,6 +684,19 @@ impl Workbench {
             return;
         };
         ui.strong("Project hardware");
+        if ui
+            .add_enabled(
+                ready && !self.library.has_drafts(state),
+                egui::Button::new("Add printer"),
+            )
+            .clicked()
+        {
+            self.library.personal = true;
+            self.library.return_to_project = Some(spiling_contracts::catalog::CatalogKind::Printer);
+            self.library
+                .discovery
+                .open(spiling_contracts::catalog::CatalogKind::Printer);
+        }
         if let Some(c) = &project.hardware {
             ui.label(format!(
                 "{} {} · {}",
@@ -790,6 +811,19 @@ impl Workbench {
             && let Err(reason) = m.configured_setup()
         {
             ui.label(reason);
+            if ui
+                .add_enabled(
+                    ready && !self.library.has_drafts(state),
+                    egui::Button::new("Configure selected machine"),
+                )
+                .clicked()
+            {
+                self.library.hardware.machine = Some(m.clone());
+                self.library.hardware.machine_detail = true;
+                self.library.personal = true;
+                self.library.return_to_project =
+                    Some(spiling_contracts::catalog::CatalogKind::Printer);
+            }
         }
         egui::ComboBox::from_id_salt("project-local-plate")
             .selected_text(

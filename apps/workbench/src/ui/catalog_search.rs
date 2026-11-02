@@ -4,7 +4,7 @@
 //! Shared, bounded native acquisition page. Reading a row never creates inventory.
 use spiling_contracts::catalog::*;
 use std::time::{Duration, Instant};
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct CatalogSearch {
     pub open: bool,
     pub query: String,
@@ -14,6 +14,8 @@ pub struct CatalogSearch {
     selected: Option<usize>,
     focus: bool,
     composing: bool,
+    #[cfg(debug_assertions)]
+    timing: Option<Instant>,
 }
 pub enum CatalogChoice {
     Review(Box<CatalogRecord>),
@@ -28,6 +30,7 @@ impl CatalogSearch {
         self.kind = Some(kind);
         self.changed = Some(Instant::now());
         self.focus = true;
+        self.composing = false;
         self.selected = None;
         self.submitted = None;
     }
@@ -62,6 +65,28 @@ impl CatalogSearch {
             }
         }
         let search_id = egui::Id::unique("reference-search");
+        let previous_selection = self.selected;
+        if let Some(page) = page.filter(|p| {
+            p.query.kind == kind
+                && p.query.query == self.query
+                && self.submitted.as_ref() == Some(&p.query)
+        }) {
+            let keyboard = ui.memory(|m| m.has_focus(search_id)) && !self.composing;
+            if keyboard
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
+                && !page.entries.is_empty()
+            {
+                self.selected = Some(
+                    self.selected
+                        .map_or(0, |n| (n + 1).min(page.entries.len() - 1)),
+                );
+            }
+            if keyboard
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
+            {
+                self.selected = self.selected.map(|n| n.saturating_sub(1));
+            }
+        }
         // Single-line TextEdit consumes Enter and surrenders focus. Admit the
         // explicit selected result before the widget handles that event.
         let review_enter = ui.memory(|m| m.has_focus(search_id))
@@ -91,7 +116,7 @@ impl CatalogSearch {
         let mut request = None;
         if self
             .changed
-            .is_some_and(|t| t.elapsed() >= Duration::from_millis(75))
+            .is_some_and(|t| t.elapsed() >= Duration::from_millis(40))
             && ready
             && (self.submitted.is_none()
                 || page.is_some_and(|p| Some(&p.query) == self.submitted.as_ref())
@@ -103,12 +128,16 @@ impl CatalogSearch {
                 offset: 0,
                 snapshot: None,
             };
+            #[cfg(debug_assertions)]
+            {
+                self.timing = self.changed;
+            }
             self.submitted = Some(q.clone());
             self.changed = None;
             request = Some(q);
         }
         if self.changed.is_some() {
-            ui.ctx().request_repaint_after(Duration::from_millis(75));
+            ui.ctx().request_repaint_after(Duration::from_millis(40));
         }
         if let Some(error) = error {
             super::problem(ui, "Search unavailable", error);
@@ -117,26 +146,55 @@ impl CatalogSearch {
             }
         }
         let mut chosen = None;
+        egui::Panel::bottom("catalog-actions")
+            .exact_size(52.0)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let selected =
+                        matching.and_then(|p| self.selected.and_then(|n| p.entries.get(n)));
+                    if super::primary(
+                        ui,
+                        &format!("Review {noun}"),
+                        if !ready {
+                            Some("Wait for the current operation")
+                        } else if selected.is_none() {
+                            Some("Select a result")
+                        } else {
+                            None
+                        },
+                    ) || (review_enter && selected.is_some() && ready)
+                    {
+                        chosen = selected
+                            .cloned()
+                            .map(|r| CatalogChoice::Review(Box::new(r)));
+                    }
+                    if let Some(page) = matching
+                        && let Some(offset) = page.next
+                        && ui
+                            .add_enabled(ready, egui::Button::new("Next results"))
+                            .clicked()
+                    {
+                        let q = CatalogQuery {
+                            kind,
+                            query: self.query.clone(),
+                            offset,
+                            snapshot: Some(page.snapshot.clone()),
+                        };
+                        self.submitted = Some(q.clone());
+                        self.selected = None;
+                        request = Some(q);
+                    }
+                    if ui.button("Enter manually").clicked() {
+                        chosen = Some(CatalogChoice::Manual);
+                    }
+                });
+            });
         if let Some(page) = matching {
-            let keyboard = response.has_focus() && !self.composing;
-            if keyboard
-                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
-                && !page.entries.is_empty()
-            {
-                self.selected = Some(
-                    self.selected
-                        .map_or(0, |n| (n + 1).min(page.entries.len() - 1)),
-                );
-            }
-            if keyboard
-                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
-            {
-                self.selected = self.selected.map(|n| n.saturating_sub(1));
-            }
             ui.weak(format!("{} results", page.total));
             egui::ScrollArea::vertical()
                 .id_salt("catalog-results")
-                .max_height((ui.available_height() - 160.0).max(100.0))
+                .min_scrolled_height(0.0)
+                .max_height(ui.available_height())
                 .show(ui, |ui| {
                     for (i, row) in page.entries.iter().enumerate() {
                         ui.push_id((&row.origin.provider, &row.origin.id), |ui| {
@@ -157,7 +215,13 @@ impl CatalogSearch {
                                     manufacturer,
                                     model,
                                     ..
-                                } => format!("{manufacturer} {model}"),
+                                } => {
+                                    if model.starts_with(manufacturer) {
+                                        model.clone()
+                                    } else {
+                                        format!("{manufacturer} {model}")
+                                    }
+                                }
                             };
                             ui.horizontal_wrapped(|ui| {
                                 if let CatalogItem::Filament { srgb, .. } = &row.item {
@@ -171,73 +235,51 @@ impl CatalogSearch {
                                         super::ColorDensity::Compact,
                                     );
                                 }
-                                if ui.selectable_label(selected, label).clicked() {
+                                let response = ui.selectable_label(selected, label);
+                                if selected && self.selected != previous_selection {
+                                    response.scroll_to_me(Some(egui::Align::Center));
+                                }
+                                if response.clicked() {
                                     self.selected = Some(i);
                                 }
                                 ui.weak(&row.origin.provider);
                             });
                         });
                     }
-                });
-            if let Some(row) = self.selected.and_then(|n| page.entries.get(n)) {
-                ui.separator();
-                match &row.item {
-                    CatalogItem::Filament { declaration, .. } => {
-                        ui.weak(declaration.hueforge_td_mm.map_or("TD unknown".into(), |v| {
-                            format!("HueForge TD {v} mm · declared")
-                        }));
+                    if let Some(row) = self.selected.and_then(|n| page.entries.get(n)) {
+                        ui.separator();
+                        match &row.item {
+                            CatalogItem::Filament { declaration, .. } => {
+                                ui.weak(
+                                    declaration.hueforge_td_mm.map_or("TD unknown".into(), |v| {
+                                        format!("HueForge TD {v} mm · declared")
+                                    }),
+                                );
+                            }
+                            CatalogItem::Printer { volume_mm, .. } => {
+                                ui.weak(volume_mm.map_or("Build size unknown".into(), |v| {
+                                    format!("{} × {} × {} mm · declared", v[0], v[1], v[2])
+                                }));
+                            }
+                        }
+                        ui.collapsing("Source details", |ui| {
+                            ui.label(&row.origin.url);
+                            ui.label(format!("{} · {}", row.origin.id, row.origin.revision));
+                        });
                     }
-                    CatalogItem::Printer { volume_mm, .. } => {
-                        ui.weak(volume_mm.map_or("Build size unknown".into(), |v| {
-                            format!("{} × {} × {} mm · declared", v[0], v[1], v[2])
-                        }));
-                    }
-                }
-                ui.collapsing("Source details", |ui| {
-                    ui.label(&row.origin.url);
-                    ui.label(format!("{} · {}", row.origin.id, row.origin.revision));
                 });
-            }
-            ui.horizontal_wrapped(|ui| {
-                let selected = self.selected.and_then(|n| page.entries.get(n));
-                let enter = review_enter && selected.is_some();
-                if super::primary(
-                    ui,
-                    &format!("Review {noun}"),
-                    if selected.is_none() {
-                        Some("Select a result")
-                    } else if !ready {
-                        Some("Wait for the current operation")
-                    } else {
-                        None
-                    },
-                ) || (enter && ready)
-                {
-                    chosen = selected
-                        .cloned()
-                        .map(|row| CatalogChoice::Review(Box::new(row)));
-                }
-                if let Some(offset) = page.next
-                    && ui
-                        .add_enabled(ready, egui::Button::new("Next results"))
-                        .clicked()
-                {
-                    let q = CatalogQuery {
-                        kind,
-                        query: self.query.clone(),
-                        offset,
-                        snapshot: Some(page.snapshot.clone()),
-                    };
-                    self.submitted = Some(q.clone());
-                    self.selected = None;
-                    request = Some(q);
-                }
-            });
         } else {
             ui.weak("Searching…");
         }
-        if ui.button("Enter manually").clicked() {
-            chosen = Some(CatalogChoice::Manual);
+        #[cfg(debug_assertions)]
+        if matching.is_some()
+            && let Some(started) = self.timing.take()
+            && std::env::var_os("SPILING_CATALOG_TIMINGS").is_some()
+        {
+            eprintln!(
+                "catalog query-to-layout: {:.3} ms",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
         }
         if chosen.is_some() {
             self.open = false;
@@ -330,6 +372,19 @@ mod tests {
             frame(&mut search, vec![key(egui::Key::Enter)]),
             Some(CatalogChoice::Review(_))
         ));
+        search.open = true;
+        search.selected = None;
+        ctx.memory_mut(|m| m.request_focus(egui::Id::unique("reference-search")));
+        assert!(
+            matches!(
+                frame(
+                    &mut search,
+                    vec![key(egui::Key::ArrowDown), key(egui::Key::Enter)]
+                ),
+                Some(CatalogChoice::Review(_))
+            ),
+            "fast navigation and review in one frame must retain keyboard focus"
+        );
         search.open = true;
         search.query = "new query".into();
         assert!(

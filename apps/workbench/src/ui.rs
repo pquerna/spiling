@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod catalog_review;
 mod catalog_search;
 mod color;
+pub use catalog_review::{CatalogReviewAction, catalog_review};
 pub use catalog_search::{CatalogChoice, CatalogSearch};
 mod gallery;
 pub use gallery::gallery;

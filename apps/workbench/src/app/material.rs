@@ -167,6 +167,9 @@ impl Workbench {
             captured,
         );
         ui::group(ui, "Material and setup");
+        if ui.button("Choose filament").clicked() {
+            self.choose_filament();
+        }
         self.button(ui, Action::LoadMaterialCatalog);
         ui.collapsing("Load a single profile", |ui| {
             self.button(ui, Action::LoadMaterial);

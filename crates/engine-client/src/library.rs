@@ -40,6 +40,27 @@ fn page(
     Ok(())
 }
 impl EngineRpc {
+    pub async fn catalog_record(
+        &self,
+        key: &spiling_contracts::catalog::CatalogKey,
+    ) -> Result<spiling_contracts::catalog::CatalogRecord, ClientError> {
+        let wire = key.clone().try_into().map_err(invalid)?;
+        let result: spiling_contracts::catalog::CatalogRecord = self
+            .libraries()
+            .get_catalog_record(self.request(checked(wire)?))
+            .await
+            .map_err(rpc_error)?
+            .into_inner()
+            .try_into()
+            .map_err(ClientError::Protocol)?;
+        if &result.key() != key {
+            return Err(ClientError::Protocol(
+                "catalog lookup identity differs".into(),
+            ));
+        }
+        Ok(result)
+    }
+
     pub async fn search_catalog(
         &self,
         query: &spiling_contracts::catalog::CatalogQuery,

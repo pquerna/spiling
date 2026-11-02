@@ -104,6 +104,26 @@ where
 }
 #[tonic::async_trait]
 impl rpc::libraries_server::Libraries for LibraryService {
+    async fn get_catalog_record(
+        &self,
+        request: Request<rpc::CatalogKey>,
+    ) -> Result<Response<rpc::CatalogRecord>, Status> {
+        let key: spiling_contracts::catalog::CatalogKey =
+            request.into_inner().try_into().map_err(bad)?;
+        let index = self.catalog.clone();
+        reply(
+            self.run(move |_| {
+                let index = index
+                    .get_or_init(crate::catalog::CatalogIndex::bundled)
+                    .as_ref()
+                    .map_err(|e| LibraryError::new(LibraryErrorCode::InvalidData, e.clone()))?;
+                index
+                    .get(&key)
+                    .map_err(|e| LibraryError::new(LibraryErrorCode::NotFound, e))
+            })
+            .await?,
+        )
+    }
     async fn search_catalog(
         &self,
         request: Request<rpc::CatalogQuery>,

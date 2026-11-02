@@ -11,6 +11,7 @@ import "spiling/native_hardware.proto";
 
 service Libraries {
  rpc SearchCatalog(CatalogQuery) returns (CatalogPage);
+ rpc GetCatalogRecord(CatalogKey) returns (CatalogRecord);
  rpc GetHardwareCatalog(google.protobuf.Empty) returns (HardwareCatalog);
  rpc GetHardware(google.protobuf.Empty) returns (LibraryHardware);
  rpc GetStatus(google.protobuf.Empty) returns (UserLibraryStatus);
@@ -142,3 +143,5 @@ message CatalogPrinter { string manufacturer=1; string model=2; repeated string 
 message CatalogRecord { CatalogOrigin origin=1; oneof item { CatalogFilament filament=2; CatalogPrinter printer=3; } }
 message CatalogQuery { CatalogKind kind=1; string query=2; uint32 offset=3; optional string snapshot=4; }
 message CatalogPage { string snapshot=1; CatalogQuery query=2; repeated CatalogRecord entries=3; uint32 total=4; optional uint32 next=5; }
+
+message CatalogKey {CatalogKind kind=1;string provider=2;string id=3;}

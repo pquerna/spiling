@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     for declaration in [
         spiling_contracts::catalog::CatalogKind::decl(&config),
+        spiling_contracts::catalog::CatalogKey::decl(&config),
         spiling_contracts::catalog::CatalogOrigin::decl(&config),
         spiling_contracts::catalog::CatalogItem::decl(&config),
         spiling_contracts::catalog::CatalogRecord::decl(&config),

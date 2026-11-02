@@ -87,6 +87,13 @@ Material catalog review has its own Library page: Use profile stages a draft,
 then returns to Material for Apply profile. A catalogue selection is not a write. Its staged draft captures project/session
 identity even when Material has not been visited. Apply or explicitly discard a
 changed draft before selecting another profile or loading another intent.
+Reference discovery keeps Review, Next results and Enter manually outside the
+scrolling result body. Up/Down moves a visible selection; Enter reviews only the
+selected result for the current query and does not interrupt IME composition.
+Catalog update checks are read-only; source differences open an explicit draft.
+Back to project selection retains the acquisition destination, and requires saved
+or discarded edits. Declared products can lack printable process profiles; show
+that requirement at the action that needs it.
 Private credentials clear on leaving their view; hiding details never implies a
 connection was used. Unconfirmed library publications retain their original request
 and require reconciliation before the application closes.
@@ -99,7 +106,7 @@ rather than becoming an incidental search default.
 
 ## Exercising a change
 
-Use the production gallery's Panels, Fields and Color categories in each theme.
+Use the production gallery's Panels, Fields, Color and Acquisition categories in each theme.
 The complete panel specimen includes ready, changed, blocked, pending, uncertain,
 invalid, read-only and stale states; its close/reopen path is interactive. Inspect narrow/normal panes,
 long names and scaled text. Test keyboard help, primary-action reasons, Escape,

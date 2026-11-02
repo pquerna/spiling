@@ -174,6 +174,16 @@ impl CatalogIndex {
         }
         Ok(Self { snapshot, rows })
     }
+    pub fn get(&self, key: &CatalogKey) -> Result<CatalogRecord, String> {
+        key.validate()?;
+        self.rows.iter().find(|row| {
+            row.record.item.kind() == key.kind
+                && row.record.origin.provider == key.provider
+                && row.record.origin.id == key.id
+        }).map(|row| row.record.clone()).ok_or_else(|| {
+            "This source record is absent from the bundled catalog; keep the captured declaration".into()
+        })
+    }
     pub fn search(&self, q: &CatalogQuery, cancel: &AtomicBool) -> Result<CatalogPage, String> {
         q.validate()?;
         if q.snapshot.as_ref().is_some_and(|s| s != &self.snapshot) {

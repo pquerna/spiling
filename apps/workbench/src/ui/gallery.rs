@@ -15,12 +15,19 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
     let id = ui.make_persistent_id("gallery-category");
     let mut category = ui.data_mut(|d| d.get_temp::<u8>(id).unwrap_or(0));
     ui.horizontal_wrapped(|ui| {
-        for (index, title) in ["Panels", "Fields", "Color"].iter().enumerate() {
+        for (index, title) in ["Panels", "Fields", "Color", "Acquisition"]
+            .iter()
+            .enumerate()
+        {
             ui.selectable_value(&mut category, index as u8, *title);
         }
     });
     ui.data_mut(|d| d.insert_temp(id, category));
     ui.separator();
+    if category == 3 {
+        acquisition(ui);
+        return;
+    }
     egui::ScrollArea::vertical()
         .id_salt(("gallery-content", category))
         .show(ui, |ui| {
@@ -199,4 +206,103 @@ mod tests {
             }
         }
     }
+}
+
+#[derive(Clone, Default)]
+struct AcquisitionSpecimen {
+    search: super::CatalogSearch,
+    page: Option<spiling_contracts::catalog::CatalogPage>,
+    reviewed: Option<spiling_contracts::catalog::CatalogRecord>,
+}
+fn acquisition(ui: &mut Ui) {
+    use spiling_contracts::{catalog::*, geometry::SourceHash};
+    let id = ui.make_persistent_id("acquisition-specimen");
+    let mut state = ui.data_mut(|d| {
+        d.get_temp::<AcquisitionSpecimen>(id).unwrap_or_else(|| {
+            let mut state = AcquisitionSpecimen::default();
+            state.search.open(CatalogKind::Filament);
+            state
+        })
+    });
+    if let Some(row) = state.reviewed.clone() {
+        pane_header(
+            ui,
+            "Review filament",
+            "Illustrative declaration · no inventory writes",
+        );
+        if close(ui, "Back to search") {
+            state.reviewed = None;
+            state.search.open(CatalogKind::Filament);
+        }
+        if let CatalogItem::Filament {
+            name,
+            declaration,
+            srgb,
+        } = &row.item
+        {
+            ui.label(name);
+            ColorPresentation::known(*srgb, ColorMeaning::DeclaredAppearance).show(
+                ui,
+                "specimen-color",
+                ColorDensity::Standard,
+            );
+            ui.label(format!(
+                "{} · diameter unknown",
+                declaration
+                    .material_label
+                    .as_deref()
+                    .unwrap_or("Material unknown")
+            ));
+        }
+        let mut next = row.clone();
+        if let CatalogItem::Filament { declaration, .. } = &mut next.item {
+            declaration.hueforge_td_mm = Some(3.2);
+        }
+        next.origin.content = next.item.content_hash().unwrap();
+        next.origin.revision = "illustrative-two".into();
+        let _ = super::catalog_review(ui, &row, Some(&Ok(next)), true);
+        ui.weak("Production saves use the owning library editor and engine receipt.");
+    } else {
+        let (query, choice) = state.search.show(ui, state.page.as_ref(), None, true);
+        if let Some(query) = query {
+            let snapshot = SourceHash::from_bytes(b"gallery-only");
+            let item = CatalogItem::Filament {
+                name: "Ocean blue".into(),
+                declaration: spiling_contracts::library::FilamentDeclaration {
+                    brand: Some("Illustrative brand".into()),
+                    material_label: Some("PLA".into()),
+                    diameter_mm: None,
+                    hueforge_td_mm: Some(2.1),
+                },
+                srgb: [0, 128, 180],
+            };
+            let row = CatalogRecord {
+                origin: CatalogOrigin {
+                    provider: "gallery-example".into(),
+                    id: "ocean-blue".into(),
+                    revision: "illustrative-one".into(),
+                    snapshot: snapshot.clone(),
+                    content: item.content_hash().unwrap(),
+                    url: "https://example.org/illustrative-catalog".into(),
+                },
+                item,
+            };
+            let matches = "illustrative brand ocean blue pla".contains(&query.query.to_lowercase());
+            state.page = Some(CatalogPage {
+                snapshot,
+                query,
+                entries: if matches { vec![row] } else { vec![] },
+                total: u32::from(matches),
+                next: None,
+            });
+            ui.ctx().request_repaint();
+        }
+        if let Some(super::CatalogChoice::Review(row)) = choice {
+            state.reviewed = Some(*row);
+        }
+        if !state.search.open && state.reviewed.is_none() {
+            state.search.open(CatalogKind::Filament);
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(id, state));
 }

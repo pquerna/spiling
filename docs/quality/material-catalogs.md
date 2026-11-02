@@ -29,8 +29,24 @@ A sibling `.lock` prevents concurrent writers. Publication stages a checked dire
 
 Keep HueForge and OpenPrintTag catalogs separate. A row is identified by its catalog source plus upstream `id`; this is neither a durable product SKU nor proof that another source's similarly named row is the same filament. Upstream slugging/deduplication can collapse distinct vendor records, and its synchronizer can publish a partial vendor set. Our disappearance guard protects the accepted baseline; it cannot reconstruct records already absent from that baseline. No cross-source joins or automatic conflict winners are introduced.
 
-`hex` is a declared sRGB color. Optional `td` is HueForge-style transmission distance in millimeters. Missing TD remains unknown. Do not convert it into a physical attenuation length, promote it to measured/calibrated evidence or derive machine/process limits. Names, colors and TD do not establish spool ownership, available stock, physical color qualification or a printable material profile. Selected definitions retain provider-local identity, exact snapshot/content hashes and original declarations alongside editable current fields. Diameter remains unknown unless entered. A saved definition has no inferred process profile; spool registration and project capture remain explicit independent actions.
+`hex` is a declared sRGB color. Optional `td` is HueForge-style transmission distance in millimeters. Missing TD remains unknown. Do not convert it into a physical attenuation length, promote it to measured/calibrated evidence or derive machine/process limits. Names, colors and TD do not establish spool ownership, available stock, physical color qualification or a printable material profile. Selected definitions retain provider-local identity, exact snapshot/content hashes and original declarations alongside editable current fields. Diameter remains unknown unless entered. Catalog updates in the native inspector compare the exact captured source key with the bundled record and require review/save; they never change saved definitions automatically. A saved definition has no inferred process profile; spool registration and project capture remain explicit independent actions.
 
 ## Distribution
 
 Retain both original MIT notices beside the raw data. [NOTICE.md](../../NOTICE.md) and [licensing](../license.md) distinguish these imports from the separately pinned Prusa v7 math port. Release provenance validates the snapshots, records each catalog as a separate source component and copies both notices and the complete manifest. The tracked public source archive includes the data and engine binaries embed the admitted snapshots.
+
+
+## Native acquisition checks
+
+Use Prepare → Material → Choose filament → Choose from My library, or Project
+hardware → Add printer. Exercise search, selected-result keyboard review, manual
+entry and explicit return at normal and narrow window sizes in Graphite/Paper.
+Check a saved imported definition against the bundled catalog, then inspect its
+self-contained project copy after save/reopen. The Acquisition gallery uses
+illustrative rows through the production controls; it does not establish engine
+or storage behavior.
+
+For local debug builds, `SPILING_CATALOG_TIMINGS=1` records query-edit to matching
+results-layout latency, including debounce and RPC observation. Measure the first
+index load separately from warm samples. This ends at egui layout, not GPU
+presentation; it is not a display latency or platform performance certification.

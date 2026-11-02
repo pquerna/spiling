@@ -18,6 +18,7 @@ impl Workbench {
                     }
                     if ui.button("Discard machine draft").clicked() {
                         self.library.hardware.machine = None;
+                        self.library.hardware.mounting_interface.clear();
                     }
                 } else if ui::primary(
                     ui,
@@ -37,10 +38,16 @@ impl Workbench {
                         let state = m.configured_setup().map_or("Setup needed".to_owned(), |s| {
                             format!("{} mm nozzle", s.printer.nozzle_diameter_mm)
                         });
-                        let label = format!(
-                            "{} · {} {} · {state}",
-                            m.nickname, m.identity.manufacturer, m.identity.model
-                        );
+                        let identity = if m.identity.model.starts_with(&m.identity.manufacturer) {
+                            m.identity.model.clone()
+                        } else {
+                            format!("{} {}", m.identity.manufacturer, m.identity.model)
+                        };
+                        let label = if m.nickname == identity {
+                            format!("{} · {state}", m.nickname)
+                        } else {
+                            format!("{} · {identity} · {state}", m.nickname)
+                        };
                         if ui
                             .add_enabled(
                                 ready && self.library.hardware.machine.is_none(),
@@ -56,10 +63,6 @@ impl Workbench {
                 });
             return;
         }
-        if ui::close(ui, "Back to machines") {
-            self.library.hardware.machine_detail = false;
-            self.library.hardware.clear_secret();
-        }
         let Some(mut draft) = self.library.hardware.machine.clone() else {
             self.library.hardware.machine_detail = false;
             return;
@@ -74,73 +77,83 @@ impl Workbench {
                 .show(ui, |ui| self.hardware_connections(ui, p, &draft.id, ready));
             return;
         }
-        ui::pane_header(
-            ui,
-            if original.is_some() {
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(if original.is_some() {
                 "Machine"
             } else {
                 "Add printer"
-            },
-            "My library · private physical instance",
-        );
-        let mut saved = false;
-        let mut discard = false;
-        egui::Panel::bottom("machine-editor-actions").show(ui, |ui| {
-            let validation = draft.validate().err();
-            let reason = if !ready {
-                Some("Wait for the current library operation")
-            } else if original == Some(&draft) {
-                Some("No unapplied changes")
-            } else {
-                validation.as_deref()
-            };
-            if ui::primary(
-                ui,
-                if original.is_some() {
-                    "Save machine"
-                } else {
-                    "Add printer"
-                },
-                reason,
-            ) {
-                if let MachineConfiguration::Configured { setup } = &mut draft.configuration
-                    && original.is_some_and(|old| {
-                        old.configuration
-                            != MachineConfiguration::Configured {
-                                setup: setup.clone(),
-                            }
-                    })
-                {
-                    setup.id = format!("custom.{}", uuid::Uuid::new_v4());
-                    setup.label = format!("Custom {} setup", setup.model.model);
-                    setup.printer.id = setup.id.clone();
-                    setup.printer.revision = spiling_contracts::geometry::SourceHash::from_bytes(
-                        &serde_json::to_vec(&setup.printer).expect("validated printer"),
-                    )
-                    .as_str()
-                    .into();
-                }
-                let mut h = p.hardware.clone();
-                if let Some(old) = h.machines.iter_mut().find(|m| m.id == draft.id) {
-                    *old = draft.clone();
-                } else {
-                    h.machines.push(draft.clone());
-                }
-                self.library.hardware.submitted_machine = Some(draft.clone());
-                self.save_hardware(p, h);
-                saved = true;
-            }
-            if ui.button("Discard machine draft").clicked() {
-                discard = true;
+            });
+            if ui::close(ui, "Back to machines") {
+                self.library.hardware.machine_detail = false;
+                self.library.hardware.clear_secret();
             }
         });
+        ui.weak("My library · private physical instance");
+        let mut saved = false;
+        let mut discard = false;
+        egui::Panel::bottom("machine-editor-actions")
+            .exact_size(76.0)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let validation = draft.validate().err();
+                    let reason = if !ready {
+                        Some("Wait for the current library operation")
+                    } else if original == Some(&draft) {
+                        Some("No unapplied changes")
+                    } else {
+                        validation.as_deref()
+                    };
+                    if ui::primary(
+                        ui,
+                        if original.is_some() {
+                            "Save machine"
+                        } else {
+                            "Add printer"
+                        },
+                        reason,
+                    ) {
+                        if let MachineConfiguration::Configured { setup } = &mut draft.configuration
+                            && original.is_some_and(|old| {
+                                old.configuration
+                                    != MachineConfiguration::Configured {
+                                        setup: setup.clone(),
+                                    }
+                            })
+                        {
+                            setup.id = format!("custom.{}", uuid::Uuid::new_v4());
+                            setup.label = format!("Custom {} setup", setup.model.model);
+                            setup.printer.id = setup.id.clone();
+                            setup.printer.revision =
+                                spiling_contracts::geometry::SourceHash::from_bytes(
+                                    &serde_json::to_vec(&setup.printer).expect("validated printer"),
+                                )
+                                .as_str()
+                                .into();
+                        }
+                        let mut h = p.hardware.clone();
+                        if let Some(old) = h.machines.iter_mut().find(|m| m.id == draft.id) {
+                            *old = draft.clone();
+                        } else {
+                            h.machines.push(draft.clone());
+                        }
+                        self.library.hardware.submitted_machine = Some(draft.clone());
+                        self.save_hardware(p, h);
+                        saved = true;
+                    }
+                    if ui.button("Discard machine draft").clicked() {
+                        discard = true;
+                    }
+                });
+            });
         if discard {
+            self.library.hardware.mounting_interface.clear();
             self.library.hardware.machine = None;
             self.library.hardware.machine_detail = false;
             return;
         }
         egui::ScrollArea::vertical()
             .id_salt("machine-editor-body")
+            .min_scrolled_height(0.0)
             .show(ui, |ui| {
                 ui.push_id(draft.id.clone(), |ui| {
                     ui.add_enabled_ui(ready, |ui| {
@@ -175,6 +188,7 @@ impl Workbench {
                 });
             });
         if discard {
+            self.library.hardware.mounting_interface.clear();
             self.library.hardware.machine = None;
             self.library.hardware.machine_detail = false;
         } else {
@@ -210,6 +224,24 @@ impl Workbench {
                     }));
                 }
             });
+        }
+        if let Some(origin) = &draft.identity.catalog_origin {
+            let lookup = self
+                .state
+                .library
+                .catalog_lookup
+                .as_ref()
+                .filter(|s| s.key == origin.key())
+                .map(|s| &s.result);
+            match ui::catalog_review(ui, origin, lookup, true) {
+                Some(ui::CatalogReviewAction::Check) => {
+                    self.library.queued = Some(LibraryAction::LookupCatalog(origin.key()))
+                }
+                Some(ui::CatalogReviewAction::Review(row)) => {
+                    draft.identity.catalog_origin = Some(row);
+                }
+                None => {}
+            }
         }
         ui.collapsing("Private details", |ui| {
             let mut serial = draft.serial.clone().unwrap_or_default();

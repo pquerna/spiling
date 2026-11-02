@@ -182,3 +182,35 @@ impl TryFrom<CatalogPage> for rpc::CatalogPage {
         })
     }
 }
+
+impl TryFrom<rpc::CatalogKey> for CatalogKey {
+    type Error = String;
+    fn try_from(v: rpc::CatalogKey) -> Result<Self, String> {
+        let kind = match rpc::CatalogKind::try_from(v.kind).map_err(|_| "invalid catalog kind")? {
+            rpc::CatalogKind::CatalogFilament => CatalogKind::Filament,
+            rpc::CatalogKind::CatalogPrinter => CatalogKind::Printer,
+            _ => return Err("missing catalog kind".into()),
+        };
+        let key = Self {
+            kind,
+            provider: v.provider,
+            id: v.id,
+        };
+        key.validate()?;
+        Ok(key)
+    }
+}
+impl TryFrom<CatalogKey> for rpc::CatalogKey {
+    type Error = String;
+    fn try_from(v: CatalogKey) -> Result<Self, String> {
+        v.validate()?;
+        Ok(Self {
+            kind: match v.kind {
+                CatalogKind::Filament => rpc::CatalogKind::CatalogFilament as i32,
+                CatalogKind::Printer => rpc::CatalogKind::CatalogPrinter as i32,
+            },
+            provider: v.provider,
+            id: v.id,
+        })
+    }
+}

@@ -8,6 +8,8 @@
 
 export type CatalogKind = "filament" | "printer";
 
+export type CatalogKey = { kind: CatalogKind, provider: string, id: string, };
+
 export type CatalogOrigin = { provider: string, id: string, revision: string, snapshot: SourceHash, content: SourceHash, url: string, };
 
 export type CatalogItem = { "kind": "filament", name: string, declaration: FilamentDeclaration, srgb: [number, number, number], } | { "kind": "printer", manufacturer: string, model: string, aliases: Array<string>, volume_mm: [number, number, number] | null, source_url: string, };

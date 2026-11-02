@@ -29,6 +29,7 @@ pub(super) struct LibraryUi {
     recipes: recipes::RecipeUi,
     hardware: hardware::HardwareUi,
     personal: bool,
+    return_to_project: Option<spiling_contracts::catalog::CatalogKind>,
     query: String,
     search_changed: Option<std::time::Instant>,
     on_hand: bool,
@@ -43,6 +44,7 @@ pub(super) struct LibraryUi {
     lot: String,
     location: String,
     draft: Option<FilamentRevision>,
+    proposed_definition: Option<FilamentDefinition>,
     draft_project: Option<ProjectDefinitionDraft>,
     pending: Option<LibraryWrite>,
     pub queued: Option<LibraryAction>,
@@ -66,6 +68,7 @@ impl LibraryUi {
             },
         );
         definition
+            || self.proposed_definition.is_some()
             || self.declaration.differs(
                 &self
                     .draft
@@ -84,6 +87,7 @@ impl LibraryUi {
     pub(super) fn discard_drafts(&mut self) {
         self.declaration = Default::default();
         self.catalog_origin = None;
+        self.proposed_definition = None;
         self.discovery.open = false;
         self.draft = None;
         self.draft_project = None;
@@ -141,6 +145,7 @@ impl LibraryUi {
     }
     fn edit(&mut self, selected: &FilamentRevision) {
         self.draft_project = None;
+        self.proposed_definition = None;
         self.declaration = declaration::DeclarationDraft::from(&selected.definition.declaration);
         self.catalog_origin = selected.definition.catalog_origin.as_deref().cloned();
         self.draft = Some(selected.clone());
@@ -148,26 +153,40 @@ impl LibraryUi {
         self.color_name = selected.definition.color_name.clone().unwrap_or_default();
         self.hex = hex(selected.definition.appearance.as_ref()).unwrap_or_default();
     }
+    fn review_update(&mut self, selected: &FilamentRevision, definition: FilamentDefinition) {
+        self.edit(selected);
+        self.name = definition.name.clone();
+        self.color_name = definition.color_name.clone().unwrap_or_default();
+        self.hex = hex(definition.appearance.as_ref()).unwrap_or_default();
+        self.declaration = declaration::DeclarationDraft::from(&definition.declaration);
+        self.catalog_origin = definition.catalog_origin.as_deref().cloned();
+        self.proposed_definition = Some(definition);
+        self.detail = 1;
+    }
     fn definition_mutation(&self) -> Result<LibraryMutation, String> {
         if self.name.trim().is_empty() {
             return Err("Enter a filament name".into());
         }
-        let mut definition = self.draft.as_ref().map_or_else(
-            || FilamentDefinition {
-                declaration: Default::default(),
-                catalog_origin: None,
-                name: String::new(),
-                material: None,
-                color_name: None,
-                appearance: None,
-                profiles: vec![],
-                source: DefinitionSource::Operator,
-            },
-            |d| d.definition.clone(),
-        );
+        let mut definition = self.proposed_definition.clone().unwrap_or_else(|| {
+            self.draft.as_ref().map_or_else(
+                || FilamentDefinition {
+                    declaration: Default::default(),
+                    catalog_origin: None,
+                    name: String::new(),
+                    material: None,
+                    color_name: None,
+                    appearance: None,
+                    profiles: vec![],
+                    source: DefinitionSource::Operator,
+                },
+                |d| d.definition.clone(),
+            )
+        });
         definition.declaration = self.declaration.value()?;
         definition.catalog_origin = self.catalog_origin.clone().map(Box::new);
-        if let Some(origin) = &self.catalog_origin {
+        if self.draft.is_none()
+            && let Some(origin) = &self.catalog_origin
+        {
             definition.source = DefinitionSource::Imported {
                 name: origin.origin.provider.clone(),
                 sha256: origin.origin.content.clone(),
@@ -176,9 +195,11 @@ impl LibraryUi {
         definition.name = self.name.trim().into();
         definition.color_name = optional(&self.color_name);
         // Editing a label must preserve exact source coordinates and provenance.
-        let unchanged_color = self.draft.as_ref().is_some_and(|d| {
-            hex(d.definition.appearance.as_ref()).unwrap_or_default() == self.hex.trim()
-        });
+        let unchanged_color = self
+            .proposed_definition
+            .as_ref()
+            .or_else(|| self.draft.as_ref().map(|d| &d.definition))
+            .is_some_and(|d| hex(d.appearance.as_ref()).unwrap_or_default() == self.hex.trim());
         if !unchanged_color {
             definition.appearance = if self.hex.trim().is_empty() {
                 None
@@ -239,6 +260,14 @@ impl LibraryUi {
     }
 }
 impl Workbench {
+    pub(super) fn choose_filament(&mut self) {
+        self.library.open = true;
+        self.library.personal = false;
+        self.library.hardware.active = false;
+        self.library.recipes.active = false;
+        self.library.detail = 0;
+        self.library.refresh();
+    }
     pub(super) fn open_profile_catalog(&mut self, ctx: &egui::Context) {
         if !self.library.open {
             self.surface_focus[1] = ctx.memory(|m| m.focused());
@@ -273,6 +302,7 @@ impl Workbench {
                     self.library.draft = None;
                     self.library.declaration = Default::default();
                     self.library.catalog_origin = None;
+                    self.library.proposed_definition = None;
                     self.library.detail = 0;
                     self.library.name.clear();
                     self.library.color_name.clear();
@@ -330,6 +360,7 @@ impl Workbench {
                     self.library.hex.clear();
                     self.library.declaration = Default::default();
                     self.library.catalog_origin = None;
+                    self.library.proposed_definition = None;
                 }
                 self.library.personal = false;
                 self.library.refresh();
@@ -386,6 +417,7 @@ impl Workbench {
             ctx.memory_mut(|m| m.request_focus(id));
         }
         self.library.open = false;
+        self.library.return_to_project = None;
         self.library.hardware.clear_secret();
     }
     pub(super) fn library_page(&mut self, ui: &mut egui::Ui) {
@@ -402,7 +434,24 @@ impl Workbench {
             ) {
                 self.close_library(ui.ctx());
             }
-            ui.weak("Project copies and My library are independent");
+            if self.library.return_to_project.is_some()
+                && self.library.personal
+                && ui
+                    .add_enabled(
+                        !self.library.has_drafts(&state) && self.library.pending.is_none(),
+                        egui::Button::new("Back to project selection"),
+                    )
+                    .clicked()
+            {
+                self.library.personal = false;
+                self.library.detail = 0;
+                self.library.discovery.open = false;
+                self.library.hardware.active = self.library.return_to_project.take()
+                    == Some(spiling_contracts::catalog::CatalogKind::Printer);
+                self.library.recipes.active = false;
+                self.library.refresh();
+            }
+            ui.weak("Independent project copies").on_hover_text("Project copies and My library are independent. Updates require explicit review and capture.");
         });
         if self.library.detail == 6 {
             ui::pane_header(
@@ -552,6 +601,38 @@ impl Workbench {
                 });
             return;
         }
+        if self.library.detail == 1 {
+            if ui::close(ui, "Back to filaments") {
+                self.library.detail = 0;
+            }
+            self.library_pending(ui, state, ready);
+            ui::pane_header(
+                ui,
+                "Filament",
+                if self.library.draft_project.is_some() {
+                    "Project copy"
+                } else {
+                    "My library definition"
+                },
+            );
+            let editor_writable = if self.library.draft_project.is_some() {
+                writable
+            } else {
+                personal_write
+            };
+            egui::Panel::bottom("filament-editor-actions")
+                .exact_size(76.0)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        self.library_definition_actions(ui, state, editor_writable)
+                    });
+                });
+            egui::ScrollArea::vertical()
+                .id_salt("filament-editor")
+                .min_scrolled_height(0.0)
+                .show(ui, |ui| self.library_definition_editor(ui, editor_writable));
+            return;
+        }
         if self.library.personal {
             self.library_header(ui, state, ready);
         }
@@ -585,11 +666,10 @@ impl Workbench {
                         self.library.detail = 1;
                     }
                 }
-            } else if self.library.detail == 0
-                && no_selection
-                && ui::primary(ui, "Choose from My library", None)
-            {
+            } else if self.library.detail == 0 && ui::primary(ui, "Choose from My library", None) {
                 self.library.personal = true;
+                self.library.return_to_project =
+                    Some(spiling_contracts::catalog::CatalogKind::Filament);
                 self.library.refresh();
             }
             if self.library.detail != 0 && ui::close(ui, "Back to filaments") {
@@ -599,29 +679,6 @@ impl Workbench {
                 ui.label("Filament draft retained");
             }
         });
-        if self.library.detail == 1 {
-            ui::pane_header(
-                ui,
-                "Filament",
-                if self.library.draft_project.is_some() {
-                    "Project copy"
-                } else {
-                    "My library definition"
-                },
-            );
-            let editor_writable = if self.library.draft_project.is_some() {
-                writable
-            } else {
-                personal_write
-            };
-            egui::Panel::bottom("filament-editor-actions").show(ui, |ui| {
-                self.library_definition_actions(ui, state, editor_writable);
-            });
-            egui::ScrollArea::vertical()
-                .id_salt("filament-editor")
-                .show(ui, |ui| self.library_definition_editor(ui, editor_writable));
-            return;
-        }
         if self.library.detail == 2 {
             if let Some((personal, selected)) = &state.selected
                 && *personal
@@ -864,6 +921,32 @@ impl Workbench {
                 "{} · {} · {} mm",
                 material.manufacturer, material.polymer_family, material.filament_diameter_mm
             ));
+        }
+        if personal && let Some(origin) = &selected.definition.catalog_origin {
+            let latest = state
+                .catalog_lookup
+                .as_ref()
+                .filter(|s| s.key == origin.key())
+                .map(|s| &s.result);
+            match ui::catalog_review(
+                ui,
+                origin,
+                latest,
+                personal_write && !self.library.has_drafts(state),
+            ) {
+                Some(ui::CatalogReviewAction::Check) => {
+                    self.library.queued = Some(LibraryAction::LookupCatalog(origin.key()))
+                }
+                Some(ui::CatalogReviewAction::Review(row)) => {
+                    match row.filament_update(&selected.definition) {
+                        Ok(definition) => {
+                            self.library.review_update(selected, definition);
+                        }
+                        Err(error) => self.local_problem = Some(error),
+                    }
+                }
+                None => {}
+            }
         }
         let declaration = &selected.definition.declaration;
         if declaration.brand.is_some() || declaration.material_label.is_some() {
@@ -1336,6 +1419,7 @@ impl Workbench {
             self.library.detail = 0;
             self.library.declaration = Default::default();
             self.library.catalog_origin = None;
+            self.library.proposed_definition = None;
             self.library.draft = None;
             self.library.draft_project = None;
             self.library.project_submission = None;
@@ -1447,5 +1531,55 @@ mod tests {
         };
         assert_eq!(definition.name, "After");
         assert_eq!(definition.appearance, revision.definition.appearance);
+    }
+    #[test]
+    fn source_only_update_is_dirty_and_retains_original_cas_after_rejection() {
+        use spiling_contracts::catalog::*;
+        let item = CatalogItem::Filament {
+            name: "Blue".into(),
+            declaration: Default::default(),
+            srgb: [0, 0, 255],
+        };
+        let row = CatalogRecord {
+            origin: CatalogOrigin {
+                provider: "example".into(),
+                id: "blue".into(),
+                revision: "one".into(),
+                snapshot: SourceHash::from_bytes(b"one"),
+                content: item.content_hash().unwrap(),
+                url: "https://example.org".into(),
+            },
+            item,
+        };
+        let definition = row.filament_definition().unwrap();
+        let revision = FilamentRevision {
+            reference: FilamentRef {
+                id: FilamentId("30891e2d-a394-4811-b3a3-bba9d8894104".into()),
+                revision: definition.content_hash().unwrap(),
+            },
+            definition,
+        };
+        let mut next = row.clone();
+        next.origin.revision = "two".into();
+        next.origin.snapshot = SourceHash::from_bytes(b"two");
+        let proposed = next.filament_update(&revision.definition).unwrap();
+        let mut ui = LibraryUi::default();
+        ui.review_update(&revision, proposed.clone());
+        assert!(ui.has_drafts(&State::default()));
+        let LibraryMutation::PutFilament {
+            expected,
+            definition,
+            ..
+        } = ui.definition_mutation().unwrap()
+        else {
+            panic!("filament update")
+        };
+        assert_eq!(expected, Some(revision.reference.revision.clone()));
+        assert_eq!(definition, proposed);
+        ui.mutation(None, ui.definition_mutation().unwrap());
+        // Rejected writes have no confirmed receipt: retain the original draft and operands.
+        assert_eq!(ui.draft.unwrap(), revision);
+        assert_eq!(ui.proposed_definition, Some(proposed));
+        assert!(ui.pending.is_some());
     }
 }

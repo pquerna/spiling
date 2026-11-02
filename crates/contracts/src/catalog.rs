@@ -15,6 +15,21 @@ pub enum CatalogKind {
     Filament,
     Printer,
 }
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogKey {
+    pub kind: CatalogKind,
+    pub provider: String,
+    pub id: String,
+}
+impl CatalogKey {
+    pub fn validate(&self) -> Result<(), String> {
+        if !text(&self.provider, 64) || !text(&self.id, 256) {
+            return Err("invalid catalog key".into());
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogOrigin {
@@ -70,6 +85,75 @@ impl CatalogItem {
     }
 }
 impl CatalogRecord {
+    pub fn key(&self) -> CatalogKey {
+        CatalogKey {
+            kind: self.item.kind(),
+            provider: self.origin.provider.clone(),
+            id: self.origin.id.clone(),
+        }
+    }
+    /// An explicit proposal. Saving still requires normal library/project CAS admission.
+    pub fn filament_update(
+        &self,
+        current: &crate::library::FilamentDefinition,
+    ) -> Result<crate::library::FilamentDefinition, String> {
+        current.validate()?;
+        if current
+            .catalog_origin
+            .as_ref()
+            .is_none_or(|r| r.key() != self.key())
+        {
+            return Err("catalog update belongs to another product".into());
+        }
+        let original = current
+            .catalog_origin
+            .as_ref()
+            .ok_or("missing captured origin")?
+            .filament_definition()?;
+        let source = self.filament_definition()?;
+        let mut proposed = current.clone();
+        fn update<T: PartialEq>(value: &mut T, baseline: &T, next: T) {
+            if value == baseline {
+                *value = next;
+            }
+        }
+        update(&mut proposed.name, &original.name, source.name);
+        update(
+            &mut proposed.color_name,
+            &original.color_name,
+            source.color_name,
+        );
+        update(
+            &mut proposed.appearance,
+            &original.appearance,
+            source.appearance,
+        );
+        update(&mut proposed.source, &original.source, source.source);
+        update(
+            &mut proposed.declaration.brand,
+            &original.declaration.brand,
+            source.declaration.brand,
+        );
+        update(
+            &mut proposed.declaration.material_label,
+            &original.declaration.material_label,
+            source.declaration.material_label,
+        );
+        update(
+            &mut proposed.declaration.diameter_mm,
+            &original.declaration.diameter_mm,
+            source.declaration.diameter_mm,
+        );
+        update(
+            &mut proposed.declaration.hueforge_td_mm,
+            &original.declaration.hueforge_td_mm,
+            source.declaration.hueforge_td_mm,
+        );
+        proposed.catalog_origin = Some(Box::new(self.clone()));
+        proposed.validate()?;
+        Ok(proposed)
+    }
+
     pub fn filament_definition(&self) -> Result<crate::library::FilamentDefinition, String> {
         self.validate()?;
         let CatalogItem::Filament {
@@ -288,5 +372,40 @@ mod tests {
         p.next = Some(1);
         p.query.snapshot = Some(SourceHash::from_bytes(b"another snapshot"));
         assert!(p.validate().is_err());
+    }
+    #[test]
+    fn reviewed_update_preserves_local_values_and_rejects_another_product() {
+        let before = record();
+        let mut local = before.filament_definition().unwrap();
+        local.name = "My workshop blue".into();
+        local.declaration.diameter_mm = Some(1.75);
+        local.source = crate::library::DefinitionSource::Operator;
+        let mut next = before.clone();
+        if let CatalogItem::Filament {
+            declaration, srgb, ..
+        } = &mut next.item
+        {
+            declaration.hueforge_td_mm = Some(3.0);
+            *srgb = [20, 40, 60];
+        }
+        next.origin.content = next.item.content_hash().unwrap();
+        next.origin.revision = "source-2".into();
+        let proposed = next.filament_update(&local).unwrap();
+        assert_eq!(proposed.name, local.name);
+        assert_eq!(proposed.declaration.diameter_mm, Some(1.75));
+        assert_eq!(proposed.declaration.hueforge_td_mm, Some(3.0));
+        assert_eq!(
+            proposed.appearance,
+            next.filament_definition().unwrap().appearance
+        );
+        assert_eq!(proposed.source, local.source);
+        assert_eq!(proposed.material, local.material);
+        assert_eq!(proposed.profiles, local.profiles);
+        assert_eq!(proposed.catalog_origin, Some(Box::new(next.clone())));
+        next.origin.provider = "another-provider".into();
+        assert!(next.filament_update(&local).is_err());
+        next.origin.provider = before.origin.provider;
+        next.origin.id = "another-product".into();
+        assert!(next.filament_update(&local).is_err());
     }
 }

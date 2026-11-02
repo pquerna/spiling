@@ -6,6 +6,7 @@ use spiling_contracts::{geometry::SourceHash, library::*};
 #[derive(Debug, Clone, Default)]
 pub struct State {
     pub catalog: Option<spiling_contracts::catalog::CatalogPage>,
+    pub catalog_lookup: Option<CatalogLookup>,
     pub catalog_error: Option<String>,
     pub hardware: super::hardware::State,
     pub personal_recipes: Option<LibraryRecipePage>,
@@ -25,6 +26,11 @@ pub struct State {
     pub spools: Vec<SpoolRecord>,
     pub receipt: Option<LibraryWriteReceipt>,
     pub rejected_request: Option<String>,
+}
+#[derive(Debug, Clone)]
+pub struct CatalogLookup {
+    pub key: spiling_contracts::catalog::CatalogKey,
+    pub result: Result<spiling_contracts::catalog::CatalogRecord, String>,
 }
 #[derive(Debug, Clone)]
 pub struct ProjectMaterialReceipt {
@@ -62,6 +68,7 @@ impl DefinitionComparison {
 }
 #[derive(Debug, Clone)]
 pub enum LibraryAction {
+    LookupCatalog(spiling_contracts::catalog::CatalogKey),
     SearchCatalog(spiling_contracts::catalog::CatalogQuery),
     Hardware(super::hardware::HardwareAction),
     Recipe(super::recipes::RecipeAction),
@@ -90,6 +97,7 @@ impl Host {
     pub fn library(&self, action: LibraryAction) -> Result<(), String> {
         match &action {
             LibraryAction::SearchCatalog(query) => query.validate()?,
+            LibraryAction::LookupCatalog(key) => key.validate()?,
             LibraryAction::Recipe(action) => match action {
                 super::recipes::RecipeAction::Refresh { query } => query.validate()?,
                 super::recipes::RecipeAction::Inspect { reference, .. } => reference.validate()?,
@@ -135,6 +143,11 @@ impl Actor {
     async fn library_inner(&mut self, action: LibraryAction) -> Result<(), ClientError> {
         let rpc = self.client.as_ref().expect("connected client").rpc();
         match action {
+            LibraryAction::LookupCatalog(key) => {
+                let result = rpc.catalog_record(&key).await.map_err(|e| e.to_string());
+                Arc::make_mut(&mut self.state.library).catalog_lookup =
+                    Some(CatalogLookup { key, result });
+            }
             LibraryAction::SearchCatalog(query) => {
                 let result = rpc.search_catalog(&query).await;
                 let state = Arc::make_mut(&mut self.state.library);

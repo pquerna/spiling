@@ -919,6 +919,20 @@ async fn bundled_reference_search_captures_declarations_stock_and_portable_proje
         page.total
     );
     assert!(page.total > 20);
+    let captured = page.entries.first().unwrap();
+    assert_eq!(
+        client.rpc().catalog_record(&captured.key()).await.unwrap(),
+        *captured
+    );
+    let mut missing = captured.key();
+    missing.id = "not-a-bundled-product".into();
+    assert!(client.rpc().catalog_record(&missing).await.is_err());
+    // A missing source is a local lookup failure, not a lost engine session.
+    assert_eq!(
+        client.rpc().catalog_record(&captured.key()).await.unwrap(),
+        *captured
+    );
+
     for text in ["prusament pla", "ovrture", "sunlu", "#8bd8c5"] {
         let query = CatalogQuery {
             query: text.into(),
