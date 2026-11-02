@@ -1043,8 +1043,8 @@ fn build_surface(
             }
             let v_range = analytic::first_turn([v0, v1]);
             let ax = placement(f.origin, z_axis(&f), f.x_axis)?;
-            let v_base_deg = (v_range[0].to_degrees() / 360.0).floor() * 360.0;
-            let anal_dom = Extent2d::from_bounds(0.0, v_base_deg, 360.0, v_base_deg + 360.0);
+            let anal_dom =
+                Extent2d::from_bounds(0.0, v_range[0].to_degrees(), 360.0, v_range[1].to_degrees());
             let tor = Torus::create_canonical(
                 k,
                 &ax,
@@ -2318,6 +2318,100 @@ pub(crate) mod analytic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_torus_complete_trims_stay_on_their_carriers_and_spatial_edges() {
+        use crate::parametric::SurfaceEvaluator as _;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/manufacturing/native/source-ring-torus.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = crate::GeometryWorkBudget::query();
+        let prepared = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let source = prepared.source_view().unwrap();
+        assert_eq!(definition.face_ids().len(), 16);
+        let mut count = 0;
+        for face_index in 0..definition.face_ids().len() {
+            let domain = source
+                .face_domain(
+                    face_index,
+                    crate::MAX_PREPARED_SECTION_BYTES,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+            assert!(domain.is_native_material());
+            for (coedge_index, coedge) in domain.coedges().iter().enumerate() {
+                let chart = coedge
+                    .native_chart_jet(coedge.native_range, &mut work, &cancel)
+                    .unwrap();
+                let carrier = domain
+                    .surface_operand()
+                    .native_surface()
+                    .unwrap()
+                    .natural_uv_domain_if_built();
+                let minimum = carrier.min();
+                let maximum = carrier.max();
+                assert!(chart.position[0].lo >= minimum.x && chart.position[0].hi <= maximum.x);
+                assert!(chart.position[1].lo >= minimum.y && chart.position[1].hi <= maximum.y);
+                domain
+                    .qualify_native_coedge_trace(
+                        coedge_index,
+                        coedge.native_range,
+                        domain.effective_tolerance_mm(),
+                        crate::MAX_PREPARED_SECTION_BYTES,
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap();
+                count += 1;
+            }
+        }
+        assert_eq!(count, 64);
+    }
+
+    #[test]
+    fn torus_carrier_contains_complete_lifted_face_windows() {
+        let mut kernel = Kernel::default();
+        let surface = b::Surface::Torus {
+            frame: b::Frame {
+                origin: [0.0; 3],
+                x_axis: [1.0, 0.0, 0.0],
+                y_axis: [0.0, 1.0, 0.0],
+            },
+            major_radius: 5.0,
+            minor_radius: 2.0,
+        };
+        for vertical in [
+            [-1e-6, FRAC_PI_2 + 1e-6],
+            [TAU - 1e-6, TAU + FRAC_PI_2 + 1e-6],
+            [-TAU - 1e-6, -TAU + FRAC_PI_2 + 1e-6],
+            [0.0, TAU],
+            [-1e-6, TAU + 1e-6],
+            [PI - 1e-6, 1.5 * PI + 1e-6],
+        ] {
+            let (native, face, _) = build_surface(
+                &mut kernel,
+                &surface,
+                [[-1e-6, FRAC_PI_2 + 1e-6], vertical],
+                true,
+            )
+            .unwrap();
+            let carrier = native.natural_uv_domain_if_built();
+            let lower = carrier.min();
+            let upper = carrier.max();
+            assert!(lower.x <= face.u_min() && face.u_max() <= upper.x);
+            assert!(lower.y <= face.v_min() && face.v_max() <= upper.y);
+        }
+    }
 
     #[test]
     fn rational_surface_weight_gauge_preserves_refusals_and_borrowed_inputs() {

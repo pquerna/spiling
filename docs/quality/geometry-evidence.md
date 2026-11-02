@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source19 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source20 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -156,14 +156,23 @@ paired boundary flow remain independent obligations. This path
 consumes no Hessian and grants no C1 authority to other queries; positional jumps,
 uncertain verticality and unresolved normals still refuse.
 
-Required native analytic-torus height/critical queries remain open. Their native
-STEP chart uses degrees, independently of original STEP radians; periodic phase
-ownership and selected boundary feasibility must respect that chart. Fitted
-native UV curves can also genuinely leave the active carrier sheet. Strict
-containment refusal remains binding: a periodic alias, wider numerical interval
-or nearby physical trace cannot repair the stored chart. Qualification requires
-a construction-owned chart correction and complete consumer acceptance; these
-required positives must not be relabeled as unsupported to clear the gate.
+Native analytic-torus construction gives the carrier the complete lifted face V
+window, including windows crossing a periodic boundary. Native STEP charts use
+degrees, independently of original STEP radians. Whole native coedge containment
+and spatial/chart correspondence remain mandatory; periodic aliases, query-time
+chart changes and nearby physical traces cannot replace those checks.
+
+Height census may witness a stationary value on an owned physical boundary when
+the complete native coedge has exactly that singleton height and the existing
+incidence census proves it is not an artificial same-face seam or a regular
+continuation. This is census existence only, not an interior UV witness, complete
+critical circle, topology or closed material metric. The frozen quadrant torus's
+terminal-crossing regression separately requires a closed metric, one material
+component, no bounded void and one tunnel cycle; its sample retains the annular
+hole. Exact Z0 vertex continuation and rational-torus closed critical material
+queries remain required unqualified positives. These gates must not be relabeled
+unsupported to clear the suite; this narrow analytic control is not general
+torus manufacturing qualification.
 
 Endpoint ownership consumes native **material** support, with one prepared owner
 shared by its world-Z and XY queries. Authoring-only chart support cannot supply

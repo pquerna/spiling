@@ -2441,6 +2441,13 @@ fn analyze_height_functional(
                         add_event(&mut events, h, height_interval_mm, policy.maximum_height_uncertainty_mm, work, cancel)?;
                         if proved_physical_boundary {
                             add_event(&mut proved_events, h, height_interval_mm, policy.maximum_height_uncertainty_mm, work, cancel)?;
+                            if let Some((values, _)) = torus_values {
+                                for (event, value) in values.into_iter().enumerate() {
+                                    if value.is_point() && h == value {
+                                        torus_proved[event] = true;
+                                    }
+                                }
+                            }
                         }
                     }
                     if vertices_share_height { return Ok(()); }
@@ -6437,7 +6444,7 @@ mod tests {
             ("native-parity-ring-torus.step", [-0.01, 0.01], 0.0, 2),
         ] {
             let definition = parity_definition(name);
-            let mut work = GeometryWorkBudget::new(20_000_000);
+            let mut work = GeometryWorkBudget::query();
             let prepared = super::super::material_source::prepare_solid(
                 &definition,
                 crate::MAX_PREPARED_SECTION_BYTES,
@@ -7147,6 +7154,12 @@ mod tests {
                     .event_brackets_mm
                     .iter()
                     .any(|event| event[0] <= critical && event[1] >= critical)
+            );
+            assert!(
+                result
+                    .proved_event_brackets_mm
+                    .iter()
+                    .any(|event| { event[0] <= critical && critical <= event[1] })
             );
         }
         assert!(result.invariance.is_none());
@@ -8893,7 +8906,7 @@ mod tests {
     fn slab_crossing_native_critical_height_never_returns_a_sample_only_certificate() {
         let cancel = AtomicBool::new(false);
         let definition = parity_definition("native-parity-ring-torus.step");
-        let mut work = GeometryWorkBudget::new(20_000_000);
+        let mut work = GeometryWorkBudget::query();
         let prepared = super::super::material_source::prepare_solid(
             &definition,
             crate::MAX_PREPARED_SECTION_BYTES,
@@ -8916,11 +8929,36 @@ mod tests {
         .unwrap();
         assert!(result.boundary_motion_bound_mm <= 0.5);
         assert!(result.critical.is_some());
+        assert_eq!(result.section.loops.len(), 2);
+        assert_eq!(result.critical_material_component_count(), Some(1));
+        assert_eq!(result.critical_bounded_void_count(), Some(0));
+        assert_eq!(result.critical_tunnel_cycle_count(), Some(1));
+        assert_eq!(
+            result
+                .section
+                .loops
+                .iter()
+                .filter(|boundary| boundary.is_hole)
+                .count(),
+            1
+        );
+        let minimum_required_error =
+            (4.0 - 1.9_f64.powi(2)).sqrt() - (4.0 - 1.99_f64.powi(2)).sqrt();
+        assert!(result.closed_shape_error_mm().unwrap() >= minimum_required_error);
+        assert!(
+            result
+                .closed_shape_error_mm()
+                .is_some_and(|bound| bound <= 0.5)
+        );
         assert!(result.event_neighborhoods().iter().any(|event| {
             let bracket = event.height_bracket_mm();
             bracket[0] <= 2.0 && bracket[1] >= 2.0
         }));
         assert_eq!(result.request().sample_height_mm, 1.99);
+        eprintln!(
+            "analytic torus closed critical slab work={}",
+            work.consumed()
+        );
     }
     #[test]
     fn sphere_terminal_cap_uses_the_actual_endpoint_biased_polygon_prism() {

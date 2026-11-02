@@ -288,7 +288,7 @@ bind preselection waste-lane staging. SPLR6 retains its command/binary interpret
 
 ## Normalized plan
 
-`NormalizedPrintPlan` uses schema11/planner56. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
+`NormalizedPrintPlan` uses schema11/planner57. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
 
 Native sampling and offset construction bounds are each 0.005 mm; finish XY construction has a separate 0.001 mm bound. The explicit recipe `native_shape_error_mm` bounds source-target approximation independently of those construction tolerances. Each mapped image additionally declares its own vertical displacement-error bound.
 
@@ -436,8 +436,8 @@ Preflight admits exact native face metadata and process bounds, expands conserva
 `ManufacturingProvenance` contains `project_id`, captured `input_revision`, `input_hash`, `definitions:StoredDefinition[]`, `occurrences:OccurrenceRecord[]`, explicit `intent`, full ordered `surface_overlays` and `process_document`, `surface_images:SurfaceImageContent[]`, `kernel:{name,version,revision}`, and explicit planner/emitter/verifier versions. The bounded unique image content table contains canonical PGM bytes once per referenced image, including disabled layers, making exported provenance self-contained. Immutable capture shares canonical content. Inspection/status provenance contains metadata only. Captured source labels/units/uncertainty remain authoritative; native reimport labels must not replace them.
 
 The [native-first DEVELOPMENT route](../adr/ADR005-native-first-development-geometry.md)
-uses source19 and the imported SolidCore BREP as its single material authority M.
-Source18 binds native spline-chart construction, literal active-domain queries,
+uses source20 and the imported SolidCore BREP as its single material authority M.
+The realization binds native spline-chart construction, literal active-domain queries,
 coefficient-projected height-event exclusion, polynomial derivative-control bounds
 with exact component-axis invariance, same-sign scalar control hulls,
 continuous first-jet native product reuse, native material endpoint support and
@@ -448,8 +448,11 @@ native direct/atlas dispatch, immutable radial calibration owners and continuous
 closed-strip trim contact and locally centered native PCURVE construction
 with literal endpoints and retained constant chart coordinates. Directional
 support intersects same-cell scalar/Cartesian coefficient and centered bounds
-before trim classification, without creating additional feasible witnesses;
-planner56 rejects previously compiled artifacts whose geometry producer differs.
+before trim classification, without creating additional feasible witnesses.
+The native torus carrier contains the complete lifted face chart. Height census
+can consume an exactly matching owned physical-boundary height without treating
+boundary membership as an interior UV witness or a closed material certificate.
+Planner57 rejects previously compiled artifacts whose geometry producer differs.
 The current planner identity is specified with the normalized plan above.
 Original STEP bytes, immutable definition/face/use identity, units,
 uncertainty and original finish operands remain captured inputs and provenance,
@@ -499,7 +502,7 @@ An independent verifier decodes command state from emitted bytes, not emitter he
 
 Current Cartesian XYZ admission binds independently parsed coordinates to the checked XYZ6 projection of each captured expected point. Raw-plan half-step tolerance cannot authorize an alternate neighboring lattice point. The explicit `contracts::manufacturing::program_coordinates` module owns this fixed output precision, coordinate-conditioning range and outward decimal/height enclosures; backend serialization and verifier command parsing remain independent. Projection multiplies the binary64 input by `1_000_000`, rounds ties away from zero, divides by `1_000_000` and normalizes signed zero; it is not exact-real decimal rounding of the original input. Accepted absolute coordinates are at most `2^52 / 1_000_000` mm, preserving distinct adjacent parsed micrometre lattice points. Compensated gap subtraction checks every intermediate and its outward result for finiteness. Unrepresentable arithmetic refuses with `program_coordinate_conditioning_failure`, not a widened clearance tolerance.
 
-Current inspection/reopen requires planner56, binding native-first material authority, wall/finish/hatch construction, mandatory physical per-occurrence material events and query-local vertical products for terraced sources. Local reuse excludes every cap in the closed queried interval; whole-source and touching-cap ownership remain separate. Input fingerprints bind complete ordered authoring documents, source/pose and printer/recipe/routing policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, ownership, permanent plate extent/attachment and lower anchors; fixed-dual replay additionally reconstructs source/material and staged tool/frame/thermal/debt/waste state. It does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3 remain stable. Emitter11/verifier19 invalidate superseded transition programs; SPLR6 keeps its existing binary interpretation. Older development assignment shapes refuse without aliases or missing-policy defaults.
+Current inspection/reopen requires planner57, binding native-first material authority, wall/finish/hatch construction, mandatory physical per-occurrence material events and query-local vertical products for terraced sources. Local reuse excludes every cap in the closed queried interval; whole-source and touching-cap ownership remain separate. Input fingerprints bind complete ordered authoring documents, source/pose and printer/recipe/routing policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, ownership, permanent plate extent/attachment and lower anchors; fixed-dual replay additionally reconstructs source/material and staged tool/frame/thermal/debt/waste state. It does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3 remain stable. Emitter11/verifier19 invalidate superseded transition programs; SPLR6 keeps its existing binary interpretation. Older development assignment shapes refuse without aliases or missing-policy defaults.
 
 Final normalized-plan admission checks ordinary projected axes during its existing coordinate pass. Independent fresh verification separately checks preferred perimeter seam dot/distance/coordinate ordering before matching actual emitted commands. A mutually matching program and plan that ignore either consumed policy do not earn semantic success; stored `verified` metadata remains descriptive.
 

@@ -874,9 +874,10 @@ fn ensure_edge_roots(
     })?;
     for (ordinal, root) in found.into_iter().enumerate() {
         if root.parameter.contains(range[0]) || root.parameter.contains(range[1]) {
-            return Err(indeterminate(
-                "native section meets a source vertex; critical vertex incidence is unqualified",
-            ));
+            return Err(indeterminate(format!(
+                "native section root enclosure meets a source vertex; critical vertex incidence is unqualified; edge={edge_id:?} root={} owned_parameter={range:?} root_parameter={:?} plane={plane:?}",
+                ordinal, root.parameter,
+            )));
         }
         let position =
             prepared.position_bounds([root.parameter.lo, root.parameter.hi], work, cancel)?;
