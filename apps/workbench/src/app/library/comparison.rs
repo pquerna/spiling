@@ -140,6 +140,14 @@ fn promotion_request(comparison: &DefinitionComparison) -> LibraryWrite {
 fn changed_fields(a: &FilamentDefinition, b: &FilamentDefinition) -> Vec<&'static str> {
     [
         (a.name != b.name, "name"),
+        (
+            a.declaration != b.declaration,
+            "declared product properties",
+        ),
+        (
+            a.catalog_origin != b.catalog_origin,
+            "captured catalog origin",
+        ),
         (a.material != b.material, "material identity"),
         (a.color_name != b.color_name, "supplier color name"),
         (a.appearance != b.appearance, "declared appearance/source"),

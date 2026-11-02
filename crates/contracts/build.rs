@@ -4,7 +4,10 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Bind watched inputs to this checkout even when several worktrees share a target directory.
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
+    let manifest = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").ok_or("missing Cargo manifest directory")?,
+    );
     let mut prost = tonic_prost_build::Config::new();
     prost.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);
     // Keep bounded protobuf control oneofs inline rather than adding per-call boxes.

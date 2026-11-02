@@ -1922,6 +1922,8 @@ fn library_inventory_and_project_copy_use_native_host_services() {
         ))
         .unwrap();
     let definition = FilamentDefinition {
+        declaration: Default::default(),
+        catalog_origin: None,
         name: "Native stock".into(),
         material: Some(selection.profile.material.clone()),
         color_name: None,
@@ -2138,6 +2140,8 @@ fn project_library_comparison_preserves_copies_and_rejects_stale_promotion() {
         LibraryAction::SetLocation(native(&root.path().join("My library.spil"))),
     );
     let original = FilamentDefinition {
+        declaration: Default::default(),
+        catalog_origin: None,
         name: "Original personal filament".into(),
         material: None,
         color_name: None,
@@ -2364,6 +2368,8 @@ fn recipe_library_copy_and_fresh_study_use_native_host_services() {
     let filaments = (0..2)
         .map(|i| {
             let definition = FilamentDefinition {
+                declaration: Default::default(),
+                catalog_origin: None,
                 name: format!("Host ingredient {i}"),
                 material: None,
                 color_name: None,

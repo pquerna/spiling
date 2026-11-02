@@ -34,6 +34,8 @@ async fn spawn(root: &Path, store: &str, library: &str) -> EngineClient {
 }
 fn definition(name: String) -> FilamentDefinition {
     FilamentDefinition {
+        declaration: Default::default(),
+        catalog_origin: None,
         name,
         material: None,
         color_name: None,
@@ -892,5 +894,187 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
         panic!("replayed")
     };
     assert!(report.verified);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn bundled_reference_search_captures_declarations_stock_and_portable_project() {
+    use spiling_contracts::catalog::*;
+    let workspace = Workspace::new();
+    let mut client = spawn(&workspace.0, "catalog-one", "Catalog library.spil").await;
+    let query = CatalogQuery {
+        kind: CatalogKind::Filament,
+        query: "3d fuel".into(),
+        offset: 0,
+        snapshot: None,
+    };
+    let started = std::time::Instant::now();
+    let page = client.rpc().search_catalog(&query).await.unwrap();
+    eprintln!(
+        "cold bundled search: {:?}; {} matches",
+        started.elapsed(),
+        page.total
+    );
+    assert!(page.total > 20);
+    for text in ["prusament pla", "ovrture", "sunlu", "#8bd8c5"] {
+        let query = CatalogQuery {
+            query: text.into(),
+            ..query.clone()
+        };
+        let started = std::time::Instant::now();
+        let result = client.rpc().search_catalog(&query).await.unwrap();
+        eprintln!(
+            "warm search {text}: {:?}; {} matches",
+            started.elapsed(),
+            result.total
+        );
+        assert!(result.total > 0);
+    }
+    assert!(
+        !workspace.0.join("Catalog library.spil").exists(),
+        "discovery is read-only"
+    );
+    let continued = CatalogQuery {
+        offset: page.next.unwrap(),
+        snapshot: Some(page.snapshot.clone()),
+        ..query.clone()
+    };
+    let next = client.rpc().search_catalog(&continued).await.unwrap();
+    assert!(
+        page.entries
+            .iter()
+            .all(|a| !next.entries.iter().any(|b| a.origin == b.origin))
+    );
+    let source=page.entries.iter().find(|r|matches!(&r.item,CatalogItem::Filament{declaration,..} if declaration.hueforge_td_mm.is_some())).unwrap().clone();
+    let definition = source.filament_definition().unwrap();
+    assert!(definition.material.is_none() && definition.profiles.is_empty());
+    assert!(definition.declaration.diameter_mm.is_none());
+    let reference = FilamentRef {
+        id: FilamentId(uuid::Uuid::new_v4().to_string()),
+        revision: definition.content_hash().unwrap(),
+    };
+    write(
+        &client,
+        LibraryMutation::PutFilament {
+            id: reference.id.clone(),
+            expected: None,
+            definition: definition.clone(),
+        },
+    )
+    .await;
+    for _ in 0..2 {
+        write(
+            &client,
+            LibraryMutation::PutSpool {
+                spool: SpoolRecord {
+                    id: SpoolId(uuid::Uuid::new_v4().to_string()),
+                    filament: reference.clone(),
+                    name: "Actual spool".into(),
+                    state: StockState::OnHand,
+                    quantity: None,
+                    lot: None,
+                    location: None,
+                },
+            },
+        )
+        .await;
+    }
+    let personal = client
+        .rpc()
+        .library_filaments(&LibraryFilamentQuery {
+            query: "3d-fuel".into(),
+            on_hand_only: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(personal.entries.len(), 1);
+    assert_eq!(personal.entries[0].on_hand_spools, 2);
+    assert_eq!(personal.entries[0].declaration, definition.declaration);
+    let mut wrong = definition.clone();
+    wrong.declaration.brand = Some("Different product brand".into());
+    let status = client.rpc().library_status().await.unwrap();
+    assert!(
+        client
+            .rpc()
+            .library_write(&LibraryWrite {
+                library_id: status.identity.as_ref().map(|i| i.id.clone()),
+                base_revision: status.identity.unwrap().revision,
+                request_id: uuid::Uuid::new_v4().to_string(),
+                mutation: LibraryMutation::PutFilament {
+                    id: reference.id.clone(),
+                    expected: Some(reference.revision.clone()),
+                    definition: wrong
+                }
+            })
+            .await
+            .is_err()
+    );
+    let revision = FilamentRevision {
+        reference: reference.clone(),
+        definition,
+    };
+    let response = client
+        .rpc()
+        .project(ProjectCommand::PutFilament {
+            session_id: client.hello().session_id.clone(),
+            base_revision: info(&client).await.revision,
+            revision: revision.clone(),
+            origin: None,
+            expected: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(response, ProjectResponse::Status { .. }));
+    let path = workspace.0.join("Catalog job.spil");
+    let ProjectResponse::OperationAccepted { operation } = client
+        .rpc()
+        .project(ProjectCommand::Save {
+            session_id: client.hello().session_id.clone(),
+            base_revision: scene_revision(&client).await,
+            target: Some(native(&path)),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("save")
+    };
+    wait(&client, operation).await;
+    client.shutdown().await.unwrap();
+    std::fs::rename(
+        workspace.0.join("Catalog library.spil"),
+        workspace.0.join("Unavailable.spil"),
+    )
+    .unwrap();
+    let mut reopened = spawn(&workspace.0, "catalog-two", "Missing.spil").await;
+    let ProjectResponse::OperationAccepted { operation } = reopened
+        .rpc()
+        .project(ProjectCommand::Open {
+            session_id: reopened.hello().session_id.clone(),
+            base_revision: scene_revision(&reopened).await,
+            path: native(&path),
+            read_only: true,
+            recover_previous: false,
+            discard_changes: false,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("open")
+    };
+    wait(&reopened, operation).await;
+    assert_eq!(
+        reopened
+            .rpc()
+            .project(ProjectCommand::GetFilament {
+                session_id: reopened.hello().session_id.clone(),
+                base_revision: info(&reopened).await.revision,
+                reference
+            })
+            .await
+            .unwrap(),
+        ProjectResponse::Filament { revision }
+    );
+    assert!(!workspace.0.join("Missing.spil").exists());
     reopened.shutdown().await.unwrap();
 }

@@ -265,3 +265,5 @@ impl TryFrom<NativePath> for rpc::NativePath {
         Ok(Self { value: Some(value) })
     }
 }
+
+mod catalog;

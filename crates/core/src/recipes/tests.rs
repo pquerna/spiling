@@ -8,6 +8,8 @@ fn ingredients(project: &mut Project, keys: &[String]) -> Vec<RecipeIngredient> 
         .enumerate()
         .map(|(i, key)| {
             let definition = FilamentDefinition {
+                declaration: Default::default(),
+                catalog_origin: None,
                 name: format!("Recipe ingredient {i}"),
                 material: None,
                 color_name: None,

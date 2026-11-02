@@ -5,6 +5,8 @@ use super::*;
 use crate::{appearance::AppearanceColor, rpc};
 fn filament(name: &str, rgb: [f64; 3]) -> FilamentRevision {
     let definition = FilamentDefinition {
+        declaration: Default::default(),
+        catalog_origin: None,
         name: name.into(),
         material: None,
         color_name: None,

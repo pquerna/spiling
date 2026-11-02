@@ -5,6 +5,8 @@ use super::*;
 use spiling_contracts::{geometry::SourceHash, library::*};
 #[derive(Debug, Clone, Default)]
 pub struct State {
+    pub catalog: Option<spiling_contracts::catalog::CatalogPage>,
+    pub catalog_error: Option<String>,
     pub hardware: super::hardware::State,
     pub personal_recipes: Option<LibraryRecipePage>,
     pub project_recipes: Vec<RecipeSummary>,
@@ -12,6 +14,7 @@ pub struct State {
     pub recipe_selection: Option<super::recipes::Selection>,
     pub status: Option<LibraryStatus>,
     pub personal: Option<LibraryFilamentPage>,
+    pub personal_query: Option<LibraryFilamentQuery>,
     pub project: Vec<LibraryFilamentSummary>,
     pub project_capture: Option<(ProjectId, ProjectRevision)>,
     pub selected: Option<(bool, FilamentRevision)>,
@@ -59,6 +62,7 @@ impl DefinitionComparison {
 }
 #[derive(Debug, Clone)]
 pub enum LibraryAction {
+    SearchCatalog(spiling_contracts::catalog::CatalogQuery),
     Hardware(super::hardware::HardwareAction),
     Recipe(super::recipes::RecipeAction),
     Refresh(LibraryFilamentQuery),
@@ -85,6 +89,7 @@ pub enum LibraryAction {
 impl Host {
     pub fn library(&self, action: LibraryAction) -> Result<(), String> {
         match &action {
+            LibraryAction::SearchCatalog(query) => query.validate()?,
             LibraryAction::Recipe(action) => match action {
                 super::recipes::RecipeAction::Refresh { query } => query.validate()?,
                 super::recipes::RecipeAction::Inspect { reference, .. } => reference.validate()?,
@@ -130,6 +135,14 @@ impl Actor {
     async fn library_inner(&mut self, action: LibraryAction) -> Result<(), ClientError> {
         let rpc = self.client.as_ref().expect("connected client").rpc();
         match action {
+            LibraryAction::SearchCatalog(query) => {
+                let result = rpc.search_catalog(&query).await;
+                let state = Arc::make_mut(&mut self.state.library);
+                state.catalog_error = result.as_ref().err().map(ToString::to_string);
+                if let Ok(page) = result {
+                    state.catalog = Some(page);
+                }
+            }
             LibraryAction::Hardware(action) => self.hardware_action(action).await?,
             LibraryAction::Recipe(action) => self.recipe_action(action).await?,
             LibraryAction::Refresh(query) => {
@@ -145,6 +158,7 @@ impl Actor {
                     Ok((status, page)) => {
                         state.status = Some(status.clone());
                         state.personal = Some(page.clone());
+                        state.personal_query = Some(query.clone());
                     }
                     Err(_) => {
                         state.status = None;

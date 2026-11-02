@@ -247,3 +247,9 @@ stale promotion, Undo/Redo and read-only return).
 Use the [development resource controls](../quality/development.md) for native
 builds/checks. These tests establish scoped software behavior, not power-loss,
 physical color, printer or cross-platform packaging qualification.
+
+## Offline reference discovery
+
+`Libraries.SearchCatalog` accepts a typed kind, bounded query and snapshot-bound offset, returning at most twenty checked records. Engine search uses an immutable index of the bundled source snapshots; it does not depend on personal storage or the network. Sources remain distinct even when their names match. Native live search coalesces edits and hides results from a different query before selection; the CLI exposes `library catalog --kind filament --query TEXT` and `library add-reference RECORD.json`.
+
+A filament definition retains required nullable brand, marketed material, nominal diameter and HueForge TD declarations separately from a typed material/process profile. Unknown values remain unknown. Catalog capture preserves the exact original row and source/content identity alongside editable current declarations. RGB and TD are source declarations, not optical calibration or manufacturing authority. Personal edits create a new revision; project copies stay self-contained and do not follow catalog or personal-library changes. Existing spools prevent reinterpretation of known brand, material, diameter and provider-local product identity. TD updates do not silently turn a product into a different stock item.

@@ -87,9 +87,41 @@ pub struct DeclaredAppearance {
     pub color: AppearanceColor,
     pub source: DefinitionSource,
 }
+/// Product labels and nominal optical declarations; never a complete process profile.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FilamentDeclaration {
+    #[serde(deserialize_with = "required_option")]
+    pub brand: Option<String>,
+    #[serde(deserialize_with = "required_option")]
+    pub material_label: Option<String>,
+    #[serde(deserialize_with = "required_option")]
+    pub diameter_mm: Option<f64>,
+    #[serde(deserialize_with = "required_option")]
+    pub hueforge_td_mm: Option<f64>,
+}
+impl FilamentDeclaration {
+    pub fn validate(&self) -> Result<(), String> {
+        optional_text(&self.brand, 256)?;
+        optional_text(&self.material_label, 256)?;
+        if self
+            .diameter_mm
+            .is_some_and(|v| !v.is_finite() || v <= 0.0 || v > 10.0)
+            || self
+                .hueforge_td_mm
+                .is_some_and(|v| !v.is_finite() || v <= 0.0)
+        {
+            return Err("invalid declared diameter or HueForge TD".into());
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FilamentDefinition {
+    pub declaration: FilamentDeclaration,
+    #[serde(deserialize_with = "required_option")]
+    pub catalog_origin: Option<crate::catalog::CatalogRecord>,
     pub name: String,
     #[serde(deserialize_with = "required_option")]
     pub material: Option<MaterialDefinition>,
@@ -102,6 +134,13 @@ pub struct FilamentDefinition {
 }
 impl FilamentDefinition {
     pub fn validate(&self) -> Result<(), String> {
+        self.declaration.validate()?;
+        if let Some(origin) = &self.catalog_origin {
+            origin.validate()?;
+            if origin.item.kind() != crate::catalog::CatalogKind::Filament {
+                return Err("filament origin must be a filament reference".into());
+            }
+        }
         text(&self.name, 256)?;
         optional_text(&self.color_name, 128)?;
         self.source.validate()?;
@@ -128,6 +167,25 @@ impl FilamentDefinition {
     }
     /// A profile/name/source update does not change the physical variant represented by owned stock.
     pub fn same_stock_variant(&self, other: &Self) -> bool {
+        let declaration_ok = self
+            .declaration
+            .brand
+            .as_ref()
+            .is_none_or(|v| Some(v) == other.declaration.brand.as_ref())
+            && self
+                .declaration
+                .material_label
+                .as_ref()
+                .is_none_or(|v| Some(v) == other.declaration.material_label.as_ref())
+            && self
+                .declaration
+                .diameter_mm
+                .is_none_or(|v| Some(v) == other.declaration.diameter_mm)
+            && self.catalog_origin.as_ref().is_none_or(|a| {
+                other.catalog_origin.as_ref().is_some_and(|b| {
+                    a.origin.provider == b.origin.provider && a.origin.id == b.origin.id
+                })
+            });
         let material_ok = match (&self.material, &other.material) {
             (Some(a), Some(b)) => {
                 a.id == b.id
@@ -140,7 +198,8 @@ impl FilamentDefinition {
             (None, Some(_)) | (None, None) => true,
             (Some(_), None) => false,
         };
-        material_ok
+        declaration_ok
+            && material_ok
             && match (&self.appearance, &other.appearance) {
                 (Some(a), Some(b)) => a.color == b.color,
                 (None, _) => true,
@@ -586,6 +645,7 @@ impl LibraryStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryFilamentSummary {
+    pub declaration: FilamentDeclaration,
     pub entry: FilamentEntry,
     pub name: String,
     #[serde(deserialize_with = "required_option")]
@@ -600,6 +660,7 @@ pub struct LibraryFilamentSummary {
 }
 impl LibraryFilamentSummary {
     pub fn validate(&self) -> Result<(), String> {
+        self.declaration.validate()?;
         self.entry.current.validate()?;
         text(&self.name, 256)?;
         optional_text(&self.color_name, 128)?;

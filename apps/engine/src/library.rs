@@ -25,6 +25,7 @@ pub(crate) struct LibraryService {
     location: Arc<RwLock<Option<PathBuf>>>,
     default_location: Option<PathBuf>,
     work: Arc<Semaphore>,
+    catalog: Arc<std::sync::OnceLock<Result<crate::catalog::CatalogIndex, String>>>,
 }
 impl LibraryService {
     pub fn new(configured: Option<PathBuf>) -> Self {
@@ -34,6 +35,7 @@ impl LibraryService {
             location: Arc::new(RwLock::new(configured.or_else(|| default_location.clone()))),
             default_location,
             work: Arc::new(Semaphore::new(1)),
+            catalog: Arc::new(std::sync::OnceLock::new()),
         }
     }
     fn store(&self) -> Result<LibraryStore, Status> {
@@ -102,6 +104,27 @@ where
 }
 #[tonic::async_trait]
 impl rpc::libraries_server::Libraries for LibraryService {
+    async fn search_catalog(
+        &self,
+        request: Request<rpc::CatalogQuery>,
+    ) -> Result<Response<rpc::CatalogPage>, Status> {
+        let query: spiling_contracts::catalog::CatalogQuery =
+            request.into_inner().try_into().map_err(bad)?;
+        let index = self.catalog.clone();
+        reply(
+            self.run(move |cancel| {
+                let index = index
+                    .get_or_init(crate::catalog::CatalogIndex::bundled)
+                    .as_ref()
+                    .map_err(|e| LibraryError::new(LibraryErrorCode::InvalidData, e.clone()))?;
+                index
+                    .search(&query, cancel)
+                    .map_err(|e| LibraryError::new(LibraryErrorCode::InvalidData, e))
+            })
+            .await?,
+        )
+    }
+
     async fn get_hardware_catalog(
         &self,
         _: Request<()>,

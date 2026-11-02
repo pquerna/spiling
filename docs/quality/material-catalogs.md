@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Reference filament catalogs
 
-`data/material-catalogs/` retains exact JSON snapshots from [Prusa FDM Mixer](https://github.com/prusa3d/prusa-fdm-mixer/tree/main/data). These are checked-in reference data for future material discovery. They are not consumed by the current native Libraries service, bundled into runtime binaries, or automatically added to personal inventory or projects. [Library contracts](../protocol/library.md) continue to govern those writes.
+`data/material-catalogs/` retains exact JSON snapshots from [Prusa FDM Mixer](https://github.com/prusa3d/prusa-fdm-mixer/tree/main/data). The engine embeds these snapshots for offline native/CLI discovery through the bounded Libraries SearchCatalog service. Search is read-only; selecting a row opens an editable declaration before an explicit personal-library write. Discovery does not create inventory or add project materials. [Library contracts](../protocol/library.md) continue to govern those writes.
 
 ## Refresh and integrity
 
@@ -29,8 +29,8 @@ A sibling `.lock` prevents concurrent writers. Publication stages a checked dire
 
 Keep HueForge and OpenPrintTag catalogs separate. A row is identified by its catalog source plus upstream `id`; this is neither a durable product SKU nor proof that another source's similarly named row is the same filament. Upstream slugging/deduplication can collapse distinct vendor records, and its synchronizer can publish a partial vendor set. Our disappearance guard protects the accepted baseline; it cannot reconstruct records already absent from that baseline. No cross-source joins or automatic conflict winners are introduced.
 
-`hex` is a declared sRGB color. Optional `td` is HueForge-style transmission distance in millimeters. Missing TD remains unknown. Do not convert it into a physical attenuation length, promote it to measured/calibrated evidence or derive machine/process limits. Names, colors and TD do not establish spool ownership, available stock, physical color qualification or a printable material profile. Selecting and capturing catalog declarations into a native library is a separate engine-owned integration.
+`hex` is a declared sRGB color. Optional `td` is HueForge-style transmission distance in millimeters. Missing TD remains unknown. Do not convert it into a physical attenuation length, promote it to measured/calibrated evidence or derive machine/process limits. Names, colors and TD do not establish spool ownership, available stock, physical color qualification or a printable material profile. Selected definitions retain provider-local identity, exact snapshot/content hashes and original declarations alongside editable current fields. Diameter remains unknown unless entered. A saved definition has no inferred process profile; spool registration and project capture remain explicit independent actions.
 
 ## Distribution
 
-Retain both original MIT notices beside the raw data. [NOTICE.md](../../NOTICE.md) and [licensing](../license.md) distinguish these imports from the separately pinned Prusa v7 math port. Release provenance validates the snapshots, records each catalog as a separate source component and copies both notices and the complete manifest. The tracked public source archive includes the data even while runtime binaries do not consume it.
+Retain both original MIT notices beside the raw data. [NOTICE.md](../../NOTICE.md) and [licensing](../license.md) distinguish these imports from the separately pinned Prusa v7 math port. Release provenance validates the snapshots, records each catalog as a separate source component and copies both notices and the complete manifest. The tracked public source archive includes the data and engine binaries embed the admitted snapshots.

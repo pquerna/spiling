@@ -40,6 +40,27 @@ fn page(
     Ok(())
 }
 impl EngineRpc {
+    pub async fn search_catalog(
+        &self,
+        query: &spiling_contracts::catalog::CatalogQuery,
+    ) -> Result<spiling_contracts::catalog::CatalogPage, ClientError> {
+        let wire = query.clone().try_into().map_err(invalid)?;
+        let result: spiling_contracts::catalog::CatalogPage = self
+            .libraries()
+            .search_catalog(self.request(checked(wire)?))
+            .await
+            .map_err(rpc_error)?
+            .into_inner()
+            .try_into()
+            .map_err(ClientError::Protocol)?;
+        if &result.query != query {
+            return Err(ClientError::Protocol(
+                "catalog response query differs".into(),
+            ));
+        }
+        Ok(result)
+    }
+
     fn libraries(&self) -> rpc::libraries_client::LibrariesClient<tonic::transport::Channel> {
         rpc::libraries_client::LibrariesClient::new(self.channel.clone())
             .max_encoding_message_size(MAX_CONTROL_BYTES as usize)

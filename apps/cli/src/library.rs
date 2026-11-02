@@ -2,15 +2,17 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 use super::{Command, Error, Options, set_once};
-use spiling_contracts::{geometry::NativePath, library::*};
+use spiling_contracts::{catalog::*, geometry::NativePath, library::*};
 use spiling_engine_client::EngineRpc;
 use std::{ffi::OsString, path::PathBuf};
-pub(super) const USAGE: &str = "library (hardware|hardware-catalog|add-machine NAME [--setup ID]|add-plate NAME [--plate ID]|hardware-capture --machine UUID --plate UUID --face KEY|replace-hardware HARDWARE_JSON|status|filaments|recipes|recipe RECIPE_UUID|spools|add-filament NAME|add-spool FILAMENT_UUID|write REQUEST_JSON) [--library ABSOLUTE_PATH] [--query TEXT] [--on-hand] [--hex RRGGBB] [--grams N] [--engine PATH]. Unknown color, quantity and manufacturing identity remain unspecified. Rich definitions and explicit revision-bound edits use bounded LibraryWrite JSON; repeat its request_id to resolve an uncertain publication.";
+pub(super) const USAGE: &str = "library (catalog [--kind filament|printer] [--query TEXT] [--offset N --snapshot HASH]|add-reference RECORD.json|hardware|hardware-catalog|add-machine NAME [--setup ID]|add-plate NAME [--plate ID]|hardware-capture --machine UUID --plate UUID --face KEY|replace-hardware HARDWARE_JSON|status|filaments|recipes|recipe RECIPE_UUID|spools|add-filament NAME|add-spool FILAMENT_UUID|write REQUEST_JSON) [--library ABSOLUTE_PATH] [--query TEXT] [--on-hand] [--hex RRGGBB] [--grams N] [--engine PATH]. Unknown color, quantity and manufacturing identity remain unspecified. Rich definitions and explicit revision-bound edits use bounded LibraryWrite JSON; repeat its request_id to resolve an uncertain publication.";
 pub(super) struct Workflow {
     location: Option<PathBuf>,
     action: Action,
 }
 enum Action {
+    Catalog(CatalogQuery),
+    AddReference(Box<CatalogRecord>),
     Hardware,
     HardwareCatalog,
     AddMachine(String, Option<String>),
@@ -35,7 +37,8 @@ pub(super) fn parse(
     let argument = if matches!(
         action.to_str(),
         Some(
-            "add-filament"
+            "add-reference"
+                | "add-filament"
                 | "add-spool"
                 | "write"
                 | "recipe"
@@ -52,6 +55,9 @@ pub(super) fn parse(
     let mut query = LibraryFilamentQuery::default();
     let mut hex = None;
     let mut grams = None;
+    let mut kind = CatalogKind::Filament;
+    let mut offset = 0;
+    let mut snapshot = None;
     let mut profile = None;
     let mut setup_id = None;
     let mut machine_id = None;
@@ -60,6 +66,29 @@ pub(super) fn parse(
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--help" | "-h") => return Ok(None),
+            Some("--kind") => {
+                kind = match args.next().and_then(|v| v.into_string().ok()).as_deref() {
+                    Some("filament") => CatalogKind::Filament,
+                    Some("printer") => CatalogKind::Printer,
+                    _ => return Err("--kind requires filament or printer".into()),
+                };
+            }
+            Some("--offset") => {
+                offset = args
+                    .next()
+                    .ok_or("--offset requires a number")?
+                    .to_str()
+                    .ok_or("offset requires UTF-8")?
+                    .parse()?;
+            }
+            Some("--snapshot") => {
+                snapshot = Some(spiling_contracts::geometry::SourceHash::parse(
+                    args.next()
+                        .ok_or("--snapshot requires a hash")?
+                        .into_string()
+                        .map_err(|_| "snapshot requires UTF-8")?,
+                )?);
+            }
             Some("--setup") => {
                 setup_id = Some(
                     args.next()
@@ -159,6 +188,29 @@ pub(super) fn parse(
         return Err("--library must be absolute".into());
     }
     let action = match action.to_str() {
+        Some("catalog") => {
+            let q = CatalogQuery {
+                kind,
+                query: query.query,
+                offset,
+                snapshot,
+            };
+            q.validate()?;
+            Action::Catalog(q)
+        }
+        Some("add-reference") => {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(PathBuf::from(argument.unwrap()))?
+                .take((MAX_CATALOG_RECORD_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > MAX_CATALOG_RECORD_BYTES {
+                return Err("reference record exceeds 2 KiB".into());
+            }
+            let r: CatalogRecord = serde_json::from_slice(&bytes)?;
+            r.validate()?;
+            Action::AddReference(Box::new(r))
+        }
         Some("hardware") => Action::Hardware,
         Some("hardware-catalog") => Action::HardwareCatalog,
         Some("add-machine") => Action::AddMachine(
@@ -210,6 +262,8 @@ pub(super) fn parse(
             Action::Recipe(id)
         }
         Some("add-filament") => Action::AddFilament(Box::new(FilamentDefinition {
+            declaration: Default::default(),
+            catalog_origin: None,
             name: argument
                 .unwrap()
                 .into_string()
@@ -263,6 +317,7 @@ pub(super) async fn execute(rpc: &EngineRpc, flow: Workflow) -> Result<serde_jso
             .await?;
     }
     let value = match flow.action {
+        Action::Catalog(query) => serde_json::to_value(rpc.search_catalog(&query).await?)?,
         Action::Hardware => serde_json::to_value(rpc.library_hardware().await?)?,
         Action::HardwareCatalog => serde_json::to_value(rpc.hardware_catalog().await?)?,
         Action::HardwareCapture(machine, plate, face) => serde_json::to_value(
@@ -388,6 +443,11 @@ pub(super) async fn execute(rpc: &EngineRpc, flow: Workflow) -> Result<serde_jso
         action => {
             let status = rpc.library_status().await?;
             let mutation = match action {
+                Action::AddReference(record) => LibraryMutation::PutFilament {
+                    id: FilamentId(uuid::Uuid::new_v4().to_string()),
+                    expected: None,
+                    definition: record.filament_definition()?,
+                },
                 Action::AddFilament(definition) => LibraryMutation::PutFilament {
                     id: FilamentId(uuid::Uuid::new_v4().to_string()),
                     expected: None,

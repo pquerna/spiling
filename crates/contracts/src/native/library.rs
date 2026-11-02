@@ -113,6 +113,8 @@ impl TryFrom<rpc::LibraryFilamentDefinition> for FilamentDefinition {
             return Err("too many filament profiles".into());
         }
         let value = Self {
+            declaration: required(v.declaration, "filament declaration")?.try_into()?,
+            catalog_origin: v.catalog_origin.map(TryInto::try_into).transpose()?,
             name: v.name,
             material: v.material.map(TryInto::try_into).transpose()?,
             color_name: v.color_name,
@@ -133,6 +135,8 @@ impl TryFrom<FilamentDefinition> for rpc::LibraryFilamentDefinition {
     fn try_from(v: FilamentDefinition) -> Result<Self, String> {
         v.content_hash()?;
         Ok(Self {
+            declaration: Some(v.declaration.try_into()?),
+            catalog_origin: v.catalog_origin.map(TryInto::try_into).transpose()?,
             name: v.name,
             material: v.material.map(TryInto::try_into).transpose()?,
             color_name: v.color_name,
@@ -211,6 +215,7 @@ impl TryFrom<rpc::LibraryFilamentSummary> for LibraryFilamentSummary {
     type Error = String;
     fn try_from(v: rpc::LibraryFilamentSummary) -> Result<Self, String> {
         let value = Self {
+            declaration: required(v.declaration, "filament declaration")?.try_into()?,
             entry: required(v.entry, "filament entry")?.try_into()?,
             name: v.name,
             material: v.material.map(TryInto::try_into).transpose()?,
@@ -229,6 +234,7 @@ impl TryFrom<LibraryFilamentSummary> for rpc::LibraryFilamentSummary {
     fn try_from(v: LibraryFilamentSummary) -> Result<Self, String> {
         v.validate()?;
         Ok(Self {
+            declaration: Some(v.declaration.try_into()?),
             entry: Some(v.entry.try_into()?),
             name: v.name,
             material: v.material.map(TryInto::try_into).transpose()?,

@@ -299,7 +299,13 @@ impl LibraryStore {
                 }
                 let material = definition.material.as_ref();
                 let text = format!(
-                    "{} {} {} {} {}",
+                    "{} {} {} {} {} {} {}",
+                    definition.declaration.brand.as_deref().unwrap_or(""),
+                    definition
+                        .declaration
+                        .material_label
+                        .as_deref()
+                        .unwrap_or(""),
                     definition.name,
                     definition.color_name.as_deref().unwrap_or(""),
                     material.map_or("", |m| m.manufacturer.as_str()),
@@ -319,6 +325,7 @@ impl LibraryStore {
                     })
                     .count() as u32;
                 matching.push(LibraryFilamentSummary {
+                    declaration: definition.declaration.clone(),
                     entry: entry.clone(),
                     name: definition.name.clone(),
                     material: definition.material.clone(),
@@ -811,6 +818,8 @@ mod tests {
     }
     fn definition(name: &str) -> FilamentDefinition {
         FilamentDefinition {
+            declaration: Default::default(),
+            catalog_origin: None,
             name: name.into(),
             material: None,
             color_name: None,

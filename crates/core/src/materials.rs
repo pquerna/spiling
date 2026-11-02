@@ -89,6 +89,8 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let path = root.join("Project.spil");
         let definition = FilamentDefinition {
+            declaration: Default::default(),
+            catalog_origin: None,
             name: "Owned PLA".into(),
             material: None,
             color_name: None,

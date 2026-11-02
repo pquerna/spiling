@@ -10,6 +10,7 @@ import "spiling/native_appearance.proto";
 import "spiling/native_hardware.proto";
 
 service Libraries {
+ rpc SearchCatalog(CatalogQuery) returns (CatalogPage);
  rpc GetHardwareCatalog(google.protobuf.Empty) returns (HardwareCatalog);
  rpc GetHardware(google.protobuf.Empty) returns (LibraryHardware);
  rpc GetStatus(google.protobuf.Empty) returns (UserLibraryStatus);
@@ -36,6 +37,7 @@ message LibraryDefinitionSource {
 }
 message LibraryAppearanceDeclaration { AppearanceColor color = 1; LibraryDefinitionSource source = 2; }
 message LibraryFilamentDefinition {
+ FilamentDeclaration declaration = 7; CatalogRecord catalog_origin = 8;
  string name = 1; MaterialDefinition material = 2; optional string color_name = 3;
  LibraryAppearanceDeclaration appearance = 4; repeated MaterialProcessProfile profiles = 5;
  LibraryDefinitionSource source = 6;
@@ -45,6 +47,7 @@ message LibraryFilamentRevision { LibraryFilamentRef reference = 1; LibraryFilam
 message LibraryOrigin { string library_id = 1; LibraryFilamentRef filament = 2; }
 message LibraryFilamentEntry { LibraryFilamentRef current = 1; bool archived = 2; LibraryOrigin origin = 3; }
 message LibraryFilamentSummary {
+ FilamentDeclaration declaration=9;
  LibraryFilamentEntry entry = 1; string name = 2; MaterialDefinition material = 3;
  optional string color_name = 4; LibraryAppearanceDeclaration appearance = 5;
  uint32 profile_count = 6; uint32 on_hand_spools = 7; uint32 earlier_spools = 8;
@@ -129,3 +132,12 @@ message HardwareLibrary {repeated OwnedMachine machines=1;repeated OwnedPlate pl
 message LibraryHardware {LibraryIdentity identity=1;HardwareLibrary hardware=2;}
 
 message HardwareCatalog {repeated HardwareModelDefinition models=1;repeated HardwareSetupDefinition setups=2;repeated PlateDefinition plates=3;}
+
+enum CatalogKind { CATALOG_KIND_UNSPECIFIED=0; CATALOG_FILAMENT=1; CATALOG_PRINTER=2; }
+message FilamentDeclaration { optional string brand=1; optional string material_label=2; optional double diameter_mm=3; optional double hueforge_td_mm=4; }
+message CatalogOrigin { string provider=1; string id=2; string revision=3; string snapshot=4; string content=5; string url=6; }
+message CatalogFilament { string name=1; FilamentDeclaration declaration=2; bytes srgb=3; }
+message CatalogPrinter { string manufacturer=1; string model=2; repeated string aliases=3; Vec3 volume_mm=4; string source_url=5; }
+message CatalogRecord { CatalogOrigin origin=1; oneof item { CatalogFilament filament=2; CatalogPrinter printer=3; } }
+message CatalogQuery { CatalogKind kind=1; string query=2; uint32 offset=3; optional string snapshot=4; }
+message CatalogPage { string snapshot=1; CatalogQuery query=2; repeated CatalogRecord entries=3; uint32 total=4; optional uint32 next=5; }

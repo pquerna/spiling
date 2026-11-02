@@ -10,6 +10,7 @@ use spiling_contracts::{
 };
 
 mod comparison;
+mod declaration;
 mod hardware;
 mod recipes;
 
@@ -21,11 +22,15 @@ struct ProjectDefinitionDraft {
 pub(super) struct LibraryUi {
     pub open: bool,
     detail: u8,
+    discovery: ui::CatalogSearch,
+    declaration: declaration::DeclarationDraft,
+    catalog_origin: Option<spiling_contracts::catalog::CatalogRecord>,
     comparison_destination: Option<bool>,
     recipes: recipes::RecipeUi,
     hardware: hardware::HardwareUi,
     personal: bool,
     query: String,
+    search_changed: Option<std::time::Instant>,
     on_hand: bool,
     include_archived: bool,
     name: String,
@@ -61,6 +66,13 @@ impl LibraryUi {
             },
         );
         definition
+            || self.declaration.differs(
+                &self
+                    .draft
+                    .as_ref()
+                    .map(|d| d.definition.declaration.clone())
+                    .unwrap_or_default(),
+            )
             || self.spool_edit.is_some()
             || !self.spool_name.is_empty()
             || !self.grams.is_empty()
@@ -70,6 +82,9 @@ impl LibraryUi {
             || self.hardware.has_changes(state)
     }
     pub(super) fn discard_drafts(&mut self) {
+        self.declaration = Default::default();
+        self.catalog_origin = None;
+        self.discovery.open = false;
         self.draft = None;
         self.draft_project = None;
         self.project_submission = None;
@@ -126,6 +141,8 @@ impl LibraryUi {
     }
     fn edit(&mut self, selected: &FilamentRevision) {
         self.draft_project = None;
+        self.declaration = declaration::DeclarationDraft::from(&selected.definition.declaration);
+        self.catalog_origin = selected.definition.catalog_origin.clone();
         self.draft = Some(selected.clone());
         self.name = selected.definition.name.clone();
         self.color_name = selected.definition.color_name.clone().unwrap_or_default();
@@ -137,6 +154,8 @@ impl LibraryUi {
         }
         let mut definition = self.draft.as_ref().map_or_else(
             || FilamentDefinition {
+                declaration: Default::default(),
+                catalog_origin: None,
                 name: String::new(),
                 material: None,
                 color_name: None,
@@ -146,6 +165,14 @@ impl LibraryUi {
             },
             |d| d.definition.clone(),
         );
+        definition.declaration = self.declaration.value()?;
+        definition.catalog_origin = self.catalog_origin.clone();
+        if let Some(origin) = &self.catalog_origin {
+            definition.source = DefinitionSource::Imported {
+                name: origin.origin.provider.clone(),
+                sha256: origin.origin.content.clone(),
+            };
+        }
         definition.name = self.name.trim().into();
         definition.color_name = optional(&self.color_name);
         // Editing a label must preserve exact source coordinates and provenance.
@@ -161,7 +188,7 @@ impl LibraryUi {
                     color: AppearanceColor::Srgb {
                         channels: rgb.map(|v| f64::from(v) / 255.0),
                     },
-                    source: DefinitionSource::Operator,
+                    source: self.catalog_origin.as_ref().filter(|r|matches!(r.item,spiling_contracts::catalog::CatalogItem::Filament{srgb,..} if srgb==rgb)).map_or(DefinitionSource::Operator,|r|DefinitionSource::Imported{name:r.origin.provider.clone(),sha256:r.origin.content.clone()}),
                 })
             };
         }
@@ -244,6 +271,9 @@ impl Workbench {
             match &pending.mutation {
                 LibraryMutation::PutFilament { .. } if self.library.draft_project.is_none() => {
                     self.library.draft = None;
+                    self.library.declaration = Default::default();
+                    self.library.catalog_origin = None;
+                    self.library.detail = 0;
                     self.library.name.clear();
                     self.library.color_name.clear();
                     self.library.hex.clear();
@@ -298,6 +328,8 @@ impl Workbench {
                     self.library.name.clear();
                     self.library.color_name.clear();
                     self.library.hex.clear();
+                    self.library.declaration = Default::default();
+                    self.library.catalog_origin = None;
                 }
                 self.library.personal = false;
                 self.library.refresh();
@@ -411,6 +443,42 @@ impl Workbench {
             && self.library.pending.is_none()
             && self.state.project.as_ref().is_some_and(|p| !p.read_only);
         let personal_write = ready && state.status.is_some() && self.library.pending.is_none();
+        if self.library.discovery.open {
+            let (query, choice) = self.library.discovery.show(
+                ui,
+                state.catalog.as_ref(),
+                state.catalog_error.as_deref(),
+                ready,
+            );
+            if let Some(query) = query {
+                self.library.queued = Some(LibraryAction::SearchCatalog(query));
+            }
+            if let Some(choice) = choice {
+                match choice {
+                    ui::CatalogChoice::Manual => {}
+                    ui::CatalogChoice::Review(row) => {
+                        if let spiling_contracts::catalog::CatalogItem::Filament {
+                            name,
+                            declaration,
+                            srgb,
+                        } = &row.item
+                        {
+                            self.library.name =
+                                format!("{} {}", declaration.brand.as_deref().unwrap_or(""), name)
+                                    .trim()
+                                    .into();
+                            self.library.color_name = name.clone();
+                            self.library.hex = spiling_contracts::color_naming::srgb8_hex(*srgb);
+                            self.library.declaration =
+                                declaration::DeclarationDraft::from(declaration);
+                            self.library.catalog_origin = Some(row);
+                        }
+                    }
+                }
+                self.library.detail = 1;
+            }
+            return;
+        }
         ui.horizontal(|ui| {
             let before = (
                 self.library.personal,
@@ -499,7 +567,7 @@ impl Workbench {
             let label = if definition_draft {
                 "Resume filament draft"
             } else {
-                "Create filament"
+                "Add filament"
             };
             if self.library.personal {
                 let open = if self.library.detail == 0 && no_selection {
@@ -508,7 +576,13 @@ impl Workbench {
                     ui.button(label).clicked()
                 };
                 if open {
-                    self.library.detail = 1;
+                    if !definition_draft {
+                        self.library
+                            .discovery
+                            .open(spiling_contracts::catalog::CatalogKind::Filament);
+                    } else {
+                        self.library.detail = 1;
+                    }
                 }
             } else if self.library.detail == 0
                 && no_selection
@@ -534,19 +608,17 @@ impl Workbench {
                     "My library definition"
                 },
             );
+            let editor_writable = if self.library.draft_project.is_some() {
+                writable
+            } else {
+                personal_write
+            };
+            egui::Panel::bottom("filament-editor-actions").show(ui, |ui| {
+                self.library_definition_actions(ui, state, editor_writable);
+            });
             egui::ScrollArea::vertical()
                 .id_salt("filament-editor")
-                .show(ui, |ui| {
-                    self.library_definition_editor(
-                        ui,
-                        state,
-                        if self.library.draft_project.is_some() {
-                            writable
-                        } else {
-                            personal_write
-                        },
-                    )
-                });
+                .show(ui, |ui| self.library_definition_editor(ui, editor_writable));
             return;
         }
         if self.library.detail == 2 {
@@ -641,15 +713,30 @@ impl Workbench {
         }
         ui.horizontal(|ui| {
             ui.label("Search");
-            ui.text_edit_singleline(&mut self.library.query);
-            if !self.library.recipes.active {
-                ui.checkbox(&mut self.library.on_hand, "On hand");
-                ui.checkbox(&mut self.library.include_archived, "Include archived");
+            if ui.text_edit_singleline(&mut self.library.query).changed() {
+                self.library.search_changed = Some(std::time::Instant::now());
             }
-            if ui.add_enabled(ready, egui::Button::new("Search")).clicked() {
-                self.library.refresh();
+            if !self.library.recipes.active {
+                if ui.checkbox(&mut self.library.on_hand, "On hand").changed() {
+                    self.library.search_changed = Some(std::time::Instant::now());
+                }
+                if ui
+                    .checkbox(&mut self.library.include_archived, "Include archived")
+                    .changed()
+                {
+                    self.library.search_changed = Some(std::time::Instant::now());
+                }
             }
         });
+        if let Some(changed) = self.library.search_changed {
+            if ready && changed.elapsed() >= std::time::Duration::from_millis(75) {
+                self.library.search_changed = None;
+                self.library.refresh();
+            } else {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(75));
+            }
+        }
     }
     fn library_rows(&mut self, ui: &mut egui::Ui, state: &State, ready: bool) {
         let spool_draft = self.library.spool_edit.is_some()
@@ -676,6 +763,16 @@ impl Workbench {
                 ui.weak("Refresh to browse the current project's materials.");
                 return;
             }
+        }
+        if self.library.personal
+            && state.personal_query.as_ref().is_some_and(|q| {
+                q.query != self.library.query
+                    || q.on_hand_only != self.library.on_hand
+                    || q.include_archived != self.library.include_archived
+            })
+        {
+            ui.weak("Searching…");
+            return;
         }
         let rows = if self.library.personal {
             state
@@ -705,9 +802,13 @@ impl Workbench {
                     }
                     color(ui, row.appearance.as_ref(), row.color_name.as_deref());
                     ui.label(
-                        row.material
-                            .as_ref()
-                            .map_or("Material not specified", |m| &m.polymer_family),
+                        row.material.as_ref().map_or(
+                            row.declaration
+                                .material_label
+                                .as_deref()
+                                .unwrap_or("Material not specified"),
+                            |m| &m.polymer_family,
+                        ),
                     );
                     if self.library.personal {
                         ui.weak(format!("{} on hand", row.on_hand_spools));
@@ -763,6 +864,35 @@ impl Workbench {
                 material.manufacturer, material.polymer_family, material.filament_diameter_mm
             ));
         }
+        let declaration = &selected.definition.declaration;
+        if declaration.brand.is_some() || declaration.material_label.is_some() {
+            ui.label(format!(
+                "{} · {}",
+                declaration.brand.as_deref().unwrap_or("Brand unknown"),
+                declaration
+                    .material_label
+                    .as_deref()
+                    .unwrap_or("Material unknown")
+            ));
+        }
+        if let Some(v) = declaration.diameter_mm {
+            ui.label(format!("{v} mm filament"));
+        }
+        ui.collapsing("Declared properties", |ui| {
+            ui.label(
+                declaration
+                    .hueforge_td_mm
+                    .map_or("HueForge TD unknown".into(), |v| {
+                        format!("HueForge TD: {v} mm")
+                    }),
+            );
+            if let Some(origin) = &selected.definition.catalog_origin {
+                ui.label(format!("{} · {}", origin.origin.provider, origin.origin.id));
+                ui.label(&origin.origin.url);
+                ui.label(format!("Captured revision {}", origin.origin.revision));
+            }
+            ui.weak("Catalog declarations are not physical calibration or a process profile.");
+        });
         self.library_selection_actions(ui, state, selected, personal, writable, personal_write);
         if personal {
             if ui.button("Manage spools").clicked() {
@@ -1081,6 +1211,8 @@ impl Workbench {
             .clicked()
         {
             let definition = FilamentDefinition {
+                declaration: Default::default(),
+                catalog_origin: None,
                 name: format!(
                     "{} {}",
                     profile.material.manufacturer, profile.material.product
@@ -1101,14 +1233,30 @@ impl Workbench {
             );
         }
     }
-    fn library_definition_editor(&mut self, ui: &mut egui::Ui, state: &State, writable: bool) {
+    fn library_definition_editor(&mut self, ui: &mut egui::Ui, writable: bool) {
         ui.set_max_width(ui.available_width().min(650.0));
         ui.add_enabled_ui(writable, |ui| {
             ui::text(ui, "Name", &mut self.library.name);
+            ui::text(ui, "Brand", &mut self.library.declaration.brand);
+            ui::text(ui, "Material label", &mut self.library.declaration.material);
+            ui::text(ui, "Diameter (mm)", &mut self.library.declaration.diameter);
             ui::text(ui, "Supplier color name", &mut self.library.color_name);
             ui::text(ui, "Hex (optional)", &mut self.library.hex);
         });
-        ui.weak("New colors are operator declarations. Unspecified color and profile are allowed.");
+        ui.collapsing("Optical declaration", |ui| {
+            ui::text(ui, "HueForge TD (mm)", &mut self.library.declaration.td);
+            ui.weak("Declared transmission distance; physical color remains uncalibrated.");
+        });
+        if let Some(origin) = &self.library.catalog_origin {
+            ui.collapsing("Catalog source", |ui| {
+                ui.label(format!("{} · {}", origin.origin.provider, origin.origin.id));
+                ui.label(&origin.origin.url);
+                ui.label(format!("Captured revision {}", origin.origin.revision));
+            });
+        }
+        ui.weak("Unknown fields and missing process profiles can be completed later.");
+    }
+    fn library_definition_actions(&mut self, ui: &mut egui::Ui, state: &State, writable: bool) {
         let current = self
             .state
             .project
@@ -1124,10 +1272,14 @@ impl Workbench {
         }
         let label = if self.library.draft_project.is_some() {
             "Save project copy"
+        } else if self.library.draft.is_none() {
+            "Add filament"
         } else {
             "Save filament"
         };
-        let validation = if self.library.name.trim().is_empty() {
+        let validation = if let Err(error) = self.library.declaration.value() {
+            Some(error)
+        } else if self.library.name.trim().is_empty() {
             Some("Enter a filament name".to_string())
         } else if !self.library.hex.trim().is_empty() {
             spiling_contracts::color_naming::parse_srgb8_hex(self.library.hex.trim()).err()
@@ -1180,6 +1332,9 @@ impl Workbench {
             }
         }
         if ui.button("Discard definition draft").clicked() {
+            self.library.detail = 0;
+            self.library.declaration = Default::default();
+            self.library.catalog_origin = None;
             self.library.draft = None;
             self.library.draft_project = None;
             self.library.project_submission = None;
@@ -1258,6 +1413,8 @@ mod tests {
     #[test]
     fn renaming_a_filament_preserves_exact_color_coordinates_and_source() {
         let definition = FilamentDefinition {
+            declaration: Default::default(),
+            catalog_origin: None,
             name: "Before".into(),
             material: None,
             color_name: None,
