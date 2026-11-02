@@ -16,7 +16,6 @@ use solidcore::topology::EdgeuseId;
 use solidcore::topology::shell::ShellMembers;
 use solidcore::{Brep, EdgeId, FaceId};
 use spiling_contracts::geometry::{MAX_SECTION_BYTES, SECTION_BOOLEAN_TOLERANCE_MM};
-use std::collections::HashMap;
 
 const Z: Interval = Interval::point(0.0);
 fn dot(a: [Interval; 3], b: [f64; 3]) -> Interval {
@@ -1637,7 +1636,7 @@ fn assemble(
         admission.push(&mut result.loop_chord_tangents, tangents)?;
     }
     canonicalize_loops(result, work, cancel)?;
-    certify_polygons(result, work, cancel)
+    certify_polygons(result, admission, work, cancel)
 }
 
 fn certify_adjacent(
@@ -1767,8 +1766,7 @@ struct CertifyChord {
     error_mm: f64,
     raw_minimum: [f64; 2],
     raw_maximum: [f64; 2],
-    minimum: [f64; 2],
-    maximum: [f64; 2],
+    cells: Option<[[i64; 2]; 2]>,
 }
 
 fn projected_chord_bounds(a: [[Interval; 2]; 2]) -> ([f64; 2], [f64; 2]) {
@@ -1792,6 +1790,45 @@ fn cell_range(lo: f64, hi: f64, origin: f64, cell: f64) -> Option<(i64, i64)> {
     let first = first.clamp(-1_000_000.0, 1_000_000.0) as i64;
     let last = last.clamp(-1_000_000.0, 1_000_000.0) as i64;
     Some((first.min(last), first.max(last)))
+}
+
+fn sort_grid_entries(
+    entries: &mut [(i64, i64, usize)],
+    work: &GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    fn sift(
+        entries: &mut [(i64, i64, usize)],
+        mut root: usize,
+        end: usize,
+        work: &GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), GeometryError> {
+        while root < end / 2 {
+            work.charge(3, cancel)?;
+            let mut child = 2 * root + 1;
+            if child + 1 < end && entries[child] < entries[child + 1] {
+                child += 1;
+            }
+            if entries[root] >= entries[child] {
+                break;
+            }
+            entries.swap(root, child);
+            root = child;
+        }
+        Ok(())
+    }
+    work.charge(1, cancel)?;
+    let count = entries.len();
+    for root in (0..count / 2).rev() {
+        sift(entries, root, count, work, cancel)?;
+    }
+    for end in (1..count).rev() {
+        work.charge(1, cancel)?;
+        entries.swap(0, end);
+        sift(entries, 0, end, work, cancel)?;
+    }
+    Ok(())
 }
 
 /// Check one nonadjacent chord pair. Adjacency and exact interval separation
@@ -1883,6 +1920,7 @@ fn certify_chord_pair(
 /// meet; the exact interval predicate still decides every candidate pair.
 fn certify_polygons(
     section: &NativeSection,
+    admission: &mut Admission,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
@@ -1892,6 +1930,7 @@ fn certify_polygons(
     let mut chords = Vec::new();
     for (li, left) in section.loops.iter().enumerate() {
         for (ei, pair) in left.points_mm.windows(2).enumerate() {
+            work.charge(1, cancel)?;
             let a = [
                 project(pair[0], section.frame),
                 project(pair[1], section.frame),
@@ -1902,27 +1941,29 @@ fn certify_polygons(
                 section.achieved_chord_error_mm()
             };
             let (raw_minimum, raw_maximum) = projected_chord_bounds(a);
-            chords.push(CertifyChord {
-                loop_index: li,
-                edge_index: ei,
-                a,
-                error_mm,
-                raw_minimum,
-                raw_maximum,
-                minimum: raw_minimum,
-                maximum: raw_maximum,
-            });
+            admission.push(
+                &mut chords,
+                CertifyChord {
+                    loop_index: li,
+                    edge_index: ei,
+                    a,
+                    error_mm,
+                    raw_minimum,
+                    raw_maximum,
+                    cells: None,
+                },
+            )?;
         }
     }
     if chords.is_empty() {
         return Ok(());
     }
-    work.charge(chords.len() as u64, cancel)?;
     let all_pairs = |chords: &[CertifyChord],
                      work: &mut GeometryWorkBudget,
                      cancel: &AtomicBool|
      -> Result<(), GeometryError> {
         for i in 0..chords.len() {
+            work.charge(1, cancel)?;
             for j in i + 1..chords.len() {
                 certify_chord_pair(
                     section,
@@ -1936,21 +1977,21 @@ fn certify_polygons(
         }
         Ok(())
     };
-    let maximum_margin = chords.iter().fold(0.0_f64, |maximum, chord| {
-        maximum.max(
-            Interval::point(chord.error_mm)
-                .mul(Interval::point(projection_scale))
-                .hi,
-        )
-    });
+    let mut maximum_error = 0.0_f64;
     let mut ground_minimum = [f64::INFINITY; 2];
     let mut ground_maximum = [f64::NEG_INFINITY; 2];
     for chord in &chords {
+        work.charge(1, cancel)?;
+        maximum_error = maximum_error.max(chord.error_mm);
         for axis in 0..2 {
             ground_minimum[axis] = ground_minimum[axis].min(chord.raw_minimum[axis]);
             ground_maximum[axis] = ground_maximum[axis].max(chord.raw_maximum[axis]);
         }
     }
+    let maximum_margin = Interval::point(maximum_error)
+        .add(Interval::point(maximum_error))
+        .mul(Interval::point(projection_scale))
+        .hi;
     let extent = (ground_maximum[0] - ground_minimum[0]).max(ground_maximum[1] - ground_minimum[1]);
     let target_axis = (chords.len() as f64).sqrt().clamp(1.0, 512.0);
     let cell = extent / target_axis;
@@ -1964,57 +2005,71 @@ fn certify_polygons(
     {
         return all_pairs(&chords, work, cancel);
     }
-    let expansion = maximum_margin.next_up();
-    for chord in &mut chords {
-        chord.minimum = [
-            chord.raw_minimum[0] - expansion,
-            chord.raw_minimum[1] - expansion,
-        ];
-        chord.maximum = [
-            chord.raw_maximum[0] + expansion,
-            chord.raw_maximum[1] + expansion,
-        ];
-    }
-    let mut grid = HashMap::<(i64, i64), Vec<usize>>::new();
-    let mut is_wide = vec![false; chords.len()];
-    let mut wide = Vec::new();
-    for (index, chord) in chords.iter().enumerate() {
+    let expansion = Interval::point(maximum_margin);
+    let mut grid = Vec::new();
+    for (index, chord) in chords.iter_mut().enumerate() {
+        work.charge(1, cancel)?;
+        let minimum = chord
+            .raw_minimum
+            .map(|value| Interval::point(value).sub(expansion).lo);
+        let maximum = chord
+            .raw_maximum
+            .map(|value| Interval::point(value).add(expansion).hi);
         let (Some((x0, x1)), Some((y0, y1))) = (
-            cell_range(chord.minimum[0], chord.maximum[0], ground_minimum[0], cell),
-            cell_range(chord.minimum[1], chord.maximum[1], ground_minimum[1], cell),
+            cell_range(minimum[0], maximum[0], ground_minimum[0], cell),
+            cell_range(minimum[1], maximum[1], ground_minimum[1], cell),
         ) else {
-            is_wide[index] = true;
-            wide.push(index);
             continue;
         };
         if (x1 - x0 + 1).saturating_mul(y1 - y0 + 1) > 4096 {
-            is_wide[index] = true;
-            wide.push(index);
             continue;
         }
+        chord.cells = Some([[x0, x1], [y0, y1]]);
         for x in x0..=x1 {
             for y in y0..=y1 {
-                grid.entry((x, y)).or_default().push(index);
+                work.charge(1, cancel)?;
+                admission.push(&mut grid, (x, y, index))?;
             }
         }
     }
-    for indices in grid.values() {
-        for i in 0..indices.len() {
-            for j in i + 1..indices.len() {
-                certify_chord_pair(
-                    section,
-                    &chords[indices[i]],
-                    &chords[indices[j]],
-                    projection_scale,
-                    work,
-                    cancel,
-                )?;
+    sort_grid_entries(&mut grid, work, cancel)?;
+    let mut start = 0;
+    while start < grid.len() {
+        let (x, y, _) = grid[start];
+        let mut end = start + 1;
+        while end < grid.len() && (grid[end].0, grid[end].1) == (x, y) {
+            work.charge(1, cancel)?;
+            end += 1;
+        }
+        for i in start..end {
+            for j in i + 1..end {
+                work.charge(1, cancel)?;
+                let first = &chords[grid[i].2];
+                let second = &chords[grid[j].2];
+                let (Some(first_cells), Some(second_cells)) = (first.cells, second.cells) else {
+                    return Err(indeterminate("native section grid lost its chord cells"));
+                };
+                if (x, y)
+                    != (
+                        first_cells[0][0].max(second_cells[0][0]),
+                        first_cells[1][0].max(second_cells[1][0]),
+                    )
+                {
+                    continue;
+                }
+                certify_chord_pair(section, first, second, projection_scale, work, cancel)?;
             }
         }
+        start = end;
     }
-    for &i in &wide {
+    for (i, chord) in chords.iter().enumerate() {
+        work.charge(1, cancel)?;
+        if chord.cells.is_some() {
+            continue;
+        }
         for j in 0..chords.len() {
-            if i == j || (is_wide[j] && j < i) {
+            work.charge(1, cancel)?;
+            if i == j || (chords[j].cells.is_none() && j < i) {
                 continue;
             }
             certify_chord_pair(
@@ -2333,7 +2388,13 @@ pub(crate) fn canonicalize_section_in_place(
         }
     }
     canonicalize_loops(section, work, cancel)?;
-    certify_polygons(section, work, cancel)
+    let mut admission = Admission::new(byte_limit as usize)?;
+    admission.used = admission
+        .used
+        .checked_add(section.retained_bytes())
+        .filter(|bytes| *bytes <= admission.limit)
+        .ok_or_else(|| resource_error("placed section leaves no polygon proof workspace"))?;
+    certify_polygons(section, &mut admission, work, cancel)
 }
 
 // Dependent axis, its strict sign and the retained graph rectangle.
@@ -2351,6 +2412,16 @@ mod correspondence_tests {
         math::{CPoint, NOW, NOZ},
         srf_basic,
     };
+
+    fn certify_polygons(
+        section: &NativeSection,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), GeometryError> {
+        let mut admission = Admission::new(MAX_PREPARED_SECTION_BYTES)?;
+        admission.used += section.retained_bytes();
+        super::certify_polygons(section, &mut admission, work, cancel)
+    }
 
     #[test]
     fn chord_metric_validation_preserves_crossing_and_uncertainty_refusals() {
@@ -2435,8 +2506,7 @@ mod correspondence_tests {
         );
     }
 
-    #[test]
-    fn grid_broad_phase_keeps_cross_loop_crossings() {
+    fn grid_section() -> NativeSection {
         let cancel = AtomicBool::new(false);
         let definition = crate::from_step_bytes_with_cancel(
             include_bytes!("../../../../fixtures/geometry/box-mm.step"),
@@ -2477,6 +2547,14 @@ mod correspondence_tests {
         section.loop_chord_errors_mm = errors;
         section.loop_chord_tangents.clear();
         section.certificate.maximum_chord_error_mm = 0.0;
+        section
+    }
+
+    #[test]
+    fn grid_broad_phase_keeps_cross_loop_crossings() {
+        let mut section = grid_section();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::query();
         certify_polygons(&section, &mut work, &cancel).unwrap();
 
         section.loops.push(SectionLoopMm {
@@ -2497,6 +2575,184 @@ mod correspondence_tests {
             GeometryErrorCode::AnalysisIndeterminate,
             "the grid broad phase must retain a nonadjacent cross-loop crossing"
         );
+    }
+
+    #[test]
+    fn grid_broad_phase_admits_chords_and_cells_before_growth() {
+        let section = grid_section();
+        let cancel = AtomicBool::new(false);
+        let used = section.retained_bytes();
+        let chord_bytes = 512 * std::mem::size_of::<CertifyChord>();
+        for extra in [0, chord_bytes] {
+            let mut admission = Admission {
+                used,
+                limit: used + extra,
+            };
+            let mut work = GeometryWorkBudget::query();
+            let failure =
+                super::certify_polygons(&section, &mut admission, &mut work, &cancel).unwrap_err();
+            assert_eq!(failure.code, GeometryErrorCode::ResourceLimit);
+            assert!(admission.used <= admission.limit);
+            if extra > 0 {
+                assert_eq!(admission.used, admission.limit);
+            }
+        }
+    }
+
+    #[test]
+    fn grid_sort_is_exact_work_bounded_and_cancellable() {
+        let original = (0..1024)
+            .map(|index| ((index % 17) - 8, index % 11, index as usize))
+            .collect::<Vec<_>>();
+        let cancel = AtomicBool::new(false);
+        let mut expected = original.clone();
+        expected.sort_unstable();
+        let mut actual = original.clone();
+        let work = GeometryWorkBudget::query();
+        sort_grid_entries(&mut actual, &work, &cancel).unwrap();
+        assert_eq!(actual, expected);
+        for cancelled in [false, true] {
+            let mut actual = original.clone();
+            let work = GeometryWorkBudget::new(32);
+            cancel.store(cancelled, std::sync::atomic::Ordering::Release);
+            let failure = sort_grid_entries(&mut actual, &work, &cancel).unwrap_err();
+            assert_eq!(
+                failure.code,
+                if cancelled {
+                    GeometryErrorCode::Cancelled
+                } else {
+                    GeometryErrorCode::ResourceLimit
+                }
+            );
+            assert!(work.consumed() <= 32);
+        }
+    }
+
+    #[test]
+    fn grid_broad_phase_checks_work_and_cancel_before_chord_growth() {
+        let section = grid_section();
+        let cancel = AtomicBool::new(false);
+        let mut validation = GeometryWorkBudget::query();
+        section
+            .validate_chord_errors(&mut validation, &cancel)
+            .unwrap();
+        let used = section.retained_bytes();
+        for cancelled in [false, true] {
+            cancel.store(cancelled, std::sync::atomic::Ordering::Release);
+            let mut work = GeometryWorkBudget::new(validation.consumed());
+            let mut admission = Admission {
+                used,
+                limit: MAX_PREPARED_SECTION_BYTES,
+            };
+            let failure =
+                super::certify_polygons(&section, &mut admission, &mut work, &cancel).unwrap_err();
+            assert_eq!(
+                failure.code,
+                if cancelled {
+                    GeometryErrorCode::Cancelled
+                } else {
+                    GeometryErrorCode::ResourceLimit
+                }
+            );
+            assert_eq!(admission.used, used);
+        }
+    }
+
+    #[test]
+    fn grid_broad_phase_matches_all_pairs_and_has_repeatable_cost() {
+        let mut section = grid_section();
+        let cancel = AtomicBool::new(false);
+        let mut expected_cost = None;
+        for _ in 0..4 {
+            let mut work = GeometryWorkBudget::query();
+            certify_polygons(&section, &mut work, &cancel).unwrap();
+            assert_eq!(
+                *expected_cost.get_or_insert(work.consumed()),
+                work.consumed()
+            );
+            assert!(work.consumed() < 480 * 479 / 2);
+        }
+        let all_pairs = |section: &NativeSection| {
+            let projection_scale = norm(section.frame.x_axis.map(Interval::point))
+                .max(norm(section.frame.y_axis.map(Interval::point)));
+            let mut chords = Vec::new();
+            for (loop_index, boundary) in section.loops.iter().enumerate() {
+                for (edge_index, pair) in boundary.points_mm.windows(2).enumerate() {
+                    let a = [
+                        project(pair[0], section.frame),
+                        project(pair[1], section.frame),
+                    ];
+                    let (raw_minimum, raw_maximum) = projected_chord_bounds(a);
+                    chords.push(CertifyChord {
+                        loop_index,
+                        edge_index,
+                        a,
+                        error_mm: section.loop_chord_errors_mm[loop_index][edge_index],
+                        raw_minimum,
+                        raw_maximum,
+                        cells: None,
+                    });
+                }
+            }
+            let mut work = GeometryWorkBudget::query();
+            for first in 0..chords.len() {
+                for second in first + 1..chords.len() {
+                    certify_chord_pair(
+                        section,
+                        &chords[first],
+                        &chords[second],
+                        projection_scale,
+                        &mut work,
+                        &cancel,
+                    )?;
+                }
+            }
+            Ok::<_, GeometryError>(())
+        };
+        for (offset, error, scale, translation) in [
+            (2.0, 0.0, 1.0, 0.0),
+            (1.0, 0.0, 1.0, 0.0),
+            (0.5, 0.0, 1.0, 0.0),
+            (1.001, 0.005, 1.0, 0.0),
+            (1.02, 0.005, 1.0, 0.0),
+            (1.0_f64.next_up(), 0.0, 1.0, 0.0),
+            (0.5, 0.0, 1.0e-8, 1.0e-4),
+            (1.0, 0.0, 1.0e8, -1.0e12),
+            (0.5, 1.0e10, 1.0, 0.0),
+        ] {
+            for (index, boundary) in section.loops.iter_mut().enumerate() {
+                let x = (index % 20) as f64 * offset;
+                let y = (index / 20) as f64 * 2.0;
+                boundary.points_mm = [
+                    [x, y],
+                    [x + 1.0, y],
+                    [x + 1.0, y + 1.0],
+                    [x, y + 1.0],
+                    [x, y],
+                ]
+                .map(|point| {
+                    [
+                        point[0] * scale + translation,
+                        point[1] * scale + translation,
+                        4.0,
+                    ]
+                })
+                .to_vec();
+            }
+            section.certificate.maximum_chord_error_mm = error;
+            section
+                .loop_chord_errors_mm
+                .iter_mut()
+                .for_each(|errors| errors.fill(error));
+            let expected = all_pairs(&section).map_err(|failure| failure.code);
+            let mut work = GeometryWorkBudget::query();
+            let actual =
+                certify_polygons(&section, &mut work, &cancel).map_err(|failure| failure.code);
+            assert_eq!(
+                actual, expected,
+                "offset={offset} error={error} scale={scale} translation={translation}"
+            );
+        }
     }
 
     #[test]

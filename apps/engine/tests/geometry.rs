@@ -56,10 +56,17 @@ async fn project_revision(client: &EngineClient) -> ProjectRevision {
     info.revision
 }
 async fn wait_job(client: &mut EngineClient, job_id: String) -> NativeOperationView {
+    wait_job_with_timeout(client, job_id, Duration::from_secs(70)).await
+}
+async fn wait_job_with_timeout(
+    client: &mut EngineClient,
+    job_id: String,
+    timeout: Duration,
+) -> NativeOperationView {
     let start = Instant::now();
     loop {
         assert!(
-            start.elapsed() < Duration::from_secs(70),
+            start.elapsed() < timeout,
             "native job did not reach terminal status"
         );
         let job = client.native_operation(&job_id).await.unwrap();
@@ -1215,6 +1222,86 @@ async fn frozen_plate_transfers_real_bounded_chunks_and_releases_the_lease() {
         .await,
         GeometryErrorCode::UnknownHandle,
     );
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_plate_section_preserves_all_holes_and_cancellation_keeps_scene() {
+    let mut client = EngineClient::spawn(ENGINE).await.unwrap();
+    let before = import(&mut client, "perforated-plate.step", RigidPoseMm::IDENTITY).await;
+    let revision = project_revision(&client).await;
+    let pid = client.pid();
+    for cancel in [true, false] {
+        let GeometryResponse::OperationAccepted { operation } = command(
+            &mut client,
+            GeometryCommand::StartSection {
+                session_id: before.session_id.clone(),
+                base_revision: before.revision,
+                plane: PlaneMm {
+                    origin_mm: [0.0, 0.0, 10.0],
+                    normal: [0.0, 0.0, 1.0],
+                },
+            },
+        )
+        .await
+        else {
+            panic!("expected plate section job");
+        };
+        if cancel {
+            let started = Instant::now();
+            loop {
+                let current = client.native_operation(&operation.name).await.unwrap();
+                if current.status == JobStatus::Running {
+                    break;
+                }
+                assert!(!current.status.is_terminal(), "{current:?}");
+                assert!(started.elapsed() < Duration::from_secs(5));
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let started = Instant::now();
+            client
+                .rpc()
+                .cancel_operation(&operation.name)
+                .await
+                .unwrap();
+            let cancelled =
+                wait_job_with_timeout(&mut client, operation.name, Duration::from_secs(5)).await;
+            assert_eq!(cancelled.status, JobStatus::Cancelled, "{cancelled:?}");
+            assert!(cancelled.outputs.is_empty());
+            assert!(started.elapsed() < Duration::from_secs(5));
+        } else {
+            let completed =
+                wait_job_with_timeout(&mut client, operation.name, Duration::from_secs(300)).await;
+            assert_eq!(completed.status, JobStatus::Completed, "{completed:?}");
+            let Some(JobResult::Section { artifact_id }) = completed.result else {
+                panic!("expected plate section artifact");
+            };
+            let (metadata, loops) = section_loops(&mut client, artifact_id).await;
+            assert_eq!(metadata.revision, before.revision);
+            assert_eq!(loops.len(), 513);
+            assert_eq!(
+                loops
+                    .iter()
+                    .filter(|(boundary, _)| boundary.is_hole)
+                    .count(),
+                512
+            );
+            for (boundary, points) in &loops {
+                assert_eq!(points.first(), points.last());
+                let signed = area(points, metadata.frame);
+                assert!(if boundary.is_hole {
+                    signed < 0.0
+                } else {
+                    signed > 0.0
+                });
+            }
+        }
+        assert_eq!(scene(&mut client).await, before);
+        assert_eq!(project_revision(&client).await, revision);
+        assert_eq!(client.pid(), pid);
+        client.ping().await.unwrap();
+    }
     client.shutdown().await.unwrap();
 }
 

@@ -64,12 +64,14 @@ not progress. A later engine-owned aggregate reservation still has to account
 for coexisting definitions, jobs, meshes and outputs rather than summing these
 independent maxima.
 
-The 512-hole plate section now completes under the 4B query envelope. Its
-former cost was dominated by a quadratic all-pairs chord-crossing scan; a
-conservative error-expanded broad phase now selects only candidate pairs and
-leaves the exact interval proof unchanged. This is a measured default, not a
-promise that every large section fits or a substitute for the remaining
-face/preparation optimization.
+Section polygon certification uses a conservative outward-error-expanded grid
+before the unchanged exact interval proof. Its projected chords and sorted
+cell entries share source/output admission; all setup, sorting and pair scans
+remain charged and cancellable. Each ordinary candidate is checked once;
+wide or unindexable chords retain all-pairs checks. The 512-hole plate motivates
+the query default, not a per-fixture exception or a promise that every large
+section fits. Preparation cost and full-engine resource qualification remain
+separate obligations.
 
 These are software resource defaults, not measured hardware requirements,
 universal GPU/platform qualification, printability or machine readiness.
