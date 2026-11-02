@@ -39,6 +39,8 @@ The in-tree Prusa v7 reference port in `crates/appearance/src/prusa_v7.rs` retai
 
 The xkcd survey under `crates/appearance/data/` retains its source-declared CC0-1.0 dedication, original bytes and provenance sidecar. Keep `LICENSE-xkcd-CC0.txt` and collect the dataset as an independent source component in release provenance. Its naming dictionary does not establish physical filament color. Original Spiling naming code remains OSL-3.0.
 
+The separate aggregate catalog snapshots under `data/material-catalogs/` retain exact upstream bytes, both MIT notices and a generated provenance manifest. Keep their catalog source components separate from the Prusa math port. [Catalog maintenance](quality/material-catalogs.md) describes the exact notice-owner/data-revision distinction and release collection. Do not add Spiling license headers to imported JSON or infer calibration from its source license.
+
 ## Standard file header
 
 Use this three-line notice in the file's native comment syntax:

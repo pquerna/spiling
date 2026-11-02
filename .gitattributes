@@ -3,3 +3,6 @@
 # Licensed under the Open Software License version 3.0
 
 * text=auto eol=lf
+
+# Catalog hashes bind exact upstream bytes across platform checkouts.
+data/material-catalogs/* -text

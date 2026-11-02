@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, resolve, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+import { collectCatalogProvenance } from "./material-catalogs.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const binSuffix = process.platform === "win32" ? ".exe" : "";
@@ -241,6 +242,7 @@ async function provenance() {
     );
   }
   const sourceComponents = [
+    ...(await collectCatalogProvenance(join(directory, "third-party", "source"))),
     {
       name: "xkcd-color-survey",
       source: "https://xkcd.com/color/rgb.txt",
@@ -490,6 +492,7 @@ Terminal=false
 }
 
 async function check() {
+  await run("node", ["tools/material-catalogs.mjs", "--check"]);
   await contracts(true);
   // Format workspace-owned targets; --all also traverses excluded upstream path dependencies.
   await run("cargo", ["fmt", "--", "--check"]);
@@ -606,6 +609,15 @@ async function main() {
       await stageEngine();
       await run("node", ["--import", "tsx", "tools/smoke-hardware-library.mjs"]);
       break;
+    case "materials:sync":
+      await run("node", ["tools/material-catalogs.mjs", "--sync", ...process.argv.slice(3)]);
+      break;
+    case "materials:check":
+      await run("node", ["tools/material-catalogs.mjs", "--check"]);
+      break;
+    case "test:material-catalogs":
+      await run("node", ["--test", "tools/material-catalogs.test.mjs"]);
+      break;
     case "test:materials":
       await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-cli"]);
       await run("node", ["tools/smoke-material-profiles.mjs"]);
@@ -617,6 +629,7 @@ async function main() {
       await stageEngine();
       await runTestSuites([
         ["tooling", () => run("node", ["--test", "tools/run.test.mjs"])],
+        ["material catalogs", () => run("node", ["--test", "tools/material-catalogs.test.mjs"])],
         [
           "Rust workspace",
           () =>

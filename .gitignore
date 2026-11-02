@@ -10,3 +10,7 @@ dist/
 /.cache/
 /artifacts/
 *.log
+# Catalog writer/recovery directories are local maintenance state.
+/data/material-catalogs.lock
+/data/material-catalogs.previous/
+/data/material-catalogs.staging-*/

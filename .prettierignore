@@ -66,3 +66,6 @@ fixtures/protocol/replay.json
 
 # Trusted TypeScript author owns the generated hardware catalog bytes.
 crates/contracts/data/hardware-catalog.json
+
+# Exact upstream catalog bytes; materials:check owns schema/hash validation.
+data/material-catalogs/

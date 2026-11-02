@@ -24,6 +24,9 @@
     "test:native": "node tools/run.mjs test:native",
     "compare:slicers": "node tools/run.mjs compare:slicers",
     "test:hardware": "node tools/run.mjs test:hardware",
+    "materials:sync": "node tools/run.mjs materials:sync",
+    "materials:check": "node tools/run.mjs materials:check",
+    "test:material-catalogs": "node tools/run.mjs test:material-catalogs",
     "test:materials": "node tools/run.mjs test:materials",
     "test:parity": "node tools/run.mjs test:parity"
   },

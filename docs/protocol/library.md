@@ -15,6 +15,8 @@ Hardware inventory, public project captures and private machine/plate associatio
 share this same container and mutation protocol. [Hardware contracts](hardware.md)
 own their identity, compatibility, credential and connection boundaries.
 
+Checked-in external [reference catalogs](../quality/material-catalogs.md) have a separate maintenance path. They do not populate these services, create owned stock, or update captured project materials.
+
 ## Location and container identity
 
 The default is `My library.spil` under

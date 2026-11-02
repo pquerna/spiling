@@ -36,6 +36,9 @@ build is required. A suitable Vulkan driver must be installed separately.
 | `pnpm gallery:native`             | Production controls/themes without an engine                                             |
 | `pnpm test:native`                | Host checks and sequential actual-child operator regressions                             |
 | `pnpm contracts --check`          | Reject Rust-derived TypeScript and packed-golden drift                                   |
+| `pnpm materials:sync`             | Refresh pinned external reference catalogs after complete admission                      |
+| `pnpm materials:check`            | Check catalog integrity offline; see [catalog maintenance](material-catalogs.md)         |
+| `pnpm test:material-catalogs`     | Exercise catalog refresh and failure handling                                            |
 | `pnpm check`                      | Formatting, Clippy, TypeScript and contract checks                                       |
 | `pnpm test`                       | Workspace behavior, real CLI and packed interoperability                                 |
 | `pnpm smoke:cli`                  | Actual child startup, operations, transfer and reap                                      |
@@ -45,7 +48,7 @@ build is required. A suitable Vulkan driver must be installed separately.
 | `pnpm package`                    | Clean-source release binaries, source/notices, portable archive and Linux Debian package |
 | `node tools/run.mjs provenance`   | Collect native dependency and data-tool provenance/notices                               |
 
-`pnpm test` builds its matching engine prerequisite, then runs tooling tests,
+`pnpm test` builds its matching engine prerequisite, then runs tooling and material-catalog tests,
 every Rust workspace test target (`--no-fail-fast`), the CLI smoke, TypeScript
 protocol tests and the independent G-code observer tests sequentially. Failures
 are summarized together and keep the overall command unsuccessful; later suites
