@@ -25,9 +25,7 @@ impl Workbench {
     }
     pub(super) fn tree_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Model");
-        if ui.button("Section Analysis…").clicked() {
-            self.analysis.open = true;
-        }
+        self.button(ui, crate::commands::Action::Analysis);
         if self.analysis.view.enabled {
             ui.weak(format!(
                 "Section {:?} · {:.3} mm",

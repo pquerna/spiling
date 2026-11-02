@@ -3,7 +3,9 @@
 // Licensed under the Open Software License version 3.0
 
 mod color;
+mod surfaces;
 pub use color::{ColorDensity, ColorInspector, ColorMeaning, ColorPresentation};
+pub use surfaces::{close, group, help, pane_header, primary, problem};
 
 use egui::{Color32, RichText, Ui};
 use serde::{Deserialize, Serialize};
@@ -92,7 +94,7 @@ pub fn property(ui: &mut Ui, label: &str, value: impl AsRef<str>, tokens: Tokens
     });
 }
 pub fn notice(ui: &mut Ui, heading: &str, detail: &str, tokens: Tokens) {
-    ui.heading(heading);
+    pane_header(ui, heading, "");
     ui.add_space(4.0);
     ui.add(egui::Label::new(RichText::new(detail).color(tokens.muted)).wrap());
 }
@@ -121,12 +123,33 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
         "Housing — 接口 — finite source-bound manufacturing requirements",
         tokens,
     );
-    notice(
-        ui,
-        "Fresh verification required",
-        "Project edits invalidate the captured review. Verify the current emitted program before exporting.",
-        tokens,
-    );
+    group(ui, "Panel specimen");
+    let state_id = ui.make_persistent_id("gallery-surface-state");
+    let mut state = ui.data_mut(|d| d.get_temp::<u8>(state_id).unwrap_or(0));
+    ui.horizontal_wrapped(|ui| {
+        for (i, label) in ["Ready", "Changed", "Blocked", "Pending", "Uncertain"]
+            .iter()
+            .enumerate()
+        {
+            ui.selectable_value(&mut state, i as u8, *label);
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(state_id, state));
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        pane_header(ui, "Construction", "Housing · Project settings");
+        match state {
+            1 => { ui.label("Unapplied changes"); }
+            2 => { problem(ui, "Choose a material", "A captured material/setup is required before compiling."); }
+            3 => { ui.label("Applying settings…"); }
+            4 => { ui.label("Save outcome uncertain. Inspect the saved project."); }
+            _ => { ui.label("Current settings"); }
+        }
+        help(ui, "specimen-help", "Construction settings", "Apply commits the complete settings draft. Closing this specimen does not submit work; gallery values are illustrative.");
+        ui.separator();
+        let disabled = match state { 2 => Some("Choose a material first"), 3 => Some("Waiting for the operation receipt"), 4 => Some("Resolve the save outcome first"), _ => None };
+        let _ = primary(ui, if state == 1 { "Apply settings" } else { "Compile" }, disabled);
+        let _ = ui.button("Close specimen");
+    });
     let id = ui.make_persistent_id("gallery-dimension");
     let mut value = ui.data_mut(|d| d.get_temp::<f64>(id).unwrap_or(0.25));
     number(ui, "Layer height (mm)", &mut value, 0.01);
@@ -181,15 +204,6 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
     ColorPresentation::unspecified(ColorMeaning::DeclaredAppearance)
         .declared_name("Supplier natural")
         .show(ui, "named-without-sample", ColorDensity::Standard);
-    ui.separator();
-    ui.colored_label(
-        tokens.warning,
-        "Draft conflict — reload current values before Apply",
-    );
-    ui.colored_label(
-        tokens.warning,
-        "Save outcome uncertain — inspect the project before another action",
-    );
 }
 
 /// Shared production/gallery draft control. No engine work or project mutation.
@@ -236,7 +250,12 @@ pub fn layer_height_goal(ui: &mut Ui, intent: &mut ManufacturingIntent, tokens: 
                     },
                 );
             }
-            ui.weak("Draft preview. Geometry and protected features can change the final schedule; Compile and fresh Verify establish actual output.");
+            help(
+                ui,
+                "height-help",
+                "Layer height",
+                "This is a draft goal. Geometry and protected features can refine the schedule. Compile and verify the program to inspect actual layer heights.",
+            );
         }
         Err(error) => {
             ui.colored_label(tokens.warning, error.to_string());
@@ -251,12 +270,19 @@ pub fn number(ui: &mut Ui, label: &str, value: &mut f64, speed: f64) -> egui::Re
     // Labels must be unique within the caller's form scope.
     let scope = ui.make_persistent_id(("number", label));
     ui.scope_builder(egui::UiBuilder::new().scope_id(scope), |ui| {
-        ui.horizontal_wrapped(|ui| {
+        if ui.available_width() < 280.0 {
             let label = ui.label(label);
             ui.add(egui::DragValue::new(value).speed(speed))
                 .labelled_by(label.id)
-        })
-        .inner
+        } else {
+            ui.horizontal(|ui| {
+                let width = (ui.available_width() - 98.0).max(80.0);
+                let label = ui.add_sized([width, 28.0], egui::Label::new(label).wrap());
+                ui.add_sized([80.0, 28.0], egui::DragValue::new(value).speed(speed))
+                    .labelled_by(label.id)
+            })
+            .inner
+        }
     })
     .inner
 }

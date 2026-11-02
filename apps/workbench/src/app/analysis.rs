@@ -36,6 +36,11 @@ pub(super) struct AnalysisUi {
     contour_key: Option<(std::sync::Weak<crate::scene::Section>, Option<OccurrenceId>)>,
 }
 impl Workbench {
+    pub(super) fn close_analysis(&mut self) {
+        self.analysis.open = false;
+        self.analysis.view.enabled = false;
+        self.analysis.follow_layer = false;
+    }
     pub(super) fn analysis_pose(&self) -> Option<&RigidPoseMm> {
         self.state
             .display
@@ -48,12 +53,17 @@ impl Workbench {
     pub(super) fn analysis_plane(&self) -> PlaneMm {
         self.analysis.view.plane(self.analysis_pose())
     }
-    pub(super) fn analysis_window(&mut self, ctx: &egui::Context) {
+    pub(super) fn analysis_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let project = self.state.project.as_ref().map(|p| p.project_id.clone());
         if self.analysis.project != project {
             self.analysis = AnalysisUi {
                 project,
                 open: self.analysis.open,
+                view: SectionView {
+                    enabled: self.analysis.open,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
         }
@@ -76,7 +86,6 @@ impl Workbench {
             self.analysis.view.offset_mm = layer.section_z_mm;
         }
         let before = self.analysis.view.clone();
-        let mut open = self.analysis.open;
         let pose = self.analysis_pose().cloned();
         let bounds = self
             .state
@@ -89,18 +98,36 @@ impl Workbench {
             && self.awaiting_serial.is_none()
             && !self.state.picker_open
             && self.state.confirmation.is_none();
-        let retry = egui::Window::new("Section Analysis")
-            .open(&mut open)
-            .default_width(380.0)
-            .default_height(720.0)
-            .default_pos(egui::pos2(190.0, 115.0))
-            .vscroll(true)
-            .show(ctx, |ui| {
+        ui::pane_header(
+            ui,
+            "Section analysis",
+            "Transient inspection · no project edits",
+        );
+        if ui::close(ui, "Close analysis") {
+            self.close_analysis();
+            ctx.request_repaint();
+            return;
+        }
+        let inspect = ui::primary(
+            ui,
+            "Inspect contour",
+            if ready {
+                None
+            } else {
+                Some("Waiting for the current source or operation")
+            },
+        );
+        ui.separator();
+        let retry = egui::ScrollArea::vertical()
+            .id_salt("analysis-body")
+            .show(ui, |ui| {
                 self.section_controls(ui, pose.as_ref(), bounds, ready)
             })
-            .and_then(|r| r.inner)
-            .unwrap_or(false);
-        self.analysis.open = open;
+            .inner
+            || inspect;
+        if retry {
+            self.analysis.view.enabled = true;
+        }
         if self.analysis.view.axis != before.axis
             || self.analysis.view.local_frame != before.local_frame
             || self.analysis.view.offset_mm != before.offset_mm
@@ -147,13 +174,11 @@ impl Workbench {
         bounds: Option<AabbMm>,
         ready: bool,
     ) -> bool {
+        ui::group(ui, "Plane");
         ui.checkbox(&mut self.analysis.view.enabled, "Enable section");
-        ui.checkbox(
-            &mut self.analysis.follow_layer,
-            "Follow selected layer · build Z",
-        );
+        ui.checkbox(&mut self.analysis.follow_layer, "Follow layer (build Z)");
         ui.horizontal(|ui| {
-            ui.label("Along");
+            ui.label("Axis");
             for (axis, label) in [
                 (Axis::X, "X"),
                 (Axis::Y, "Y"),
@@ -177,14 +202,8 @@ impl Workbench {
             });
         }
         ui.add_enabled_ui(pose.is_some(), |ui| {
-            ui.checkbox(
-                &mut self.analysis.view.local_frame,
-                "Selected part coordinates",
-            );
-            ui.checkbox(
-                &mut self.analysis.view.selected_only,
-                "Selected source occurrence only",
-            );
+            ui.checkbox(&mut self.analysis.view.local_frame, "Part coordinates");
+            ui.checkbox(&mut self.analysis.view.selected_only, "Selected part only");
         });
         if (self.analysis.view.local_frame || self.analysis.view.selected_only) && pose.is_none() {
             ui.colored_label(
@@ -214,7 +233,7 @@ impl Workbench {
             .filter(|i| Some(&i.reference) == self.selected.as_ref())
             && let Some(AnalyticSurfaceDescription::Plane { origin_mm, normal }) =
                 &inspection.face.geometry.analytic
-            && ui.button("Use selected planar face").clicked()
+            && ui.button("Use selected face").clicked()
         {
             let q = DQuat::from_array(inspection.pose.rotation_xyzw);
             let n = q * DVec3::from_array(*normal);
@@ -243,7 +262,7 @@ impl Workbench {
             }
         });
         ui.separator();
-        ui.label("Inspect representation");
+        ui.label("Display");
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(
                 &mut self.analysis.view.representation,
@@ -254,7 +273,7 @@ impl Workbench {
                 ui.selectable_value(
                     &mut self.analysis.view.representation,
                     Representation::Actual,
-                    "Actual beads",
+                    "Program",
                 );
                 ui.selectable_value(
                     &mut self.analysis.view.representation,
@@ -263,13 +282,18 @@ impl Workbench {
                 );
             });
         });
-        ui.weak("Blue hatch: source display section. Orange: nominal actual-program beads. Display caps are approximate; they are not native measurements or physical extrusion.");
+        ui.weak("Approximate section · blue source / orange program");
+        ui::help(
+            ui,
+            "section-help",
+            "Section display",
+            "Caps are display estimates, not native faces or physical extrusion. Native source contours and their sampling allowances are inspected separately. Program beads retain job, layer, role and command scope.",
+        );
         if self.analysis.view.representation != Representation::Source {
-            ui.weak("Actual material is job scoped. Layer, role, tool and command filters remain active.");
             if !self.manufacturing_current() {
                 ui.colored_label(
                     self.prefs.theme.tokens().warning,
-                    "Fresh Verify is required for the current project revision.",
+                    "Verify the current program to compare deposition.",
                 );
             }
             if let Some(problem) = self
@@ -280,11 +304,15 @@ impl Workbench {
                 .and_then(|r| r.display.as_ref())
                 .and_then(|d| d.beads.as_ref().err())
             {
-                ui.weak(format!("Nominal bead surfaces unavailable: {problem}. Checked centerlines remain available."));
+                ui::problem(
+                    ui,
+                    "Bead surfaces unavailable · showing centerlines",
+                    problem,
+                );
             }
         }
         ui.separator();
-        ui.label("Native source contour");
+        ui::group(ui, "Native contour");
         if self.state.section_loading {
             ui.label("Retrieving checked contour…");
             if ui.button("Cancel contour transfer").clicked() {
@@ -292,7 +320,7 @@ impl Workbench {
             }
         }
         let retry = ui
-            .add_enabled(ready, egui::Button::new("Refresh native contour"))
+            .add_enabled(ready, egui::Button::new("Refresh contour"))
             .clicked();
         let plane = self.analysis_plane();
         if let Some(section) = self.state.section.as_ref().filter(|s| {
@@ -329,7 +357,7 @@ impl Workbench {
                 preview.show(ui);
             }
         } else {
-            ui.weak("No native contour for this plane/revision. Visual clipping remains available; native analysis may explicitly refuse a query.");
+            ui.weak("No current native contour. Approximate clipping remains available.");
         }
         if let Some(review) = self
             .state
@@ -357,7 +385,7 @@ impl Workbench {
             });
         }
         ui.separator();
-        ui.label("Pinned analysis views · this project");
+        ui::group(ui, "Saved views");
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.analysis.name)
@@ -418,7 +446,7 @@ impl Workbench {
         if let Some(i) = remove {
             self.prefs.analysis_pins.remove(i);
         }
-        ui.weak("Inspection views are desktop preferences, outside project history. Native contours always refresh against the current source revision.");
+
         retry
     }
 }

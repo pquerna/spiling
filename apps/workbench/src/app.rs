@@ -173,6 +173,7 @@ impl Workbench {
         match action {
             Action::Analysis => {
                 self.analysis.open = true;
+                self.analysis.view.enabled = true;
                 return;
             }
             Action::Library => {
@@ -265,6 +266,25 @@ impl Workbench {
         }
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        // Route Escape once, from the topmost surface. Popups and modal decisions
+        // retain their own Escape; an edit gets its first opportunity to finish.
+        if !self.show_commands
+            && self.state.confirmation.is_none()
+            && !egui::Popup::is_any_open(ctx)
+            && !ctx.text_edit_focused()
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            if self.show_gallery {
+                self.show_gallery = false;
+            } else if self.show_license {
+                self.show_license = false;
+            } else if self.library.open {
+                // The library owns its draft-aware exit.
+            } else if self.analysis.open {
+                self.close_analysis();
+            }
+            return;
+        }
         // Text/IME owns its own editing keys. Project undo never steals text undo.
         if ctx.text_edit_focused() && !self.show_commands {
             return;
@@ -698,7 +718,7 @@ impl eframe::App for Workbench {
             .default_size(160.0)
             .min_size(72.0)
             .show(ui, |ui| self.feedback(ui));
-        if !compact || !self.compact_tree {
+        if self.analysis.open || !compact || !self.compact_tree {
             egui::Panel::right("project")
                 .resizable(true)
                 .default_size(if compact { 250.0 } else { 340.0 })
@@ -706,6 +726,10 @@ impl eframe::App for Workbench {
                 // A pasted numeric draft or long source label must retain a canvas.
                 .max_size((ui.available_width() * 0.5).max(210.0))
                 .show(ui, |ui| {
+                    if self.analysis.open {
+                        self.analysis_ui(ui);
+                        return;
+                    }
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if self.manufacturing.panel == 0 {
                             self.selection_ui(ui);
@@ -720,7 +744,7 @@ impl eframe::App for Workbench {
                     });
                 });
         }
-        if !compact || self.compact_tree {
+        if !compact || (self.compact_tree && !self.analysis.open) {
             egui::Panel::left("model-tree")
                 .resizable(true)
                 .default_size(210.0)
@@ -926,7 +950,6 @@ impl eframe::App for Workbench {
             self.prefs.theme.apply(&ctx);
         }
         self.library_window(&ctx);
-        self.analysis_window(&ctx);
         // Side effects execute once in logic(), even if egui lays out the UI in multiple passes.
         if self.queued.is_some()
             || self.confirmation.is_some()
