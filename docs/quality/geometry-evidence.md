@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Geometry has separate admission, inspection, display and material-query boundaries.
 A successful import, pick or section is **not manufacturing acceptance**.
 [ADR005](../adr/ADR005-native-first-development-geometry.md) owns the implemented
-source20 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
+source21 DEVELOPMENT route (current planner identity is owned by the manufacturing contract): the imported SolidCore BREP is its sole
 material geometry. Qualification requires the actual coherent producer,
 recorded dependency sources and preserved operators. Earlier producer receipts
 do not transfer by relabeling. The
@@ -169,10 +169,27 @@ continuation. This is census existence only, not an interior UV witness, complet
 critical circle, topology or closed material metric. The frozen quadrant torus's
 terminal-crossing regression separately requires a closed metric, one material
 component, no bounded void and one tunnel cycle; its sample retains the annular
-hole. Exact Z0 vertex continuation and rational-torus closed critical material
-queries remain required unqualified positives. These gates must not be relabeled
-unsupported to clear the suite; this narrow analytic control is not general
-torus manufacturing qualification.
+hole. The rational terminal regression separately requires the same
+closed metric and component/void/tunnel obligations on its literal rational
+carrier. Exact Z0 vertex continuation remains a required unqualified positive;
+it must not be relabeled unsupported to clear the suite. These narrow controls
+are not general torus manufacturing qualification.
+At an authored coplanar edge, a complete spatial height identity and nearby
+UV trace do not identify their zero sets. Native edge/face ownership and complete
+endpoint-star continuation need their own section receipt; an endpoint-root
+exception or tolerance-based identification cannot replace that operation.
+
+Closed material covers may intersect Cartesian positions and first derivatives
+with coefficient-first coordinate functionals centered on the same cell. A finite
+constant origin retains rational cancellation without changing the surface,
+parameter box or tolerance. Original second derivatives and their smoothness
+authority remain separate; first-jet tightening grants no Hessian or C1 proof.
+
+Native fiber census exhausts every original knot rectangle. A cell lacking closed
+parameter C1 may only exclude or subdivide; an accepted Krawczyk root still needs
+C1 on its complete actual owner. An interior root does not require C1 across
+unrelated knot endpoints. Roots on unresolved knots, seams or trim boundaries
+still refuse; geometric G1 does not stand in for parameter C1.
 
 Endpoint ownership consumes native **material** support, with one prepared owner
 shared by its world-Z and XY queries. Authoring-only chart support cannot supply

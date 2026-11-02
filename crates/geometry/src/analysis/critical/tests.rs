@@ -528,10 +528,53 @@ fn native_rational_and_polynomial_caps_share_the_critical_complex() {
     }
 }
 #[test]
+fn regular_torus_sample_still_covers_zero_height_in_the_closed_slab() {
+    let cancel = AtomicBool::new(false);
+    let definition = source("native-parity-ring-torus.step");
+    let mut work = GeometryWorkBudget::query();
+    let prepared = crate::prepare_solid(
+        &definition,
+        crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    let frame = PlaneFrameMm {
+        origin_mm: [0.0; 3],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
+    };
+    let result = prepared
+        .analyze_slab(
+            SlabRequest {
+                frame,
+                height_interval_mm: [-0.01, 0.01],
+                sample_height_mm: 0.001,
+                native_shape_error_mm: 0.1,
+            },
+            crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes(),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+    assert_eq!(result.section.loops.len(), 2);
+    assert_eq!(result.request().height_interval_mm, [-0.01, 0.01]);
+    assert_eq!(result.request().sample_height_mm, 0.001);
+    assert_eq!(result.critical_material_component_count(), Some(1));
+    assert_eq!(result.critical_tunnel_cycle_count(), Some(1));
+    assert!(
+        result
+            .closed_shape_error_mm()
+            .is_some_and(|bound| bound <= 0.1)
+    );
+}
+
+#[test]
 fn imported_rational_torus_has_generic_terminal_metric_and_cycle_incidence() {
     let cancel = AtomicBool::new(false);
     let definition = source("native-parity-nurbs-torus.step");
-    let mut work = GeometryWorkBudget::new(100_000_000);
+    let mut work = GeometryWorkBudget::query();
     let prepared = crate::prepare_solid(
         &definition,
         crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
@@ -565,6 +608,13 @@ fn imported_rational_torus_has_generic_terminal_metric_and_cycle_incidence() {
     assert_eq!(result.critical_tunnel_cycle_count(), Some(1));
     assert!(!result.event_neighborhoods().is_empty());
     assert!(result.boundary_motion_bound_mm <= request.native_shape_error_mm);
+    assert!(
+        result
+            .closed_shape_error_mm()
+            .is_some_and(|bound| bound <= request.native_shape_error_mm)
+    );
+    let (face_cells, coedge_cells) = result.critical.as_ref().unwrap().covered_cells();
+    assert!(face_cells > 0 && coedge_cells > 0);
     assert_eq!(result.request().sample_height_mm, request.sample_height_mm);
     assert!(
         result
@@ -572,6 +622,7 @@ fn imported_rational_torus_has_generic_terminal_metric_and_cycle_incidence() {
             .as_ref()
             .is_some_and(|s| !s.is_native_intersection())
     );
+    eprintln!("rational terminal closed material work={}", work.consumed());
 }
 
 #[test]

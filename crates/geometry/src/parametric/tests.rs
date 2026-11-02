@@ -13,6 +13,81 @@ use solidcore::{
     },
 };
 
+#[test]
+fn centered_first_jet_retains_rational_height_and_original_hessians() {
+    let definition = crate::analysis::test_source::recipe("native-parity-nurbs-torus.step");
+    let surface = definition.face_surface(definition.face_ids()[0]).unwrap();
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::query();
+    let domain = [[0.703125, 0.703369140625], [0.994140625, 0.99462890625]];
+    let original = surface_enclosure(surface, domain, &mut work, &cancel).unwrap();
+    let mut jet = original.clone();
+    tighten_surface_first_enclosure(surface, domain, &mut jet, &mut work, &cancel).unwrap();
+    assert!(jet.position[2].width() < 1e-4, "{jet:?}");
+    assert!(jet.du[2].abs_upper() < 1e-3, "{jet:?}");
+    for parameter in domain[1] {
+        let height = 4.0 * parameter / (1.0 + parameter.powi(2));
+        let derivative = 4.0 * (1.0 - parameter.powi(2)) / (1.0 + parameter.powi(2)).powi(2);
+        assert!(jet.position[2].contains(height));
+        assert!(jet.du[2].contains(0.0));
+        assert!(jet.dv[2].contains(derivative));
+    }
+    for horizontal in domain[0] {
+        let horizontal_weight = 1.0 + horizontal.powi(2);
+        let circle = [
+            (1.0 - horizontal.powi(2)) / horizontal_weight,
+            2.0 * horizontal / horizontal_weight,
+        ];
+        let derivative = [
+            -4.0 * horizontal / horizontal_weight.powi(2),
+            2.0 * (1.0 - horizontal.powi(2)) / horizontal_weight.powi(2),
+        ];
+        for vertical in domain[1] {
+            let vertical_weight = 1.0 + vertical.powi(2);
+            let radius = 6.0 + 2.0 * (1.0 - vertical.powi(2)) / vertical_weight;
+            let radial_derivative = -8.0 * vertical / vertical_weight.powi(2);
+            for axis in 0..2 {
+                assert!(jet.position[axis].contains(radius * circle[axis]));
+                assert!(jet.du[axis].contains(radius * derivative[axis]));
+                assert!(jet.dv[axis].contains(radial_derivative * circle[axis]));
+            }
+        }
+    }
+    assert_eq!(jet.duu, original.duu);
+    assert_eq!(jet.duv, original.duv);
+    assert_eq!(jet.dvv, original.dvv);
+    assert_eq!(
+        tighten_surface_first_enclosure(
+            surface,
+            domain,
+            &mut jet,
+            &mut GeometryWorkBudget::new(0),
+            &cancel
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::ResourceLimit
+    );
+    assert_eq!(
+        tighten_surface_first_enclosure(
+            surface,
+            domain,
+            &mut jet,
+            &mut work,
+            &AtomicBool::new(true)
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::Cancelled
+    );
+    let mut inconsistent = original.clone();
+    inconsistent.position[2] = Interval::point(0.0);
+    assert!(
+        tighten_surface_first_enclosure(surface, domain, &mut inconsistent, &mut work, &cancel)
+            .is_err()
+    );
+}
+
 fn curve(points: Vec<CPoint>, degree: usize, knots: Vec<f64>, dim: u64) -> Curve {
     let raw = crv_basic::Curve::new(points, degree, knots).unwrap();
     // borrowed=true preserves the supplied original knot vector, including

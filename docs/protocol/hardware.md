@@ -95,7 +95,7 @@ collision analysis. Fresh independent replay checks actual decoded deposition
 bead bounds, including width and physical height, against those same captured
 constraints. Purge/travel remain governed by the machine workflow rather than the
 part's plate placement rectangle. Swept travel/toolhead collision remains
-unqualified. These semantics are bound by planner57/verifier19; emitter11 and the
+unqualified. These semantics are bound by planner58/verifier19; emitter11 and the
 existing numerical document/binary versions remain unchanged.
 
 The capture is at most 24 KiB and the complete hardware inventory at most 48 KiB,

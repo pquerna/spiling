@@ -1108,6 +1108,44 @@ fn correlated_surface_regular(
         jets.map(|jet| jet.dv),
     ))
 }
+pub(crate) const CORRELATED_SURFACE_FIRST_SCRATCH_BYTES: usize =
+    surface_functional_scratch_bytes::<3>() + std::mem::size_of::<SurfaceEnclosure>();
+
+pub(crate) fn tighten_surface_first_enclosure(
+    surface: &(impl SurfaceEvaluator + ?Sized),
+    domain: [[f64; 2]; 2],
+    jet: &mut SurfaceEnclosure,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    work.charge(1, cancel)?;
+    let Some(native) = surface.native_surface() else {
+        return Ok(());
+    };
+    match analytic_eval::native_surface_nurbs(native) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Ok(()),
+        Err(error) if error.code == GeometryErrorCode::UnsupportedOperation => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let origin = jet.position.map(|value| Interval::point(value.mid()));
+    let functionals = std::array::from_fn(|axis| SurfaceFunctional {
+        direction: std::array::from_fn(|coordinate| {
+            Interval::point(if coordinate == axis { 1.0 } else { 0.0 })
+        }),
+        origin,
+        offset: Interval::point(0.0),
+    });
+    let first = surface_functional_enclosures::<3>(surface, domain, &functionals, work, cancel)?;
+    for axis in 0..3 {
+        jet.position[axis] =
+            jet.position[axis].intersect(first[axis].position.add(origin[axis]))?;
+        jet.du[axis] = jet.du[axis].intersect(first[axis].du)?;
+        jet.dv[axis] = jet.dv[axis].intersect(first[axis].dv)?;
+    }
+    Ok(())
+}
+
 fn certify_surface_regular(
     surface: &Surface,
     domain: [[f64; 2]; 2],

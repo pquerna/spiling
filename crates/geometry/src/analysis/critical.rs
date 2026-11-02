@@ -2805,6 +2805,7 @@ pub(super) fn certify_critical_slab(
         + std::mem::size_of::<material_link::PairedMaterialLink<'_, '_>>()
         + RESERVED_STACK_BYTES
         + super::slab::HEIGHT_CONTRACTION_SCRATCH_BYTES
+        + crate::parametric::CORRELATED_SURFACE_FIRST_SCRATCH_BYTES
         + capture_bytes
         + std::mem::size_of::<NativeFaceNegativeProposal>()
         + 4 * std::mem::size_of::<[[f64; 2]; 2]>()
@@ -2972,7 +2973,7 @@ pub(super) fn certify_critical_slab(
                     || surface_parameter_span_smooth(surface, uv, work, cancel)?;
                 // Height contraction below returns intersections of this UV
                 // box; an inherited whole-box Inside premise remains valid.
-                let (uv, jet, height_preconditioned) = if !whole_source && !height_preconditioned {
+                let (uv, mut jet, height_preconditioned) = if !whole_source && !height_preconditioned {
                     let Some((clipped, jet)) = super::slab::clip_height_box(
                         surface, uv, functional, [height_target.lo, height_target.hi], work, cancel,
                     )? else {
@@ -2994,6 +2995,7 @@ pub(super) fn certify_critical_slab(
                     };
                     (uv, jet, height_preconditioned)
                 };
+                crate::parametric::tighten_surface_first_enclosure(surface, uv, &mut jet, work, cancel)?;
                 // The allowance-expanded carrier excludes its entire trimmed
                 // subset from this closed capture; no winding query is needed.
                 // Keep full jets: annular meridian/convexity obligations below

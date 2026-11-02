@@ -332,10 +332,7 @@ fn census_native_fiber(
                 active_depth = 0;
                 phase = "whole original span regularity";
                 work.charge(1, cancel)?;
-                // Reuse the prepared whole-carrier C1 premise. Without it,
-                // qualify the complete original span before any root refinement;
-                // subdivision cannot manufacture continuity authority.
-                let smooth = prepared_carrier_c1_covers(domain, span)
+                let span_smooth = prepared_carrier_c1_covers(domain, span)
                     || surface_parameter_span_smooth(surface, span, work, cancel)?;
                 let mut pending = 1_usize;
                 stack[0] = Some(FiberCell {
@@ -354,6 +351,9 @@ fn census_native_fiber(
                     })?;
                     active_uv = cell.uv;
                     active_depth = cell.depth;
+                    let smooth = span_smooth
+                        || prepared_carrier_c1_covers(domain, cell.uv)
+                        || surface_parameter_span_smooth(surface, cell.uv, work, cancel)?;
                     phase = "original root position/first matrix";
                     // Affine fiber equations and their native first matrix
                     // need no full spatial/Hessian jet on every search cell.
@@ -398,33 +398,19 @@ fn census_native_fiber(
                     if jet.excluded(fiber, restriction) {
                         continue;
                     }
-                    if !smooth {
-                        // A nonsmooth carrier can still be wholly outside the
-                        // trim. Preserve that exclusion before declining its
-                        // root theorem; subdivision supplies no C1 authority.
-                        if !cell.trim_inside {
-                            phase = "nonsmooth original carrier trim exclusion";
-                            if domain.classify_with_byte_limit(
-                                cell.uv,
-                                domain_bytes,
-                                work,
-                                cancel,
-                            )? == TrimClassification::Outside
-                            {
-                                continue;
-                            }
-                        }
-                        return Ok(false);
-                    }
                     phase = "uniform affine-family Krawczyk root";
-                    let root = fiber_krawczyk_jacobian(
-                        surface,
-                        cell.uv,
-                        jet.jacobian(fiber),
-                        fiber,
-                        work,
-                        cancel,
-                    );
+                    let root = if smooth {
+                        fiber_krawczyk_jacobian(
+                            surface,
+                            cell.uv,
+                            jet.jacobian(fiber),
+                            fiber,
+                            work,
+                            cancel,
+                        )
+                    } else {
+                        Ok(FiberNewton::Unresolved)
+                    };
                     let root = match root {
                         Ok(root) => root,
                         Err(error)
@@ -903,6 +889,74 @@ fn qualify_fiber_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rational_fiber_interior_root_does_not_require_global_parameter_c1() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::analysis::test_source::recipe("native-parity-nurbs-torus.step");
+        let mut work = GeometryWorkBudget::query();
+        let prepared = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let frame = PlaneFrameMm {
+            origin_mm: [0.0; 3],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+            z_axis: [0.0, 0.0, 1.0],
+        };
+        let request = SlabRequest {
+            frame,
+            height_interval_mm: [1.999, 2.001],
+            sample_height_mm: 1.99901,
+            native_shape_error_mm: 0.05,
+        };
+        let rows = [[-0.5, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|row| row.map(Interval::point));
+        let fiber = NativeFiber {
+            center: [0.0, 0.0, 1.99901],
+            rows,
+            offsets: [Interval::point(0.0); 2],
+            forward: cross(rows[0], rows[1]),
+            forward_offset: Interval::point(0.0),
+            min_forward: 0.0,
+            core: Some(FiberCore { frame, radius: 6.0 }),
+        };
+        assert!(
+            native_fiber_degree_one(
+                prepared.source_view().unwrap(),
+                &fiber,
+                &request,
+                HeightFunctional::from_frame(frame),
+                crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes(),
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_some()
+        );
+        let seam_rows = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|row| row.map(Interval::point));
+        let seam = NativeFiber {
+            rows: seam_rows,
+            forward: cross(seam_rows[0], seam_rows[1]),
+            ..fiber
+        };
+        assert!(
+            native_fiber_degree_one(
+                prepared.source_view().unwrap(),
+                &seam,
+                &request,
+                HeightFunctional::from_frame(frame),
+                crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes(),
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
     use solidcore::geom::{extent2d::Extent2d, vector2d::Vec2};
     use solidcore::surface::surface::Surface;
     use solidcore::surface::{plane::Plane, surface::p2::SurfaceKind};
