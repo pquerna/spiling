@@ -284,15 +284,8 @@ fn step_sphere_normal(
                 if determinant.contains_zero() {
                     return Ok(None);
                 }
-                let degree = Interval {
-                    lo: super::down(std::f64::consts::PI),
-                    hi: super::up(std::f64::consts::PI),
-                }
-                .div(Interval::point(180.0))?;
-                let (su, cu) =
-                    super::sin_cos_interval(Interval::new(uv[0][0], uv[0][1])?.mul(degree));
-                let (sv, cv) =
-                    super::sin_cos_interval(Interval::new(uv[1][0], uv[1][1])?.mul(degree));
+                let (su, cu) = super::sin_cos_degrees_interval(Interval::new(uv[0][0], uv[0][1])?);
+                let (sv, cv) = super::sin_cos_degrees_interval(Interval::new(uv[1][0], uv[1][1])?);
                 let q = [cv.mul(cu), cv.mul(su), sv];
                 let normal: [Interval; 3] = std::array::from_fn(|k| {
                     (0..3).fold(Interval::point(0.0), |v, j| {
@@ -550,12 +543,8 @@ fn step_surface_tensor(
     }
     let zero = Interval::point(0.0);
     let one = Interval::point(1.0);
-    let degree = Interval {
-        lo: super::down(std::f64::consts::PI),
-        hi: super::up(std::f64::consts::PI),
-    }
-    .div(Interval::point(180.0))?;
-    let (su, cu) = super::sin_cos_interval(u.mul(degree));
+    let degree = super::radians_per_degree();
+    let (su, cu) = super::sin_cos_degrees_interval(u);
     // Radial and axial functions, with their literal STEP V derivatives.
     let (placement, radial, axial) = match surface.kind() {
         SurfaceKind::Plane(_) | SurfaceKind::BSpline(_) => {
@@ -564,7 +553,7 @@ fn step_surface_tensor(
         SurfaceKind::Cone(c) => {
             let native = c.canonical();
             let (sin_a, cos_a) =
-                super::sin_cos_interval(Interval::point(native.semi_angle_deg).mul(degree));
+                super::sin_cos_degrees_interval(Interval::point(native.semi_angle_deg));
             let slope = sin_a.div(cos_a)?;
             (
                 native.origin,
@@ -578,7 +567,7 @@ fn step_surface_tensor(
             )
         }
         SurfaceKind::Sphere(s) => {
-            let (sv, cv) = super::sin_cos_interval(v.mul(degree));
+            let (sv, cv) = super::sin_cos_degrees_interval(v);
             let r = Interval::point(s.radius());
             (
                 *s.base().position(),
@@ -597,7 +586,7 @@ fn step_surface_tensor(
             )
         }
         SurfaceKind::Torus(t) => {
-            let (sv, cv) = super::sin_cos_interval(v.mul(degree));
+            let (sv, cv) = super::sin_cos_degrees_interval(v);
             let r = Interval::point(t.minor_radius());
             (
                 *t.base().position(),
@@ -669,8 +658,75 @@ mod support_tests {
     use super::*;
     use solidcore::{
         geom::{axis2_placement::Axis2Placement, vector3d::Vec3},
-        surface::{sphere::Sphere, surface::p1::StepSurface},
+        surface::{
+            sphere::Sphere,
+            surface::p1::StepSurface,
+            torus::{Torus, TorusOptions},
+        },
     };
+
+    #[test]
+    fn native_degree_quadrants_preserve_third_and_mixed_derivative_units() {
+        let kernel = crate::make_kernel_context();
+        let placement = Axis2Placement::new(Vec3::ZERO, Vec3::X, Vec3::Y);
+        let torus =
+            Torus::create_canonical(&kernel, &placement, 6.0, 2.0, TorusOptions::default(), None)
+                .unwrap();
+        let sphere = Sphere::create_canonical(&kernel, &placement, 2.0).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        let first_axial = Interval::new(0.03490658503988659, 0.0349065850398866).unwrap();
+        let third_axial = Interval::new(1.0633153868415576e-5, 1.0633153868415577e-5).unwrap();
+        for (native, level, radial, third_radial) in [
+            (
+                Surface::from(torus),
+                360.0,
+                8.0,
+                Interval::new(4.25326154736623e-5, 4.253261547366231e-5).unwrap(),
+            ),
+            (Surface::from(sphere), 0.0, 2.0, third_axial),
+        ] {
+            assert!(native_surface_nurbs(&native).unwrap().is_some());
+            let step = Surface::from(StepSurface::new(native, true).unwrap());
+            assert!(native_surface_nurbs(&step).unwrap().is_none());
+            let jet = surface_tensor(&step, [[0.0; 2], [level; 2]], 3, &mut work, &cancel).unwrap();
+            assert_eq!(jet[0][0], [radial, 0.0, 0.0].map(Interval::point));
+            assert!(jet[0][1][2].contains_interval(first_axial));
+            assert!(jet[0][3][2].contains_interval(third_axial.neg()));
+            assert!(jet[1][2][1].contains_interval(third_axial.neg()));
+            assert!(jet[3][0][1].contains_interval(third_radial.neg()));
+            assert_eq!(jet[2][1], [Interval::point(0.0); 3]);
+        }
+    }
+
+    #[test]
+    fn exact_degree_levels_do_not_erase_a_literal_near_horn_radial_residual() {
+        let kernel = crate::make_kernel_context();
+        let placement = Axis2Placement::new(Vec3::ZERO, Vec3::X, Vec3::Y);
+        let major = super::super::up(2.0);
+        let torus = Torus::create_canonical(
+            &kernel,
+            &placement,
+            major,
+            2.0,
+            TorusOptions::default(),
+            None,
+        )
+        .unwrap();
+        let step = Surface::from(StepSurface::new(Surface::from(torus), true).unwrap());
+        let jet = surface_tensor(
+            &step,
+            [[0.0; 2], [180.0; 2]],
+            3,
+            &mut GeometryWorkBudget::new(100_000),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(jet[0][0][0], Interval::point(major - 2.0));
+        assert!(jet[0][0][0].lo > 0.0);
+        assert!(jet[1][0][1].lo > 0.0);
+        assert_eq!(jet[0][0][2], Interval::point(0.0));
+    }
 
     #[test]
     fn step_sphere_scalar_support_keeps_exact_axis_contact_and_rejects_nurbs_alias() {

@@ -458,6 +458,49 @@ pub fn sin_cos_interval(angle: Interval) -> (Interval, Interval) {
     }
 }
 
+pub(super) fn radians_per_degree() -> Interval {
+    Interval {
+        lo: down(std::f64::consts::PI),
+        hi: up(std::f64::consts::PI),
+    }
+    .div(Interval::point(180.0))
+    .unwrap()
+}
+
+pub(super) fn sin_cos_degrees_interval(angle: Interval) -> (Interval, Interval) {
+    let full = Interval { lo: -1.0, hi: 1.0 };
+    if !angle.lo.is_finite()
+        || !angle.hi.is_finite()
+        || angle.lo > angle.hi
+        || angle.abs_upper() > 90.0 * (1_u64 << 40) as f64
+        || angle.width() >= 360.0
+    {
+        return (full, full);
+    }
+    let quadrant = (angle.mid() / 90.0).round() as i64;
+    let anchor = Interval::point((quadrant * 90) as f64);
+    let residual = Interval {
+        lo: Interval::point(angle.lo).sub(anchor).lo,
+        hi: Interval::point(angle.hi).sub(anchor).hi,
+    };
+    let (mut sine, mut cosine) = sin_cos_interval(residual.mul(radians_per_degree()));
+    if residual.lo >= 0.0 && residual.hi <= 180.0 {
+        sine.lo = sine.lo.max(0.0);
+    }
+    if residual.lo >= -180.0 && residual.hi <= 0.0 {
+        sine.hi = sine.hi.min(0.0);
+    }
+    if residual.lo >= -90.0 && residual.hi <= 90.0 {
+        cosine.lo = cosine.lo.max(0.0);
+    }
+    match quadrant.rem_euclid(4) {
+        0 => (sine, cosine),
+        1 => (cosine, sine.neg()),
+        2 => (sine.neg(), cosine.neg()),
+        _ => (cosine.neg(), sine),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IntervalVec2 {
     pub u: Interval,
@@ -850,6 +893,262 @@ mod tests {
         assert_eq!(sin_f.hi, 1.0);
         assert_eq!(cos_f.lo, -1.0);
         assert_eq!(cos_f.hi, 1.0);
+    }
+
+    #[test]
+    fn degree_trigonometry_preserves_exact_quadrants_without_snapping_neighbors() {
+        let quadrants = [(0.0, 1.0), (1.0, 0.0), (0.0, -1.0), (-1.0, 0.0)];
+        for turn in [-1_000_000_i64, -2, -1, 0, 1, 2, 1_000_000] {
+            for (index, (sine, cosine)) in quadrants.into_iter().enumerate() {
+                let angle = (turn * 360 + index as i64 * 90) as f64;
+                assert_eq!(
+                    sin_cos_degrees_interval(Interval::point(angle)),
+                    (Interval::point(sine), Interval::point(cosine)),
+                    "angle={angle}",
+                );
+                for neighbor in [down(angle), up(angle)] {
+                    let actual = sin_cos_degrees_interval(Interval::point(neighbor));
+                    if sine == 0.0 {
+                        let directed = actual.0.mul(Interval::point(cosine));
+                        assert!(
+                            if neighbor < angle {
+                                directed.lo < 0.0 && directed.hi <= 0.0
+                            } else {
+                                directed.lo >= 0.0 && directed.hi > 0.0
+                            },
+                            "wrong side or snapped residual: angle={angle}, neighbor={neighbor}, sine={:?}",
+                            actual.0,
+                        );
+                    }
+                    if cosine == 0.0 {
+                        let directed = actual.1.mul(Interval::point(-sine));
+                        assert!(
+                            if neighbor < angle {
+                                directed.lo < 0.0 && directed.hi <= 0.0
+                            } else {
+                                directed.lo >= 0.0 && directed.hi > 0.0
+                            },
+                            "wrong side or snapped residual: angle={angle}, neighbor={neighbor}, cosine={:?}",
+                            actual.1,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn degree_trigonometry_retains_one_sided_and_crossing_level_intervals() {
+        for level in [-360.0, -180.0, 0.0, 180.0, 360.0, 720.0] {
+            let below = sin_cos_degrees_interval(Interval::new(down(level), level).unwrap()).0;
+            let above = sin_cos_degrees_interval(Interval::new(level, up(level)).unwrap()).0;
+            let crossing =
+                sin_cos_degrees_interval(Interval::new(down(level), up(level)).unwrap()).0;
+            let derivative_sign = if (level / 180.0) as i64 % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
+            let below = below.mul(Interval::point(derivative_sign));
+            let above = above.mul(Interval::point(derivative_sign));
+            assert!(below.lo < 0.0 && below.hi == 0.0, "{level}: {below:?}");
+            assert!(above.lo == 0.0 && above.hi > 0.0, "{level}: {above:?}");
+            assert!(crossing.lo < 0.0 && crossing.hi > 0.0);
+        }
+    }
+
+    #[test]
+    fn degree_trigonometry_refuses_unbounded_range_reduction() {
+        let full = Interval { lo: -1.0, hi: 1.0 };
+        for angle in [
+            Interval::new(-180.0, 180.0).unwrap(),
+            Interval::point(up(90.0 * (1_u64 << 40) as f64)),
+            Interval::point(f64::MAX),
+            Interval::point(f64::INFINITY),
+            Interval::point(f64::NAN),
+            Interval { lo: 1.0, hi: 0.0 },
+        ] {
+            assert_eq!(sin_cos_degrees_interval(angle), (full, full));
+        }
+        for sign in [-1_i64, 1] {
+            for offset in 0..4 {
+                let quadrant = sign * ((1_i64 << 40) - offset);
+                let (sine, cosine) = match quadrant.rem_euclid(4) {
+                    0 => (0.0, 1.0),
+                    1 => (1.0, 0.0),
+                    2 => (0.0, -1.0),
+                    _ => (-1.0, 0.0),
+                };
+                assert_eq!(
+                    sin_cos_degrees_interval(Interval::point((quadrant * 90) as f64)),
+                    (Interval::point(sine), Interval::point(cosine)),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn degree_trigonometry_contains_independent_150_digit_reference_intervals() {
+        for [
+            lower,
+            upper,
+            sine_lower,
+            sine_upper,
+            cosine_lower,
+            cosine_upper,
+        ] in [
+            [
+                0.01,
+                0.02,
+                0.00017453292431333678,
+                0.00034906584331009674,
+                0.9999999390765166,
+                0.9999999847691291,
+            ],
+            [
+                -0.02,
+                -0.01,
+                -0.00034906584331009674,
+                -0.00017453292431333678,
+                0.9999999390765166,
+                0.9999999847691291,
+            ],
+            [30.0, 30.0, 0.5, 0.5, 0.8660254037844386, 0.8660254037844387],
+            [
+                -45.0,
+                -45.0,
+                -0.7071067811865476,
+                -0.7071067811865475,
+                0.7071067811865475,
+                0.7071067811865476,
+            ],
+            [
+                89.99999999999999,
+                90.0,
+                0.9999999999999999,
+                1.0,
+                0.0,
+                2.480262043028361e-16,
+            ],
+            [
+                90.0,
+                90.00000000000001,
+                0.9999999999999999,
+                1.0,
+                -2.480262043028361e-16,
+                0.0,
+            ],
+            [
+                179.99,
+                180.01,
+                -0.00017453292431317808,
+                0.00017453292431317808,
+                -1.0,
+                -0.999999984769129,
+            ],
+            [
+                269.0,
+                271.0,
+                -1.0,
+                -0.9998476951563912,
+                -0.017452406437283515,
+                0.017452406437283515,
+            ],
+            [
+                359.99,
+                360.01,
+                -0.00017453292431317808,
+                0.00017453292431317808,
+                0.999999984769129,
+                1.0,
+            ],
+            [
+                -360.01,
+                -359.99,
+                -0.00017453292431317808,
+                0.00017453292431317808,
+                0.999999984769129,
+                1.0,
+            ],
+            [
+                98956046499839.98,
+                98956046499840.0,
+                -0.00027270769224392545,
+                0.0,
+                0.9999999628152565,
+                1.0,
+            ],
+            [
+                -98956046499840.0,
+                -98956046499839.98,
+                0.0,
+                0.00027270769224392545,
+                0.9999999628152565,
+                1.0,
+            ],
+            [
+                359.99999999,
+                359.99999999,
+                -1.745330636534541e-10,
+                -1.7453306365345408e-10,
+                0.9999999999999999,
+                1.0,
+            ],
+            [
+                360.00000001,
+                360.00000001,
+                1.7453306365345408e-10,
+                1.745330636534541e-10,
+                0.9999999999999999,
+                1.0,
+            ],
+            [
+                3.141592653589793,
+                3.141592653589793,
+                0.054803665148789524,
+                0.05480366514878953,
+                0.9984971498638637,
+                0.9984971498638638,
+            ],
+            [
+                1.5707963267948966,
+                1.5707963267948966,
+                0.02741213359204429,
+                0.027412133592044294,
+                0.9996242168594816,
+                0.9996242168594817,
+            ],
+            [0.0, 90.0, 0.0, 1.0, 0.0, 1.0],
+            [90.0, 180.0, 0.0, 1.0, -1.0, 0.0],
+            [-90.0, 90.0, -1.0, 1.0, 0.0, 1.0],
+            [-180.0, 180.0, -1.0, 1.0, -1.0, 1.0],
+            [
+                -123.456,
+                -12.345,
+                -1.0,
+                -0.21379769029187878,
+                -0.5512964442855826,
+                0.9768779594329365,
+            ],
+            [
+                720.001,
+                720.01,
+                1.7453292518644483e-05,
+                0.00017453292431317808,
+                0.999999984769129,
+                0.9999999998476914,
+            ],
+        ] {
+            let (sine, cosine) = sin_cos_degrees_interval(Interval::new(lower, upper).unwrap());
+            assert!(
+                sine.contains_interval(Interval::new(sine_lower, sine_upper).unwrap()),
+                "[{lower}, {upper}]: sine={sine:?}",
+            );
+            assert!(
+                cosine.contains_interval(Interval::new(cosine_lower, cosine_upper).unwrap()),
+                "[{lower}, {upper}]: cosine={cosine:?}",
+            );
+        }
     }
 
     #[test]

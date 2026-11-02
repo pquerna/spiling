@@ -178,6 +178,12 @@ At an authored coplanar edge, a complete spatial height identity and nearby
 UV trace do not identify their zero sets. Native edge/face ownership and complete
 endpoint-star continuation need their own section receipt; an endpoint-root
 exception or tolerance-based identification cannot replace that operation.
+Native degree-law evaluation reduces by exact integer quadrants before enclosing
+the residual radians. Literal 180/360-degree carrier levels can therefore retain
+exact zeros without making a neighboring stored coefficient equal to that level.
+Derivative factors remain powers of mathematical pi/180, and stored NURBS charts
+retain their separate coefficient law. An exact carrier level is not by itself
+a retained-trim, paired-coverage or endpoint-star section receipt.
 Regular common-carrier coedge checks exhaust the complete closed native range
 through bounded interval subdivision. Every accepted piece independently retains
 paired correspondence, coherent normals and height transversality; an accepted

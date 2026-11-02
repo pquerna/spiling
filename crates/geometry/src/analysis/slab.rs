@@ -6971,6 +6971,48 @@ mod tests {
     }
 
     #[test]
+    fn zero_torus_carrier_levels_are_exact_but_neighboring_native_levels_are_not() {
+        let definition = parity_definition("native-parity-ring-torus.step");
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::query();
+        for (ordinal, level, below, above) in [
+            (0, 360.0, true, false),
+            (3, 360.0, false, true),
+            (1, 180.0, false, true),
+            (2, 180.0, true, false),
+        ] {
+            let face = definition.face_ids()[ordinal];
+            let surface = definition.face_surface(face).unwrap();
+            let uv = [[0.01, 89.99], [level; 2]];
+            let exact =
+                crate::parametric::evaluate_analytic_surface_jet(surface, uv, &mut work, &cancel)
+                    .unwrap();
+            assert_eq!(exact.position[2], Interval::point(0.0));
+            assert!(!exact.dv[2].contains_zero());
+            for neighbor in [
+                below.then(|| crate::parametric::down(level)),
+                above.then(|| crate::parametric::up(level)),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let jet = crate::parametric::evaluate_analytic_surface_jet(
+                    surface,
+                    [uv[0], [neighbor; 2]],
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+                assert!(
+                    !jet.position[2].contains_zero(),
+                    "literal neighboring level must not become a coplanar trace: face={ordinal}, v={neighbor:.17e}, height={:?}",
+                    jet.position[2],
+                );
+            }
+        }
+    }
+
+    #[test]
     fn zero_torus_partitions_have_common_carriers_and_complete_regular_stars() {
         let definition = parity_definition("native-parity-ring-torus.step");
         let cancel = AtomicBool::new(false);

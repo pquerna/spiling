@@ -8598,25 +8598,55 @@ mod tests {
         let domain = &source.faces[face];
         let range = [0.00011238767719667916, 0.00011238767719667919];
         let tolerance = domain.effective_tolerance_mm();
+        let coedge = &domain.coedges[index];
+        let spatial = definition.edge_curve(coedge.edge).unwrap();
+        let surface = definition.face_surface(domain.face).unwrap();
+        let chart = parametric::curve_prepared::NativeChartCurve {
+            surface,
+            chart: coedge.curve,
+        };
+        let binding = coedge.native_trace_correspondence.as_ref().unwrap();
+        assert!(binding.accepted_range_allowance.get().is_none());
+        domain
+            .qualify_native_coedge_trace(
+                index,
+                range,
+                tolerance,
+                NATIVE_TRACE_QUERY_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        let parameter =
+            coedge.native_range[0] + (coedge.native_range[1] - coedge.native_range[0]) / 16384.0;
+        let native = spatial
+            .tensor([parameter; 2], 0, &mut work, &cancel)
+            .unwrap()[0];
+        let (uv, scale) = coedge
+            .native_parameter_image([parameter; 2], &mut work, &cancel)
+            .unwrap();
+        let carrier = native_trace_tensor(&chart, uv, scale, 0, &mut work, &cancel).unwrap()[0];
+        let distance = norm(std::array::from_fn(|axis| native[axis].sub(carrier[axis]))).unwrap();
+        assert!(distance.lo > tolerance);
+        let approved = binding.accepted_range_allowance.get().unwrap();
+        assert_eq!(approved.0, range);
+        let fixed_failure = domain
+            .qualify_native_coedge_trace(
+                index,
+                [parameter; 2],
+                tolerance,
+                NATIVE_TRACE_QUERY_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap_err();
         assert_eq!(
-            domain
-                .qualify_native_coedge_trace(
-                    index,
-                    range,
-                    tolerance,
-                    NATIVE_TRACE_QUERY_SCRATCH_BYTES,
-                    &mut work,
-                    &cancel,
-                )
-                .unwrap_err()
-                .code,
+            fixed_failure.code,
             GeometryErrorCode::ParameterCorrespondenceUnavailable,
             "the fixed normalized gauge is not promoted merely because a derived map exists",
         );
-        let binding = domain.coedges[index]
-            .native_trace_correspondence
-            .as_ref()
-            .unwrap();
+        assert!(fixed_failure.message.contains("positional counterexample"));
+        assert_eq!(binding.accepted_range_allowance.get(), Some(approved));
         let map = binding
             .derived_position
             .get()
