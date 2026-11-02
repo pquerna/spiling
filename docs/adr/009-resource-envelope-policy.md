@@ -8,7 +8,8 @@ Licensed under the Open Software License version 3.0
 
 Status: adopted. `crates/geometry/src/compute.rs` owns the default native
 geometry envelopes; `GeometryWorkBudget::query()` and `::compile()` bind them
-to ordinary work. This decision changes default allowances only. Geometric
+to ordinary work. Display also accepts a borrowed caller allowance and phase
+observer rather than imposing a second hidden ceiling. Geometric
 tolerances, material/void/incidence obligations, independent emitted-program
 verification and physical qualification are unchanged.
 
@@ -49,6 +50,9 @@ reuse, layer or API boundary does not reset it. Byte limits are live bounds for
 the owner named by each constant, not additive process-RSS promises. Existing
 borrowed-work and explicit byte-limit APIs permit narrower caller limits;
 convenience APIs choose fixed defaults and do not expose every allowance.
+`tessellate_with_work` accepts the display caller's guard and a synchronous
+phase observer. The engine retains one display guard across all definitions
+rebuilt by an open operation as well as all faces and refinement attempts.
 Deliberate exhaustion, overflow, cancellation and stale-result tests keep their narrow
 selectors; ordinary positive tests use the default policy.
 
@@ -67,7 +71,12 @@ invalid chart, stalled enclosure or combinatorial blowup.
 Valid but expensive work may now run for tens of seconds or minutes. It must
 run off the UI thread from first dispatch, report real stages or indeterminate
 progress, and remain cancellable; consumed allowance divided by the maximum is
-not progress. A later engine-owned aggregate reservation still has to account
+not progress. Native display reports edge preparation, candidate generation,
+independent auditing and completed-face counts for the current attempt. The
+engine coalesces these through one job-bound slot into existing Operations
+phase metadata, without a second scheduler or per-cell IPC. Stale progress
+cannot override cancellation, promotion or terminal status.
+A later engine-owned aggregate reservation still has to account
 for coexisting definitions, jobs, meshes and outputs rather than summing these
 independent maxima.
 
@@ -86,6 +95,13 @@ wide or unindexable chords retain all-pairs checks. The 512-hole plate motivates
 the query default, not a per-fixture exception or a promise that every large
 section fits. Preparation cost and full-engine resource qualification remain
 separate obligations.
+
+Display trim circuits similarly use a closed UV box sweep before unchanged
+interval joint/crossing proofs. It prunes only strictly disjoint boxes across
+all source loops, with charged cancellable sorting and coexisting storage
+admission. A high work count can expose avoidable candidate enumeration, not
+intrinsically expensive geometry. Phase-scoped diagnostics must identify that
+distinction before selecting either an algorithm change or a larger allowance.
 
 These are software resource defaults, not measured hardware requirements,
 universal GPU/platform qualification, printability or machine readiness.

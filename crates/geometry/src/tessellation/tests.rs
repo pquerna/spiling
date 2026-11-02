@@ -101,6 +101,72 @@ fn audit_encoded(definition: &Definition, encoded: &MeshArtifact) {
 }
 
 #[test]
+fn caller_work_and_progress_cover_the_complete_display_without_resetting() {
+    let definition = fixture("box-mm.step");
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::query();
+    work.charge(11, &cancel).unwrap();
+    let mut updates = Vec::new();
+    crate::tessellate_with_work(
+        &definition,
+        DisplayProfile::MeshTrimmedMm005V2,
+        &cancel,
+        MeshBudget::FROZEN,
+        &mut work,
+        &mut |update| updates.push(update),
+    )
+    .unwrap();
+    assert_eq!(updates[0].stage, DisplayStage::PreparingEdges);
+    assert!(updates[0].consumed_work > 11);
+    assert!(updates.windows(2).all(|pair| {
+        pair[0].consumed_work <= pair[1].consumed_work
+            && pair[0].completed_faces <= pair[1].completed_faces
+    }));
+    let completed: Vec<_> = updates
+        .iter()
+        .filter(|update| update.stage == DisplayStage::FaceComplete)
+        .map(|update| update.completed_faces)
+        .collect();
+    assert_eq!(completed, vec![1, 2, 3, 4, 5, 6]);
+    let last = updates.last().unwrap();
+    assert_eq!(last.stage, DisplayStage::Complete);
+    assert_eq!(last.total_faces, 6);
+    assert_eq!(last.completed_faces, last.total_faces);
+    assert_eq!(last.consumed_work, work.consumed());
+    let mut limited = GeometryWorkBudget::new(work.consumed() - 12);
+    let mut stages = Vec::new();
+    let failure = crate::tessellate_with_work(
+        &definition,
+        DisplayProfile::MeshTrimmedMm005V2,
+        &cancel,
+        MeshBudget::FROZEN,
+        &mut limited,
+        &mut |update| stages.push(update.stage),
+    )
+    .unwrap_err();
+    assert_eq!(failure.code, GeometryErrorCode::ResourceLimit);
+    assert!(!stages.contains(&DisplayStage::Complete));
+    let mut stages = Vec::new();
+    let failure = crate::tessellate_with_work(
+        &definition,
+        DisplayProfile::MeshTrimmedMm005V2,
+        &cancel,
+        MeshBudget::FROZEN,
+        &mut GeometryWorkBudget::query(),
+        &mut |update| {
+            stages.push(update.stage);
+            if update.stage == DisplayStage::AuditingFace {
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+            }
+        },
+    )
+    .unwrap_err();
+    assert_eq!(failure.code, GeometryErrorCode::Cancelled);
+    assert!(stages.contains(&DisplayStage::AuditingFace));
+    assert!(!stages.contains(&DisplayStage::Complete));
+}
+
+#[test]
 fn original_parts_preserve_all_source_faces_analytic_normals_and_profile_precision() {
     for name in [
         "box-mm.step",

@@ -360,6 +360,16 @@ impl Runtime {
                 }
             }
         }
+        if let Some((job, stage)) = self.worker.progress.lock().take()
+            && self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.id == job && !active.deciding)
+            && let Some(current) = self.jobs.get_mut(&job)
+            && current.status == JobStatus::Running
+        {
+            current.stage = stage;
+        }
         if let Some(active) = &self.active
             && active.cancel.load(Ordering::Acquire)
             && !active.deciding

@@ -1186,7 +1186,34 @@ async fn native_source_paths_preserve_non_utf8_bytes_and_reject_nonregular_handl
 #[tokio::test]
 async fn frozen_plate_transfers_real_bounded_chunks_and_releases_the_lease() {
     let mut client = EngineClient::spawn(ENGINE).await.unwrap();
-    let summary = import(&mut client, "perforated-plate.step", RigidPoseMm::IDENTITY).await;
+    let operation = start_import(
+        &mut client,
+        fixture("perforated-plate.step"),
+        RigidPoseMm::IDENTITY,
+    )
+    .await;
+    let started = Instant::now();
+    let mut saw_audit = false;
+    let summary = loop {
+        assert!(
+            started.elapsed()
+                < Duration::from_millis(u64::from(JOB_CANCEL_AFTER_MS + JOB_CANCEL_GRACE_MS))
+        );
+        let job = client.native_operation(&operation).await.unwrap();
+        saw_audit |= job.stage.starts_with("display_auditing_faces_");
+        if job.status.is_terminal() {
+            assert_eq!(job.status, JobStatus::Completed, "{job:?}");
+            let Some(JobResult::Scene { summary }) = job.result else {
+                panic!("expected plate import scene result");
+            };
+            break summary;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        saw_audit,
+        "real display audit phases must reach Operations while native work runs"
+    );
     let definition = definitions(&mut client, &summary).await.remove(0);
     let hashes = mesh(&mut client, &definition).await;
     assert!(summary.unique_mesh_bytes > 0);
@@ -1222,6 +1249,43 @@ async fn frozen_plate_transfers_real_bounded_chunks_and_releases_the_lease() {
         .await,
         GeometryErrorCode::UnknownHandle,
     );
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_plate_display_audit_reports_progress_and_preserves_existing_scene() {
+    let mut client = EngineClient::spawn(ENGINE).await.unwrap();
+    let before = import(&mut client, "box-mm.step", RigidPoseMm::IDENTITY).await;
+    let revision = project_revision(&client).await;
+    let operation = start_import(
+        &mut client,
+        fixture("perforated-plate.step"),
+        RigidPoseMm::IDENTITY,
+    )
+    .await;
+    let started = Instant::now();
+    loop {
+        assert!(started.elapsed() < Duration::from_millis(u64::from(JOB_CANCEL_AFTER_MS)));
+        let job = client.native_operation(&operation).await.unwrap();
+        assert!(
+            !job.status.is_terminal(),
+            "display audit must be observable before publication: {job:?}"
+        );
+        if job.stage.starts_with("display_auditing_faces_") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    client.rpc().cancel_operation(&operation).await.unwrap();
+    let started = Instant::now();
+    let cancelled = wait_job_with_timeout(&mut client, operation, Duration::from_secs(5)).await;
+    assert_eq!(cancelled.status, JobStatus::Cancelled, "{cancelled:?}");
+    assert!(cancelled.outputs.is_empty());
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(scene(&mut client).await, before);
+    assert_eq!(project_revision(&client).await, revision);
+    let definition = definitions(&mut client, &before).await.remove(0);
+    assert!(!mesh(&mut client, &definition).await.is_empty());
     client.shutdown().await.unwrap();
 }
 

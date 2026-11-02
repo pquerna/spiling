@@ -13,6 +13,8 @@ pub mod parametric;
 mod section;
 mod tessellation;
 
+pub use tessellation::{DisplayProgress, DisplayStage};
+
 #[cfg(test)]
 #[path = "../examples/corpus/ast.rs"]
 pub(crate) mod corpus_fixtures;
@@ -218,6 +220,20 @@ pub fn tessellate_with_budget(
     budget: MeshBudget,
 ) -> Result<MeshArtifact, GeometryError> {
     tessellation::tessellate(definition, profile, cancel, budget)
+}
+
+/// Borrow the caller's cumulative work allowance and report native display phases.
+/// Face counts apply to the current refinement attempt; work consumption is not
+/// percentage complete. Callbacks run on the native caller thread.
+pub fn tessellate_with_work(
+    definition: &Definition,
+    profile: DisplayProfile,
+    cancel: &AtomicBool,
+    budget: MeshBudget,
+    work: &mut GeometryWorkBudget,
+    progress: &mut impl FnMut(DisplayProgress),
+) -> Result<MeshArtifact, GeometryError> {
+    tessellation::tessellate_with_work(definition, profile, cancel, budget, work, progress)
 }
 
 pub fn section(

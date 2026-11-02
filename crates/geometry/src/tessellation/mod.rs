@@ -23,11 +23,47 @@ use std::sync::atomic::AtomicBool;
 
 const PROOF_BYTES: usize = crate::compute::DISPLAY_PROOF_BYTES;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayStage {
+    PreparingEdges,
+    TessellatingFace,
+    AuditingFace,
+    FaceComplete,
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayProgress {
+    pub stage: DisplayStage,
+    pub attempt: u32,
+    pub completed_faces: u32,
+    pub total_faces: u32,
+    pub consumed_work: u64,
+}
+
 pub(crate) fn tessellate(
     definition: &Definition,
     profile: DisplayProfile,
     cancel: &AtomicBool,
     budget: MeshBudget,
+) -> Result<MeshArtifact, GeometryError> {
+    tessellate_with_work(
+        definition,
+        profile,
+        cancel,
+        budget,
+        &mut GeometryWorkBudget::query(),
+        &mut |_| {},
+    )
+}
+
+pub(crate) fn tessellate_with_work(
+    definition: &Definition,
+    profile: DisplayProfile,
+    cancel: &AtomicBool,
+    budget: MeshBudget,
+    work: &mut GeometryWorkBudget,
+    progress: &mut impl FnMut(DisplayProgress),
 ) -> Result<MeshArtifact, GeometryError> {
     check_cancel(cancel)?;
     budget.validate()?;
@@ -42,7 +78,6 @@ pub(crate) fn tessellate(
     }
     let brep = definition.brep();
     let kernel = crate::make_kernel_context();
-    let mut work = GeometryWorkBudget::query();
     let mut options = TessellateOptions {
         chord_tolerance: Tolerance::Absolute(MESH_CARRIER_TOLERANCE_MM * 0.25),
         max_triangles_per_face: budget.triangles as usize,
@@ -63,7 +98,15 @@ pub(crate) fn tessellate(
     let mut first_refinement = None;
     for attempt in 0..=8 {
         work.charge(1, cancel)?;
-        let edges = candidate_query(0, &mut work, cancel, |native| {
+        let mut phase = DisplayProgress {
+            stage: DisplayStage::PreparingEdges,
+            attempt: attempt as u32,
+            completed_faces: 0,
+            total_faces: faces.len() as u32,
+            consumed_work: work.consumed(),
+        };
+        progress(phase);
+        let edges = candidate_query(0, work, cancel, |native| {
             solidcore_mesh::tessellate_edge_set_with_budget(&kernel, brep, &options, native)
         })
         .map_err(|cause| {
@@ -102,7 +145,10 @@ pub(crate) fn tessellate(
                 candidate_options.max_triangles_per_face =
                     builder.remaining_budget().triangles as usize;
                 let occupied = edge_bytes.saturating_add(builder.retained_bytes());
-                let candidate = candidate_query(occupied, &mut work, cancel, |native| {
+                phase.stage = DisplayStage::TessellatingFace;
+                phase.consumed_work = work.consumed();
+                progress(phase);
+                let candidate = candidate_query(occupied, work, cancel, |native| {
                     solidcore_mesh::tessellate_face_with_budget(
                         &kernel,
                         brep,
@@ -126,6 +172,9 @@ pub(crate) fn tessellate(
                 if candidate.face != face {
                     return Err(invalid("native mesher changed source face identity"));
                 }
+                phase.stage = DisplayStage::AuditingFace;
+                phase.consumed_work = work.consumed();
+                progress(phase);
                 let data = audit::face(
                     definition,
                     ordinal,
@@ -133,7 +182,7 @@ pub(crate) fn tessellate(
                     &edges,
                     builder.remaining_budget(),
                     occupied,
-                    &mut work,
+                    work,
                     cancel,
                 )
                 .map_err(|cause| {
@@ -154,6 +203,10 @@ pub(crate) fn tessellate(
                     data.carrier_error,
                     data.trim_error,
                 )?;
+                phase.stage = DisplayStage::FaceComplete;
+                phase.completed_faces = ordinal as u32 + 1;
+                phase.consumed_work = work.consumed();
+                progress(phase);
             }
             check_cancel(cancel)?;
             builder.finish()
@@ -177,7 +230,13 @@ pub(crate) fn tessellate(
                     None => cause,
                 });
             }
-            Ok(mesh) => return Ok(mesh),
+            Ok(mesh) => {
+                phase.stage = DisplayStage::Complete;
+                phase.consumed_work = work.consumed();
+                progress(phase);
+                check_cancel(cancel)?;
+                return Ok(mesh);
+            }
         }
     }
     unreachable!("the last candidate returns its actual audit result")

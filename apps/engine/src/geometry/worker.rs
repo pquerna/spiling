@@ -252,6 +252,7 @@ pub struct Worker {
     pub command: SyncSender<Command>,
     pub result: Receiver<Event>,
     pub live: Live,
+    pub progress: Arc<Mutex<Option<(JobId, String)>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl Worker {
@@ -260,9 +261,11 @@ impl Worker {
         let (results, result) = mpsc::sync_channel(1);
         let live = Arc::new(Mutex::new(LiveSnapshot::default()));
         let snapshot = live.clone();
+        let progress = Arc::new(Mutex::new(None));
+        let worker_progress = progress.clone();
         let thread = std::thread::spawn(move || {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(commands, results, snapshot)
+                run(commands, results, snapshot, worker_progress)
             }))
             .is_err()
             {
@@ -278,6 +281,7 @@ impl Worker {
             command,
             result,
             live,
+            progress,
             thread: Some(thread),
         }
     }
@@ -306,7 +310,12 @@ fn reclaim(definitions: &mut BTreeMap<DefinitionId, Resident>, live: &Live, epoc
     // snapshot mutex during it; unchanged snapshots allocate/copy nothing.
     definitions.retain(|id, _| ids.contains(id));
 }
-fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
+fn run(
+    commands: Receiver<Command>,
+    results: SyncSender<Event>,
+    live: Live,
+    progress: Arc<Mutex<Option<(JobId, String)>>>,
+) {
     let mut definitions = BTreeMap::<DefinitionId, Resident>::new();
     let mut epoch = 0;
     loop {
@@ -330,6 +339,8 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
         reclaim(&mut definitions, &live, &mut epoch);
         let mut pending = BTreeMap::new();
         let mut pending_records = BTreeMap::new();
+        let report = |stage: String| *progress.lock() = Some((job, stage));
+        let mut display_work = GeometryWorkBudget::query();
         let result = match work {
             Work::StorageMaintenance {
                 storage,
@@ -404,32 +415,40 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
                 source,
                 allowed_reuse,
                 budget,
-            } => import(source, &definitions, &allowed_reuse, budget, &cancel).map(
-                |(product, resident)| {
-                    if let Some(resident) = resident {
-                        pending.insert(resident.definition.id().clone(), resident);
-                    }
-                    Product::Import(product)
-                },
-            ),
-            Work::Open(request) => open(request, &definitions, &cancel).map(
-                |Opened {
-                     project,
-                     imports,
-                     residents,
-                 }| {
-                    for imported in &imports {
-                        if matches!(imported.display, ImportedDisplay::Reused) {
-                            pending_records.insert(
-                                imported.definition_id.clone(),
-                                imported.source.record.clone(),
-                            );
+            } => import(
+                source,
+                &definitions,
+                &allowed_reuse,
+                budget,
+                &cancel,
+                &mut display_work,
+                &report,
+            )
+            .map(|(product, resident)| {
+                if let Some(resident) = resident {
+                    pending.insert(resident.definition.id().clone(), resident);
+                }
+                Product::Import(product)
+            }),
+            Work::Open(request) => open(request, &definitions, &cancel, &mut display_work, &report)
+                .map(
+                    |Opened {
+                         project,
+                         imports,
+                         residents,
+                     }| {
+                        for imported in &imports {
+                            if matches!(imported.display, ImportedDisplay::Reused) {
+                                pending_records.insert(
+                                    imported.definition_id.clone(),
+                                    imported.source.record.clone(),
+                                );
+                            }
                         }
-                    }
-                    pending = residents;
-                    Product::Open { project, imports }
-                },
-            ),
+                        pending = residents;
+                        Product::Open { project, imports }
+                    },
+                ),
             Work::Save {
                 snapshot,
                 existing,
@@ -632,12 +651,29 @@ impl Capacity {
         &mut self,
         definition: &Definition,
         cancel: &AtomicBool,
+        work: &mut GeometryWorkBudget,
+        progress: &dyn Fn(String),
     ) -> Result<MeshArtifact, GeometryError> {
-        let mesh = spiling_geometry::tessellate_with_budget(
+        let mesh = spiling_geometry::tessellate_with_work(
             definition,
             DisplayProfile::MeshTrimmedMm005V2,
             cancel,
             self.mesh,
+            work,
+            &mut |update| {
+                use spiling_geometry::DisplayStage;
+                let stage = match update.stage {
+                    DisplayStage::PreparingEdges => "preparing_edges",
+                    DisplayStage::TessellatingFace => "tessellating",
+                    DisplayStage::AuditingFace => "auditing",
+                    DisplayStage::FaceComplete => "face_complete",
+                    DisplayStage::Complete => "complete",
+                };
+                progress(format!(
+                    "display_{stage}_faces_{}_of_{}_attempt_{}",
+                    update.completed_faces, update.total_faces, update.attempt,
+                ));
+            },
         )?;
         if mesh.vertex_count > self.mesh.vertices
             || mesh.triangle_count > self.mesh.triangles
@@ -657,8 +693,10 @@ impl Capacity {
         &mut self,
         definition: &Definition,
         cancel: &AtomicBool,
+        work: &mut GeometryWorkBudget,
+        progress: &dyn Fn(String),
     ) -> Result<ImportedDisplay, GeometryError> {
-        match self.tessellate(definition, cancel) {
+        match self.tessellate(definition, cancel, work, progress) {
             Ok(mesh) => Ok(ImportedDisplay::Mesh(mesh)),
             Err(failure) => {
                 if failure.code == GeometryErrorCode::Cancelled {
@@ -721,6 +759,8 @@ fn import(
     reuse: &BTreeSet<DefinitionId>,
     budget: MeshBudget,
     cancel: &AtomicBool,
+    work: &mut GeometryWorkBudget,
+    progress: &dyn Fn(String),
 ) -> Result<(Imported, Option<Resident>), JobError> {
     check_cancel(cancel)?;
     let mut capacity = Capacity::new(definitions, budget);
@@ -740,6 +780,7 @@ fn import(
             None,
         ));
     }
+    progress("preparing_native_geometry".into());
     let definition = capacity.admit(&captured.bytes, cancel)?;
     let mut provenance = definition.provenance().clone();
     provenance.source_name = captured.label;
@@ -750,7 +791,7 @@ fn import(
         },
         captured.bytes,
     )?);
-    let display = capacity.display(&definition, cancel)?;
+    let display = capacity.display(&definition, cancel, work, progress)?;
     let resident = resident(definition, &source, &display);
     let imported = imported(&resident.definition, source, display);
     check_cancel(cancel)?;
@@ -783,6 +824,8 @@ fn open(
     request: OpenRequest,
     definitions: &BTreeMap<DefinitionId, Resident>,
     cancel: &AtomicBool,
+    work: &mut GeometryWorkBudget,
+    progress: &dyn Fn(String),
 ) -> Result<Opened, JobError> {
     let OpenRequest {
         path,
@@ -875,10 +918,11 @@ fn open(
                 ImportedDisplay::Reused,
             ));
         } else {
+            progress("preparing_native_geometry".into());
             let definition = capacity.admit(source.bytes.as_slice(), cancel)?;
             validate_provenance(&definition, source)?;
             validate_surface_targets(&definition, &loaded.manifest.surface_overlays)?;
-            let display = capacity.display(&definition, cancel)?;
+            let display = capacity.display(&definition, cancel, work, progress)?;
             let resident = resident(definition, source, &display);
             imports.push(imported(&resident.definition, source.clone(), display));
             pending.insert(id.clone(), resident);
@@ -1333,6 +1377,8 @@ mod geometry_only_tests {
                 bytes: 0,
             },
             &cancel,
+            &mut GeometryWorkBudget::query(),
+            &|_| {},
         )
         .unwrap();
         assert!(matches!(
@@ -1373,7 +1419,12 @@ mod geometry_only_tests {
             },
         );
         assert!(matches!(
-            capacity.display(&resident.definition, &cancel),
+            capacity.display(
+                &resident.definition,
+                &cancel,
+                &mut GeometryWorkBudget::query(),
+                &|_| {},
+            ),
             Err(GeometryError {
                 code: GeometryErrorCode::Cancelled,
                 ..
