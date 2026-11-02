@@ -627,7 +627,7 @@ export type LayerHeightAssessment = { policy: LayerHeightPolicy, requested_mm: n
 
 export type PlanarPrintRecipe = { id: string, revision: string, material_id: string, material_revision: string, filament_diameter_mm: number, layer_height_mm: number, layer_height_policy: LayerHeightPolicy, native_shape_error_mm: number, bead_width_mm: number, sparse_infill: SparseInfillPolicy, perimeter_count: number, infill_fraction: number, top_skin_thickness_mm: number, bottom_skin_thickness_mm: number, print_speed_mm_s: number, travel_speed_mm_s: number, flow_multiplier: number, process: ProcessPolicy, supports: SupportPolicy, seam_policy: SeamPolicy, rectilinear_axis: RectilinearAxisPolicy, top_skin_axis: RectilinearAxisPolicy, };
 
-export type SeamPolicy = { "kind": "nearest" } | { "kind": "preferred_build_direction", xy: [number, number], };
+export type SeamPolicy = { "kind": "nearest" } | { "kind": "preferred_build_direction", xy: [number, number], } | { "kind": "distributed" };
 
 export type RectilinearAxisPolicy = "x" | "y" | "alternating_xy" | "alternating_yx";
 

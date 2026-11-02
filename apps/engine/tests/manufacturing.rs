@@ -272,6 +272,255 @@ async fn preflight(client: &mut EngineClient) -> NativeOperationView {
     wait(client, operation.name).await
 }
 
+fn actual_closed_wall_starts(bytes: &[u8]) -> Vec<(u16, u32, [f64; 3])> {
+    let mut strokes: Vec<(u16, u32, Vec<[f64; 3]>)> = Vec::new();
+    let mut previous = None;
+    let mut active = false;
+    for event in bytes[REPLAY_HEADER_BYTES..]
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+    {
+        let position = std::array::from_fn(|axis| {
+            f64::from_le_bytes(event[axis * 8..axis * 8 + 8].try_into().unwrap())
+        });
+        let layer = u16::from_le_bytes(event[44..46].try_into().unwrap());
+        let tool = u32::from_le_bytes(event[76..80].try_into().unwrap());
+        let wall = matches!(event[46], 1 | 8)
+            && event[47] & 2 != 0
+            && u32::from_le_bytes(event[72..76].try_into().unwrap()) == u32::MAX - 2;
+        if wall {
+            if !active
+                || strokes
+                    .last()
+                    .is_none_or(|stroke| (stroke.0, stroke.1) != (layer, tool))
+            {
+                strokes.push((layer, tool, vec![previous.expect("wall entry travel")]));
+            }
+            strokes.last_mut().unwrap().2.push(position);
+        }
+        active = wall;
+        previous = Some(position);
+    }
+    strokes
+        .into_iter()
+        .filter(|(_, _, points)| points.len() >= 4 && points.first() == points.last())
+        .map(|(layer, tool, points)| (layer, tool, points[0]))
+        .collect()
+}
+
+fn deposition_edge_inventory(plan: &NormalizedPrintPlan) -> Vec<String> {
+    let mut edges = Vec::new();
+    for layer in &plan.layers {
+        for path in &layer.paths {
+            for edge in path.checked_edges().unwrap() {
+                let mut points = [edge.points_mm[0], edge.points_mm[1]];
+                points.sort_by(|left, right| left.partial_cmp(right).unwrap());
+                edges.push(
+                    serde_json::to_string(&(
+                        layer.index,
+                        path.kind,
+                        &path.owner,
+                        &path.material_domain,
+                        edge.width_mm,
+                        path.physical_z_mm,
+                        points,
+                    ))
+                    .unwrap(),
+                );
+            }
+        }
+    }
+    edges.sort();
+    edges
+}
+
+async fn seam_motion(
+    client: &mut EngineClient,
+    record: &ManufacturingArtifactRecord,
+) -> (
+    Vec<u8>,
+    VerificationReport,
+    ManufacturingInspectionProvenance,
+) {
+    let before = status(client).await;
+    let ManufacturingResponse::OperationAccepted { operation } = client
+        .manufacturing(ManufacturingCommand::Inspect {
+            session_id: client.hello().session_id.clone(),
+            base_revision: before.0.revision,
+            output: VerificationOutput::ReportAndMotion,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("seam actual-program inspection")
+    };
+    let completed = wait(client, operation.name).await;
+    assert_eq!(completed.status, JobStatus::Completed, "{completed:?}");
+    let Some(JobResult::ManufacturingVerified {
+        record: verified,
+        report,
+        provenance,
+        replay_display: Some(display),
+        ..
+    }) = completed.result
+    else {
+        panic!("fresh seam report and motion")
+    };
+    assert_eq!(&verified, record);
+    assert!(report.verified);
+    assert_eq!(provenance.input_hash, record.input_hash);
+    let bytes = client.fetch_replay_display(record, &display).await.unwrap();
+    assert_eq!(status(client).await, before);
+    (bytes, report, provenance)
+}
+
+#[tokio::test]
+async fn distributed_seams_change_actual_closed_wall_starts_and_survive_fresh_replay() {
+    use spiling_engine_client::export::OutputDirectory;
+
+    let work = Workspace::new();
+    let source = work.source("box-mm.step");
+    let project = work.0.join("distributed.spil");
+    let mut client = spawn().await;
+    import(&mut client, &source).await;
+    let captured = scene(&mut client).await;
+    let GeometryResponse::ScenePage { occurrences, .. } = client
+        .geometry(GeometryCommand::GetScenePage {
+            session_id: captured.session_id.clone(),
+            revision: captured.revision,
+            kind: ScenePageKind::Occurrences,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("seam source occurrence")
+    };
+    let mut nearest: ManufacturingIntent = serde_json::from_slice(
+        &std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/manufacturing/complete-sparse.intent.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    nearest.recipe.perimeter_count = 1;
+    let revision = status(&mut client).await.0.revision;
+    let prepared = client
+        .prepare_bed_pose(
+            &captured,
+            revision,
+            &occurrences[0],
+            nearest.printer.build_envelope,
+            true,
+        )
+        .await
+        .unwrap();
+    client
+        .geometry(GeometryCommand::SetInstancePose {
+            session_id: captured.session_id,
+            base_revision: prepared.scene_revision,
+            project_revision: prepared.project_revision,
+            occurrence_id: occurrences[0].occurrence_id,
+            pose: prepared.pose,
+        })
+        .await
+        .unwrap();
+    let unchanged_scene = scene(&mut client).await;
+    assert_eq!(nearest.recipe.seam_policy, SeamPolicy::Nearest);
+    set_intent(&mut client, nearest.clone()).await;
+    let baseline_record = compile(&mut client).await;
+    let baseline = fetch_bundle(&mut client, &baseline_record).await.unwrap();
+    let (baseline_motion, baseline_report, _) = seam_motion(&mut client, &baseline_record).await;
+    let baseline_starts = actual_closed_wall_starts(&baseline_motion);
+
+    let mut distributed = nearest;
+    distributed.recipe.seam_policy = SeamPolicy::Distributed;
+    set_intent(&mut client, distributed.clone()).await;
+    assert!(status(&mut client).await.1.is_none());
+    history(&mut client, true).await;
+    assert_eq!(status(&mut client).await.1, Some(baseline_record));
+    history(&mut client, false).await;
+    assert!(status(&mut client).await.1.is_none());
+    assert_eq!(scene(&mut client).await, unchanged_scene);
+    let record = compile(&mut client).await;
+    let bundle = fetch_bundle(&mut client, &record).await.unwrap();
+    assert_eq!(bundle.provenance.intent, distributed);
+    assert_eq!(
+        bundle.provenance.definitions,
+        baseline.provenance.definitions
+    );
+    assert_ne!(record.input_hash, baseline.provenance.input_hash);
+    assert_eq!(
+        deposition_edge_inventory(&bundle.plan),
+        deposition_edge_inventory(&baseline.plan)
+    );
+    let (motion, report, provenance) = seam_motion(&mut client, &record).await;
+    let starts = actual_closed_wall_starts(&motion);
+    assert!(starts.len() > 8);
+    for (captured_bundle, observed) in [(&baseline, &baseline_starts), (&bundle, &starts)] {
+        let closed_walls = captured_bundle
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.paths)
+            .filter(|path| {
+                path.owner == Some(DepositionOwner::Wall)
+                    && path.points_mm.first() == path.points_mm.last()
+            })
+            .count();
+        assert_eq!(observed.len(), closed_walls);
+        assert_eq!(observed.len(), captured_bundle.plan.layers.len());
+    }
+    assert_eq!(starts[0], baseline_starts[0]);
+    assert!(
+        starts
+            .iter()
+            .zip(&baseline_starts)
+            .skip(1)
+            .any(|(distributed, nearest)| distributed != nearest),
+        "one closed wall per layer must carry seam history across layers"
+    );
+    assert!((report.deposited_volume_mm3 - baseline_report.deposited_volume_mm3).abs() < 0.001);
+    assert_eq!(
+        report.deposition_segments,
+        baseline_report.deposition_segments
+    );
+    assert_eq!(provenance.workflow, distributed.printer.workflow);
+    assert!(record.summary.software_only);
+    save(&mut client, &project).await;
+    let first_session = client.hello().session_id.clone();
+    client.shutdown().await.unwrap();
+    std::fs::remove_file(source).unwrap();
+
+    let mut reader = spawn().await;
+    assert_ne!(reader.hello().session_id, first_session);
+    assert_eq!(
+        open(&mut reader, &project, true).await.status,
+        JobStatus::Completed
+    );
+    let before = status(&mut reader).await;
+    assert!(before.0.read_only && !before.0.dirty && !before.0.can_undo);
+    assert_eq!(fetch_bundle(&mut reader, &record).await.unwrap(), bundle);
+    let (fresh_motion, fresh_report, fresh_provenance) = seam_motion(&mut reader, &record).await;
+    assert_eq!(fresh_motion, motion);
+    assert_eq!(fresh_report, report);
+    assert_eq!(fresh_provenance, provenance);
+    let destination = work.0.join("fresh-export");
+    let mut output = OutputDirectory::create(&destination).unwrap();
+    output
+        .write_manufacturing_bundle(&bundle, &fresh_report, &fresh_provenance)
+        .unwrap();
+    output.commit();
+    drop(output);
+    assert_eq!(
+        std::fs::read(destination.join("program.gcode")).unwrap(),
+        bundle.program.as_bytes()
+    );
+    assert_eq!(status(&mut reader).await, before);
+    reader.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn preferred_goal_survives_history_and_source_independent_fresh_replay() {
     let work = Workspace::new();

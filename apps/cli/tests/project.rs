@@ -444,6 +444,255 @@ fn manufacturing_intent_fixture() -> PathBuf {
 }
 
 #[test]
+fn seam_policy_json_refuses_missing_unknown_and_variant_fields_before_engine_spawn() {
+    let root = root();
+    let intent_path = root.join("intent.json");
+    let declared: Value =
+        serde_json::from_slice(&std::fs::read(manufacturing_intent_fixture()).unwrap()).unwrap();
+    for (policy, expected) in [
+        (None, "missing field `seam_policy`"),
+        (
+            Some(serde_json::json!({"kind":"random"})),
+            "unknown variant",
+        ),
+        (
+            Some(serde_json::json!({"kind":"distributed","xy":[1,0]})),
+            "unknown field",
+        ),
+        (
+            Some(serde_json::json!({"kind":"distributed","seed":42})),
+            "unknown field",
+        ),
+        (
+            Some(serde_json::json!({"kind":"nearest","xy":[1,0]})),
+            "unknown field",
+        ),
+        (
+            Some(serde_json::json!({"kind":"preferred_build_direction"})),
+            "missing field `xy`",
+        ),
+    ] {
+        let mut invalid = declared.clone();
+        if let Some(policy) = policy {
+            invalid["recipe"]["seam_policy"] = policy;
+        } else {
+            invalid["recipe"]
+                .as_object_mut()
+                .unwrap()
+                .remove("seam_policy");
+        }
+        std::fs::write(&intent_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let error = terminal_error(
+            Command::new(env!("CARGO_BIN_EXE_spiling-cli"))
+                .arg("--engine")
+                .arg(root.join("missing-engine"))
+                .args(["project", "create"])
+                .arg(root.join("never-created.spil"))
+                .arg("--intent")
+                .arg(&intent_path)
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(error["domain"], "input_or_output");
+        assert!(
+            error["message"].as_str().unwrap().contains(expected),
+            "{error}"
+        );
+        assert!(!root.join("never-created.spil").exists());
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "actual source-backed seam CLI regression; requires SPILING_TEST_ENGINE"]
+fn distributed_seam_history_source_deleted_readonly_replay_and_export() {
+    use spiling_contracts::manufacturing::{
+        ManufacturingArtifactRecord, ManufacturingIntent, ReplayDisplayDescriptor,
+        validate_replay_display,
+    };
+
+    let root = root();
+    let project = root.join("seams.spil");
+    let source = root.join("original.step");
+    let nearest_path = root.join("nearest.intent.json");
+    let distributed_path = root.join("distributed.intent.json");
+    std::fs::copy(fixture("box-mm.step"), &source).unwrap();
+    let complete_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/manufacturing/complete-sparse.intent.json");
+    let nearest: Value = serde_json::from_slice(&std::fs::read(complete_fixture).unwrap()).unwrap();
+    let mut distributed = nearest.clone();
+    distributed["recipe"]["seam_policy"] = serde_json::json!({"kind":"distributed"});
+    std::fs::write(&nearest_path, serde_json::to_vec(&nearest).unwrap()).unwrap();
+    std::fs::write(&distributed_path, serde_json::to_vec(&distributed).unwrap()).unwrap();
+    let baseline_export = root.join("nearest-export");
+    let baseline_replay = root.join("nearest.splr");
+    let baseline = report(
+        cli("create", &project)
+            .arg("--import")
+            .arg(&source)
+            .arg("--intent")
+            .arg(&nearest_path)
+            .args([
+                "--center-on-bed",
+                "1",
+                "--preflight",
+                "--compile",
+                "--verify",
+                "--manufacturing-out",
+            ])
+            .arg(&baseline_export)
+            .arg("--replay-out")
+            .arg(&baseline_replay)
+            .output()
+            .unwrap(),
+    );
+    let first_export = root.join("distributed-export");
+    let first_replay = root.join("distributed.splr");
+    let authored = report(
+        cli("edit", &project)
+            .arg("--intent")
+            .arg(&distributed_path)
+            .args([
+                "--undo",
+                "--redo",
+                "--preflight",
+                "--compile",
+                "--verify",
+                "--manufacturing-out",
+            ])
+            .arg(&first_export)
+            .output()
+            .unwrap(),
+    );
+    let inspected = report(
+        cli("inspect", &project)
+            .arg("--replay-out")
+            .arg(&first_replay)
+            .output()
+            .unwrap(),
+    );
+    let operations = authored["operations"].as_array().unwrap();
+    let operation = |name| {
+        operations
+            .iter()
+            .find(|row| row["operation"] == name)
+            .unwrap()
+    };
+    assert!(operation("intent")["manufacturing"]["artifact"].is_null());
+    assert_eq!(
+        operation("undo")["manufacturing"]["artifact"],
+        baseline["manufacturing"]["artifact"]
+    );
+    assert!(operation("redo")["manufacturing"]["artifact"].is_null());
+    assert_eq!(
+        authored["manufacturing"]["preflight"]["disposition"],
+        "admitted"
+    );
+    assert_eq!(authored["project"]["dirty"], false);
+    assert_eq!(authored["project"]["can_undo"], true);
+    assert_eq!(authored["manufacturing"]["not_machine_ready"], true);
+    let captured: ManufacturingIntent =
+        serde_json::from_value(authored["manufacturing"]["intent"].clone()).unwrap();
+    assert_eq!(
+        captured,
+        serde_json::from_value::<ManufacturingIntent>(distributed).unwrap()
+    );
+    assert_ne!(
+        authored["manufacturing"]["artifact"]["input_hash"],
+        baseline["manufacturing"]["artifact"]["input_hash"]
+    );
+    assert_ne!(
+        std::fs::read(first_export.join("program.gcode")).unwrap(),
+        std::fs::read(baseline_export.join("program.gcode")).unwrap()
+    );
+    let actual = std::fs::read(&first_replay).unwrap();
+    let baseline_actual = std::fs::read(&baseline_replay).unwrap();
+    assert_ne!(
+        &actual[spiling_contracts::manufacturing::REPLAY_HEADER_BYTES..],
+        &baseline_actual[spiling_contracts::manufacturing::REPLAY_HEADER_BYTES..]
+    );
+    let provenance: Value =
+        serde_json::from_slice(&std::fs::read(first_export.join("provenance.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        provenance["intent"]["recipe"]["seam_policy"],
+        serde_json::json!({"kind":"distributed"})
+    );
+    assert_eq!(
+        provenance["intent"]["printer"]["workflow"]["kind"],
+        "complete_marlin"
+    );
+    std::fs::remove_file(source).unwrap();
+    std::fs::remove_file(nearest_path).unwrap();
+    std::fs::remove_file(distributed_path).unwrap();
+
+    let fresh_export = root.join("fresh-export");
+    let fresh_replay = root.join("fresh.splr");
+    let fresh = report(
+        cli("inspect", &project)
+            .args(["--preflight", "--verify", "--manufacturing-out"])
+            .arg(&fresh_export)
+            .arg("--replay-out")
+            .arg(&fresh_replay)
+            .output()
+            .unwrap(),
+    );
+    assert_ne!(
+        fresh["hello"]["session_id"],
+        authored["hello"]["session_id"]
+    );
+    assert_eq!(fresh["project"]["read_only"], true);
+    assert_eq!(fresh["project"]["dirty"], false);
+    assert_eq!(fresh["project"]["can_undo"], false);
+    assert_eq!(
+        fresh["project"]["revision"],
+        authored["project"]["revision"]
+    );
+    assert_eq!(
+        fresh["manufacturing"]["intent"],
+        authored["manufacturing"]["intent"]
+    );
+    assert_eq!(
+        fresh["manufacturing"]["artifact"],
+        authored["manufacturing"]["artifact"]
+    );
+    assert_eq!(
+        fresh["manufacturing"]["preflight"]["disposition"],
+        "admitted"
+    );
+    let descriptor: ReplayDisplayDescriptor =
+        serde_json::from_value(fresh["manufacturing_replay"]["replay_display"].clone()).unwrap();
+    let record: ManufacturingArtifactRecord =
+        serde_json::from_value(fresh["manufacturing"]["artifact"].clone()).unwrap();
+    descriptor.validate_for_record(&record).unwrap();
+    let fresh_actual = std::fs::read(fresh_replay).unwrap();
+    validate_replay_display(&fresh_actual, &descriptor).unwrap();
+    assert_eq!(fresh_actual, actual);
+    assert_eq!(
+        fresh["manufacturing_replay"],
+        inspected["manufacturing_replay"]
+    );
+    for name in [
+        "plan.json",
+        "program.gcode",
+        "verification.json",
+        "provenance.json",
+    ] {
+        assert_eq!(
+            std::fs::read(fresh_export.join(name)).unwrap(),
+            std::fs::read(first_export.join(name)).unwrap(),
+            "{name}"
+        );
+    }
+    let verified: Value =
+        serde_json::from_slice(&std::fs::read(fresh_export.join("verification.json")).unwrap())
+            .unwrap();
+    assert_eq!(verified, fresh["manufacturing_export"]["verification"]);
+    assert_eq!(verified["verified"], true);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 #[ignore = "actual preflight CLI regression; requires SPILING_TEST_ENGINE"]
 fn refused_preflight_is_read_only_and_never_supplies_machine_permissions() {
     let root = root();

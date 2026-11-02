@@ -954,6 +954,18 @@ fn seam_and_axis_json_are_explicit_strict_and_preserve_unit_directions() {
         serde_json::json!({"kind":"nearest"})
     );
     assert_eq!(value["recipe"]["rectilinear_axis"], "alternating_xy");
+    let mut distributed = original.clone();
+    distributed.recipe.seam_policy = SeamPolicy::Distributed;
+    assert_eq!(
+        serde_json::to_value(&distributed).unwrap()["recipe"]["seam_policy"],
+        serde_json::json!({"kind":"distributed"})
+    );
+    assert_eq!(
+        decode_intent(&serde_json::to_vec(&distributed).unwrap()).unwrap(),
+        distributed
+    );
+    let wire: crate::rpc::ManufacturingIntent = distributed.clone().try_into().unwrap();
+    assert_eq!(ManufacturingIntent::try_from(wire).unwrap(), distributed);
     for (axis, name) in [
         (RectilinearAxisPolicy::X, "x"),
         (RectilinearAxisPolicy::Y, "y"),
@@ -978,6 +990,8 @@ fn seam_and_axis_json_are_explicit_strict_and_preserve_unit_directions() {
         serde_json::json!({}),
         serde_json::json!({"kind":"unknown"}),
         serde_json::json!({"kind":"nearest","xy":[1.0,0.0]}),
+        serde_json::json!({"kind":"distributed","history":16}),
+        serde_json::json!({"kind":"distributed","xy":[1.0,0.0]}),
         serde_json::json!({"kind":"preferred_build_direction"}),
         serde_json::json!({"kind":"preferred_build_direction","xy":[1.0]}),
         serde_json::json!({"kind":"preferred_build_direction","xy":[1.0,0.0,0.0]}),

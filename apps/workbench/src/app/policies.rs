@@ -86,13 +86,38 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
             }
         }
     });
-    egui::CollapsingHeader::new(format!("Seam · {}", if matches!(intent.recipe.seam_policy, SeamPolicy::Nearest) { "Nearest" } else { "Preferred direction" })).id_salt("seam-policy").show(ui,|ui|{
-        let mut preferred=matches!(intent.recipe.seam_policy,SeamPolicy::PreferredBuildDirection{..});
-        if ui.checkbox(&mut preferred,"Preferred build/machine XY seam direction").changed(){intent.recipe.seam_policy=if preferred{SeamPolicy::PreferredBuildDirection{xy:[0.0,0.0]}}else{SeamPolicy::Nearest};}
-        if let SeamPolicy::PreferredBuildDirection{xy}=&mut intent.recipe.seam_policy{ui::number(ui,"Build X direction",&mut xy[0],0.1);ui::number(ui,"Build Y direction",&mut xy[1],0.1);ui.weak("Apply normalizes a finite nonzero direction. It selects existing perimeter vertices; bridge/support orientation remains native.");}
-        for (label,value) in [("Interior hatch",&mut intent.recipe.rectilinear_axis),("Top skin hatch",&mut intent.recipe.top_skin_axis)]{
-            egui::ComboBox::from_id_salt(label).selected_text(format!("{label}: {value:?}")).show_ui(ui,|ui|{for variant in [RectilinearAxisPolicy::X,RectilinearAxisPolicy::Y,RectilinearAxisPolicy::AlternatingXY,RectilinearAxisPolicy::AlternatingYX]{ui.selectable_value(value,variant,format!("{variant:?}"));}});
-        }
+    egui::CollapsingHeader::new("Hatch directions")
+        .id_salt("hatch-directions")
+        .show(ui, |ui| {
+            for (label, value) in [
+                ("Interior hatch", &mut intent.recipe.rectilinear_axis),
+                ("Top skin hatch", &mut intent.recipe.top_skin_axis),
+            ] {
+                egui::ComboBox::from_id_salt(label)
+                    .selected_text(format!("{label}: {value:?}"))
+                    .show_ui(ui, |ui| {
+                        for variant in [
+                            RectilinearAxisPolicy::X,
+                            RectilinearAxisPolicy::Y,
+                            RectilinearAxisPolicy::AlternatingXY,
+                            RectilinearAxisPolicy::AlternatingYX,
+                        ] {
+                            ui.selectable_value(value, variant, format!("{variant:?}"));
+                        }
+                    });
+            }
+        });
+}
+
+pub(super) fn seam_fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
+    ui.weak("Entire print job · closed constructed walls");
+    egui::CollapsingHeader::new(format!(
+        "Wall starts · {}",
+        ui::seam_summary(&intent.recipe.seam_policy)
+    ))
+    .id_salt("seam-policy")
+    .show(ui, |ui| {
+        ui::seam_policy_fields(ui, &mut intent.recipe.seam_policy);
     });
 }
 
@@ -192,5 +217,22 @@ mod tests {
         let mut expected = result;
         expected.recipe.flow_multiplier = 0.95;
         assert_eq!(prepared(&edited).unwrap(), expected);
+    }
+
+    #[test]
+    fn spreading_starts_commits_the_full_intent_without_hatch_edits() {
+        let original: ManufacturingIntent = serde_json::from_str(include_str!(
+            "../../../../fixtures/manufacturing/complete-sparse.intent.json"
+        ))
+        .unwrap();
+        let mut draft = original.clone();
+        draft.recipe.seam_policy = SeamPolicy::Distributed;
+        draft.recipe.flow_multiplier = 0.96;
+        let applied = prepared(&draft).unwrap();
+        assert_eq!(applied, draft);
+        let mut restored = applied;
+        restored.recipe.seam_policy = original.recipe.seam_policy;
+        restored.recipe.flow_multiplier = original.recipe.flow_multiplier;
+        assert_eq!(restored, original);
     }
 }

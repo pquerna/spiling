@@ -662,7 +662,16 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
     let intent_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/manufacturing/complete-sparse.intent.json");
     let loaded = send(&host, Action::LoadIntent(native(&intent_path)));
-    let intent = loaded.manufacturing.loaded.as_ref().unwrap().intent.clone();
+    let mut intent = loaded
+        .manufacturing
+        .loaded
+        .as_ref()
+        .unwrap()
+        .intent
+        .as_ref()
+        .clone();
+    intent.recipe.seam_policy = SeamPolicy::Distributed;
+    let intent = Arc::new(intent);
     let h = s.hello.as_ref().unwrap();
     let serial = host.snapshot().serial;
     host.manufacturing(ManufacturingCommand::SetIntent {
@@ -817,6 +826,44 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
     );
     let replay = r.display.as_ref().unwrap();
     assert!(!replay.batches.is_empty());
+    assert_eq!(
+        r.bundle.provenance.intent.recipe.seam_policy,
+        SeamPolicy::Distributed
+    );
+    assert!(!replay.seams.is_empty());
+    let mut selected_seam = None;
+    let mut seam_view = crate::replay::View {
+        seams: true,
+        ..Default::default()
+    };
+    ctx.run_ui(egui::RawInput::default(), |ui| {
+        crate::ui::seam_review(
+            ui,
+            &replay.seams,
+            &mut selected_seam,
+            &mut seam_view,
+            crate::replay::seams::SectionClip::default(),
+            replay.origin,
+            &r.bundle.provenance.intent.recipe.seam_policy,
+        );
+    })
+    .drop_without_applying_deltas();
+    assert_eq!(selected_seam, Some(replay.seams[0].first_event));
+    assert_eq!(
+        host.snapshot().project.as_ref().unwrap().revision,
+        s.project.as_ref().unwrap().revision
+    );
+    assert!(
+        replay
+            .batches
+            .iter()
+            .filter(|batch| batch.seam)
+            .all(|batch| batch.points
+                && batch
+                    .context_ranges(seam_view)
+                    .iter()
+                    .all(std::ops::Range::is_empty))
+    );
     assert!(
         replay
             .batches

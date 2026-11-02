@@ -15,9 +15,16 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
     let id = ui.make_persistent_id("gallery-category");
     let mut category = ui.data_mut(|d| d.get_temp::<u8>(id).unwrap_or(0));
     ui.horizontal_wrapped(|ui| {
-        for (index, title) in ["Panels", "Fields", "Color", "Acquisition", "Matching"]
-            .iter()
-            .enumerate()
+        for (index, title) in [
+            "Panels",
+            "Fields",
+            "Color",
+            "Acquisition",
+            "Matching",
+            "Wall starts",
+        ]
+        .iter()
+        .enumerate()
         {
             ui.selectable_value(&mut category, index as u8, *title);
         }
@@ -36,9 +43,77 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
                 0 => panel(ui),
                 1 => fields(ui, theme.tokens()),
                 4 => matching(ui),
+                5 => wall_starts(ui),
                 _ => colors(ui),
             }
         });
+}
+fn wall_starts(ui: &mut Ui) {
+    use crate::replay::{
+        View,
+        seams::{SeamStart, SectionClip},
+    };
+    use spiling_contracts::manufacturing::SeamPolicy;
+    pane_header(
+        ui,
+        "Wall starts",
+        "Illustrative settings and read-only review · no engine request",
+    );
+    let id = ui.make_persistent_id("gallery-seam-policy");
+    let mut policy = ui
+        .data_mut(|data| data.get_temp::<SeamPolicy>(id))
+        .unwrap_or(SeamPolicy::Distributed);
+    seam_policy_fields(ui, &mut policy);
+    ui.weak(format!("Draft · {}", seam_summary(&policy)));
+    primary(
+        ui,
+        "Apply settings",
+        Some("Illustrative draft · no project is open"),
+    );
+    ui.separator();
+    let starts = [0, 1].map(|tool| SeamStart {
+        position: [10.0 + f64::from(tool) * 5.0, 20.0, 0.4],
+        physical_z: [0.2, 0.4],
+        layer: 1,
+        tool,
+        role: 1,
+        entry_event: tool * 6,
+        first_event: tool * 6 + 1,
+        closing_event: tool * 6 + 4,
+        command_line: tool * 8 + 20,
+        closing_line: tool * 8 + 23,
+    });
+    let view_id = ui.make_persistent_id("gallery-seam-view");
+    let selected_id = ui.make_persistent_id("gallery-seam-selection");
+    let mut view = ui
+        .data_mut(|data| data.get_temp::<View>(view_id))
+        .unwrap_or(View {
+            seams: true,
+            layer: Some(1),
+            ..Default::default()
+        });
+    let mut selected = ui
+        .data_mut(|data| data.get_temp::<Option<u32>>(selected_id))
+        .flatten();
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(&mut view.tool, None, "All tools");
+        ui.selectable_value(&mut view.tool, Some(0), "Tool 0");
+        ui.selectable_value(&mut view.tool, Some(2), "Empty selection");
+    });
+    seam_review(
+        ui,
+        &starts,
+        &mut selected,
+        &mut view,
+        SectionClip::default(),
+        glam::DVec3::ZERO,
+        &SeamPolicy::Distributed,
+    );
+    ui.data_mut(|data| {
+        data.insert_temp(id, policy);
+        data.insert_temp(view_id, view);
+        data.insert_temp(selected_id, selected);
+    });
 }
 fn panel(ui: &mut Ui) {
     let id = ui.make_persistent_id("gallery-panel-state");
@@ -203,6 +278,38 @@ mod tests {
                         right <= width + 1.0,
                         "{theme:?}: content used {right} points in {width}"
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seam_specimens_reflow_in_both_themes_and_scaled_panes() {
+        for theme in [Theme::Graphite, Theme::Paper] {
+            for width in [240.0, 320.0, 400.0] {
+                for scale in [1.0, 1.5, 2.0] {
+                    let ctx = egui::Context::default();
+                    theme.apply(&ctx);
+                    ctx.set_zoom_factor(scale);
+                    for _ in 0..2 {
+                        let mut overflow = false;
+                        ctx.run_ui(
+                            egui::RawInput {
+                                screen_rect: Some(egui::Rect::from_min_size(
+                                    egui::Pos2::ZERO,
+                                    egui::vec2(width * scale, 1600.0 * scale),
+                                )),
+                                ..Default::default()
+                            },
+                            |ui| {
+                                let right = ui.max_rect().right();
+                                wall_starts(ui);
+                                overflow = ui.min_rect().right() > right + 1.0;
+                            },
+                        )
+                        .drop_without_applying_deltas();
+                        assert!(!overflow, "{theme:?} / {width} points / {scale} scale");
+                    }
                 }
             }
         }

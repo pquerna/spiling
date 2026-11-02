@@ -1688,6 +1688,295 @@ fn nearest_seam_and_open_direction_are_useful_and_deterministic() {
     );
 }
 
+fn distributed_square_fixture(layer_count: usize) -> (ManufacturingIntent, NormalizedPrintPlan) {
+    let (mut intent, mut plan) = fixture();
+    intent.recipe.seam_policy = SeamPolicy::Distributed;
+    let mut template = plan.layers[0].clone();
+    template.paths.truncate(1);
+    plan.layers = (0..layer_count)
+        .map(|index| {
+            let mut layer = template.clone();
+            layer.index = index as u32;
+            layer.lower_z_mm = index as f64;
+            layer.z_mm = index as f64 + 1.0;
+            layer.section_z_mm = index as f64 + 0.5;
+            for path in &mut layer.paths {
+                path.physical_z_mm = [layer.lower_z_mm, layer.z_mm];
+                for point in &mut path.points_mm {
+                    point[2] = layer.z_mm;
+                }
+            }
+            layer
+        })
+        .collect();
+    refresh_volumes(&intent, &mut plan);
+    (intent, plan)
+}
+
+#[test]
+fn distributed_seams_have_hand_derived_xy_history_and_evict_after_eight_starts() {
+    let (intent, mut plan) = distributed_square_fixture(12);
+    let cancel = AtomicBool::new(false);
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    let expected = [
+        [1.0, 1.0],
+        [5.0, 5.0],
+        [1.0, 5.0],
+        [5.0, 1.0],
+        [5.0, 1.0],
+        [5.0, 1.0],
+        [5.0, 1.0],
+        [5.0, 1.0],
+        [5.0, 1.0],
+        [1.0, 1.0],
+        [5.0, 5.0],
+        [1.0, 5.0],
+    ];
+    for (layer, xy) in plan.layers.iter().zip(expected) {
+        assert_eq!(layer.paths[0].points_mm[0], [xy[0], xy[1], layer.z_mm]);
+    }
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
+    assert_eq!(report.deposition_segments, 48);
+    assert!(report.verified);
+    assert_eq!(
+        program,
+        crate::backend::emit(&plan, &intent, &cancel).unwrap()
+    );
+    plan.layers[9].paths[0].rotate_closed(1).unwrap();
+    let mutated = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let error = verify(&mutated, &plan, &intent, &cancel).unwrap_err();
+    assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
+    assert!(error.message.contains("seam policy"));
+}
+
+#[test]
+fn distributed_seams_accept_independent_two_square_numeric_program() {
+    let (intent, mut plan) = distributed_square_fixture(2);
+    plan.layers[1].paths[0].rotate_closed(2).unwrap();
+    let program = "G21\nG90\nM82\nG92 E0\nM106 S0\n\
+G0 X1 Y1 Z1 F1200\n\
+G1 X5 Y1 Z1 E1 F600\n\
+G1 X5 Y5 Z1 E2 F600\n\
+G1 X1 Y5 Z1 E3 F600\n\
+G1 X1 Y1 Z1 E4 F600\n\
+G0 X5 Y5 Z2 F1200\n\
+G1 X1 Y5 Z2 E5 F600\n\
+G1 X1 Y1 Z2 E6 F600\n\
+G1 X5 Y1 Z2 E7 F600\n\
+G1 X5 Y5 Z2 E8 F600\n";
+    let report = verify(program, &plan, &intent, &AtomicBool::new(false)).unwrap();
+    assert_eq!(report.deposition_segments, 8);
+    assert_eq!(report.filament_length_mm, 8.0);
+}
+
+#[test]
+fn distributed_empty_history_uses_actual_prime_endpoint_without_recording_it() {
+    let (mut intent, mut plan) = distributed_square_fixture(2);
+    let (complete, _) = complete_fixture();
+    intent.printer = complete.printer;
+    let cancel = AtomicBool::new(false);
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.0, 5.0, 1.0]);
+    assert_eq!(plan.layers[1].paths[0].points_mm[0], [1.0, 1.0, 2.0]);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+}
+
+#[test]
+fn distributed_seams_share_history_between_walls_within_each_actual_layer() {
+    let (intent, mut plan) = distributed_square_fixture(2);
+    for layer in &mut plan.layers {
+        for point in &mut layer.paths[0].points_mm {
+            point[0] = if point[0] == 1.0 { 1.0 } else { 9.0 };
+            point[1] = if point[1] == 1.0 { 1.0 } else { 9.0 };
+        }
+        let mut inner = layer.paths[0].clone();
+        for point in &mut inner.points_mm {
+            point[0] = if point[0] == 1.0 { 2.0 } else { 8.0 };
+            point[1] = if point[1] == 1.0 { 2.0 } else { 8.0 };
+        }
+        layer.paths.push(inner);
+    }
+    refresh_volumes(&intent, &mut plan);
+    let cancel = AtomicBool::new(false);
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    assert_eq!(plan.layers[0].paths[0].points_mm[0], [1.0, 1.0, 1.0]);
+    assert_eq!(plan.layers[0].paths[1].points_mm[0], [8.0, 8.0, 1.0]);
+    assert_eq!(plan.layers[1].paths[0].points_mm[0], [1.0, 9.0, 2.0]);
+    assert_eq!(plan.layers[1].paths[1].points_mm[0], [8.0, 2.0, 2.0]);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+}
+
+#[test]
+fn distributed_seams_ignore_non_wall_and_open_wall_starts() {
+    for closed in [false, true] {
+        let (intent, mut plan) = distributed_square_fixture(2);
+        let mut other = plan.layers[0].paths[0].clone();
+        other.points_mm = if closed {
+            vec![
+                [5.0, 5.0, 1.0],
+                [6.0, 5.0, 1.0],
+                [6.0, 6.0, 1.0],
+                [5.0, 6.0, 1.0],
+                [5.0, 5.0, 1.0],
+            ]
+        } else {
+            vec![[5.0, 5.0, 1.0], [6.0, 5.0, 1.0]]
+        };
+        if closed {
+            other.owner = None;
+            other.kind = DepositionKind::Bridge;
+        }
+        plan.layers[0].paths.push(other);
+        refresh_volumes(&intent, &mut plan);
+        let cancel = AtomicBool::new(false);
+        crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+        assert_eq!(plan.layers[0].paths[0].points_mm[0], [1.0, 1.0, 1.0]);
+        assert_eq!(plan.layers[1].paths[0].points_mm[0], [5.0, 5.0, 2.0]);
+        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+    }
+}
+
+#[test]
+fn distributed_seam_ties_use_projected_history_then_previous_actual_position() {
+    for proximity_wins in [false, true] {
+        let (intent, mut plan) = distributed_square_fixture(3);
+        for layer in &mut plan.layers[..2] {
+            for point in &mut layer.paths[0].points_mm {
+                point[1] += 0.000_000_4;
+            }
+        }
+        if proximity_wins {
+            plan.layers[1].paths.push(DepositionPath {
+                material_domain: None,
+                kind: DepositionKind::SolidFill,
+                owner: None,
+                width: WidthProfile::Constant { width_mm: 1.0 },
+                physical_z_mm: [1.0, 2.0],
+                points_mm: vec![[5.0, 4.0, 2.0], [5.0, 1.0, 2.0]],
+            });
+        }
+        refresh_volumes(&intent, &mut plan);
+        let cancel = AtomicBool::new(false);
+        crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+        let expected = if proximity_wins {
+            [5.0, 1.0, 3.0]
+        } else {
+            [1.0, 5.0, 3.0]
+        };
+        assert_eq!(plan.layers[2].paths[0].points_mm[0], expected);
+        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+        let alternate = if proximity_wins {
+            [1.0, 5.0, 3.0]
+        } else {
+            [5.0, 1.0, 3.0]
+        };
+        let wall = &mut plan.layers[2].paths[0];
+        let index = wall
+            .points_mm
+            .iter()
+            .position(|point| *point == alternate)
+            .unwrap();
+        wall.rotate_closed(index).unwrap();
+        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        assert_eq!(
+            verify(&program, &plan, &intent, &cancel).unwrap_err().code,
+            ManufacturingErrorCode::VerificationFailed
+        );
+    }
+}
+
+#[test]
+fn distributed_seams_preserve_directed_edges_widths_and_wall_bridge_dose() {
+    let (mut intent, mut plan) = distributed_square_fixture(2);
+    intent.recipe.process.first_layer_flow_factor = 1.1;
+    intent.recipe.process.bridge_flow_factor = 0.8;
+    let second = &mut plan.layers[1].paths[0];
+    second.kind = DepositionKind::Bridge;
+    second.width = WidthProfile::PerEdge {
+        widths_mm: vec![1.0, 1.001, 1.005, 1.01],
+    };
+    let mut expected = second.clone();
+    expected.rotate_closed(2).unwrap();
+    refresh_volumes(&intent, &mut plan);
+    let volume: f64 = plan
+        .layers
+        .iter()
+        .map(|layer| layer.region_coverage.nominal_deposition_volume_mm3)
+        .sum();
+    let cancel = AtomicBool::new(false);
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    assert_eq!(plan.layers[1].paths[0], expected);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let report = verify(&program, &plan, &intent, &cancel).unwrap();
+    assert_eq!(report.deposition_segments, 8);
+    assert!((report.deposited_volume_mm3 - volume).abs() < 2e-8);
+    assert!(program.contains("M106 S255\n"));
+    if let WidthProfile::PerEdge { widths_mm } = &mut plan.layers[1].paths[0].width {
+        widths_mm.rotate_left(1);
+    }
+    refresh_volumes(&intent, &mut plan);
+    assert_eq!(
+        verify(&program, &plan, &intent, &cancel).unwrap_err().code,
+        ManufacturingErrorCode::VerificationFailed
+    );
+}
+
+#[test]
+fn distributed_seams_reject_matching_rotated_program_and_byte_only_mutations() {
+    let (intent, mut plan) = distributed_square_fixture(2);
+    let cancel = AtomicBool::new(false);
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let altered = program.replacen(
+        "G0 X5.000000 Y5.000000 Z2.000000",
+        "G0 X1.000000 Y1.000000 Z2.000000",
+        1,
+    );
+    assert_ne!(altered, program);
+    assert!(verify(&altered, &plan, &intent, &cancel).is_err());
+    plan.layers[1].paths[0].rotate_closed(2).unwrap();
+    plan.validate(&intent).unwrap();
+    let altered = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    assert_ne!(altered, program);
+    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let error = verify_actual(&altered, &plan, &intent, &cancel, Some(&mut sink)).unwrap_err();
+    assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
+    assert!(error.message.contains("seam policy"));
+}
+
+#[test]
+fn distributed_seams_honor_cancellation_in_realization_and_independent_replay() {
+    let (intent, mut plan) = distributed_square_fixture(2);
+    let running = AtomicBool::new(false);
+    crate::realization::canonicalize(&mut plan, &intent, &running).unwrap();
+    let program = crate::backend::emit(&plan, &intent, &running).unwrap();
+    let cancelled = AtomicBool::new(true);
+    assert_eq!(
+        crate::realization::canonicalize(&mut plan, &intent, &cancelled)
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::Cancelled
+    );
+    assert_eq!(
+        expected::validate_wall_seams(&plan, &intent.recipe, None, None, &cancelled)
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::Cancelled
+    );
+    assert_eq!(
+        verify(&program, &plan, &intent, &cancelled)
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::Cancelled
+    );
+}
+
 #[test]
 fn support_only_layers_are_real_and_not_object_accounting() {
     let (mut intent, mut plan) = process_fixture();
@@ -3003,6 +3292,76 @@ fn fixed_dual_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
 #[test]
 fn fixed_dual_actual_epochs_repay_feeders_and_separate_waste_from_model() {
     fixed_dual_golden(None);
+}
+
+#[test]
+fn distributed_fixed_dual_seams_keep_separate_history_across_layers_and_waste() {
+    let (mut intent, mut plan) = fixed_dual_fixture();
+    intent.recipe.seam_policy = SeamPolicy::Distributed;
+    let mut template = plan.layers[0].clone();
+    template
+        .paths
+        .retain(|path| path.owner == Some(DepositionOwner::Wall));
+    plan.layers = (0..7)
+        .map(|index| {
+            let mut layer = template.clone();
+            layer.index = index;
+            layer.lower_z_mm = f64::from(index);
+            layer.z_mm = f64::from(index) + 1.0;
+            layer.section_z_mm = f64::from(index) + 0.5;
+            for path in &mut layer.paths {
+                path.physical_z_mm = [layer.lower_z_mm, layer.z_mm];
+                for point in &mut path.points_mm {
+                    point[2] = layer.z_mm;
+                }
+            }
+            layer
+        })
+        .collect();
+    refresh_volumes(&intent, &mut plan);
+    let cancel = AtomicBool::new(false);
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    let expected = [
+        [25.0, 25.0],
+        [21.0, 21.0],
+        [21.0, 25.0],
+        [25.0, 21.0],
+        [25.0, 25.0],
+        [25.0, 25.0],
+        [25.0, 25.0],
+    ];
+    for (layer, xy) in plan.layers.iter().zip(expected) {
+        assert_eq!(layer.paths[0].points_mm[0], [xy[0], xy[1], layer.z_mm]);
+        assert_eq!(
+            layer.paths[1].points_mm[0],
+            [xy[0] + 100.0, xy[1], layer.z_mm]
+        );
+    }
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
+    assert!(report.verified);
+    plan.layers[6].paths[1].rotate_closed(1).unwrap();
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let error = verify(&program, &plan, &intent, &cancel).unwrap_err();
+    assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
+    assert!(error.message.contains("seam policy"));
+}
+
+#[test]
+fn distributed_fixed_dual_seam_ties_use_actual_xyz6_waste_endpoint() {
+    let (mut intent, mut plan) = fixed_dual_fixture();
+    intent.recipe.seam_policy = SeamPolicy::Distributed;
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    job.tools[0].waste_line_xy_mm = [[60.0, 23.0], [80.0, 23.000_000_4]];
+    let cancel = AtomicBool::new(false);
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    assert_eq!(plan.layers[0].paths[0].points_mm[0], [25.0, 21.0, 1.0]);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    assert!(program.contains("G1 X80.000000 Y23.000000 Z1.000000"));
+    assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
 }
 
 #[test]

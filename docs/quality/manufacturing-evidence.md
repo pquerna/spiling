@@ -412,7 +412,10 @@ Ambiguous/multiple crossings, another regional owner or a separator still refuse
 [`realization::canonicalize`](../../crates/manufacturing/src/realization/mod.rs) fixes
 the normalized plan before [`backend::emit`](../../crates/manufacturing/src/backend/mod.rs).
 Perimeter starts select existing vertices at XYZ6 positions from the explicit
-nearest/preferred build-XY policy, preserving winding and closure. Exact projected
+nearest/preferred build-XY or distributed-start policy, preserving winding and closure. Distributed
+maximizes distance from the most recent eight closed-wall starts for the same tool;
+its fixed-size history crosses scheduled layers but does not track contour identity.
+It neither guarantees a minimum separation nor establishes sealing. Exact projected
 ties use actual previous-position distance, lexicographic projected/raw XY and
 original cyclic index; complete-job prime supplies the initial previous position.
 No source pose or camera rotation changes the declared build direction.
@@ -420,7 +423,7 @@ The independent [`verifier`](../../crates/manufacturing/src/verifier/mod.rs) par
 actual command bytes and modal state against expected paths, lifecycle, coordinates,
 extrusion, feeds and declared process limits; it does not trust emitter comments.
 Final coordinate validation rejects ordinary paths off the authored layer axis;
-the independent verifier checks preferred seams before consuming expected paths.
+the independent verifier reconstructs the authored wall-seam policy before consuming expected paths.
 `inspect_bundle` repeats this verification and optionally streams bounded actual
 motion into [SPLR](../protocol/replay.md), not a visualization of intended moves.
 
@@ -440,8 +443,8 @@ Source-bound planar surface color is exercised through the real CLI on the commi
 
 Retained optical studies apply through typed Core/engine/client/CLI transactions with complete accepted report/selection and explicit two-material evidence/declaration bindings. Queued cancellation and stale revisions preserve the committed project; ACK commits one revision without changing SceneRevision or publishing scene artifacts. Both native source workflows exercise application, physical depth/history edits, changed-pose reassessment and source/palette/study-deleted fresh verification/export. Inspection distinguishes the small requested patch from complete realized side exposure and reuses the existing model with captured evidence; it does not reuse the requested prediction as a printed outcome. Unknown evidence/conditions remain unassessed and backing optics remain unmodelled. The native Review panel supports source-hidden actual replay and catalog metadata tint by decoded tool, plus requested/realized inspection and fresh four-file export. The native window can consume a CLI-produced recovered project; local hardware evidence does not qualify other GPUs/platforms or physical color.
 
-Current identities are project10/manufacturing11/process3/surface3, source21/planner58,
-emitter11/verifier19 and SPLR6; executable constants and exact native pins remain authoritative.
+Current identities are project10/manufacturing11/process3/surface3, source21/planner59,
+emitter11/verifier20 and SPLR6; executable constants and exact native pins remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
 Raw inspection, an older producer's successful job or historical hardware

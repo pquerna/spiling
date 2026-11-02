@@ -52,6 +52,8 @@ struct Resources {
     actual_cap: wgpu::RenderPipeline,
     clear_stencil: wgpu::RenderPipeline,
     point_pipeline: wgpu::RenderPipeline,
+    seam_pipeline: wgpu::RenderPipeline,
+    selected_seam_pipeline: wgpu::RenderPipeline,
     tool_uniforms: [wgpu::Buffer; 2],
     tool_groups: [wgpu::BindGroup; 2],
     pipeline: wgpu::RenderPipeline,
@@ -273,40 +275,45 @@ impl Viewport {
         let source_cap = section::cap(device, &line_pipeline_layout, state.target_format, true);
         let actual_cap = section::cap(device, &line_pipeline_layout, state.target_format, false);
         let clear_stencil = section::clear(device, &line_pipeline_layout, state.target_format);
-        let point_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("stationary actual-program events"),
-            layout: Some(&line_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &line_shader,
-                entry_point: Some("vs_point"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 24,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3],
-                })],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &line_shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(state.target_format.into())],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: egui_wgpu::depth_format_from_bits(24, 8).expect("depth format"),
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let points = |entry, label| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&line_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &line_shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: 24,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3],
+                    })],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &line_shader,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(state.target_format.into())],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: egui_wgpu::depth_format_from_bits(24, 8).expect("depth format"),
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let point_pipeline = points("vs_point", "stationary actual-program events");
+        let seam_pipeline = points("vs_seam", "closed actual wall starts");
+        let selected_seam_pipeline = points("vs_selected_seam", "selected actual wall start");
         let line_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("overlay camera"),
             layout: &line_layout,
@@ -358,6 +365,8 @@ impl Viewport {
             actual_cap,
             clear_stencil,
             point_pipeline,
+            seam_pipeline,
+            selected_seam_pipeline,
             tool_uniforms,
             tool_groups,
             pipeline,
@@ -673,25 +682,10 @@ impl Viewport {
                 scope,
             );
         }
-        let normal = DVec3::from_array(plane.normal) * if analysis.flipped { -1.0 } else { 1.0 };
-        let offset = -normal.dot(DVec3::from_array(plane.origin_mm) - center);
-        let projected = [
-            normal.x as f32,
-            normal.y as f32,
-            normal.z as f32,
-            offset as f32,
-        ];
-        let projection_error = (DVec3::new(
-            f64::from(projected[0]),
-            f64::from(projected[1]),
-            f64::from(projected[2]),
-        ) - normal)
-            .length()
-            * display_radius
-            + (f64::from(projected[3]) - offset).abs();
-        let cut_enabled = analysis.enabled
-            && projected.iter().all(|v| v.is_finite())
-            && projection_error <= 0.001;
+        let clip =
+            crate::replay::seams::SectionClip::project(analysis, plane, center, display_radius);
+        let projected = clip.plane;
+        let cut_enabled = clip.enabled;
         if analysis.enabled && !cut_enabled {
             ui.painter().text(
                 rect.left_top() + egui::vec2(12.0, 12.0),
@@ -1052,19 +1046,23 @@ impl egui_wgpu::CallbackTrait for Callback {
                 .zip(&r.replay_buffers)
                 .filter(|_| self.uniform.cut[1] == 0.0)
             {
-                if beads.is_some_and(|beads| {
-                    beads
-                        .batches
-                        .iter()
-                        .any(|b| b.kind == batch.kind && b.tool == batch.tool)
-                }) {
+                if !batch.seam
+                    && beads.is_some_and(|beads| {
+                        beads
+                            .batches
+                            .iter()
+                            .any(|b| b.kind == batch.kind && b.tool == batch.tool)
+                    })
+                {
                     continue;
                 }
                 let range = batch.range(self.view);
                 if range.is_empty() {
                     continue;
                 }
-                pass.set_pipeline(if batch.points {
+                pass.set_pipeline(if batch.seam {
+                    &r.seam_pipeline
+                } else if batch.points {
                     &r.point_pipeline
                 } else {
                     &r.line_pipeline
@@ -1072,7 +1070,7 @@ impl egui_wgpu::CallbackTrait for Callback {
                 let deposition = matches!(batch.kind,1..=5|8..=10|13|15);
                 pass.set_bind_group(
                     0,
-                    if deposition {
+                    if deposition && !batch.seam {
                         &r.tool_groups[batch.tool as usize]
                     } else {
                         &r.line_group
@@ -1081,7 +1079,17 @@ impl egui_wgpu::CallbackTrait for Callback {
                 );
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 if batch.points {
-                    pass.draw(0..6, range);
+                    pass.draw(0..6, range.clone());
+                    if batch.seam
+                        && let Some(event) = self.view.selected_seam
+                        && let Ok(index) = batch
+                            .events
+                            .binary_search_by_key(&event, |(ordinal, _)| *ordinal)
+                        && range.contains(&(index as u32))
+                    {
+                        pass.set_pipeline(&r.selected_seam_pipeline);
+                        pass.draw(0..6, index as u32..index as u32 + 1);
+                    }
                 } else {
                     pass.draw(range, 0..1);
                 }

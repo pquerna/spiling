@@ -893,18 +893,21 @@ impl PrinterSpecification {
 pub enum SeamPolicy {
     Nearest,
     PreferredBuildDirection { xy: [f64; 2] },
+    Distributed,
 }
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum RawSeamPolicy {
     Nearest {},
     PreferredBuildDirection { xy: [f64; 2] },
+    Distributed {},
 }
 impl<'de> Deserialize<'de> for SeamPolicy {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = match RawSeamPolicy::deserialize(deserializer)? {
             RawSeamPolicy::Nearest {} => Self::Nearest,
             RawSeamPolicy::PreferredBuildDirection { xy } => Self::PreferredBuildDirection { xy },
+            RawSeamPolicy::Distributed {} => Self::Distributed,
         };
         value.validate().map_err(serde::de::Error::custom)?;
         Ok(value)

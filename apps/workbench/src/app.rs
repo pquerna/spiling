@@ -955,7 +955,7 @@ impl eframe::App for Workbench {
                             self.queued_host = Some(Command::ResumeDisplay);
                         }
                     }
-                    self.replay_controls(ui);
+                    ui::replay_control_area(ui, |ui| self.replay_controls(ui));
                     let current = self.display_current();
                     if !current && self.state.display.is_some() {
                         ui.colored_label(

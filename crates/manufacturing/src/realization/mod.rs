@@ -57,12 +57,17 @@ fn wall_seam(
     points: &[[f64; 3]],
     policy: SeamPolicy,
     position: Option<[f64; 3]>,
+    recent_starts: &[[f64; 2]],
     cancel: &AtomicBool,
 ) -> Result<usize, ManufacturingError> {
     let mut seam = 0;
     let mut best = project_xyz6_point_mm(points[0])?;
     let score = |point: [f64; 3]| match policy {
         SeamPolicy::Nearest => 0.0,
+        SeamPolicy::Distributed => recent_starts
+            .iter()
+            .map(|start| (point[0] - start[0]).hypot(point[1] - start[1]))
+            .fold(f64::INFINITY, f64::min),
         SeamPolicy::PreferredBuildDirection { xy } => {
             unsigned_zero(point[0] * xy[0] + point[1] * xy[1])
         }
@@ -116,6 +121,9 @@ pub(crate) fn canonicalize(
         JobWorkflow::CompleteMarlin { job } => Some(project_xyz6_point_mm(job.prime_end_mm)?),
         JobWorkflow::FixedDualMarlin { .. } => None,
     };
+    let mut recent_starts = [[[0.0; 2]; 8]; 2];
+    let mut recent_counts = [0usize; 2];
+    let mut next_start = [0usize; 2];
     for layer in &mut plan.layers {
         check_cancel(cancel)?;
         let mut boundary = layer.paths.len();
@@ -155,12 +163,12 @@ pub(crate) fn canonicalize(
         let mut previous_tool = None;
         for path in &mut layer.paths {
             check_cancel(cancel)?;
-            if let Some(job) = routed {
-                let tool = job.tool_for_path(path)?;
-                if previous_tool != Some(tool) {
-                    position = Some(project_xyz6_point_mm(job.waste_end_mm(tool, layer.z_mm))?);
-                    previous_tool = Some(tool);
-                }
+            let tool = routed.map_or(Ok(0), |job| job.tool_for_path(path))?;
+            if let Some(job) = routed
+                && previous_tool != Some(tool)
+            {
+                position = Some(project_xyz6_point_mm(job.waste_end_mm(tool, layer.z_mm))?);
+                previous_tool = Some(tool);
             }
             let n = path.points_mm.len();
             if path.owner == Some(DepositionOwner::Wall)
@@ -170,9 +178,17 @@ pub(crate) fn canonicalize(
                     &path.points_mm,
                     intent.recipe.seam_policy,
                     position.map(project_xyz6_point_mm).transpose()?,
+                    &recent_starts[tool as usize][..recent_counts[tool as usize]],
                     cancel,
                 )?;
                 path.rotate_closed(seam)?;
+                if intent.recipe.seam_policy == SeamPolicy::Distributed {
+                    let tool = tool as usize;
+                    let start = project_xyz6_point_mm(path.points_mm[0])?;
+                    recent_starts[tool][next_start[tool]] = [start[0], start[1]];
+                    next_start[tool] = (next_start[tool] + 1) % 8;
+                    recent_counts[tool] = (recent_counts[tool] + 1).min(8);
+                }
             } else if let Some(from) = position {
                 if path.points_mm[0] == path.points_mm[n - 1] {
                     let mut seam = 0;
@@ -464,4 +480,43 @@ pub(crate) fn stream(
         }
     }
     Ok((position, extrusion))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distributed_seam_exact_projected_ties_use_raw_xy_then_cyclic_index() {
+        let mut points = [
+            [1.000_000_4, 1.0, 1.0],
+            [3.0, 3.0, 1.0],
+            [1.000_000_1, 1.0, 1.0],
+            [4.0, 4.0, 1.0],
+            [1.000_000_4, 1.0, 1.0],
+        ];
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            wall_seam(&points, SeamPolicy::Distributed, None, &[], &cancel).unwrap(),
+            2
+        );
+        points[0] = points[2];
+        points[4] = points[0];
+        assert_eq!(
+            wall_seam(&points, SeamPolicy::Distributed, None, &[], &cancel).unwrap(),
+            0
+        );
+        assert_eq!(
+            wall_seam(
+                &points,
+                SeamPolicy::Distributed,
+                None,
+                &[],
+                &AtomicBool::new(true)
+            )
+            .unwrap_err()
+            .code,
+            ManufacturingErrorCode::Cancelled
+        );
+    }
 }

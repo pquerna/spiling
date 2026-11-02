@@ -8,7 +8,9 @@ mod color;
 pub use catalog_review::{CatalogReviewAction, catalog_review};
 pub use catalog_search::{CatalogChoice, CatalogSearch};
 mod gallery;
+mod seams;
 pub use gallery::gallery;
+pub use seams::{seam_policy_fields, seam_review, seam_summary};
 mod stock;
 mod surfaces;
 pub use color::{ColorDensity, ColorInspector, ColorMeaning, ColorPresentation};
@@ -18,6 +20,13 @@ pub use surfaces::{close, group, help, pane_header, primary, problem};
 use egui::{Color32, RichText, Ui};
 use serde::{Deserialize, Serialize};
 use spiling_contracts::manufacturing::{LayerHeightPolicy, LayerHeightReason, ManufacturingIntent};
+
+pub fn replay_control_area(ui: &mut Ui, contents: impl FnOnce(&mut Ui)) {
+    egui::ScrollArea::vertical()
+        .id_salt("actual-motion-controls")
+        .max_height(ui.available_height() * 0.5)
+        .show(ui, contents);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Theme {

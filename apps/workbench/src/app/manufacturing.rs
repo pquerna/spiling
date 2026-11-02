@@ -34,6 +34,7 @@ pub(super) struct ManufacturingUi {
     pub layers: crate::layers::Browser,
     pub review_nonce: Option<u64>,
     bead_statistics: Option<BeadStatistics>,
+    selected_seam: Option<u32>,
 }
 impl ManufacturingUi {
     pub(super) fn pending_loaded(&self, loaded: Option<&crate::manufacture::LoadedIntent>) -> bool {
@@ -361,6 +362,7 @@ impl Workbench {
                         d.value.recipe.id, d.value.recipe.revision
                     ));
                     ui.add_enabled_ui(writable && !conflict, |ui| {
+                    super::policies::seam_fields(ui, &mut d.value);
                     ui::group(ui, "Geometry");
                     ui::number(ui, "Shape approximation limit (mm)", &mut d.value.recipe.native_shape_error_mm, 0.001);
                     ui::help(ui, "shape-approximation", "Geometry approximation", "The geometry approximation bound protects source material and holes. It does not specify physical print accuracy.");
@@ -627,9 +629,15 @@ impl Workbench {
             self.manufacturing.replay.layer_end = None;
             self.manufacturing.replay.role = None;
             self.manufacturing.replay.tool = None;
+            self.manufacturing.selected_seam = None;
         }
         let compact = ui.available_height() < 500.0 || ui.available_width() < 600.0;
         let section_representation = self.analysis.view.enabled;
+        let mut section = self.analysis.view.clone();
+        section.enabled &= section.valid()
+            && (!section.local_frame || self.analysis_pose().is_some())
+            && (!section.selected_only || self.occurrence.is_some());
+        let plane = self.analysis_plane();
         let view = &mut self.manufacturing.replay;
         ui.horizontal_wrapped(|ui| {
             ui.label("Actual emitted motion");
@@ -754,6 +762,50 @@ impl Workbench {
             }
         }
         self.manufacturing.layers.controls(ui, view, &review);
+        if let Some(display) = &review.display {
+            let bounds = self
+                .state
+                .display
+                .as_ref()
+                .and_then(|scene| scene.summary.bounds_mm);
+            let radius = bounds
+                .map_or(0.01, |bounds| {
+                    (glam::DVec3::from_array(bounds.max) - glam::DVec3::from_array(bounds.min))
+                        .length()
+                        * 0.5
+                })
+                .max(0.01);
+            let bounds = descriptor.info.bounds_mm;
+            let center =
+                (glam::DVec3::from_array(bounds.min) + glam::DVec3::from_array(bounds.max)) * 0.5;
+            let radius = radius.max(
+                (center - display.origin).length()
+                    + (glam::DVec3::from_array(bounds.max) - glam::DVec3::from_array(bounds.min))
+                        .length()
+                        * 0.5,
+            );
+            let clip =
+                crate::replay::seams::SectionClip::project(&section, plane, display.origin, radius);
+            let mut visible_view = *view;
+            if section.enabled {
+                visible_view.visible =
+                    section.representation != crate::analysis::Representation::Source;
+            }
+            ui::seam_review(
+                ui,
+                &display.seams,
+                &mut self.manufacturing.selected_seam,
+                &mut visible_view,
+                clip,
+                display.origin,
+                &review.bundle.provenance.intent.recipe.seam_policy,
+            );
+            view.seams = visible_view.seams;
+            view.selected_seam = view
+                .seams
+                .then_some(self.manufacturing.selected_seam)
+                .flatten();
+        }
         ui.collapsing("Command playback", |ui| {
             event_controls(ui, view, &review, descriptor);
         });

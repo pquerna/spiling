@@ -883,6 +883,7 @@ impl TryFrom<rpc::SeamPolicy> for SeamPolicy {
                 Policy::PreferredBuildDirection(direction) => Self::PreferredBuildDirection {
                     xy: [direction.x, direction.y],
                 },
+                Policy::Distributed(_) => Self::Distributed,
             },
             Self::validate,
         )
@@ -896,6 +897,7 @@ impl TryFrom<SeamPolicy> for rpc::SeamPolicy {
         Ok(Self {
             policy: Some(match value {
                 SeamPolicy::Nearest => Policy::Nearest(rpc::NearestSeam {}),
+                SeamPolicy::Distributed => Policy::Distributed(rpc::DistributedSeam {}),
                 SeamPolicy::PreferredBuildDirection { xy } => {
                     Policy::PreferredBuildDirection(rpc::PreferredBuildDirectionSeam {
                         x: xy[0],
@@ -1578,7 +1580,7 @@ mod tests {
             None,
             Some(rpc::SeamPolicy { policy: None }),
             // Unknown oneof arm is discarded by Prost, never a nearest-policy default.
-            Some(rpc::SeamPolicy::decode([0x1a, 0x00].as_slice()).unwrap()),
+            Some(rpc::SeamPolicy::decode([0x22, 0x00].as_slice()).unwrap()),
         ] {
             let mut missing = wire.clone();
             missing.recipe.as_mut().unwrap().seam_policy = seam_policy;

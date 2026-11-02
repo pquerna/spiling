@@ -262,8 +262,10 @@ message SeamPolicy {
   oneof policy {
     NearestSeam nearest = 1;
     PreferredBuildDirectionSeam preferred_build_direction = 2;
+    DistributedSeam distributed = 3;
   }
 }
+message DistributedSeam {}
 enum RectilinearAxisPolicy {
   RECTILINEAR_AXIS_POLICY_UNSPECIFIED = 0;
   RECTILINEAR_X = 1;

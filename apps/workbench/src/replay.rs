@@ -4,6 +4,7 @@
 
 //! Projection of validated SPLR6 events, never a machine-program parser.
 pub mod beads;
+pub mod seams;
 const METADATA_BYTES: usize = 16_384;
 use glam::DVec3;
 use spiling_contracts::manufacturing::*;
@@ -20,6 +21,7 @@ pub struct Batch {
     pub kind: u8,
     pub tool: u32,
     pub points: bool,
+    pub seam: bool,
     pub vertices: Vec<Vertex>,
     pub events: Vec<(u32, u16)>,
 }
@@ -27,6 +29,7 @@ pub struct Batch {
 pub struct Replay {
     pub origin: DVec3,
     pub batches: Vec<Batch>,
+    pub seams: Vec<seams::SeamStart>,
     pub owned_bytes: usize,
     pub beads: Result<beads::Beads, String>,
 }
@@ -44,6 +47,8 @@ pub struct View {
     pub visible: bool,
     pub material: bool,
     pub beads: bool,
+    pub seams: bool,
+    pub selected_seam: Option<u32>,
     pub role: Option<u8>,
     pub tool: Option<u32>,
 }
@@ -60,6 +65,8 @@ impl Default for View {
             visible: true,
             material: false,
             beads: true,
+            seams: false,
+            selected_seam: None,
             role: None,
             tool: None,
         }
@@ -153,7 +160,7 @@ impl Batch {
         let Some(lower) = view.layer else {
             return [0..0, 0..0];
         };
-        if !view.context || !matches!(self.kind, 1..=5 | 8..=10 | 13 | 15) {
+        if self.seam || !view.context || !matches!(self.kind, 1..=5 | 8..=10 | 13 | 15) {
             return [0..0, 0..0];
         }
         let upper = view.layer_end.unwrap_or(lower).max(lower);
@@ -183,6 +190,9 @@ impl Batch {
         ]
     }
     pub fn range(&self, view: View) -> Range<u32> {
+        if self.seam && !view.seams {
+            return 0..0;
+        }
         event_range(
             &self.events,
             self.kind,
@@ -202,9 +212,17 @@ impl Replay {
     ) -> Result<Self, String> {
         validate_replay_display(bytes, descriptor).map_err(|e| e.to_string())?;
         let count = descriptor.info.event_count as usize;
+        let mut seam_counts = BTreeMap::<(u8, u32), usize>::new();
+        seams::scan(bytes, |start| {
+            *seam_counts.entry((start.role, start.tool)).or_default() += 1
+        });
+        let seam_count: usize = seam_counts.values().sum();
         // Raw input plus CPU vertices, GPU copy, event indices and a bounded staging copy.
-        let upper =
-            METADATA_BYTES + bytes.len() + count * (2 * std::mem::size_of::<Vertex>() * 3 + 8);
+        let upper = METADATA_BYTES
+            + bytes.len()
+            + count * (2 * std::mem::size_of::<Vertex>() * 3 + 8)
+            + seam_count
+                * (std::mem::size_of::<seams::SeamStart>() + 3 * std::mem::size_of::<Vertex>() + 8);
         if reserved
             .checked_add(upper)
             .is_none_or(|n| n > spiling_contracts::geometry::MAX_DISPLAY_BUFFER_BYTES as usize)
@@ -252,6 +270,7 @@ impl Replay {
                         kind,
                         tool,
                         points,
+                        seam: false,
                         vertices: Vec::with_capacity(count * if points { 1 } else { 2 }),
                         events: Vec::with_capacity(count),
                     },
@@ -276,6 +295,7 @@ impl Replay {
                 kind,
                 tool,
                 points,
+                seam: false,
                 vertices: vec![],
                 events: vec![],
             });
@@ -294,9 +314,39 @@ impl Replay {
                 .events
                 .push((i as u32, u16::from_le_bytes(r[44..46].try_into().unwrap())));
         }
-        let batches: Vec<_> = groups.into_values().collect();
+        let mut batches: Vec<_> = groups.into_values().collect();
+        let mut seams = Vec::with_capacity(seam_count);
+        let mut markers: BTreeMap<_, _> = seam_counts
+            .into_iter()
+            .map(|((kind, tool), count)| {
+                (
+                    (kind, tool),
+                    Batch {
+                        kind,
+                        tool,
+                        points: true,
+                        seam: true,
+                        vertices: Vec::with_capacity(count),
+                        events: Vec::with_capacity(count),
+                    },
+                )
+            })
+            .collect();
+        seams::scan(bytes, |start| {
+            let batch = markers.get_mut(&(start.role, start.tool)).unwrap();
+            batch.vertices.push(Vertex {
+                position: (DVec3::from_array(start.position) - origin)
+                    .as_vec3()
+                    .to_array(),
+                color: [0.25, 0.85, 1.0],
+            });
+            batch.events.push((start.first_event, start.layer));
+            seams.push(start);
+        });
+        batches.extend(markers.into_values());
         let owned_bytes = METADATA_BYTES
             + bytes.len()
+            + seams.capacity() * std::mem::size_of::<seams::SeamStart>()
             + batches
                 .iter()
                 .map(|b| {
@@ -310,6 +360,7 @@ impl Replay {
             beads,
             origin,
             batches,
+            seams,
             owned_bytes,
         })
     }
@@ -376,6 +427,7 @@ mod tests {
             assert!(Replay::project(&bytes, &descriptor, 128 * 1024 * 1024, origin).is_err());
             let all = View {
                 pressure: true,
+                seams: true,
                 ..Default::default()
             };
             for batch in &replay.batches {
@@ -387,7 +439,9 @@ mod tests {
                 for (j, (event, layer)) in batch.events.iter().enumerate() {
                     let n = if batch.points { 1 } else { 2 };
                     for k in 0..n {
-                        let actual = if batch.points {
+                        let actual = if batch.seam {
+                            event - 1
+                        } else if batch.points {
                             *event
                         } else {
                             event - 1 + k as u32
@@ -446,7 +500,7 @@ mod tests {
 #[cfg(test)]
 mod bead_tests {
     use super::*;
-    fn fixture(name: &str) -> (Vec<u8>, ReplayDisplayDescriptor) {
+    pub(super) fn fixture(name: &str) -> (Vec<u8>, ReplayDisplayDescriptor) {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(format!("../../fixtures/protocol/{name}.json"));
         let fixture: serde_json::Value =
@@ -606,6 +660,7 @@ mod layer_range_tests {
             kind: 1,
             tool: 0,
             points: false,
+            seam: false,
             vertices: Vec::new(),
             events: vec![
                 (0, u16::MAX),
@@ -677,6 +732,7 @@ mod layer_range_tests {
                 events: batch.events.clone(),
                 vertices: Vec::new(),
                 points: false,
+                seam: false,
                 tool: 0,
             };
             assert!(

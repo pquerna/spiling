@@ -64,6 +64,17 @@ committed inputs; unapplied drafts stay labelled. Review promotes Verify program
 then Export after current passing inspection. Qualification and stale state remain
 visible beside the action.
 
+Seam settings apply to the entire print job's closed constructed walls, not the
+selected face. Nearest, Preferred direction and Spread starts share the existing
+complete-intent draft and Apply settings action. Review's Seam starts controls
+inspect fresh actual closed-wall starts; visibility and navigation never edit
+the project. Counts follow selected layers, role/tool, playback and clipping,
+excluding surrounding context. A start marker is not a cosmetic-face assignment,
+minimum-separation guarantee or measured seal.
+Actual-motion controls scroll within half the available central height so expanded
+inspection and playback retain a usable canvas. Start coordinates and command
+details use progressive disclosure; counts and navigation remain above them.
+
 Layer review keeps selected layers in color and shows other layers as dim neutral
 actual-program deposition paths by default. Other layers can be hidden for isolated
 inspection. Context respects role/tool visibility and section clipping, excludes

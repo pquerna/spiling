@@ -68,6 +68,27 @@ Single-tool replay begins with an unknown-start endpoint, not an invented origin
 
 Every model/support/waste deposition kind1–5,8–10,13,15 requires bit1, finite positive nominal width and ordered physical interval whose upper agrees with actual XYZ6 Z. Height is upper minus lower, never movement delta or reporting layer thickness. Kind15 requires unknown model owner. Other records have zero bytes48–71 and unknown owner; no bead is inferred from E alone. Wall ownership survives genuine Bridge and open junction strokes. Per-edge width is the expected consumed edge's width, not a path average. A mixed regional/mandatory skin bridge associates each emitted portion independently; whole-path construction remains in the verified plan.
 
+## Native closed-wall start inspection
+
+The native workbench derives transient start markers only from fresh current
+checked replay. An explicit path-entry travel supplies the actual start endpoint;
+an optional stationary unretraction at that same layer/tool/position may precede
+the contiguous Wall-associated deposition run, which must close exactly at that
+XYZ in command coordinates. Travel, stationary process events within a run, tool epochs and
+incompatible layer/tool/physical-interval associations break runs. Perimeter role
+alone is insufficient; open Wall strokes have no marker, while closed Wall-owned
+Bridge strokes do. Per-edge width changes do not split a path.
+
+Markers retain entry, first-deposition and closing ordinals, source command lines,
+actual XYZ, tool/role and nominal physical interval. They obey selected layer/range,
+role/tool, playback and section clipping; dim surrounding-layer context adds no
+markers or selected counts. CPU metadata and dedicated GPU point batches share the
+existing active/staged display budget and remain available with nominal beads or
+centerlines. Visibility and marker navigation are inspection state, not project edits.
+SPLR carries no face/occurrence identity, wall depth or adjacency here; these markers
+do not establish cosmetic seam assignment, separation guarantees or physical sealing.
+No new packed layout or persistent seam flag is introduced.
+
 ## Consumer boundary and reproduction
 
 The decoder borrows DataView bytes and strided accessors. Viewport batches real deposition/travel into lines and stationary pressure operations into points, rebased to f32 within0.001mm. Epochs are frame breaks, never printed segments; explicit waste remains visible separately from model/support when travel is hidden. Source-hidden inspection and layer/event controls consume these same bytes. These are nominal command views, not measured bead shape, calibrated optical color or a physical swept-tool certificate.
