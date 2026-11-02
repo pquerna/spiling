@@ -18,6 +18,8 @@ struct Uniform {
     tool_color: [f32; 4],
     plane: [f32; 4],
     cut: [f32; 4],
+    /// Neutral RGB/alpha for contextual lines; zero alpha keeps normal colors.
+    context: [f32; 4],
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -60,6 +62,8 @@ struct Resources {
     failure: Option<String>,
     line_pipeline: wgpu::RenderPipeline,
     line_group: wgpu::BindGroup,
+    context_uniform: wgpu::Buffer,
+    context_group: wgpu::BindGroup,
     lines: Option<wgpu::Buffer>,
     line_count: u32,
     section: Option<Arc<Section>>,
@@ -239,7 +243,11 @@ impl Viewport {
                 module: &line_shader,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &[Some(state.target_format.into())],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: state.target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::LineList,
@@ -307,6 +315,20 @@ impl Viewport {
                 resource: uniform.as_entire_binding(),
             }],
         });
+        let context_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Other-layer context camera"),
+            size: std::mem::size_of::<Uniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let context_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Other-layer context"),
+            layout: &line_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: context_uniform.as_entire_binding(),
+            }],
+        });
         let tool_uniforms = std::array::from_fn(|_| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Declared tool tint camera"),
@@ -346,6 +368,8 @@ impl Viewport {
             failure: None,
             line_pipeline,
             line_group,
+            context_uniform,
+            context_group,
             lines: None,
             line_count: 0,
             section: None,
@@ -716,6 +740,11 @@ impl Viewport {
                 section,
                 review,
                 view,
+                context_color: if ui.visuals().dark_mode {
+                    [0.55, 0.62, 0.71, 0.16]
+                } else {
+                    [0.21, 0.29, 0.39, 0.14]
+                },
                 uniform: Uniform {
                     matrix: matrix.as_mat4().to_cols_array_2d(),
                     selected: [
@@ -725,6 +754,7 @@ impl Viewport {
                         (rect.height() * ui.ctx().pixels_per_point()) as u32,
                     ],
                     tool_color: [0.0; 4],
+                    context: [0.0; 4],
                     plane: if cut_enabled {
                         projected
                     } else {
@@ -785,6 +815,7 @@ struct Callback {
     section: Option<Arc<Section>>,
     review: Option<Arc<crate::manufacture::Review>>,
     view: crate::replay::View,
+    context_color: [f32; 4],
     uniform: Uniform,
 }
 impl egui_wgpu::CallbackTrait for Callback {
@@ -884,6 +915,14 @@ impl egui_wgpu::CallbackTrait for Callback {
             r.replay = self.review.clone();
         }
         queue.write_buffer(&r.uniform, 0, bytemuck::bytes_of(&self.uniform));
+        queue.write_buffer(
+            &r.context_uniform,
+            0,
+            bytemuck::bytes_of(&Uniform {
+                context: self.context_color,
+                ..self.uniform
+            }),
+        );
         let colors = self
             .review
             .as_ref()
@@ -947,6 +986,21 @@ impl egui_wgpu::CallbackTrait for Callback {
             pass.draw(0..r.line_count, 0..1);
         }
         if let Some(display) = r.replay.as_ref().and_then(|r| r.display.as_ref()) {
+            // Draw neutral context first without depth writes. Selected beads/paths
+            // remain foreground; no statistics or caps include unselected paths.
+            // Section-only hides them too, and normal cuts still clip the lines.
+            if self.uniform.cut[1] == 0.0 {
+                pass.set_pipeline(&r.line_pipeline);
+                pass.set_bind_group(0, &r.context_group, &[]);
+                for (batch, buffer) in display.batches.iter().zip(&r.replay_buffers) {
+                    for range in batch.context_ranges(self.view) {
+                        if !range.is_empty() {
+                            pass.set_vertex_buffer(0, buffer.slice(..));
+                            pass.draw(range, 0..1);
+                        }
+                    }
+                }
+            }
             let beads = display.beads.as_ref().ok().filter(|_| self.view.beads);
             if let Some(beads) = beads {
                 pass.set_pipeline(&r.bead_pipeline);

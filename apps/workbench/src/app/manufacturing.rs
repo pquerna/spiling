@@ -51,6 +51,17 @@ impl ManufacturingUi {
     }
 }
 impl Workbench {
+    pub(super) fn show_prepare(&mut self, section: u8) {
+        self.manufacturing.panel = 1;
+        self.manufacturing.prepare_section = section;
+    }
+
+    pub(super) fn discard_preparation_drafts(&mut self) {
+        self.manufacturing.ignored_nonce =
+            self.state.manufacturing.loaded.as_ref().map(|l| l.nonce);
+        self.manufacturing.draft = None;
+    }
+
     pub(super) fn manufacturing_current(&self) -> bool {
         self.state.phase == Phase::Running
             && self
@@ -64,6 +75,202 @@ impl Workbench {
                         .current_capture(p, &h.session_id)
                         .is_some()
                 })
+    }
+    pub(super) fn manufacturing_pane(&mut self, ui: &mut egui::Ui) {
+        let prepare = self.manufacturing.panel == 1;
+        ui::pane_header(
+            ui,
+            if prepare { "Prepare" } else { "Program review" },
+            "Project · committed inputs and explicit drafts",
+        );
+        if ui::close(ui, "Back to Inspect") {
+            self.manufacturing.panel = 0;
+        }
+        if prepare {
+            ui.horizontal_wrapped(|ui| {
+                for (index, label) in ["Setup", "Material", "Settings", "Placement", "Infill"]
+                    .iter()
+                    .enumerate()
+                {
+                    ui.selectable_value(
+                        &mut self.manufacturing.prepare_section,
+                        index as u8,
+                        *label,
+                    );
+                }
+            });
+        } else {
+            ui.colored_label(self.prefs.theme.tokens().warning, "NOT MACHINE READY");
+            ui::help(
+                ui,
+                "verification-scope",
+                "Software verification",
+                "Independent replay checks the emitted program. Physical printability, collisions and machine execution remain unqualified.",
+            );
+        }
+        // Keep the action strip outside the body's single scroll owner.
+        self.manufacturing_actions(ui);
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt((
+                "manufacturing-body",
+                self.manufacturing.panel,
+                self.manufacturing.prepare_section,
+            ))
+            .show(ui, |ui| self.manufacturing_ui(ui));
+    }
+    fn manufacturing_actions(&mut self, ui: &mut egui::Ui) {
+        let (Some(project), Some(hello)) = (self.state.project.clone(), self.state.hello.clone())
+        else {
+            return;
+        };
+        let m = self.state.manufacturing.clone();
+        if self.manufacturing.panel == 2 {
+            if self.manufacturing_current() {
+                self.button(ui, Action::Verify);
+                self.primary_button(ui, Action::Export);
+            } else {
+                self.primary_button(ui, Action::Verify);
+            }
+            return;
+        }
+        let ready = self.state.phase == Phase::Running
+            && !self.state.busy
+            && !self.state.picker_open
+            && self.state.confirmation.is_none()
+            && self.awaiting_serial.is_none();
+        let draft = self
+            .manufacturing
+            .has_intent_draft(&project.project_id, m.intent.as_deref())
+            || self.manufacturing.pending_loaded(m.loaded.as_deref())
+            || self
+                .material
+                .has_changes(&project.project_id, m.intent.as_deref())
+            || self.process.has_changes();
+        if draft {
+            ui.label("Unapplied changes · compile uses committed settings");
+        }
+        match self.manufacturing.prepare_section {
+            1 if self
+                .material
+                .has_changes(&project.project_id, m.intent.as_deref()) =>
+            {
+                self.material_actions(ui);
+                return;
+            }
+            2 => {
+                if let Some(d) = &mut self.manufacturing.draft {
+                    if d.project != project.project_id {
+                        return;
+                    }
+                    let prepared = super::policies::prepared(&d.value);
+                    let changed = m.intent.as_deref() != Some(&d.value);
+                    let reason = if !ready {
+                        Some("Wait for the current operation")
+                    } else if project.read_only {
+                        Some("Project is read-only")
+                    } else if d.revision != project.revision {
+                        Some("Project changed. Discard this draft and reload current settings.")
+                    } else {
+                        prepared.as_ref().err().map(String::as_str)
+                    };
+                    if changed && ui::primary(ui, "Apply settings", reason) {
+                        let value = prepared.expect("validated intent");
+                        d.value = value.clone();
+                        self.queued_manufacturing = Some(ManufacturingCommand::SetIntent {
+                            session_id: hello.session_id.clone(),
+                            base_revision: d.revision,
+                            intent: Arc::new(value),
+                        });
+                    }
+                    if changed {
+                        if ui.button("Discard settings draft").clicked() {
+                            self.manufacturing.ignored_nonce = m.loaded.as_ref().map(|l| l.nonce);
+                            self.manufacturing.draft = None;
+                        }
+                        return;
+                    }
+                }
+            }
+            3 => {
+                self.placement_actions(ui);
+                return;
+            }
+            4 if self.process.has_changes() => {
+                self.process_actions(ui);
+                return;
+            }
+            _ => {}
+        }
+        if !draft && m.intent.is_some() {
+            if self.disabled(Action::Compile).is_none() {
+                self.primary_button(ui, Action::Compile);
+            } else {
+                self.primary_button(ui, Action::Preflight);
+            }
+        } else if draft {
+            ui.label("Apply or discard in the changed section");
+        }
+    }
+    fn placement_actions(&mut self, ui: &mut egui::Ui) {
+        let (Some(project), Some(hello), Some(scene)) = (
+            self.state.project.clone(),
+            self.state.hello.clone(),
+            self.state.display.clone(),
+        ) else {
+            return;
+        };
+        let Some(intent) = self.state.manufacturing.intent.as_ref() else {
+            self.primary_button(ui, Action::LoadIntent);
+            return;
+        };
+        let occurrence = scene
+            .occurrences
+            .iter()
+            .find(|o| Some(o.occurrence_id) == self.occurrence);
+        let ready = self.state.phase == Phase::Running
+            && !self.state.busy
+            && !self.state.picker_open
+            && self.awaiting_serial.is_none()
+            && !project.read_only
+            && self.display_current();
+        let reason = if !ready {
+            Some("Open a writable project and wait for pending operations")
+        } else if occurrence.is_none() {
+            Some("Select a part in the model tree")
+        } else {
+            None
+        };
+        let proposal = self.state.bed_proposal.as_ref().filter(|p| {
+            p.session_id == hello.session_id
+                && p.project_revision == project.revision
+                && p.scene_revision == scene.summary.revision
+                && Some(p.occurrence_id) == self.occurrence
+        });
+        if let Some(proposal) = proposal {
+            if ui::primary(ui, "Apply placement", reason) {
+                self.queued_geometry = Some(GeometryCommand::SetInstancePose {
+                    session_id: proposal.session_id.clone(),
+                    base_revision: proposal.scene_revision,
+                    project_revision: proposal.project_revision,
+                    occurrence_id: proposal.occurrence_id,
+                    pose: proposal.pose,
+                });
+            }
+        } else if ui::primary(ui, "Review bed placement", reason) {
+            let o = occurrence.expect("checked selection");
+            self.queued_geometry = Some(GeometryCommand::PrepareBedPose {
+                session_id: hello.session_id.clone(),
+                base_revision: scene.summary.revision,
+                project_revision: project.revision,
+                occurrence_id: o.occurrence_id,
+                expected_definition_id: o.definition_id.clone(),
+                expected_pose: o.pose,
+                envelope_mm: intent.printer.build_envelope,
+                center_xy: true,
+                contact_tolerance_mm: SECTION_PLANE_TOLERANCE_MM,
+            });
+        }
     }
     pub(super) fn manufacturing_ui(&mut self, ui: &mut egui::Ui) {
         let Some(project) = self.state.project.clone() else {
@@ -80,24 +287,6 @@ impl Workbench {
         let writable = ready && !project.read_only;
         let m = self.state.manufacturing.clone();
         if self.manufacturing.panel == 1 {
-            ui::pane_header(
-                ui,
-                "Prepare",
-                "Project · committed settings and explicit drafts",
-            );
-            ui.horizontal_wrapped(|ui| {
-                for (index, label) in ["Setup", "Material", "Settings", "Placement", "Infill"]
-                    .iter()
-                    .enumerate()
-                {
-                    ui.selectable_value(
-                        &mut self.manufacturing.prepare_section,
-                        index as u8,
-                        *label,
-                    );
-                }
-            });
-            ui.separator();
             if project.read_only {
                 ui.label("Read-only project");
             }
@@ -113,7 +302,7 @@ impl Workbench {
                 self.button(ui, Action::Library);
             }
             if section == 1 {
-                self.material_ui(ui, ready, writable);
+                self.material_ui(ui, writable);
             }
             if section == 2 {
                 ui::group(ui, "Construction");
@@ -205,26 +394,7 @@ impl Workbench {
                         );
                     });
                     super::policies::fields(ui, &mut d.value);
-                    let valid = super::policies::prepared(&d.value);
-                    if let Err(error) = &valid {
-                        ui.colored_label(self.prefs.theme.tokens().warning, error.to_string());
-                    }
-                    let changed = m.intent.as_deref() != Some(&d.value);
-                    if changed && ui::primary(ui, "Apply settings", valid.as_ref().err().map(String::as_str))
-                    {
-                        let value = valid.expect("validated complete intent");
-                        d.value = value.clone();
-                        self.queued_manufacturing = Some(ManufacturingCommand::SetIntent {
-                            session_id: hello.session_id.clone(),
-                            base_revision: d.revision,
-                            intent: Arc::new(value),
-                        });
-                    }
                 });
-                    if ui.button("Discard settings draft").clicked() {
-                        self.manufacturing.ignored_nonce = m.loaded.as_ref().map(|l| l.nonce);
-                        self.manufacturing.draft = None;
-                    }
                     ui.collapsing("Complete declaration", |ui| {
                         ui.label(serde_json::to_string_pretty(&source).unwrap_or_default());
                     });
@@ -237,35 +407,6 @@ impl Workbench {
             }
             if section == 3 {
                 ui::group(ui, "Placement");
-                if let Some(scene) = self.state.display.clone()
-                    && let Some(o) = scene
-                        .occurrences
-                        .iter()
-                        .find(|o| Some(o.occurrence_id) == self.occurrence)
-                {
-                    if let Some(intent) = &m.intent
-                        && ui
-                            .add_enabled(
-                                writable && self.display_current(),
-                                egui::Button::new("Review bed placement"),
-                            )
-                            .clicked()
-                    {
-                        self.queued_geometry = Some(GeometryCommand::PrepareBedPose {
-                            session_id: hello.session_id.clone(),
-                            base_revision: scene.summary.revision,
-                            project_revision: project.revision,
-                            occurrence_id: o.occurrence_id,
-                            expected_definition_id: o.definition_id.clone(),
-                            expected_pose: o.pose,
-                            envelope_mm: intent.printer.build_envelope,
-                            center_xy: true,
-                            contact_tolerance_mm: SECTION_PLANE_TOLERANCE_MM,
-                        });
-                    }
-                } else {
-                    ui.weak("Select an occurrence in the model tree.");
-                }
                 if let Some(proposal) = &self.state.bed_proposal {
                     let current = proposal.session_id == hello.session_id
                         && proposal.project_revision == project.revision
@@ -289,42 +430,11 @@ impl Workbench {
                     ui.collapsing("Native support and envelope evidence", |ui| {
                         ui.label(format!("{proposal:#?}"));
                     });
-                    if ui
-                        .add_enabled(writable && current, egui::Button::new("Apply placement"))
-                        .clicked()
-                    {
-                        self.queued_geometry = Some(GeometryCommand::SetInstancePose {
-                            session_id: proposal.session_id.clone(),
-                            base_revision: proposal.scene_revision,
-                            project_revision: proposal.project_revision,
-                            occurrence_id: proposal.occurrence_id,
-                            pose: proposal.pose,
-                        });
+                    if !current {
+                        ui.label("Placement proposal is out of date");
                     }
                 }
             }
-            let draft = self
-                .manufacturing
-                .has_intent_draft(&project.project_id, m.intent.as_deref())
-                || self.manufacturing.pending_loaded(m.loaded.as_deref())
-                || self
-                    .material
-                    .has_changes(&project.project_id, m.intent.as_deref())
-                || self.process.has_changes();
-            ui.separator();
-            if draft {
-                ui.label("Unapplied changes · Apply or discard in the owning section");
-            }
-            if !draft && m.intent.is_some() {
-                if self.disabled(Action::Compile).is_none() {
-                    self.primary_button(ui, Action::Compile);
-                } else {
-                    self.primary_button(ui, Action::Preflight);
-                }
-            } else {
-                self.button(ui, Action::Preflight);
-            }
-
             if let Some(preflight) = &m.preflight {
                 ui.label(format!(
                     "Preflight: {:?} · revision {}",
@@ -339,24 +449,7 @@ impl Workbench {
                     }
                 });
             }
-            if draft {
-                self.button(ui, Action::Compile);
-            }
         } else if self.manufacturing.panel == 2 {
-            ui::pane_header(ui, "Program review", "Current compiled output");
-            ui.colored_label(self.prefs.theme.tokens().warning, "NOT MACHINE READY");
-            ui::help(
-                ui,
-                "verification-scope",
-                "Software verification",
-                "Independent replay checks the emitted program. Physical printability, collisions and machine execution remain unqualified.",
-            );
-            if self.manufacturing_current() {
-                self.button(ui, Action::Verify);
-                self.primary_button(ui, Action::Export);
-            } else {
-                self.primary_button(ui, Action::Verify);
-            }
             if m.loading {
                 ui.spinner();
                 ui.label("Retrieving checked actual output…");
@@ -661,14 +754,9 @@ impl Workbench {
             }
         }
         self.manufacturing.layers.controls(ui, view, &review);
-        if compact {
-            ui.collapsing("Event and model details", |ui| {
-                ui.label(BEAD_MODEL);
-                event_controls(ui, view, &review, descriptor);
-            });
-        } else {
+        ui.collapsing("Command playback", |ui| {
             event_controls(ui, view, &review, descriptor);
-        }
+        });
     }
 }
 
@@ -691,6 +779,9 @@ fn event_controls(
         .changed()
     {
         view.events = window.start + progress;
+    }
+    if view.context && view.layer.is_some() {
+        ui.weak("Dim layers show complete deposition, independent of playback.");
     }
     if view.events > window.start
         && view.events <= window.end

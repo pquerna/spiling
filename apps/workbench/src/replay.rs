@@ -35,6 +35,8 @@ pub struct View {
     pub layer: Option<u16>,
     /// Inclusive upper layer; None preserves single-layer selection.
     pub layer_end: Option<u16>,
+    /// Dim unselected deposited paths, independent of selected-layer playback.
+    pub context: bool,
     pub events: u32,
     pub travels: bool,
     pub pressure: bool,
@@ -50,6 +52,7 @@ impl Default for View {
         Self {
             layer: None,
             layer_end: None,
+            context: true,
             events: u32::MAX,
             travels: true,
             pressure: false,
@@ -143,6 +146,42 @@ fn event_range(
     (start * vertices) as u32..(end.max(start) * vertices) as u32
 }
 impl Batch {
+    /// Borrow at most two ranges from existing checked centerlines. Context shows
+    /// complete unselected deposition, never travels, pressure or lifecycle events.
+    /// Role/tool filters still apply; command progress belongs to the selection.
+    pub fn context_ranges(&self, view: View) -> [Range<u32>; 2] {
+        let Some(lower) = view.layer else {
+            return [0..0, 0..0];
+        };
+        if !view.context || !matches!(self.kind, 1..=5 | 8..=10 | 13 | 15) {
+            return [0..0, 0..0];
+        }
+        let upper = view.layer_end.unwrap_or(lower).max(lower);
+        let other = View {
+            events: u32::MAX,
+            ..view
+        };
+        [
+            if lower > 0 {
+                self.range(View {
+                    layer: Some(0),
+                    layer_end: Some(lower - 1),
+                    ..other
+                })
+            } else {
+                0..0
+            },
+            if upper < u16::MAX - 1 {
+                self.range(View {
+                    layer: Some(upper + 1),
+                    layer_end: Some(u16::MAX - 1),
+                    ..other
+                })
+            } else {
+                0..0
+            },
+        ]
+    }
     pub fn range(&self, view: View) -> Range<u32> {
         event_range(
             &self.events,
@@ -561,6 +600,93 @@ mod bead_tests {
 #[cfg(test)]
 mod layer_range_tests {
     use super::*;
+    #[test]
+    fn other_layers_are_deposition_context_not_selected_playback_or_lifecycle() {
+        let batch = Batch {
+            kind: 1,
+            tool: 0,
+            points: false,
+            vertices: Vec::new(),
+            events: vec![
+                (0, u16::MAX),
+                (2, 0),
+                (5, 1),
+                (7, 1),
+                (9, 2),
+                (12, 3),
+                (20, u16::MAX),
+            ],
+        };
+        let view = View {
+            layer: Some(1),
+            events: 0,
+            ..View::default()
+        };
+        // Below and above remain whole even at zero selected-command progress.
+        // No selected paths or unattributed lifecycle sentinels enter context.
+        assert_eq!(batch.context_ranges(view), [2..4, 8..12]);
+        assert!(batch.range(view).is_empty());
+        assert_eq!(
+            batch.context_ranges(View {
+                layer_end: Some(2),
+                ..view
+            }),
+            [2..4, 10..12]
+        );
+        assert_eq!(
+            batch.context_ranges(View {
+                layer: Some(0),
+                ..view
+            }),
+            [0..0, 4..12]
+        );
+        assert_eq!(
+            batch.context_ranges(View {
+                layer: Some(u16::MAX - 1),
+                ..view
+            }),
+            [2..12, 0..0]
+        );
+        for excluded in [
+            View {
+                context: false,
+                ..view
+            },
+            View {
+                layer: None,
+                ..view
+            },
+            View {
+                visible: false,
+                ..view
+            },
+            View {
+                role: Some(2),
+                ..view
+            },
+            View {
+                tool: Some(1),
+                ..view
+            },
+        ] {
+            assert!(batch.context_ranges(excluded).iter().all(Range::is_empty));
+        }
+        for kind in [0, 6, 7, 11, 12, 14] {
+            let non_deposition = Batch {
+                kind,
+                events: batch.events.clone(),
+                vertices: Vec::new(),
+                points: false,
+                tool: 0,
+            };
+            assert!(
+                non_deposition
+                    .context_ranges(view)
+                    .iter()
+                    .all(Range::is_empty)
+            );
+        }
+    }
     #[test]
     fn inclusive_layer_ranges_compose_with_exclusive_progress_and_role_tool_filters() {
         let events = [(2, 0), (3, 0), (5, 1), (7, 1), (9, 2), (12, 3)];

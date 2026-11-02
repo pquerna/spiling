@@ -22,6 +22,29 @@ struct MaterialDraft {
     value: MaterialProfileSelection,
 }
 impl MaterialUi {
+    fn stage_reviewed(
+        &mut self,
+        project: ProjectId,
+        session: SessionId,
+        revision: ProjectRevision,
+        ignored_nonce: Option<u64>,
+        selection: MaterialProfileSelection,
+    ) {
+        self.identity = Some((project, session));
+        self.ignored_nonce = ignored_nonce;
+        self.draft = Some(MaterialDraft {
+            revision,
+            nonce: 0,
+            original: selection.clone(),
+            value: selection,
+        });
+    }
+
+    pub(super) fn discard(&mut self, nonce: Option<u64>) {
+        self.ignored_nonce = nonce;
+        self.draft = None;
+    }
+
     pub(super) fn has_changes(
         &self,
         project: &ProjectId,
@@ -74,7 +97,58 @@ impl MaterialUi {
     }
 }
 impl Workbench {
-    pub(super) fn material_ui(&mut self, ui: &mut egui::Ui, ready: bool, writable: bool) {
+    pub(super) fn material_actions(&mut self, ui: &mut egui::Ui) {
+        let (Some(project), Some(hello)) = (self.state.project.clone(), self.state.hello.clone())
+        else {
+            return;
+        };
+        let m = self.state.manufacturing.clone();
+        let captured = m
+            .intent
+            .as_ref()
+            .and_then(|i| i.material_profile.as_ref())
+            .map(|p| &p.selection);
+        let pending_intent = self.manufacturing.pending_loaded(m.loaded.as_deref())
+            || self
+                .manufacturing
+                .has_intent_draft(&project.project_id, m.intent.as_deref());
+        let writable = self.state.phase == Phase::Running
+            && !self.state.busy
+            && !self.state.picker_open
+            && !project.read_only
+            && self.awaiting_serial.is_none();
+        let Some(d) = &mut self.material.draft else {
+            return;
+        };
+        let conflict = d.revision != project.revision;
+        let validity = d.value.validate();
+        if let Err(error) = &validity {
+            ui.colored_label(self.prefs.theme.tokens().warning, error.to_string());
+        }
+        let validation_problem = validity.as_ref().err().map(ToString::to_string);
+        let changed = captured != Some(&d.value);
+        let disabled = if !writable {
+            Some("Project is read-only or an operation is pending")
+        } else if conflict {
+            Some("Reload the captured profile after the project change")
+        } else if pending_intent {
+            Some("Apply or discard the settings draft first")
+        } else {
+            validation_problem.as_deref()
+        };
+        if changed && ui::primary(ui, "Apply profile", disabled) {
+            self.queued_manufacturing = Some(ManufacturingCommand::ApplyMaterialProfile {
+                session_id: hello.session_id.clone(),
+                base_revision: d.revision,
+                selection: d.value.clone(),
+            });
+        }
+        if ui.button("Discard profile draft").clicked() {
+            self.material.ignored_nonce = m.loaded_material.as_ref().map(|l| l.nonce);
+            self.material.draft = None;
+        }
+    }
+    pub(super) fn material_ui(&mut self, ui: &mut egui::Ui, writable: bool) {
         let (Some(project), Some(hello)) = (self.state.project.clone(), self.state.hello.clone())
         else {
             return;
@@ -97,7 +171,6 @@ impl Workbench {
         ui.collapsing("Load a single profile", |ui| {
             self.button(ui, Action::LoadMaterial);
         });
-        self.catalog_ui(ui, &project, &hello.session_id, ready);
 
         let pending_intent = self.manufacturing.pending_loaded(m.loaded.as_deref())
             || self
@@ -210,32 +283,6 @@ impl Workbench {
                 ui.weak(format!("Profile policy: later fan {} PWM · bridge span {:.3} mm · bridge speed ×{:.3}, flow ×{:.3}", p.process.fan_after_first_layers, p.process.max_bridge_span_mm, p.process.bridge_speed_factor, p.process.bridge_flow_factor));
             }
         });
-        let validity = d.value.validate();
-        if let Err(error) = &validity {
-            ui.colored_label(self.prefs.theme.tokens().warning, error.to_string());
-        }
-        let validation_problem = validity.as_ref().err().map(ToString::to_string);
-        let changed = captured != Some(&d.value);
-        let disabled = if !writable {
-            Some("Project is read-only or an operation is pending")
-        } else if conflict {
-            Some("Reload the captured profile after the project change")
-        } else if pending_intent {
-            Some("Apply or discard the settings draft first")
-        } else {
-            validation_problem.as_deref()
-        };
-        if changed && ui::primary(ui, "Apply profile", disabled) {
-            self.queued_manufacturing = Some(ManufacturingCommand::ApplyMaterialProfile {
-                session_id: hello.session_id.clone(),
-                base_revision: d.revision,
-                selection: d.value.clone(),
-            });
-        }
-        if ui.button("Discard profile draft").clicked() {
-            self.material.ignored_nonce = m.loaded_material.as_ref().map(|l| l.nonce);
-            self.material.draft = None;
-        }
         if let Some(intent) = &m.intent
             && let Some(profile) = &intent.material_profile
         {
@@ -307,6 +354,27 @@ mod tests {
     }
     fn ids() -> (ProjectId, SessionId) {
         (ProjectId::new(), SessionId::new())
+    }
+    #[test]
+    fn catalog_first_selection_survives_return_to_material_and_stays_project_bound() {
+        let (project, session) = ids();
+        let selected = selection();
+        let mut ui = MaterialUi::default();
+        ui.stage_reviewed(
+            project.clone(),
+            session.clone(),
+            ProjectRevision(7),
+            None,
+            selected.clone(),
+        );
+        ui.sync(&project, &session, ProjectRevision(7), None, None);
+        assert_eq!(ui.draft.as_ref().map(|d| &d.value), Some(&selected));
+        assert!(ui.has_changes(&project, None));
+        ui.sync(&ProjectId::new(), &session, ProjectRevision(7), None, None);
+        assert!(
+            ui.draft.is_none(),
+            "a different project cannot inherit the staged profile"
+        );
     }
     #[test]
     fn rejected_and_stale_drafts_preserve_overrides_until_reload() {

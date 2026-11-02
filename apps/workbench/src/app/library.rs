@@ -20,6 +20,8 @@ struct ProjectDefinitionDraft {
 #[derive(Default)]
 pub(super) struct LibraryUi {
     pub open: bool,
+    detail: u8,
+    comparison_destination: Option<bool>,
     recipes: recipes::RecipeUi,
     hardware: hardware::HardwareUi,
     personal: bool,
@@ -46,6 +48,46 @@ pub(super) struct LibraryUi {
     project_submission: Option<FilamentRef>,
 }
 impl LibraryUi {
+    pub(super) fn pending_save(&self) -> bool {
+        self.pending.is_some()
+    }
+    pub(super) fn has_drafts(&self, state: &State) -> bool {
+        let definition = self.draft.as_ref().map_or(
+            !self.name.is_empty() || !self.hex.is_empty() || !self.color_name.is_empty(),
+            |d| {
+                self.name != d.definition.name
+                    || self.color_name != d.definition.color_name.clone().unwrap_or_default()
+                    || self.hex != hex(d.definition.appearance.as_ref()).unwrap_or_default()
+            },
+        );
+        definition
+            || self.spool_edit.is_some()
+            || !self.spool_name.is_empty()
+            || !self.grams.is_empty()
+            || !self.lot.is_empty()
+            || !self.location.is_empty()
+            || self.recipes.has_changes()
+            || self.hardware.has_changes(state)
+    }
+    pub(super) fn discard_drafts(&mut self) {
+        self.draft = None;
+        self.draft_project = None;
+        self.project_submission = None;
+        self.name.clear();
+        self.color_name.clear();
+        self.hex.clear();
+        self.spool_edit = None;
+        self.spool_state = None;
+        self.spool_name.clear();
+        self.grams.clear();
+        self.lot.clear();
+        self.location.clear();
+        self.recipes.clear_composer();
+        self.recipes.discard_context();
+        self.hardware = hardware::HardwareUi::default();
+        self.detail = 0;
+    }
+
     fn mutation(&mut self, status: Option<&LibraryStatus>, mutation: LibraryMutation) {
         let identity = status.and_then(|s| s.identity.as_ref());
         let request = LibraryWrite {
@@ -170,7 +212,28 @@ impl LibraryUi {
     }
 }
 impl Workbench {
-    pub(super) fn library_window(&mut self, ctx: &egui::Context) {
+    pub(super) fn open_profile_catalog(&mut self, ctx: &egui::Context) {
+        if !self.library.open {
+            self.surface_focus[1] = ctx.memory(|m| m.focused());
+        }
+        self.library.hardware.clear_secret();
+        self.library.open = true;
+        self.library.detail = 6;
+    }
+    pub(super) fn finish_profile_selection(&mut self, ctx: &egui::Context) {
+        self.close_library(ctx);
+        self.show_prepare(1);
+    }
+    pub(super) fn choose_recipe(&mut self) {
+        self.library.hardware.clear_secret();
+        self.library.detail = 0;
+        self.library.open = true;
+        self.library.personal = false;
+        self.library.recipes.active = true;
+        self.library.hardware.active = false;
+        self.library.refresh();
+    }
+    pub(super) fn library_sync(&mut self) {
         let state = self.state.library.clone();
         if let (Some(pending), Some(receipt)) = (&self.library.pending, &state.receipt)
             && pending.request_id == receipt.request_id
@@ -185,9 +248,26 @@ impl Workbench {
                     self.library.color_name.clear();
                     self.library.hex.clear();
                 }
+                LibraryMutation::PutRecipe { transfer, .. }
+                    if self.library.recipes.submission.as_ref().is_some_and(
+                        |(personal, _, reference)| {
+                            *personal && *reference == transfer.recipe.reference()
+                        },
+                    ) =>
+                {
+                    self.library.recipes.clear_composer();
+                    self.library.detail = 0;
+                }
+                LibraryMutation::ReplaceHardware { .. } => {
+                    self.library.hardware.confirmed_write();
+                }
                 LibraryMutation::PutSpool { .. } => {
                     self.library.spool_edit = None;
                     self.library.spool_state = None;
+                    self.library.spool_name.clear();
+                    self.library.grams.clear();
+                    self.library.lot.clear();
+                    self.library.location.clear();
                 }
                 _ => {}
             }
@@ -223,6 +303,26 @@ impl Workbench {
                 self.library.refresh();
             }
         }
+        if self
+            .library
+            .recipes
+            .submission
+            .as_ref()
+            .is_some_and(|(personal, project, reference)| {
+                !personal
+                    && state
+                        .recipe_project
+                        .as_ref()
+                        .is_some_and(|(id, _)| Some(id) == project.as_ref())
+                    && state
+                        .project_recipes
+                        .iter()
+                        .any(|r| &r.reference == reference)
+            })
+        {
+            self.library.recipes.clear_composer();
+            self.library.detail = 0;
+        }
         if !self.library.open {
             return;
         }
@@ -245,19 +345,71 @@ impl Workbench {
             self.library.personal = true;
             self.library.refresh();
         }
-        let mut open = true;
-        egui::Window::new("Materials")
-            .open(&mut open)
-            .default_size([760.0, 640.0])
-            .vscroll(true)
-            .show(ctx, |ui| self.library_content(ui, &state));
-        self.library.open = open;
+    }
+    pub(super) fn suspend_library(&mut self) {
+        self.library.hardware.clear_secret();
+    }
+    pub(super) fn close_library(&mut self, ctx: &egui::Context) {
+        if let Some(id) = self.surface_focus[1].take() {
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
+        self.library.open = false;
+        self.library.hardware.clear_secret();
+    }
+    pub(super) fn library_page(&mut self, ui: &mut egui::Ui) {
+        let state = self.state.library.clone();
+        ui.horizontal(|ui| {
+            ui.heading("Library");
+            if ui::close(
+                ui,
+                if self.library.detail == 6 {
+                    "Back to Material"
+                } else {
+                    "Back to workbench"
+                },
+            ) {
+                self.close_library(ui.ctx());
+            }
+            ui.weak("Project copies and My library are independent");
+        });
+        if self.library.detail == 6 {
+            ui::pane_header(
+                ui,
+                "Material profiles",
+                "Project setup · compare before staging a draft",
+            );
+            let ready = self.state.phase == Phase::Running
+                && !self.state.busy
+                && !self.state.picker_open
+                && self.awaiting_serial.is_none();
+            if self.state.manufacturing.loaded_catalog.is_none() {
+                self.primary_button(ui, Action::LoadMaterialCatalog);
+            } else {
+                self.button(ui, Action::LoadMaterialCatalog);
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("profile-catalog-page")
+                .show(ui, |ui| {
+                    ui.set_max_width(ui.available_width().min(900.0));
+                    if let (Some(project), Some(hello)) =
+                        (self.state.project.clone(), self.state.hello.clone())
+                    {
+                        self.catalog_ui(ui, &project, &hello.session_id, ready);
+                    }
+                });
+            return;
+        }
+        self.library_content(ui, &state);
     }
     fn library_content(&mut self, ui: &mut egui::Ui, state: &State) {
         let ready = self.state.phase == Phase::Running
             && !self.state.busy
+            && !self.state.picker_open
+            && self.state.confirmation.is_none()
             && self.awaiting_serial.is_none();
-        let writable = ready && self.state.project.as_ref().is_some_and(|p| !p.read_only);
+        let writable = ready
+            && self.library.pending.is_none()
+            && self.state.project.as_ref().is_some_and(|p| !p.read_only);
         let personal_write = ready && state.status.is_some() && self.library.pending.is_none();
         ui.horizontal(|ui| {
             let before = (
@@ -289,7 +441,7 @@ impl Workbench {
                 self.library.hardware.active = false;
             }
             if ui
-                .selectable_label(self.library.hardware.active, "My Hardware")
+                .selectable_label(self.library.hardware.active, "Hardware")
                 .clicked()
             {
                 self.library.hardware.active = true;
@@ -301,6 +453,8 @@ impl Workbench {
                     self.library.hardware.active,
                 )
             {
+                self.library.hardware.clear_secret();
+                self.library.detail = 0;
                 self.library.refresh();
             }
             if ui
@@ -310,64 +464,149 @@ impl Workbench {
                 self.library.refresh();
             }
         });
-        if self.library.personal {
-            self.library_header(ui, state, ready);
-        }
+        ui.separator();
         if self.library.hardware.active {
-            self.hardware_content(ui, state, ready, writable);
-            self.library_pending(ui, state, ready);
+            egui::ScrollArea::vertical()
+                .id_salt("hardware-page")
+                .show(ui, |ui| {
+                    self.hardware_content(ui, state, ready, writable);
+                    self.library_pending(ui, state, ready);
+                });
             return;
         }
         if self.library.recipes.active {
-            self.recipes_content(ui, state, ready, writable, personal_write);
-            self.library_pending(ui, state, ready);
+            egui::ScrollArea::vertical()
+                .id_salt("recipes-page")
+                .show(ui, |ui| {
+                    self.recipes_content(ui, state, ready, writable, personal_write);
+                    self.library_pending(ui, state, ready);
+                });
             return;
         }
-        self.library_rows(ui, state, ready);
-        ui.separator();
-        if let Some((personal, selected)) = &state.selected
-            && *personal == self.library.personal
-        {
-            let current = self
-                .state
-                .project
-                .as_ref()
-                .map(|p| (p.project_id.clone(), p.revision));
-            if *personal || (current.is_some() && state.selected_project == current) {
-                self.library_selection(ui, state, selected, *personal, writable, personal_write);
-            } else {
-                ui.weak("Project material selection changed. Refresh and inspect it again.");
-            }
-        }
         if self.library.personal {
-            self.library_capture_job(ui, state, personal_write);
-        }
-        let project_draft = self.library.draft_project.is_some();
-        if self.library.personal && !project_draft {
-            ui.separator();
-            let title = if self.library.draft.is_some() {
-                "Edit My library definition"
-            } else {
-                "Add filament"
-            };
-            ui.collapsing(title, |ui| {
-                self.library_definition_editor(ui, state, personal_write)
-            });
-        } else if !self.library.personal && project_draft {
-            ui.separator();
-            ui.heading("Edit project copy");
-            self.library_definition_editor(ui, state, writable);
-        } else if self.library.draft.is_some() {
-            ui.weak(if project_draft {
-                "A Project definition draft is retained. Switch to Project to finish it."
-            } else {
-                "A My library definition draft is retained. Switch to My library to finish it."
-            });
-        }
-        if !self.library.personal {
-            self.library_comparison(ui, state, writable, personal_write);
+            self.library_header(ui, state, ready);
         }
         self.library_pending(ui, state, ready);
+        let definition_draft = self.library.draft.is_some()
+            || !self.library.name.is_empty()
+            || !self.library.hex.is_empty()
+            || !self.library.color_name.is_empty();
+        ui.horizontal_wrapped(|ui| {
+            let no_selection = state
+                .selected
+                .as_ref()
+                .is_none_or(|(personal, _)| *personal != self.library.personal);
+            let label = if definition_draft {
+                "Resume filament draft"
+            } else {
+                "Create filament"
+            };
+            if self.library.personal {
+                let open = if self.library.detail == 0 && no_selection {
+                    ui::primary(ui, label, None)
+                } else {
+                    ui.button(label).clicked()
+                };
+                if open {
+                    self.library.detail = 1;
+                }
+            } else if self.library.detail == 0
+                && no_selection
+                && ui::primary(ui, "Choose from My library", None)
+            {
+                self.library.personal = true;
+                self.library.refresh();
+            }
+            if self.library.detail != 0 && ui::close(ui, "Back to filaments") {
+                self.library.detail = 0;
+            }
+            if definition_draft {
+                ui.label("Filament draft retained");
+            }
+        });
+        if self.library.detail == 1 {
+            ui::pane_header(
+                ui,
+                "Filament",
+                if self.library.draft_project.is_some() {
+                    "Project copy"
+                } else {
+                    "My library definition"
+                },
+            );
+            egui::ScrollArea::vertical()
+                .id_salt("filament-editor")
+                .show(ui, |ui| {
+                    self.library_definition_editor(
+                        ui,
+                        state,
+                        if self.library.draft_project.is_some() {
+                            writable
+                        } else {
+                            personal_write
+                        },
+                    )
+                });
+            return;
+        }
+        if self.library.detail == 2 {
+            if let Some((personal, selected)) = &state.selected
+                && *personal
+            {
+                ui::pane_header(ui, "Physical spools", &selected.definition.name);
+                egui::ScrollArea::vertical()
+                    .id_salt("spool-editor")
+                    .show(ui, |ui| {
+                        self.library_spools(ui, state, selected, personal_write)
+                    });
+            }
+            return;
+        }
+        let width = (ui.available_width() * 0.32).clamp(200.0, 340.0);
+        egui::Panel::left("filament-list")
+            .exact_size(width)
+            .show(ui, |ui| {
+                ui::group(ui, "Filaments");
+                egui::ScrollArea::vertical()
+                    .id_salt("filament-list-body")
+                    .show(ui, |ui| self.library_rows(ui, state, ready));
+            });
+        egui::ScrollArea::vertical()
+            .id_salt("filament-detail")
+            .show(ui, |ui| {
+                if let Some((personal, selected)) = &state.selected
+                    && *personal == self.library.personal
+                {
+                    let current = self
+                        .state
+                        .project
+                        .as_ref()
+                        .map(|p| (p.project_id.clone(), p.revision));
+                    if *personal || (current.is_some() && state.selected_project == current) {
+                        self.library_selection(
+                            ui,
+                            state,
+                            selected,
+                            *personal,
+                            writable,
+                            personal_write,
+                        );
+                    } else {
+                        ui.label("Project changed. Refresh and inspect this filament again.");
+                    }
+                } else {
+                    ui::pane_header(
+                        ui,
+                        "Choose a filament",
+                        "Select a row to inspect its declaration",
+                    );
+                }
+                if self.library.personal {
+                    self.library_capture_job(ui, state, personal_write);
+                } else {
+                    self.library_comparison(ui, state, writable, personal_write);
+                }
+            });
     }
     fn library_header(&mut self, ui: &mut egui::Ui, state: &State, ready: bool) {
         if let Some(status) = &state.status {
@@ -387,10 +626,14 @@ impl Workbench {
         } else {
             ui.weak("My library is unavailable. Project materials remain independent.");
         }
+        let draft = self.library.has_drafts(state);
+        if draft {
+            ui.label("Save or discard library drafts before changing this location.");
+        }
         if ui
             .add_enabled(
-                ready && self.library.pending.is_none(),
-                egui::Button::new("Choose another library .spil…"),
+                ready && self.library.pending.is_none() && !draft,
+                egui::Button::new("Choose library…"),
             )
             .clicked()
         {
@@ -409,6 +652,20 @@ impl Workbench {
         });
     }
     fn library_rows(&mut self, ui: &mut egui::Ui, state: &State, ready: bool) {
+        let spool_draft = self.library.spool_edit.is_some()
+            || !self.library.spool_name.is_empty()
+            || !self.library.grams.is_empty()
+            || !self.library.lot.is_empty()
+            || !self.library.location.is_empty();
+        if spool_draft {
+            ui.label(
+                "Spool draft retained. Resume spools or discard before choosing another filament.",
+            );
+            if ui.button("Resume spools").clicked() {
+                self.library.detail = 2;
+            }
+        }
+
         if !self.library.personal {
             let current = self
                 .state
@@ -435,7 +692,10 @@ impl Workbench {
                         *scope == self.library.personal && r.reference == row.entry.current
                     });
                     if ui
-                        .add_enabled(ready, egui::Button::selectable(selected, &row.name))
+                        .add_enabled(
+                            ready && !spool_draft,
+                            egui::Button::selectable(selected, &row.name),
+                        )
                         .clicked()
                     {
                         self.library.queued = Some(LibraryAction::Inspect {
@@ -505,9 +765,9 @@ impl Workbench {
         }
         self.library_selection_actions(ui, state, selected, personal, writable, personal_write);
         if personal {
-            ui.collapsing("Physical spools", |ui| {
-                self.library_spools(ui, state, selected, personal_write)
-            });
+            if ui.button("Manage spools").clicked() {
+                self.library.detail = 2;
+            }
         } else {
             if selected.definition.profiles.is_empty() {
                 ui.weak("No process profile captured. Add a compatible profile before applying to a job.");
@@ -522,7 +782,8 @@ impl Workbench {
                     .clicked()
                 {
                     self.library.queued = Some(LibraryAction::ReviewProfile(profile.clone()));
-                    self.manufacturing.panel = 1;
+                    self.show_prepare(1);
+                    self.close_library(ui.ctx());
                 }
             }
         }
@@ -559,7 +820,10 @@ impl Workbench {
         ui.horizontal_wrapped(|ui| {
             if !personal {
                 if ui
-                    .add_enabled(writable, egui::Button::new("Edit project copy"))
+                    .add_enabled(
+                        writable && self.library.draft.is_none() && self.library.name.is_empty(),
+                        egui::Button::new("Edit project copy"),
+                    )
                     .clicked()
                 {
                     let origin = state
@@ -568,6 +832,7 @@ impl Workbench {
                         .find(|r| r.entry.current == selected.reference)
                         .and_then(|r| r.entry.origin.clone());
                     self.library.edit(selected);
+                    self.library.detail = 1;
                     self.library.draft_project = state
                         .selected_project
                         .clone()
@@ -595,21 +860,26 @@ impl Workbench {
                 }
             }
             if personal
-                && ui
-                    .add_enabled(writable, egui::Button::new("Add to project"))
-                    .clicked()
+                && ui::primary(
+                    ui,
+                    "Copy to project",
+                    (!writable).then_some("Open a writable project to copy this filament"),
+                )
             {
                 self.library_copy_to_project(state, selected);
             }
             if personal
                 && ui
                     .add_enabled(
-                        personal_write,
-                        egui::Button::new("Edit My library definition"),
+                        personal_write
+                            && self.library.draft.is_none()
+                            && self.library.name.is_empty(),
+                        egui::Button::new("Edit definition"),
                     )
                     .clicked()
             {
                 self.library.edit(selected);
+                self.library.detail = 1;
             }
             if !personal
                 && ui
@@ -748,51 +1018,41 @@ impl Workbench {
             "Add another spool of this variant"
         });
         let state_value = self.library.spool_state.get_or_insert(StockState::OnHand);
-        egui::ComboBox::from_label("Stock state")
-            .selected_text(stock_label(*state_value))
-            .show_ui(ui, |ui| {
-                for state in [
-                    StockState::OnHand,
-                    StockState::Ordered,
-                    StockState::Empty,
-                    StockState::Archived,
-                ] {
-                    ui.selectable_value(state_value, state, stock_label(state));
-                }
-            });
-        ui.horizontal(|ui| {
-            ui.label("Name");
-            ui.text_edit_singleline(&mut self.library.spool_name);
+        ui.add_enabled_ui(writable, |ui| {
+            egui::ComboBox::from_label("Stock state")
+                .selected_text(stock_label(*state_value))
+                .show_ui(ui, |ui| {
+                    for state in [
+                        StockState::OnHand,
+                        StockState::Ordered,
+                        StockState::Empty,
+                        StockState::Archived,
+                    ] {
+                        ui.selectable_value(state_value, state, stock_label(state));
+                    }
+                });
         });
-        ui.horizontal(|ui| {
-            ui.label("Remaining g (optional)");
-            ui.text_edit_singleline(&mut self.library.grams);
+        ui.add_enabled_ui(writable, |ui| {
+            ui::text(ui, "Name", &mut self.library.spool_name);
+            ui::text(ui, "Remaining (g, optional)", &mut self.library.grams);
+            ui::text(ui, "Lot", &mut self.library.lot);
+            ui::text(ui, "Location", &mut self.library.location);
         });
-        ui.horizontal(|ui| {
-            ui.label("Lot");
-            ui.text_edit_singleline(&mut self.library.lot);
-        });
-        ui.horizontal(|ui| {
-            ui.label("Location");
-            ui.text_edit_singleline(&mut self.library.location);
-        });
-        if ui
-            .add_enabled(
-                writable,
-                egui::Button::new(if self.library.spool_edit.is_some() {
-                    "Save spool"
-                } else {
-                    "Add spool"
-                }),
-            )
-            .clicked()
-        {
+        if ui::primary(
+            ui,
+            if self.library.spool_edit.is_some() {
+                "Save spool"
+            } else {
+                "Add spool"
+            },
+            (!writable).then_some("Wait for the current library operation"),
+        ) {
             match self.library.spool_mutation(&selected.reference) {
                 Ok(mutation) => self.library.mutation(state.status.as_ref(), mutation),
                 Err(error) => self.local_problem = Some(error),
             }
         }
-        if ui.button("Start a new spool draft").clicked() {
+        if ui.button("Discard spool draft").clicked() {
             self.library.spool_edit = None;
             self.library.spool_state = None;
             self.library.spool_name.clear();
@@ -842,17 +1102,11 @@ impl Workbench {
         }
     }
     fn library_definition_editor(&mut self, ui: &mut egui::Ui, state: &State, writable: bool) {
-        ui.horizontal(|ui| {
-            ui.label("Name");
-            ui.text_edit_singleline(&mut self.library.name);
-        });
-        ui.horizontal(|ui| {
-            ui.label("Supplier color name");
-            ui.text_edit_singleline(&mut self.library.color_name);
-        });
-        ui.horizontal(|ui| {
-            ui.label("Hex (optional)");
-            ui.text_edit_singleline(&mut self.library.hex);
+        ui.set_max_width(ui.available_width().min(650.0));
+        ui.add_enabled_ui(writable, |ui| {
+            ui::text(ui, "Name", &mut self.library.name);
+            ui::text(ui, "Supplier color name", &mut self.library.color_name);
+            ui::text(ui, "Hex (optional)", &mut self.library.hex);
         });
         ui.weak("New colors are operator declarations. Unspecified color and profile are allowed.");
         let current = self
@@ -871,12 +1125,23 @@ impl Workbench {
         let label = if self.library.draft_project.is_some() {
             "Save project copy"
         } else {
-            "Save definition"
+            "Save filament"
         };
-        if ui
-            .add_enabled(writable && draft_current, egui::Button::new(label))
-            .clicked()
-        {
+        let validation = if self.library.name.trim().is_empty() {
+            Some("Enter a filament name".to_string())
+        } else if !self.library.hex.trim().is_empty() {
+            spiling_contracts::color_naming::parse_srgb8_hex(self.library.hex.trim()).err()
+        } else {
+            None
+        };
+        let reason = if !writable {
+            Some("Wait for the current operation or choose a writable scope")
+        } else if !draft_current {
+            Some("Discard this stale draft and inspect the current Project copy")
+        } else {
+            validation.as_deref()
+        };
+        if ui::primary(ui, label, reason) {
             match self.library.definition_mutation() {
                 Ok(LibraryMutation::PutFilament {
                     id,

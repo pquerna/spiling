@@ -9,7 +9,12 @@ pub(super) struct HardwareUi {
     pub active: bool,
     tab: u8,
     query: String,
-    name: String,
+    names: [String; 3],
+    submitted_add: Option<(usize, String)>,
+    submitted_connection: Option<(String, String)>,
+    machine_detail: bool,
+    plate_detail: bool,
+    connections: bool,
     setup: usize,
     plate_model: usize,
     machine: Option<OwnedMachine>,
@@ -24,17 +29,51 @@ pub(super) struct HardwareUi {
     secret: zeroize::Zeroizing<String>,
     credential_route: Option<String>,
 }
-fn field(ui: &mut egui::Ui, label: &str, value: &mut String) {
-    ui.horizontal(|ui| {
-        let l = ui.label(label);
-        ui.text_edit_singleline(value).labelled_by(l.id);
-    });
+impl HardwareUi {
+    pub(super) fn has_changes(&self, state: &State) -> bool {
+        let current = state.hardware.personal.as_ref().map(|p| &p.hardware);
+        self.machine
+            .as_ref()
+            .is_some_and(|d| current.is_none_or(|h| !h.machines.contains(d)))
+            || self
+                .plate
+                .as_ref()
+                .is_some_and(|d| current.is_none_or(|h| !h.plates.contains(d)))
+            || self
+                .accessory
+                .as_ref()
+                .is_some_and(|d| current.is_none_or(|h| !h.accessories.contains(d)))
+            || self.names.iter().any(|n| !n.is_empty())
+            || !self.endpoint.is_empty()
+            || !self.identity.is_empty()
+            || !self.secret.is_empty()
+    }
+    pub(super) fn confirmed_write(&mut self) {
+        if let Some((endpoint, identity)) = self.submitted_connection.take() {
+            if self.endpoint == endpoint {
+                self.endpoint.clear();
+            }
+            if self.identity == identity {
+                self.identity.clear();
+            }
+        }
+        if let Some((index, value)) = self.submitted_add.take()
+            && self.names[index] == value
+        {
+            self.names[index].clear();
+        }
+    }
+
+    pub(super) fn clear_secret(&mut self) {
+        self.secret = zeroize::Zeroizing::default();
+        self.credential_route = None;
+    }
 }
-fn number(ui: &mut egui::Ui, label: &str, v: &mut f64) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(egui::DragValue::new(v).speed(0.1));
-    });
+fn field(ui: &mut egui::Ui, label: &str, value: &mut String) {
+    ui::text(ui, label, value);
+}
+fn number(ui: &mut egui::Ui, label: &str, value: &mut f64) {
+    ui::number(ui, label, value, 0.1);
 }
 fn machine_picker(
     ui: &mut egui::Ui,
@@ -65,6 +104,17 @@ impl Workbench {
             self.local_problem = Some(e);
             return;
         }
+        if hardware.routes.len() > personal.hardware.routes.len() {
+            self.library.hardware.submitted_connection = Some((
+                self.library.hardware.endpoint.clone(),
+                self.library.hardware.identity.clone(),
+            ));
+        }
+        if hardware.machines.len() > personal.hardware.machines.len() {
+            self.library.hardware.submitted_add = Some((0, self.library.hardware.names[0].clone()));
+        } else if hardware.plates.len() > personal.hardware.plates.len() {
+            self.library.hardware.submitted_add = Some((1, self.library.hardware.names[1].clone()));
+        }
         let request = LibraryWrite {
             library_id: personal.identity.as_ref().map(|i| i.id.clone()),
             base_revision: personal.identity.as_ref().map_or(0, |i| i.revision),
@@ -81,12 +131,14 @@ impl Workbench {
         ready: bool,
         writable: bool,
     ) {
+        ui.set_max_width(ui.available_width().min(850.0));
         let personal = state.hardware.personal.clone();
         let catalog = state.hardware.catalog.clone();
         if !self.library.personal {
             self.project_hardware(ui, state, ready, writable);
             return;
         }
+        let previous_tab = self.library.hardware.tab;
         ui.horizontal(|ui| {
             for (index, name) in ["Machines", "Build plates", "Accessories", "Catalog"]
                 .iter()
@@ -95,6 +147,9 @@ impl Workbench {
                 ui.selectable_value(&mut self.library.hardware.tab, index as u8, *name);
             }
         });
+        if previous_tab != self.library.hardware.tab {
+            self.library.hardware.clear_secret();
+        }
         if let Some(error) = &state.hardware.error {
             ui.label(format!("Local hardware unavailable: {error}"));
         }
@@ -120,7 +175,7 @@ impl Workbench {
                 self.queue_hardware(HardwareAction::ResolveCredential);
             }
         }
-        match self.library.hardware.tab {
+        ui.add_enabled_ui(can_write, |ui| match self.library.hardware.tab {
             0 => self.hardware_machines(ui, &personal, catalog.as_ref(), can_write),
             1 => self.hardware_plates(ui, &personal, catalog.as_ref(), can_write),
             2 => self.hardware_accessories(ui, &personal, can_write),
@@ -156,7 +211,7 @@ impl Workbench {
                     }
                 }
             }
-        }
+        });
     }
     fn hardware_machines(
         &mut self,
@@ -165,100 +220,150 @@ impl Workbench {
         catalog: Option<&HardwareCatalog>,
         ready: bool,
     ) {
-        ui.weak("Machine names, locations, serials and connections stay on this computer.");
-        for m in &p.hardware.machines {
-            ui.push_id(&m.id, |ui| {
-                if ui
-                    .selectable_label(
-                        self.library
-                            .hardware
-                            .machine
-                            .as_ref()
-                            .is_some_and(|d| d.id == m.id),
-                        format!(
-                            "{} · {} · {} mm",
-                            m.nickname, m.setup.model.model, m.setup.printer.nozzle_diameter_mm
-                        ),
-                    )
-                    .clicked()
-                {
-                    self.library.hardware.secret = zeroize::Zeroizing::default();
-                    self.library.hardware.credential_route = None;
-                    self.library.hardware.machine = Some(m.clone());
-                }
-            });
-        }
-        ui.collapsing("Add machine", |ui| {
-            field(ui, "Machine name", &mut self.library.hardware.name);
-            if let Some(c) = catalog {
-                egui::ComboBox::from_id_salt("hardware-add-setup")
-                    .selected_text(
-                        c.setups
-                            .get(self.library.hardware.setup)
-                            .map_or("Current project setup", |s| s.label.as_str()),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (i, s) in c.setups.iter().enumerate() {
-                            ui.selectable_value(&mut self.library.hardware.setup, i, &s.label);
-                        }
-                        if self.state.manufacturing.intent.is_some() {
-                            ui.selectable_value(
-                                &mut self.library.hardware.setup,
-                                c.setups.len(),
-                                "Current project setup (custom copy)",
-                            );
-                        }
-                    });
-                if ui
-                    .add_enabled(
-                        ready && !self.library.hardware.name.trim().is_empty(),
-                        egui::Button::new("Add machine"),
-                    )
-                    .clicked()
-                {
-                    let setup = c
-                        .setups
-                        .get(self.library.hardware.setup)
-                        .cloned()
-                        .or_else(|| {
-                            self.state.manufacturing.intent.as_ref().map(|intent| {
-                                let model = HardwareModelDefinition {
-                                    id: format!("custom.{}", uuid::Uuid::new_v4()),
-                                    vendor: "Custom".into(),
-                                    model: "Custom Cartesian machine".into(),
-                                    source: "Operator-declared public setup".into(),
-                                    mounting_interface: "custom.cartesian".into(),
-                                    declared_volume_mm: Some(intent.printer.build_envelope),
-                                };
-                                HardwareSetupDefinition {
-                                    id: format!("custom.{}", uuid::Uuid::new_v4()),
-                                    label: "Custom project setup".into(),
-                                    model,
-                                    printer: intent.printer.clone(),
-                                }
-                            })
-                        });
-                    if let Some(setup) = setup {
-                        let mut h = p.hardware.clone();
-                        h.machines.push(OwnedMachine {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            nickname: self.library.hardware.name.trim().into(),
-                            serial: None,
-                            location: None,
-                            setup,
-                            generation: 1,
-                        });
-                        self.save_hardware(p, h);
-                    }
+        if !self.library.hardware.machine_detail {
+            if self.library.hardware.machine.is_some() {
+                ui.label(
+                    "Machine draft retained. Resume or discard it before choosing another machine.",
+                );
+                if ui.button("Resume machine").clicked() {
+                    self.library.hardware.machine_detail = true;
                 }
             }
-        });
+            ui.weak("Machine names, locations, serials and connections stay on this computer.");
+            for m in &p.hardware.machines {
+                ui.push_id(&m.id, |ui| {
+                    if ui
+                        .add_enabled(
+                            !self.library.hardware.machine.as_ref().is_some_and(|d| {
+                                p.hardware
+                                    .machines
+                                    .iter()
+                                    .find(|m| m.id == d.id)
+                                    .is_none_or(|m| m != d)
+                            }) && self.library.hardware.endpoint.is_empty()
+                                && self.library.hardware.identity.is_empty(),
+                            egui::Button::selectable(
+                                self.library
+                                    .hardware
+                                    .machine
+                                    .as_ref()
+                                    .is_some_and(|d| d.id == m.id),
+                                format!(
+                                    "{} · {} · {} mm",
+                                    m.nickname,
+                                    m.setup.model.model,
+                                    m.setup.printer.nozzle_diameter_mm
+                                ),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.library.hardware.secret = zeroize::Zeroizing::default();
+                        self.library.hardware.credential_route = None;
+                        self.library.hardware.machine = Some(m.clone());
+                        self.library.hardware.machine_detail = true;
+                    }
+                });
+            }
+            egui::CollapsingHeader::new("Add machine")
+                .default_open(p.hardware.machines.is_empty())
+                .show(ui, |ui| {
+                    field(ui, "Machine name", &mut self.library.hardware.names[0]);
+                    if let Some(c) = catalog {
+                        egui::ComboBox::from_id_salt("hardware-add-setup")
+                            .selected_text(
+                                c.setups
+                                    .get(self.library.hardware.setup)
+                                    .map_or("Current project setup", |s| s.label.as_str()),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (i, s) in c.setups.iter().enumerate() {
+                                    ui.selectable_value(
+                                        &mut self.library.hardware.setup,
+                                        i,
+                                        &s.label,
+                                    );
+                                }
+                                if self.state.manufacturing.intent.is_some() {
+                                    ui.selectable_value(
+                                        &mut self.library.hardware.setup,
+                                        c.setups.len(),
+                                        "Current project setup (custom copy)",
+                                    );
+                                }
+                            });
+                        if ui::primary(
+                            ui,
+                            "Add machine",
+                            if !ready {
+                                Some("Wait for pending library operations")
+                            } else if self.library.hardware.names[0].trim().is_empty() {
+                                Some("Enter a name")
+                            } else {
+                                None
+                            },
+                        ) {
+                            let setup =
+                                c.setups
+                                    .get(self.library.hardware.setup)
+                                    .cloned()
+                                    .or_else(|| {
+                                        self.state.manufacturing.intent.as_ref().map(|intent| {
+                                            let model = HardwareModelDefinition {
+                                                id: format!("custom.{}", uuid::Uuid::new_v4()),
+                                                vendor: "Custom".into(),
+                                                model: "Custom Cartesian machine".into(),
+                                                source: "Operator-declared public setup".into(),
+                                                mounting_interface: "custom.cartesian".into(),
+                                                declared_volume_mm: Some(
+                                                    intent.printer.build_envelope,
+                                                ),
+                                            };
+                                            HardwareSetupDefinition {
+                                                id: format!("custom.{}", uuid::Uuid::new_v4()),
+                                                label: "Custom project setup".into(),
+                                                model,
+                                                printer: intent.printer.clone(),
+                                            }
+                                        })
+                                    });
+                            if let Some(setup) = setup {
+                                let mut h = p.hardware.clone();
+                                h.machines.push(OwnedMachine {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    nickname: self.library.hardware.names[0].trim().into(),
+                                    serial: None,
+                                    location: None,
+                                    setup,
+                                    generation: 1,
+                                });
+                                self.save_hardware(p, h);
+                            }
+                        }
+                    }
+                });
+            return;
+        }
+        if ui::close(ui, "Back to machines") {
+            self.library.hardware.machine_detail = false;
+            self.library.hardware.clear_secret();
+        }
         if let Some(mut draft) = self.library.hardware.machine.clone() {
             let Some(original) = p.hardware.machines.iter().find(|m| m.id == draft.id) else {
                 return;
             };
-            ui.separator();
+            if self.library.hardware.connections {
+                if ui::close(ui, "Back to machine") {
+                    self.library.hardware.connections = false;
+                    self.library.hardware.clear_secret();
+                }
+                self.hardware_connections(ui, p, &draft.id, ready);
+                return;
+            }
+            ui::pane_header(ui, "Machine", "My library · private inventory");
             ui.push_id(draft.id.clone(), |ui| {
+                if draft != *original { ui.label("Unapplied machine changes"); }
+                if ui.button("Discard machine draft").clicked() { draft = original.clone(); }
                 field(ui, "Name", &mut draft.nickname);
                 let mut serial = draft.serial.clone().unwrap_or_default();
                 let mut location = draft.location.clone().unwrap_or_default();
@@ -275,7 +380,7 @@ impl Workbench {
                     }
                     ui.label(format!("Mount: {}", draft.setup.model.mounting_interface));
                 });
-                if ui.add_enabled(ready && draft != *original, egui::Button::new("Save machine")).clicked() {
+                if draft != *original && ui::primary(ui, "Save machine", (!ready).then_some("Wait for the current library operation")) {
                     if draft.setup != original.setup {
                         let Some(generation) = original.generation.checked_add(1) else {
                             self.local_problem = Some("Machine installation generation exhausted".into());
@@ -312,7 +417,7 @@ impl Workbench {
                     self.save_hardware(p, h);
                     self.library.hardware.machine = None;
                 }
-                self.hardware_connections(ui, p, &draft.id, ready);
+                if ui.button("Connections…").clicked() { self.library.hardware.connections = true; }
             });
             if self.library.hardware.machine.is_some() {
                 self.library.hardware.machine = Some(draft);
@@ -326,65 +431,104 @@ impl Workbench {
         catalog: Option<&HardwareCatalog>,
         ready: bool,
     ) {
-        ui.weak("One sheet is one inventory item; its faces can have different planning limits.");
-        for plate in &p.hardware.plates {
-            if ui
-                .selectable_label(
-                    self.library
-                        .hardware
-                        .plate
-                        .as_ref()
-                        .is_some_and(|d| d.id == plate.id),
-                    format!("{} · {}", plate.nickname, plate.definition.label),
-                )
-                .clicked()
-            {
-                self.library.hardware.plate = Some(plate.clone());
-            }
-        }
-        ui.collapsing("Add build plate", |ui| {
-            field(ui, "Plate name", &mut self.library.hardware.name);
-            if let Some(c) = catalog {
-                egui::ComboBox::from_id_salt("hardware-add-plate")
-                    .selected_text(
-                        c.plates
-                            .get(self.library.hardware.plate_model)
-                            .map_or("Choose plate", |p| p.label.as_str()),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (i, p) in c.plates.iter().enumerate() {
-                            ui.selectable_value(
-                                &mut self.library.hardware.plate_model,
-                                i,
-                                &p.label,
-                            );
-                        }
-                    });
-                if ui
-                    .add_enabled(
-                        ready && !self.library.hardware.name.trim().is_empty(),
-                        egui::Button::new("Add plate"),
-                    )
-                    .clicked()
-                    && let Some(definition) = c.plates.get(self.library.hardware.plate_model)
-                {
-                    let mut h = p.hardware.clone();
-                    h.plates.push(OwnedPlate {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        nickname: self.library.hardware.name.trim().into(),
-                        definition: definition.clone(),
-                        installed_machine: None,
-                        notes: String::new(),
-                    });
-                    self.save_hardware(p, h);
+        if !self.library.hardware.plate_detail {
+            if self.library.hardware.plate.is_some() {
+                ui.label(
+                    "Plate draft retained. Resume or discard it before choosing another plate.",
+                );
+                if ui.button("Resume plate").clicked() {
+                    self.library.hardware.plate_detail = true;
                 }
             }
-        });
+            ui.weak(
+                "One sheet is one inventory item; its faces can have different planning limits.",
+            );
+            for plate in &p.hardware.plates {
+                if ui
+                    .add_enabled(
+                        !self.library.hardware.plate.as_ref().is_some_and(|d| {
+                            p.hardware
+                                .plates
+                                .iter()
+                                .find(|p| p.id == d.id)
+                                .is_none_or(|p| p != d)
+                        }),
+                        egui::Button::selectable(
+                            self.library
+                                .hardware
+                                .plate
+                                .as_ref()
+                                .is_some_and(|d| d.id == plate.id),
+                            format!("{} · {}", plate.nickname, plate.definition.label),
+                        ),
+                    )
+                    .clicked()
+                {
+                    self.library.hardware.plate = Some(plate.clone());
+                    self.library.hardware.plate_detail = true;
+                }
+            }
+            egui::CollapsingHeader::new("Add build plate")
+                .default_open(p.hardware.plates.is_empty())
+                .show(ui, |ui| {
+                    field(ui, "Plate name", &mut self.library.hardware.names[1]);
+                    if let Some(c) = catalog {
+                        egui::ComboBox::from_id_salt("hardware-add-plate")
+                            .selected_text(
+                                c.plates
+                                    .get(self.library.hardware.plate_model)
+                                    .map_or("Choose plate", |p| p.label.as_str()),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (i, p) in c.plates.iter().enumerate() {
+                                    ui.selectable_value(
+                                        &mut self.library.hardware.plate_model,
+                                        i,
+                                        &p.label,
+                                    );
+                                }
+                            });
+                        if ui::primary(
+                            ui,
+                            "Add plate",
+                            if !ready {
+                                Some("Wait for pending library operations")
+                            } else if self.library.hardware.names[1].trim().is_empty() {
+                                Some("Enter a name")
+                            } else {
+                                None
+                            },
+                        ) && let Some(definition) =
+                            c.plates.get(self.library.hardware.plate_model)
+                        {
+                            let mut h = p.hardware.clone();
+                            h.plates.push(OwnedPlate {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                nickname: self.library.hardware.names[1].trim().into(),
+                                definition: definition.clone(),
+                                installed_machine: None,
+                                notes: String::new(),
+                            });
+                            self.save_hardware(p, h);
+                        }
+                    }
+                });
+            return;
+        }
+        if ui::close(ui, "Back to plates") {
+            self.library.hardware.plate_detail = false;
+        }
         if let Some(mut draft) = self.library.hardware.plate.clone() {
             ui.separator();
             ui.push_id(draft.id.clone(), |ui| {
+                ui::pane_header(ui, "Build plate", "My library · one physical sheet");
+                if ui.button("Discard plate draft").clicked()
+                    && let Some(original) = p.hardware.plates.iter().find(|p| p.id == draft.id)
+                {
+                    draft = original.clone();
+                }
                 field(ui, "Name", &mut draft.nickname);
-                field(ui, "Condition / notes (private)", &mut draft.notes);
+                field(ui, "Notes (private)", &mut draft.notes);
                 machine_picker(
                     ui,
                     "plate-installed",
@@ -455,10 +599,11 @@ impl Workbench {
                         });
                     }
                 });
-                if ui
-                    .add_enabled(ready, egui::Button::new("Save plate"))
-                    .clicked()
-                {
+                if ui::primary(
+                    ui,
+                    "Save plate",
+                    (!ready).then_some("Wait for the current library operation"),
+                ) {
                     let mut h = p.hardware.clone();
                     if let Some(old) = h.plates.iter_mut().find(|v| v.id == draft.id) {
                         if old.definition != draft.definition {
@@ -487,56 +632,62 @@ impl Workbench {
         }
     }
     fn hardware_accessories(&mut self, ui: &mut egui::Ui, p: &LibraryHardware, ready: bool) {
-        for a in &p.hardware.accessories {
-            if ui
-                .selectable_label(
-                    self.library
-                        .hardware
-                        .accessory
-                        .as_ref()
-                        .is_some_and(|d| d.id == a.id),
-                    &a.nickname,
-                )
-                .clicked()
-            {
-                self.library.hardware.accessory = Some(a.clone());
-            }
+        let editing = self.library.hardware.accessory.is_some();
+        if editing && ui.button("Discard accessory draft").clicked() {
+            self.library.hardware.accessory = None;
         }
-        ui.horizontal(|ui| {
-            if ui.button("Add nozzle").clicked() {
-                self.library.hardware.accessory = Some(OwnedAccessory {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    nickname: "Spare nozzle".into(),
-                    definition: AccessoryDefinition {
-                        id: format!("custom.{}", uuid::Uuid::new_v4()),
-                        label: "0.4 mm nozzle".into(),
-                        mounting_interface: "spiling.reference.220".into(),
-                        effect: AccessoryEffect::Nozzle {
-                            diameter_mm: 0.4,
-                            material: "Hardened steel".into(),
-                        },
-                    },
-                    installed_machine: None,
-                });
+        ui.add_enabled_ui(!editing, |ui| {
+            for a in &p.hardware.accessories {
+                if ui
+                    .selectable_label(
+                        self.library
+                            .hardware
+                            .accessory
+                            .as_ref()
+                            .is_some_and(|d| d.id == a.id),
+                        &a.nickname,
+                    )
+                    .clicked()
+                {
+                    self.library.hardware.accessory = Some(a.clone());
+                }
             }
-            if ui.button("Add fixture").clicked() {
-                self.library.hardware.accessory = Some(OwnedAccessory {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    nickname: "Bed fixture".into(),
-                    definition: AccessoryDefinition {
-                        id: format!("custom.{}", uuid::Uuid::new_v4()),
-                        label: "Rectangular fixture".into(),
-                        mounting_interface: "spiling.reference.220".into(),
-                        effect: AccessoryEffect::Fixture {
-                            bounds_mm: AabbMm {
-                                min: [100., 100., 0.],
-                                max: [110., 110., 10.],
+            ui.horizontal(|ui| {
+                if ui.button("Add nozzle").clicked() {
+                    self.library.hardware.accessory = Some(OwnedAccessory {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        nickname: "Spare nozzle".into(),
+                        definition: AccessoryDefinition {
+                            id: format!("custom.{}", uuid::Uuid::new_v4()),
+                            label: "0.4 mm nozzle".into(),
+                            mounting_interface: "spiling.reference.220".into(),
+                            effect: AccessoryEffect::Nozzle {
+                                diameter_mm: 0.4,
+                                material: "Hardened steel".into(),
                             },
                         },
-                    },
-                    installed_machine: None,
-                });
-            }
+                        installed_machine: None,
+                    });
+                }
+                if ui.button("Add fixture").clicked() {
+                    self.library.hardware.accessory = Some(OwnedAccessory {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        nickname: "Bed fixture".into(),
+                        definition: AccessoryDefinition {
+                            id: format!("custom.{}", uuid::Uuid::new_v4()),
+                            label: "Rectangular fixture".into(),
+                            mounting_interface: "spiling.reference.220".into(),
+                            effect: AccessoryEffect::Fixture {
+                                bounds_mm: AabbMm {
+                                    min: [100., 100., 0.],
+                                    max: [110., 110., 10.],
+                                },
+                            },
+                        },
+                        installed_machine: None,
+                    });
+                }
+            });
         });
         if let Some(mut d) = self.library.hardware.accessory.clone() {
             ui.separator();
@@ -573,10 +724,11 @@ impl Workbench {
                         }
                     }
                 }
-                if ui
-                    .add_enabled(ready, egui::Button::new("Save accessory"))
-                    .clicked()
-                {
+                if ui::primary(
+                    ui,
+                    "Save accessory",
+                    (!ready).then_some("Wait for pending library operations"),
+                ) {
                     let mut h = p.hardware.clone();
                     if let Some(old) = h.accessories.iter_mut().find(|a| a.id == d.id) {
                         if old.definition != d.definition {
@@ -610,7 +762,12 @@ impl Workbench {
         machine: &str,
         ready: bool,
     ) {
-        ui.collapsing("Connections", |ui| {
+        ui::pane_header(
+            ui,
+            "Connections",
+            "Private configuration · no machine communication",
+        );
+        ui.vertical(|ui| {
             ui.weak("Routes stay on this installation. Selecting a route never sends a program.");
             for route in p.hardware.routes.iter().filter(|r| r.machine_id == machine) {
                 ui.push_id(&route.id, |ui| {
@@ -639,11 +796,12 @@ impl Workbench {
                         self.library.hardware.credential_route = Some(route.id.clone());
                     }
                     if self.library.hardware.credential_route.as_deref() == Some(route.id.as_str()) {
+                        ui.label("Leaving this view clears unsubmitted credentials.");
                         let l = ui.label("Credential");
                         ui.add(egui::TextEdit::singleline(&mut *self.library.hardware.secret).password(true).char_limit(8192))
                             .labelled_by(l.id);
                         ui.weak("On headless or unsupported systems, new credentials use a private plaintext file. An inaccessible existing keyring entry never falls back.");
-                        if ui.add_enabled(ready && !self.library.hardware.secret.is_empty(), egui::Button::new("Remember credential")).clicked()
+                        if ui::primary(ui, "Remember credential", (!ready || self.library.hardware.secret.is_empty()).then_some("Enter a credential and wait for any pending save"))
                             && let Some(expected) = &p.identity
                         {
                             let secret = spiling_engine_client::hardware::credentials::CredentialInput::new(std::mem::take(&mut *self.library.hardware.secret));
@@ -663,6 +821,7 @@ impl Workbench {
                 });
             }
             ui.separator();
+            if ui.button("Discard connection draft").clicked() { self.library.hardware.endpoint.clear(); self.library.hardware.identity.clear(); self.library.hardware.clear_secret(); }
             let families = [ConnectionFamily::File, ConnectionFamily::BambuConnect,
                 ConnectionFamily::BambuDeveloperLan, ConnectionFamily::Moonraker,
                 ConnectionFamily::OctoPrint, ConnectionFamily::PrusaLink];
@@ -680,7 +839,7 @@ impl Workbench {
                 field(ui, "Endpoint (without credentials)", &mut self.library.hardware.endpoint);
                 field(ui, "Expected device identity", &mut self.library.hardware.identity);
             }
-            if ui.add_enabled(ready, egui::Button::new("Save connection configuration")).clicked() {
+            if self.library.hardware.credential_route.is_none() && ui::primary(ui, "Save connection", (!ready).then_some("Wait for the current operation")) {
                 let mut h = p.hardware.clone();
                 h.routes.push(EndpointRoute {
                     id: uuid::Uuid::new_v4().to_string(), machine_id: machine.into(), family,
@@ -867,16 +1026,14 @@ impl Workbench {
                 }
             }
         }
-        if ui
-            .add_enabled(
-                ready
-                    && writable
-                    && self.library.pending.is_none()
-                    && candidate.as_ref().is_some_and(Result::is_ok),
-                egui::Button::new("Apply hardware to project"),
-            )
-            .clicked()
-        {
+        let reason = if !ready || !writable || self.library.pending.is_some() {
+            Some("Open a writable project and wait for pending operations")
+        } else if !candidate.as_ref().is_some_and(Result::is_ok) {
+            Some("Choose a compatible machine, plate and face")
+        } else {
+            None
+        };
+        if ui::primary(ui, "Apply setup", reason) {
             self.queue_hardware(HardwareAction::Select {
                 project: project.project_id.clone(),
                 base: project.revision,
@@ -917,6 +1074,7 @@ impl Workbench {
             ));
         }
         if ui.button("Choose hardware").clicked() {
+            self.library.detail = 0;
             self.library.open = true;
             self.library.personal = false;
             self.library.hardware.active = true;

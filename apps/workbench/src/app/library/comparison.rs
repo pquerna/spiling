@@ -70,14 +70,36 @@ impl Workbench {
                 );
             }
         });
-        ui.weak("Choose a complete replacement. The current job profile changes only through Manufacturing Apply.");
-        if ui
-            .add_enabled(
-                writable,
-                egui::Button::new("Replace project copy with My library version"),
-            )
-            .clicked()
-        {
+        ui.label("Choose which copy to replace. The current job profile stays unchanged.");
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(
+                &mut self.library.comparison_destination,
+                Some(false),
+                "Replace Project copy",
+            );
+            ui.selectable_value(
+                &mut self.library.comparison_destination,
+                Some(true),
+                "Update My library",
+            );
+        });
+        let destination = self.library.comparison_destination;
+        let reason = match destination {
+            None => Some("Choose a destination"),
+            Some(false) if !writable => Some("Project is read-only or busy"),
+            Some(true) if !personal_write => Some("Wait for the original library save to finish"),
+            _ => None,
+        };
+        let apply = ui::primary(
+            ui,
+            if destination == Some(true) {
+                "Update My library"
+            } else {
+                "Replace project copy"
+            },
+            reason,
+        );
+        if apply && destination == Some(false) {
             self.library.queued = Some(LibraryAction::PutProjectFilament {
                 project_id: comparison.project.0.clone(),
                 base_revision: comparison.project.1,
@@ -95,13 +117,7 @@ impl Workbench {
                 }),
             });
         }
-        if ui
-            .add_enabled(
-                personal_write,
-                egui::Button::new("Update My library with project version"),
-            )
-            .clicked()
-        {
+        if apply && destination == Some(true) {
             let request = promotion_request(comparison);
             self.library.pending = Some(request.clone());
             self.library.queued = Some(LibraryAction::Write(request));

@@ -17,8 +17,20 @@ pub(super) struct StudyUi {
     construction: Option<usize>,
 }
 impl Workbench {
+    pub(super) fn study_page(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Color study");
+            if ui::close(ui, "Back to workbench") {
+                self.manufacturing.panel = 0;
+            }
+        });
+        egui::ScrollArea::vertical()
+            .id_salt("study-page")
+            .show(ui, |ui| self.study_ui(ui));
+    }
     pub(super) fn study_ui(&mut self, ui: &mut egui::Ui) {
-        self.colors.show(ui);
+        ui.set_max_width(ui.available_width().min(850.0));
+        ui.collapsing("Color reference", |ui| self.colors.show(ui));
         ui.separator();
         let (Some(project), Some(hello)) = (self.state.project.clone(), self.state.hello.clone())
         else {
@@ -43,34 +55,74 @@ impl Workbench {
                 ..Default::default()
             };
         }
-        ui.heading("Retained optical study");
-        ui.weak("Named reference estimates. Backing optics, calibration and physical color remain unqualified. Manufacturing independently admits every construction.");
+        ui::pane_header(
+            ui,
+            "Reference study",
+            "Project · estimates, not calibrated color",
+        );
+        ui.label("Physical color is unqualified");
+        ui::help(
+            ui,
+            "reference-scope",
+            "Reference estimates",
+            "Backing optics and calibration are unmodelled. Manufacturing independently admits every construction; accepting a reference estimate does not qualify physical color.",
+        );
         let Some(study) = &project.appearance_study.optical else {
-            ui.label("No retained optical study. In Materials > Recipes, create or copy a recipe, inspect it in Project, then load it with an explicit study context.");
+            ui::pane_header(
+                ui,
+                "No color study",
+                "Choose a Project recipe and set its study context",
+            );
+            if ui::primary(ui, "Choose recipe", None) {
+                self.choose_recipe();
+            }
             return;
         };
         ui.label(format!(
-            "Materials: {}",
-            study.request.materials.join(" / ")
+            "{} material declarations",
+            study.request.materials.len()
         ));
+        ui.collapsing("Study inputs", |ui| {
+            ui.add(
+                egui::Label::new(format!("{:#?}", study.request))
+                    .wrap()
+                    .selectable(true),
+            );
+        });
         ui.label(format!(
             "Requested patch: {:.3} × {:.3} mm",
             study.request.patch.width_mm, study.request.patch.height_mm
         ));
-        if ui
-            .add_enabled(
-                ready && !self.state.optical_loading && study.report.is_some(),
-                egui::Button::new("Load retained reference report"),
-            )
-            .clicked()
-        {
-            self.queued_project = Some(ProjectCommand::GetOpticalReport {
-                session_id: hello.session_id.clone(),
-                base_revision: project.revision,
-            });
-        }
-        if ui
-            .add_enabled(writable, egui::Button::new("Recompare current study"))
+        let has_report = self
+            .state
+            .optical_report
+            .as_ref()
+            .is_some_and(|c| c.is_current(&project));
+        if !has_report {
+            if study.report.is_some() {
+                if ui::primary(
+                    ui,
+                    "Load report",
+                    (!ready || self.state.optical_loading)
+                        .then_some("Wait for the current operation"),
+                ) {
+                    self.queued_project = Some(ProjectCommand::GetOpticalReport {
+                        session_id: hello.session_id.clone(),
+                        base_revision: project.revision,
+                    });
+                }
+            } else if ui::primary(
+                ui,
+                "Compare",
+                (!writable).then_some("Open a writable project and wait for pending operations"),
+            ) {
+                self.queued_project = Some(ProjectCommand::CompareOptical {
+                    session_id: hello.session_id.clone(),
+                    base_revision: project.revision,
+                });
+            }
+        } else if ui
+            .add_enabled(writable, egui::Button::new("Compare again"))
             .clicked()
         {
             self.queued_project = Some(ProjectCommand::CompareOptical {
@@ -148,20 +200,24 @@ impl Workbench {
                 super::review::assessment(ui, "Selected candidate", &visit.assessment);
             });
         }
-        if ui
-            .add_enabled(
-                writable
-                    && capture.record.complete
-                    && self
-                        .study
-                        .selection
-                        .as_ref()
-                        .is_some_and(|s| capture.report.has_selection(s))
-                    && study.selection != self.study.selection,
-                egui::Button::new("Accept selected complete report"),
-            )
-            .clicked()
+        let accepted = study.selection.is_some()
+            && study.selection == self.study.selection
+            && study.report.as_ref() == Some(&capture.record);
+        let reason = if !writable {
+            Some("Open a writable project and wait for pending operations")
+        } else if !capture.record.complete {
+            Some("This report is incomplete. Compare again before accepting.")
+        } else if !self
+            .study
+            .selection
+            .as_ref()
+            .is_some_and(|s| capture.report.has_selection(s))
         {
+            Some("Choose a reported cycle")
+        } else {
+            None
+        };
+        if !accepted && ui::primary(ui, "Accept selection", reason) {
             self.queued_project = Some(ProjectCommand::AcceptOpticalReport {
                 session_id: hello.session_id.clone(),
                 base_revision: project.revision,
@@ -250,13 +306,14 @@ impl Workbench {
                     }
                 }),
             });
-        if ui
-            .add_enabled(
-                writable && application.as_ref().is_some_and(|a| a.validate().is_ok()),
-                egui::Button::new("Apply retained selection to source construction"),
-            )
-            .clicked()
-        {
+        let reason = if !writable {
+            Some("Open a writable project and wait for pending operations")
+        } else if !application.as_ref().is_some_and(|a| a.validate().is_ok()) {
+            Some("Choose two distinct loaded materials and an existing construction")
+        } else {
+            None
+        };
+        if accepted && ui::primary(ui, "Apply construction", reason) {
             self.queued_project = Some(ProjectCommand::ApplyOpticalConstruction {
                 session_id: hello.session_id.clone(),
                 base_revision: project.revision,

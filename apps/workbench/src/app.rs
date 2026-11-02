@@ -49,6 +49,8 @@ pub struct Workbench {
     show_commands: bool,
     show_feedback: bool,
     command_selection: Option<usize>,
+    command_return_focus: Option<egui::Id>,
+    surface_focus: [Option<egui::Id>; 4],
     command_query: String,
     command_focus: bool,
     compact_tree: bool,
@@ -60,6 +62,9 @@ pub struct Workbench {
     selected: Option<FaceRef>,
     occurrence: Option<OccurrenceId>,
     pose: [f64; 6],
+    pose_original: [f64; 6],
+    navigation: Option<navigation::Navigation>,
+    navigation_focus: Option<egui::Id>,
     pose_revision: Option<SceneRevision>,
     analysis: analysis::AnalysisUi,
     queued_geometry: Option<GeometryCommand>,
@@ -115,6 +120,8 @@ impl Workbench {
             show_commands: false,
             show_feedback: false,
             command_selection: None,
+            command_return_focus: None,
+            surface_focus: [None; 4],
             command_query: String::new(),
             command_focus: false,
             compact_tree: false,
@@ -125,6 +132,9 @@ impl Workbench {
             selected: None,
             occurrence: None,
             pose: [0.0; 6],
+            pose_original: [0.0; 6],
+            navigation: None,
+            navigation_focus: None,
             pose_revision: None,
             analysis: analysis::AnalysisUi::default(),
             queued_geometry: None,
@@ -156,6 +166,26 @@ impl Workbench {
         }
     }
     fn disabled(&self, action: Action) -> Option<&'static str> {
+        if let Some(project) = &self.state.project {
+            if action == Action::LoadMaterial
+                && self.material.has_changes(
+                    &project.project_id,
+                    self.state.manufacturing.intent.as_deref(),
+                )
+            {
+                return Some("Apply or discard the Material draft before loading another profile");
+            }
+            if action == Action::LoadIntent
+                && (self.manufacturing.has_intent_draft(
+                    &project.project_id,
+                    self.state.manufacturing.intent.as_deref(),
+                ) || self
+                    .manufacturing
+                    .pending_loaded(self.state.manufacturing.loaded.as_deref()))
+            {
+                return Some("Apply or discard the Settings draft before loading another intent");
+            }
+        }
         if self.awaiting_serial.is_some()
             && !matches!(action, Action::Gallery | Action::License | Action::Analysis)
         {
@@ -179,23 +209,62 @@ impl Workbench {
         if self.disabled(action).is_some() {
             return;
         }
+        if self.guard_action(action) {
+            return;
+        }
+        if action != Action::Gallery && self.show_gallery {
+            self.show_gallery = false;
+            if let Some(id) = self.surface_focus[3].take() {
+                ctx.memory_mut(|m| m.request_focus(id));
+            }
+        }
+        if action != Action::License && self.show_license {
+            self.show_license = false;
+            if let Some(id) = self.surface_focus[2].take() {
+                ctx.memory_mut(|m| m.request_focus(id));
+            }
+        }
         match action {
             Action::Analysis => {
+                self.close_library(ctx);
+                if !self.analysis.open {
+                    self.surface_focus[0] = ctx.memory(|m| m.focused());
+                }
                 self.analysis.open = true;
                 self.analysis.view.enabled = true;
                 return;
             }
             Action::Library => {
+                if !self.library.open {
+                    self.surface_focus[1] = ctx.memory(|m| m.focused());
+                }
                 self.library.open = true;
                 return;
             }
             Action::License => {
+                self.suspend_library();
+                if !self.show_license {
+                    self.surface_focus[2] = ctx.memory(|m| m.focused());
+                }
                 self.show_license = true;
                 return;
             }
             Action::Gallery => {
+                self.suspend_library();
+                if !self.show_gallery {
+                    self.surface_focus[3] = ctx.memory(|m| m.focused());
+                }
                 self.show_gallery = true;
                 return;
+            }
+            _ => {}
+        }
+        match action {
+            Action::LoadIntent => self.show_prepare(2),
+            Action::LoadMaterial => self.show_prepare(1),
+            Action::LoadMaterialCatalog => {
+                self.show_prepare(1);
+                self.open_profile_catalog(ctx);
             }
             _ => {}
         }
@@ -275,9 +344,13 @@ impl Workbench {
         }
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.navigation.is_some() {
+            return;
+        }
         // Route Escape once, from the topmost surface. Popups and modal decisions
         // retain their own Escape; an edit gets its first opportunity to finish.
         if !self.show_commands
+            && self.navigation.is_none()
             && self.state.confirmation.is_none()
             && !egui::Popup::is_any_open(ctx)
             && !ctx.text_edit_focused()
@@ -285,12 +358,24 @@ impl Workbench {
         {
             if self.show_gallery {
                 self.show_gallery = false;
+                if let Some(id) = self.surface_focus[3].take() {
+                    ctx.memory_mut(|m| m.request_focus(id));
+                }
             } else if self.show_license {
                 self.show_license = false;
+                if let Some(id) = self.surface_focus[2].take() {
+                    ctx.memory_mut(|m| m.request_focus(id));
+                }
             } else if self.library.open {
-                // The library owns its draft-aware exit.
+                self.close_library(ctx);
             } else if self.analysis.open {
-                self.close_analysis();
+                self.close_analysis(ctx);
+            } else if self.show_feedback {
+                self.show_feedback = false;
+            } else if self.manufacturing.panel != 0 {
+                self.manufacturing.panel = 0;
+            } else if self.selected.is_some() || self.occurrence.is_some() {
+                self.clear_selection();
             }
             return;
         }
@@ -353,8 +438,10 @@ impl Workbench {
             "Save outcome uncertain"
         } else if p.dirty {
             "Unsaved changes"
+        } else if p.path_label.is_some() {
+            "Saved"
         } else {
-            "Committed state"
+            "Not saved"
         };
         ui::property(ui, "State", status, tokens);
         ui.collapsing("Saved revisions", |ui| {
@@ -411,6 +498,11 @@ impl Workbench {
             self.button(ui, Action::Cancel);
             self.button(ui, Action::Resume);
         });
+        ui.add(
+            egui::Label::new(&self.state.message)
+                .wrap()
+                .selectable(true),
+        );
         ui.columns(2, |columns| {
             ui::group(&mut columns[0], "Jobs");
             if let Some(d) = &self.state.diagnostic {
@@ -466,6 +558,7 @@ mod analysis;
 mod library;
 mod manufacturing;
 mod material;
+mod navigation;
 mod policies;
 mod process;
 mod review;
@@ -643,6 +736,7 @@ impl eframe::App for Workbench {
             }
             return;
         }
+        self.library_sync();
         let compact = ui.available_width() < 900.0;
         egui::Panel::top("commands").show(ui, |ui| {
             let wide = ui.available_width() >= 900.0;
@@ -721,7 +815,13 @@ impl eframe::App for Workbench {
                     .into_iter()
                     .enumerate()
                 {
-                    ui.selectable_value(&mut self.manufacturing.panel, index, label);
+                    if ui
+                        .selectable_value(&mut self.manufacturing.panel, index, label)
+                        .clicked()
+                        && self.library.open
+                    {
+                        self.close_library(&ctx);
+                    }
                 }
                 ui.separator();
                 self.button(ui, Action::Open);
@@ -761,170 +861,220 @@ impl eframe::App for Workbench {
                 .max_size((ui.available_height() * 0.5).max(100.0))
                 .show(ui, |ui| self.feedback(ui));
         }
-        if self.analysis.open || !compact || !self.compact_tree {
-            egui::Panel::right("project")
-                .resizable(true)
-                .default_size(if compact { 250.0 } else { 340.0 })
-                .min_size(210.0)
-                // A pasted numeric draft or long source label must retain a canvas.
-                .max_size((ui.available_width() * 0.5).max(210.0))
-                .show(ui, |ui| {
-                    if self.analysis.open {
-                        self.analysis_ui(ui);
-                        return;
+        if self.show_gallery {
+            egui::CentralPanel::default_margins().show(ui, |ui| {
+                if ui::close(ui, "Back to workbench") {
+                    self.show_gallery = false;
+                    if let Some(id) = self.surface_focus[3].take() {
+                        ctx.memory_mut(|m| m.request_focus(id));
                     }
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        if self.manufacturing.panel == 0 {
-                            self.selection_ui(ui);
-                            self.project(ui);
-                        } else if self.manufacturing.panel == 3 {
-                            self.surface_ui(ui);
-                        } else if self.manufacturing.panel == 4 {
-                            self.study_ui(ui);
-                        } else {
-                            self.manufacturing_ui(ui);
+                }
+                ui::gallery(ui, &mut self.prefs.theme);
+            });
+        } else if self.show_license {
+            egui::CentralPanel::default_margins().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("License · OSL-3.0");
+                    if ui::close(ui, "Back to workbench") {
+                        self.show_license = false;
+                        if let Some(id) = self.surface_focus[2].take() {
+                            ctx.memory_mut(|m| m.request_focus(id));
+                        }
+                    }
+                });
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.add(egui::Label::new(LICENSE).wrap().selectable(true));
+                });
+            });
+        } else if self.library.open {
+            egui::CentralPanel::default_margins().show(ui, |ui| self.library_page(ui));
+        } else if self.manufacturing.panel == 4 {
+            egui::CentralPanel::default_margins().show(ui, |ui| self.study_page(ui));
+        } else {
+            if self.analysis.open || !compact || !self.compact_tree {
+                egui::Panel::right("project")
+                    .resizable(true)
+                    .default_size(if compact { 250.0 } else { 340.0 })
+                    .min_size(210.0)
+                    // A pasted numeric draft or long source label must retain a canvas.
+                    .max_size((ui.available_width() * 0.5).max(210.0))
+                    .show(ui, |ui| {
+                        if self.analysis.open {
+                            self.analysis_ui(ui);
+                            return;
+                        }
+                        if self.manufacturing.panel == 3 {
+                            self.finish_pane(ui);
+                            return;
+                        }
+                        if matches!(self.manufacturing.panel, 1 | 2) {
+                            self.manufacturing_pane(ui);
+                            return;
+                        }
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            if self.manufacturing.panel == 0 {
+                                self.selection_ui(ui);
+                                self.project(ui);
+                            } else if self.manufacturing.panel == 3 {
+                                self.surface_ui(ui);
+                            } else if self.manufacturing.panel == 4 {
+                                self.study_ui(ui);
+                            } else {
+                                self.manufacturing_ui(ui);
+                            }
+                        });
+                    });
+            }
+            if !compact || (self.compact_tree && !self.analysis.open) {
+                egui::Panel::left("model-tree")
+                    .resizable(true)
+                    .default_size(210.0)
+                    .min_size(140.0)
+                    .show(ui, |ui| self.tree_ui(ui));
+            }
+            egui::CentralPanel::default_margins()
+                .frame(
+                    egui::Frame::central_panel(ui.style()).fill(self.prefs.theme.tokens().canvas),
+                )
+                .show(ui, |ui| {
+                    if self.state.display_loading {
+                        ui.label("Updating source display · previous revision retained");
+                        if ui.button("Pause transfer").clicked() {
+                            self.queued_host = Some(Command::PauseDisplay);
+                        }
+                    }
+                    if self.state.display_paused {
+                        ui.colored_label(
+                            self.prefs.theme.tokens().warning,
+                            "Source display paused · previous revision retained",
+                        );
+                        if ui.button("Resume transfer").clicked() {
+                            self.queued_host = Some(Command::ResumeDisplay);
+                        }
+                    }
+                    self.replay_controls(ui);
+                    let current = self.display_current();
+                    if !current && self.state.display.is_some() {
+                        ui.colored_label(
+                            self.prefs.theme.tokens().warning,
+                            "Displayed source is stale · picking and edits disabled",
+                        );
+                    }
+                    if self
+                        .state
+                        .display
+                        .as_ref()
+                        .is_none_or(|s| s.occurrences.is_empty())
+                    {
+                        ui::pane_header(
+                            ui,
+                            "No source geometry",
+                            "Import a STEP part or open a saved project",
+                        );
+                        self.primary_button(ui, Action::Import);
+                    }
+                    let review = if self.manufacturing_current() {
+                        self.state.manufacturing.review.clone()
+                    } else {
+                        None
+                    };
+                    let mut view = if review.is_some() {
+                        self.manufacturing.replay
+                    } else {
+                        crate::replay::View {
+                            source: true,
+                            visible: false,
+                            ..Default::default()
+                        }
+                    };
+                    let plane = self.analysis_plane();
+                    let mut analysis = self.analysis.view.clone();
+                    analysis.enabled &= analysis.valid()
+                        && (!analysis.local_frame || self.analysis_pose().is_some())
+                        && (!analysis.selected_only || self.occurrence.is_some());
+                    if analysis.enabled {
+                        match self.analysis.view.representation {
+                            crate::analysis::Representation::Source => {
+                                view.source = true;
+                                view.visible = false;
+                            }
+                            crate::analysis::Representation::Actual => {
+                                view.source = false;
+                                view.visible = review.is_some();
+                            }
+                            crate::analysis::Representation::Compare => {
+                                view.source = true;
+                                view.visible = review.is_some();
+                            }
+                        }
+                    }
+                    let mut picked = None;
+                    ui.horizontal_top(|ui| {
+                        let rail = if review.is_some() { 84.0 } else { 0.0 };
+                        let size = egui::vec2(
+                            (ui.available_width() - rail).max(1.0),
+                            ui.available_height(),
+                        );
+                        ui.allocate_ui_with_layout(
+                            size,
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                picked = self.viewport.show(
+                                    ui,
+                                    crate::viewport::Input {
+                                        scene: if review.is_some() && !current {
+                                            None
+                                        } else {
+                                            self.state.display.clone()
+                                        },
+                                        section: self.state.section.clone().filter(|s| {
+                                            self.analysis.view.enabled
+                                                && (DVec3::from_array(s.summary.plane.normal)
+                                                    - DVec3::from_array(plane.normal))
+                                                .length()
+                                                    < 1e-10
+                                                && DVec3::from_array(plane.normal)
+                                                    .dot(
+                                                        DVec3::from_array(
+                                                            s.summary.plane.origin_mm,
+                                                        ) - DVec3::from_array(plane.origin_mm),
+                                                    )
+                                                    .abs()
+                                                    < 1e-9
+                                        }),
+                                        review: review.clone(),
+                                        view,
+                                        selected: self.selected.as_ref(),
+                                        interactive: current,
+                                        analysis: &mut analysis,
+                                        plane,
+                                        scope: self.occurrence,
+                                    },
+                                    frame,
+                                );
+                            },
+                        );
+                        if let Some(review) = &review {
+                            self.manufacturing.layers.rail(
+                                ui,
+                                &mut self.manufacturing.replay,
+                                review,
+                            );
                         }
                     });
-                });
-        }
-        if !compact || (self.compact_tree && !self.analysis.open) {
-            egui::Panel::left("model-tree")
-                .resizable(true)
-                .default_size(210.0)
-                .min_size(140.0)
-                .show(ui, |ui| self.tree_ui(ui));
-        }
-        egui::CentralPanel::default_margins()
-            .frame(egui::Frame::central_panel(ui.style()).fill(self.prefs.theme.tokens().canvas))
-            .show(ui, |ui| {
-                if self.state.display_loading {
-                    ui.label("Updating source display · previous revision retained");
-                    if ui.button("Pause transfer").clicked() {
-                        self.queued_host = Some(Command::PauseDisplay);
+                    if analysis.enabled && self.analysis.view.offset_mm != analysis.offset_mm {
+                        self.analysis.follow_layer = false;
+                        self.analysis.view.offset_mm = analysis.offset_mm;
                     }
-                }
-                if self.state.display_paused {
-                    ui.colored_label(
-                        self.prefs.theme.tokens().warning,
-                        "Source display paused · previous revision retained",
-                    );
-                    if ui.button("Resume transfer").clicked() {
-                        self.queued_host = Some(Command::ResumeDisplay);
-                    }
-                }
-                self.replay_controls(ui);
-                let current = self.display_current();
-                if !current && self.state.display.is_some() {
-                    ui.colored_label(
-                        self.prefs.theme.tokens().warning,
-                        "Displayed source is stale · picking and edits disabled",
-                    );
-                }
-                if self
-                    .state
-                    .display
-                    .as_ref()
-                    .is_none_or(|s| s.occurrences.is_empty())
-                {
-                    ui.label(
-                        "Import STEP or open a saved project to inspect native source geometry.",
-                    );
-                }
-                let review = if self.manufacturing_current() {
-                    self.state.manufacturing.review.clone()
-                } else {
-                    None
-                };
-                let mut view = if review.is_some() {
-                    self.manufacturing.replay
-                } else {
-                    crate::replay::View {
-                        source: true,
-                        visible: false,
-                        ..Default::default()
-                    }
-                };
-                let plane = self.analysis_plane();
-                let mut analysis = self.analysis.view.clone();
-                analysis.enabled &= analysis.valid()
-                    && (!analysis.local_frame || self.analysis_pose().is_some())
-                    && (!analysis.selected_only || self.occurrence.is_some());
-                if analysis.enabled {
-                    match self.analysis.view.representation {
-                        crate::analysis::Representation::Source => {
-                            view.source = true;
-                            view.visible = false;
-                        }
-                        crate::analysis::Representation::Actual => {
-                            view.source = false;
-                            view.visible = review.is_some();
-                        }
-                        crate::analysis::Representation::Compare => {
-                            view.source = true;
-                            view.visible = review.is_some();
-                        }
-                    }
-                }
-                let mut picked = None;
-                ui.horizontal_top(|ui| {
-                    let rail = if review.is_some() { 84.0 } else { 0.0 };
-                    let size = egui::vec2(
-                        (ui.available_width() - rail).max(1.0),
-                        ui.available_height(),
-                    );
-                    ui.allocate_ui_with_layout(
-                        size,
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            picked = self.viewport.show(
-                                ui,
-                                crate::viewport::Input {
-                                    scene: if review.is_some() && !current {
-                                        None
-                                    } else {
-                                        self.state.display.clone()
-                                    },
-                                    section: self.state.section.clone().filter(|s| {
-                                        self.analysis.view.enabled
-                                            && (DVec3::from_array(s.summary.plane.normal)
-                                                - DVec3::from_array(plane.normal))
-                                            .length()
-                                                < 1e-10
-                                            && DVec3::from_array(plane.normal)
-                                                .dot(
-                                                    DVec3::from_array(s.summary.plane.origin_mm)
-                                                        - DVec3::from_array(plane.origin_mm),
-                                                )
-                                                .abs()
-                                                < 1e-9
-                                    }),
-                                    review: review.clone(),
-                                    view,
-                                    selected: self.selected.as_ref(),
-                                    interactive: current,
-                                    analysis: &mut analysis,
-                                    plane,
-                                    scope: self.occurrence,
-                                },
-                                frame,
-                            );
-                        },
-                    );
-                    if let Some(review) = &review {
-                        self.manufacturing
-                            .layers
-                            .rail(ui, &mut self.manufacturing.replay, review);
+                    if let Some(reference) = picked {
+                        self.select_face(reference);
                     }
                 });
-                if analysis.enabled && self.analysis.view.offset_mm != analysis.offset_mm {
-                    self.analysis.follow_layer = false;
-                    self.analysis.view.offset_mm = analysis.offset_mm;
-                }
-                if let Some(reference) = picked {
-                    self.select_face(reference);
-                }
-            });
+        }
         if self.show_commands {
+            if self.command_focus {
+                self.command_return_focus = ctx.memory(|m| m.focused());
+            }
             let modal = egui::Modal::new(egui::Id::unique("command-palette")).show(&ctx, |ui| {
                 ui.set_width(360.0);
                 ui.horizontal(|ui| {
@@ -1001,7 +1151,13 @@ impl eframe::App for Workbench {
             if modal.should_close() {
                 self.show_commands = false;
             }
+            if !self.show_commands
+                && let Some(id) = self.command_return_focus.take()
+            {
+                ctx.memory_mut(|m| m.request_focus(id));
+            }
         }
+        self.navigation_dialog(&ctx);
         if let Some(confirmation) = &self.state.confirmation {
             let id = confirmation.id;
             let modal = egui::Modal::new(egui::Id::unique("discard-project")).show(&ctx,|ui| {
@@ -1018,38 +1174,10 @@ impl eframe::App for Workbench {
                 self.confirmation = Some((id, false));
             }
         }
-        egui::Window::new("License · OSL-3.0")
-            .open(&mut self.show_license)
-            .vscroll(true)
-            .show(&ctx, |ui| {
-                if ui::close(ui, "Close license") {
-                    ui.close();
-                }
-                ui.label(LICENSE);
-            })
-            .inspect(|r| {
-                if r.response.should_close() {
-                    self.show_license = false;
-                }
-            });
-        egui::Window::new("Component gallery")
-            .open(&mut self.show_gallery)
-            .vscroll(true)
-            .show(&ctx, |ui| {
-                if ui::close(ui, "Close gallery") {
-                    ui.close();
-                }
-                ui::gallery(ui, &mut self.prefs.theme);
-            })
-            .inspect(|r| {
-                if r.response.should_close() {
-                    self.show_gallery = false;
-                }
-            });
         if previous_theme != self.prefs.theme {
             self.prefs.theme.apply(&ctx);
         }
-        self.library_window(&ctx);
+
         // Side effects execute once in logic(), even if egui lays out the UI in multiple passes.
         if self.queued.is_some()
             || self.confirmation.is_some()

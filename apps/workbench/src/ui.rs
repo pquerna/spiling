@@ -3,6 +3,8 @@
 // Licensed under the Open Software License version 3.0
 
 mod color;
+mod gallery;
+pub use gallery::gallery;
 mod surfaces;
 pub use color::{ColorDensity, ColorInspector, ColorMeaning, ColorPresentation};
 pub use surfaces::{close, group, help, pane_header, primary, problem};
@@ -24,6 +26,7 @@ pub struct Tokens {
     pub muted: Color32,
     pub accent: Color32,
     pub warning: Color32,
+    pub error: Color32,
 }
 impl Theme {
     pub fn tokens(self) -> Tokens {
@@ -35,6 +38,7 @@ impl Theme {
                 muted: Color32::from_rgb(168, 183, 202),
                 accent: Color32::from_rgb(121, 184, 255),
                 warning: Color32::from_rgb(244, 196, 107),
+                error: Color32::from_rgb(255, 138, 128),
             },
             Self::Paper => Tokens {
                 panel: Color32::from_rgb(246, 248, 251),
@@ -43,6 +47,7 @@ impl Theme {
                 muted: Color32::from_rgb(75, 93, 115),
                 accent: Color32::from_rgb(23, 95, 181),
                 warning: Color32::from_rgb(128, 80, 0),
+                error: Color32::from_rgb(179, 38, 30),
             },
         }
     }
@@ -60,6 +65,7 @@ impl Theme {
         visuals.selection.stroke.color = tokens.accent;
         visuals.hyperlink_color = tokens.accent;
         visuals.warn_fg_color = tokens.warning;
+        visuals.error_fg_color = tokens.error;
         ctx.set_visuals(visuals);
         ctx.global_style_mut(|style| {
             style.spacing.item_spacing = egui::vec2(8.0, 8.0);
@@ -103,107 +109,6 @@ pub fn theme_choice(ui: &mut Ui, theme: &mut Theme) {
         ui.selectable_value(theme, Theme::Graphite, "Graphite");
         ui.selectable_value(theme, Theme::Paper, "Paper");
     });
-}
-
-pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
-    theme_choice(ui, theme);
-    ui.separator();
-    let tokens = theme.tokens();
-    ui.heading("Spiling component gallery");
-    ui.label("Production project-window components · illustrative data only");
-    ui.horizontal(|ui| {
-        let _ = action(ui, "Open project…", None);
-        let _ = action(ui, "Save", Some("This example is read-only"));
-    });
-    ui.separator();
-    property(ui, "Project state", "Read-only committed snapshot", tokens);
-    property(
-        ui,
-        "Long source label",
-        "Housing — 接口 — finite source-bound manufacturing requirements",
-        tokens,
-    );
-    group(ui, "Panel specimen");
-    let state_id = ui.make_persistent_id("gallery-surface-state");
-    let mut state = ui.data_mut(|d| d.get_temp::<u8>(state_id).unwrap_or(0));
-    ui.horizontal_wrapped(|ui| {
-        for (i, label) in ["Ready", "Changed", "Blocked", "Pending", "Uncertain"]
-            .iter()
-            .enumerate()
-        {
-            ui.selectable_value(&mut state, i as u8, *label);
-        }
-    });
-    ui.data_mut(|d| d.insert_temp(state_id, state));
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        pane_header(ui, "Construction", "Housing · Project settings");
-        match state {
-            1 => { ui.label("Unapplied changes"); }
-            2 => { problem(ui, "Choose a material", "A captured material/setup is required before compiling."); }
-            3 => { ui.label("Applying settings…"); }
-            4 => { ui.label("Save outcome uncertain. Inspect the saved project."); }
-            _ => { ui.label("Current settings"); }
-        }
-        help(ui, "specimen-help", "Construction settings", "Apply commits the complete settings draft. Closing this specimen does not submit work; gallery values are illustrative.");
-        ui.separator();
-        let disabled = match state { 2 => Some("Choose a material first"), 3 => Some("Waiting for the operation receipt"), 4 => Some("Resolve the save outcome first"), _ => None };
-        let _ = primary(ui, if state == 1 { "Apply settings" } else { "Compile" }, disabled);
-        let _ = ui.button("Close specimen");
-    });
-    let id = ui.make_persistent_id("gallery-dimension");
-    let mut value = ui.data_mut(|d| d.get_temp::<f64>(id).unwrap_or(0.25));
-    number(ui, "Layer height (mm)", &mut value, 0.01);
-    ui.data_mut(|d| d.insert_temp(id, value));
-    ui.add_enabled_ui(false, |ui| {
-        number(ui, "Inherited (mm)", &mut 0.4, 0.01);
-    });
-    ui.label("Inherited from definition · occurrence override · mixed values");
-    ui.separator();
-    ui.heading("Construction goal draft");
-    let goal_id = ui.make_persistent_id("gallery-layer-goal");
-    let mut intent = ui
-        .data_mut(|d| d.get_temp::<ManufacturingIntent>(goal_id))
-        .unwrap_or_else(|| {
-            serde_json::from_str(include_str!(
-                "../../../fixtures/manufacturing/preferred-layers.intent.json"
-            ))
-            .expect("checked illustrative intent")
-        });
-    layer_height_goal(ui, &mut intent, tokens);
-    ui.data_mut(|d| d.insert_temp(goal_id, intent));
-    ui.separator();
-    let color_id = ui.make_persistent_id("gallery-color-reference");
-    let mut inspector = ui.data_mut(|d| d.get_temp::<ColorInspector>(color_id).unwrap_or_default());
-    inspector.show(ui);
-    ui.data_mut(|d| d.insert_temp(color_id, inspector));
-    ui.heading("Color presentation");
-    ui.label("The same sample in compact, standard and expanded views");
-    let coral = ColorPresentation::known([207, 82, 78], ColorMeaning::DeclaredAppearance)
-        .declared_name("Supplier coral");
-    for (id, density) in [
-        ("compact", ColorDensity::Compact),
-        ("standard", ColorDensity::Standard),
-        ("expanded", ColorDensity::Expanded),
-    ] {
-        ui.label(id);
-        coral.show(ui, id, density);
-    }
-    ui.separator();
-    for (id, rgb, meaning) in [
-        ("white", [255; 3], ColorMeaning::Target),
-        ("black", [0; 3], ColorMeaning::CatalogEstimate),
-        ("estimate", [189, 120, 101], ColorMeaning::ReferenceEstimate),
-    ] {
-        ColorPresentation::known(rgb, meaning).show(ui, id, ColorDensity::Standard);
-    }
-    ColorPresentation::unspecified(ColorMeaning::DeclaredAppearance).show(
-        ui,
-        "unknown-color",
-        ColorDensity::Standard,
-    );
-    ColorPresentation::unspecified(ColorMeaning::DeclaredAppearance)
-        .declared_name("Supplier natural")
-        .show(ui, "named-without-sample", ColorDensity::Standard);
 }
 
 /// Shared production/gallery draft control. No engine work or project mutation.
@@ -273,8 +178,43 @@ pub fn percent(ui: &mut Ui, label: &str, fraction: &mut f64) -> egui::Response {
     response
 }
 
+/// Text editing uses the same stable owning-label scope as numeric fields.
+pub fn text(ui: &mut Ui, label: &str, value: &mut String) -> egui::Response {
+    let scope = ui.make_persistent_id(("text", label));
+    ui.scope_builder(egui::UiBuilder::new().scope_id(scope), |ui| {
+        if ui.available_width() < 340.0 {
+            let label = ui.label(label);
+            ui.add(egui::TextEdit::singleline(value).desired_width(360.0))
+                .labelled_by(label.id)
+        } else {
+            ui.horizontal(|ui| {
+                let width = (ui.available_width() * 0.32).clamp(100.0, 200.0);
+                let label = ui
+                    .allocate_ui_with_layout(
+                        egui::vec2(width, 28.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.set_min_width(width);
+                            ui.add(egui::Label::new(label).wrap())
+                        },
+                    )
+                    .inner;
+                ui.add(egui::TextEdit::singleline(value).desired_width(360.0))
+                    .labelled_by(label.id)
+            })
+            .inner
+        }
+    })
+    .inner
+}
+
 /// A local draft field; project mutation occurs only on its form's explicit Apply.
-pub fn number(ui: &mut Ui, label: &str, value: &mut f64, speed: f64) -> egui::Response {
+pub fn number<N: egui::emath::Numeric>(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut N,
+    speed: f64,
+) -> egui::Response {
     // Draft warnings can insert siblings while the user is typing. DragValue's
     // auto ID must start from this stable field scope, not its current position.
     // Labels must be unique within the caller's form scope.
@@ -286,8 +226,17 @@ pub fn number(ui: &mut Ui, label: &str, value: &mut f64, speed: f64) -> egui::Re
                 .labelled_by(label.id)
         } else {
             ui.horizontal(|ui| {
-                let width = (ui.available_width() - 98.0).max(80.0);
-                let label = ui.add_sized([width, 28.0], egui::Label::new(label).wrap());
+                let width = (ui.available_width() - 98.0).clamp(80.0, 380.0);
+                let label = ui
+                    .allocate_ui_with_layout(
+                        egui::vec2(width, 28.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.set_min_width(width);
+                            ui.add(egui::Label::new(label).wrap())
+                        },
+                    )
+                    .inner;
                 ui.add_sized([80.0, 28.0], egui::DragValue::new(value).speed(speed))
                     .labelled_by(label.id)
             })
@@ -323,7 +272,7 @@ mod tests {
                 ctx.global_style().visuals.weak_text_color,
                 Some(tokens.muted)
             );
-            for foreground in [tokens.text, tokens.muted] {
+            for foreground in [tokens.text, tokens.muted, tokens.warning, tokens.error] {
                 for background in [tokens.panel, tokens.canvas] {
                     let a = luminance(foreground);
                     let b = luminance(background);

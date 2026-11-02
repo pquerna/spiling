@@ -121,6 +121,10 @@ impl Browser {
             }
         });
         self.select(view, lower, upper);
+        if self.mode != Mode::All {
+            ui.checkbox(&mut view.context, "Other layers")
+                .on_hover_text("Dim deposited paths outside the selected layers");
+        }
         if (old.layer, old.layer_end) != (view.layer, view.layer_end) {
             view.events = event_window(review, *view).end;
         }

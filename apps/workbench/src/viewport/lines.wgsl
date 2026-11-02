@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
-struct Camera {view_projection:mat4x4<f32>,selected:vec4<u32>,tool_color:vec4<f32>,plane:vec4<f32>,cut:vec4<f32>};
+struct Camera {view_projection:mat4x4<f32>,selected:vec4<u32>,tool_color:vec4<f32>,plane:vec4<f32>,cut:vec4<f32>,context:vec4<f32>};
 @group(0) @binding(0) var<uniform> camera:Camera;
 struct Output {@builtin(position) position:vec4<f32>,@location(0) color:vec3<f32>,@location(1) world:vec3<f32>};
 @vertex fn vs(@location(0) position:vec3<f32>,@location(1) color:vec3<f32>)->Output {
@@ -14,4 +14,4 @@ struct Output {@builtin(position) position:vec4<f32>,@location(0) color:vec3<f32
     out.position=vec4(out.position.xy+corners[vertex]*out.position.w*5.0/max(vec2<f32>(camera.selected.zw),vec2(1.0)),out.position.zw);
     out.color=color;return out;
 }
-@fragment fn fs(input:Output)->@location(0) vec4<f32>{if camera.cut.x>0.0 && dot(camera.plane,vec4(input.world,1.0))>0.000001 {discard;} return vec4<f32>(input.color,1.0);}
+@fragment fn fs(input:Output)->@location(0) vec4<f32>{if camera.cut.x>0.0 && dot(camera.plane,vec4(input.world,1.0))>0.000001 {discard;} return select(vec4<f32>(input.color,1.0),camera.context,camera.context.w>0.0);}

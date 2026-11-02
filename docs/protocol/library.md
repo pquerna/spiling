@@ -172,7 +172,7 @@ bounded fixed-dual construction can be applied, with two loaded declarations and
 source-bound construction independently admitted by manufacturing. Three-material
 recipes are reference studies, not executable three-tool support.
 
-The native Materials window separates Filaments and Recipes within My library
+The native Library page separates Filaments, Recipes and Hardware within My library
 and Project. Add variants from either scope to a retained ingredient draft. Create
 an unassessed declaration recipe directly in either scope; a new declaration
 palette uses explicit sRGB as catalog estimates and leaves absent/non-sRGB optical
@@ -195,7 +195,10 @@ export are separate future consumers.
 
 ## Consumer surfaces and reproduction
 
-The Materials window is reachable from Project, Prepare and the command palette.
+The Library page is reachable from Project, Prepare and the command palette.
+Its explicit Back action returns to the workbench and retains ordinary drafts.
+Focused editors preserve their subject/scope; replacing a draft requires deliberate
+discard. Private credential input clears on leaving its view.
 My library supports entry/search, on-hand filtering, exact inspection, additional
 spools, archive and explicit project capture. Project selection and profile review retain the exact project identity/revision;
 a project change requires fresh inspection before review. Read-only inspection
