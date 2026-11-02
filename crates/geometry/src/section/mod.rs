@@ -13,6 +13,8 @@ mod roots;
 mod tests;
 mod types;
 use crate::{Definition, GeometryError, GeometryWorkBudget, PlaneMm};
+pub(crate) use direct::intersect as intersect_direct;
+pub(crate) use direct::{Arc, finish_arcs};
 pub(crate) use direct::{canonicalize_section_in_place, certify_plane_functional_family};
 use spiling_contracts::geometry::{
     GeometryErrorCode, SECTION_PLANE_TOLERANCE_MM, SECTION_SAMPLING_TOLERANCE_MM,
@@ -20,7 +22,7 @@ use spiling_contracts::geometry::{
 use std::{cell::Cell, sync::atomic::AtomicBool};
 pub use types::{
     NativeSection, SectionChartEndpoint, SectionCurve, SectionEndpoint, SectionGraphChart,
-    SectionLoopMm, SectionSpan,
+    SectionLoopMm, SectionSpan, SectionSpanAttachments,
 };
 pub(crate) use types::{NativeSectionCertificate, SectionAuthority};
 
@@ -62,9 +64,10 @@ impl<'a> PreparedSectionSource<'a> {
         byte_limit: u32,
         work: &mut GeometryWorkBudget,
     ) -> Result<NativeSection, GeometryError> {
-        direct::intersect(
+        crate::intersect_native_section(
             self.definition,
             Some(self),
+            None,
             query,
             byte_limit as usize,
             byte_limit as usize,
@@ -180,6 +183,25 @@ pub(crate) struct SectionQuery {
     pub(crate) maximum_plane_error_mm: f64,
 }
 impl SectionQuery {
+    pub(crate) fn normalized(&self) -> Result<Self, GeometryError> {
+        if !self.maximum_chord_error_mm.is_finite()
+            || self.maximum_chord_error_mm <= 0.0
+            || self.maximum_chord_error_mm > SECTION_SAMPLING_TOLERANCE_MM
+            || !self.maximum_plane_error_mm.is_finite()
+            || self.maximum_plane_error_mm <= 0.0
+            || self.maximum_plane_error_mm > SECTION_PLANE_TOLERANCE_MM
+        {
+            return Err(GeometryError::new(
+                GeometryErrorCode::InvalidGeometry,
+                "section query must narrow the frozen chord/plane allowances",
+            ));
+        }
+        Ok(Self {
+            plane: self.plane.normalized()?,
+            maximum_chord_error_mm: self.maximum_chord_error_mm,
+            maximum_plane_error_mm: self.maximum_plane_error_mm,
+        })
+    }
     fn standard(plane: PlaneMm) -> Self {
         Self {
             plane,
@@ -195,8 +217,9 @@ pub(crate) fn section(
     byte_limit: u32,
     work: &mut GeometryWorkBudget,
 ) -> Result<NativeSection, GeometryError> {
-    direct::intersect(
+    crate::intersect_native_section(
         definition,
+        None,
         None,
         &SectionQuery::standard(plane),
         MAX_PREPARED_SECTION_BYTES,
@@ -215,8 +238,9 @@ pub(crate) fn section_for_query(
     byte_limit: u32,
     work: &mut GeometryWorkBudget,
 ) -> Result<NativeSection, GeometryError> {
-    direct::intersect(
+    crate::intersect_native_section(
         definition,
+        None,
         None,
         query,
         byte_limit as usize,
@@ -234,12 +258,12 @@ pub(super) fn resource_error(message: impl AsRef<str>) -> GeometryError {
 
 /// Every retained capacity and fixed interval-evaluation scratch coexists with
 /// the output. Admission precedes growth; source geometry remains borrowed.
-struct Admission {
-    limit: usize,
-    used: usize,
+pub(crate) struct Admission {
+    pub(crate) limit: usize,
+    pub(crate) used: usize,
 }
 impl Admission {
-    fn new(limit: usize) -> Result<Self, GeometryError> {
+    pub(crate) fn new(limit: usize) -> Result<Self, GeometryError> {
         let used = crate::parametric::PreparedValidatedCurve::scratch_bytes()
             + crate::parametric::SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
             + 256 * 1024;
@@ -250,7 +274,7 @@ impl Admission {
         }
         Ok(Self { limit, used })
     }
-    fn push<T>(&mut self, values: &mut Vec<T>, value: T) -> Result<(), GeometryError> {
+    pub(crate) fn push<T>(&mut self, values: &mut Vec<T>, value: T) -> Result<(), GeometryError> {
         if values.len() == values.capacity() {
             let old = values.capacity();
             let target = old

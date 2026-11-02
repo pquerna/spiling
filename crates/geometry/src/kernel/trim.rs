@@ -574,6 +574,9 @@ struct TrimSpan {
 /// the declared native vertex tolerance ball. It is not a spatial material edge
 /// and deliberately cannot be returned by an original-source accessor.
 struct NativeChartBridge {
+    incoming: usize,
+    outgoing: usize,
+    vertex: VertexId,
     loop_index: usize,
     endpoints: [[Interval; 2]; 2],
     enclosure: [Interval; 2],
@@ -1325,6 +1328,9 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             .try_reserve_exact(1)
             .map_err(|_| resource("native chart bridge allocation failed"))?;
         self.native_bridges.push(NativeChartBridge {
+            incoming,
+            outgoing,
+            vertex: a.vertices[endpoint_a],
             loop_index,
             endpoints: [p, q],
             enclosure,
@@ -1552,6 +1558,56 @@ impl<'d> PreparedFaceTrimDomain<'d> {
     }
     pub(crate) fn loops(&self) -> &[[usize; 2]] {
         &self.loops
+    }
+    pub(crate) fn native_joint_cover(
+        &self,
+        incoming: usize,
+        outgoing: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(VertexId, [Interval; 2]), GeometryError> {
+        work.charge(1, cancel)?;
+        if self.native_tolerance_mm.is_none() {
+            return Err(unavailable(
+                "joint cover requires the original native material owner",
+            ));
+        }
+        let first = self.coedge(incoming)?;
+        let second = self.coedge(outgoing)?;
+        let [start, end] = self.loops[first.loop_index];
+        let expected = if incoming + 1 == end {
+            start
+        } else {
+            incoming + 1
+        };
+        let first_end = usize::from(first.forward);
+        let second_end = usize::from(!second.forward);
+        let vertex = first.vertices[first_end];
+        if outgoing != expected
+            || first.loop_index != second.loop_index
+            || vertex != second.vertices[second_end]
+        {
+            return Err(unavailable(
+                "joint cover changed its original circuit or vertex owner",
+            ));
+        }
+        for bridge in &self.native_bridges {
+            work.charge(1, cancel)?;
+            if bridge.incoming == incoming && bridge.outgoing == outgoing {
+                if bridge.vertex != vertex || bridge.loop_index != first.loop_index {
+                    return Err(unavailable("joint cover lost its prepared native owner"));
+                }
+                return Ok((vertex, bridge.enclosure));
+            }
+        }
+        let first = self.native_endpoint_position(first, first_end, work, cancel)?;
+        let second = self.native_endpoint_position(second, second_end, work, cancel)?;
+        if first != second || first.iter().any(|value| !value.is_point()) {
+            return Err(unavailable(
+                "non-singleton native joint lost its prepared cover",
+            ));
+        }
+        Ok((vertex, first))
     }
     pub(crate) fn is_native_material(&self) -> bool {
         self.native_tolerance_mm.is_some()

@@ -6469,6 +6469,19 @@ mod tests {
             });
             assert_eq!(result.section.loops.len(), expected_loops);
             assert!(result.invariance.is_none());
+            if name == "native-parity-ring-torus.step" {
+                let radial_motion = 2.0 - (4.0_f64 - 0.01_f64.powi(2)).sqrt();
+                assert!(result.boundary_motion_bound_mm >= radial_motion);
+                assert_eq!(
+                    result
+                        .section
+                        .loops
+                        .iter()
+                        .filter(|boundary| boundary.is_hole)
+                        .count(),
+                    1
+                );
+            }
             assert!(
                 result.boundary_motion_bound_mm > 0.0 && result.boundary_motion_bound_mm <= 0.1
             );

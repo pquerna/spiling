@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+pub(crate) mod boundary_level;
 mod bounds;
 mod collar;
 mod critical;
@@ -39,6 +40,7 @@ pub use joint::{
     certify_native_collar_incidence, certify_native_one_sided_source_leaf,
     certify_native_source_leaf, certify_native_union,
 };
+pub(crate) use material_source::MaterialSourceView;
 pub use material_source::{PreparedSolid, prepare_solid};
 pub use placed::{
     PlacedMaterialProjectedBounds, analyze_placed_height_domain, placed_bounds,

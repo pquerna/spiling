@@ -33,6 +33,14 @@ pub(crate) struct MaterialSourceView<'s, 'd> {
     retained_owner_bytes: usize,
 }
 impl<'s, 'd> MaterialSourceView<'s, 'd> {
+    pub(crate) fn from_native_trims(trims: &'s PreparedNativeTrimSource<'d>) -> Self {
+        Self {
+            definition: trims.definition(),
+            trims,
+            material_position_bounds: None,
+            retained_owner_bytes: trims.retained_bytes(),
+        }
+    }
     pub(crate) fn definition(self) -> &'d Definition {
         self.definition
     }
@@ -298,9 +306,22 @@ impl<'d> PreparedSolid<'d> {
         byte_limit: u32,
         work: &mut GeometryWorkBudget,
     ) -> Result<NativeSection, GeometryError> {
-        let section = self
-            .sections
-            .section_for_query(query, cancel, byte_limit, work)?;
+        let material = self.charts.as_ref().ok().map(|trims| MaterialSourceView {
+            definition: self.definition,
+            trims,
+            material_position_bounds: self.material_position_bounds.as_ref(),
+            retained_owner_bytes: self.retained_bytes(),
+        });
+        let section = crate::intersect_native_section(
+            self.definition,
+            Some(&self.sections),
+            material,
+            query,
+            byte_limit as usize,
+            byte_limit as usize,
+            work,
+            cancel,
+        )?;
         if !section.matches_native_material(self.definition)
             || section.certificate.pose != RigidPoseMm::IDENTITY
         {

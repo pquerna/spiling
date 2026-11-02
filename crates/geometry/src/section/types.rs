@@ -46,10 +46,19 @@ pub struct SectionGraphChart {
     pub reversed: bool,
 }
 
-/// Exact native surface/plane zero-set expressions, not fitted curves.
-/// Parameter intervals enclose roots; exact limits retain their root expressions.
+/// Native surface/plane expressions, not fitted curves. Boundary levels retain
+/// an exact carrier trace with independently bounded native joint representatives.
+/// Graph parameter intervals enclose roots and retain their exact expressions.
 #[derive(Debug, Clone)]
 pub enum SectionCurve {
+    NativeBoundaryLevel {
+        edge: EdgeId,
+        edgeuses: [EdgeuseId; 2],
+        source_faces: [usize; 2],
+        witness: EdgeuseId,
+        parameter: [f64; 2],
+        endpoint_zone_error_mm: [f64; 2],
+    },
     SurfacePlaneGraph {
         independent_axis: u8,
         independent: [f64; 2],
@@ -63,12 +72,24 @@ pub enum SectionCurve {
 impl SectionCurve {
     pub(super) fn allocated_bytes(&self) -> usize {
         match self {
-            Self::SurfacePlaneGraph { .. } => 0,
+            Self::SurfacePlaneGraph { .. } | Self::NativeBoundaryLevel { .. } => 0,
             Self::SurfacePlaneAtlas { charts } => {
                 charts.capacity() * std::mem::size_of::<SectionGraphChart>()
             }
         }
     }
+}
+#[derive(Debug, Clone, Copy)]
+pub enum SectionSpanAttachments {
+    TrimRoots {
+        edgeuses: [EdgeuseId; 2],
+        parameters: [[f64; 2]; 2],
+        native_parameters: [[f64; 2]; 2],
+    },
+    NativeBoundary {
+        edge: EdgeId,
+        vertices: [VertexId; 2],
+    },
 }
 #[derive(Debug, Clone)]
 pub struct SectionSpan {
@@ -80,12 +101,7 @@ pub struct SectionSpan {
     pub section_pose: spiling_contracts::geometry::RigidPoseMm,
     pub curve: SectionCurve,
     pub endpoints: [SectionEndpoint; 2],
-    /// Underlying curve traversal, regardless of `reversed`; a single graph
-    /// uses increasing independent parameter, an atlas its connected chart order.
-    pub trim_edgeuses: [EdgeuseId; 2],
-    /// Root isolators in the native edgeuse normalized parameter law [0,1].
-    pub trim_parameters: [[f64; 2]; 2],
-    pub native_edge_parameters: [[f64; 2]; 2],
+    pub attachments: SectionSpanAttachments,
     pub reversed: bool,
     pub maximum_chord_error_mm: f64,
     pub maximum_plane_error_mm: f64,

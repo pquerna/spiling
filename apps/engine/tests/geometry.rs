@@ -1246,56 +1246,58 @@ async fn native_analytic_torus_section_preserves_annulus_after_lifted_chart_impo
             ))
     );
     let occurrence = occurrences(&mut client, &before).await.remove(0);
-    let completed = section(
-        &mut client,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 1.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-    )
-    .await;
-    assert_eq!(completed.status, JobStatus::Completed, "{completed:?}");
-    let Some(JobResult::Section { artifact_id }) = completed.result else {
-        panic!("expected native section artifact");
-    };
-    let (metadata, loops) = section_loops(&mut client, artifact_id).await;
-    assert_eq!(metadata.revision, before.revision);
-    assert_eq!(loops.len(), 2);
-    assert_eq!(
-        loops
-            .iter()
-            .filter(|(boundary, _)| boundary.is_hole)
-            .count(),
-        1
-    );
-    let radial = 3.0_f64.sqrt();
-    let error = metadata.sampling_tolerance_mm + metadata.boolean_tolerance_mm;
-    let mut measured_area = 0.0;
-    for (boundary, points) in &loops {
-        assert_eq!(boundary.definition_id, definition.definition_id);
-        assert_eq!(boundary.occurrence_id, occurrence.occurrence_id);
-        assert_eq!(points.first(), points.last());
-        let signed = area(points, metadata.frame);
-        assert_eq!(signed < 0.0, boundary.is_hole);
-        measured_area += signed;
-        let expected_radius = if boundary.is_hole {
-            5.0 - radial
-        } else {
-            5.0 + radial
+    for height in [1.0, 0.0] {
+        let completed = section(
+            &mut client,
+            PlaneMm {
+                origin_mm: [0.0, 0.0, height],
+                normal: [0.0, 0.0, 1.0],
+            },
+        )
+        .await;
+        assert_eq!(completed.status, JobStatus::Completed, "{completed:?}");
+        let Some(JobResult::Section { artifact_id }) = completed.result else {
+            panic!("expected native section artifact");
         };
-        for point in points {
-            let world: [f64; 3] =
-                std::array::from_fn(|axis| point[axis] + metadata.plane.origin_mm[axis]);
-            assert!((world[0].hypot(world[1]) - expected_radius).abs() <= error);
-            assert!((world[2] - 1.0).abs() <= error);
+        let (metadata, loops) = section_loops(&mut client, artifact_id).await;
+        assert_eq!(metadata.revision, before.revision);
+        assert_eq!(loops.len(), 2);
+        assert_eq!(
+            loops
+                .iter()
+                .filter(|(boundary, _)| boundary.is_hole)
+                .count(),
+            1
+        );
+        let radial = (4.0_f64 - height * height).sqrt();
+        let error = metadata.sampling_tolerance_mm + metadata.boolean_tolerance_mm;
+        let mut measured_area = 0.0;
+        for (boundary, points) in &loops {
+            assert_eq!(boundary.definition_id, definition.definition_id);
+            assert_eq!(boundary.occurrence_id, occurrence.occurrence_id);
+            assert_eq!(points.first(), points.last());
+            let signed = area(points, metadata.frame);
+            assert_eq!(signed < 0.0, boundary.is_hole);
+            measured_area += signed;
+            let expected_radius = if boundary.is_hole {
+                5.0 - radial
+            } else {
+                5.0 + radial
+            };
+            for point in points {
+                let world: [f64; 3] =
+                    std::array::from_fn(|axis| point[axis] + metadata.plane.origin_mm[axis]);
+                assert!((world[0].hypot(world[1]) - expected_radius).abs() <= error);
+                assert!((world[2] - height).abs() <= error);
+            }
         }
+        assert!(
+            (measured_area - 20.0 * std::f64::consts::PI * radial).abs()
+                <= 20.0 * std::f64::consts::PI * error + 2.0 * std::f64::consts::PI * error.powi(2)
+        );
+        assert_eq!(scene(&mut client).await, before);
+        assert_eq!(project_revision(&client).await, revision);
     }
-    assert!(
-        (measured_area - 20.0 * std::f64::consts::PI * radial).abs()
-            <= 20.0 * std::f64::consts::PI * error + 2.0 * std::f64::consts::PI * error.powi(2)
-    );
-    assert_eq!(scene(&mut client).await, before);
-    assert_eq!(project_revision(&client).await, revision);
     client.shutdown().await.unwrap();
 }
 

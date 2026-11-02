@@ -66,7 +66,9 @@ fn assert_provenance(definition: &Definition, result: &NativeSection) {
                 Some(span.source_face_ordinal)
             );
             assert!(owners.contains(&span.source_face_ordinal));
-            assert!(span.trim_parameters.iter().all(|r| r[0] <= r[1]));
+            if let SectionSpanAttachments::TrimRoots { parameters, .. } = span.attachments {
+                assert!(parameters.iter().all(|range| range[0] <= range[1]));
+            }
         }
         for j in 0..spans.len() {
             assert_eq!(

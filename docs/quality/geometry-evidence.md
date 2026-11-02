@@ -171,13 +171,36 @@ terminal-crossing regression separately requires a closed metric, one material
 component, no bounded void and one tunnel cycle; its sample retains the annular
 hole. The rational terminal regression separately requires the same
 closed metric and component/void/tunnel obligations on its literal rational
-carrier. Exact Z0 vertex continuation remains a required unqualified positive;
-it must not be relabeled unsupported to clear the suite. These narrow controls
-are not general torus manufacturing qualification.
+carrier. The exact Z0 regular-slab positive retains two annular boundaries,
+the protected hole and nonzero whole-slab motion; it is not an invariant extrusion.
+These narrow controls are not general torus manufacturing qualification.
 At an authored coplanar edge, a complete spatial height identity and nearby
 UV trace do not identify their zero sets. Native edge/face ownership and complete
 endpoint-star continuation need their own section receipt; an endpoint-root
 exception or tolerance-based identification cannot replace that operation.
+`analysis/boundary_level.rs` supplies a narrow paired supporting-coordinate
+operation: complete nonrational clamped native UV laws, one circuit and one
+selected edge per face, opposite retained sides on coefficient-identical
+carriers, an injective exact retained witness covering the mate's level set,
+and exhaustive carrier zero exclusion/regular collars. Other trim contacts must
+be absent or original endpoints. Joint census borrows the original prepared
+interval covers with their coedge/vertex owners, not smaller hulls of literal
+control endpoints. Their complete level intersections are bounded at the original
+vertex, never dropped or rounded into equality.
+Complete regular native stars and exactly two external ports authorize those
+native representatives within the existing material tolerance; this does not
+assert literal equality of imperfect fitted endpoint images. Sampling evaluates
+the actual witness UV/carrier law and adds representative and whole-zone errors
+to the chord ledger. Both original face owners survive the ordinary assembler.
+Boundary spans retain the witness's actual UV parameter gauge and typed native
+vertex attachments; trim-root consumers cannot borrow invented root isolators.
+Trace derivatives do not certify joint-zone monotonicity: boundary-level loops
+retain the nonadjacent tube-separation requirement rather than borrowing the
+ordinary graph chain shortcut.
+Raw and prepared queries use this same operation through the geometry facade;
+raw preparation is query-local and charged alongside output. Small nonzero
+heights are not snapped, terminal resource/cancellation failures propagate, and
+placed covector-family qualification remains independent.
 Native degree-law evaluation reduces by exact integer quadrants before enclosing
 the residual radians. Literal 180/360-degree carrier levels can therefore retain
 exact zeros without making a neighboring stored coefficient equal to that level.
@@ -188,7 +211,7 @@ Regular common-carrier coedge checks exhaust the complete closed native range
 through bounded interval subdivision. Every accepted piece independently retains
 paired correspondence, coherent normals and height transversality; an accepted
 prefix or exhausted depth grants no whole-edge result. This regularity proof is
-not the missing section attachment/completeness receipt.
+not by itself a section attachment/completeness receipt.
 
 Closed material covers may intersect Cartesian positions and first derivatives
 with coefficient-first coordinate functionals centered on the same cell. A finite

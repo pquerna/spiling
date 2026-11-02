@@ -862,6 +862,12 @@ fn native_port_strip(
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     work.charge(512, cancel)?;
+    let crate::SectionSpanAttachments::TrimRoots {
+        native_parameters, ..
+    } = span.attachments
+    else {
+        return Ok(false);
+    };
     let Some(surface) = domain.definition().face_surface(span.face) else {
         return Ok(false);
     };
@@ -914,7 +920,7 @@ fn native_port_strip(
         if slope.contains_zero() {
             return Ok(false);
         }
-        let root = span.native_edge_parameters[endpoint_slots[end]];
+        let root = native_parameters[endpoint_slots[end]];
         if root[0] <= side.native_range[0] || root[1] >= side.native_range[1] {
             return Ok(false);
         }
@@ -1394,6 +1400,9 @@ fn capture_native_port_branches(
     let mut exclusions = Vec::new();
     let section = &request.analysis.section;
     for span in section.spans(native_index).unwrap_or(&[]) {
+        let crate::SectionSpanAttachments::TrimRoots { edgeuses, .. } = span.attachments else {
+            continue;
+        };
         let face = span.source_face_ordinal;
         let mut face_branches = 0;
         for index in 0..section.loops.len() {
@@ -1470,9 +1479,9 @@ fn capture_native_port_branches(
                     start + (local + 1) % count,
                 ];
                 let uses = sides.map(|index| domain.coedges()[index].edgeuse);
-                let slots = if uses == span.trim_edgeuses {
+                let slots = if uses == edgeuses {
                     [0, 1]
-                } else if uses == [span.trim_edgeuses[1], span.trim_edgeuses[0]] {
+                } else if uses == [edgeuses[1], edgeuses[0]] {
                     [1, 0]
                 } else {
                     continue;

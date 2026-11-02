@@ -77,14 +77,14 @@ pub(super) struct Event {
     pub(super) uv: [Interval; 2],
     pub(super) crossing: i8,
 }
-pub(super) struct Arc {
-    pub(super) span: Option<SectionSpan>,
-    pub(super) points: Vec<[f64; 3]>,
-    pub(super) tangents: Vec<[Interval; 3]>,
-    pub(super) chord_errors: Vec<f64>,
+pub(crate) struct Arc {
+    pub(crate) span: Option<SectionSpan>,
+    pub(crate) points: Vec<[f64; 3]>,
+    pub(crate) tangents: Vec<[Interval; 3]>,
+    pub(crate) chord_errors: Vec<f64>,
 }
 
-pub(super) fn intersect(
+pub(crate) fn intersect(
     definition: &Definition,
     prepared: Option<&PreparedSectionSource<'_>>,
     query: &SectionQuery,
@@ -99,18 +99,6 @@ pub(super) fn intersect(
             "native section receipt belongs to another definition",
         ));
     }
-    if !query.maximum_chord_error_mm.is_finite()
-        || query.maximum_chord_error_mm <= 0.0
-        || query.maximum_chord_error_mm > SECTION_SAMPLING_TOLERANCE_MM
-        || !query.maximum_plane_error_mm.is_finite()
-        || query.maximum_plane_error_mm <= 0.0
-        || query.maximum_plane_error_mm > SECTION_PLANE_TOLERANCE_MM
-    {
-        return Err(GeometryError::new(
-            GeometryErrorCode::InvalidGeometry,
-            "section query must narrow the frozen chord/plane allowances",
-        ));
-    }
     let limit = byte_limit.min(MAX_PREPARED_SECTION_BYTES);
     let mut admission = Admission::new(limit)?;
     admission.used = admission
@@ -118,8 +106,7 @@ pub(super) fn intersect(
         .checked_add(definition.id().allocated_bytes())
         .filter(|n| *n <= limit)
         .ok_or_else(|| resource_error("native section identity exceeds query allowance"))?;
-    let plane = query.plane.normalized()?;
-    let frame = PlaneFrameMm::from_plane(plane)?;
+    let plane = query.plane;
     // Import converts the BREP once. Source unit scale is provenance, not a
     // second conversion to apply to the native coefficient law.
     let scale = 1.0;
@@ -523,12 +510,14 @@ pub(super) fn intersect(
                             dependent: root_domain[axis],
                         },
                         endpoints,
-                        trim_edgeuses: [a.edgeuse, b.edgeuse],
-                        trim_parameters: [
-                            [a.parameter.lo, a.parameter.hi],
-                            [b.parameter.lo, b.parameter.hi],
-                        ],
-                        native_edge_parameters: roots.map(|r| [r.parameter.lo, r.parameter.hi]),
+                        attachments: SectionSpanAttachments::TrimRoots {
+                            edgeuses: [a.edgeuse, b.edgeuse],
+                            parameters: [
+                                [a.parameter.lo, a.parameter.hi],
+                                [b.parameter.lo, b.parameter.hi],
+                            ],
+                            native_parameters: roots.map(|r| [r.parameter.lo, r.parameter.hi]),
+                        },
                         reversed: reverse,
                         maximum_chord_error_mm: achieved[0],
                         maximum_plane_error_mm: achieved[1],
@@ -540,6 +529,29 @@ pub(super) fn intersect(
             )?;
         }
     }
+    finish_arcs(
+        definition,
+        query,
+        arcs,
+        admission,
+        packed_byte_limit,
+        work,
+        cancel,
+    )
+}
+
+pub(crate) fn finish_arcs(
+    definition: &Definition,
+    query: &SectionQuery,
+    mut arcs: Vec<Arc>,
+    mut admission: Admission,
+    packed_byte_limit: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<NativeSection, GeometryError> {
+    let plane = query.plane;
+    let frame = PlaneFrameMm::from_plane(plane)?;
+    let limit = admission.limit;
     let mut result = NativeSection {
         plane,
         frame,
@@ -1601,6 +1613,11 @@ fn assemble(
                 }
             }
             admission.push(&mut faces, span.source_face_ordinal)?;
+            if let SectionCurve::NativeBoundaryLevel { source_faces, .. } = &span.curve {
+                for &face in source_faces {
+                    admission.push(&mut faces, face)?;
+                }
+            }
             result.certificate.maximum_chord_error_mm = result
                 .certificate
                 .maximum_chord_error_mm
@@ -1910,7 +1927,17 @@ fn certify_chord_pair(
     if clear(d, a) || clear(e, b) {
         return Ok(());
     }
+    let has_boundary_zones = if li == lj {
+        let spans = section.loop_spans.get(li).map_or(&[][..], Vec::as_slice);
+        work.charge(spans.len() as u64, cancel)?;
+        spans
+            .iter()
+            .any(|span| matches!(span.curve, SectionCurve::NativeBoundaryLevel { .. }))
+    } else {
+        false
+    };
     if li == lj
+        && !has_boundary_zones
         && let Some(tangents) = section.loop_chord_tangents.get(li)
         && (certify_monotone_chain(
             &section.loops[li],

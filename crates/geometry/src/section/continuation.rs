@@ -6,7 +6,7 @@
 //! from original directed trim crossings. Artificial cuts never become BREP IDs.
 use super::{
     Admission, SectionChartEndpoint, SectionCurve, SectionEndpoint, SectionGraphChart,
-    SectionQuery, SectionSpan,
+    SectionQuery, SectionSpan, SectionSpanAttachments,
     atlas::{self, GraphCell},
     cuts::{CutInventory, CutRootId},
     direct::{Arc, EdgeRoot, Event, Graph},
@@ -576,10 +576,12 @@ pub(super) fn intersect_face(
                     section_pose: RigidPoseMm::IDENTITY,
                     curve,
                     endpoints,
-                    trim_edgeuses: original.map(|event| event.edgeuse),
-                    trim_parameters: original.map(|event| [event.parameter.lo, event.parameter.hi]),
-                    native_edge_parameters: native
-                        .map(|root| [root.parameter.lo, root.parameter.hi]),
+                    attachments: SectionSpanAttachments::TrimRoots {
+                        edgeuses: original.map(|event| event.edgeuse),
+                        parameters: original.map(|event| [event.parameter.lo, event.parameter.hi]),
+                        native_parameters: native
+                            .map(|root| [root.parameter.lo, root.parameter.hi]),
+                    },
                     reversed: span_reversed,
                     maximum_chord_error_mm: achieved[0],
                     maximum_plane_error_mm: achieved[1],

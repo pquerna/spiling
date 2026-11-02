@@ -62,7 +62,7 @@ pub(crate) use section::NativeSectionCertificate;
 pub(crate) use section::SectionAuthority;
 pub use section::{
     NativeSection, PreparedSectionSource, SectionChartEndpoint, SectionCurve, SectionEndpoint,
-    SectionGraphChart, SectionLoopMm, SectionSpan, prepare_section_source,
+    SectionGraphChart, SectionLoopMm, SectionSpan, SectionSpanAttachments, prepare_section_source,
 };
 pub use spiling_contracts::display::EncodedMesh as MeshArtifact;
 pub use spiling_contracts::display::MeshBudget;
@@ -71,6 +71,89 @@ pub use spiling_contracts::geometry::{
     DisplayProfile, FaceId, FaceInfo, GeometryError, KERNEL_NAME, PlaneFrameMm, PlaneMm,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
+
+fn intersect_native_section(
+    definition: &Definition,
+    prepared: Option<&PreparedSectionSource<'_>>,
+    material: Option<analysis::MaterialSourceView<'_, '_>>,
+    query: &section::SectionQuery,
+    byte_limit: usize,
+    packed_byte_limit: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<NativeSection, GeometryError> {
+    let query = query.normalized()?;
+    if prepared.is_some_and(|source| !std::ptr::eq(source.definition(), definition))
+        || material.is_some_and(|source| !std::ptr::eq(source.definition(), definition))
+    {
+        return Err(GeometryError::new(
+            GeometryErrorCode::InvalidGeometry,
+            "native section operands belong to another definition",
+        ));
+    }
+    if analysis::boundary_level::has_candidate(definition, query.plane, work, cancel)? {
+        let local;
+        let (source, available) = if let Some(source) = material {
+            (source, byte_limit)
+        } else {
+            local = kernel::PreparedNativeTrimSource::prepare_material(
+                definition,
+                byte_limit.min(MAX_PREPARED_SECTION_BYTES),
+                work,
+                cancel,
+            );
+            match &local {
+                Ok(trims) => (
+                    analysis::MaterialSourceView::from_native_trims(trims),
+                    byte_limit
+                        .min(MAX_PREPARED_SECTION_BYTES)
+                        .checked_sub(trims.retained_bytes())
+                        .ok_or_else(|| {
+                            section::resource_error("native section trims exceed query allowance")
+                        })?,
+                ),
+                Err(error)
+                    if matches!(
+                        error.code,
+                        GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
+                    ) =>
+                {
+                    return Err(error.clone());
+                }
+                Err(_) => {
+                    return section::intersect_direct(
+                        definition,
+                        prepared,
+                        &query,
+                        byte_limit,
+                        packed_byte_limit,
+                        work,
+                        cancel,
+                    );
+                }
+            }
+        };
+        if let Some(result) = analysis::boundary_level::intersect(
+            source,
+            &query,
+            available,
+            packed_byte_limit,
+            work,
+            cancel,
+        )? {
+            return Ok(result);
+        }
+    }
+    section::intersect_direct(
+        definition,
+        prepared,
+        &query,
+        byte_limit,
+        packed_byte_limit,
+        work,
+        cancel,
+    )
+}
 
 /// Native adapter dependency version captured in persisted provenance.
 pub const KERNEL_VERSION: &str = "1.0.1";
