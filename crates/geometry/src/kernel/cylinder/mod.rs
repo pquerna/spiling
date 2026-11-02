@@ -123,11 +123,7 @@ impl Definition {
         face_id: &FaceId,
         cancel: &AtomicBool,
     ) -> Result<VerticalCylinderFace, GeometryError> {
-        self.vertical_cylinder_face_with_work(
-            face_id,
-            &mut GeometryWorkBudget::new(50_000_000),
-            cancel,
-        )
+        self.vertical_cylinder_face_with_work(face_id, &mut GeometryWorkBudget::query(), cancel)
     }
 
     pub(crate) fn vertical_cylinder_face_with_work(

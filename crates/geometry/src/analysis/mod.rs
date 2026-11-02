@@ -20,7 +20,7 @@ use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, che
 use spiling_contracts::geometry::{DefinitionId, GeometryErrorCode};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-pub(crate) use bounds::MAX_SCRATCH_ALLOCATION_BYTES;
+pub(crate) use crate::compute::MAX_DIRECTIONAL_SCRATCH_BYTES as MAX_SCRATCH_ALLOCATION_BYTES;
 pub use bounds::{MaterialProjectedBounds, material_projected_bounds, projected_bounds};
 pub use collar::{
     NativeCollarHeightSpace, NativeCollarPort, NativeCriticalCollar, NativeCriticalCollarCell,
@@ -71,6 +71,14 @@ impl GeometryWorkBudget {
             consumed: AtomicU64::new(0),
         }
     }
+    /// Default allowance for one interactive measurement, section or display query.
+    pub fn query() -> Self {
+        Self::new(crate::QUERY_WORK_UNITS)
+    }
+    /// Default cumulative allowance for one complete manufacturing compile.
+    pub fn compile() -> Self {
+        Self::new(crate::COMPILE_WORK_UNITS)
+    }
     pub fn consumed(&self) -> u64 {
         self.consumed.load(Ordering::Acquire)
     }
@@ -102,7 +110,10 @@ impl GeometryWorkBudget {
                 check_cancel(cancel)?;
                 return Err(GeometryError::new(
                     GeometryErrorCode::ResourceLimit,
-                    "cumulative geometry work exhausted",
+                    format!(
+                        "cumulative geometry work exhausted: consumed={} requested={amount} remaining={current}",
+                        self.consumed()
+                    ),
                 ));
             }
             match self.remaining.compare_exchange_weak(

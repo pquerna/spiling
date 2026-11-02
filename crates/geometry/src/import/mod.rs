@@ -23,7 +23,7 @@ use spiling_contracts::geometry::{
 use std::{collections::BTreeSet, sync::atomic::AtomicBool};
 use step_p21::ast::Parameter;
 
-pub(crate) const MAX_QUERY_PROOF_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) use crate::compute::MAX_QUERY_PROOF_BYTES;
 fn error(code: GeometryErrorCode, message: &str) -> GeometryError {
     GeometryError::new(code, message)
 }
@@ -708,7 +708,7 @@ fn native_enclosure_bounds(
     cancel: &AtomicBool,
 ) -> Result<spiling_contracts::geometry::AabbMm, GeometryError> {
     use crate::parametric::{self, CurveEvaluator, Interval};
-    let mut work = crate::GeometryWorkBudget::new(128_000_000);
+    let mut work = crate::GeometryWorkBudget::query();
     let mut minimum = [f64::INFINITY; 3];
     let mut maximum = [f64::NEG_INFINITY; 3];
     let mut include = |position: [Interval; 3]| -> Result<(), GeometryError> {

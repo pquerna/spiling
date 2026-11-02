@@ -942,7 +942,7 @@ fn section(
     // and break the consumer's exact normalized-request identity.
     let mut builder = SectionChunkBuilder::new(session, artifact, revision, plane)?;
     let plane = plane.normalized()?;
-    let mut work = GeometryWorkBudget::new(50_000_000);
+    let mut work = GeometryWorkBudget::query();
     let source_limit = MAX_PREPARED_SECTION_SOURCE_BYTES;
     let mut sources = BTreeMap::<DefinitionId, (usize, Option<PreparedSectionSource<'_>>)>::new();
     for occurrence in &occurrences {

@@ -7963,7 +7963,7 @@ mod tests {
             byte_limit: MAX_BYTES as u32,
         };
         // Isolate the collar's work selector; this is not a whole Compile budget.
-        let mut metric_work = GeometryWorkBudget::new(2_000_000);
+        let mut metric_work = GeometryWorkBudget::query();
         let collar = prepared
             .certify_native_critical_collar(&current, &inputs, policy, &mut metric_work, &cancel)
             .unwrap();
