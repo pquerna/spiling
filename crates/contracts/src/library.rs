@@ -121,7 +121,7 @@ impl FilamentDeclaration {
 pub struct FilamentDefinition {
     pub declaration: FilamentDeclaration,
     #[serde(deserialize_with = "required_option")]
-    pub catalog_origin: Option<crate::catalog::CatalogRecord>,
+    pub catalog_origin: Option<Box<crate::catalog::CatalogRecord>>,
     pub name: String,
     #[serde(deserialize_with = "required_option")]
     pub material: Option<MaterialDefinition>,

@@ -171,15 +171,53 @@ impl TryFrom<ProjectHardwareCapture> for rpc::ProjectHardwareCapture {
         Ok(value)
     }
 }
+impl TryFrom<rpc::PrinterIdentity> for PrinterIdentity {
+    type Error = String;
+    fn try_from(v: rpc::PrinterIdentity) -> Result<Self, String> {
+        let value = Self {
+            manufacturer: v.manufacturer,
+            model: v.model,
+            catalog_origin: v
+                .catalog_origin
+                .map(|v| (*v).try_into().map(Box::new))
+                .transpose()?,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<PrinterIdentity> for rpc::PrinterIdentity {
+    type Error = String;
+    fn try_from(v: PrinterIdentity) -> Result<Self, String> {
+        v.validate()?;
+        Ok(Self {
+            manufacturer: v.manufacturer,
+            model: v.model,
+            catalog_origin: v
+                .catalog_origin
+                .map(|v| (*v).try_into().map(Box::new))
+                .transpose()?,
+        })
+    }
+}
 impl TryFrom<rpc::OwnedMachine> for OwnedMachine {
     type Error = String;
     fn try_from(v: rpc::OwnedMachine) -> Result<Self, String> {
+        let configuration = match required(v.configuration, "OwnedMachine.configuration")? {
+            rpc::owned_machine::Configuration::Setup(setup) => MachineConfiguration::Configured {
+                setup: Box::new((*setup).try_into()?),
+            },
+            rpc::owned_machine::Configuration::Unconfigured(()) => {
+                MachineConfiguration::Unconfigured
+            }
+        };
         let value = Self {
             id: v.id,
             nickname: v.nickname,
             serial: v.serial,
             location: v.location,
-            setup: required(v.setup, "OwnedMachine.setup")?.try_into()?,
+            identity: required(v.identity, "OwnedMachine.identity")?.try_into()?,
+            configuration,
             generation: v.generation,
         };
         value.validate()?;
@@ -190,15 +228,23 @@ impl TryFrom<OwnedMachine> for rpc::OwnedMachine {
     type Error = String;
     fn try_from(v: OwnedMachine) -> Result<Self, String> {
         v.validate()?;
-        let value = Self {
+        let configuration = Some(match v.configuration {
+            MachineConfiguration::Configured { setup } => {
+                rpc::owned_machine::Configuration::Setup(Box::new((*setup).try_into()?))
+            }
+            MachineConfiguration::Unconfigured => {
+                rpc::owned_machine::Configuration::Unconfigured(())
+            }
+        });
+        Ok(Self {
             id: v.id,
             nickname: v.nickname,
             serial: v.serial,
             location: v.location,
-            setup: Some(v.setup.try_into()?),
+            identity: Some(v.identity.try_into()?),
+            configuration,
             generation: v.generation,
-        };
-        Ok(value)
+        })
     }
 }
 impl TryFrom<rpc::OwnedPlate> for OwnedPlate {

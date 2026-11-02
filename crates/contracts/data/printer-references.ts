@@ -1,0 +1,52 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
+// Originally authored model declarations. No imported slicer profiles or scripts.
+import type { CatalogItem } from "../../../packages/protocol/src/generated.ts";
+type Printer = Extract<CatalogItem, { kind: "printer" }>;
+export default [
+  {
+    id: "bambulab.a1",
+    item: {
+      kind: "printer",
+      manufacturer: "Bambu Lab",
+      model: "A1",
+      aliases: ["Bambu A1"],
+      volume_mm: null,
+      source_url: "https://bambulab.com/en/a1/tech-specs",
+    },
+  },
+  {
+    id: "bambulab.a1-mini",
+    item: {
+      kind: "printer",
+      manufacturer: "Bambu Lab",
+      model: "A1 mini",
+      aliases: ["Bambu A1 mini"],
+      volume_mm: null,
+      source_url: "https://bambulab.com/en/a1-mini/tech-specs",
+    },
+  },
+  {
+    id: "prusa.mk4s",
+    item: {
+      kind: "printer",
+      manufacturer: "Prusa Research",
+      model: "Original Prusa MK4S",
+      aliases: ["Prusa MK4S"],
+      volume_mm: [250, 210, 220],
+      source_url: "https://www.prusa3d.com/product/original-prusa-mk4s-3d-printer-5/",
+    },
+  },
+  {
+    id: "creality.ender-3-v3-se",
+    item: {
+      kind: "printer",
+      manufacturer: "Creality",
+      model: "Ender-3 V3 SE",
+      aliases: ["Ender 3 V3 SE"],
+      volume_mm: null,
+      source_url: "https://www.creality.com/products/creality-ender-3-v3-se",
+    },
+  },
+] satisfies Array<{ id: string; item: Printer }>;

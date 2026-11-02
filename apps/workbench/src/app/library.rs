@@ -142,7 +142,7 @@ impl LibraryUi {
     fn edit(&mut self, selected: &FilamentRevision) {
         self.draft_project = None;
         self.declaration = declaration::DeclarationDraft::from(&selected.definition.declaration);
-        self.catalog_origin = selected.definition.catalog_origin.clone();
+        self.catalog_origin = selected.definition.catalog_origin.as_deref().cloned();
         self.draft = Some(selected.clone());
         self.name = selected.definition.name.clone();
         self.color_name = selected.definition.color_name.clone().unwrap_or_default();
@@ -166,7 +166,7 @@ impl LibraryUi {
             |d| d.definition.clone(),
         );
         definition.declaration = self.declaration.value()?;
-        definition.catalog_origin = self.catalog_origin.clone();
+        definition.catalog_origin = self.catalog_origin.clone().map(Box::new);
         if let Some(origin) = &self.catalog_origin {
             definition.source = DefinitionSource::Imported {
                 name: origin.origin.provider.clone(),
@@ -454,28 +454,33 @@ impl Workbench {
                 self.library.queued = Some(LibraryAction::SearchCatalog(query));
             }
             if let Some(choice) = choice {
-                match choice {
-                    ui::CatalogChoice::Manual => {}
-                    ui::CatalogChoice::Review(row) => {
-                        if let spiling_contracts::catalog::CatalogItem::Filament {
+                if self.library.hardware.active {
+                    let row = match choice {
+                        ui::CatalogChoice::Manual => None,
+                        ui::CatalogChoice::Review(row) => Some(*row),
+                    };
+                    if let Err(error) = self.library.hardware.begin_printer(row) {
+                        self.local_problem = Some(error);
+                    }
+                } else {
+                    if let ui::CatalogChoice::Review(row) = choice
+                        && let spiling_contracts::catalog::CatalogItem::Filament {
                             name,
                             declaration,
                             srgb,
                         } = &row.item
-                        {
-                            self.library.name =
-                                format!("{} {}", declaration.brand.as_deref().unwrap_or(""), name)
-                                    .trim()
-                                    .into();
-                            self.library.color_name = name.clone();
-                            self.library.hex = spiling_contracts::color_naming::srgb8_hex(*srgb);
-                            self.library.declaration =
-                                declaration::DeclarationDraft::from(declaration);
-                            self.library.catalog_origin = Some(row);
-                        }
+                    {
+                        self.library.name =
+                            format!("{} {}", declaration.brand.as_deref().unwrap_or(""), name)
+                                .trim()
+                                .into();
+                        self.library.color_name = name.clone();
+                        self.library.hex = spiling_contracts::color_naming::srgb8_hex(*srgb);
+                        self.library.declaration = declaration::DeclarationDraft::from(declaration);
+                        self.library.catalog_origin = Some(*row);
                     }
+                    self.library.detail = 1;
                 }
-                self.library.detail = 1;
             }
             return;
         }
@@ -534,12 +539,8 @@ impl Workbench {
         });
         ui.separator();
         if self.library.hardware.active {
-            egui::ScrollArea::vertical()
-                .id_salt("hardware-page")
-                .show(ui, |ui| {
-                    self.hardware_content(ui, state, ready, writable);
-                    self.library_pending(ui, state, ready);
-                });
+            self.library_pending(ui, state, ready);
+            self.hardware_content(ui, state, ready, writable);
             return;
         }
         if self.library.recipes.active {

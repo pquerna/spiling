@@ -292,6 +292,62 @@ impl ProjectHardwareCapture {
         Ok(())
     }
 }
+/// Public model identity is independent of a complete installed slicing setup.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PrinterIdentity {
+    pub manufacturer: String,
+    pub model: String,
+    #[serde(deserialize_with = "required_option")]
+    pub catalog_origin: Option<Box<crate::catalog::CatalogRecord>>,
+}
+impl PrinterIdentity {
+    pub fn from_setup(setup: &HardwareSetupDefinition) -> Self {
+        Self {
+            manufacturer: setup.model.vendor.clone(),
+            model: setup.model.model.clone(),
+            catalog_origin: None,
+        }
+    }
+    pub fn from_reference(record: crate::catalog::CatalogRecord) -> Result<Self, String> {
+        record.validate()?;
+        let crate::catalog::CatalogItem::Printer {
+            manufacturer,
+            model,
+            ..
+        } = &record.item
+        else {
+            return Err("select a printer reference".into());
+        };
+        let identity = Self {
+            manufacturer: manufacturer.clone(),
+            model: model.clone(),
+            catalog_origin: Some(Box::new(record)),
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        text(&self.manufacturer)?;
+        text(&self.model)?;
+        if let Some(origin) = &self.catalog_origin {
+            origin.validate()?;
+            if origin.item.kind() != crate::catalog::CatalogKind::Printer {
+                return Err("machine origin must describe a printer".into());
+            }
+        }
+        Ok(())
+    }
+    pub fn matches_setup(&self, setup: &HardwareSetupDefinition) -> bool {
+        self.manufacturer == setup.model.vendor && self.model == setup.model.model
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MachineConfiguration {
+    Unconfigured,
+    Configured { setup: Box<HardwareSetupDefinition> },
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct OwnedMachine {
@@ -301,16 +357,39 @@ pub struct OwnedMachine {
     pub serial: Option<String>,
     #[serde(deserialize_with = "required_option")]
     pub location: Option<String>,
-    pub setup: HardwareSetupDefinition,
+    pub identity: PrinterIdentity,
+    pub configuration: MachineConfiguration,
     pub generation: u64,
 }
 impl OwnedMachine {
+    pub fn configured_setup(&self) -> Result<&HardwareSetupDefinition, String> {
+        match &self.configuration {
+            MachineConfiguration::Configured { setup } => Ok(setup),
+            MachineConfiguration::Unconfigured => Err(
+                "Setup needed: declare a complete installed setup before applying hardware".into(),
+            ),
+        }
+    }
+    pub fn configured_setup_mut(&mut self) -> Result<&mut HardwareSetupDefinition, String> {
+        match &mut self.configuration {
+            MachineConfiguration::Configured { setup } => Ok(setup),
+            MachineConfiguration::Unconfigured => Err(
+                "Setup needed: declare a complete installed setup before applying hardware".into(),
+            ),
+        }
+    }
     pub fn validate(&self) -> Result<(), String> {
         validate_library_uuid(&self.id)?;
         text(&self.nickname)?;
         option_text(&self.serial)?;
         option_text(&self.location)?;
-        self.setup.validate()?;
+        self.identity.validate()?;
+        if let MachineConfiguration::Configured { setup } = &self.configuration {
+            setup.validate()?;
+            if !self.identity.matches_setup(setup) {
+                return Err("installed setup belongs to a different printer model".into());
+            }
+        }
         if self.generation == 0 {
             return Err("machine generation must be positive".into());
         }
@@ -513,7 +592,8 @@ impl HardwareLibrary {
         for p in &self.plates {
             p.validate()?;
             if let Some(id) = &p.installed_machine
-                && p.definition.mounting_interface != machine(id)?.setup.model.mounting_interface
+                && p.definition.mounting_interface
+                    != machine(id)?.configured_setup()?.model.mounting_interface
             {
                 return Err("installed plate mount mismatch".into());
             }
@@ -521,7 +601,8 @@ impl HardwareLibrary {
         for a in &self.accessories {
             a.validate()?;
             if let Some(id) = &a.installed_machine
-                && a.definition.mounting_interface != machine(id)?.setup.model.mounting_interface
+                && a.definition.mounting_interface
+                    != machine(id)?.configured_setup()?.model.mounting_interface
             {
                 return Err("installed accessory mount mismatch".into());
             }
@@ -560,6 +641,7 @@ impl HardwareLibrary {
             .iter()
             .find(|m| m.id == machine)
             .ok_or("owned machine missing")?;
+        m.configured_setup()?;
         let p = self
             .plates
             .iter()
@@ -572,7 +654,7 @@ impl HardwareLibrary {
             return Err("selected plate is recorded installed on another machine".into());
         }
         let c = ProjectHardwareCapture {
-            setup: m.setup.clone(),
+            setup: m.configured_setup()?.clone(),
             plate: p.definition.clone(),
             face: face.into(),
             accessories: self

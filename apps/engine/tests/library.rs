@@ -612,7 +612,10 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
             nickname: "PRIVATE Workshop sentinel".into(),
             serial: Some("PRIVATE-SERIAL-SENTINEL".into()),
             location: Some("PRIVATE-ROOM-SENTINEL".into()),
-            setup: catalog.setups[0].clone(),
+            identity: PrinterIdentity::from_setup(&catalog.setups[0]),
+            configuration: MachineConfiguration::Configured {
+                setup: Box::new(catalog.setups[0].clone()),
+            },
             generation: 1,
         });
     }
@@ -1076,5 +1079,118 @@ async fn bundled_reference_search_captures_declarations_stock_and_portable_proje
         ProjectResponse::Filament { revision }
     );
     assert!(!workspace.0.join("Missing.spil").exists());
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn printer_discovery_preserves_incomplete_inventory_and_requires_deliberate_setup() {
+    use spiling_contracts::{catalog::*, hardware::*};
+    let workspace = Workspace::new();
+    let mut client = spawn(&workspace.0, "printers-one", "Printers.spil").await;
+    let query = CatalogQuery {
+        kind: CatalogKind::Printer,
+        query: "a1".into(),
+        offset: 0,
+        snapshot: None,
+    };
+    let page = client.rpc().search_catalog(&query).await.unwrap();
+    let reference = page
+        .entries
+        .iter()
+        .find(|r| matches!(&r.item,CatalogItem::Printer {model,..} if model=="A1"))
+        .unwrap()
+        .clone();
+    assert!(
+        matches!(&page.entries[0].item,CatalogItem::Printer{model,..} if model=="A1"),
+        "exact model precedes its longer variant"
+    );
+    let mini = client
+        .rpc()
+        .search_catalog(&CatalogQuery {
+            query: "a1 mini".into(),
+            ..query.clone()
+        })
+        .await
+        .unwrap();
+    assert!(
+        mini.entries
+            .iter()
+            .all(|r| matches!(&r.item,CatalogItem::Printer{model,..} if model=="A1 mini"))
+    );
+    assert!(!workspace.0.join("Printers.spil").exists());
+    let known = PrinterIdentity::from_reference(reference.clone()).unwrap();
+    let machine = |identity: PrinterIdentity| OwnedMachine {
+        id: uuid::Uuid::new_v4().to_string(),
+        nickname: "Workshop".into(),
+        serial: Some("PRIVATE".into()),
+        location: None,
+        identity,
+        configuration: MachineConfiguration::Unconfigured,
+        generation: 1,
+    };
+    let mut h = HardwareLibrary::default();
+    h.machines.push(machine(known.clone()));
+    h.machines.push(machine(known));
+    h.machines.push(machine(PrinterIdentity {
+        manufacturer: "Custom".into(),
+        model: "Workshop printer".into(),
+        catalog_origin: None,
+    }));
+    write(
+        &client,
+        LibraryMutation::ReplaceHardware {
+            hardware: h.clone(),
+        },
+    )
+    .await;
+    let saved = client.rpc().library_hardware().await.unwrap();
+    assert_eq!(saved.hardware, h);
+    assert!(
+        h.capture(
+            &h.machines[0].id,
+            &uuid::Uuid::new_v4().to_string(),
+            "smooth"
+        )
+        .unwrap_err()
+        .contains("Setup needed")
+    );
+    let c = client.rpc().hardware_catalog().await.unwrap();
+    let mut wrong = h.clone();
+    wrong.machines[0].configuration = MachineConfiguration::Configured {
+        setup: Box::new(c.setups[0].clone()),
+    };
+    assert!(
+        wrong
+            .validate()
+            .unwrap_err()
+            .contains("different printer model")
+    );
+    let mut custom = c.setups[0].clone();
+    custom.id = "custom.operator-declaration".into();
+    custom.model.vendor = "Custom".into();
+    custom.model.model = "Workshop printer".into();
+    custom.model.source = "Operator declaration from explicit software settings".into();
+    h.machines[2].configuration = MachineConfiguration::Configured {
+        setup: Box::new(custom),
+    };
+    write(&client, LibraryMutation::ReplaceHardware { hardware: h }).await;
+    let saved = client.rpc().library_hardware().await.unwrap();
+    assert_eq!(saved.hardware.machines[2].generation, 2);
+    assert_eq!(saved.hardware.machines[0].generation, 1);
+    client.shutdown().await.unwrap();
+    let mut reopened = spawn(&workspace.0, "printers-two", "Printers.spil").await;
+    let persisted = reopened.rpc().library_hardware().await.unwrap();
+    assert_eq!(persisted, saved);
+    assert_eq!(
+        persisted.hardware.machines[0]
+            .identity
+            .catalog_origin
+            .as_deref(),
+        Some(&reference)
+    );
+    assert_ne!(
+        persisted.hardware.machines[0].id,
+        persisted.hardware.machines[1].id
+    );
     reopened.shutdown().await.unwrap();
 }

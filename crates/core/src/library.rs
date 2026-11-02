@@ -637,7 +637,7 @@ fn apply(document: &mut LibraryDocument, mutation: &LibraryMutation) -> Result<(
                             "machine generation must retain or advance one installation",
                         ));
                     }
-                    if m.setup != old.setup {
+                    if m.configuration != old.configuration || m.identity != old.identity {
                         m.generation = next;
                     }
                 } else if m.generation != 1 {
@@ -858,7 +858,10 @@ mod tests {
             nickname: "Workshop".into(),
             serial: None,
             location: None,
-            setup: catalog.setups[0].clone(),
+            identity: PrinterIdentity::from_setup(&catalog.setups[0]),
+            configuration: MachineConfiguration::Configured {
+                setup: Box::new(catalog.setups[0].clone()),
+            },
             generation: 1,
         });
         h.routes.push(EndpointRoute {
@@ -890,7 +893,12 @@ mod tests {
             },
         );
         assert_eq!(second.document.hardware.machines[0].generation, 1);
-        h.machines[0].setup.printer.build_envelope.max[2] = 200.;
+        h.machines[0]
+            .configured_setup_mut()
+            .unwrap()
+            .printer
+            .build_envelope
+            .max[2] = 200.;
         let third = write(
             &store,
             Some(&second.document),

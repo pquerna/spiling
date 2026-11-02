@@ -106,7 +106,11 @@ export type AccessoryDefinition = { id: string, label: string, mounting_interfac
 
 export type ProjectHardwareCapture = { setup: HardwareSetupDefinition, plate: PlateDefinition, face: string, accessories: Array<AccessoryDefinition>, };
 
-export type OwnedMachine = { id: string, nickname: string, serial: string | null, location: string | null, setup: HardwareSetupDefinition, generation: bigint, };
+export type PrinterIdentity = { manufacturer: string, model: string, catalog_origin: CatalogRecord | null, };
+
+export type MachineConfiguration = { "state": "unconfigured" } | { "state": "configured", setup: HardwareSetupDefinition, };
+
+export type OwnedMachine = { id: string, nickname: string, serial: string | null, location: string | null, identity: PrinterIdentity, configuration: MachineConfiguration, generation: bigint, };
 
 export type OwnedPlate = { id: string, nickname: string, definition: PlateDefinition, installed_machine: string | null, notes: string, };
 

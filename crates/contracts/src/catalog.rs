@@ -89,7 +89,7 @@ impl CatalogRecord {
                 .trim()
                 .into(),
             declaration: declaration.clone(),
-            catalog_origin: Some(self.clone()),
+            catalog_origin: Some(Box::new(self.clone())),
             material: None,
             color_name: Some(name.clone()),
             appearance: Some(crate::library::DeclaredAppearance {
@@ -253,7 +253,7 @@ mod tests {
         let d = row.filament_definition().unwrap();
         assert_eq!(d.declaration.diameter_mm, None);
         assert!(d.material.is_none() && d.profiles.is_empty());
-        assert_eq!(d.catalog_origin, Some(row.clone()));
+        assert_eq!(d.catalog_origin, Some(Box::new(row.clone())));
         if let CatalogItem::Filament { srgb, .. } = &mut row.item {
             *srgb = [0, 0, 0];
         }

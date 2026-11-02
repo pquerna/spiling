@@ -46,7 +46,10 @@ fn same_name_devices_and_normalized_credentials_keep_distinct_identities() {
         nickname: "Workshop".into(),
         serial: None,
         location: None,
-        setup: c.setup.clone(),
+        identity: PrinterIdentity::from_setup(&c.setup),
+        configuration: MachineConfiguration::Configured {
+            setup: Box::new(c.setup.clone()),
+        },
         generation: 1,
     };
     let mut h = HardwareLibrary::default();
@@ -139,7 +142,14 @@ fn standalone_native_owned_records_validate_identity_and_file_route_authority() 
     let invalid = crate::rpc::OwnedMachine {
         id: "not-a-uuid".into(),
         nickname: "Workshop".into(),
-        setup: Some(capture().setup.try_into().unwrap()),
+        identity: Some(
+            PrinterIdentity::from_setup(&capture().setup)
+                .try_into()
+                .unwrap(),
+        ),
+        configuration: Some(crate::rpc::owned_machine::Configuration::Setup(Box::new(
+            capture().setup.try_into().unwrap(),
+        ))),
         generation: 1,
         serial: None,
         location: None,
@@ -162,4 +172,50 @@ fn standalone_native_owned_records_validate_identity_and_file_route_authority() 
         backend: CredentialBackend::PlaintextFile,
     });
     assert!(route.validate().is_err());
+}
+
+#[test]
+fn incomplete_machine_is_inventory_without_mount_or_project_authority() {
+    let mut machine = OwnedMachine {
+        id: uuid::Uuid::new_v4().to_string(),
+        nickname: "My custom printer".into(),
+        serial: None,
+        location: None,
+        identity: PrinterIdentity {
+            manufacturer: "Custom".into(),
+            model: "Workshop".into(),
+            catalog_origin: None,
+        },
+        configuration: MachineConfiguration::Unconfigured,
+        generation: 1,
+    };
+    machine.validate().unwrap();
+    let wire: crate::rpc::OwnedMachine = machine.clone().try_into().unwrap();
+    assert_eq!(OwnedMachine::try_from(wire).unwrap(), machine);
+    let mut h = HardwareLibrary {
+        machines: vec![machine.clone()],
+        ..Default::default()
+    };
+    h.validate().unwrap();
+    let catalog = builtin_catalog().unwrap();
+    h.plates.push(OwnedPlate {
+        id: uuid::Uuid::new_v4().to_string(),
+        nickname: "Sheet".into(),
+        definition: catalog.plates[0].clone(),
+        installed_machine: Some(machine.id.clone()),
+        notes: String::new(),
+    });
+    assert!(h.validate().unwrap_err().contains("Setup needed"));
+    machine.configuration = MachineConfiguration::Configured {
+        setup: Box::new(catalog.setups[0].clone()),
+    };
+    assert!(
+        machine
+            .validate()
+            .unwrap_err()
+            .contains("different printer model")
+    );
+    let mut json = serde_json::to_value(&h.machines[0]).unwrap();
+    json.as_object_mut().unwrap().remove("configuration");
+    assert!(serde_json::from_value::<OwnedMachine>(json).is_err());
 }

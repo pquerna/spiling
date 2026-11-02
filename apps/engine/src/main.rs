@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod catalog;
 mod geometry;
 mod jobs;
 mod library;
@@ -1011,5 +1012,3 @@ async fn main() -> std::process::ExitCode {
         }
     }
 }
-
-mod catalog;

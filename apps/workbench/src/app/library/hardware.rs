@@ -4,11 +4,11 @@
 use super::*;
 use crate::host::hardware::HardwareAction;
 use spiling_contracts::hardware::*;
+mod machine;
 #[derive(Default)]
 pub(super) struct HardwareUi {
     pub active: bool,
     tab: u8,
-    query: String,
     names: [String; 3],
     submitted_add: Option<(usize, String)>,
     submitted_connection: Option<(String, String)>,
@@ -18,6 +18,8 @@ pub(super) struct HardwareUi {
     setup: usize,
     plate_model: usize,
     machine: Option<OwnedMachine>,
+    submitted_machine: Option<OwnedMachine>,
+    mounting_interface: String,
     plate: Option<OwnedPlate>,
     accessory: Option<OwnedAccessory>,
     chosen_machine: String,
@@ -48,7 +50,42 @@ impl HardwareUi {
             || !self.identity.is_empty()
             || !self.secret.is_empty()
     }
+    pub(super) fn begin_printer(
+        &mut self,
+        record: Option<spiling_contracts::catalog::CatalogRecord>,
+    ) -> Result<(), String> {
+        let identity = record
+            .map(PrinterIdentity::from_reference)
+            .transpose()?
+            .unwrap_or(PrinterIdentity {
+                manufacturer: String::new(),
+                model: String::new(),
+                catalog_origin: None,
+            });
+        let nickname = format!("{} {}", identity.manufacturer, identity.model)
+            .trim()
+            .to_owned();
+        self.machine = Some(OwnedMachine {
+            id: uuid::Uuid::new_v4().to_string(),
+            nickname,
+            serial: None,
+            location: None,
+            identity,
+            configuration: MachineConfiguration::Unconfigured,
+            generation: 1,
+        });
+        self.machine_detail = true;
+        self.tab = 0;
+        self.mounting_interface.clear();
+        Ok(())
+    }
     pub(super) fn confirmed_write(&mut self) {
+        if let Some(submitted) = self.submitted_machine.take()
+            && self.machine.as_ref() == Some(&submitted)
+        {
+            self.machine = None;
+            self.machine_detail = false;
+        }
         if let Some((endpoint, identity)) = self.submitted_connection.take() {
             if self.endpoint == endpoint {
                 self.endpoint.clear();
@@ -90,7 +127,11 @@ fn machine_picker(
         )
         .show_ui(ui, |ui| {
             ui.selectable_value(value, None, "Not installed");
-            for m in &hardware.machines {
+            for m in hardware
+                .machines
+                .iter()
+                .filter(|m| m.configured_setup().is_ok())
+            {
                 ui.selectable_value(value, Some(m.id.clone()), &m.nickname);
             }
         });
@@ -135,7 +176,9 @@ impl Workbench {
         let personal = state.hardware.personal.clone();
         let catalog = state.hardware.catalog.clone();
         if !self.library.personal {
-            self.project_hardware(ui, state, ready, writable);
+            egui::ScrollArea::vertical()
+                .id_salt("project-hardware-body")
+                .show(ui, |ui| self.project_hardware(ui, state, ready, writable));
             return;
         }
         let previous_tab = self.library.hardware.tab;
@@ -175,253 +218,29 @@ impl Workbench {
                 self.queue_hardware(HardwareAction::ResolveCredential);
             }
         }
-        ui.add_enabled_ui(can_write, |ui| match self.library.hardware.tab {
-            0 => self.hardware_machines(ui, &personal, catalog.as_ref(), can_write),
-            1 => self.hardware_plates(ui, &personal, catalog.as_ref(), can_write),
-            2 => self.hardware_accessories(ui, &personal, can_write),
-            _ => {
-                field(ui, "Search catalog", &mut self.library.hardware.query);
-                if let Some(c) = catalog {
-                    for m in c.models.iter().filter(|m| {
-                        format!("{} {}", m.vendor, m.model)
-                            .to_lowercase()
-                            .contains(&self.library.hardware.query.to_lowercase())
-                    }) {
-                        ui.group(|ui| {
-                            ui.strong(format!("{} {}", m.vendor, m.model));
-                            ui.label(&m.source);
-                            if let Some(v) = m.declared_volume_mm {
-                                ui.label(format!(
-                                    "Declared volume: {:.0} × {:.0} × {:.0} mm",
-                                    v.max[0] - v.min[0],
-                                    v.max[1] - v.min[1],
-                                    v.max[2] - v.min[2]
-                                ));
-                            }
-                            for s in c.setups.iter().filter(|s| s.model.id == m.id) {
-                                ui.label(format!(
-                                    "{} · {} mm nozzle",
-                                    s.label, s.printer.nozzle_diameter_mm
-                                ));
-                            }
-                            if !c.setups.iter().any(|s| s.model.id == m.id) {
-                                ui.weak("Catalog identity only · no admitted setup in this build");
-                            }
-                        });
-                    }
-                }
-            }
-        });
-    }
-    fn hardware_machines(
-        &mut self,
-        ui: &mut egui::Ui,
-        p: &LibraryHardware,
-        catalog: Option<&HardwareCatalog>,
-        ready: bool,
-    ) {
-        if !self.library.hardware.machine_detail {
-            if self.library.hardware.machine.is_some() {
-                ui.label(
-                    "Machine draft retained. Resume or discard it before choosing another machine.",
-                );
-                if ui.button("Resume machine").clicked() {
-                    self.library.hardware.machine_detail = true;
-                }
-            }
-            ui.weak("Machine names, locations, serials and connections stay on this computer.");
-            for m in &p.hardware.machines {
-                ui.push_id(&m.id, |ui| {
-                    if ui
-                        .add_enabled(
-                            !self.library.hardware.machine.as_ref().is_some_and(|d| {
-                                p.hardware
-                                    .machines
-                                    .iter()
-                                    .find(|m| m.id == d.id)
-                                    .is_none_or(|m| m != d)
-                            }) && self.library.hardware.endpoint.is_empty()
-                                && self.library.hardware.identity.is_empty(),
-                            egui::Button::selectable(
-                                self.library
-                                    .hardware
-                                    .machine
-                                    .as_ref()
-                                    .is_some_and(|d| d.id == m.id),
-                                format!(
-                                    "{} · {} · {} mm",
-                                    m.nickname,
-                                    m.setup.model.model,
-                                    m.setup.printer.nozzle_diameter_mm
-                                ),
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.library.hardware.secret = zeroize::Zeroizing::default();
-                        self.library.hardware.credential_route = None;
-                        self.library.hardware.machine = Some(m.clone());
-                        self.library.hardware.machine_detail = true;
-                    }
-                });
-            }
-            egui::CollapsingHeader::new("Add machine")
-                .default_open(p.hardware.machines.is_empty())
+        if self.library.hardware.tab == 0 {
+            self.hardware_machines(ui, &personal, catalog.as_ref(), can_write);
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("hardware-body")
                 .show(ui, |ui| {
-                    field(ui, "Machine name", &mut self.library.hardware.names[0]);
-                    if let Some(c) = catalog {
-                        egui::ComboBox::from_id_salt("hardware-add-setup")
-                            .selected_text(
-                                c.setups
-                                    .get(self.library.hardware.setup)
-                                    .map_or("Current project setup", |s| s.label.as_str()),
-                            )
-                            .show_ui(ui, |ui| {
-                                for (i, s) in c.setups.iter().enumerate() {
-                                    ui.selectable_value(
-                                        &mut self.library.hardware.setup,
-                                        i,
-                                        &s.label,
-                                    );
-                                }
-                                if self.state.manufacturing.intent.is_some() {
-                                    ui.selectable_value(
-                                        &mut self.library.hardware.setup,
-                                        c.setups.len(),
-                                        "Current project setup (custom copy)",
-                                    );
-                                }
-                            });
-                        if ui::primary(
-                            ui,
-                            "Add machine",
-                            if !ready {
-                                Some("Wait for pending library operations")
-                            } else if self.library.hardware.names[0].trim().is_empty() {
-                                Some("Enter a name")
-                            } else {
-                                None
-                            },
-                        ) {
-                            let setup =
-                                c.setups
-                                    .get(self.library.hardware.setup)
-                                    .cloned()
-                                    .or_else(|| {
-                                        self.state.manufacturing.intent.as_ref().map(|intent| {
-                                            let model = HardwareModelDefinition {
-                                                id: format!("custom.{}", uuid::Uuid::new_v4()),
-                                                vendor: "Custom".into(),
-                                                model: "Custom Cartesian machine".into(),
-                                                source: "Operator-declared public setup".into(),
-                                                mounting_interface: "custom.cartesian".into(),
-                                                declared_volume_mm: Some(
-                                                    intent.printer.build_envelope,
-                                                ),
-                                            };
-                                            HardwareSetupDefinition {
-                                                id: format!("custom.{}", uuid::Uuid::new_v4()),
-                                                label: "Custom project setup".into(),
-                                                model,
-                                                printer: intent.printer.clone(),
-                                            }
-                                        })
-                                    });
-                            if let Some(setup) = setup {
-                                let mut h = p.hardware.clone();
-                                h.machines.push(OwnedMachine {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    nickname: self.library.hardware.names[0].trim().into(),
-                                    serial: None,
-                                    location: None,
-                                    setup,
-                                    generation: 1,
-                                });
-                                self.save_hardware(p, h);
+                    ui.add_enabled_ui(can_write, |ui| match self.library.hardware.tab {
+                        1 => self.hardware_plates(ui, &personal, catalog.as_ref(), can_write),
+                        2 => self.hardware_accessories(ui, &personal, can_write),
+                        _ => {
+                            ui::pane_header(
+                                ui,
+                                "Printer references",
+                                "Model declarations · setup is separate",
+                            );
+                            if ui::primary(ui, "Find a printer", None) {
+                                self.library
+                                    .discovery
+                                    .open(spiling_contracts::catalog::CatalogKind::Printer);
                             }
                         }
-                    }
+                    });
                 });
-            return;
-        }
-        if ui::close(ui, "Back to machines") {
-            self.library.hardware.machine_detail = false;
-            self.library.hardware.clear_secret();
-        }
-        if let Some(mut draft) = self.library.hardware.machine.clone() {
-            let Some(original) = p.hardware.machines.iter().find(|m| m.id == draft.id) else {
-                return;
-            };
-            if self.library.hardware.connections {
-                if ui::close(ui, "Back to machine") {
-                    self.library.hardware.connections = false;
-                    self.library.hardware.clear_secret();
-                }
-                self.hardware_connections(ui, p, &draft.id, ready);
-                return;
-            }
-            ui::pane_header(ui, "Machine", "My library · private inventory");
-            ui.push_id(draft.id.clone(), |ui| {
-                if draft != *original { ui.label("Unapplied machine changes"); }
-                if ui.button("Discard machine draft").clicked() { draft = original.clone(); }
-                field(ui, "Name", &mut draft.nickname);
-                let mut serial = draft.serial.clone().unwrap_or_default();
-                let mut location = draft.location.clone().unwrap_or_default();
-                field(ui, "Serial (private)", &mut serial);
-                field(ui, "Location (private)", &mut location);
-                draft.serial = (!serial.is_empty()).then_some(serial);
-                draft.location = (!location.is_empty()).then_some(location);
-                ui.collapsing("Installed setup", |ui| {
-                    ui.label(format!("{} · {}", draft.setup.model.vendor, draft.setup.model.model));
-                    ui.weak("Changes create a custom setup. Existing projects retain their saved setup until Apply.");
-                    number(ui, "Nozzle diameter (mm)", &mut draft.setup.printer.nozzle_diameter_mm);
-                    for (axis, label) in ["Maximum X (mm)", "Maximum Y (mm)", "Maximum Z (mm)"].iter().enumerate() {
-                        number(ui, label, &mut draft.setup.printer.build_envelope.max[axis]);
-                    }
-                    ui.label(format!("Mount: {}", draft.setup.model.mounting_interface));
-                });
-                if draft != *original && ui::primary(ui, "Save machine", (!ready).then_some("Wait for the current library operation")) {
-                    if draft.setup != original.setup {
-                        let Some(generation) = original.generation.checked_add(1) else {
-                            self.local_problem = Some("Machine installation generation exhausted".into());
-                            return;
-                        };
-                        draft.generation = generation;
-                        draft.setup.id = format!("custom.{}", uuid::Uuid::new_v4());
-                        draft.setup.label = format!("Custom {} setup", draft.setup.model.model);
-                        draft.setup.printer.id = draft.setup.id.clone();
-                        if let Err(reason) = draft.setup.validate() {
-                            self.local_problem = Some(reason);
-                            return;
-                        }
-                        let bytes = serde_json::to_vec(&draft.setup.printer).expect("validated finite printer");
-                        draft.setup.printer.revision = spiling_contracts::geometry::SourceHash::from_bytes(&bytes).as_str().into();
-                    }
-                    let mut h = p.hardware.clone();
-                    *h.machines.iter_mut().find(|m| m.id == draft.id).expect("retained machine") = draft.clone();
-                    self.save_hardware(p, h);
-                }
-                let has_credentials = p.hardware.routes.iter().any(|r| r.machine_id == draft.id && r.credential.is_some());
-                if has_credentials { ui.weak("Forget connection credentials before removing this machine."); }
-                if ui.add_enabled(ready && !has_credentials, egui::Button::new("Remove machine")).clicked() {
-                    let mut h = p.hardware.clone();
-                    h.machines.retain(|m| m.id != draft.id);
-                    h.routes.retain(|r| r.machine_id != draft.id);
-                    h.bindings.retain(|b| b.machine_id != draft.id);
-                    for plate in &mut h.plates {
-                        if plate.installed_machine.as_deref() == Some(&draft.id) { plate.installed_machine = None; }
-                    }
-                    for accessory in &mut h.accessories {
-                        if accessory.installed_machine.as_deref() == Some(&draft.id) { accessory.installed_machine = None; }
-                    }
-                    self.save_hardware(p, h);
-                    self.library.hardware.machine = None;
-                }
-                if ui.button("Connections…").clicked() { self.library.hardware.connections = true; }
-            });
-            if self.library.hardware.machine.is_some() {
-                self.library.hardware.machine = Some(draft);
-            }
         }
     }
     fn hardware_plates(
@@ -915,7 +734,10 @@ impl Workbench {
                 nickname: capture.setup.model.model.clone(),
                 serial: None,
                 location: None,
-                setup: capture.setup.clone(),
+                identity: PrinterIdentity::from_setup(&capture.setup),
+                configuration: MachineConfiguration::Configured {
+                    setup: Box::new(capture.setup.clone()),
+                },
                 generation: 1,
             });
             h.plates.push(OwnedPlate {
@@ -948,10 +770,27 @@ impl Workbench {
                     ui.selectable_value(
                         &mut self.library.hardware.chosen_machine,
                         m.id.clone(),
-                        &m.nickname,
+                        format!(
+                            "{}{}",
+                            m.nickname,
+                            if m.configured_setup().is_err() {
+                                " · Setup needed"
+                            } else {
+                                ""
+                            }
+                        ),
                     );
                 }
             });
+        if let Some(m) = p
+            .hardware
+            .machines
+            .iter()
+            .find(|m| m.id == self.library.hardware.chosen_machine)
+            && let Err(reason) = m.configured_setup()
+        {
+            ui.label(reason);
+        }
         egui::ComboBox::from_id_salt("project-local-plate")
             .selected_text(
                 p.hardware

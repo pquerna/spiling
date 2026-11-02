@@ -10,6 +10,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut prost = tonic_prost_build::Config::new();
     prost.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);
+    // Captured provenance and optional installed setups are cold owned payloads.
+    // Keep them out of every surrounding control enum's inline size.
+    prost.boxed(".spiling.engine.LibraryFilamentDefinition.catalog_origin");
+    prost.boxed(".spiling.engine.PrinterIdentity.catalog_origin");
+    prost.boxed(".spiling.engine.OwnedMachine.configuration.setup");
     // Keep bounded protobuf control oneofs inline rather than adding per-call boxes.
     for oneof in [
         ".spiling.engine.ArtifactSummary.kind",

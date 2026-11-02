@@ -10,6 +10,8 @@ const HUEFORGE: &[u8] =
     include_bytes!("../../../data/material-catalogs/filament-library-hueforge.json");
 const OPENPRINTTAG: &[u8] =
     include_bytes!("../../../data/material-catalogs/filament-library-openprinttag.json");
+const PRINTERS: &[u8] = include_bytes!("../../../crates/contracts/data/printer-references.json");
+const HARDWARE: &[u8] = include_bytes!("../../../crates/contracts/data/hardware-catalog.json");
 const MANIFEST: &[u8] = include_bytes!("../../../data/material-catalogs/manifest.json");
 #[derive(Deserialize)]
 struct Manifest {
@@ -71,8 +73,14 @@ pub(super) fn normalize(s: &str) -> String {
 impl CatalogIndex {
     pub fn bundled() -> Result<Self, String> {
         let manifest: Manifest = serde_json::from_slice(MANIFEST).map_err(|e| e.to_string())?;
-        let snapshot = SourceHash::parse(format!("{:x}", Sha256::digest(MANIFEST)))
-            .map_err(|e| e.to_string())?;
+        let snapshot = SourceHash::from_bytes(
+            &serde_json::to_vec(&[
+                SourceHash::from_bytes(MANIFEST),
+                SourceHash::from_bytes(PRINTERS),
+                SourceHash::from_bytes(HARDWARE),
+            ])
+            .map_err(|e| e.to_string())?,
+        );
         let mut rows = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         for (source, bytes) in [("hueforge", HUEFORGE), ("openprinttag", OPENPRINTTAG)] {
@@ -130,6 +138,39 @@ impl CatalogIndex {
                     text,
                 });
             }
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PrinterRow {
+            id: String,
+            item: CatalogItem,
+        }
+        let mut printers: Vec<PrinterRow> =
+            serde_json::from_slice(PRINTERS).map_err(|e| e.to_string())?;
+        if PRINTERS.len() > 48 * 1024 || printers.len() > 128 {
+            return Err("printer reference source exceeds budget".into());
+        }
+        let author_url = "https://github.com/pquerna/spiling/blob/main/crates/contracts/data/printer-references.ts";
+        let revision = SourceHash::from_bytes(PRINTERS);
+        for row in printers.drain(..) {
+            if row.item.kind() != CatalogKind::Printer
+                || !seen.insert(("spiling-printers".into(), row.id.clone()))
+            {
+                return Err("invalid printer reference identity".into());
+            }
+            rows.push(index_printer(
+                row.id,
+                row.item,
+                "spiling-printers",
+                revision.as_str(),
+                author_url,
+                &snapshot,
+            )?);
+        }
+        let revision = SourceHash::from_bytes(HARDWARE);
+        for model in spiling_contracts::hardware::builtin_catalog()?.models {
+            let item=CatalogItem::Printer {manufacturer:model.vendor,model:model.model,aliases:vec![],volume_mm:model.declared_volume_mm.map(|b|std::array::from_fn(|a|b.max[a]-b.min[a])),source_url:"https://github.com/pquerna/spiling/blob/main/crates/contracts/data/hardware-catalog.ts".into()};
+            rows.push(index_printer(model.id,item,"spiling-setups",revision.as_str(),"https://github.com/pquerna/spiling/blob/main/crates/contracts/data/hardware-catalog.ts",&snapshot)?);
         }
         Ok(Self { snapshot, rows })
     }
@@ -208,6 +249,44 @@ impl CatalogIndex {
         result.validate()?;
         Ok(result)
     }
+}
+fn index_printer(
+    id: String,
+    item: CatalogItem,
+    provider: &str,
+    revision: &str,
+    url: &str,
+    snapshot: &SourceHash,
+) -> Result<Indexed, String> {
+    let CatalogItem::Printer {
+        manufacturer,
+        model,
+        aliases,
+        ..
+    } = &item
+    else {
+        return Err("expected printer declaration".into());
+    };
+    let text = normalize(&format!("{manufacturer} {model} {}", aliases.join(" ")));
+    let name = normalize(model);
+    let record = CatalogRecord {
+        origin: CatalogOrigin {
+            provider: provider.into(),
+            id,
+            revision: revision.into(),
+            snapshot: snapshot.clone(),
+            content: item.content_hash()?,
+            url: url.into(),
+        },
+        item,
+    };
+    record.validate()?;
+    Ok(Indexed {
+        record,
+        tokens: text.split_whitespace().map(str::to_owned).collect(),
+        text,
+        name,
+    })
 }
 fn one_edit(a: &str, b: &str) -> bool {
     let al = a.chars().count();

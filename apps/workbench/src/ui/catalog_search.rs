@@ -16,7 +16,7 @@ pub struct CatalogSearch {
     composing: bool,
 }
 pub enum CatalogChoice {
-    Review(CatalogRecord),
+    Review(Box<CatalogRecord>),
     Manual,
 }
 impl CatalogSearch {
@@ -213,7 +213,9 @@ impl CatalogSearch {
                     },
                 ) || (enter && ready)
                 {
-                    chosen = selected.cloned().map(CatalogChoice::Review);
+                    chosen = selected
+                        .cloned()
+                        .map(|row| CatalogChoice::Review(Box::new(row)));
                 }
                 if let Some(offset) = page.next
                     && ui

@@ -114,7 +114,10 @@ impl TryFrom<rpc::LibraryFilamentDefinition> for FilamentDefinition {
         }
         let value = Self {
             declaration: required(v.declaration, "filament declaration")?.try_into()?,
-            catalog_origin: v.catalog_origin.map(TryInto::try_into).transpose()?,
+            catalog_origin: v
+                .catalog_origin
+                .map(|v| (*v).try_into().map(Box::new))
+                .transpose()?,
             name: v.name,
             material: v.material.map(TryInto::try_into).transpose()?,
             color_name: v.color_name,
@@ -136,7 +139,10 @@ impl TryFrom<FilamentDefinition> for rpc::LibraryFilamentDefinition {
         v.content_hash()?;
         Ok(Self {
             declaration: Some(v.declaration.try_into()?),
-            catalog_origin: v.catalog_origin.map(TryInto::try_into).transpose()?,
+            catalog_origin: v
+                .catalog_origin
+                .map(|v| (*v).try_into().map(Box::new))
+                .transpose()?,
             name: v.name,
             material: v.material.map(TryInto::try_into).transpose()?,
             color_name: v.color_name,

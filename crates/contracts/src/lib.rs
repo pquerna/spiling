@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub mod appearance;
+pub mod catalog;
 pub mod color_naming;
 pub mod display;
 pub mod geometry;
@@ -265,5 +266,3 @@ pub fn synthetic_triangle() -> [u8; 64] {
     }
     bytes
 }
-
-pub mod catalog;

@@ -69,3 +69,5 @@ crates/contracts/data/hardware-catalog.json
 
 # Exact upstream catalog bytes; materials:check owns schema/hash validation.
 data/material-catalogs/
+
+crates/contracts/data/printer-references.json

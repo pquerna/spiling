@@ -5,7 +5,7 @@ use super::{Command, Error, Options, set_once};
 use spiling_contracts::{catalog::*, geometry::NativePath, library::*};
 use spiling_engine_client::EngineRpc;
 use std::{ffi::OsString, path::PathBuf};
-pub(super) const USAGE: &str = "library (catalog [--kind filament|printer] [--query TEXT] [--offset N --snapshot HASH]|add-reference RECORD.json|hardware|hardware-catalog|add-machine NAME [--setup ID]|add-plate NAME [--plate ID]|hardware-capture --machine UUID --plate UUID --face KEY|replace-hardware HARDWARE_JSON|status|filaments|recipes|recipe RECIPE_UUID|spools|add-filament NAME|add-spool FILAMENT_UUID|write REQUEST_JSON) [--library ABSOLUTE_PATH] [--query TEXT] [--on-hand] [--hex RRGGBB] [--grams N] [--engine PATH]. Unknown color, quantity and manufacturing identity remain unspecified. Rich definitions and explicit revision-bound edits use bounded LibraryWrite JSON; repeat its request_id to resolve an uncertain publication.";
+pub(super) const USAGE: &str = "library (catalog [--kind filament|printer] [--query TEXT] [--offset N --snapshot HASH]|add-reference RECORD.json|hardware|hardware-catalog|add-machine NAME (--manufacturer BRAND --model MODEL|--setup ID)|add-plate NAME [--plate ID]|hardware-capture --machine UUID --plate UUID --face KEY|replace-hardware HARDWARE_JSON|status|filaments|recipes|recipe RECIPE_UUID|spools|add-filament NAME|add-spool FILAMENT_UUID|write REQUEST_JSON) [--library ABSOLUTE_PATH] [--query TEXT] [--on-hand] [--hex RRGGBB] [--grams N] [--engine PATH]. Unknown color, quantity and manufacturing identity remain unspecified. Rich definitions and explicit revision-bound edits use bounded LibraryWrite JSON; repeat its request_id to resolve an uncertain publication.";
 pub(super) struct Workflow {
     location: Option<PathBuf>,
     action: Action,
@@ -15,7 +15,11 @@ enum Action {
     AddReference(Box<CatalogRecord>),
     Hardware,
     HardwareCatalog,
-    AddMachine(String, Option<String>),
+    AddMachine(
+        String,
+        Option<String>,
+        Option<spiling_contracts::hardware::PrinterIdentity>,
+    ),
     AddPlate(String, Option<String>),
     HardwareCapture(String, String, String),
     ReplaceHardware(Box<spiling_contracts::hardware::HardwareLibrary>),
@@ -60,6 +64,8 @@ pub(super) fn parse(
     let mut snapshot = None;
     let mut profile = None;
     let mut setup_id = None;
+    let mut manufacturer = None;
+    let mut model = None;
     let mut machine_id = None;
     let mut plate_id = None;
     let mut face = None;
@@ -88,6 +94,22 @@ pub(super) fn parse(
                         .into_string()
                         .map_err(|_| "snapshot requires UTF-8")?,
                 )?);
+            }
+            Some("--manufacturer") => {
+                manufacturer = Some(
+                    args.next()
+                        .ok_or("--manufacturer requires text")?
+                        .into_string()
+                        .map_err(|_| "manufacturer requires UTF-8")?,
+                );
+            }
+            Some("--model") => {
+                model = Some(
+                    args.next()
+                        .ok_or("--model requires text")?
+                        .into_string()
+                        .map_err(|_| "model requires UTF-8")?,
+                );
             }
             Some("--setup") => {
                 setup_id = Some(
@@ -219,6 +241,17 @@ pub(super) fn parse(
                 .into_string()
                 .map_err(|_| "nickname requires UTF-8")?,
             setup_id,
+            match (manufacturer, model) {
+                (Some(manufacturer), Some(model)) => {
+                    Some(spiling_contracts::hardware::PrinterIdentity {
+                        manufacturer,
+                        model,
+                        catalog_origin: None,
+                    })
+                }
+                (None, None) => None,
+                _ => return Err("manual machines require both --manufacturer and --model".into()),
+            },
         ),
         Some("add-plate") => Action::AddPlate(
             argument
@@ -330,19 +363,36 @@ pub(super) async fn execute(rpc: &EngineRpc, flow: Workflow) -> Result<serde_jso
             use spiling_contracts::hardware::*;
             let mut snapshot = rpc.library_hardware().await?;
             match action {
-                Action::AddMachine(nickname, setup) => {
-                    let catalog = rpc.hardware_catalog().await?;
-                    let setup = catalog
-                        .setups
-                        .into_iter()
-                        .find(|s| setup.as_ref().is_none_or(|id| id == &s.id))
-                        .ok_or("catalog setup absent; catalog-only models cannot be planned")?;
+                Action::AddMachine(nickname, setup, identity) => {
+                    let (identity, configuration) = if let Some(id) = setup {
+                        let setup = rpc
+                            .hardware_catalog()
+                            .await?
+                            .setups
+                            .into_iter()
+                            .find(|s| s.id == id)
+                            .ok_or("admitted setup is absent")?;
+                        let identity =
+                            identity.unwrap_or_else(|| PrinterIdentity::from_setup(&setup));
+                        (
+                            identity,
+                            MachineConfiguration::Configured {
+                                setup: Box::new(setup),
+                            },
+                        )
+                    } else {
+                        let identity = identity.ok_or(
+                            "enter --manufacturer and --model, or explicitly choose --setup ID",
+                        )?;
+                        (identity, MachineConfiguration::Unconfigured)
+                    };
                     snapshot.hardware.machines.push(OwnedMachine {
                         id: uuid::Uuid::new_v4().to_string(),
                         nickname,
                         serial: None,
                         location: None,
-                        setup,
+                        identity,
+                        configuration,
                         generation: 1,
                     });
                 }
@@ -443,10 +493,32 @@ pub(super) async fn execute(rpc: &EngineRpc, flow: Workflow) -> Result<serde_jso
         action => {
             let status = rpc.library_status().await?;
             let mutation = match action {
-                Action::AddReference(record) => LibraryMutation::PutFilament {
-                    id: FilamentId(uuid::Uuid::new_v4().to_string()),
-                    expected: None,
-                    definition: record.filament_definition()?,
+                Action::AddReference(record) => match record.item.kind() {
+                    CatalogKind::Filament => LibraryMutation::PutFilament {
+                        id: FilamentId(uuid::Uuid::new_v4().to_string()),
+                        expected: None,
+                        definition: record.filament_definition()?,
+                    },
+                    CatalogKind::Printer => {
+                        use spiling_contracts::hardware::*;
+                        let mut snapshot = rpc.library_hardware().await?;
+                        if snapshot.identity != status.identity {
+                            return Err("My library changed; review again".into());
+                        }
+                        let identity = PrinterIdentity::from_reference(*record)?;
+                        snapshot.hardware.machines.push(OwnedMachine {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            nickname: format!("{} {}", identity.manufacturer, identity.model),
+                            serial: None,
+                            location: None,
+                            identity,
+                            configuration: MachineConfiguration::Unconfigured,
+                            generation: 1,
+                        });
+                        LibraryMutation::ReplaceHardware {
+                            hardware: snapshot.hardware,
+                        }
+                    }
                 },
                 Action::AddFilament(definition) => LibraryMutation::PutFilament {
                     id: FilamentId(uuid::Uuid::new_v4().to_string()),

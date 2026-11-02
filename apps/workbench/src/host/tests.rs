@@ -2643,7 +2643,10 @@ fn hardware_selection_save_as_restart_and_missing_library_keep_portable_authorit
             nickname: "PRIVATE same-name workshop".into(),
             serial: Some("PRIVATE machine serial".into()),
             location: None,
-            setup: catalog.setups[0].clone(),
+            identity: PrinterIdentity::from_setup(&catalog.setups[0]),
+            configuration: MachineConfiguration::Configured {
+                setup: Box::new(catalog.setups[0].clone()),
+            },
             generation: 1,
         });
     }

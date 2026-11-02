@@ -79,6 +79,8 @@ try {
       "library",
       "add-machine",
       "PRIVATE same-name workshop",
+      "--setup",
+      catalog.result.setups[0].id,
       "--library",
       library,
     ]);

@@ -69,6 +69,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         AccessoryEffect::decl(&config),
         AccessoryDefinition::decl(&config),
         ProjectHardwareCapture::decl(&config),
+        PrinterIdentity::decl(&config),
+        MachineConfiguration::decl(&config),
         OwnedMachine::decl(&config),
         OwnedPlate::decl(&config),
         OwnedAccessory::decl(&config),

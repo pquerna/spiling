@@ -122,7 +122,8 @@ message LibraryPutRecipe { LibraryRecipeTransfer transfer = 1; optional string e
 message RecipeStudyContext { OpticalPatch patch = 1; double cycle_origin_z_mm = 2; }
 
 // Private personal library data, excluded from portable project captures.
-message OwnedMachine {string id=1;string nickname=2;optional string serial=3;optional string location=4;HardwareSetupDefinition setup=5;uint64 generation=6;}
+message PrinterIdentity { string manufacturer=1; string model=2; CatalogRecord catalog_origin=3; }
+message OwnedMachine {string id=1;string nickname=2;optional string serial=3;optional string location=4; oneof configuration {HardwareSetupDefinition setup=5;google.protobuf.Empty unconfigured=8;}uint64 generation=6;PrinterIdentity identity=7;}
 message OwnedPlate {string id=1;string nickname=2;PlateDefinition definition=3;optional string installed_machine=4;string notes=5;}
 message OwnedAccessory {string id=1;string nickname=2;AccessoryDefinition definition=3;optional string installed_machine=4;}
 message CredentialRef {string slot_id=1;string role=2;string backend=3;}

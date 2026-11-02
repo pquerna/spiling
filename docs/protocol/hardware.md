@@ -15,17 +15,17 @@ hardware database or automatic project synchronization.
 
 ## Identity and ownership
 
-| Record                  | Meaning                                                                                                                | Storage                                                                 |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Model                   | Public manufacturer/model identity and mounting interface; known volume may be absent                                  | Built-in catalog or custom setup; copied into a project capture         |
-| Setup                   | Complete existing `PrinterSpecification` and public model, with an inspectable content revision                        | Personal machine record; copied into project                            |
-| Owned machine           | Physical instance UUID, private nickname, serial/location and installed setup generation                               | Personal library only                                                   |
-| Plate definition / face | Public mounting interface, thickness, installed surface datum, faces, usable bounds, keepouts and temperature limits   | Personal plate; copied into project                                     |
-| Owned plate             | Physical sheet UUID, private nickname/condition and optional installed machine                                         | Personal library only                                                   |
-| Accessory               | Public nozzle declaration or rectangular fixture; owned instance can be installed on a machine                         | Personal library; installed definitions copied into project             |
-| Route                   | Physical machine UUID, closed connection family, endpoint, expected peer, generation and optional credential reference | Personal library only                                                   |
-| Project capture         | Complete setup, plate, selected face and installed accessory definitions                                               | Project snapshot, history, manifest and manufacturing intent/provenance |
-| Remembered selection    | Project UUID plus exact local attachment, capture hash and owned machine/plate/generation                              | Personal library only                                                   |
+| Record                  | Meaning                                                                                                                    | Storage                                                                        |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Printer reference       | Public manufacturer/model declarations and optional build size; no inferred mount or process settings                      | Built-in reference discovery; exact original row retained by personal identity |
+| Setup                   | Complete existing `PrinterSpecification` and public model, with an inspectable content revision                            | Personal machine record; copied into project                                   |
+| Owned machine           | Physical instance UUID, model identity, private nickname/serial/location and explicit unconfigured or complete setup state | Personal library only                                                          |
+| Plate definition / face | Public mounting interface, thickness, installed surface datum, faces, usable bounds, keepouts and temperature limits       | Personal plate; copied into project                                            |
+| Owned plate             | Physical sheet UUID, private nickname/condition and optional installed machine                                             | Personal library only                                                          |
+| Accessory               | Public nozzle declaration or rectangular fixture; owned instance can be installed on a machine                             | Personal library; installed definitions copied into project                    |
+| Route                   | Physical machine UUID, closed connection family, endpoint, expected peer, generation and optional credential reference     | Personal library only                                                          |
+| Project capture         | Complete setup, plate, selected face and installed accessory definitions                                                   | Project snapshot, history, manifest and manufacturing intent/provenance        |
+| Remembered selection    | Project UUID plus exact local attachment, capture hash and owned machine/plate/generation                                  | Personal library only                                                          |
 
 Names are display values, never identity keys. Two identical machines or sheets
 remain distinct physical records. Portable setup/plate labels are explicitly
@@ -35,7 +35,7 @@ public definitions are operator declarations, not calibrated machine evidence.
 `hardware-catalog.ts` is trusted TypeScript authoring data against the generated
 Rust domain view. `pnpm contracts` generates inert `hardware-catalog.json`;
 `pnpm check` checks drift and TypeScript. Rust validates the embedded catalog.
-The catalog supplies the existing diagnostic Cartesian and complete Marlin
+`printer-references.ts` separately authors small manufacturer-cited identity declarations; its generated inert JSON shares offline `SearchCatalog` with filament discovery. It imports no external slicer scripts or compilation. Unknown build size remains unknown. The setup catalog supplies the existing diagnostic Cartesian and complete Marlin
 software configurations and a two-face reference sheet. H2C is a catalog-only
 identity with unknown declared volume and no executable setup. Adding a model
 record cannot authorize a dialect, firmware, connector or physical process.
@@ -43,11 +43,15 @@ record cannot authorize a dialect, firmware, connector or physical process.
 ## Selection, copying and invalidation
 
 My Library's **My Hardware** view owns Machines, Build plates, Accessories and
-Catalog. Users can add catalog instances, edit private instance information,
+Catalog. Users can find an exact model or enter manufacturer/model manually, record multiple physical instances, edit private instance information,
 author custom setups and plate faces, record installation, and save connection
 configuration. The project view and Prepare's **Choose hardware** action review
 and explicitly apply a machine/plate/face. A captured setup and its accessories
 can also be copied back into My Hardware, including from a read-only project.
+
+An owned machine carries `PrinterIdentity` and tagged `MachineConfiguration`. `Unconfigured` is valid inventory and displays **Setup needed**. It supplies no mount, nozzle, dialect or process limits. Installing a plate/accessory or capturing it for a project requires a complete setup; a configured setup must name the same manufacturer/model. Selecting a reference never silently adopts diagnostic Marlin settings. Exact admitted configurations are deliberately selected; a manually entered model can instead start from explicit software settings with an operator-entered mount. Those declarations do not qualify physical hardware. Core advances installation generation when identity or configuration changes; nickname edits alone retain it.
+
+Native acquisition uses the shared search/review page, then a bounded editor with visible Add/Save and discard actions. CLI `library catalog --kind printer --query TEXT` and `library add-reference RECORD.json` save source-only inventory; `library add-machine NAME --manufacturer BRAND --model MODEL` saves manual inventory. `--setup ID` explicitly starts a complete admitted configuration. Rich setup edits continue to use typed `replace-hardware`/receipt requests. Project captures remain complete and contain no private instance identity.
 
 `Projects.SetHardware` works before a manufacturing recipe exists. Core commits
 the complete capture and, when present, the recipe's printer/capture atomically.

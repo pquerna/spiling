@@ -5,6 +5,7 @@
 // Trusted authoring code only; the engine reads the validated inert JSON.
 import { readFile, writeFile } from "node:fs/promises";
 import catalog from "../crates/contracts/data/hardware-catalog.ts";
+import references from "../crates/contracts/data/printer-references.ts";
 const args = process.argv.slice(2);
 if (args.length > 1 || (args.length && args[0] !== "--check"))
   throw new Error(
@@ -23,3 +24,22 @@ if (args[0] === "--check") {
   if ((await readFile(output, "utf8")) !== text)
     throw new Error("Hardware catalog drift; run pnpm contracts");
 } else await writeFile(output, text);
+
+if (
+  !Array.isArray(references) ||
+  references.length > 128 ||
+  new Set(references.map((r) => r.id)).size !== references.length ||
+  references.some((r) => !r.id || r.item.kind !== "printer")
+)
+  throw new Error("Invalid authored printer references");
+const referenceOutput = new URL(
+  "../crates/contracts/data/printer-references.json",
+  import.meta.url,
+);
+const referenceText = JSON.stringify(references, null, 2) + "\n";
+if (Buffer.byteLength(referenceText) > 48 * 1024)
+  throw new Error("Printer references exceed source budget");
+if (args[0] === "--check") {
+  if ((await readFile(referenceOutput, "utf8")) !== referenceText)
+    throw new Error("Printer reference drift; run pnpm contracts");
+} else await writeFile(referenceOutput, referenceText);
