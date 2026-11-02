@@ -408,8 +408,9 @@ output. Candidate deviation estimates and generated UV curves are not original
 STEP declarations or manufacturing authority. Unqualified collapsed/singular
 coverage refuses display rather than dropping triangles or publishing an empty mesh.
 
-The independent bridge fixtures each require a nonempty, all-face, watertight
-mesh (`cargo test --locked -p spiling-geometry native_bridge_mesh`). Native
+The independent bridge fixtures use the same exact null-spur normalization as
+production import, then each require a nonempty, all-face, watertight mesh
+(`cargo test --locked -p spiling-geometry native_bridge_mesh`). Native
 section contracts are exercised separately in `section/tests.rs`, through the
 production section service; raw kernel surface-intersection port coverage is
 not the application's section contract.

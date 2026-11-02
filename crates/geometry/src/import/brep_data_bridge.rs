@@ -2556,7 +2556,7 @@ mod tests {
         let mut context = solidcraft_step::units::Context::default();
         context.units.len = unit.scale_to_mm();
         context.uncertainty = uncertainty;
-        let solid = crate::import::closed_spline_decode::read_solid(
+        let mut solid = crate::import::closed_spline_decode::read_solid(
             &mut ex,
             roots[0],
             context,
@@ -2565,6 +2565,12 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("{name}: STEP extraction failed: {e}"));
         assert!(!solid.sheet, "{name}: expected closed solid");
+        strip_lamina_spurs(
+            &mut solid.brep,
+            crate::import::MAX_QUERY_PROOF_BYTES,
+            &cancel,
+        )
+        .unwrap();
 
         let mut reader = crate::import::source::reader(&ex, unit.scale_to_mm());
         let carriers = crate::import::source::face_carriers(
