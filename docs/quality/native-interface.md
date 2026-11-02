@@ -64,6 +64,14 @@ committed inputs; unapplied drafts stay labelled. Review promotes Verify program
 then Export after current passing inspection. Qualification and stale state remain
 visible beside the action.
 
+Layer review keeps selected layers in color and shows other layers as dim neutral
+actual-program deposition paths by default. Other layers can be hidden for isolated
+inspection. Context respects role/tool visibility and section clipping, excludes
+travel/pressure/lifecycle events, and does not enter selected stroke statistics or
+section caps. Command playback advances only the selected layers; dim context shows
+complete surrounding deposition, including later layers. It is display context,
+not evidence that those commands have executed.
+
 Inspectors keep task navigation and their action strip outside the body scroll.
 Back to Inspect hides an ordinary draft; replacing its source face/part or infill
 scope asks whether to keep editing or discard. Project replacement still uses the

@@ -780,6 +780,9 @@ fn event_controls(
     {
         view.events = window.start + progress;
     }
+    if view.context && view.layer.is_some() {
+        ui.weak("Dim layers show complete deposition, independent of playback.");
+    }
     if view.events > window.start
         && view.events <= window.end
         && let Some(index) = view.events.checked_sub(1)
