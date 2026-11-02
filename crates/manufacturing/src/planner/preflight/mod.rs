@@ -51,7 +51,7 @@ pub(super) fn admit<'a>(
         native_capture_proposal_bands: Vec::new(),
         material_domains: BTreeMap::new(),
         surface_fields: BTreeMap::new(),
-        geometry_work: spiling_geometry::GeometryWorkBudget::new(super::MAX_NATIVE_WORK_UNITS),
+        geometry_work: spiling_geometry::GeometryWorkBudget::compile(),
         report: PreflightReport {
             input_revision: input.revision,
             disposition: PreflightDisposition::Admitted,
@@ -394,6 +394,7 @@ pub(super) fn admit<'a>(
                 occurrence,
                 placed,
                 (MAX_DEPOSITION_SEGMENTS as usize / 4).saturating_sub(surface_samples),
+                &mut result.geometry_work,
                 cancel,
             ) {
                 Ok(fields) => {

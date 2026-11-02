@@ -68,8 +68,6 @@ fn remaining_geometry_units(
         })?;
     Ok(units.min(bytes / std::mem::size_of::<geo::Coord<f64>>()))
 }
-// Native interval operations and polygon Boolean pairs are independent resources.
-const MAX_NATIVE_WORK_UNITS: u64 = 512_000_000;
 // Compile-local immutable D span, required-C/exemption owner and exact XY width
 // envelope. Actual physical Z remains on each materialized layer and skin key.
 type WallCacheKey = (usize, Option<usize>, [u64; 3]);
@@ -911,6 +909,7 @@ fn admit_schedule<'model>(
         retained_points,
         construction_owned_bytes,
         surface_work,
+        &mut admission.geometry_work,
         cancel,
     )?;
     retained_points += construction.points;

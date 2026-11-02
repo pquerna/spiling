@@ -105,10 +105,10 @@ impl Definition {
         face_id: &FaceId,
         cancel: &AtomicBool,
     ) -> Result<VerticalWallFace, GeometryError> {
-        self.vertical_wall_face_with_work(face_id, &mut GeometryWorkBudget::new(50_000_000), cancel)
+        self.vertical_wall_face_with_work(face_id, &mut GeometryWorkBudget::query(), cancel)
     }
 
-    pub(crate) fn vertical_wall_face_with_work(
+    pub fn vertical_wall_face_with_work(
         &self,
         face_id: &FaceId,
         work: &mut GeometryWorkBudget,

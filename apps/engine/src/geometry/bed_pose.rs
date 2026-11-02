@@ -9,7 +9,7 @@ use spiling_geometry::{BoundsPolicy, Definition, GeometryWorkBudget};
 use std::sync::atomic::AtomicBool;
 
 // One cumulative allowance covers source preparation and all three queries.
-const MAX_CONTACT_WORK: u64 = 20_000_000;
+const MAX_CONTACT_WORK: u64 = spiling_geometry::QUERY_WORK_UNITS;
 
 pub(super) struct Request {
     pub session_id: SessionId,

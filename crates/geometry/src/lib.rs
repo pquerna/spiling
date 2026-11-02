@@ -5,6 +5,7 @@
 //! Native geometry admission and inspection, independent of sessions and applications.
 
 mod analysis;
+mod compute;
 mod exact_coefficient;
 mod import;
 mod kernel;
@@ -43,6 +44,11 @@ pub use analysis::{
     material_projected_bounds, placed_bounds, placed_material_bounds, prepare_solid,
     projected_bounds, projected_protected_void_envelopes,
 };
+pub use compute::{
+    COMPILE_WORK_UNITS, DISPLAY_PROOF_BYTES, MAX_DIRECTIONAL_SCRATCH_BYTES,
+    MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES, MAX_QUERY_PROOF_BYTES,
+    QUERY_WORK_UNITS,
+};
 pub use import::{
     from_step_bytes, from_step_bytes_with_cancel, from_step_bytes_with_limits, from_step_file,
 };
@@ -55,9 +61,8 @@ pub use parametric::{Interval, IntervalVec2, IntervalVec3};
 pub(crate) use section::NativeSectionCertificate;
 pub(crate) use section::SectionAuthority;
 pub use section::{
-    MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES, NativeSection,
-    PreparedSectionSource, SectionChartEndpoint, SectionCurve, SectionEndpoint, SectionGraphChart,
-    SectionLoopMm, SectionSpan, prepare_section_source,
+    NativeSection, PreparedSectionSource, SectionChartEndpoint, SectionCurve, SectionEndpoint,
+    SectionGraphChart, SectionLoopMm, SectionSpan, prepare_section_source,
 };
 pub use spiling_contracts::display::EncodedMesh as MeshArtifact;
 pub use spiling_contracts::display::MeshBudget;
@@ -101,7 +106,7 @@ impl PreparedSectionSource<'_> {
     /// Intersect the actual placed native source with an arbitrary world plane.
     /// The query allowance excludes every retained source and other coexisting
     /// buffer. Direct native intersection owns its proof/output admission;
-    /// the 64 MiB query and packed 16 MiB output caps remain independent.
+    /// `MAX_PREPARED_SECTION_BYTES` and the packed 16 MiB output cap remain independent.
     pub fn section_placed_with_work(
         &self,
         pose: spiling_contracts::geometry::RigidPoseMm,
@@ -158,7 +163,7 @@ pub fn section_with_byte_limit(
     cancel: &AtomicBool,
     byte_limit: u32,
 ) -> Result<NativeSection, GeometryError> {
-    let mut work = GeometryWorkBudget::new(50_000_000);
+    let mut work = GeometryWorkBudget::query();
     section::section(
         definition,
         plane_in_definition_mm,

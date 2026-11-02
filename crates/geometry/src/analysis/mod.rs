@@ -20,7 +20,7 @@ use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, che
 use spiling_contracts::geometry::{DefinitionId, GeometryErrorCode};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-pub(crate) use bounds::MAX_SCRATCH_ALLOCATION_BYTES;
+pub(crate) use crate::compute::MAX_DIRECTIONAL_SCRATCH_BYTES as MAX_SCRATCH_ALLOCATION_BYTES;
 pub use bounds::{MaterialProjectedBounds, material_projected_bounds, projected_bounds};
 pub use collar::{
     NativeCollarHeightSpace, NativeCollarPort, NativeCriticalCollar, NativeCriticalCollarCell,
@@ -71,6 +71,14 @@ impl GeometryWorkBudget {
             consumed: AtomicU64::new(0),
         }
     }
+    /// Default allowance for one interactive measurement, section or display query.
+    pub fn query() -> Self {
+        Self::new(crate::QUERY_WORK_UNITS)
+    }
+    /// Default cumulative allowance for one complete manufacturing compile.
+    pub fn compile() -> Self {
+        Self::new(crate::COMPILE_WORK_UNITS)
+    }
     pub fn consumed(&self) -> u64 {
         self.consumed.load(Ordering::Acquire)
     }
@@ -102,7 +110,10 @@ impl GeometryWorkBudget {
                 check_cancel(cancel)?;
                 return Err(GeometryError::new(
                     GeometryErrorCode::ResourceLimit,
-                    "cumulative geometry work exhausted",
+                    format!(
+                        "cumulative geometry work exhausted: consumed={} requested={amount} remaining={current}",
+                        self.consumed()
+                    ),
                 ));
             }
             match self.remaining.compare_exchange_weak(
@@ -558,6 +569,29 @@ impl SlabAnalysis {
 #[cfg(test)]
 mod work_tests {
     use super::*;
+    #[test]
+    fn exhaustion_reports_cumulative_work_without_resetting_it() {
+        let work = GeometryWorkBudget::compile();
+        let cancel = AtomicBool::new(false);
+        let first_stage = 5_000_000_000;
+        work.charge(first_stage, &cancel).unwrap();
+        let remaining = crate::COMPILE_WORK_UNITS - first_stage;
+        let requested = remaining + 1;
+        let failure = work.charge(requested, &cancel).unwrap_err();
+        assert_eq!(failure.code, GeometryErrorCode::ResourceLimit);
+        assert_eq!(
+            failure.message,
+            format!(
+                "cumulative geometry work exhausted: consumed={first_stage} requested={requested} remaining={remaining}"
+            )
+        );
+        assert_eq!(work.consumed(), first_stage);
+        assert_eq!(work.remaining(), remaining);
+        work.charge(remaining, &cancel).unwrap();
+        assert_eq!(work.consumed(), crate::COMPILE_WORK_UNITS);
+        assert_eq!(work.remaining(), 0);
+    }
+
     #[test]
     fn cancellation_does_not_discard_completed_native_work() {
         let work = GeometryWorkBudget::new(10);

@@ -24,8 +24,7 @@ pub use types::{
 };
 pub(crate) use types::{NativeSectionCertificate, SectionAuthority};
 
-pub const MAX_PREPARED_SECTION_BYTES: usize = 64 * 1024 * 1024;
-pub const MAX_PREPARED_SECTION_SOURCE_BYTES: usize = MAX_PREPARED_SECTION_BYTES - 4 * 1024 * 1024;
+pub use crate::compute::{MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES};
 
 struct NativeCorrespondenceReceipt {
     edgeuse: solidcore::topology::EdgeuseId,

@@ -446,9 +446,11 @@ must never be converted into display unavailability.
 One `PreparedSolid` owns native query preparation for a captured definition.
 `material_bounds`, placed bounds/height analysis and slab queries borrow that
 same BREP; repeated XYZ queries do not rebuild it or reselect implicit
-branches. Unposed directional bounds retain the frozen combined 32 MiB
-owner/query cap. The standalone material-bounds function composes the same
-prepared path for one-off consumers.
+branches. Unposed directional bounds retain the shared
+`MAX_DIRECTIONAL_SCRATCH_BYTES` owner/query cap. The standalone material-bounds
+function composes the same prepared path for one-off consumers. Defaults and
+their separation from correctness are owned by
+[ADR009](../adr/009-resource-envelope-policy.md).
 
 ## Native material and operation proof boundaries
 
@@ -651,7 +653,7 @@ material interfaces remain outside support. The original bracket remains
 manufacturing-unqualified; its separate W1 completion is not claimed here.
 
 Standalone fitting/housing section queries and original bracket cut controls
-retain their frozen work/source/output limits. Literal native-chart bounds use
+retain their independent work/source/output limits. Literal native-chart bounds use
 the complete coefficient-backed trim hull rather than an arbitrary large natural
 plane domain; that exclusion cover never supplies an `Inside` witness.
 Nonclosed or ambiguous native coefficient circuits can still refuse. There is

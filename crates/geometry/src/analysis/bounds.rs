@@ -19,7 +19,7 @@ use std::{cmp::Ordering, collections::BinaryHeap, sync::atomic::AtomicBool};
 
 const MAX_LIVE_CELLS: usize = 131_072;
 const MAX_CREATED_CELLS: u64 = 2_000_000;
-pub(crate) const MAX_SCRATCH_ALLOCATION_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) use crate::compute::MAX_DIRECTIONAL_SCRATCH_BYTES as MAX_SCRATCH_ALLOCATION_BYTES;
 const MAX_DEPTH: u16 = 96;
 
 /// Enclose the minimum and maximum of mathematically normalized `direction`

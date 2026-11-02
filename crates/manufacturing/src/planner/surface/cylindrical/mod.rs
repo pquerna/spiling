@@ -91,13 +91,14 @@ pub(super) fn metadata(
     source_bounds: AabbMm,
     layer: &SurfaceLayer,
     sample_limit: usize,
+    work: &mut spiling_geometry::GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<CylinderField, ManufacturingError> {
     check_cancel(cancel)?;
     let face_id = &layer.face_id;
     let native = &input.definitions[&occurrence.definition_id];
     let cert = native
-        .vertical_cylinder_face_with_cancel(face_id, cancel)
+        .vertical_cylinder_face_with_work(face_id, work, cancel)
         .map_err(|e| {
             error(
                 match e.code {

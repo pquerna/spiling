@@ -20,7 +20,7 @@ use spiling_contracts::geometry::{
 };
 use std::sync::atomic::AtomicBool;
 
-const PROOF_BYTES: usize = 32 * 1024 * 1024;
+const PROOF_BYTES: usize = crate::compute::DISPLAY_PROOF_BYTES;
 
 pub(crate) fn tessellate(
     definition: &Definition,
@@ -41,7 +41,7 @@ pub(crate) fn tessellate(
     }
     let brep = definition.brep();
     let kernel = crate::make_kernel_context();
-    let mut work = GeometryWorkBudget::new(20_000_000);
+    let mut work = GeometryWorkBudget::query();
     let mut options = TessellateOptions {
         chord_tolerance: Tolerance::Absolute(MESH_CARRIER_TOLERANCE_MM * 0.25),
         max_triangles_per_face: budget.triangles as usize,
@@ -236,9 +236,10 @@ fn candidate_query<T>(
 
 pub(super) fn check_memory(bytes: usize) -> Result<(), GeometryError> {
     if bytes > PROOF_BYTES {
-        Err(resource(
-            "native display retained proof workspace exceeds 32 MiB",
-        ))
+        Err(resource(format!(
+            "native display retained proof workspace exceeds {} MiB",
+            PROOF_BYTES / (1024 * 1024)
+        )))
     } else {
         Ok(())
     }

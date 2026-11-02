@@ -4428,9 +4428,7 @@ mod capture_proposal_tests {
                 software_only: true,
                 checks: Vec::new(),
             },
-            geometry_work: spiling_geometry::GeometryWorkBudget::new(
-                super::super::MAX_NATIVE_WORK_UNITS,
-            ),
+            geometry_work: spiling_geometry::GeometryWorkBudget::compile(),
         }
     }
 

@@ -583,8 +583,8 @@ application is a typed Core transaction, never a local optical model.
 `apps/engine/src/geometry/bed_pose.rs` prepares one immutable native source for
 the three directional material-support queries. Retained native domains and
 correspondence-map capacity are charged once; each query uses only the remaining
-shared geometry bytes. Preparation and all directions share the unchanged
-20M cumulative contact-work allowance. Exercise this path with `--center-on-bed 1`
+shared geometry bytes. Preparation and all directions share one cumulative
+`QUERY_WORK_UNITS` contact-work allowance. Exercise this path with `--center-on-bed 1`
 before Compile on the ordinary housing above; the revision/nonpenetration gate is
 `cargo test --locked -p spiling-engine --test geometry native_bed_contact_is_nonpenetrating_read_only_and_revision_bound`.
 
