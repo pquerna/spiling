@@ -172,6 +172,334 @@ async fn compile(client: &mut EngineClient) -> ManufacturingArtifactRecord {
     };
     record
 }
+async fn start_alternative(client: &mut EngineClient, intent: ManufacturingIntent) -> String {
+    let ManufacturingResponse::Status {
+        info, context_hash, ..
+    } = client
+        .manufacturing(ManufacturingCommand::Get {
+            session_id: client.hello().session_id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("Current context")
+    };
+    let ManufacturingResponse::OperationAccepted { operation } = client
+        .manufacturing(ManufacturingCommand::EvaluateAlternative {
+            session_id: client.hello().session_id.clone(),
+            base_revision: info.revision,
+            expected_context_hash: context_hash,
+            intent: intent.into(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("alternative accepted")
+    };
+    operation.name
+}
+
+#[tokio::test]
+async fn alternatives_preserve_current_replay_and_survive_named_option_reopen() {
+    let work = Workspace::new();
+    let source = work.source("box-mm.step");
+    let project = work.0.join("alternatives.spil");
+    let mut client = spawn().await;
+    import(&mut client, &source).await;
+    set_intent(&mut client, intent()).await;
+    let baseline_record = compile(&mut client).await;
+    let baseline_bundle = fetch_bundle(&mut client, &baseline_record).await.unwrap();
+    save(&mut client, &project).await;
+    let baseline = status(&mut client).await;
+    let baseline_scene = scene(&mut client).await;
+    let mut candidate = intent();
+    candidate.recipe.seam_policy = SeamPolicy::Distributed;
+    let name = start_alternative(&mut client, candidate.clone()).await;
+    let job = wait(&mut client, name).await;
+    assert_eq!(job.status, JobStatus::Completed, "{job:?}");
+    let Some(JobResult::ManufacturingAlternativeEvaluated { evaluation }) = job.result else {
+        panic!("alternative receipt")
+    };
+    assert_eq!(*evaluation.intent, candidate);
+    assert_eq!(evaluation.captured_revision, baseline.0.revision);
+    assert!(evaluation.changed_inputs_complete);
+    assert!(
+        evaluation
+            .changed_inputs
+            .iter()
+            .any(|change| change.path == "recipe/seam_policy/kind")
+    );
+    assert_eq!(status(&mut client).await, baseline);
+    assert_eq!(scene(&mut client).await, baseline_scene);
+    let candidate_bundle = client
+        .fetch_manufacturing_bundle(&evaluation.record, &evaluation.resource)
+        .await
+        .unwrap();
+    let replay = client
+        .fetch_replay_display(&evaluation.record, &evaluation.replay_display)
+        .await
+        .unwrap();
+    assert!(!replay.is_empty());
+    assert_ne!(candidate_bundle.program, baseline_bundle.program);
+    assert_eq!(candidate_bundle.provenance.intent, candidate);
+    let fresh = spiling_manufacturing::inspect_bundle(
+        &candidate_bundle,
+        &evaluation.record.hash,
+        VerificationOutput::ReportOnly,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(fresh.report, evaluation.report);
+    assert_eq!(
+        fetch_bundle(&mut client, &baseline_record).await.unwrap(),
+        baseline_bundle
+    );
+    let mut refused = candidate.clone();
+    refused.printer.build_envelope.max = [1.0, 1.0, 1.0];
+    let name = start_alternative(&mut client, refused).await;
+    let failed = wait(&mut client, name).await;
+    assert_eq!(failed.status, JobStatus::Failed, "{failed:?}");
+    assert!(failed.result.is_none() && failed.outputs.is_empty());
+    assert_eq!(status(&mut client).await, baseline);
+    let option = ManufacturingOption::new(
+        "Distributed".into(),
+        evaluation.context_hash.clone(),
+        evaluation.intent.clone(),
+    )
+    .unwrap();
+    let id = option.id.clone();
+    let session_id = client.hello().session_id.clone();
+    let ProjectResponse::Status { info: retained } = client
+        .project(ProjectCommand::RetainManufacturingOption {
+            session_id: session_id.clone(),
+            base_revision: baseline.0.revision,
+            option: option.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("retained")
+    };
+    assert_eq!(status(&mut client).await.1, Some(baseline_record.clone()));
+    assert_eq!(retained.manufacturing_options, vec![option.info()]);
+    let ProjectResponse::Status { info: removed } = client
+        .project(ProjectCommand::RemoveManufacturingOption {
+            session_id: session_id.clone(),
+            base_revision: retained.revision,
+            id: id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("removed")
+    };
+    assert!(removed.manufacturing_options.is_empty());
+    assert_eq!(status(&mut client).await.1, Some(baseline_record.clone()));
+    let base_revision = scene(&mut client).await.revision;
+    client
+        .project(ProjectCommand::Undo {
+            session_id: session_id.clone(),
+            base_revision,
+        })
+        .await
+        .unwrap();
+    let retained = status(&mut client).await.0;
+    assert_eq!(retained.manufacturing_options, vec![option.info()]);
+    let ProjectResponse::Status { info: adopted } = client
+        .project(ProjectCommand::ApplyManufacturingOption {
+            session_id: session_id.clone(),
+            base_revision: retained.revision,
+            id: id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("adopted")
+    };
+    assert!(status(&mut client).await.1.is_none());
+    let base_revision = scene(&mut client).await.revision;
+    client
+        .project(ProjectCommand::Undo {
+            session_id: session_id.clone(),
+            base_revision,
+        })
+        .await
+        .unwrap();
+    assert_eq!(status(&mut client).await.1, Some(baseline_record));
+    assert!(status(&mut client).await.0.revision > adopted.revision);
+    let current = status(&mut client).await.0;
+    let captured_scene = scene(&mut client).await;
+    client
+        .geometry(GeometryCommand::SetInstancePose {
+            session_id: session_id.clone(),
+            base_revision: captured_scene.revision,
+            project_revision: current.revision,
+            occurrence_id: OccurrenceId::new(1).unwrap(),
+            pose: RigidPoseMm {
+                translation_mm: [1.0, 0.0, 0.0],
+                ..RigidPoseMm::IDENTITY
+            },
+        })
+        .await
+        .unwrap();
+    let changed_context = status(&mut client).await;
+    let ManufacturingResponse::OperationAccepted { operation } = client
+        .manufacturing(ManufacturingCommand::EvaluateAlternative {
+            session_id: session_id.clone(),
+            base_revision: changed_context.0.revision,
+            expected_context_hash: option.context_hash.clone(),
+            intent: option.intent.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("alternative operation")
+    };
+    let refused = wait(&mut client, operation.name).await;
+    assert_eq!(refused.status, JobStatus::Failed);
+    assert!(
+        matches!(refused.error, Some(JobError::Manufacturing { error }) if error.code == ManufacturingErrorCode::StaleRevision)
+    );
+    assert!(refused.result.is_none() && refused.outputs.is_empty());
+    let adoption = client
+        .project(ProjectCommand::ApplyManufacturingOption {
+            session_id: session_id.clone(),
+            base_revision: changed_context.0.revision,
+            id: id.clone(),
+        })
+        .await;
+    assert!(
+        matches!(&adoption, Err(ClientError::Project(error)) if error.message.contains("different source or manufacturing context")),
+        "{adoption:?}"
+    );
+    assert_eq!(status(&mut client).await, changed_context);
+    let base_revision = scene(&mut client).await.revision;
+    client
+        .project(ProjectCommand::Undo {
+            session_id: session_id.clone(),
+            base_revision,
+        })
+        .await
+        .unwrap();
+    let saved_revision = scene(&mut client).await.revision;
+    let ProjectResponse::OperationAccepted { operation } = client
+        .project(ProjectCommand::Save {
+            session_id,
+            base_revision: saved_revision,
+            target: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("save")
+    };
+    assert_eq!(
+        wait(&mut client, operation.name).await.status,
+        JobStatus::Completed
+    );
+    client.shutdown().await.unwrap();
+    std::fs::remove_file(&source).unwrap();
+    let mut reader = spawn().await;
+    assert_eq!(
+        open(&mut reader, &project, true).await.status,
+        JobStatus::Completed
+    );
+    let state = status(&mut reader).await;
+    assert_eq!(state.0.manufacturing_options, vec![option.info()]);
+    let ProjectResponse::ManufacturingOption { option: fetched } = reader
+        .project(ProjectCommand::GetManufacturingOption {
+            session_id: reader.hello().session_id.clone(),
+            base_revision: state.0.revision,
+            id,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("option getter")
+    };
+    assert_eq!(fetched, option);
+    let name = start_alternative(&mut reader, candidate).await;
+    assert_eq!(wait(&mut reader, name).await.status, JobStatus::Completed);
+    assert_eq!(status(&mut reader).await, state);
+    reader.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn alternatives_cancel_and_reject_stale_revision_or_context_without_publication() {
+    use spiling_contracts::rpc::{DiagnosticState, RunDiagnosticRequest};
+    let work = Workspace::new();
+    let source = work.source("box-mm.step");
+    let mut client = spawn().await;
+    import(&mut client, &source).await;
+    set_intent(&mut client, intent()).await;
+    compile(&mut client).await;
+    let before = status(&mut client).await;
+    let ManufacturingResponse::OperationAccepted { operation } = client
+        .manufacturing(ManufacturingCommand::EvaluateAlternative {
+            session_id: client.hello().session_id.clone(),
+            base_revision: before.0.revision,
+            expected_context_hash: SourceHash::from_bytes(b"wrong captured source context"),
+            intent: intent().into(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("alternative operation")
+    };
+    let refused = wait(&mut client, operation.name).await;
+    assert_eq!(refused.status, JobStatus::Failed);
+    assert!(
+        matches!(refused.error, Some(JobError::Manufacturing { error }) if error.code == ManufacturingErrorCode::StaleRevision)
+    );
+    assert!(refused.result.is_none() && refused.outputs.is_empty());
+    assert_eq!(status(&mut client).await, before);
+    let rpc = client.rpc();
+    let blocker = rpc
+        .run_diagnostic(RunDiagnosticRequest {
+            parent: "diagnostics/alternative-boundary".into(),
+            request_id: String::new(),
+            chunk_count: 4,
+            delay_ms: 1000,
+            chunk_bytes: 64,
+            input_revision: "hold-native-permit".into(),
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let operation = rpc.get_operation(&blocker.name).await.unwrap();
+            if spiling_contracts::metadata(&operation).unwrap().state
+                == DiagnosticState::Running as i32
+            {
+                break;
+            }
+            assert!(!operation.done);
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let name = start_alternative(&mut client, intent()).await;
+    client.cancel_operation(&name).await.unwrap();
+    let cancelled = wait(&mut client, name).await;
+    assert_eq!(cancelled.status, JobStatus::Cancelled);
+    assert!(cancelled.result.is_none() && cancelled.outputs.is_empty());
+    assert_eq!(status(&mut client).await, before);
+    let name = start_alternative(&mut client, intent()).await;
+    let mut edited = intent();
+    edited.recipe.revision = "edited".into();
+    set_intent(&mut client, edited).await;
+    let changed = status(&mut client).await;
+    rpc.cancel_operation(&blocker.name).await.unwrap();
+    let stale = wait(&mut client, name).await;
+    assert_eq!(stale.status, JobStatus::Failed);
+    assert!(
+        matches!(stale.error, Some(JobError::Manufacturing { error }) if error.code == ManufacturingErrorCode::StaleRevision)
+    );
+    assert!(stale.result.is_none() && stale.outputs.is_empty());
+    assert_eq!(status(&mut client).await, changed);
+    client.shutdown().await.unwrap();
+}
 async fn inspect(client: &mut EngineClient) -> (ManufacturingArtifactRecord, VerificationReport) {
     let (info, _) = status(client).await;
     let session_id = client.hello().session_id.clone();

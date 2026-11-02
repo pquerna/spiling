@@ -122,6 +122,13 @@ enum Operation {
     ProcessEdit(ProcessEdit),
     ProcessResolve(OccurrenceId),
     Intent(Arc<ManufacturingIntent>),
+    EvaluateAlternative(Arc<ManufacturingIntent>),
+    EvaluateOption(SourceHash),
+    ListOptions,
+    GetOption(SourceHash),
+    KeepOption(String),
+    RemoveOption(SourceHash),
+    ApplyOption(SourceHash),
     Hardware(Option<Arc<spiling_contracts::hardware::ProjectHardwareCapture>>),
     LocalHardware(String, String, String),
     MaterialProfile(Box<MaterialProfileSelection>),
@@ -521,6 +528,33 @@ pub fn parse(
                 operations.push(Operation::LocalHardware(machine, plate, face));
             }
             Some("--intent") => operations.push(Operation::Intent(intent(&mut args)?.into())),
+            Some("--evaluate") => {
+                operations.push(Operation::EvaluateAlternative(intent(&mut args)?.into()))
+            }
+            Some("--compare-option") => operations.push(Operation::EvaluateOption(
+                SourceHash::parse(text(&mut args, "--compare-option ID")?)?,
+            )),
+            Some("--options") => operations.push(Operation::ListOptions),
+            Some("--get-option") => operations.push(Operation::GetOption(SourceHash::parse(
+                text(&mut args, "--get-option ID")?,
+            )?)),
+            Some("--keep-option") => {
+                let name = text(&mut args, "--keep-option NAME")?;
+                if name.is_empty()
+                    || name.len() > MAX_MANUFACTURING_OPTION_NAME_BYTES
+                    || name.trim() != name
+                    || name.chars().any(char::is_control)
+                {
+                    return Err("--keep-option name must be 1..128 bytes without surrounding whitespace or controls".into());
+                }
+                operations.push(Operation::KeepOption(name));
+            }
+            Some("--remove-option") => operations.push(Operation::RemoveOption(SourceHash::parse(
+                text(&mut args, "--remove-option ID")?,
+            )?)),
+            Some("--apply-option") => operations.push(Operation::ApplyOption(SourceHash::parse(
+                text(&mut args, "--apply-option ID")?,
+            )?)),
             Some("--library") => {
                 let path = args.next().ok_or("--library requires an absolute path")?;
                 if !std::path::Path::new(&path).is_absolute() {
@@ -718,6 +752,10 @@ pub fn parse(
                 !matches!(
                     operation,
                     Operation::LibraryLocation(_)
+                        | Operation::EvaluateAlternative(_)
+                        | Operation::EvaluateOption(_)
+                        | Operation::ListOptions
+                        | Operation::GetOption(_)
                         | Operation::ProjectMaterials
                         | Operation::ProjectRecipes
                         | Operation::RecipeInspect(_)
@@ -899,7 +937,8 @@ async fn project_materials(
 }
 async fn complete(client: &mut EngineClient, response: ProjectResponse) -> Result<(), Error> {
     match response {
-        ProjectResponse::Filaments { .. }
+        ProjectResponse::ManufacturingOption { .. }
+        | ProjectResponse::Filaments { .. }
         | ProjectResponse::Recipe { .. }
         | ProjectResponse::Recipes { .. }
         | ProjectResponse::Filament { .. } => {
@@ -952,12 +991,14 @@ async fn manufacturing_status(
     {
         ManufacturingResponse::Status {
             info,
+            context_hash,
             intent,
             artifact,
             ..
         } => {
             let mut status = serde_json::json!({
                 "artifact": artifact, "current_revision": info.revision,
+                "context_hash": context_hash,
                 "software_only": true, "not_machine_ready": true
             });
             // Ordered history retains artifact evidence, not 256 copies of the profile.
@@ -1072,7 +1113,7 @@ pub async fn run(
     plane: Option<PlaneMm>,
     outputs: Outputs<'_>,
 ) -> Result<serde_json::Value, Error> {
-    match execute(client, workflow, plane, outputs).await {
+    match Box::pin(execute(client, workflow, plane, outputs)).await {
         Ok(report) => Ok(report),
         Err(error)
             if matches!(
@@ -1138,6 +1179,8 @@ async fn execute(
         "manufacturing": manufacturing_status(client, false).await?
     })];
     let mut verification = None;
+    let mut alternative_evaluation: Option<ManufacturingAlternativeEvaluation> = None;
+    let mut option_evidence = Vec::new();
     let mut export_evidence = None;
     let mut replay_evidence = None;
     let mut image_evidence = None;
@@ -1167,6 +1210,145 @@ async fn execute(
         let mut process_resolution = None;
         let mut storage_maintenance = None;
         match operation {
+            Operation::EvaluateAlternative(_) | Operation::EvaluateOption(_) => {
+                label = "evaluate_alternative";
+                let ManufacturingResponse::Status {
+                    info: captured,
+                    context_hash,
+                    ..
+                } = client
+                    .manufacturing(ManufacturingCommand::Get {
+                        session_id: session.clone(),
+                    })
+                    .await?
+                else {
+                    return Err("expected checked Current context".into());
+                };
+                let (intent, expected_context_hash) = match operation {
+                    Operation::EvaluateAlternative(intent) => (intent, context_hash),
+                    Operation::EvaluateOption(id) => {
+                        let ProjectResponse::ManufacturingOption { option } = client
+                            .project(ProjectCommand::GetManufacturingOption {
+                                session_id: session.clone(),
+                                base_revision: captured.revision,
+                                id,
+                            })
+                            .await?
+                        else {
+                            return Err("expected retained manufacturing option".into());
+                        };
+                        (option.intent, option.context_hash)
+                    }
+                    _ => unreachable!(),
+                };
+                let ManufacturingResponse::OperationAccepted { operation } = client
+                    .manufacturing(ManufacturingCommand::EvaluateAlternative {
+                        session_id: session.clone(),
+                        base_revision: captured.revision,
+                        expected_context_hash: expected_context_hash.clone(),
+                        intent: intent.clone(),
+                    })
+                    .await?
+                else {
+                    return Err("expected alternative evaluation operation".into());
+                };
+                let JobResult::ManufacturingAlternativeEvaluated { evaluation } =
+                    geometry::wait_operation(client, &session, operation).await?
+                else {
+                    return Err("unexpected alternative job result".into());
+                };
+                if evaluation.project_id != captured.project_id
+                    || evaluation.captured_revision != captured.revision
+                    || evaluation.context_hash != expected_context_hash
+                    || evaluation.intent != intent
+                {
+                    return Err("alternative evaluation capture mismatch".into());
+                }
+                let bundle = client
+                    .fetch_manufacturing_bundle(&evaluation.record, &evaluation.resource)
+                    .await?;
+                if bundle.provenance.intent != *evaluation.intent
+                    || bundle.provenance.project_id != evaluation.project_id
+                    || bundle.provenance.input_revision != evaluation.captured_revision
+                {
+                    return Err("alternative bundle input mismatch".into());
+                }
+                client
+                    .fetch_replay_display(&evaluation.record, &evaluation.replay_display)
+                    .await?;
+                if info(client).await? != captured {
+                    return Err("alternative evaluation changed Current".into());
+                }
+                alternative_evaluation = Some(evaluation);
+            }
+            Operation::ListOptions => {
+                label = "manufacturing_options";
+                option_evidence.push(serde_json::json!({"operation": label, "options":info(client).await?.manufacturing_options}));
+            }
+            Operation::GetOption(id) => {
+                label = "get_manufacturing_option";
+                let base_revision = info(client).await?.revision;
+                let ProjectResponse::ManufacturingOption { option } = client
+                    .project(ProjectCommand::GetManufacturingOption {
+                        session_id: session.clone(),
+                        base_revision,
+                        id,
+                    })
+                    .await?
+                else {
+                    return Err("expected manufacturing option".into());
+                };
+                option_evidence.push(serde_json::json!({"operation": label, "option": option}));
+            }
+            Operation::KeepOption(name) => {
+                label = "retain_manufacturing_option";
+                let evaluation = alternative_evaluation.as_ref().ok_or(
+                    "--keep-option requires a successful preceding --evaluate or --compare-option",
+                )?;
+                let captured = info(client).await?;
+                if captured.project_id != evaluation.project_id
+                    || captured.revision != evaluation.captured_revision
+                {
+                    return Err("evaluation is stale; evaluate again before keeping".into());
+                }
+                let option = ManufacturingOption::new(
+                    name,
+                    evaluation.context_hash.clone(),
+                    evaluation.intent.clone(),
+                )?;
+                let response = client
+                    .project(ProjectCommand::RetainManufacturingOption {
+                        session_id: session.clone(),
+                        base_revision: captured.revision,
+                        option,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
+            Operation::RemoveOption(id) => {
+                label = "remove_manufacturing_option";
+                let base_revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::RemoveManufacturingOption {
+                        session_id: session.clone(),
+                        base_revision,
+                        id,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
+            Operation::ApplyOption(id) => {
+                label = "apply_manufacturing_option";
+                let base_revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::ApplyManufacturingOption {
+                        session_id: session.clone(),
+                        base_revision,
+                        id,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
             Operation::StockMatch(query) => {
                 label = "stock_match";
                 let captured = info(client).await?;
@@ -2534,6 +2716,7 @@ async fn execute(
         history.push(serde_json::json!({
             "operation": label, "project": project, "manufacturing": manufacturing,
             "storage_maintenance": storage_maintenance,
+            "alternative": if label == "evaluate_alternative" { alternative_evaluation.as_ref().map(|evaluation| serde_json::json!({"context_hash":evaluation.context_hash,"captured_revision":evaluation.captured_revision,"record":evaluation.record,"report":evaluation.report,"changed_inputs":evaluation.changed_inputs,"changed_inputs_complete":evaluation.changed_inputs_complete,"duration_seconds":null})) } else { None },
             "hardware_association": if label == "save" { hardware_association.as_ref() } else { None },
             "preflight": if label == "preflight" { preflight_report.as_ref() } else { None },
             "process_resolution": process_resolution,
@@ -2593,6 +2776,8 @@ async fn execute(
     report["operations"] = serde_json::json!(history);
     report["process_inspections"] = serde_json::json!(process_inspections);
     report["manufacturing"] = manufacturing_status(client, true).await?;
+    report["manufacturing_options"] = serde_json::json!(option_evidence);
+    report["alternative_evaluation"] = serde_json::to_value(alternative_evaluation)?;
     if let Some(review) = material_review {
         report["manufacturing"]["material_review_freshness"] =
             serde_json::json!(if review.input_revision == project.revision {
@@ -2639,6 +2824,42 @@ mod tests {
     use super::*;
     fn parse_args(args: &[&str]) -> Result<Option<Options>, Error> {
         parse(args.iter().map(OsString::from), None, None)
+    }
+    #[test]
+    fn alternative_flags_are_ordered_and_only_evaluation_is_read_only_safe() {
+        let hash = "a".repeat(64);
+        let options = parse_args(&[
+            "inspect",
+            "project.spil",
+            "--options",
+            "--get-option",
+            &hash,
+            "--compare-option",
+            &hash,
+        ])
+        .unwrap()
+        .unwrap();
+        let Command::Project { workflow, .. } = options.command else {
+            panic!("project expected")
+        };
+        assert!(matches!(
+            workflow.operations.as_slice(),
+            [
+                Operation::ListOptions,
+                Operation::GetOption(_),
+                Operation::EvaluateOption(_)
+            ]
+        ));
+        for flags in [
+            ["--keep-option", "name"],
+            ["--apply-option", hash.as_str()],
+            ["--remove-option", hash.as_str()],
+        ] {
+            assert!(parse_args(&["inspect", "project.spil", flags[0], flags[1]]).is_err());
+        }
+        assert!(
+            parse_args(&["inspect", "project.spil", "--compare-option", "not-a-hash"]).is_err()
+        );
     }
     #[test]
     fn storage_flags_are_ordered_and_stats_alone_is_read_only_safe() {

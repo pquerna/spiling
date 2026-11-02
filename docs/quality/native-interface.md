@@ -71,6 +71,22 @@ inspect fresh actual closed-wall starts; visibility and navigation never edit
 the project. Counts follow selected layers, role/tool, playback and clipping,
 excluding surrounding context. A start marker is not a cosmetic-face assignment,
 minimum-separation guarantee or measured seal.
+
+Try and Compare preserves the ordinary Settings → Apply → Review path. A separate
+trial editor identifies its captured subject and says Current is unchanged.
+Evaluate alternative computes a result; Use these settings deliberately adopts
+the reviewed intent. Keep option is a separate project write, not activation.
+Only one alternative draft is edited at a time. Ordinary Back retains it;
+replacement/discard and project-close resolution are explicit. Saving does not
+silently apply it. Read-only projects can inspect/evaluate, not keep or adopt.
+
+Review's reference/candidate switch changes inspection only. Keep the canvas,
+camera and compatible filters; distinguish physical height from layer index.
+Input differences and actual result summaries have separate meanings. A stale
+candidate stays visibly bound to its original revision/context and requires
+reevaluation; cancellation/failure cannot relabel older output as the latest
+trial. Options are named settings captures, not project versions or a second
+Current. Ordinary Export remains Current-only regardless of the visible side.
 Actual-motion controls scroll within half the available central height so expanded
 inspection and playback retain a usable canvas. Start coordinates and command
 details use progressive disclosure; counts and navigation remain above them.
@@ -123,7 +139,7 @@ rather than becoming an incidental search default.
 
 ## Exercising a change
 
-Use the production gallery's Panels, Fields, Color and Acquisition categories in each theme.
+Use the production gallery's Panels, Fields, Color, Acquisition and Try / Compare categories in each theme.
 The complete panel specimen includes ready, changed, blocked, pending, uncertain,
 invalid, read-only and stale states; its close/reopen path is interactive. Inspect narrow/normal panes,
 long names and scaled text. Test keyboard help, primary-action reasons, Escape,
@@ -134,6 +150,14 @@ Then exercise the real affected native flow: source selection/section, draft/app
 receipt, stale-output invalidation, save/reopen/fresh verification/export and awaited
 child cleanup as relevant. A snapshot or enabled accessibility feature is not
 keyboard, screen-reader, packaged-platform or universal GPU qualification.
+
+For Try and Compare, freshly verify Current in Program review, then choose
+Try an alternative in Review or Prepare's Settings. Change the complete trial
+settings, Evaluate alternative and switch between the fixed reference and checked
+candidate. Exercise Keep option separately from Use these settings, Undo/Redo,
+Current-only export while inspecting the candidate, and explicit trial discard.
+After save and source-independent reopen, inspect the kept settings and evaluate
+again; a stored option is not a freshly verified result.
 
 [Development](development.md#native-egui-workbench) owns run commands and hardware
 acceptance; [ADR006](../adr/006-native-egui-workbench.md) owns runtime architecture.

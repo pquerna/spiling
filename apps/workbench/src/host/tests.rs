@@ -219,6 +219,8 @@ fn native_path_limit_and_problem_history_are_bounded() {
         diagnostic_paused: false,
         image_task: None,
         review_task: None,
+        alternative_task: None,
+        preserve_current_for_option_edit: false,
         export_task: None,
         section_task: None,
         section_cancel: Arc::new(AtomicBool::new(false)),
@@ -966,6 +968,493 @@ fn manufacture_control(
     ))
     .unwrap();
     idle_after(host, serial)
+}
+
+fn inspect_current_program(host: &Host) -> Snapshot {
+    manufacture_control(host, |session_id, base_revision| {
+        ManufacturingCommand::Inspect {
+            session_id,
+            base_revision,
+            output: spiling_contracts::manufacturing::VerificationOutput::ReportAndMotion,
+        }
+    });
+    wait(host, |snapshot| {
+        !snapshot.manufacturing.loading && snapshot.manufacturing.review.is_some()
+    })
+}
+
+fn evaluate_alternative_program(
+    host: &Host,
+    intent: Arc<spiling_contracts::manufacturing::ManufacturingIntent>,
+    context: spiling_contracts::geometry::SourceHash,
+) -> Snapshot {
+    let revision = host.snapshot().project.as_ref().unwrap().revision;
+    let submitted = manufacture_control(host, |session_id, base_revision| {
+        ManufacturingCommand::EvaluateAlternative {
+            session_id,
+            base_revision,
+            expected_context_hash: context,
+            intent: intent.clone(),
+        }
+    });
+    assert!(
+        submitted
+            .manufacturing
+            .alternative
+            .as_ref()
+            .is_some_and(|evaluation| {
+                evaluation.captured_revision == revision && evaluation.intent == intent
+            }),
+        "Alternative evaluation failed: {:?}",
+        submitted.problems
+    );
+    let loaded = wait(host, |snapshot| {
+        !snapshot.busy && !snapshot.manufacturing.alternative_loading
+    });
+    assert!(
+        loaded
+            .manufacturing
+            .alternative_review
+            .as_ref()
+            .is_some_and(|review| review.capture.observed_revision == revision),
+        "Alternative retrieval failed: {:?}",
+        loaded.problems
+    );
+    loaded
+}
+
+#[test]
+#[ignore = "actual supervised alternative workflow; requires SPILING_TEST_ENGINE"]
+fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_export() {
+    use spiling_contracts::{geometry::SourceHash, manufacturing::*, project::ManufacturingOption};
+    let root = tempfile::tempdir().unwrap();
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    let empty = wait(&host, |snapshot| snapshot.phase == Phase::Running);
+    let serial = empty.serial;
+    host.command(Command::PinAlternativeReference { nonce: 0 })
+        .unwrap();
+    let missing = idle_after(&host, serial);
+    assert!(missing.manufacturing.reference_review.is_none());
+    assert_eq!(missing.project, empty.project);
+    assert!(!missing.problems.is_empty());
+    let source = root.path().join("housing.step");
+    std::fs::copy(
+        repo.join("fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"),
+        &source,
+    )
+    .unwrap();
+    send(&host, Action::Import(native(&source)));
+    let original = Arc::new(
+        decode_intent(
+            &std::fs::read(repo.join("fixtures/manufacturing/complete-sparse.intent.json"))
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::SetIntent {
+            session_id,
+            base_revision,
+            intent: original.clone(),
+        }
+    });
+    place_on_bed(&host, &original);
+    manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::Preflight {
+            session_id,
+            base_revision,
+        }
+    });
+    manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::Compile {
+            session_id,
+            base_revision,
+        }
+    });
+    let baseline = inspect_current_program(&host);
+    let reference = baseline.manufacturing.review.as_ref().unwrap().clone();
+    let serial = baseline.serial;
+    host.command(Command::PinAlternativeReference {
+        nonce: reference.capture.nonce,
+    })
+    .unwrap();
+    idle_after(&host, serial);
+    let file = root.path().join("Alternatives — 保存.spil");
+    let baseline = send(
+        &host,
+        Action::Save {
+            target: Some(native(&file)),
+        },
+    );
+    assert!(!baseline.project.as_ref().unwrap().dirty);
+    let context = baseline.manufacturing.context_hash.clone().unwrap();
+    let mut candidate = (*original).clone();
+    candidate.recipe.seam_policy = SeamPolicy::Distributed;
+    let candidate = Arc::new(candidate);
+    let evaluated = evaluate_alternative_program(&host, candidate.clone(), context.clone());
+    assert_eq!(evaluated.project, baseline.project);
+    assert_eq!(
+        evaluated.manufacturing.intent,
+        baseline.manufacturing.intent
+    );
+    assert_eq!(
+        evaluated.manufacturing.artifact,
+        baseline.manufacturing.artifact
+    );
+    assert!(Arc::ptr_eq(
+        evaluated.manufacturing.review.as_ref().unwrap(),
+        &reference
+    ));
+    let evaluation = evaluated
+        .manufacturing
+        .alternative
+        .as_ref()
+        .unwrap()
+        .clone();
+    assert!(evaluation.report.verified);
+    assert!(evaluation.changed_inputs_complete);
+    assert!(
+        evaluation
+            .changed_inputs
+            .iter()
+            .any(|change| change.path.contains("seam_policy"))
+    );
+    let candidate_review = evaluated
+        .manufacturing
+        .alternative_review
+        .as_ref()
+        .unwrap()
+        .clone();
+    assert!(!candidate_review.display.as_ref().unwrap().seams.is_empty());
+    assert_ne!(reference.bundle.program, candidate_review.bundle.program);
+    let exported = root.path().join("Current-only");
+    let snapshot = send(&host, Action::Export(native(&exported)));
+    assert_eq!(
+        std::fs::read_to_string(exported.join("program.gcode")).unwrap(),
+        reference.bundle.program
+    );
+    assert_eq!(snapshot.project, baseline.project);
+    let option = ManufacturingOption::new(
+        "Distributed starts — 試行".into(),
+        context.clone(),
+        candidate.clone(),
+    )
+    .unwrap();
+    let kept = project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::RetainManufacturingOption {
+            session_id,
+            base_revision,
+            option: option.clone(),
+        }
+    });
+    assert!(kept.project.as_ref().unwrap().dirty);
+    assert_eq!(kept.manufacturing.artifact, baseline.manufacturing.artifact);
+    assert_eq!(kept.manufacturing.intent, baseline.manufacturing.intent);
+    assert_eq!(kept.manufacturing.context_hash, Some(context.clone()));
+    assert!(kept.manufacturing.review.is_some());
+    assert!(Arc::ptr_eq(
+        kept.manufacturing.reference_review.as_ref().unwrap(),
+        &reference
+    ));
+    assert_eq!(
+        kept.manufacturing
+            .alternative
+            .as_ref()
+            .unwrap()
+            .captured_revision,
+        evaluation.captured_revision
+    );
+    assert_ne!(
+        kept.project.as_ref().unwrap().revision,
+        evaluation.captured_revision
+    );
+    let inspected = project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::GetManufacturingOption {
+            session_id,
+            base_revision,
+            id: option.id.clone(),
+        }
+    });
+    assert_eq!(inspected.project, kept.project);
+    assert_eq!(
+        inspected
+            .manufacturing
+            .inspected_option
+            .as_ref()
+            .unwrap()
+            .option,
+        option
+    );
+    let reevaluated = evaluate_alternative_program(&host, candidate.clone(), context.clone());
+    assert_eq!(
+        reevaluated
+            .manufacturing
+            .alternative
+            .as_ref()
+            .unwrap()
+            .captured_revision,
+        kept.project.as_ref().unwrap().revision
+    );
+    let candidate_review = reevaluated
+        .manufacturing
+        .alternative_review
+        .as_ref()
+        .unwrap()
+        .clone();
+    let applied = project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::ApplyManufacturingOption {
+            session_id,
+            base_revision,
+            id: option.id.clone(),
+        }
+    });
+    assert_eq!(applied.manufacturing.intent, Some(candidate.clone()));
+    let receipt = applied
+        .manufacturing
+        .applied_settings
+        .as_ref()
+        .expect("confirmed Use receipt");
+    assert_eq!(
+        receipt.base_revision,
+        reevaluated.project.as_ref().unwrap().revision
+    );
+    assert_eq!(receipt.revision, applied.project.as_ref().unwrap().revision);
+    assert_eq!(receipt.intent, candidate);
+    let serial = applied.serial;
+    host.command(Command::Undo).unwrap();
+    let undone = idle_after(&host, serial);
+    assert_eq!(undone.manufacturing.intent, Some(original.clone()));
+    let serial = undone.serial;
+    host.command(Command::Redo).unwrap();
+    let redone = idle_after(&host, serial);
+    assert_eq!(redone.manufacturing.intent, Some(candidate.clone()));
+    let serial = redone.serial;
+    host.command(Command::Undo).unwrap();
+    let restored = idle_after(&host, serial);
+    assert_eq!(restored.manufacturing.intent, Some(original.clone()));
+    assert_eq!(
+        restored.project.as_ref().unwrap().manufacturing_options,
+        vec![option.info()]
+    );
+    let stale = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::EvaluateAlternative {
+            session_id,
+            base_revision,
+            expected_context_hash: SourceHash::from_bytes(b"wrong context"),
+            intent: candidate.clone(),
+        }
+    });
+    assert_eq!(stale.project, restored.project);
+    assert!(Arc::ptr_eq(
+        stale.manufacturing.alternative_review.as_ref().unwrap(),
+        &candidate_review
+    ));
+    assert_eq!(stale.manufacturing.intent, baseline.manufacturing.intent);
+    send(&host, Action::Save { target: None });
+    assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
+    drop(host);
+    std::fs::remove_file(&source).unwrap();
+
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("read-only-operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&host, |snapshot| snapshot.phase == Phase::Running);
+    let reopened = send(
+        &host,
+        Action::Open {
+            path: native(&file),
+            read_only: true,
+            recover_previous: false,
+        },
+    );
+    assert!(reopened.project.as_ref().unwrap().read_only);
+    assert!(reopened.manufacturing.alternative.is_none());
+    assert!(reopened.manufacturing.review.is_none());
+    assert_eq!(
+        reopened.project.as_ref().unwrap().manufacturing_options,
+        vec![option.info()]
+    );
+    let inspected = project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::GetManufacturingOption {
+            session_id,
+            base_revision,
+            id: option.id.clone(),
+        }
+    });
+    assert_eq!(inspected.project, reopened.project);
+    let fresh =
+        evaluate_alternative_program(&host, option.intent.clone(), option.context_hash.clone());
+    assert_eq!(fresh.project, reopened.project);
+    for command in [
+        ProjectCommand::ApplyManufacturingOption {
+            session_id: fresh.hello.as_ref().unwrap().session_id.clone(),
+            base_revision: fresh.project.as_ref().unwrap().revision,
+            id: option.id.clone(),
+        },
+        ProjectCommand::RemoveManufacturingOption {
+            session_id: fresh.hello.as_ref().unwrap().session_id.clone(),
+            base_revision: fresh.project.as_ref().unwrap().revision,
+            id: option.id.clone(),
+        },
+        ProjectCommand::RetainManufacturingOption {
+            session_id: fresh.hello.as_ref().unwrap().session_id.clone(),
+            base_revision: fresh.project.as_ref().unwrap().revision,
+            option: option.clone(),
+        },
+    ] {
+        let serial = host.snapshot().serial;
+        host.project(command).unwrap();
+        let refused = idle_after(&host, serial);
+        assert_eq!(refused.project, reopened.project);
+        assert_eq!(refused.manufacturing.intent, Some(original.clone()));
+    }
+    assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
+    drop(host);
+
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("use-operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&host, |snapshot| snapshot.phase == Phase::Running);
+    send(
+        &host,
+        Action::Open {
+            path: native(&file),
+            read_only: false,
+            recover_previous: false,
+        },
+    );
+    let current = inspect_current_program(&host);
+    let reference = current.manufacturing.review.as_ref().unwrap().clone();
+    let serial = current.serial;
+    host.command(Command::PinAlternativeReference {
+        nonce: reference.capture.nonce,
+    })
+    .unwrap();
+    idle_after(&host, serial);
+    evaluate_alternative_program(&host, option.intent.clone(), option.context_hash.clone());
+    let applied = project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::ApplyManufacturingOption {
+            session_id,
+            base_revision,
+            id: option.id.clone(),
+        }
+    });
+    assert_eq!(applied.manufacturing.intent, Some(candidate.clone()));
+    assert!(applied.manufacturing.capture.is_none());
+    assert!(applied.manufacturing.artifact.is_none());
+    assert!(Arc::ptr_eq(
+        applied.manufacturing.reference_review.as_ref().unwrap(),
+        &reference
+    ));
+    assert!(applied.project.as_ref().unwrap().dirty);
+    manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::Preflight {
+            session_id,
+            base_revision,
+        }
+    });
+    manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::Compile {
+            session_id,
+            base_revision,
+        }
+    });
+    let current = inspect_current_program(&host);
+    assert_eq!(
+        current
+            .manufacturing
+            .review
+            .as_ref()
+            .unwrap()
+            .bundle
+            .provenance
+            .intent,
+        *candidate
+    );
+    assert!(
+        current.manufacturing.display_bytes()
+            >= reference.display.as_ref().unwrap().owned_bytes
+                + current
+                    .manufacturing
+                    .review
+                    .as_ref()
+                    .unwrap()
+                    .display
+                    .as_ref()
+                    .unwrap()
+                    .owned_bytes
+                + current
+                    .manufacturing
+                    .alternative_review
+                    .as_ref()
+                    .unwrap()
+                    .display
+                    .as_ref()
+                    .unwrap()
+                    .owned_bytes
+    );
+    let output = root.path().join("Used-Current");
+    send(&host, Action::Export(native(&output)));
+    assert_ne!(
+        std::fs::read_to_string(output.join("program.gcode")).unwrap(),
+        reference.bundle.program
+    );
+    let removed = project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::RemoveManufacturingOption {
+            session_id,
+            base_revision,
+            id: option.id.clone(),
+        }
+    });
+    assert!(
+        removed
+            .project
+            .as_ref()
+            .unwrap()
+            .manufacturing_options
+            .is_empty()
+    );
+    assert_eq!(removed.manufacturing.intent, Some(candidate));
+    assert_eq!(
+        removed.manufacturing.artifact,
+        current.manufacturing.artifact
+    );
+    let serial = removed.serial;
+    host.command(Command::Undo).unwrap();
+    let undone = idle_after(&host, serial);
+    assert_eq!(
+        undone.project.as_ref().unwrap().manufacturing_options,
+        vec![option.info()]
+    );
+    let serial = undone.serial;
+    host.command(Command::DiscardAlternative).unwrap();
+    let discarded = idle_after(&host, serial);
+    assert!(discarded.manufacturing.reference_review.is_none());
+    assert!(discarded.manufacturing.alternative.is_none());
+    assert_eq!(discarded.project, undone.project);
+    let closed = send(&host, Action::Close);
+    if let Some(confirmation) = closed.confirmation {
+        host.confirm(confirmation.id, true).unwrap();
+        wait(&host, |snapshot| snapshot.phase == Phase::Closed);
+    }
 }
 fn place_on_bed(
     host: &Host,

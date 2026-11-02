@@ -129,6 +129,7 @@ message NativeOperationResult {
     ProjectInfo project_save_uncertain = 14;
     ProjectStorageMaintainedResult project_storage_maintained = 15;
     StockMatchedResult stock_matched = 16;
+    ManufacturingAlternativeEvaluation manufacturing_alternative_evaluated = 17;
   }
 }
 

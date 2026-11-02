@@ -12,7 +12,17 @@ pub(crate) fn bytes<'a>(
     extra: impl Iterator<Item = Arc<ProjectHardwareCapture>>,
 ) -> Result<usize, ProjectError> {
     let mut allocations = BTreeMap::new();
-    for capture in snapshots.filter_map(|s| s.hardware.clone()).chain(extra) {
+    for capture in snapshots
+        .flat_map(|snapshot| {
+            snapshot.hardware.iter().cloned().chain(
+                snapshot
+                    .manufacturing_options
+                    .iter()
+                    .filter_map(|option| option.intent.hardware.clone()),
+            )
+        })
+        .chain(extra)
+    {
         allocations.entry(Arc::as_ptr(&capture)).or_insert_with(|| {
             serde_json::to_vec(capture.as_ref())
                 .map(|v| v.len())

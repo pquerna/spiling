@@ -511,6 +511,45 @@ fn publish_terminal(
         jobs.native_finish(name, Ok(result), vec![])?;
         return Ok(true);
     }
+    if let geometry::JobResult::ManufacturingAlternativeEvaluated { evaluation } = private {
+        let asset = runtime
+            .alternative_publication(id)
+            .ok_or_else(|| Status::internal("ACK candidate bytes missing"))?;
+        let replay = runtime
+            .replay_publication(id)
+            .ok_or_else(|| Status::internal("ACK candidate replay missing"))?;
+        let bundle_descriptor = jobs.describe_native_artifact(
+            &asset.bytes,
+            "application/x-spiling-manufacturing-bundle",
+            spiling_contracts::manufacturing::MAX_MANUFACTURING_BUNDLE_BYTES as u64,
+        )?;
+        let replay_descriptor = jobs.describe_native_artifact(
+            &replay.bytes,
+            "application/x-spiling-replay-motion",
+            MAX_REPLAY_DISPLAY_BYTES as u64,
+        )?;
+        if view(&bundle_descriptor)? != evaluation.resource
+            || view(&replay_descriptor)? != evaluation.replay_display.resource
+        {
+            return Err(Status::data_loss(
+                "candidate publication descriptor mismatch",
+            ));
+        }
+        jobs.native_finish(
+            name,
+            Ok(
+                spiling_contracts::geometry::JobResult::ManufacturingAlternativeEvaluated {
+                    evaluation,
+                },
+            ),
+            vec![
+                (bundle_descriptor, asset.bytes.as_slice()),
+                (replay_descriptor, replay.bytes.as_slice()),
+            ],
+        )?;
+        runtime.release_alternative_publication(id);
+        return Ok(true);
+    }
     // No short edit can interleave between ACK/Core commit and immutable output capture.
     let mut outputs = Vec::new();
     for artifact in runtime.scene_artifacts() {
@@ -745,6 +784,11 @@ fn public_result(
         }
         geometry::JobResult::ManufacturingPreflight { report } => {
             Public::ManufacturingPreflight { report }
+        }
+        geometry::JobResult::ManufacturingAlternativeEvaluated { .. } => {
+            return Err(Status::internal(
+                "candidate requires ACK-bound blob publication",
+            ));
         }
         geometry::JobResult::ManufacturingCompiled { info, record } => {
             let descriptor = resource(record.hash.as_str(), resources)?;

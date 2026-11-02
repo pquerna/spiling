@@ -1821,6 +1821,7 @@ fn root_parsing_is_strict_without_legacy_or_missing_field_defaults() {
         "next_process_layer",
         "next_process_operation",
         "manufacturing_intent",
+        "manufacturing_options",
         "manufacturing_artifact",
     ] {
         let mut value = original.clone();
@@ -1855,6 +1856,205 @@ fn root_parsing_is_strict_without_legacy_or_missing_field_defaults() {
             .code,
         ProjectErrorCode::UnsupportedFormat
     );
+}
+
+#[test]
+fn manufacturing_options_are_self_contained_revision_bound_and_read_only_inspectable() {
+    let sandbox = Sandbox::new();
+    let mut project = crate::tests::manufactured();
+    save_project(&mut project, Some(sandbox.target()));
+    let original = project.snapshot();
+    let external = sandbox.0.join("part.step");
+    fs::write(
+        &external,
+        original.sources.values().next().unwrap().bytes.as_slice(),
+    )
+    .unwrap();
+    let option = ManufacturingOption::new(
+        "Retained fine".into(),
+        crate::context_hash(&original).unwrap(),
+        original.manufacturing_intent.as_ref().unwrap().clone(),
+    )
+    .unwrap();
+    let prepared = project
+        .prepare(Edit::RetainManufacturingOption {
+            option: option.clone(),
+        })
+        .unwrap();
+    project.commit(prepared).unwrap();
+    assert!(project.info().dirty);
+    project.undo().unwrap();
+    assert!(!project.info().dirty);
+    project.redo().unwrap();
+    assert!(project.info().dirty);
+    save_project(&mut project, None);
+    assert!(!project.info().dirty);
+    let manifest = project.capture().manifest;
+    let expected_guard = ProjectRecoveryGuard::from_manifest(&manifest);
+    fs::remove_file(external).unwrap();
+    drop(project);
+    let mut reader =
+        Project::from_loaded(open(&sandbox.target(), true, false, &flag()).unwrap()).unwrap();
+    assert_eq!(reader.capture().manifest, manifest);
+    assert_eq!(
+        ProjectRecoveryGuard::from_manifest(&reader.capture().manifest),
+        expected_guard
+    );
+    assert!(!reader.info().dirty);
+    assert_eq!(
+        reader
+            .manufacturing_option(reader.info().revision, &option.id)
+            .unwrap(),
+        option
+    );
+    assert_eq!(
+        reader
+            .snapshot()
+            .manufacturing_artifact
+            .as_ref()
+            .unwrap()
+            .record,
+        original.manufacturing_artifact.as_ref().unwrap().record
+    );
+    assert_eq!(
+        crate::context_hash(&reader.snapshot()).unwrap(),
+        option.context_hash
+    );
+    let trial = crate::trial_snapshot(&reader.snapshot(), option.intent.clone()).unwrap();
+    assert!(trial.manufacturing_artifact.is_none());
+    assert!(reader.snapshot().manufacturing_artifact.is_some());
+    for edit in [
+        Edit::RetainManufacturingOption {
+            option: option.clone(),
+        },
+        Edit::RemoveManufacturingOption {
+            id: option.id.clone(),
+        },
+        Edit::ApplyManufacturingOption {
+            id: option.id.clone(),
+        },
+    ] {
+        assert_eq!(
+            reader.prepare(edit).unwrap_err().code,
+            ProjectErrorCode::ReadOnly
+        );
+    }
+    assert_eq!(reader.undo().unwrap_err().code, ProjectErrorCode::ReadOnly);
+    assert_eq!(reader.redo().unwrap_err().code, ProjectErrorCode::ReadOnly);
+    assert_eq!(reader.capture().manifest, manifest);
+}
+
+#[test]
+fn stale_context_options_survive_ptac_without_restoring_old_source_state() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    let option = ManufacturingOption::new(
+        "Earlier pose".into(),
+        crate::context_hash(&project.snapshot()).unwrap(),
+        Arc::new(crate::tests::manufacturing_intent()),
+    )
+    .unwrap();
+    let prepared = project
+        .prepare(Edit::RetainManufacturingOption {
+            option: option.clone(),
+        })
+        .unwrap();
+    project.commit(prepared).unwrap();
+    pose(&mut project, 4.0);
+    save_project(&mut project, Some(sandbox.target()));
+    drop(project);
+    let project =
+        Project::from_loaded(open(&sandbox.target(), false, false, &flag()).unwrap()).unwrap();
+    assert_eq!(
+        project
+            .manufacturing_option(project.info().revision, &option.id)
+            .unwrap(),
+        option
+    );
+    assert_ne!(
+        crate::context_hash(&project.snapshot()).unwrap(),
+        option.context_hash
+    );
+    assert_eq!(
+        project
+            .prepare(Edit::ApplyManufacturingOption { id: option.id })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::InvalidProject
+    );
+    assert_eq!(
+        project
+            .snapshot()
+            .occurrences
+            .values()
+            .next()
+            .unwrap()
+            .pose
+            .translation_mm[0],
+        4.0
+    );
+    assert!(!project.info().dirty);
+}
+
+#[test]
+fn option_domain_corruption_refuses_even_with_rehashed_closed_ptac_root() {
+    for change in 0..6 {
+        let sandbox = Sandbox::new();
+        let mut project = crate::tests::manufactured();
+        let option = ManufacturingOption::new(
+            "Saved option".into(),
+            crate::context_hash(&project.snapshot()).unwrap(),
+            Arc::new(crate::tests::manufacturing_intent()),
+        )
+        .unwrap();
+        let prepared = project
+            .prepare(Edit::RetainManufacturingOption { option })
+            .unwrap();
+        project.commit(prepared).unwrap();
+        save_project(&mut project, Some(sandbox.target()));
+        let (root, members) = captured_root(&sandbox.target());
+        let mut value: serde_json::Value = serde_json::from_slice(&root).unwrap();
+        match change {
+            0 => {
+                value["manufacturing_options"][0]["id"] =
+                    serde_json::json!(SourceHash::from_bytes(b"forged identity"))
+            }
+            1 => value["manufacturing_options"][0]["name"] = serde_json::json!("Rebound name"),
+            2 => {
+                value["manufacturing_options"][0]["intent"]["recipe"]["print_speed_mm_s"] =
+                    serde_json::json!(9.0)
+            }
+            3 => {
+                value["manufacturing_options"][0]["context_hash"] =
+                    serde_json::json!(SourceHash::from_bytes(b"foreign context"))
+            }
+            4 => {
+                let duplicate = value["manufacturing_options"][0].clone();
+                value["manufacturing_options"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(duplicate);
+            }
+            _ => {
+                value["manufacturing_options"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("intent");
+            }
+        }
+        drop(project);
+        rewrite_current(
+            &sandbox.target(),
+            &serde_json::to_vec(&value).unwrap(),
+            &members,
+        );
+        assert_eq!(
+            open(&sandbox.target(), true, false, &flag())
+                .unwrap_err()
+                .code,
+            ProjectErrorCode::InvalidProject
+        );
+    }
 }
 
 #[test]

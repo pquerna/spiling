@@ -25,6 +25,18 @@ fn geometry_error(error: GeometryError) -> ManufacturingError {
     };
     ManufacturingError::new(code, error.message)
 }
+fn compilation_byte_budget(retained_bytes: u64) -> Result<u32, ManufacturingError> {
+    MAX_MANUFACTURING_RETAINED_BYTES
+        .checked_sub(retained_bytes)
+        .filter(|remaining| *remaining > 0)
+        .map(|remaining| remaining.min(u64::from(MAX_MANUFACTURING_BUNDLE_BYTES)) as u32)
+        .ok_or_else(|| {
+            ManufacturingError::new(
+                ManufacturingErrorCode::ResourceLimit,
+                "no remaining retained/staged manufacturing budget",
+            )
+        })
+}
 impl Runtime {
     fn capture_surface_images(
         &self,
@@ -83,6 +95,14 @@ impl Runtime {
         let snapshot = self.project.snapshot();
         Reply::Manufacturing(ManufacturingResponse::Status {
             info: self.project.info(),
+            context_hash: match spiling_core::context_hash(&snapshot) {
+                Ok(hash) => hash,
+                Err(error) => {
+                    return Reply::Manufacturing(ManufacturingResponse::Error {
+                        error: project_error(error),
+                    });
+                }
+            },
             intent: snapshot.manufacturing_intent.clone(),
             artifact: snapshot
                 .manufacturing_artifact
@@ -205,6 +225,64 @@ impl Runtime {
                 })
                 .map_err(geometry_error)
             }
+            ManufacturingCommand::EvaluateAlternative {
+                session_id,
+                base_revision,
+                expected_context_hash,
+                intent,
+            } => {
+                self.manufacturing_base(&session_id, base_revision)?;
+                if self.active.is_some() {
+                    return Err(ManufacturingError::new(
+                        ManufacturingErrorCode::Busy,
+                        "an engine job is active",
+                    ));
+                }
+                let baseline = self.project.snapshot();
+                let context_hash = spiling_core::context_hash(&baseline).map_err(project_error)?;
+                if context_hash != expected_context_hash {
+                    return Err(ManufacturingError::new(
+                        ManufacturingErrorCode::StaleRevision,
+                        "alternative source context is stale",
+                    ));
+                }
+                let (changed_inputs, changed_inputs_complete) =
+                    manufacturing_input_changes(baseline.manufacturing_intent.as_deref(), &intent)?;
+                let snapshot = spiling_core::trial_snapshot(&baseline, intent.clone())
+                    .map_err(project_error)?;
+                if snapshot.occurrences.is_empty() {
+                    return Err(ManufacturingError::new(
+                        ManufacturingErrorCode::EmptyProject,
+                        "manufacturing requires source-backed occurrences",
+                    ));
+                }
+                let surface_images = self.capture_surface_images()?;
+                let request = super::worker::CompileRequest {
+                    project_id: self.project.info().project_id,
+                    revision: base_revision,
+                    definition_ids: snapshot.sources.keys().cloned().collect(),
+                    stored_definitions: snapshot
+                        .sources
+                        .values()
+                        .map(|source| source.record.clone())
+                        .collect(),
+                    occurrences: snapshot.occurrences.values().cloned().collect(),
+                    intent,
+                    surface_overlays: snapshot.surface_overlays.clone(),
+                    process_document: snapshot.process_document.clone(),
+                    byte_budget: compilation_byte_budget(self.manufacturing_bytes())?,
+                    surface_images,
+                };
+                self.start(Purpose::EvaluateAlternative, 0, move |_, _, _| {
+                    Work::EvaluateAlternative {
+                        request,
+                        context_hash,
+                        changed_inputs,
+                        changed_inputs_complete,
+                    }
+                })
+                .map_err(geometry_error)
+            }
             ManufacturingCommand::Compile {
                 session_id,
                 base_revision,
@@ -246,15 +324,7 @@ impl Runtime {
                 let surface_overlays = snapshot.surface_overlays.clone();
                 let process_document = snapshot.process_document.clone();
                 let surface_images = self.capture_surface_images()?;
-                let byte_budget = MAX_MANUFACTURING_RETAINED_BYTES
-                    .checked_sub(self.manufacturing_bytes())
-                    .filter(|budget| *budget > 0)
-                    .ok_or_else(|| {
-                        ManufacturingError::new(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "no remaining retained/staged manufacturing budget",
-                        )
-                    })?;
+                let byte_budget = compilation_byte_budget(self.manufacturing_bytes())?;
                 let response = self
                     .start(Purpose::Compile, 0, move |_, _, _| {
                         Work::Compile(super::worker::CompileRequest {
@@ -267,8 +337,7 @@ impl Runtime {
                             surface_overlays,
                             process_document,
                             surface_images,
-                            byte_budget: byte_budget.min(MAX_MANUFACTURING_BUNDLE_BYTES as u64)
-                                as u32,
+                            byte_budget,
                         })
                     })
                     .map_err(geometry_error)?;
@@ -309,5 +378,30 @@ impl Runtime {
     }
     pub fn current_manufacturing_asset(&self) -> Option<Arc<spiling_core::ManufacturingAsset>> {
         self.project.snapshot().manufacturing_artifact.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compilation_reserves_only_remaining_current_and_history_headroom() {
+        let retained = 60 * 1024 * 1024;
+        assert_eq!(compilation_byte_budget(retained).unwrap(), 4 * 1024 * 1024);
+        assert_eq!(
+            compilation_byte_budget(0).unwrap(),
+            MAX_MANUFACTURING_BUNDLE_BYTES
+        );
+        assert_eq!(
+            compilation_byte_budget(MAX_MANUFACTURING_RETAINED_BYTES - 1).unwrap(),
+            1
+        );
+        for retained in [MAX_MANUFACTURING_RETAINED_BYTES, u64::MAX] {
+            assert_eq!(
+                compilation_byte_budget(retained).unwrap_err().code,
+                ManufacturingErrorCode::ResourceLimit
+            );
+        }
     }
 }

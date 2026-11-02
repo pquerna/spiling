@@ -15,6 +15,8 @@ use ts_rs::TS;
 
 mod goals;
 pub use goals::*;
+mod alternative;
+pub use alternative::*;
 mod surface_inspection;
 pub use surface_inspection::*;
 mod replay;
@@ -4077,6 +4079,12 @@ pub enum ManufacturingCommand {
         session_id: SessionId,
         base_revision: ProjectRevision,
     },
+    EvaluateAlternative {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        expected_context_hash: SourceHash,
+        intent: Arc<ManufacturingIntent>,
+    },
     Preflight {
         session_id: SessionId,
         base_revision: ProjectRevision,
@@ -4099,6 +4107,7 @@ pub enum ManufacturingResponse {
     },
     Status {
         info: ProjectInfo,
+        context_hash: SourceHash,
         intent: Option<Arc<ManufacturingIntent>>,
         artifact: Option<ManufacturingArtifactRecord>,
         resource: Option<crate::ArtifactView>,

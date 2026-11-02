@@ -22,6 +22,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
             "Acquisition",
             "Matching",
             "Wall starts",
+            "Try / Compare",
         ]
         .iter()
         .enumerate()
@@ -33,6 +34,10 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
     ui.separator();
     if category == 3 {
         acquisition(ui);
+        return;
+    }
+    if category == 6 {
+        crate::app::alternative_gallery(ui, theme.tokens());
         return;
     }
     egui::ScrollArea::vertical()

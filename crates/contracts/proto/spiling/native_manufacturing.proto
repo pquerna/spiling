@@ -13,6 +13,9 @@ import "spiling/native_material.proto";
 import "spiling/native_appearance.proto";
 
 service Manufacturing {
+  rpc EvaluateAlternative(EvaluateManufacturingAlternativeRequest) returns (google.longrunning.Operation) {
+    option (google.longrunning.operation_info) = { response_type: "NativeOperationResult" metadata_type: "NativeOperationMetadata" };
+  }
   rpc Execute(ManufacturingRequest) returns (ManufacturingReply);
   rpc Preflight(PreflightManufacturingRequest) returns (google.longrunning.Operation) {
     option (google.longrunning.operation_info) = {
@@ -44,6 +47,39 @@ message ManufacturingRequest {
   }
 }
 message GetManufacturingRequest {}
+message EvaluateManufacturingAlternativeRequest {
+  string parent = 1;
+  string request_id = 2;
+  uint32 base_revision = 3;
+  string expected_context_hash = 4;
+  ManufacturingIntent intent = 5;
+}
+enum ManufacturingInputGroup {
+  MANUFACTURING_INPUT_GROUP_UNSPECIFIED = 0;
+  MANUFACTURING_INPUT_GROUP_HARDWARE = 1;
+  MANUFACTURING_INPUT_GROUP_MATERIAL_PROFILE = 2;
+  MANUFACTURING_INPUT_GROUP_PRINTER = 3;
+  MANUFACTURING_INPUT_GROUP_RECIPE = 4;
+}
+message ManufacturingInputChange {
+  ManufacturingInputGroup group = 1;
+  string path = 2;
+  optional string before = 3;
+  optional string after = 4;
+}
+message ManufacturingAlternativeEvaluation {
+  string project_id = 1;
+  uint32 captured_revision = 2;
+  string context_hash = 3;
+  ManufacturingIntent intent = 4;
+  repeated ManufacturingInputChange changed_inputs = 5;
+  bool changed_inputs_complete = 6;
+  ManufacturingArtifactRecord record = 7;
+  VerificationReport report = 8;
+  ManufacturingInspectionProvenance provenance = 9;
+  Artifact resource = 10;
+  ReplayDisplayDescriptor replay_display = 11;
+}
 message ReviewMaterialsRequest {
   uint32 base_revision = 1;
   MaterialReviewRequest request = 2;
@@ -118,6 +154,7 @@ message ManufacturingReply {
   }
 }
 message ManufacturingStatus {
+  string context_hash = 5;
   ProjectInfo info = 1;
   ManufacturingIntent intent = 2;
   ManufacturingArtifactRecord artifact = 3;
@@ -176,12 +213,6 @@ message ReplayDisplayDescriptor {
   Artifact resource = 2;
 }
 
-message ManufacturingIntent {
-  PrinterSpecification printer = 1;
-  PlanarPrintRecipe recipe = 2;
-  ResolvedMaterialProfile material_profile = 3;
-  ProjectHardwareCapture hardware = 4;
-}
 message RoutedToolAccounting {
   uint32 tool = 1;
   string material_id = 2;
@@ -197,11 +228,6 @@ message FixedDualVerification {
   uint32 selection_count = 1;
   // Exactly two entries, indexed by tool.
   repeated RoutedToolAccounting tools = 2;
-}
-enum LayerHeightPolicy {
-  LAYER_HEIGHT_POLICY_UNSPECIFIED = 0;
-  LAYER_HEIGHT_POLICY_PREFERRED = 1;
-  LAYER_HEIGHT_POLICY_PROTECTED_MAXIMUM = 2;
 }
 enum LayerHeightReason {
   LAYER_HEIGHT_REASON_UNSPECIFIED = 0;
@@ -219,72 +245,6 @@ message LayerHeightAssessment {
   uint32 layer_count = 7;
   uint32 differing_layer_count = 8;
   optional uint32 first_differing_layer = 9;
-}
-message PlanarPrintRecipe {
-  string id = 1;
-  string revision = 2;
-  string material_id = 3;
-  string material_revision = 4;
-  double filament_diameter_mm = 5;
-  double layer_height_mm = 6;
-  LayerHeightPolicy layer_height_policy = 22;
-  double bead_width_mm = 7;
-  uint32 perimeter_count = 8;
-  double infill_fraction = 9;
-  double print_speed_mm_s = 10;
-  double travel_speed_mm_s = 11;
-  double flow_multiplier = 12;
-  double top_skin_thickness_mm = 13;
-  double bottom_skin_thickness_mm = 14;
-  ProcessPolicy process = 15;
-  SupportPolicy supports = 16;
-  double native_shape_error_mm = 17;
-  SeamPolicy seam_policy = 18;
-  RectilinearAxisPolicy rectilinear_axis = 19;
-  SparseInfillPolicy sparse_infill = 20;
-  RectilinearAxisPolicy top_skin_axis = 21;
-}
-message NearestSeam {}
-message CombineEligibleSparseInfill { double max_height_mm = 1; }
-message SparseInfillPolicy {
-  oneof policy {
-    FineSparseInfill fine = 1;
-    CombineEligibleSparseInfill combine_eligible = 2;
-  }
-}
-message FineSparseInfill {}
-message PreferredBuildDirectionSeam {
-  // Finite normalized unit vector in build/machine XY, not source or camera XY.
-  double x = 1;
-  double y = 2;
-}
-message SeamPolicy {
-  oneof policy {
-    NearestSeam nearest = 1;
-    PreferredBuildDirectionSeam preferred_build_direction = 2;
-    DistributedSeam distributed = 3;
-  }
-}
-message DistributedSeam {}
-enum RectilinearAxisPolicy {
-  RECTILINEAR_AXIS_POLICY_UNSPECIFIED = 0;
-  RECTILINEAR_X = 1;
-  RECTILINEAR_Y = 2;
-  ALTERNATING_XY = 3;
-  ALTERNATING_YX = 4;
-}
-message SupportsDisabled {}
-message BreakawaySupports {
-  double density = 1;
-  double xy_clearance_mm = 2;
-  double z_gap_mm = 3;
-  double interface_thickness_mm = 4;
-}
-message SupportPolicy {
-  oneof policy {
-    SupportsDisabled disabled = 1;
-    BreakawaySupports breakaway = 2;
-  }
 }
 message ManufacturingArtifactRecord {
   string hash = 1;

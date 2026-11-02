@@ -24,6 +24,55 @@ An operator may author a TypeScript data module against generated Rust-defined t
 
 All names, IDs and revision labels below are nonempty strings of at most 256 UTF-8 bytes, without control characters. Numeric process parameters must be finite and positive. Unknown enum discriminants fail decoding. Profile/intent JSON is at most 32,768 bytes. All fields below are required, including explicit `null` manifest option values.
 
+## Evaluating alternatives
+
+`EvaluateAlternative` captures the current project revision and requires an exact
+`expected_context_hash` plus complete alternate intent. The checked Manufacturing
+status exposes the current context hash. An option supplies its original context,
+not a newly substituted hash. A stale revision, foreign context or incompatible
+hardware refuses before construction.
+
+The existing sole Jobs worker compiles a detached Core snapshot and independently
+inspects the actual program, producing a checked bundle and SPLR replay. No active
+Project mutation, artifact publication, dirty transition or undo transaction is
+performed. Read-only projects can evaluate. Failure/cancellation leaves Current
+and its last valid output untouched.
+
+`ManufacturingAlternativeEvaluated` returns exact project/revision/context/intent,
+record, fresh report/provenance and bundle/replay descriptors. Display-only input
+differences are bounded and carry an explicit completeness flag; they cannot
+authorize mutation or substitute for the complete intent. The terminal receipt is
+checked against the control envelope before publication. All existing source,
+construction, actual-program, cancellation and resource checks still apply.
+
+Alternative artifacts are not Current's stored artifact. Viewing or retrieving
+them cannot authorize ordinary Current export. Adoption is a separate
+revision-bound intent transaction, followed by ordinary fresh output qualification.
+Estimated time, nominal material and geometric starts remain software observations,
+not physical sealing, strength or printer qualification. See [ADR010](../adr/010-manufacturing-alternatives.md).
+
+With matching built binaries and an existing saved project, the CLI uses the same
+services (use a complete candidate intent JSON, not a partial settings patch):
+
+```sh
+target/debug/spiling-cli project edit part.spil --engine "$PWD/target/debug/spiling-engine" \
+  --evaluate candidate.intent.json --keep-option "Spread starts"
+target/debug/spiling-cli project inspect part.spil --engine "$PWD/target/debug/spiling-engine" \
+  --options
+target/debug/spiling-cli project inspect part.spil --engine "$PWD/target/debug/spiling-engine" \
+  --compare-option OPTION_ID
+target/debug/spiling-cli project edit part.spil --engine "$PWD/target/debug/spiling-engine" \
+  --apply-option OPTION_ID --compile --verify
+```
+
+`inspect` is read-only. `edit` saves explicit project edits; inspection/evaluation alone does not apply the
+candidate. Use the content-derived ID from the option list rather than its display
+name. `--get-option` retrieves complete settings; `--remove-option` deliberately
+removes one. `--manufacturing-out` always exports freshly inspected Current,
+including when a candidate has just been evaluated. The final JSON retains exact
+capture/provenance and comparison completeness. Unavailable duration is `null`,
+not an invented print-time estimate.
+
 ## Construction goals and protected layer heights
 
 `PlanarPrintRecipe.layer_height_policy` is required: `preferred` or

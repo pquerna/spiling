@@ -38,6 +38,7 @@ fn manifest() -> ProjectManifest {
             pose: RigidPoseMm::IDENTITY,
         }],
         manufacturing_intent: None,
+        manufacturing_options: vec![],
         manufacturing_artifact: None,
     }
 }

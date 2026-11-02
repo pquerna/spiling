@@ -152,6 +152,12 @@ pub enum Work {
         fault: Option<crate::ProjectFault>,
     },
     Compile(CompileRequest),
+    EvaluateAlternative {
+        request: CompileRequest,
+        context_hash: SourceHash,
+        changed_inputs: Vec<ManufacturingInputChange>,
+        changed_inputs_complete: bool,
+    },
     Preflight(CompileRequest),
     Verify {
         asset: Arc<ManufacturingAsset>,
@@ -230,6 +236,11 @@ pub enum Product {
     StockReport(Arc<super::stock::StockPublication>),
     Section(EncodedSection),
     Compiled(Arc<ManufacturingAsset>),
+    AlternativeEvaluated {
+        evaluation: ManufacturingAlternativeEvaluation,
+        asset: Arc<ManufacturingAsset>,
+        replay: spiling_manufacturing::EncodedReplayDisplay,
+    },
     Preflight(PreflightReport),
     BedPosePrepared(BedPosePreparation),
     Verified {
@@ -458,6 +469,73 @@ fn run(
             } => save(snapshot, existing, target, commit, fault, &cancel).map(Product::Saved),
             Work::Compile(request) => {
                 compile(request, &definitions, &cancel).map(Product::Compiled)
+            }
+            Work::EvaluateAlternative {
+                request,
+                context_hash,
+                changed_inputs,
+                changed_inputs_complete,
+            } => {
+                let project_id = request.project_id.clone();
+                let captured_revision = request.revision;
+                let intent = request.intent.clone();
+                compile(request, &definitions, &cancel).and_then(|asset| {
+                    let inspection =
+                        inspect_asset(&asset, VerificationOutput::ReportAndMotion, &cancel)?;
+                    let replay = inspection.replay.ok_or_else(|| {
+                        ManufacturingError::new(
+                            ManufacturingErrorCode::CorruptArtifact,
+                            "candidate inspection omitted actual replay",
+                        )
+                    })?;
+                    let descriptor = |bytes: &[u8], media_type: &str| {
+                        let hash = SourceHash::from_bytes(bytes);
+                        spiling_contracts::ArtifactView {
+                            name: format!("artifacts/{}", hash.as_str()),
+                            size_bytes: bytes.len().to_string(),
+                            sha256: hash.as_str().into(),
+                            media_type: media_type.into(),
+                        }
+                    };
+                    let evaluation = ManufacturingAlternativeEvaluation {
+                        project_id,
+                        captured_revision,
+                        context_hash,
+                        intent,
+                        changed_inputs,
+                        changed_inputs_complete,
+                        record: asset.record.clone(),
+                        report: inspection.report,
+                        provenance: inspection.provenance,
+                        resource: descriptor(
+                            &asset.bytes,
+                            "application/x-spiling-manufacturing-bundle",
+                        ),
+                        replay_display: ReplayDisplayDescriptor {
+                            info: replay.info.clone(),
+                            resource: descriptor(
+                                &replay.bytes,
+                                "application/x-spiling-replay-motion",
+                            ),
+                        },
+                    };
+                    let wire =
+                        spiling_contracts::rpc::ManufacturingAlternativeEvaluation::try_from(
+                            evaluation.clone(),
+                        )
+                        .map_err(|message| {
+                            ManufacturingError::new(
+                                ManufacturingErrorCode::CorruptArtifact,
+                                message,
+                            )
+                        })?;
+                    check_alternative_receipt_budget(prost::Message::encoded_len(&wire))?;
+                    Ok(Product::AlternativeEvaluated {
+                        evaluation,
+                        asset,
+                        replay,
+                    })
+                })
             }
             Work::Preflight(request) => {
                 preflight(request, &definitions, &cancel).map(Product::Preflight)
@@ -1169,6 +1247,16 @@ fn inspect_asset(
     Ok(inspection)
 }
 
+fn check_alternative_receipt_budget(encoded_bytes: usize) -> Result<(), ManufacturingError> {
+    if encoded_bytes > (spiling_contracts::MAX_CONTROL_BYTES as usize).saturating_sub(4096) {
+        return Err(ManufacturingError::new(
+            ManufacturingErrorCode::ResourceLimit,
+            "candidate receipt exceeds bounded control response; reduce captured input or report size",
+        ));
+    }
+    Ok(())
+}
+
 struct BundleWriter {
     bytes: Vec<u8>,
     limit: usize,
@@ -1314,6 +1402,34 @@ fn compile(
 #[cfg(test)]
 mod image_import_tests {
     use super::*;
+
+    #[test]
+    fn alternative_receipt_refuses_control_overflow_before_publication() {
+        let maximum = spiling_contracts::MAX_CONTROL_BYTES as usize - 4096;
+        assert!(check_alternative_receipt_budget(maximum).is_ok());
+        let error = check_alternative_receipt_budget(maximum + 1).unwrap_err();
+        assert_eq!(error.code, ManufacturingErrorCode::ResourceLimit);
+        assert!(check_alternative_receipt_budget(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn manufacturing_bundle_writer_never_exceeds_captured_headroom() {
+        use std::io::Write;
+        let mut writer = BundleWriter {
+            bytes: Vec::new(),
+            limit: 4,
+        };
+        writer.write_all(b"head").unwrap();
+        assert!(writer.write_all(b"room").is_err());
+        assert_eq!(writer.bytes, b"head");
+        assert!(writer.bytes.capacity() <= writer.limit);
+        let mut exhausted = BundleWriter {
+            bytes: Vec::new(),
+            limit: 0,
+        };
+        assert!(exhausted.write_all(b"x").is_err());
+        assert!(exhausted.bytes.is_empty());
+    }
 
     #[test]
     fn captured_canonical_budget_rejects_before_retained_asset_admission() {

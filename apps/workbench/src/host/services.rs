@@ -6,6 +6,119 @@ use super::*;
 use spiling_contracts::{ArtifactView, manufacturing::*};
 
 impl Actor {
+    fn settings_applied(
+        &mut self,
+        session: spiling_contracts::geometry::SessionId,
+        base_revision: ProjectRevision,
+        info: &ProjectInfo,
+    ) {
+        if self.state.project.as_ref().is_none_or(|project| {
+            project.project_id != info.project_id || project.revision != info.revision
+        }) || self
+            .state
+            .hello
+            .as_ref()
+            .is_none_or(|hello| hello.session_id != session)
+        {
+            return;
+        }
+        if let Some(intent) = self.state.manufacturing.intent.clone() {
+            self.nonce += 1;
+            Arc::make_mut(&mut self.state.manufacturing).applied_settings =
+                Some(Arc::new(manufacture::AppliedSettings {
+                    nonce: self.nonce,
+                    project: info.project_id.clone(),
+                    session,
+                    base_revision,
+                    revision: info.revision,
+                    intent,
+                }));
+        }
+    }
+    pub(super) fn alternative_capture_matches(&self, capture: &Arc<manufacture::Capture>) -> bool {
+        self.state
+            .project
+            .as_ref()
+            .zip(self.state.hello.as_ref())
+            .is_some_and(|(project, hello)| {
+                project.project_id == capture.provenance.project_id
+                    && hello.session_id == capture.session
+                    && self
+                        .state
+                        .manufacturing
+                        .alternative
+                        .as_ref()
+                        .is_some_and(|evaluation| {
+                            evaluation.record == capture.record
+                                && evaluation.resource == capture.resource
+                                && evaluation.captured_revision == capture.observed_revision
+                        })
+            })
+    }
+    pub(super) async fn alternative_evaluated(
+        &mut self,
+        evaluation: ManufacturingAlternativeEvaluation,
+    ) {
+        if let Err(error) = self.refresh().await {
+            self.failure(error).await;
+            return;
+        }
+        let Some(client) = &self.client else {
+            return;
+        };
+        let Some(project) = &self.state.project else {
+            return;
+        };
+        if evaluation.project_id != project.project_id {
+            self.problem("Alternative result belongs to a different project");
+            return;
+        }
+        self.nonce += 1;
+        let capture = Arc::new(manufacture::Capture {
+            nonce: self.nonce,
+            session: client.hello().session_id.clone(),
+            observed_revision: evaluation.captured_revision,
+            record: evaluation.record.clone(),
+            report: evaluation.report.clone(),
+            provenance: evaluation.provenance.clone(),
+            resource: evaluation.resource.clone(),
+            replay: Some(evaluation.replay_display.clone()),
+        });
+        if let Some(task) = self.alternative_task.take() {
+            task.abort();
+        }
+        let reserved = self
+            .state
+            .display
+            .as_ref()
+            .map_or(0, |display| display.raw_bytes * 2)
+            + self.state.manufacturing.display_bytes()
+            + self.state.section.as_ref().map_or(0, |section| {
+                section.summary.total_bytes as usize * crate::scene::SECTION_DISPLAY_MULTIPLIER
+            })
+            + if self.section_task.is_some() {
+                spiling_contracts::geometry::MAX_SECTION_BYTES as usize
+                    * crate::scene::SECTION_DISPLAY_MULTIPLIER
+            } else {
+                0
+            }
+            + 16 * 1024 * 1024;
+        let origin = self
+            .state
+            .scene
+            .as_ref()
+            .and_then(|scene| scene.bounds_mm)
+            .map_or(glam::DVec3::ZERO, |bounds| {
+                (glam::DVec3::from_array(bounds.min) + glam::DVec3::from_array(bounds.max)) * 0.5
+            });
+        Arc::make_mut(&mut self.state.manufacturing).alternative = Some(Arc::new(evaluation));
+        self.alternative_task = Some(tokio::spawn(manufacture::load_checked_review(
+            client.rpc(),
+            capture,
+            reserved,
+            origin,
+        )));
+    }
     pub(super) fn capture_current(&self, capture: &Arc<manufacture::Capture>) -> bool {
         self.state.phase == Phase::Running
             && self
@@ -63,6 +176,9 @@ impl Actor {
             ManufacturingCommand::Compile { .. } => "Compile manufacturing",
             ManufacturingCommand::Inspect { .. } => "Fresh actual-program verification",
             ManufacturingCommand::Get { .. } => "Manufacturing status",
+            ManufacturingCommand::EvaluateAlternative { .. } => {
+                "Evaluate alternative · Current unchanged"
+            }
         };
         let applying = matches!(
             &command,
@@ -70,6 +186,15 @@ impl Actor {
                 | ManufacturingCommand::ApplyMaterialProfile { .. }
         );
         let material = matches!(&command, ManufacturingCommand::ApplyMaterialProfile { .. });
+        let settings_apply = match &command {
+            ManufacturingCommand::SetIntent {
+                session_id,
+                base_revision,
+                ..
+            } => Some((session_id.clone(), *base_revision)),
+            _ => None,
+        };
+        let mut settings_receipt = None;
         let review_request = match &command {
             ManufacturingCommand::ReviewMaterials {
                 session_id,
@@ -92,7 +217,8 @@ impl Actor {
             Ok(ManufacturingResponse::OperationAccepted { operation }) => {
                 self.accept(operation, Receipt::Manufacturing, label).await
             }
-            Ok(ManufacturingResponse::Status { .. }) => {
+            Ok(ManufacturingResponse::Status { info, .. }) => {
+                settings_receipt = Some(info);
                 if applying {
                     Arc::make_mut(&mut self.state.manufacturing).loaded = None;
                     if material {
@@ -145,9 +271,35 @@ impl Actor {
         }
         if self.pending.is_none() {
             self.refresh_after_failure().await;
+            if let Some((session, base_revision)) = settings_apply
+                && let Some(info) = settings_receipt
+            {
+                self.settings_applied(session, base_revision, &info);
+            }
         }
     }
     pub(super) async fn project_edit(&mut self, command: ProjectCommand) -> Option<ProjectInfo> {
+        let settings_apply = match &command {
+            ProjectCommand::ApplyManufacturingOption {
+                session_id,
+                base_revision,
+                ..
+            } => Some((session_id.clone(), *base_revision)),
+            _ => None,
+        };
+        let option_metadata_edit = matches!(
+            &command,
+            ProjectCommand::RetainManufacturingOption { .. }
+                | ProjectCommand::RemoveManufacturingOption { .. }
+        );
+        let option_request = match &command {
+            ProjectCommand::GetManufacturingOption {
+                session_id,
+                base_revision,
+                id,
+            } => Some((session_id.clone(), *base_revision, id.clone())),
+            _ => None,
+        };
         if matches!(command, ProjectCommand::MatchStock { .. }) {
             self.state.stock = super::stock::State::default();
         }
@@ -167,6 +319,26 @@ impl Actor {
                     .await
             }
             Ok(ProjectResponse::Status { info }) => receipt = Some(info),
+            Ok(ProjectResponse::ManufacturingOption { option }) => {
+                if let Some((session, revision, id)) = option_request
+                    && let Some(project) = &self.state.project
+                    && project.revision == revision
+                    && option.id == id
+                    && self
+                        .state
+                        .hello
+                        .as_ref()
+                        .is_some_and(|hello| hello.session_id == session)
+                {
+                    Arc::make_mut(&mut self.state.manufacturing).inspected_option =
+                        Some(Arc::new(manufacture::InspectedOption {
+                            project: project.project_id.clone(),
+                            revision,
+                            session,
+                            option,
+                        }));
+                }
+            }
             Ok(ProjectResponse::SceneChanged { .. }) => {}
             Ok(
                 ProjectResponse::Filament { .. }
@@ -178,7 +350,14 @@ impl Actor {
             Err(error) => self.failure(error).await,
         }
         if self.pending.is_none() {
+            self.preserve_current_for_option_edit = option_metadata_edit && receipt.is_some();
             self.refresh_after_failure().await;
+            self.preserve_current_for_option_edit = false;
+            if let Some((session, base_revision)) = settings_apply
+                && let Some(info) = &receipt
+            {
+                self.settings_applied(session, base_revision, info);
+            }
         }
         receipt
     }

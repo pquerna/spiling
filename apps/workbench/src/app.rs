@@ -13,6 +13,9 @@ use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use spiling_contracts::geometry::*;
 
+mod alternative;
+pub(crate) use alternative::gallery as alternative_gallery;
+
 const LICENSE: &str = include_str!("../../../LICENSE.md");
 const PREFS: &str = "spiling-native-preferences-v1";
 #[derive(Serialize, Deserialize)]
@@ -584,6 +587,7 @@ impl eframe::App for Workbench {
                 self.awaiting_serial = None;
             }
         }
+        self.reconcile_alternative_receipt();
         if self.state.phase == Phase::Running
             && !self.state.busy
             && self.awaiting_serial.is_none()
@@ -910,7 +914,7 @@ impl eframe::App for Workbench {
                             self.finish_pane(ui);
                             return;
                         }
-                        if matches!(self.manufacturing.panel, 1 | 2) {
+                        if matches!(self.manufacturing.panel, 1 | 2 | 5 | 6) {
                             self.manufacturing_pane(ui);
                             return;
                         }
@@ -976,11 +980,7 @@ impl eframe::App for Workbench {
                         );
                         self.primary_button(ui, Action::Import);
                     }
-                    let review = if self.manufacturing_current() {
-                        self.state.manufacturing.review.clone()
-                    } else {
-                        None
-                    };
+                    let review = self.selected_manufacturing_review();
                     let mut view = if review.is_some() {
                         self.manufacturing.replay
                     } else {

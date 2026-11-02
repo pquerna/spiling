@@ -19,6 +19,7 @@ struct Options {
     store: Option<PathBuf>,
 }
 const STORAGE_USAGE: &str = "Storage maintenance: project open FILE.spil --storage-stats | --collect-unreachable | --compact-to NEW.spil. Stats permits read-only inspect. Collection retains current and previous roots; compact exclusively creates a new project file without switching the open attachment. Maintenance does not change project history or scene. Interrupted scratch and uncertain publication require explicit inspection, never automatic retry.";
+const ALTERNATIVE_USAGE: &str = "Try and Compare: --evaluate INTENT_JSON and --compare-option ID compile and independently replay a transient alternative without changing Current; read-only inspection is supported. --options lists retained names; --get-option ID retrieves exact input. --keep-option NAME retains only the latest successful current-revision evaluation; --remove-option ID removes it; --apply-option ID explicitly adopts its intent and invalidates Current output. Retained options keep their original source context and refuse after incompatible context edits. Ordinary --manufacturing-out and --replay-out always inspect Current, never alternatives. Material and segment counts describe actual replay; duration is undefined, not estimated.";
 enum Command {
     Diagnose,
     Library(library::Workflow),
@@ -405,7 +406,10 @@ async fn main() -> ExitCode {
     let result = match parse_options(env::args_os().skip(1)) {
         Ok(Some(options)) => run(options).await,
         Ok(None) => {
-            println!("{USAGE}\n\n{STORAGE_USAGE}\n{}", library::USAGE);
+            println!(
+                "{USAGE}\n\n{STORAGE_USAGE}\n\n{ALTERNATIVE_USAGE}\n{}",
+                library::USAGE
+            );
             println!(
                 "Portable hardware (ordered): project --library ABSOLUTE.spil --hardware-local MACHINE_UUID PLATE_UUID FACE | --hardware CAPTURE_JSON | --hardware-clear. The project captures public planning definitions; physical names and remembered device selections stay in My library. No network printing is supported."
             );

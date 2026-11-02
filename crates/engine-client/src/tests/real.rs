@@ -645,6 +645,7 @@ async fn manufacturing_rejections_preserve_pid_session_and_unwritten_preflight()
         intent: None,
         artifact: None,
         resource: None,
+        ..
     } = status
     else {
         panic!("fresh process must have no manufacturing intent or artifact");

@@ -123,6 +123,7 @@ enum Purpose {
     Save,
     StorageMaintenance,
     Compile,
+    EvaluateAlternative,
     Preflight,
     Verify,
     ImportSurfaceImage {
@@ -184,6 +185,11 @@ enum PublicationKind {
         record: ManufacturingArtifactRecord,
     },
     Preflight(PreflightReport),
+    AlternativeEvaluated {
+        evaluation: ManufacturingAlternativeEvaluation,
+        asset: Arc<spiling_core::ManufacturingAsset>,
+        replay: spiling_manufacturing::EncodedReplayDisplay,
+    },
     BedPosePrepared(BedPosePreparation),
     Verified {
         record: ManufacturingArtifactRecord,
@@ -216,6 +222,7 @@ pub struct Runtime {
     // One <=16 MiB replay allocation is staged by the sole worker, then borrowed
     // into the terminal ledger transaction after ACK and released immediately.
     replay_publication: Option<(JobId, spiling_manufacturing::EncodedReplayDisplay)>,
+    alternative_publication: Option<(JobId, Arc<spiling_core::ManufacturingAsset>)>,
     image_publication: Option<(JobId, Arc<spiling_core::SurfaceImageAsset>)>,
     appearance_publication: Option<(JobId, Arc<appearance::ReportPublication>)>,
     appearance_comparison: Option<(
@@ -252,6 +259,7 @@ impl Runtime {
             retained_source_bytes: 0,
             artifacts: BTreeMap::new(),
             replay_publication: None,
+            alternative_publication: None,
             released: VecDeque::new(),
             image_publication: None,
             appearance_publication: None,
@@ -350,6 +358,24 @@ impl Runtime {
         }
     }
 
+    pub fn alternative_publication(&self, id: JobId) -> Option<&spiling_core::ManufacturingAsset> {
+        self.alternative_publication
+            .as_ref()
+            .filter(|(job, _)| *job == id)
+            .map(|(_, asset)| asset.as_ref())
+    }
+
+    pub fn release_alternative_publication(&mut self, id: JobId) {
+        if self
+            .alternative_publication
+            .as_ref()
+            .is_some_and(|(job, _)| *job == id)
+        {
+            self.alternative_publication = None;
+        }
+        self.release_replay_publication(id);
+    }
+
     pub fn poll(&mut self) -> Result<(), String> {
         loop {
             match self.worker.result.try_recv() {
@@ -409,6 +435,7 @@ impl Runtime {
                         || (matches!(
                             active.purpose,
                             Purpose::Compile
+                                | Purpose::EvaluateAlternative
                                 | Purpose::Preflight
                                 | Purpose::Verify
                                 | Purpose::ImportSurfaceImage { .. }
@@ -426,7 +453,10 @@ impl Runtime {
                         Err(
                             if matches!(
                                 active.purpose,
-                                Purpose::Compile | Purpose::Preflight | Purpose::Verify
+                                Purpose::Compile
+                                    | Purpose::EvaluateAlternative
+                                    | Purpose::Preflight
+                                    | Purpose::Verify
                             ) {
                                 ManufacturingError::new(
                                     ManufacturingErrorCode::StaleRevision,
@@ -716,6 +746,20 @@ impl Runtime {
                         PublicationKind::Preflight(report) => {
                             Some(JobResult::ManufacturingPreflight { report })
                         }
+                        PublicationKind::AlternativeEvaluated {
+                            evaluation,
+                            asset,
+                            replay,
+                        } => {
+                            if self.alternative_publication.is_some()
+                                || self.replay_publication.is_some()
+                            {
+                                return Err("unreleased alternative publication".into());
+                            }
+                            self.alternative_publication = Some((job, asset));
+                            self.replay_publication = Some((job, replay));
+                            Some(JobResult::ManufacturingAlternativeEvaluated { evaluation })
+                        }
                         PublicationKind::BedPosePrepared(preparation) => {
                             Some(JobResult::BedPosePrepared { preparation })
                         }
@@ -940,6 +984,31 @@ impl Runtime {
                 report.validate()?;
                 Ok(Publication {
                     kind: PublicationKind::Preflight(report),
+                    artifact: None,
+                })
+            }
+            (
+                Purpose::EvaluateAlternative,
+                Product::AlternativeEvaluated {
+                    evaluation,
+                    asset,
+                    replay,
+                },
+            ) => {
+                evaluation.validate()?;
+                if replay.bytes.capacity() > MAX_REPLAY_DISPLAY_BYTES as usize {
+                    return Err(ManufacturingError::new(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "staged alternative replay exceeds its separate byte budget",
+                    )
+                    .into());
+                }
+                Ok(Publication {
+                    kind: PublicationKind::AlternativeEvaluated {
+                        evaluation,
+                        asset,
+                        replay,
+                    },
                     artifact: None,
                 })
             }
@@ -1713,6 +1782,58 @@ impl Runtime {
                     self.commit_metadata_edit(Edit::SetHardware { capture })
                 }
             }
+            ProjectCommand::GetManufacturingOption {
+                session_id,
+                base_revision,
+                id,
+            } => {
+                if session_id != self.session_id || base_revision != self.project.info().revision {
+                    return Err(project_error(
+                        ProjectErrorCode::StaleRevision,
+                        "manufacturing option query is stale",
+                    ));
+                }
+                let option = self
+                    .project
+                    .snapshot()
+                    .manufacturing_options
+                    .iter()
+                    .find(|option| option.id == id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        project_error(
+                            ProjectErrorCode::MissingAsset,
+                            "manufacturing option is absent",
+                        )
+                    })?;
+                Ok(Reply::Project(ProjectResponse::ManufacturingOption {
+                    option,
+                }))
+            }
+            ProjectCommand::RetainManufacturingOption {
+                session_id,
+                base_revision,
+                option,
+            } => {
+                self.metadata_base(&session_id, base_revision)?;
+                self.commit_metadata_edit(Edit::RetainManufacturingOption { option })
+            }
+            ProjectCommand::RemoveManufacturingOption {
+                session_id,
+                base_revision,
+                id,
+            } => {
+                self.metadata_base(&session_id, base_revision)?;
+                self.commit_metadata_edit(Edit::RemoveManufacturingOption { id })
+            }
+            ProjectCommand::ApplyManufacturingOption {
+                session_id,
+                base_revision,
+                id,
+            } => {
+                self.metadata_base(&session_id, base_revision)?;
+                self.commit_metadata_edit(Edit::ApplyManufacturingOption { id })
+            }
             ProjectCommand::PutFilament {
                 session_id,
                 base_revision,
@@ -2143,6 +2264,7 @@ impl Runtime {
             Purpose::Save => "saving",
             Purpose::StorageMaintenance => "maintaining_storage",
             Purpose::Compile => "compiling_manufacturing",
+            Purpose::EvaluateAlternative => "evaluating_manufacturing_alternative",
             Purpose::Preflight => "preflighting_manufacturing",
             Purpose::Verify => "verifying_manufacturing",
             Purpose::ImportSurfaceImage { .. } => "importing_surface_image",
@@ -2248,11 +2370,13 @@ fn is_cancelled(error: &JobError) -> bool {
 }
 fn cancelled(purpose: &Purpose) -> JobError {
     match purpose {
-        Purpose::Compile | Purpose::Preflight | Purpose::Verify => ManufacturingError::new(
-            ManufacturingErrorCode::Cancelled,
-            "manufacturing job cancelled before publication",
-        )
-        .into(),
+        Purpose::Compile | Purpose::EvaluateAlternative | Purpose::Preflight | Purpose::Verify => {
+            ManufacturingError::new(
+                ManufacturingErrorCode::Cancelled,
+                "manufacturing job cancelled before publication",
+            )
+            .into()
+        }
         Purpose::Open
         | Purpose::Save
         | Purpose::StorageMaintenance

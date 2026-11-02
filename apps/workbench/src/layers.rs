@@ -51,6 +51,15 @@ fn record_window(bytes: &[u8], view: View) -> std::ops::Range<u32> {
     start as u32..end.max(start) as u32
 }
 impl Browser {
+    fn synchronize_selection(&mut self, view: &View) {
+        self.mode = match (view.layer, view.layer_end) {
+            (None, _) => Mode::All,
+            (Some(_), None) => Mode::Single,
+            (Some(0), Some(_)) if self.mode == Mode::Through => Mode::Through,
+            (Some(_), Some(_)) => Mode::Range,
+        };
+    }
+
     fn select(&self, view: &mut View, lower: u16, upper: u16) {
         match self.mode {
             Mode::All => {
@@ -76,13 +85,7 @@ impl Browser {
         if count == 0 {
             return;
         }
-        // Diagnostic navigation can select a layer independently of this widget.
-        if view.layer.is_some() && view.layer_end.is_none() {
-            self.mode = Mode::Single;
-        }
-        if view.layer.is_none() {
-            self.mode = Mode::All;
-        }
+        self.synchronize_selection(view);
         let old = *view;
         let mut upper = view
             .layer_end
@@ -93,6 +96,7 @@ impl Browser {
         } else {
             0
         };
+        let previous_controls = (self.mode, lower, upper);
         ui.horizontal_wrapped(|ui| {
             ui.label("Layers");
             for (mode, label) in [
@@ -120,7 +124,9 @@ impl Browser {
                 upper = (hi - 1) as u16;
             }
         });
-        self.select(view, lower, upper);
+        if previous_controls != (self.mode, lower, upper) {
+            self.select(view, lower, upper);
+        }
         if self.mode != Mode::All {
             ui.checkbox(&mut view.context, "Other layers")
                 .on_hover_text("Dim deposited paths outside the selected layers");
@@ -145,6 +151,7 @@ impl Browser {
         if count == 0 {
             return;
         }
+        self.synchronize_selection(view);
         let maximum = count.saturating_sub(1) as u16;
         let old = *view;
         let mut upper = view
@@ -157,6 +164,7 @@ impl Browser {
         } else {
             0
         };
+        let previous_controls = (self.mode, lower, upper);
         ui.vertical_centered(|ui| {
             egui::ComboBox::from_id_salt("layer-mode-rail")
                 .width(65.0)
@@ -259,7 +267,9 @@ impl Browser {
                         as u16;
                 }
             }
-            self.select(view, lower, upper);
+            if previous_controls != (self.mode, lower, upper) {
+                self.select(view, lower, upper);
+            }
             let painter = ui.painter();
             painter.rect_filled(track, 3.0, ui.visuals().widgets.inactive.bg_fill);
             let lo = if self.mode == Mode::Single {
@@ -310,6 +320,30 @@ impl Browser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn externally_projected_range_changes_single_mode_without_collapsing_selection() {
+        let mut browser = Browser {
+            mode: Mode::Single,
+            ..Default::default()
+        };
+        let mut view = View {
+            layer: Some(0),
+            layer_end: Some(1),
+            ..Default::default()
+        };
+        browser.synchronize_selection(&view);
+        assert!(browser.mode == Mode::Range);
+        assert_eq!((view.layer, view.layer_end), (Some(0), Some(1)));
+        browser.select(&mut view, 0, 1);
+        assert_eq!((view.layer, view.layer_end), (Some(0), Some(1)));
+        view.layer_end = None;
+        browser.synchronize_selection(&view);
+        assert!(browser.mode == Mode::Single);
+        view.layer = None;
+        browser.synchronize_selection(&view);
+        assert!(browser.mode == Mode::All);
+    }
+
     #[test]
     fn layer_windows_preserve_global_ordinals_and_exclude_lifecycle_sentinels() {
         let mut bytes = Vec::new();

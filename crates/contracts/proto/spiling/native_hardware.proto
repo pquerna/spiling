@@ -5,6 +5,85 @@ package spiling.engine;
 import "spiling/native_common.proto";
 import "spiling/native_material.proto";
 import "spiling/native_appearance.proto";
+message ManufacturingIntent {
+  PrinterSpecification printer = 1;
+  PlanarPrintRecipe recipe = 2;
+  ResolvedMaterialProfile material_profile = 3;
+  ProjectHardwareCapture hardware = 4;
+}
+
+enum LayerHeightPolicy {
+  LAYER_HEIGHT_POLICY_UNSPECIFIED = 0;
+  LAYER_HEIGHT_POLICY_PREFERRED = 1;
+  LAYER_HEIGHT_POLICY_PROTECTED_MAXIMUM = 2;
+}
+
+message PlanarPrintRecipe {
+  string id = 1;
+  string revision = 2;
+  string material_id = 3;
+  string material_revision = 4;
+  double filament_diameter_mm = 5;
+  double layer_height_mm = 6;
+  LayerHeightPolicy layer_height_policy = 22;
+  double bead_width_mm = 7;
+  uint32 perimeter_count = 8;
+  double infill_fraction = 9;
+  double print_speed_mm_s = 10;
+  double travel_speed_mm_s = 11;
+  double flow_multiplier = 12;
+  double top_skin_thickness_mm = 13;
+  double bottom_skin_thickness_mm = 14;
+  ProcessPolicy process = 15;
+  SupportPolicy supports = 16;
+  double native_shape_error_mm = 17;
+  SeamPolicy seam_policy = 18;
+  RectilinearAxisPolicy rectilinear_axis = 19;
+  SparseInfillPolicy sparse_infill = 20;
+  RectilinearAxisPolicy top_skin_axis = 21;
+}
+message NearestSeam {}
+message CombineEligibleSparseInfill { double max_height_mm = 1; }
+message SparseInfillPolicy {
+  oneof policy {
+    FineSparseInfill fine = 1;
+    CombineEligibleSparseInfill combine_eligible = 2;
+  }
+}
+message FineSparseInfill {}
+message PreferredBuildDirectionSeam {
+  // Finite normalized unit vector in build/machine XY, not source or camera XY.
+  double x = 1;
+  double y = 2;
+}
+message SeamPolicy {
+  oneof policy {
+    NearestSeam nearest = 1;
+    PreferredBuildDirectionSeam preferred_build_direction = 2;
+    DistributedSeam distributed = 3;
+  }
+}
+message DistributedSeam {}
+enum RectilinearAxisPolicy {
+  RECTILINEAR_AXIS_POLICY_UNSPECIFIED = 0;
+  RECTILINEAR_X = 1;
+  RECTILINEAR_Y = 2;
+  ALTERNATING_XY = 3;
+  ALTERNATING_YX = 4;
+}
+message SupportsDisabled {}
+message BreakawaySupports {
+  double density = 1;
+  double xy_clearance_mm = 2;
+  double z_gap_mm = 3;
+  double interface_thickness_mm = 4;
+}
+message SupportPolicy {
+  oneof policy {
+    SupportsDisabled disabled = 1;
+    BreakawaySupports breakaway = 2;
+  }
+}
 enum PrinterCoordinateFrame {
   PRINTER_COORDINATE_FRAME_UNSPECIFIED = 0;
   RIGHT_HANDED_MILLIMETRES = 1;

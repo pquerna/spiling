@@ -14,14 +14,23 @@ pub(super) enum Navigation {
 impl Workbench {
     fn project_drafts(&self) -> bool {
         self.state.project.as_ref().is_some_and(|p| {
-            self.manufacturing
-                .has_intent_draft(&p.project_id, self.state.manufacturing.intent.as_deref())
+            self.manufacturing.trial.is_some()
+                || self
+                    .manufacturing
+                    .has_intent_draft(&p.project_id, self.state.manufacturing.intent.as_deref())
                 || self
                     .manufacturing
                     .pending_loaded(self.state.manufacturing.loaded.as_deref())
                 || self
                     .material
                     .has_changes(&p.project_id, self.state.manufacturing.intent.as_deref())
+                || self.state.hello.as_ref().is_some_and(|hello| {
+                    self.material.pending_loaded(
+                        &p.project_id,
+                        &hello.session_id,
+                        self.state.manufacturing.loaded_material.as_deref(),
+                    )
+                })
         })
     }
     pub(super) fn guard_action(&mut self, action: Action) -> bool {
@@ -76,7 +85,7 @@ impl Workbench {
         let modal = egui::Modal::new(egui::Id::unique("draft-navigation")).show(ctx, |ui| {
             ui.set_max_width(420.0);
             ui.heading("Leave unapplied changes?");
-            ui.label("Apply the draft first to keep it. Discarding leaves committed project settings unchanged.");
+            ui.label("Back retains drafts. Apply normal drafts or explicitly Keep an evaluated alternative before leaving. Discarding leaves Current settings and kept options unchanged.");
             if let Some(Navigation::Action(action)) = &self.navigation { ui.label(format!("Next: {}", action.label())); }
             keep = ui::primary(ui, "Keep editing", None);
             discard = ui.button(egui::RichText::new("Discard drafts and continue").color(self.prefs.theme.tokens().warning)).clicked();

@@ -5,6 +5,68 @@ use std::sync::Arc;
 use super::{request_id, required, session_parent};
 use crate::{geometry::*, project::*, rpc, surface::*};
 
+fn validate_option_info(option: &ManufacturingOptionInfo) -> Result<(), String> {
+    if option.name.is_empty()
+        || option.name.len() > MAX_MANUFACTURING_OPTION_NAME_BYTES
+        || option.name.trim() != option.name
+        || option.name.chars().any(char::is_control)
+    {
+        return Err("invalid manufacturing option summary name".into());
+    }
+    Ok(())
+}
+
+impl TryFrom<rpc::ManufacturingOption> for ManufacturingOption {
+    type Error = String;
+    fn try_from(value: rpc::ManufacturingOption) -> Result<Self, String> {
+        let option = Self {
+            id: SourceHash::parse(value.id).map_err(|error| error.to_string())?,
+            name: value.name,
+            context_hash: SourceHash::parse(value.context_hash)
+                .map_err(|error| error.to_string())?,
+            intent: Arc::new(required(value.intent, "manufacturing option intent")?.try_into()?),
+        };
+        option.validate().map_err(|error| error.to_string())?;
+        Ok(option)
+    }
+}
+impl TryFrom<ManufacturingOption> for rpc::ManufacturingOption {
+    type Error = String;
+    fn try_from(value: ManufacturingOption) -> Result<Self, String> {
+        value.validate().map_err(|error| error.to_string())?;
+        Ok(Self {
+            id: value.id.as_str().into(),
+            name: value.name,
+            context_hash: value.context_hash.as_str().into(),
+            intent: Some(Arc::unwrap_or_clone(value.intent).try_into()?),
+        })
+    }
+}
+impl TryFrom<rpc::ManufacturingOptionInfo> for ManufacturingOptionInfo {
+    type Error = String;
+    fn try_from(value: rpc::ManufacturingOptionInfo) -> Result<Self, String> {
+        let option = Self {
+            id: SourceHash::parse(value.id).map_err(|error| error.to_string())?,
+            name: value.name,
+            context_hash: SourceHash::parse(value.context_hash)
+                .map_err(|error| error.to_string())?,
+        };
+        validate_option_info(&option)?;
+        Ok(option)
+    }
+}
+impl TryFrom<ManufacturingOptionInfo> for rpc::ManufacturingOptionInfo {
+    type Error = String;
+    fn try_from(value: ManufacturingOptionInfo) -> Result<Self, String> {
+        validate_option_info(&value)?;
+        Ok(Self {
+            id: value.id.as_str().into(),
+            name: value.name,
+            context_hash: value.context_hash.as_str().into(),
+        })
+    }
+}
+
 pub enum ProjectCall {
     MatchStock(rpc::MatchStockRequest),
     StorageMaintenance(rpc::StorageMaintenanceRequest),
@@ -24,6 +86,50 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
     request_id(id)?;
     use rpc::project_request::Command as C;
     let (session_id, command) = match command {
+        ProjectCommand::GetManufacturingOption {
+            session_id,
+            base_revision,
+            id,
+        } => (
+            session_id,
+            C::GetManufacturingOption(rpc::ManufacturingOptionRequest {
+                base_revision: base_revision.get(),
+                id: id.as_str().into(),
+            }),
+        ),
+        ProjectCommand::RetainManufacturingOption {
+            session_id,
+            base_revision,
+            option,
+        } => (
+            session_id,
+            C::RetainManufacturingOption(rpc::RetainManufacturingOptionRequest {
+                base_revision: base_revision.get(),
+                option: Some(option.try_into()?),
+            }),
+        ),
+        ProjectCommand::RemoveManufacturingOption {
+            session_id,
+            base_revision,
+            id,
+        } => (
+            session_id,
+            C::RemoveManufacturingOption(rpc::ManufacturingOptionRequest {
+                base_revision: base_revision.get(),
+                id: id.as_str().into(),
+            }),
+        ),
+        ProjectCommand::ApplyManufacturingOption {
+            session_id,
+            base_revision,
+            id,
+        } => (
+            session_id,
+            C::ApplyManufacturingOption(rpc::ManufacturingOptionRequest {
+                base_revision: base_revision.get(),
+                id: id.as_str().into(),
+            }),
+        ),
         ProjectCommand::MatchStock {
             session_id,
             base_revision,
@@ -469,6 +575,26 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
         let session_id = session_parent(&v.parent)?;
         use rpc::project_request::Command as C;
         Ok(match required(v.command, "project command")? {
+            C::GetManufacturingOption(value) => Self::GetManufacturingOption {
+                session_id,
+                base_revision: ProjectRevision(value.base_revision),
+                id: SourceHash::parse(value.id).map_err(|error| error.to_string())?,
+            },
+            C::RetainManufacturingOption(value) => Self::RetainManufacturingOption {
+                session_id,
+                base_revision: ProjectRevision(value.base_revision),
+                option: required(value.option, "manufacturing option")?.try_into()?,
+            },
+            C::RemoveManufacturingOption(value) => Self::RemoveManufacturingOption {
+                session_id,
+                base_revision: ProjectRevision(value.base_revision),
+                id: SourceHash::parse(value.id).map_err(|error| error.to_string())?,
+            },
+            C::ApplyManufacturingOption(value) => Self::ApplyManufacturingOption {
+                session_id,
+                base_revision: ProjectRevision(value.base_revision),
+                id: SourceHash::parse(value.id).map_err(|error| error.to_string())?,
+            },
             C::PutRecipe(v) => Self::PutRecipe {
                 session_id,
                 base_revision: ProjectRevision(v.base_revision),
@@ -738,6 +864,17 @@ impl TryFrom<rpc::GetOpticalReportRequest> for ProjectCommand {
     }
 }
 pub fn validate_project_info(v: &ProjectInfo) -> Result<(), String> {
+    if v.manufacturing_options.len() > MAX_MANUFACTURING_OPTIONS {
+        return Err("manufacturing option summary count exceeds limit".into());
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeSet::new();
+    for option in &v.manufacturing_options {
+        validate_option_info(option)?;
+        if !ids.insert(&option.id) || !names.insert(&option.name) {
+            return Err("invalid or duplicate manufacturing option summary".into());
+        }
+    }
     if let Some(record) = &v.materials {
         record.validate()?;
     }
@@ -782,10 +919,18 @@ pub fn validate_project_info(v: &ProjectInfo) -> Result<(), String> {
 impl TryFrom<rpc::ProjectInfo> for ProjectInfo {
     type Error = String;
     fn try_from(v: rpc::ProjectInfo) -> Result<Self, String> {
+        if v.manufacturing_options.len() > MAX_MANUFACTURING_OPTIONS {
+            return Err("manufacturing option summary count exceeds limit".into());
+        }
         if v.resolved_process.len() > MAX_OCCURRENCES as usize {
             return Err("resolved process occurrence budget exceeded".into());
         }
         let info = Self {
+            manufacturing_options: v
+                .manufacturing_options
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
             project_id: ProjectId::parse(v.project_id).map_err(|e| e.to_string())?,
             revision: ProjectRevision(v.revision),
             saved_revision: v.saved_revision.map(ProjectRevision),
@@ -819,6 +964,11 @@ impl TryFrom<ProjectInfo> for rpc::ProjectInfo {
     fn try_from(v: ProjectInfo) -> Result<Self, String> {
         validate_project_info(&v)?;
         Ok(Self {
+            manufacturing_options: v
+                .manufacturing_options
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
             project_id: v.project_id.as_str().into(),
             revision: v.revision.0,
             saved_revision: v.saved_revision.map(|r| r.0),
@@ -847,6 +997,9 @@ impl TryFrom<rpc::ProjectReply> for ProjectResponse {
     fn try_from(v: rpc::ProjectReply) -> Result<Self, String> {
         use rpc::project_reply::Response as R;
         Ok(match required(v.response, "project reply")? {
+            R::ManufacturingOption(value) => Self::ManufacturingOption {
+                option: value.try_into()?,
+            },
             R::Recipe(v) => Self::Recipe {
                 transfer: v.try_into()?,
             },
@@ -900,6 +1053,9 @@ impl TryFrom<ProjectResponse> for rpc::ProjectReply {
         use rpc::project_reply::Response as R;
         Ok(Self {
             response: Some(match v {
+                ProjectResponse::ManufacturingOption { option } => {
+                    R::ManufacturingOption(option.try_into()?)
+                }
                 ProjectResponse::Recipe { transfer } => R::Recipe(transfer.try_into()?),
                 ProjectResponse::Recipes {
                     entries,

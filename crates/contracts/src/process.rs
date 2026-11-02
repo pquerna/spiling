@@ -1219,6 +1219,7 @@ mod public_state_tests {
             }],
         };
         let info = ProjectInfo {
+            manufacturing_options: vec![],
             hardware: None,
             project_id: ProjectId::new(),
             revision: ProjectRevision(1),

@@ -170,6 +170,7 @@ fn artifact_limits_are_class_specific_and_sizes_are_canonical() {
 #[test]
 fn clean_new_and_semantically_clean_undo_project_info_are_valid() {
     let info = ProjectInfo {
+        manufacturing_options: vec![],
         hardware: None,
         project_id: ProjectId::new(),
         revision: ProjectRevision(2),
@@ -247,6 +248,7 @@ fn failed_committed_save_keeps_operation_specific_uncertain_receipt() {
         hardware: None,
         project_id: ProjectId::new(),
         revision: ProjectRevision(7),
+        manufacturing_options: vec![],
         saved_revision: Some(ProjectRevision(7)),
         path_label: Some("attached-save-as".into()),
         dirty: true,
@@ -346,6 +348,7 @@ fn failed_committed_save_keeps_operation_specific_uncertain_receipt() {
     ]);
     let invalid_info = rpc::ProjectInfo {
         hardware: None,
+        manufacturing_options: vec![],
         project_id: info.project_id.as_str().into(),
         revision: 7,
         saved_revision: Some(8),
@@ -475,6 +478,7 @@ fn surface_commands_have_checked_typed_roundtrips_and_no_missing_kind_defaults()
         hardware: None,
         project_id: ProjectId::new(),
         revision: ProjectRevision(0),
+        manufacturing_options: vec![],
         saved_revision: None,
         path_label: None,
         dirty: false,
@@ -641,6 +645,7 @@ fn imported_image_receipt_matches_authoritative_metadata_and_new_layer() {
         hardware: None,
         project_id: ProjectId::new(),
         revision: ProjectRevision(1),
+        manufacturing_options: vec![],
         saved_revision: None,
         path_label: None,
         dirty: true,

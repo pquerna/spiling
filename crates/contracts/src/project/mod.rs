@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 //! Persistent source-backed project contracts, independent of storage and BREP.
+mod manufacturing_options;
 mod recovery;
 mod storage;
 use crate::appearance::{AppearanceStudy, AppearanceStudyInfo, AppearanceTarget, SearchLimits};
@@ -13,6 +14,7 @@ use crate::manufacturing::{
 use crate::optical::{OpticalRequest, OpticalSelection};
 use crate::process::*;
 use crate::surface::*;
+pub use manufacturing_options::*;
 pub use recovery::ProjectRecoveryGuard;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc};
@@ -182,6 +184,7 @@ pub struct ProjectManifest {
     pub occurrences: Vec<OccurrenceRecord>,
     #[serde(deserialize_with = "required_option")]
     pub manufacturing_intent: Option<Arc<ManufacturingIntent>>,
+    pub manufacturing_options: Vec<ManufacturingOption>,
     #[serde(deserialize_with = "required_option")]
     pub manufacturing_artifact: Option<ManufacturingArtifactRecord>,
 }
@@ -275,6 +278,7 @@ impl ProjectManifest {
             self.next_process_operation,
         )?;
         self.appearance_study.validate()?;
+        validate_manufacturing_options(&self.manufacturing_options)?;
         if let Some(intent) = &self.manufacturing_intent {
             intent.validate().map_err(|e| invalid(&e.message))?;
         }
@@ -325,10 +329,31 @@ pub struct ProjectInfo {
     #[serde(deserialize_with = "required_option")]
     pub hardware: Option<Arc<crate::hardware::ProjectHardwareCapture>>,
     pub resolved_process: Vec<ResolvedOccurrenceProcess>,
+    pub manufacturing_options: Vec<ManufacturingOptionInfo>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectCommand {
+    GetManufacturingOption {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        id: SourceHash,
+    },
+    RetainManufacturingOption {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        option: ManufacturingOption,
+    },
+    RemoveManufacturingOption {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        id: SourceHash,
+    },
+    ApplyManufacturingOption {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        id: SourceHash,
+    },
     MatchStock {
         session_id: SessionId,
         base_revision: ProjectRevision,
@@ -514,6 +539,9 @@ pub enum ProjectCommand {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectResponse {
+    ManufacturingOption {
+        option: ManufacturingOption,
+    },
     Recipe {
         transfer: crate::library::RecipeTransfer,
     },

@@ -41,9 +41,39 @@ The root object is strict UTF-8 `ProjectManifest` JSON, at most 1,048,576 bytes.
 - `definitions`: at most 32 `StoredDefinition` records, each with `definition_id` and `provenance`.
 - `occurrences`: at most 256 `OccurrenceRecord` records, each with nonzero `occurrence_id`, referenced `definition_id`, and `pose` (`translation_mm[3]`, `rotation_xyzw[4]`). Translation is finite and the quaternion is a unit quaternion under the shared pose validator.
 - `manufacturing_intent`: explicit `null` or validated `ManufacturingIntent` containing every printer/recipe field.
+- `manufacturing_options`: required bounded list of immutable named manufacturing alternatives. Each entry binds its complete intent, context hash and name through a content-derived identity; there is no missing-field compatibility default. See [manufacturing alternatives](#manufacturing-options).
 - `manufacturing_artifact`: explicit `null` or validated `ManufacturingArtifactRecord` containing exact-byte hash, semantic input hash, byte count and software-only summary.
 
 Every definition is referenced by an occurrence; definition and occurrence identities are unique. The writer emits definitions and occurrences in ID order. Readers validate identities/references rather than assuming array order. Provenance contains `source_hash` (lowercase 64-character SHA-256), `source_name`, original `source_unit` (`millimetre`, `metre`, or `inch`) and optional finite nonnegative `uncertainty_mm`. Geometry's shared label/provenance validator is authoritative. Native admission rebuilds geometry from source bytes and independently checks native provenance; a syntactically valid storage snapshot is not proof of native geometry support.
+
+## Manufacturing options
+
+Current remains the single applied manufacturing intent. An option contains `id`,
+`name`, `context_hash` and complete `intent`; its immutable identity binds all three
+content fields. Names are nonempty, bounded UTF-8 without control characters.
+At most eight options and 256 KiB serialized option content are retained, subject
+also to the complete manifest and history/prepared budgets. Option identities
+need no allocation counter and do not rewind any existing guard.
+
+The context binds source definitions/provenance, occurrence poses, surface/process
+construction, canonical image contents and captured materials/hardware. Active
+intent/artifact, option bookkeeping and unrelated appearance studies are excluded.
+An old-context option remains inspectable; adoption and evaluation require exact
+matching context rather than guessed source remapping. Retained options do not
+preserve superseded source geometry as separate project versions.
+
+Retain/remove are ordinary revision-bound, undoable project edits. They make
+project content dirty without replacing the active manufacturing inputs/artifact
+or changing scene geometry. Apply is one ordinary intent transaction and checks
+current context/hardware. Read-only inspection cannot retain, remove or apply.
+`GetManufacturingOption` returns the full validated option for an exact project
+revision and ID. ProjectInfo carries only small `ManufacturingOptionInfo`
+summaries (`id`, `name`, `context_hash`), not repeated complete profiles.
+
+Options persist in the domain root and share the existing PTAC container. The two
+saved storage snapshots are recovery state, not user-facing versions or an undo
+archive. Saving never implicitly applies a workbench draft. [ADR010](../adr/010-manufacturing-alternatives.md)
+owns the distinction between drafts, options, results, history and saving.
 
 Each surface layer has checked nonzero `layer_id`, explicit `enabled`, a canonical `face_id` STEP string, tagged `scope` and tagged `finish`. Scope is `{"kind":"definition","definition_id":...}` or `{"kind":"occurrence","occurrence_id":...,"expected_definition_id":...}` and must match stored identities. Finish is Smooth, VerticalRibs, CylindricalRibs or `{"kind":"image_relief","image_hash":...,"parameters":...}`. The executable contracts own parameter validation; native/process eligibility remains a separate manufacturing gate. Image mapping and error bounds are specified in [ADR003](../adr/003-spatial-image-relief.md). IDs are unique and below the allocator. Disabled layers remain authored content and retain their images. Enabled definition layers apply in stored order, then enabled occurrence layers in stored order; the last matching whole-face fill wins. Smooth explicitly overrides lower finishes; removal/disabling reveals lower fills. A syntactically canonical face string is insufficient: engine open validates every stored target against the exact rebuilt/reused source-face table before publication.
 

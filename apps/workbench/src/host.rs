@@ -183,6 +183,8 @@ pub enum Command {
     ResumeDisplay,
     CancelSection,
     CancelReview,
+    DiscardAlternative,
+    PinAlternativeReference { nonce: u64 },
     Diagnostic,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,6 +338,8 @@ impl Host {
             diagnostic_paused: false,
             image_task: None,
             review_task: None,
+            alternative_task: None,
+            preserve_current_for_option_edit: false,
             export_task: None,
             display_task: None,
             display_cancel: Arc::new(AtomicBool::new(false)),
@@ -367,7 +371,9 @@ impl Host {
     pub fn manufacturing(&self, command: ManufacturingCommand) -> Result<(), String> {
         // Validate variable-sized controls before bounded host admission; the engine
         // independently validates them and owns mutation authority.
-        if let ManufacturingCommand::SetIntent { intent, .. } = &command {
+        if let ManufacturingCommand::SetIntent { intent, .. }
+        | ManufacturingCommand::EvaluateAlternative { intent, .. } = &command
+        {
             intent.validate().map_err(|e| e.to_string())?;
             if serde_json::to_vec(intent).map_err(|e| e.to_string())?.len()
                 > spiling_contracts::manufacturing::MAX_PROFILE_JSON_BYTES as usize
@@ -605,6 +611,8 @@ struct Actor {
     diagnostic_paused: bool,
     image_task: Option<JoinHandle<Result<Arc<crate::assets::ImagePreview>, ClientError>>>,
     review_task: Option<JoinHandle<Result<Arc<manufacture::Review>, ClientError>>>,
+    alternative_task: Option<JoinHandle<Result<Arc<manufacture::Review>, ClientError>>>,
+    preserve_current_for_option_edit: bool,
     export_task: Option<JoinHandle<Result<manufacture::StagedExport, String>>>,
     section_task: Option<JoinHandle<Result<Arc<Section>, ClientError>>>,
     section_cancel: Arc<AtomicBool>,
@@ -619,6 +627,8 @@ impl Actor {
         self.state.section_loading = self.section_task.is_some();
         self.state.display_loading = self.display_task.is_some();
         Arc::make_mut(&mut self.state.manufacturing).loading = self.review_task.is_some();
+        Arc::make_mut(&mut self.state.manufacturing).alternative_loading =
+            self.alternative_task.is_some();
         Arc::make_mut(&mut self.state.manufacturing).export_busy = self.export_task.is_some();
         self.state.active_operation =
             self.pending.is_some() || self.state.diagnostic.as_ref().is_some_and(|d| !d.done);
@@ -711,6 +721,16 @@ impl Actor {
                     match result {
                         Ok(Ok(review)) if self.capture_current(&review.capture) => {Arc::make_mut(&mut self.state.manufacturing).review=Some(review);},
                         Ok(Ok(_))=>{},Ok(Err(error))=>self.failure(error).await,Err(error)=>self.problem(format!("Review transfer failed: {error}")),
+                    }
+                },
+                result = async {match &mut self.alternative_task {Some(task)=>task.await,None=>std::future::pending().await}} => {
+                    self.alternative_task=None;
+                    match result {
+                        Ok(Ok(review)) if self.alternative_capture_matches(&review.capture) => {
+                            Arc::make_mut(&mut self.state.manufacturing).alternative_review=Some(review);
+                        },
+                        Ok(Ok(_))=>{},Ok(Err(error))=>self.failure(error).await,
+                        Err(error)=>self.problem(format!("Alternative transfer failed: {error}")),
                     }
                 },
                 result = async {match &mut self.export_task {Some(task)=>task.await,None=>std::future::pending().await}} => {
@@ -813,6 +833,15 @@ impl Actor {
         self.state.inspection = None;
         self.state.display_paused = false;
         self.clear_review();
+        if let Some(task) = self.alternative_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        let manufacturing = Arc::make_mut(&mut self.state.manufacturing);
+        manufacturing.alternative = None;
+        manufacturing.alternative_review = None;
+        manufacturing.reference_review = None;
+        manufacturing.inspected_option = None;
         self.state.image_preview = None;
         self.state.manufacturing = Arc::default();
         self.state.bed_proposal = None;
@@ -906,6 +935,16 @@ impl Actor {
         }
         self.clear_review();
         // A staged transaction must finish and drop before the engine/session is released.
+        if let Some(task) = self.alternative_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        let manufacturing = Arc::make_mut(&mut self.state.manufacturing);
+        manufacturing.alternative = None;
+        manufacturing.alternative_review = None;
+        manufacturing.reference_review = None;
+        manufacturing.inspected_option = None;
+        manufacturing.applied_settings = None;
         if let Some(task) = self.export_task.take() {
             let _ = task.await;
         }
@@ -928,6 +967,10 @@ impl Actor {
         }
         self.cancel_display();
         self.clear_review();
+        if let Some(task) = self.alternative_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         self.state.bed_proposal = None;
         if let Some(mut client) = self.client.take() {
             let _ = client.terminate().await;
@@ -1006,6 +1049,7 @@ impl Actor {
             intent,
             artifact,
             resource,
+            context_hash,
         } = status
         else {
             return Err(ClientError::Protocol(
@@ -1026,7 +1070,27 @@ impl Actor {
             || self.state.manufacturing.artifact != artifact
             || self.state.manufacturing.resource != resource;
         if changed {
-            self.clear_review();
+            let preserve = self.preserve_current_for_option_edit
+                && self.state.manufacturing.context_hash.as_ref() == Some(&context_hash)
+                && self.state.manufacturing.intent == intent
+                && self.state.manufacturing.artifact == artifact
+                && self.state.manufacturing.resource == resource;
+            if preserve {
+                let m = Arc::make_mut(&mut self.state.manufacturing);
+                if let Some(capture) = &m.capture {
+                    let mut capture = (**capture).clone();
+                    capture.observed_revision = project.revision;
+                    let capture = Arc::new(capture);
+                    if let Some(review) = &m.review {
+                        let mut review = (**review).clone();
+                        review.capture = capture.clone();
+                        m.review = Some(Arc::new(review));
+                    }
+                    m.capture = Some(capture);
+                }
+            } else {
+                self.clear_review();
+            }
             self.state.bed_proposal = None;
             if self
                 .state
@@ -1039,6 +1103,7 @@ impl Actor {
             Arc::make_mut(&mut self.state.manufacturing).preflight = None;
         }
         let m = Arc::make_mut(&mut self.state.manufacturing);
+        m.context_hash = Some(context_hash);
         if m.revision
             .as_ref()
             .is_some_and(|(id, _)| *id != project.project_id)
@@ -1046,6 +1111,14 @@ impl Actor {
             m.loaded = None;
             m.loaded_material = None;
             m.loaded_catalog = None;
+            m.alternative = None;
+            m.alternative_review = None;
+            m.reference_review = None;
+            m.inspected_option = None;
+            m.applied_settings = None;
+            if let Some(task) = self.alternative_task.take() {
+                task.abort();
+            }
         }
         m.revision = Some((project.project_id.clone(), project.revision));
         m.intent = intent;
@@ -1157,8 +1230,35 @@ impl Actor {
                 self.clear_review();
                 self.state.message = "Review transfer cancelled; verify again to reload".into();
             }
+            Request::Command(Command::DiscardAlternative) => {
+                if self.pending.is_some() {
+                    self.problem(
+                        "Resolve the alternative operation before discarding its inspection",
+                    );
+                } else {
+                    if let Some(task) = self.alternative_task.take() {
+                        task.abort();
+                    }
+                    let m = Arc::make_mut(&mut self.state.manufacturing);
+                    m.retired_display_bytes = m.display_bytes();
+                    m.alternative = None;
+                    m.alternative_review = None;
+                    m.reference_review = None;
+                    self.state.message = "Alternative inspection closed".into();
+                }
+            }
             Request::Command(Command::CancelSection) => {
                 self.section_cancel.store(true, Ordering::Relaxed);
+            }
+            Request::Command(Command::PinAlternativeReference { nonce }) => {
+                let reference = self.state.manufacturing.review.clone().filter(|review| {
+                    review.capture.nonce == nonce && self.capture_current(&review.capture)
+                });
+                if let Some(reference) = reference {
+                    Arc::make_mut(&mut self.state.manufacturing).reference_review = Some(reference);
+                } else {
+                    self.problem("Current reference changed before reservation. End this trial, freshly verify Current and start again.");
+                }
             }
             Request::Command(Command::PauseDisplay) => {
                 self.display_cancel.store(true, Ordering::Relaxed);
@@ -1483,7 +1583,8 @@ impl Actor {
                 ProjectResponse::Filament { .. }
                 | ProjectResponse::Filaments { .. }
                 | ProjectResponse::Recipe { .. }
-                | ProjectResponse::Recipes { .. },
+                | ProjectResponse::Recipes { .. }
+                | ProjectResponse::ManufacturingOption { .. },
             ) => self.problem("Unexpected material response to project action"),
             Ok(ProjectResponse::Error { error }) => {
                 self.problem(error.to_string());
@@ -1613,6 +1714,12 @@ impl Actor {
             }
             (Receipt::Manufacturing, Some(JobResult::ManufacturingCompiled { .. }))
                 if completed => {}
+            (
+                Receipt::Manufacturing,
+                Some(JobResult::ManufacturingAlternativeEvaluated { evaluation }),
+            ) if completed => {
+                self.alternative_evaluated(evaluation.clone()).await;
+            }
             (
                 Receipt::Manufacturing,
                 Some(JobResult::ManufacturingVerified {

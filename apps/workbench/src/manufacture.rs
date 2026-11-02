@@ -60,15 +60,38 @@ pub struct Capture {
     pub resource: ArtifactView,
     pub replay: Option<ReplayDisplayDescriptor>,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Review {
     pub capture: Arc<Capture>,
     pub bundle: Arc<ManufacturingBundle>,
     pub motion: Option<Arc<[u8]>>,
     pub display: Option<Arc<crate::replay::Replay>>,
 }
+#[derive(Debug, Clone)]
+pub struct InspectedOption {
+    pub project: spiling_contracts::project::ProjectId,
+    pub revision: spiling_contracts::project::ProjectRevision,
+    pub session: SessionId,
+    pub option: spiling_contracts::project::ManufacturingOption,
+}
+#[derive(Debug, Clone)]
+pub struct AppliedSettings {
+    pub nonce: u64,
+    pub project: spiling_contracts::project::ProjectId,
+    pub session: SessionId,
+    pub base_revision: spiling_contracts::project::ProjectRevision,
+    pub revision: spiling_contracts::project::ProjectRevision,
+    pub intent: Arc<ManufacturingIntent>,
+}
 #[derive(Debug, Clone, Default)]
 pub struct State {
+    pub context_hash: Option<spiling_contracts::geometry::SourceHash>,
+    pub alternative: Option<Arc<ManufacturingAlternativeEvaluation>>,
+    pub alternative_review: Option<Arc<Review>>,
+    pub reference_review: Option<Arc<Review>>,
+    pub alternative_loading: bool,
+    pub inspected_option: Option<Arc<InspectedOption>>,
+    pub applied_settings: Option<Arc<AppliedSettings>>,
     pub revision: Option<(
         spiling_contracts::project::ProjectId,
         spiling_contracts::project::ProjectRevision,
@@ -103,12 +126,22 @@ impl State {
         })
     }
     pub fn display_bytes(&self) -> usize {
-        self.retired_display_bytes.max(
-            self.review
-                .as_ref()
-                .and_then(|r| r.display.as_ref())
-                .map_or(0, |r| r.owned_bytes),
-        )
+        let reviews = [
+            self.review.as_ref(),
+            self.reference_review.as_ref(),
+            self.alternative_review.as_ref(),
+        ];
+        let displays = reviews
+            .iter()
+            .flatten()
+            .filter_map(|review| review.display.as_ref())
+            .map(|display| (display, display.owned_bytes));
+        let bundles = reviews
+            .iter()
+            .flatten()
+            .map(|review| (&review.bundle, MAX_MANUFACTURING_BUNDLE_BYTES as usize));
+        self.retired_display_bytes
+            .max(unique_bytes(displays) + unique_bytes(bundles))
     }
     pub fn invalidate(&mut self) {
         // Conservatively retain the prior GPU charge until this engine session ends.
@@ -119,6 +152,20 @@ impl State {
         self.last_export = None;
         self.loading = false;
     }
+}
+fn unique_bytes<'value, Value: 'value>(
+    values: impl Iterator<Item = (&'value Arc<Value>, usize)>,
+) -> usize {
+    let mut seen = Vec::new();
+    let mut total = 0;
+    for (value, bytes) in values {
+        let pointer = Arc::as_ptr(value);
+        if !seen.contains(&pointer) {
+            seen.push(pointer);
+            total += bytes;
+        }
+    }
+    total
 }
 fn invalid(message: impl Into<String>) -> ClientError {
     ClientError::InvalidRequest(message.into())
@@ -193,6 +240,17 @@ pub async fn load_review(
     origin: glam::DVec3,
 ) -> Result<Arc<Review>, ClientError> {
     check_current(&rpc, &capture).await?;
+    let review = load_checked_review(rpc.clone(), capture, reserved, origin).await?;
+    check_current(&rpc, &review.capture).await?;
+    Ok(review)
+}
+pub async fn load_checked_review(
+    rpc: EngineRpc,
+    capture: Arc<Capture>,
+    reserved: usize,
+    origin: glam::DVec3,
+) -> Result<Arc<Review>, ClientError> {
+    capture.provenance.validate_for_record(&capture.record)?;
     let bundle = rpc
         .fetch_manufacturing_bundle(&capture.record, &capture.resource)
         .await?;
@@ -213,7 +271,6 @@ pub async fn load_review(
         )),
         _ => None,
     };
-    check_current(&rpc, &capture).await?;
     Ok(Arc::new(Review {
         capture,
         bundle: Arc::new(bundle),
@@ -266,6 +323,28 @@ pub async fn stage_export(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn alternative_reference_budget_counts_each_shared_allocation_once() {
+        let current = Arc::new(1);
+        let candidate = Arc::new(2);
+        let reference = current.clone();
+        assert_eq!(
+            unique_bytes([(&current, 20), (&reference, 20), (&candidate, 30)].into_iter()),
+            50
+        );
+        let replacement_current = Arc::new(3);
+        assert_eq!(
+            unique_bytes(
+                [
+                    (&replacement_current, 40),
+                    (&reference, 20),
+                    (&candidate, 30)
+                ]
+                .into_iter()
+            ),
+            90
+        );
+    }
     #[test]
     fn profile_files_are_bounded_strict_and_preserve_setup_and_overrides() {
         let root = tempfile::tempdir().unwrap();

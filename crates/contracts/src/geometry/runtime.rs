@@ -118,10 +118,6 @@ impl JobStatus {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Bounded control results stay inline without per-observation heap indirection"
-)]
 pub enum JobResult {
     ProjectStorageMaintained {
         action: crate::project::StorageMaintenanceAction,
@@ -181,6 +177,9 @@ pub enum JobResult {
     },
     ManufacturingPreflight {
         report: crate::manufacturing::PreflightReport,
+    },
+    ManufacturingAlternativeEvaluated {
+        evaluation: crate::manufacturing::ManufacturingAlternativeEvaluation,
     },
     ManufacturingCompiled {
         info: crate::project::ProjectInfo,

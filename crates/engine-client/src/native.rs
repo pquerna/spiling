@@ -232,6 +232,11 @@ impl EngineRpc {
             request.validate()?;
         }
         match &command {
+            ProjectCommand::RetainManufacturingOption { option, .. } => {
+                option.validate().map_err(|error| {
+                    GeometryError::new(GeometryErrorCode::InvalidGeometry, error.message)
+                })
+            }
             ProjectCommand::StorageMaintenance { target, .. } => {
                 target.as_ref().map_or(Ok(()), |path| path.validate())
             }
@@ -242,6 +247,9 @@ impl EngineRpc {
                 target: Some(path), ..
             } => path.validate(),
             ProjectCommand::SetHardware { .. }
+            | ProjectCommand::GetManufacturingOption { .. }
+            | ProjectCommand::RemoveManufacturingOption { .. }
+            | ProjectCommand::ApplyManufacturingOption { .. }
             | ProjectCommand::PutRecipe { .. }
             | ProjectCommand::GetRecipe { .. }
             | ProjectCommand::ListRecipes { .. }
@@ -435,7 +443,9 @@ impl EngineRpc {
         command: ManufacturingCommand,
         request_id: &str,
     ) -> Result<ManufacturingResponse, ClientError> {
-        if let ManufacturingCommand::SetIntent { intent, .. } = &command {
+        if let ManufacturingCommand::SetIntent { intent, .. }
+        | ManufacturingCommand::EvaluateAlternative { intent, .. } = &command
+        {
             intent.validate()?;
         }
         let expected_material_review = match &command {
@@ -476,6 +486,16 @@ impl EngineRpc {
                     ManufacturingResponse::Error { error } => Err(error.into()),
                     response => Ok(response),
                 }
+            }
+            ManufacturingCall::EvaluateAlternative(request) => {
+                let op = client
+                    .evaluate_alternative(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
+                Ok(ManufacturingResponse::OperationAccepted {
+                    operation: native::native_operation_view(&op).map_err(ClientError::Protocol)?,
+                })
             }
             ManufacturingCall::Compile(request) => {
                 let operation = client

@@ -22,14 +22,11 @@ fn valid<T>(
     Ok(value)
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "A one-shot bounded RPC dispatch value does not need a separate heap allocation"
-)]
 #[derive(Debug, Clone)]
 pub enum ManufacturingCall {
     Execute(rpc::ManufacturingRequest),
     Compile(rpc::CompileManufacturingRequest),
+    EvaluateAlternative(rpc::EvaluateManufacturingAlternativeRequest),
     Preflight(rpc::PreflightManufacturingRequest),
     Verify(rpc::VerifyManufacturingRequest),
 }
@@ -40,6 +37,11 @@ pub fn manufacturing_call(
 ) -> Result<ManufacturingCall, String> {
     super::request_id(request_id)?;
     match command {
+        command @ ManufacturingCommand::EvaluateAlternative { .. } => {
+            let mut request = rpc::EvaluateManufacturingAlternativeRequest::try_from(command)?;
+            request.request_id = request_id.to_owned();
+            Ok(ManufacturingCall::EvaluateAlternative(request))
+        }
         command @ ManufacturingCommand::Preflight { .. } => {
             let mut request = rpc::PreflightManufacturingRequest::try_from(command)?;
             request.request_id = request_id.to_owned();
@@ -151,6 +153,144 @@ impl TryFrom<ManufacturingCommand> for rpc::CompileManufacturingRequest {
             parent,
             request_id: String::new(),
             base_revision: base_revision.get(),
+        })
+    }
+}
+impl TryFrom<ManufacturingCommand> for rpc::EvaluateManufacturingAlternativeRequest {
+    type Error = String;
+    fn try_from(value: ManufacturingCommand) -> Result<Self, String> {
+        let ManufacturingCommand::EvaluateAlternative {
+            session_id,
+            base_revision,
+            expected_context_hash,
+            intent,
+        } = value
+        else {
+            return Err("expected alternative evaluation command".into());
+        };
+        Ok(Self {
+            parent: format!("sessions/{}", session_id.as_str()),
+            request_id: String::new(),
+            base_revision: base_revision.get(),
+            expected_context_hash: expected_context_hash.as_str().into(),
+            intent: Some(Arc::unwrap_or_clone(intent).try_into()?),
+        })
+    }
+}
+impl TryFrom<rpc::EvaluateManufacturingAlternativeRequest> for ManufacturingCommand {
+    type Error = String;
+    fn try_from(value: rpc::EvaluateManufacturingAlternativeRequest) -> Result<Self, String> {
+        super::request_id(&value.request_id)?;
+        Ok(Self::EvaluateAlternative {
+            session_id: super::session_parent(&value.parent)?,
+            base_revision: ProjectRevision(value.base_revision),
+            expected_context_hash: SourceHash::parse(value.expected_context_hash)
+                .map_err(|error| error.to_string())?,
+            intent: Arc::new(required(value.intent, "alternative intent")?.try_into()?),
+        })
+    }
+}
+
+impl TryFrom<rpc::ManufacturingAlternativeEvaluation> for ManufacturingAlternativeEvaluation {
+    type Error = String;
+    fn try_from(value: rpc::ManufacturingAlternativeEvaluation) -> Result<Self, String> {
+        if value.changed_inputs.len() > 128 {
+            return Err("alternative input change count exceeds limit".into());
+        }
+        let evaluation = Self {
+            project_id: crate::project::ProjectId::parse(value.project_id)
+                .map_err(|error| error.to_string())?,
+            captured_revision: ProjectRevision(value.captured_revision),
+            context_hash: SourceHash::parse(value.context_hash)
+                .map_err(|error| error.to_string())?,
+            intent: Arc::new(required(value.intent, "alternative intent")?.try_into()?),
+            changed_inputs: value
+                .changed_inputs
+                .into_iter()
+                .map(|change| {
+                    Ok(ManufacturingInputChange {
+                        group: match rpc::ManufacturingInputGroup::try_from(change.group)
+                            .map_err(|_| "unknown input group")?
+                        {
+                            rpc::ManufacturingInputGroup::Hardware => {
+                                ManufacturingInputGroup::Hardware
+                            }
+                            rpc::ManufacturingInputGroup::MaterialProfile => {
+                                ManufacturingInputGroup::MaterialProfile
+                            }
+                            rpc::ManufacturingInputGroup::Printer => {
+                                ManufacturingInputGroup::Printer
+                            }
+                            rpc::ManufacturingInputGroup::Recipe => ManufacturingInputGroup::Recipe,
+                            _ => return Err("unspecified input group".to_string()),
+                        },
+                        path: change.path,
+                        before: change.before,
+                        after: change.after,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+            changed_inputs_complete: value.changed_inputs_complete,
+            record: required(value.record, "alternative record")?.try_into()?,
+            report: required(value.report, "alternative report")?.try_into()?,
+            provenance: required(value.provenance, "alternative provenance")?.try_into()?,
+            resource: super::artifact_to_view(
+                required(value.resource, "alternative resource")?,
+                MAX_MANUFACTURING_BUNDLE_BYTES as u64,
+            )?,
+            replay_display: required(value.replay_display, "alternative replay")?.try_into()?,
+        };
+        evaluation.validate().map_err(|error| error.to_string())?;
+        super::operation::validate_verified(
+            &evaluation.record,
+            &evaluation.report,
+            &evaluation.provenance,
+            Some(&evaluation.replay_display),
+        )?;
+        Ok(evaluation)
+    }
+}
+impl TryFrom<ManufacturingAlternativeEvaluation> for rpc::ManufacturingAlternativeEvaluation {
+    type Error = String;
+    fn try_from(value: ManufacturingAlternativeEvaluation) -> Result<Self, String> {
+        value.validate().map_err(|error| error.to_string())?;
+        super::operation::validate_verified(
+            &value.record,
+            &value.report,
+            &value.provenance,
+            Some(&value.replay_display),
+        )?;
+        Ok(Self {
+            project_id: value.project_id.as_str().into(),
+            captured_revision: value.captured_revision.get(),
+            context_hash: value.context_hash.as_str().into(),
+            intent: Some(Arc::unwrap_or_clone(value.intent).try_into()?),
+            changed_inputs: value
+                .changed_inputs
+                .into_iter()
+                .map(|change| rpc::ManufacturingInputChange {
+                    group: match change.group {
+                        ManufacturingInputGroup::Hardware => rpc::ManufacturingInputGroup::Hardware,
+                        ManufacturingInputGroup::MaterialProfile => {
+                            rpc::ManufacturingInputGroup::MaterialProfile
+                        }
+                        ManufacturingInputGroup::Printer => rpc::ManufacturingInputGroup::Printer,
+                        ManufacturingInputGroup::Recipe => rpc::ManufacturingInputGroup::Recipe,
+                    } as i32,
+                    path: change.path,
+                    before: change.before,
+                    after: change.after,
+                })
+                .collect(),
+            changed_inputs_complete: value.changed_inputs_complete,
+            record: Some(value.record.try_into()?),
+            report: Some(value.report.try_into()?),
+            provenance: Some(value.provenance.try_into()?),
+            resource: Some(super::artifact_from_view(
+                value.resource,
+                MAX_MANUFACTURING_BUNDLE_BYTES as u64,
+            )?),
+            replay_display: Some(value.replay_display.try_into()?),
         })
     }
 }
@@ -1425,6 +1565,7 @@ impl TryFrom<ManufacturingResponse> for rpc::ManufacturingReply {
         }
         let ManufacturingResponse::Status {
             info,
+            context_hash,
             intent,
             artifact,
             resource,
@@ -1450,6 +1591,7 @@ impl TryFrom<ManufacturingResponse> for rpc::ManufacturingReply {
         Ok(Self {
             result: Some(rpc::manufacturing_reply::Result::Status(
                 rpc::ManufacturingStatus {
+                    context_hash: context_hash.as_str().into(),
                     info: Some(info.try_into()?),
                     intent: intent
                         .map(|v| rpc::ManufacturingIntent::try_from(Arc::unwrap_or_clone(v)))
@@ -1485,6 +1627,8 @@ impl TryFrom<rpc::ManufacturingReply> for ManufacturingResponse {
         }
         Ok(Self::Status {
             info: required(status.info, "project info")?.try_into()?,
+            context_hash: SourceHash::parse(status.context_hash)
+                .map_err(|error| error.to_string())?,
             intent: status
                 .intent
                 .map(|v| v.try_into().map(Arc::new))

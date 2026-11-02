@@ -104,7 +104,7 @@ fn native_artifact_limit(media: &str) -> Result<u64, String> {
         _ => Err("unexpected native artifact media type".into()),
     }
 }
-fn validate_verified(
+pub(super) fn validate_verified(
     record: &ManufacturingArtifactRecord,
     report: &VerificationReport,
     provenance: &ManufacturingInspectionProvenance,
@@ -408,6 +408,30 @@ pub fn native_operation_view(
                     return Err("preflight revision or output mismatch".into());
                 }
             }
+            JobResult::ManufacturingAlternativeEvaluated { evaluation } => {
+                evaluation.validate().map_err(|error| error.to_string())?;
+                validate_verified(
+                    &evaluation.record,
+                    &evaluation.report,
+                    &evaluation.provenance,
+                    Some(&evaluation.replay_display),
+                )?;
+                if evaluation.captured_revision.get() != meta.captured_project_revision
+                    || meta.outputs.len() != 2
+                {
+                    return Err("alternative captured revision or output count mismatch".into());
+                }
+                for resource in [&evaluation.resource, &evaluation.replay_display.resource] {
+                    if !meta.outputs.iter().any(|output| {
+                        output.name == resource.name
+                            && output.sha256 == resource.sha256
+                            && output.size_bytes.to_string() == resource.size_bytes
+                            && output.media_type == resource.media_type
+                    }) {
+                        return Err("alternative output not published".into());
+                    }
+                }
+            }
             JobResult::BedPosePrepared { preparation } => {
                 preparation.validate().map_err(|error| error.to_string())?;
                 if preparation.session_id != session_id
@@ -504,6 +528,11 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
     fn try_from(v: rpc::NativeOperationResult) -> Result<Self, String> {
         use rpc::native_operation_result::Result as R;
         Ok(match required(v.result, "native result")? {
+            R::ManufacturingAlternativeEvaluated(value) => {
+                Self::ManufacturingAlternativeEvaluated {
+                    evaluation: value.try_into()?,
+                }
+            }
             R::AppearancePaletteImported(value) => {
                 let info: ProjectInfo =
                     required(value.info, "palette import project info")?.try_into()?;
@@ -679,6 +708,15 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
     fn try_from(v: JobResult) -> Result<Self, String> {
         use rpc::native_operation_result::Result as R;
         let result = match v {
+            JobResult::ManufacturingAlternativeEvaluated { evaluation } => {
+                validate_verified(
+                    &evaluation.record,
+                    &evaluation.report,
+                    &evaluation.provenance,
+                    Some(&evaluation.replay_display),
+                )?;
+                R::ManufacturingAlternativeEvaluated(evaluation.try_into()?)
+            }
             JobResult::AppearancePaletteImported { info, palette } => {
                 if info.appearance_study.palette.as_ref() != Some(&palette) {
                     return Err("imported palette differs from authoritative study".into());

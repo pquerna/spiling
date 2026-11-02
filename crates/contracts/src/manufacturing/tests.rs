@@ -1462,6 +1462,7 @@ fn manifest_artifact_must_reference_current_explicit_intent_and_input_hash() {
     let p = &bundle.provenance;
     let bytes = serde_json::to_vec(&bundle).unwrap();
     let mut manifest = ProjectManifest {
+        manufacturing_options: Vec::new(),
         hardware: None,
         next_process_layer: 1,
         next_process_operation: 1,

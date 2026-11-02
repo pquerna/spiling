@@ -35,6 +35,9 @@ pub(super) struct ManufacturingUi {
     pub review_nonce: Option<u64>,
     bead_statistics: Option<BeadStatistics>,
     selected_seam: Option<u32>,
+    pub(super) trial: Option<super::alternative::Trial>,
+    pub(super) inspected_option: Option<spiling_contracts::geometry::SourceHash>,
+    pub(super) comparison_no_height_match: bool,
 }
 impl ManufacturingUi {
     pub(super) fn pending_loaded(&self, loaded: Option<&crate::manufacture::LoadedIntent>) -> bool {
@@ -61,6 +64,7 @@ impl Workbench {
         self.manufacturing.ignored_nonce =
             self.state.manufacturing.loaded.as_ref().map(|l| l.nonce);
         self.manufacturing.draft = None;
+        self.manufacturing.trial = None;
     }
 
     pub(super) fn manufacturing_current(&self) -> bool {
@@ -78,6 +82,14 @@ impl Workbench {
                 })
     }
     pub(super) fn manufacturing_pane(&mut self, ui: &mut egui::Ui) {
+        if self.manufacturing.panel == 5 {
+            self.alternative_pane(ui);
+            return;
+        }
+        if self.manufacturing.panel == 6 {
+            self.option_pane(ui);
+            return;
+        }
         let prepare = self.manufacturing.panel == 1;
         ui::pane_header(
             ui,
@@ -109,6 +121,9 @@ impl Workbench {
                 "Independent replay checks the emitted program. Physical printability, collisions and machine execution remain unqualified.",
             );
         }
+        if !prepare || self.manufacturing.prepare_section == 2 {
+            self.try_alternative_entry(ui);
+        }
         // Keep the action strip outside the body's single scroll owner.
         self.manufacturing_actions(ui);
         ui.separator();
@@ -126,6 +141,13 @@ impl Workbench {
             return;
         };
         let m = self.state.manufacturing.clone();
+        if self.manufacturing.panel == 1
+            && matches!(self.manufacturing.prepare_section, 1 | 2)
+            && self.manufacturing.trial.is_some()
+        {
+            ui.label("Current drafts are retained. Return to the alternative or explicitly end it before editing Current.");
+            return;
+        }
         if self.manufacturing.panel == 2 {
             if self.manufacturing_current() {
                 self.button(ui, Action::Verify);
@@ -288,6 +310,17 @@ impl Workbench {
         let writable = ready && !project.read_only;
         let m = self.state.manufacturing.clone();
         if self.manufacturing.panel == 1 {
+            if matches!(self.manufacturing.prepare_section, 1 | 2)
+                && self.manufacturing.trial.is_some()
+            {
+                ui.label(
+                    "An alternative is open. Current Settings drafts are retained, not consumed.",
+                );
+                if ui.button("Return to alternative").clicked() {
+                    self.manufacturing.panel = 5;
+                }
+                return;
+            }
             if project.read_only {
                 ui.label("Read-only project");
             }
@@ -362,41 +395,8 @@ impl Workbench {
                         d.value.recipe.id, d.value.recipe.revision
                     ));
                     ui.add_enabled_ui(writable && !conflict, |ui| {
-                    super::policies::seam_fields(ui, &mut d.value);
-                    ui::group(ui, "Geometry");
-                    ui::number(ui, "Shape approximation limit (mm)", &mut d.value.recipe.native_shape_error_mm, 0.001);
-                    ui::help(ui, "shape-approximation", "Geometry approximation", "The geometry approximation bound protects source material and holes. It does not specify physical print accuracy.");
-                    ui.separator();
-                    ui::group(ui, "Construction goals");
-                    ui::layer_height_goal(ui, &mut d.value, self.prefs.theme.tokens());
-                    for (label, value) in [
-                        ("Bead width (mm)", &mut d.value.recipe.bead_width_mm),
-
-                        ("Top skin (mm)", &mut d.value.recipe.top_skin_thickness_mm),
-                        (
-                            "Bottom skin (mm)",
-                            &mut d.value.recipe.bottom_skin_thickness_mm,
-                        ),
-                        ("Travel speed (mm/s)", &mut d.value.recipe.travel_speed_mm_s),
-                    ] {
-                        ui::number(ui, label, value, 0.01);
-                    }
-                    ui::percent(ui, "Infill (%)", &mut d.value.recipe.infill_fraction);
-                    ui.add_enabled_ui(d.value.material_profile.is_none(), |ui| {
-                        ui::number(ui, "Print speed (mm/s)", &mut d.value.recipe.print_speed_mm_s, 0.1);
-                        ui::number(ui, "Flow multiplier", &mut d.value.recipe.flow_multiplier, 0.01);
+                        settings_fields(ui, &mut d.value, self.prefs.theme.tokens());
                     });
-                    if d.value.material_profile.is_some() {
-                        ui.weak("Speed, flow and process overrides: Material section");
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label("Perimeters");
-                        ui.add(
-                            egui::DragValue::new(&mut d.value.recipe.perimeter_count).range(1..=8),
-                        );
-                    });
-                    super::policies::fields(ui, &mut d.value);
-                });
                     ui.collapsing("Complete declaration", |ui| {
                         ui.label(serde_json::to_string_pretty(&source).unwrap_or_default());
                     });
@@ -459,9 +459,8 @@ impl Workbench {
                     self.queued_host = Some(Command::CancelReview);
                 }
             }
-            if self.manufacturing_current()
-                && let Some(review) = &m.review
-            {
+            self.manufacturing_options(ui);
+            if let Some(review) = self.selected_manufacturing_review() {
                 if self.manufacturing.pending_loaded(m.loaded.as_deref())
                     || self
                         .manufacturing
@@ -547,7 +546,7 @@ impl Workbench {
                     }
                 }
 
-                super::review::details(ui, review);
+                super::review::details(ui, &review);
                 ui.collapsing("Coverage", |ui| {
                     for row in &report.coverage {
                         ui.label(row);
@@ -613,10 +612,7 @@ impl Workbench {
         }
     }
     pub(super) fn replay_controls(&mut self, ui: &mut egui::Ui) {
-        if !self.manufacturing_current() {
-            return;
-        }
-        let Some(review) = self.state.manufacturing.review.clone() else {
+        let Some(review) = self.selected_manufacturing_review() else {
             return;
         };
         let Some(descriptor) = &review.capture.replay else {
@@ -810,6 +806,64 @@ impl Workbench {
             event_controls(ui, view, &review, descriptor);
         });
     }
+}
+
+pub(super) fn settings_fields(
+    ui: &mut egui::Ui,
+    intent: &mut ManufacturingIntent,
+    tokens: ui::Tokens,
+) {
+    super::policies::seam_fields(ui, intent);
+    ui::group(ui, "Geometry");
+    ui::number(
+        ui,
+        "Shape approximation limit (mm)",
+        &mut intent.recipe.native_shape_error_mm,
+        0.001,
+    );
+    ui::help(
+        ui,
+        "shape-approximation",
+        "Geometry approximation",
+        "The geometry approximation bound protects source material and holes. It does not specify physical print accuracy.",
+    );
+    ui.separator();
+    ui::group(ui, "Construction goals");
+    ui::layer_height_goal(ui, intent, tokens);
+    for (label, value) in [
+        ("Bead width (mm)", &mut intent.recipe.bead_width_mm),
+        ("Top skin (mm)", &mut intent.recipe.top_skin_thickness_mm),
+        (
+            "Bottom skin (mm)",
+            &mut intent.recipe.bottom_skin_thickness_mm,
+        ),
+        ("Travel speed (mm/s)", &mut intent.recipe.travel_speed_mm_s),
+    ] {
+        ui::number(ui, label, value, 0.01);
+    }
+    ui::percent(ui, "Infill (%)", &mut intent.recipe.infill_fraction);
+    ui.add_enabled_ui(intent.material_profile.is_none(), |ui| {
+        ui::number(
+            ui,
+            "Print speed (mm/s)",
+            &mut intent.recipe.print_speed_mm_s,
+            0.1,
+        );
+        ui::number(
+            ui,
+            "Flow multiplier",
+            &mut intent.recipe.flow_multiplier,
+            0.01,
+        );
+    });
+    if intent.material_profile.is_some() {
+        ui.weak("Speed, flow and process overrides: Material section");
+    }
+    ui.horizontal(|ui| {
+        ui.label("Perimeters");
+        ui.add(egui::DragValue::new(&mut intent.recipe.perimeter_count).range(1..=8));
+    });
+    super::policies::fields(ui, intent);
 }
 
 fn event_controls(

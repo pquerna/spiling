@@ -374,6 +374,7 @@ fn load_assets(
             .map(|record| (record.occurrence_id, record.clone()))
             .collect(),
         manufacturing_intent: manifest.manufacturing_intent.clone(),
+        manufacturing_options: Arc::new(manifest.manufacturing_options.clone()),
         hardware: manifest.hardware.clone(),
         surface_overlays: Arc::new(manifest.surface_overlays.clone()),
         process_document: Arc::new(manifest.process_document.clone()),

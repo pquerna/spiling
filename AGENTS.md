@@ -122,6 +122,7 @@ Keep backend, packager, connector interfaces, and verifier as distinct logical m
 - No kernel object or pointer crosses IPC. Session handles expire on engine restart; persistent references identify immutable assets and revisions.
 - Persistence uses a `.spil` PTAC SQLite container with a strict typed root, exact-byte immutable objects, current/previous saved snapshots and an independent allocator guard. Core validates domain closure; core-ptac owns guarded SQLite/OS admission and atomic publication. No legacy project-storage compatibility is supported.
 - Undo/redo is bounded session transaction history; save does not clear it. Camera and playback state are outside project undo. A drag commits once on release.
+- Manufacturing alternatives evaluate detached captured inputs without changing Current. Named options are bounded, immutable, context-bound project content, not branches or saved-root versions; adoption is explicit and ordinary export stays bound to Current. [ADR010](docs/adr/010-manufacturing-alternatives.md) owns the workflow boundary.
 - Recovery yields a complete committed state, never a mixed manifest. Restart never automatically replays printer operations.
 
 ### Pre-release format evolution

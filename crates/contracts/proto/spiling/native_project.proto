@@ -52,6 +52,10 @@ message ProjectRequest {
  string parent = 1;
  oneof command {
   ProjectSetHardwareRequest set_hardware = 22;
+  RetainManufacturingOptionRequest retain_manufacturing_option = 23;
+  ManufacturingOptionRequest remove_manufacturing_option = 24;
+  ManufacturingOptionRequest apply_manufacturing_option = 25;
+  ManufacturingOptionRequest get_manufacturing_option = 26;
   ProjectPutRecipeRequest put_recipe = 17;
   ProjectGetRecipeRequest get_recipe = 18;
   ProjectListRecipesRequest list_recipes = 19;
@@ -81,6 +85,10 @@ message ProjectGetFilamentRequest { uint32 base_revision = 1; LibraryFilamentRef
 message ProjectListFilamentsRequest { uint32 base_revision = 1; uint32 offset = 2; }
 message ProjectFilamentPage { repeated LibraryFilamentSummary entries = 1; uint32 total = 2; optional uint32 next_offset = 3; }
 message GetProjectRequest {}
+message ManufacturingOption { string id = 1; string name = 2; string context_hash = 3; ManufacturingIntent intent = 4; }
+message ManufacturingOptionInfo { string id = 1; string name = 2; string context_hash = 3; }
+message RetainManufacturingOptionRequest { uint32 base_revision = 1; ManufacturingOption option = 2; }
+message ManufacturingOptionRequest { uint32 base_revision = 1; string id = 2; }
 message NewProjectRequest {uint32 base_revision = 1; bool discard_changes = 2;}
 message UndoProjectRequest {uint32 base_revision = 1;}
 message RedoProjectRequest {uint32 base_revision = 1;}
@@ -179,9 +187,9 @@ message ImportSurfaceImageFinishRequest { string parent = 1; string request_id =
 message GetSurfaceImageRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; string image_hash = 4; }
 message SurfaceImageImportedResult { ProjectInfo info = 1; SurfaceImageRecord image = 2; uint32 layer_id = 3; }
 message SurfaceImagePreparedResult { string project_id = 1; uint32 captured_revision = 2; SurfaceImageRecord record = 3; Artifact resource = 4; }
-message ProjectInfo {string project_id = 1; uint32 revision = 2; optional uint32 saved_revision = 3; optional string path_label = 4; bool dirty = 5; bool save_uncertain = 6; bool read_only = 7; bool recovered_previous = 8; bool can_undo = 9; bool can_redo = 10; SurfaceOverlays surface_overlays = 11; ProcessDocument process_document = 12; repeated ResolvedOccurrenceProcess resolved_process = 13; AppearanceStudyInfo appearance_study = 14; MaterialCollectionRecord materials = 15; ProjectHardwareCapture hardware=16;}
+message ProjectInfo {string project_id = 1; uint32 revision = 2; optional uint32 saved_revision = 3; optional string path_label = 4; bool dirty = 5; bool save_uncertain = 6; bool read_only = 7; bool recovered_previous = 8; bool can_undo = 9; bool can_redo = 10; SurfaceOverlays surface_overlays = 11; ProcessDocument process_document = 12; repeated ResolvedOccurrenceProcess resolved_process = 13; AppearanceStudyInfo appearance_study = 14; MaterialCollectionRecord materials = 15; ProjectHardwareCapture hardware=16; repeated ManufacturingOptionInfo manufacturing_options = 17;}
 message ProjectSceneChanged {ProjectInfo info = 1; SceneSummary summary = 2;}
-message ProjectReply {oneof response {ProjectInfo status = 1; ProjectSceneChanged scene_changed = 2; ProjectFilamentPage filaments = 3; LibraryFilamentRevision filament = 4; LibraryRecipeTransfer recipe = 5; ProjectRecipePage recipes = 6;}}
+message ProjectReply {oneof response {ProjectInfo status = 1; ProjectSceneChanged scene_changed = 2; ProjectFilamentPage filaments = 3; LibraryFilamentRevision filament = 4; LibraryRecipeTransfer recipe = 5; ProjectRecipePage recipes = 6; ManufacturingOption manufacturing_option = 7;}}
 message ImportAppearancePaletteRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath source = 4; }
 message CompareAppearanceRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }
 message GetAppearanceReportRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }

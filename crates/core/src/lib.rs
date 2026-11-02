@@ -4,6 +4,8 @@
 
 //! Runtime-independent authoring authority. Native caches are engine-owned.
 mod hardware;
+mod manufacturing_options;
+pub use manufacturing_options::{context_hash, trial_snapshot};
 pub mod materials;
 mod optical_construction;
 mod process;
@@ -223,6 +225,7 @@ pub struct Snapshot {
     pub sources: BTreeMap<DefinitionId, Arc<SourceAsset>>,
     pub occurrences: BTreeMap<OccurrenceId, OccurrenceRecord>,
     pub manufacturing_intent: Option<Arc<ManufacturingIntent>>,
+    pub manufacturing_options: Arc<Vec<ManufacturingOption>>,
     pub manufacturing_artifact: Option<Arc<ManufacturingAsset>>,
     pub surface_overlays: Arc<SurfaceOverlays>,
     pub process_document: Arc<ProcessDocument>,
@@ -298,6 +301,15 @@ pub enum Edit {
     SetManufacturingIntent {
         intent: Arc<ManufacturingIntent>,
     },
+    RetainManufacturingOption {
+        option: ManufacturingOption,
+    },
+    RemoveManufacturingOption {
+        id: SourceHash,
+    },
+    ApplyManufacturingOption {
+        id: SourceHash,
+    },
     PublishManufacturing {
         asset: Arc<ManufacturingAsset>,
     },
@@ -354,6 +366,7 @@ struct Content {
     definitions: BTreeMap<DefinitionId, StoredDefinition>,
     occurrences: BTreeMap<OccurrenceId, OccurrenceRecord>,
     manufacturing_intent: Option<Arc<ManufacturingIntent>>,
+    manufacturing_options: Arc<Vec<ManufacturingOption>>,
     manufacturing_artifact: Option<ManufacturingArtifactRecord>,
     surface_overlays: Arc<SurfaceOverlays>,
     process_document: Arc<ProcessDocument>,
@@ -367,6 +380,7 @@ impl Content {
             && self.materials.as_ref() == snapshot.materials.as_ref().map(|a| a.record())
             && self.occurrences == snapshot.occurrences
             && self.manufacturing_intent == snapshot.manufacturing_intent
+            && self.manufacturing_options == snapshot.manufacturing_options
             && self.surface_overlays == snapshot.surface_overlays
             && self.process_document == snapshot.process_document
             && self.appearance_study.palette == snapshot.appearance_study.palette
@@ -406,6 +420,7 @@ impl Content {
                 .map(|r| (r.occurrence_id, r.clone()))
                 .collect(),
             manufacturing_intent: manifest.manufacturing_intent.clone(),
+            manufacturing_options: Arc::new(manifest.manufacturing_options.clone()),
             manufacturing_artifact: manifest.manufacturing_artifact.clone(),
             surface_overlays: Arc::new(manifest.surface_overlays.clone()),
             process_document: Arc::new(manifest.process_document.clone()),
@@ -480,6 +495,7 @@ impl Project {
                 .map(|r| (r.occurrence_id, r.clone()))
                 .collect(),
             manufacturing_intent: loaded.manifest.manufacturing_intent.clone(),
+            manufacturing_options: Arc::new(loaded.manifest.manufacturing_options.clone()),
             manufacturing_artifact: loaded.manufacturing_artifact,
             surface_overlays: Arc::new(loaded.manifest.surface_overlays.clone()),
             process_document: Arc::new(loaded.manifest.process_document.clone()),
@@ -515,6 +531,7 @@ impl Project {
             || self.saved.as_ref().map_or(
                 !self.current.occurrences.is_empty()
                     || self.current.manufacturing_intent.is_some()
+                    || !self.current.manufacturing_options.is_empty()
                     || !self.current.surface_overlays.layers.is_empty()
                     || !self.current.process_document.layers.is_empty()
                     || *self.current.appearance_study != AppearanceStudy::default()
@@ -541,6 +558,12 @@ impl Project {
             appearance_study: self.current.appearance_study.info(),
             materials: self.current.materials.as_ref().map(|a| a.record().clone()),
             hardware: self.current.hardware.clone(),
+            manufacturing_options: self
+                .current
+                .manufacturing_options
+                .iter()
+                .map(ManufacturingOption::info)
+                .collect(),
             resolved_process: self.current.manufacturing_intent.as_ref().map_or_else(
                 Vec::new,
                 |intent| {
@@ -571,6 +594,26 @@ impl Project {
     }
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.current.clone()
+    }
+    pub fn manufacturing_option(
+        &self,
+        base_revision: ProjectRevision,
+        id: &SourceHash,
+    ) -> Result<ManufacturingOption, ProjectError> {
+        if self.revision != base_revision {
+            return Err(error(
+                ProjectErrorCode::StaleRevision,
+                "manufacturing option inspection revision is stale",
+            ));
+        }
+        let option = self
+            .current
+            .manufacturing_options
+            .iter()
+            .find(|option| &option.id == id)
+            .ok_or_else(|| invalid("unknown manufacturing option"))?;
+        option.validate()?;
+        Ok(option.clone())
     }
     pub fn appearance_study(&self) -> &AppearanceStudy {
         &self.current.appearance_study
@@ -780,6 +823,8 @@ impl Project {
                 | Edit::AcceptAppearanceReport { .. }
                 | Edit::SetOpticalStudy { .. }
                 | Edit::AcceptOpticalReport { .. }
+                | Edit::RetainManufacturingOption { .. }
+                | Edit::RemoveManufacturingOption { .. }
         ) {
             snapshot.manufacturing_artifact = None;
         }
@@ -1078,23 +1123,29 @@ impl Project {
                 }
                 snapshot.hardware = capture;
             }
-            Edit::SetManufacturingIntent { mut intent } => {
-                if intent.hardware.is_none()
-                    && let Some(c) = &snapshot.hardware
-                {
-                    let edited = Arc::make_mut(&mut intent);
-                    edited.hardware = Some(c.clone());
-                }
-
-                intent.validate().map_err(|e| {
-                    if e.code == ManufacturingErrorCode::ResourceLimit {
-                        error(ProjectErrorCode::ResourceLimit, e.message)
-                    } else {
-                        invalid(e.message)
-                    }
-                })?;
-                snapshot.hardware = intent.hardware.clone();
-                snapshot.manufacturing_intent = Some(intent);
+            Edit::SetManufacturingIntent { intent } => {
+                manufacturing_options::set_intent(&mut snapshot, intent)?;
+            }
+            Edit::RetainManufacturingOption { option } => {
+                manufacturing_options::retain_option(&mut snapshot, option)?;
+            }
+            Edit::RemoveManufacturingOption { id } => {
+                let options = Arc::make_mut(&mut snapshot.manufacturing_options);
+                let index = options
+                    .iter()
+                    .position(|option| option.id == id)
+                    .ok_or_else(|| invalid("unknown manufacturing option"))?;
+                options.remove(index);
+            }
+            Edit::ApplyManufacturingOption { id } => {
+                let option = snapshot
+                    .manufacturing_options
+                    .iter()
+                    .find(|option| option.id == id)
+                    .ok_or_else(|| invalid("unknown manufacturing option"))?;
+                manufacturing_options::validate_option_context(&snapshot, option)?;
+                let intent = option.intent.clone();
+                manufacturing_options::set_intent(&mut snapshot, intent)?;
             }
             Edit::PublishManufacturing { mut asset } => {
                 let bundle = asset.validate()?;
@@ -1360,6 +1411,7 @@ impl Project {
             .collect();
         candidate.occurrences = snapshot.occurrences.values().cloned().collect();
         candidate.manufacturing_intent = snapshot.manufacturing_intent.clone();
+        candidate.manufacturing_options = snapshot.manufacturing_options.as_ref().clone();
         candidate.manufacturing_artifact = snapshot
             .manufacturing_artifact
             .as_ref()
@@ -1375,6 +1427,41 @@ impl Project {
             .map_err(|_| error(ProjectErrorCode::Io, "appearance staging lock poisoned"))?;
         staged.retain(|state| state.strong_count() != 0);
         let live: Vec<_> = staged.iter().filter_map(Weak::upgrade).collect();
+        if manufacturing_options::retained_bytes(
+            std::iter::once(snapshot.as_ref())
+                .chain(std::iter::once(self.current.as_ref()))
+                .chain(self.undo.iter().map(Arc::as_ref))
+                .chain(self.redo.iter().map(Arc::as_ref))
+                .chain(live.iter().map(Arc::as_ref)),
+            self.saved
+                .as_ref()
+                .map(|(_, content)| &content.manufacturing_options),
+        )? > manufacturing_options::MAX_RETAINED_OPTION_BYTES
+        {
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "retained/staged manufacturing options exceed 16 MiB",
+            ));
+        }
+        if hardware::bytes(
+            std::iter::once(snapshot.as_ref())
+                .chain(std::iter::once(self.current.as_ref()))
+                .chain(self.undo.iter().map(Arc::as_ref))
+                .chain(self.redo.iter().map(Arc::as_ref))
+                .chain(live.iter().map(Arc::as_ref)),
+            self.saved.iter().flat_map(|(_, content)| {
+                content
+                    .manufacturing_options
+                    .iter()
+                    .filter_map(|option| option.intent.hardware.clone())
+            }),
+        )? > hardware::MAX_RETAINED_BYTES
+        {
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "retained/staged option hardware exceeds 2 MiB",
+            ));
+        }
         if materials::retained_bytes(
             std::iter::once(snapshot.as_ref())
                 .chain(std::iter::once(self.current.as_ref()))
@@ -1485,6 +1572,7 @@ impl Project {
                 .collect(),
             occurrences: self.current.occurrences.values().cloned().collect(),
             manufacturing_intent: self.current.manufacturing_intent.clone(),
+            manufacturing_options: self.current.manufacturing_options.as_ref().clone(),
             manufacturing_artifact: self
                 .current
                 .manufacturing_artifact
@@ -1869,6 +1957,14 @@ fn validate_surface_image_budget(snapshot: &Snapshot) -> Result<(), ProjectError
 }
 fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<(), ProjectError> {
     let snapshots: Vec<_> = snapshots.collect();
+    if manufacturing_options::retained_bytes(snapshots.iter().copied(), None)?
+        > manufacturing_options::MAX_RETAINED_OPTION_BYTES
+    {
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "retained manufacturing options exceed 16 MiB",
+        ));
+    }
     if hardware::bytes(snapshots.iter().copied(), std::iter::empty())?
         > hardware::MAX_RETAINED_BYTES
     {

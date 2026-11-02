@@ -58,6 +58,18 @@ impl MaterialUi {
                     != Some(&d.value)
             })
     }
+    pub(super) fn pending_loaded(
+        &self,
+        project: &ProjectId,
+        session: &SessionId,
+        loaded: Option<&crate::manufacture::LoadedMaterial>,
+    ) -> bool {
+        loaded.is_some_and(|loaded| {
+            &loaded.project == project
+                && &loaded.session == session
+                && self.ignored_nonce != Some(loaded.nonce)
+        })
+    }
     fn sync(
         &mut self,
         project: &ProjectId,
@@ -500,6 +512,9 @@ mod tests {
             selection: selected.clone(),
         };
         let mut state = MaterialUi::default();
+        assert!(state.pending_loaded(&project, &session, Some(&loaded)));
+        assert!(!state.pending_loaded(&ProjectId::new(), &session, Some(&loaded)));
+        assert!(!state.pending_loaded(&project, &SessionId::new(), Some(&loaded)));
         state.sync(
             &project,
             &session,
@@ -510,6 +525,7 @@ mod tests {
         assert_eq!(state.draft.as_ref().unwrap().revision, ProjectRevision(2));
         assert_eq!(state.draft.as_ref().unwrap().value, selected);
         state.ignored_nonce = Some(7);
+        assert!(!state.pending_loaded(&project, &session, Some(&loaded)));
         state.draft = None;
         state.sync(
             &project,
