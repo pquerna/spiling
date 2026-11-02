@@ -489,6 +489,14 @@ output. Candidate deviation estimates and generated UV curves are not original
 STEP declarations or manufacturing authority. Unqualified collapsed/singular
 coverage refuses display rather than dropping triangles or publishing an empty mesh.
 
+Trim circuits use a conservative UV box sweep rather than checking every
+boundary pair. Only strict closed-box separation skips the unchanged interval
+joint/crossing predicates; different source loops, touching boxes and degenerate
+bounds retain their checks. The sweep admits coexisting capacity and shares the
+charged, cancellable heapsort with section certification. Failures retain trim
+and circuit phase work deltas so an exhausted allowance can be distinguished
+from avoidable candidate work. Physical error budgets are unchanged.
+
 The independent bridge fixtures use the same exact null-spur normalization as
 production import, then each require a nonempty, all-face, watertight mesh
 (`cargo test --locked -p spiling-geometry native_bridge_mesh`). Native

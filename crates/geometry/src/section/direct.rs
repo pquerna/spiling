@@ -1838,38 +1838,7 @@ fn sort_grid_entries(
     work: &GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
-    fn sift(
-        entries: &mut [(i64, i64, usize)],
-        mut root: usize,
-        end: usize,
-        work: &GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<(), GeometryError> {
-        while root < end / 2 {
-            work.charge(3, cancel)?;
-            let mut child = 2 * root + 1;
-            if child + 1 < end && entries[child] < entries[child + 1] {
-                child += 1;
-            }
-            if entries[root] >= entries[child] {
-                break;
-            }
-            entries.swap(root, child);
-            root = child;
-        }
-        Ok(())
-    }
-    work.charge(1, cancel)?;
-    let count = entries.len();
-    for root in (0..count / 2).rev() {
-        sift(entries, root, count, work, cancel)?;
-    }
-    for end in (1..count).rev() {
-        work.charge(1, cancel)?;
-        entries.swap(0, end);
-        sift(entries, 0, end, work, cancel)?;
-    }
-    Ok(())
+    crate::compute::sort_unstable_by(entries, Ord::cmp, work, cancel)
 }
 
 /// Check one nonadjacent chord pair. Adjacency and exact interval separation

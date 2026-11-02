@@ -8,6 +8,7 @@
 
 mod audit;
 mod singular;
+mod sweep;
 mod trim;
 
 use crate::{GeometryWorkBudget, MeshArtifact, check_cancel, kernel::Definition};

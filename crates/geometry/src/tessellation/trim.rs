@@ -446,15 +446,24 @@ pub(super) fn certify(
             )?);
         }
     }
+    let before = work.consumed();
     circuits(
         mesh,
         &inventory,
         &boundary,
         fu.loopuses.len(),
         sense,
+        outside.saturating_add(requested),
         work,
         cancel,
-    )?;
+    )
+    .map_err(|cause| {
+        work.annotate_error(
+            cause,
+            before,
+            format_args!("display boundary circuits segments={}", boundary.len()),
+        )
+    })?;
     inventory.carrier_error = fan_error;
     Ok((trim_error, inventory))
 }
@@ -828,12 +837,17 @@ fn position_chord_error(
     ))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Circuit ownership, orientation and coexisting proof storage remain independent audit inputs"
+)]
 fn circuits(
     mesh: &FaceMesh,
     inventory: &super::singular::Inventory,
     boundary: &[Boundary],
     loop_count: usize,
     sense: f64,
+    outside: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
@@ -888,19 +902,22 @@ fn circuits(
     if loops.iter().any(|v| !*v) {
         return Err(invalid("native display omitted an original trim loop"));
     }
-    for (i, a) in boundary.iter().enumerate() {
-        let a0 = inventory.uv(mesh, a.a);
-        let a1 = inventory.uv(mesh, a.b);
-        for b in &boundary[i + 1..] {
-            work.charge(1, cancel)?;
+    super::sweep::pairs(
+        boundary.len(),
+        |index| {
+            let edge = boundary[index];
+            [inventory.uv(mesh, edge.a), inventory.uv(mesh, edge.b)]
+        },
+        outside,
+        work,
+        cancel,
+        |left, right| {
+            let a = boundary[left];
+            let b = boundary[right];
+            let a0 = inventory.uv(mesh, a.a);
+            let a1 = inventory.uv(mesh, a.b);
             let b0 = inventory.uv(mesh, b.a);
             let b1 = inventory.uv(mesh, b.b);
-            if (0..2).any(|axis| {
-                a0[axis].max(a1[axis]) < b0[axis].min(b1[axis])
-                    || b0[axis].max(b1[axis]) < a0[axis].min(a1[axis])
-            }) {
-                continue;
-            }
             let shared = a.a == b.a || a.a == b.b || a.b == b.a || a.b == b.b;
             if shared {
                 let (joint, p, q) = if a.a == b.a {
@@ -914,7 +931,7 @@ fn circuits(
                 };
                 let turn = orient(joint, p, q);
                 if turn.lo > 0.0 || turn.hi < 0.0 {
-                    continue;
+                    return Ok(());
                 }
                 let dot = (0..2).fold(Interval::point(0.0), |sum, k| {
                     sum.add(
@@ -924,7 +941,7 @@ fn circuits(
                     )
                 });
                 if dot.hi < 0.0 {
-                    continue;
+                    return Ok(());
                 }
                 return Err(invalid(
                     "native trim circuit has an overlapping or uncertain joint",
@@ -939,14 +956,13 @@ fn circuits(
                 || (e.lo > 0.0 && f.lo > 0.0)
                 || (e.hi < 0.0 && f.hi < 0.0)
             {
-                continue;
+                return Ok(());
             }
             return Err(invalid(
                 "native display trim circuits cross, touch or have uncertain separation",
             ));
-        }
-    }
-    Ok(())
+        },
+    )
 }
 pub(super) fn orient(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> Interval {
     let x = |p: [f64; 2], axis| Interval::point(p[axis]).sub(Interval::point(a[axis]));

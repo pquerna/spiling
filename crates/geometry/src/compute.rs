@@ -44,6 +44,47 @@ pub const MAX_DIRECTIONAL_SCRATCH_BYTES: usize = 256 * 1024 * 1024;
 /// charged separately against the caller's scene budget.
 pub const DISPLAY_PROOF_BYTES: usize = 256 * 1024 * 1024;
 
+pub(crate) fn sort_unstable_by<T>(
+    entries: &mut [T],
+    compare: impl Fn(&T, &T) -> std::cmp::Ordering,
+    work: &crate::GeometryWorkBudget,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(), spiling_contracts::geometry::GeometryError> {
+    fn sift<T>(
+        entries: &mut [T],
+        compare: &impl Fn(&T, &T) -> std::cmp::Ordering,
+        mut root: usize,
+        end: usize,
+        work: &crate::GeometryWorkBudget,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), spiling_contracts::geometry::GeometryError> {
+        while root < end / 2 {
+            work.charge(3, cancel)?;
+            let mut child = 2 * root + 1;
+            if child + 1 < end && compare(&entries[child], &entries[child + 1]).is_lt() {
+                child += 1;
+            }
+            if !compare(&entries[root], &entries[child]).is_lt() {
+                break;
+            }
+            entries.swap(root, child);
+            root = child;
+        }
+        Ok(())
+    }
+    work.charge(1, cancel)?;
+    let count = entries.len();
+    for root in (0..count / 2).rev() {
+        sift(entries, &compare, root, count, work, cancel)?;
+    }
+    for end in (1..count).rev() {
+        work.charge(1, cancel)?;
+        entries.swap(0, end);
+        sift(entries, &compare, 0, end, work, cancel)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

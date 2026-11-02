@@ -71,7 +71,19 @@ pub(super) fn face(
         .face_surface(mesh.face)
         .ok_or_else(|| invalid("native display face has no carrier"))?;
     let sense = outward_sense(definition.brep(), mesh.face)?;
-    let (trim_error, singular) = trim::certify(definition, mesh, edges, sense, base, work, cancel)?;
+    let before = work.consumed();
+    let (trim_error, singular) = trim::certify(definition, mesh, edges, sense, base, work, cancel)
+        .map_err(|cause| {
+            work.annotate_error(
+                cause,
+                before,
+                format_args!(
+                    "display trim audit vertices={} triangles={}",
+                    mesh.positions.len(),
+                    mesh.triangles.len(),
+                ),
+            )
+        })?;
     // The complete native carrier is the union of retained triangle patches
     // and the proved missing chart fans. Direct transport on disjoint patches
     // combines by max, not by adding one patch's error to another's. Original
