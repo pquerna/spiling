@@ -22,6 +22,19 @@ struct MaterialDraft {
     value: MaterialProfileSelection,
 }
 impl MaterialUi {
+    pub(super) fn has_changes(
+        &self,
+        project: &ProjectId,
+        intent: Option<&ManufacturingIntent>,
+    ) -> bool {
+        self.identity.as_ref().is_some_and(|(id, _)| id == project)
+            && self.draft.as_ref().is_some_and(|d| {
+                intent
+                    .and_then(|i| i.material_profile.as_ref())
+                    .map(|p| &p.selection)
+                    != Some(&d.value)
+            })
+    }
     fn sync(
         &mut self,
         project: &ProjectId,
@@ -79,14 +92,14 @@ impl Workbench {
             m.loaded_material.as_deref(),
             captured,
         );
-        ui.heading("Material and setup");
+        ui::group(ui, "Material and setup");
         self.button(ui, Action::LoadMaterialCatalog);
         ui.collapsing("Load a single profile", |ui| {
             self.button(ui, Action::LoadMaterial);
         });
         self.catalog_ui(ui, &project, &hello.session_id, ready);
 
-        let pending_intent = m.loaded.is_some()
+        let pending_intent = self.manufacturing.pending_loaded(m.loaded.as_deref())
             || self
                 .manufacturing
                 .has_intent_draft(&project.project_id, m.intent.as_deref());
@@ -182,7 +195,7 @@ impl Workbench {
             ui.colored_label(self.prefs.theme.tokens().warning, "Project changed while editing this material draft. Reload the captured profile before applying.");
         }
         ui.add_enabled_ui(writable && !conflict, |ui| {
-            ui.weak("Enable an override to replace its profile value. Clear it to inherit again.");
+            ui::help(ui, "profile-overrides", "Profile overrides", "An enabled override replaces the captured profile value. Clear the override to inherit again. Apply commits the complete profile draft.");
             scalar(ui, "Nozzle", "°C", p.nozzle_temperature_c, &mut d.value.overrides.nozzle_temperature_c, 1.0);
             scalar(ui, "Bed", "°C", p.bed_temperature_c, &mut d.value.overrides.bed_temperature_c, 1.0);
             scalar(ui, "Speed", "mm/s", p.print_speed_mm_s, &mut d.value.overrides.print_speed_mm_s, 0.1);
@@ -201,24 +214,25 @@ impl Workbench {
         if let Err(error) = &validity {
             ui.colored_label(self.prefs.theme.tokens().warning, error.to_string());
         }
-        if ui
-            .add_enabled(
-                writable
-                    && !conflict
-                    && validity.is_ok()
-                    && !pending_intent
-                    && captured != Some(&d.value),
-                egui::Button::new("Apply material profile"),
-            )
-            .clicked()
-        {
+        let validation_problem = validity.as_ref().err().map(ToString::to_string);
+        let changed = captured != Some(&d.value);
+        let disabled = if !writable {
+            Some("Project is read-only or an operation is pending")
+        } else if conflict {
+            Some("Reload the captured profile after the project change")
+        } else if pending_intent {
+            Some("Apply or discard the settings draft first")
+        } else {
+            validation_problem.as_deref()
+        };
+        if changed && ui::primary(ui, "Apply profile", disabled) {
             self.queued_manufacturing = Some(ManufacturingCommand::ApplyMaterialProfile {
                 session_id: hello.session_id.clone(),
                 base_revision: d.revision,
                 selection: d.value.clone(),
             });
         }
-        if ui.button("Reload captured profile").clicked() {
+        if ui.button("Discard profile draft").clicked() {
             self.material.ignored_nonce = m.loaded_material.as_ref().map(|l| l.nonce);
             self.material.draft = None;
         }

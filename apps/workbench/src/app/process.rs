@@ -24,6 +24,11 @@ pub(super) struct ProcessUi {
     dirty: bool,
     submitted: Option<u64>,
 }
+impl ProcessUi {
+    pub(super) fn has_changes(&self) -> bool {
+        self.dirty
+    }
+}
 impl Workbench {
     pub(super) fn process_ui(&mut self, ui: &mut egui::Ui, writable: bool) {
         let (Some(project), Some(hello), Some(scene)) = (
@@ -41,14 +46,14 @@ impl Workbench {
             return;
         };
         let p = &mut self.process;
-        ui.heading("Source-bound sparse process");
+        ui::group(ui, "Infill");
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut p.definition, false, "Occurrence");
             ui.selectable_value(&mut p.definition, true, "Shared definition");
         });
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut p.boxed, false, "Whole owned volume");
-            ui.selectable_value(&mut p.boxed, true, "Source-local box");
+            ui.selectable_value(&mut p.boxed, false, "Whole part");
+            ui.selectable_value(&mut p.boxed, true, "Source box");
         });
         let identity = (
             project.project_id.clone(),
@@ -141,7 +146,7 @@ impl Workbench {
         }
         ui.add_enabled_ui(writable && !conflict,|ui|{
             let mut changed=false;
-            changed|=ui.add(egui::DragValue::new(&mut p.fraction).speed(0.01).prefix("Sparse fraction ")).changed();
+            changed |= ui::percent(ui, "Infill (%)", &mut p.fraction).changed();
             if p.boxed{
                 ui.label("Immutable definition-local mm: min inclusive, max exclusive.");
                 for (label,values) in [("Minimum",&mut p.min),("Maximum",&mut p.max)] {ui.label(label);ui.horizontal(|ui|{for (axis,value) in values.iter_mut().enumerate(){changed|=ui.add(egui::DragValue::new(value).speed(0.1).prefix(format!("{} ",["X","Y","Z"][axis]))).changed();}});}
@@ -156,7 +161,8 @@ impl Workbench {
             p.dirty|=changed;
             let edit=if p.boxed{ProcessEdit::SetBoxSparseFraction{scope:scope.clone(),min:p.min,max:p.max,fraction:p.fraction,interface:if !p.permission{None}else if p.plate{Some(ProcessInterfacePermission::HorizontalDiaphragm{thickness_mm:p.thickness})}else{Some(ProcessInterfacePermission::SeparatorWall)}}}else{ProcessEdit::SetSparseFraction{scope:scope.clone(),fraction:p.fraction}};
             let validity=edit.validate();if let Err(error)=&validity{ui.colored_label(self.prefs.theme.tokens().warning,error.to_string());}
-            if ui.add_enabled(validity.is_ok() && p.dirty,egui::Button::new("Apply sparse requirement")).clicked(){p.submitted=Some(self.state.serial);self.queued_project=Some(ProjectCommand::EditProcess{session_id:hello.session_id.clone(),base_revision:p.revision.expect("captured process revision"),edit});}
+            let validation_problem=validity.as_ref().err().map(ToString::to_string);
+            if p.dirty && ui::primary(ui, "Apply infill", validation_problem.as_deref()){p.submitted=Some(self.state.serial);self.queued_project=Some(ProjectCommand::EditProcess{session_id:hello.session_id.clone(),base_revision:p.revision.expect("captured process revision"),edit});}
             if ui.button("Reset this scope to inherit").clicked(){p.submitted=Some(self.state.serial);self.queued_project=Some(ProjectCommand::EditProcess{session_id:hello.session_id.clone(),base_revision:project.revision,edit:ProcessEdit::Reset{scope:scope.clone()}});}
         });
         if let Some(r) = project

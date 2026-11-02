@@ -27,13 +27,19 @@ struct BeadStatistics {
 #[derive(Default)]
 pub(super) struct ManufacturingUi {
     draft: Option<IntentDraft>,
+    ignored_nonce: Option<u64>,
     pub panel: usize,
+    prepare_section: u8,
     pub replay: crate::replay::View,
     pub layers: crate::layers::Browser,
     pub review_nonce: Option<u64>,
     bead_statistics: Option<BeadStatistics>,
 }
 impl ManufacturingUi {
+    pub(super) fn pending_loaded(&self, loaded: Option<&crate::manufacture::LoadedIntent>) -> bool {
+        loaded.is_some_and(|l| self.ignored_nonce != Some(l.nonce))
+    }
+
     pub(super) fn has_intent_draft(
         &self,
         project: &ProjectId,
@@ -74,69 +80,107 @@ impl Workbench {
         let writable = ready && !project.read_only;
         let m = self.state.manufacturing.clone();
         if self.manufacturing.panel == 1 {
-            ui.heading("Prepare");
-            ui.label("Declared printer and process");
-            self.hardware_summary(ui);
-            self.button(ui, Action::LoadIntent);
-            self.button(ui, Action::Library);
-            self.material_ui(ui, ready, writable);
-            ui.separator();
-            ui.heading("Recipe and construction");
-            let (source, nonce) = if let Some(loaded) = &m.loaded {
-                (Some(loaded.intent.clone()), loaded.nonce)
-            } else {
-                (m.intent.clone(), 0)
-            };
-            if let Some(source) = source {
-                let reset = self.manufacturing.draft.as_ref().is_none_or(|d| {
-                    d.project != project.project_id
-                        || d.nonce != nonce
-                        || (d.revision != project.revision
-                            && (d.value == *d.original
-                                || super::policies::prepared(&d.value).is_ok_and(|v| v == *source)))
-                });
-                if reset {
-                    self.manufacturing.draft = Some(IntentDraft {
-                        project: project.project_id.clone(),
-                        revision: project.revision,
-                        nonce,
-                        original: source.clone(),
-                        value: (*source).clone(),
-                    });
-                }
-                let d = self
-                    .manufacturing
-                    .draft
-                    .as_mut()
-                    .expect("initialized intent");
-                let conflict = d.revision != project.revision;
-                if conflict {
-                    ui.colored_label(
-                        self.prefs.theme.tokens().warning,
-                        "Project changed while editing. Reload current values before applying.",
+            ui::pane_header(
+                ui,
+                "Prepare",
+                "Project · committed settings and explicit drafts",
+            );
+            ui.horizontal_wrapped(|ui| {
+                for (index, label) in ["Setup", "Material", "Settings", "Placement", "Infill"]
+                    .iter()
+                    .enumerate()
+                {
+                    ui.selectable_value(
+                        &mut self.manufacturing.prepare_section,
+                        index as u8,
+                        *label,
                     );
                 }
-                if let Some(loaded) = &m.loaded {
-                    ui.weak(format!("Selected: {}", loaded.label));
+            });
+            ui.separator();
+            if project.read_only {
+                ui.label("Read-only project");
+            }
+            let section = self.manufacturing.prepare_section;
+            if section == 0 {
+                ui::group(ui, "Machine and plate");
+                self.hardware_summary(ui);
+                if m.intent.is_none() {
+                    self.primary_button(ui, Action::LoadIntent);
+                } else {
+                    self.button(ui, Action::LoadIntent);
                 }
-                ui.label(format!(
-                    "{} · {}",
-                    d.value.printer.name, d.value.recipe.material_id
-                ));
-                ui.weak(format!(
-                    "Recipe {} / {}",
-                    d.value.recipe.id, d.value.recipe.revision
-                ));
-                ui.add_enabled_ui(writable && !conflict, |ui| {
-                    ui.heading("Protect the part");
+                self.button(ui, Action::Library);
+            }
+            if section == 1 {
+                self.material_ui(ui, ready, writable);
+            }
+            if section == 2 {
+                ui::group(ui, "Construction");
+                let (source, nonce) = if let Some(loaded) = m
+                    .loaded
+                    .as_ref()
+                    .filter(|l| self.manufacturing.ignored_nonce != Some(l.nonce))
+                {
+                    (Some(loaded.intent.clone()), loaded.nonce)
+                } else {
+                    (m.intent.clone(), 0)
+                };
+                if let Some(source) = source {
+                    let reset = self.manufacturing.draft.as_ref().is_none_or(|d| {
+                        d.project != project.project_id
+                            || d.nonce != nonce
+                            || (d.revision != project.revision
+                                && (d.value == *d.original
+                                    || super::policies::prepared(&d.value)
+                                        .is_ok_and(|v| v == *source)))
+                    });
+                    if reset {
+                        self.manufacturing.draft = Some(IntentDraft {
+                            project: project.project_id.clone(),
+                            revision: project.revision,
+                            nonce,
+                            original: source.clone(),
+                            value: (*source).clone(),
+                        });
+                    }
+                    let d = self
+                        .manufacturing
+                        .draft
+                        .as_mut()
+                        .expect("initialized intent");
+                    let conflict = d.revision != project.revision;
+                    if conflict {
+                        ui.colored_label(
+                            self.prefs.theme.tokens().warning,
+                            "Project changed while editing. Reload current values before applying.",
+                        );
+                    }
+                    if let Some(loaded) = m
+                        .loaded
+                        .as_ref()
+                        .filter(|l| self.manufacturing.ignored_nonce != Some(l.nonce))
+                    {
+                        ui.weak(format!("Selected: {}", loaded.label));
+                    }
+                    ui.label(format!(
+                        "{} · {}",
+                        d.value.printer.name, d.value.recipe.material_id
+                    ));
+                    ui.weak(format!(
+                        "Recipe {} / {}",
+                        d.value.recipe.id, d.value.recipe.revision
+                    ));
+                    ui.add_enabled_ui(writable && !conflict, |ui| {
+                    ui::group(ui, "Geometry");
                     ui::number(ui, "Shape approximation limit (mm)", &mut d.value.recipe.native_shape_error_mm, 0.001);
-                    ui.weak("Source material and holes remain protected. This bounds geometry approximation, not physical print accuracy.");
+                    ui::help(ui, "shape-approximation", "Geometry approximation", "The geometry approximation bound protects source material and holes. It does not specify physical print accuracy.");
                     ui.separator();
-                    ui.heading("Construction goals");
+                    ui::group(ui, "Construction goals");
                     ui::layer_height_goal(ui, &mut d.value, self.prefs.theme.tokens());
                     for (label, value) in [
                         ("Bead width (mm)", &mut d.value.recipe.bead_width_mm),
-                        ("Sparse fraction", &mut d.value.recipe.infill_fraction),
+
                         ("Top skin (mm)", &mut d.value.recipe.top_skin_thickness_mm),
                         (
                             "Bottom skin (mm)",
@@ -146,12 +190,13 @@ impl Workbench {
                     ] {
                         ui::number(ui, label, value, 0.01);
                     }
+                    ui::percent(ui, "Infill (%)", &mut d.value.recipe.infill_fraction);
                     ui.add_enabled_ui(d.value.material_profile.is_none(), |ui| {
                         ui::number(ui, "Print speed (mm/s)", &mut d.value.recipe.print_speed_mm_s, 0.1);
                         ui::number(ui, "Flow multiplier", &mut d.value.recipe.flow_multiplier, 0.01);
                     });
                     if d.value.material_profile.is_some() {
-                        ui.weak("Material-bound speed, flow and process are edited as explicit overrides above. Filament diameter belongs to the captured material.");
+                        ui.weak("Speed, flow and process overrides: Material section");
                     }
                     ui.horizontal(|ui| {
                         ui.label("Perimeters");
@@ -164,12 +209,8 @@ impl Workbench {
                     if let Err(error) = &valid {
                         ui.colored_label(self.prefs.theme.tokens().warning, error.to_string());
                     }
-                    if ui
-                        .add_enabled(
-                            valid.as_ref().is_ok_and(|v| m.intent.as_deref() != Some(v)),
-                            egui::Button::new("Apply full intent"),
-                        )
-                        .clicked()
+                    let changed = m.intent.as_deref() != Some(&d.value);
+                    if changed && ui::primary(ui, "Apply settings", valid.as_ref().err().map(String::as_str))
                     {
                         let value = valid.expect("validated complete intent");
                         d.value = value.clone();
@@ -180,88 +221,110 @@ impl Workbench {
                         });
                     }
                 });
-                if ui.button("Reload declared intent").clicked() {
-                    self.manufacturing.draft = None;
+                    if ui.button("Discard settings draft").clicked() {
+                        self.manufacturing.ignored_nonce = m.loaded.as_ref().map(|l| l.nonce);
+                        self.manufacturing.draft = None;
+                    }
+                    ui.collapsing("Complete declaration", |ui| {
+                        ui.label(serde_json::to_string_pretty(&source).unwrap_or_default());
+                    });
+                } else {
+                    ui.weak("Load an explicit inert intent. No printer or material is inferred.");
                 }
-                ui.collapsing("Complete declaration", |ui| {
-                    ui.label(serde_json::to_string_pretty(&source).unwrap_or_default());
-                });
-            } else {
-                ui.weak("Load an explicit inert intent. No printer or material is inferred.");
             }
-            ui.separator();
-            self.process_ui(ui, writable && self.display_current());
-            ui.heading("Native placement");
-            if let Some(scene) = self.state.display.clone()
-                && let Some(o) = scene
-                    .occurrences
-                    .iter()
-                    .find(|o| Some(o.occurrence_id) == self.occurrence)
-            {
-                if let Some(intent) = &m.intent
-                    && ui
-                        .add_enabled(
-                            writable && self.display_current(),
-                            egui::Button::new("Prepare native bed placement"),
-                        )
+            if section == 4 {
+                self.process_ui(ui, writable && self.display_current());
+            }
+            if section == 3 {
+                ui::group(ui, "Placement");
+                if let Some(scene) = self.state.display.clone()
+                    && let Some(o) = scene
+                        .occurrences
+                        .iter()
+                        .find(|o| Some(o.occurrence_id) == self.occurrence)
+                {
+                    if let Some(intent) = &m.intent
+                        && ui
+                            .add_enabled(
+                                writable && self.display_current(),
+                                egui::Button::new("Review bed placement"),
+                            )
+                            .clicked()
+                    {
+                        self.queued_geometry = Some(GeometryCommand::PrepareBedPose {
+                            session_id: hello.session_id.clone(),
+                            base_revision: scene.summary.revision,
+                            project_revision: project.revision,
+                            occurrence_id: o.occurrence_id,
+                            expected_definition_id: o.definition_id.clone(),
+                            expected_pose: o.pose,
+                            envelope_mm: intent.printer.build_envelope,
+                            center_xy: true,
+                            contact_tolerance_mm: SECTION_PLANE_TOLERANCE_MM,
+                        });
+                    }
+                } else {
+                    ui.weak("Select an occurrence in the model tree.");
+                }
+                if let Some(proposal) = &self.state.bed_proposal {
+                    let current = proposal.session_id == hello.session_id
+                        && proposal.project_revision == project.revision
+                        && self
+                            .state
+                            .scene
+                            .as_ref()
+                            .is_some_and(|s| s.revision == proposal.scene_revision);
+                    ui.label(format!(
+                        "Proposed translation: {:.4?} mm",
+                        proposal.pose.translation_mm
+                    ));
+                    ui.label(format!(
+                        "Original support Z: {:.6}…{:.6} mm",
+                        proposal.minimum_lower_mm[2], proposal.minimum_upper_mm[2]
+                    ));
+                    ui.weak(format!(
+                        "Maximum contact gap {:.6} mm; allowed {:.6} mm",
+                        proposal.maximum_contact_gap_mm, proposal.contact_tolerance_mm
+                    ));
+                    ui.collapsing("Native support and envelope evidence", |ui| {
+                        ui.label(format!("{proposal:#?}"));
+                    });
+                    if ui
+                        .add_enabled(writable && current, egui::Button::new("Apply placement"))
                         .clicked()
-                {
-                    self.queued_geometry = Some(GeometryCommand::PrepareBedPose {
-                        session_id: hello.session_id.clone(),
-                        base_revision: scene.summary.revision,
-                        project_revision: project.revision,
-                        occurrence_id: o.occurrence_id,
-                        expected_definition_id: o.definition_id.clone(),
-                        expected_pose: o.pose,
-                        envelope_mm: intent.printer.build_envelope,
-                        center_xy: true,
-                        contact_tolerance_mm: SECTION_PLANE_TOLERANCE_MM,
-                    });
+                    {
+                        self.queued_geometry = Some(GeometryCommand::SetInstancePose {
+                            session_id: proposal.session_id.clone(),
+                            base_revision: proposal.scene_revision,
+                            project_revision: proposal.project_revision,
+                            occurrence_id: proposal.occurrence_id,
+                            pose: proposal.pose,
+                        });
+                    }
+                }
+            }
+            let draft = self
+                .manufacturing
+                .has_intent_draft(&project.project_id, m.intent.as_deref())
+                || self.manufacturing.pending_loaded(m.loaded.as_deref())
+                || self
+                    .material
+                    .has_changes(&project.project_id, m.intent.as_deref())
+                || self.process.has_changes();
+            ui.separator();
+            if draft {
+                ui.label("Unapplied changes · Apply or discard in the owning section");
+            }
+            if !draft && m.intent.is_some() {
+                if self.disabled(Action::Compile).is_none() {
+                    self.primary_button(ui, Action::Compile);
+                } else {
+                    self.primary_button(ui, Action::Preflight);
                 }
             } else {
-                ui.weak("Select an occurrence in the model tree.");
+                self.button(ui, Action::Preflight);
             }
-            if let Some(proposal) = &self.state.bed_proposal {
-                let current = proposal.session_id == hello.session_id
-                    && proposal.project_revision == project.revision
-                    && self
-                        .state
-                        .scene
-                        .as_ref()
-                        .is_some_and(|s| s.revision == proposal.scene_revision);
-                ui.label(format!(
-                    "Proposed translation: {:.4?} mm",
-                    proposal.pose.translation_mm
-                ));
-                ui.label(format!(
-                    "Original support Z: {:.6}…{:.6} mm",
-                    proposal.minimum_lower_mm[2], proposal.minimum_upper_mm[2]
-                ));
-                ui.weak(format!(
-                    "Maximum contact gap {:.6} mm; allowed {:.6} mm",
-                    proposal.maximum_contact_gap_mm, proposal.contact_tolerance_mm
-                ));
-                ui.collapsing("Native support and envelope evidence", |ui| {
-                    ui.label(format!("{proposal:#?}"));
-                });
-                if ui
-                    .add_enabled(
-                        writable && current,
-                        egui::Button::new("Apply reviewed placement"),
-                    )
-                    .clicked()
-                {
-                    self.queued_geometry = Some(GeometryCommand::SetInstancePose {
-                        session_id: proposal.session_id.clone(),
-                        base_revision: proposal.scene_revision,
-                        project_revision: proposal.project_revision,
-                        occurrence_id: proposal.occurrence_id,
-                        pose: proposal.pose,
-                    });
-                }
-            }
-            ui.separator();
-            self.button(ui, Action::Preflight);
+
             if let Some(preflight) = &m.preflight {
                 ui.label(format!(
                     "Preflight: {:?} · revision {}",
@@ -276,12 +339,24 @@ impl Workbench {
                     }
                 });
             }
-            self.button(ui, Action::Compile);
+            if draft {
+                self.button(ui, Action::Compile);
+            }
         } else if self.manufacturing.panel == 2 {
-            ui.heading("Actual program review");
+            ui::pane_header(ui, "Program review", "Current compiled output");
             ui.colored_label(self.prefs.theme.tokens().warning, "NOT MACHINE READY");
-            ui.label("Independent replay is software evidence. Physical printability and machine execution remain unqualified.");
-            self.button(ui, Action::Verify);
+            ui::help(
+                ui,
+                "verification-scope",
+                "Software verification",
+                "Independent replay checks the emitted program. Physical printability, collisions and machine execution remain unqualified.",
+            );
+            if self.manufacturing_current() {
+                self.button(ui, Action::Verify);
+                self.primary_button(ui, Action::Export);
+            } else {
+                self.primary_button(ui, Action::Verify);
+            }
             if m.loading {
                 ui.spinner();
                 ui.label("Retrieving checked actual output…");
@@ -292,7 +367,7 @@ impl Workbench {
             if self.manufacturing_current()
                 && let Some(review) = &m.review
             {
-                if m.loaded.is_some()
+                if self.manufacturing.pending_loaded(m.loaded.as_deref())
                     || self
                         .manufacturing
                         .has_intent_draft(&project.project_id, m.intent.as_deref())
@@ -304,7 +379,7 @@ impl Workbench {
                 }
                 let report = &review.capture.report;
                 ui.label(format!(
-                    "Fresh verification: {}",
+                    "Software verification: {}",
                     if report.verified { "Passed" } else { "Failed" }
                 ));
                 ui.label(format!(
@@ -317,7 +392,7 @@ impl Workbench {
                 ));
                 let goal = &report.layer_height;
                 ui.separator();
-                ui.heading("Construction goals");
+                ui::group(ui, "Construction goals");
                 ui.label(match goal.policy {
                     LayerHeightPolicy::Preferred => "Layer height · preferred target",
                     LayerHeightPolicy::ProtectedMaximum => "Layer height · protected maximum",
@@ -376,7 +451,7 @@ impl Workbench {
                         self.manufacturing.replay.tool = None;
                     }
                 }
-                ui.weak("Geometry, anchors and physical interval boundaries remain checked. This assessment does not predict strength or physical printability.");
+
                 super::review::details(ui, review);
                 ui.collapsing("Coverage", |ui| {
                     for row in &report.coverage {
@@ -391,16 +466,20 @@ impl Workbench {
                 ui.collapsing("Captured inspection identity", |ui| {
                     ui.label(format!("{:#?}", review.capture.provenance));
                 });
-                self.button(ui, Action::Export);
+
                 if let Some(label) = &m.last_export {
-                    ui.label(format!("Written to {label}: plan.json, program.gcode, verification.json, provenance.json"));
+                    ui.label("Export complete");
+                    ui.add(egui::Label::new(label).wrap().selectable(true));
+                    ui.collapsing("Exported files", |ui| {
+                        ui.label("plan.json · program.gcode · verification.json · provenance.json");
+                    });
                 }
                 let plan = &review.bundle.plan;
                 if let Some(index) = self.manufacturing.replay.layer
                     && let Some(layer) = plan.layers.get(index as usize)
                 {
                     ui.separator();
-                    ui.heading(format!("Layer {}", index + 1));
+                    ui::group(ui, format!("Layer {}", index + 1));
                     ui.label(format!(
                         "Layer schedule interval {:.6}…{:.6} mm",
                         layer.lower_z_mm, layer.z_mm

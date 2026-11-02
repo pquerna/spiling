@@ -47,6 +47,8 @@ pub struct Workbench {
     show_license: bool,
     show_gallery: bool,
     show_commands: bool,
+    show_feedback: bool,
+    command_selection: Option<usize>,
     command_query: String,
     command_focus: bool,
     compact_tree: bool,
@@ -111,6 +113,8 @@ impl Workbench {
             show_license: false,
             show_gallery: false,
             show_commands: false,
+            show_feedback: false,
+            command_selection: None,
             command_query: String::new(),
             command_focus: false,
             compact_tree: false,
@@ -164,6 +168,11 @@ impl Workbench {
         if ui::action(ui, action.label(), self.disabled(action)) {
             self.queued = Some(action);
             ui.close_kind(egui::UiKind::Menu);
+        }
+    }
+    fn primary_button(&mut self, ui: &mut egui::Ui, action: Action) {
+        if ui::primary(ui, action.label(), self.disabled(action)) {
+            self.queued = Some(action);
         }
     }
     fn dispatch(&mut self, action: Action, frame: &eframe::Frame, ctx: &egui::Context) {
@@ -324,7 +333,7 @@ impl Workbench {
     }
     fn project(&self, ui: &mut egui::Ui) {
         let tokens = self.prefs.theme.tokens();
-        ui.heading("Project");
+        ui::pane_header(ui, "Project", "Saved state and identity");
         if self.state.phase != Phase::Running {
             ui.colored_label(tokens.warning, "Last observed state · engine disconnected");
         }
@@ -348,37 +357,40 @@ impl Workbench {
             "Committed state"
         };
         ui::property(ui, "State", status, tokens);
-        ui::property(ui, "Project revision", p.revision.0.to_string(), tokens);
-        ui::property(
-            ui,
-            "Saved revision",
-            p.saved_revision
-                .map(|r| r.0.to_string())
-                .unwrap_or_else(|| "Never saved".into()),
-            tokens,
-        );
+        ui.collapsing("Saved revisions", |ui| {
+            ui::property(ui, "Project revision", p.revision.0.to_string(), tokens);
+            ui::property(
+                ui,
+                "Saved revision",
+                p.saved_revision
+                    .map(|r| r.0.to_string())
+                    .unwrap_or_else(|| "Never saved".into()),
+                tokens,
+            );
+        });
         if p.recovered_previous {
             ui.colored_label(tokens.warning, "Recovered previous checkpoint");
         }
         if p.save_uncertain {
             ui.colored_label(tokens.warning,"A save may have reached disk. Inspect the saved project before relying on the outcome.");
         }
-        if let Some(scene) = &self.state.scene {
-            ui.separator();
-            ui::property(
-                ui,
-                "Native definitions",
-                scene.definition_count.to_string(),
-                tokens,
-            );
-            ui::property(
-                ui,
-                "Native occurrences",
-                scene.occurrence_count.to_string(),
-                tokens,
-            );
-            ui::property(ui, "Scene revision", scene.revision.0.to_string(), tokens);
-        }
+        ui.collapsing("Scene details", |ui| {
+            if let Some(scene) = &self.state.scene {
+                ui::property(
+                    ui,
+                    "Native definitions",
+                    scene.definition_count.to_string(),
+                    tokens,
+                );
+                ui::property(
+                    ui,
+                    "Native occurrences",
+                    scene.occurrence_count.to_string(),
+                    tokens,
+                );
+                ui::property(ui, "Scene revision", scene.revision.0.to_string(), tokens);
+            }
+        });
         ui.collapsing("Native identity", |ui| {
             ui::property(ui, "Project ID", p.project_id.as_str(), tokens);
             if let Some(hello) = &self.state.hello {
@@ -391,8 +403,16 @@ impl Workbench {
         });
     }
     fn feedback(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui::pane_header(ui, "Activity", "Closing details keeps operations running");
+            if ui::close(ui, "Close details") {
+                self.show_feedback = false;
+            }
+            self.button(ui, Action::Cancel);
+            self.button(ui, Action::Resume);
+        });
         ui.columns(2, |columns| {
-            columns[0].heading("Jobs");
+            ui::group(&mut columns[0], "Jobs");
             if let Some(d) = &self.state.diagnostic {
                 columns[0].label(format!(
                     "Unitless diagnostic · {} · {}/{}",
@@ -423,15 +443,17 @@ impl Workbench {
                         ui.small(format!("{} · {} / {}", job.stage, job.completed, job.total));
                     }
                 });
-            columns[1].heading("Problems");
+            ui::group(&mut columns[1], "Problems");
             egui::ScrollArea::vertical()
                 .id_salt("problems")
                 .show(&mut columns[1], |ui| {
                     if let Some(problem) = &self.local_problem {
-                        ui.colored_label(self.prefs.theme.tokens().warning, problem);
+                        ui::problem(ui, "Workbench action unavailable", problem);
                     }
                     for problem in self.state.problems.iter().rev() {
-                        ui.label(problem);
+                        ui.push_id(problem, |ui| {
+                            ui::problem(ui, "Native operation reported a problem", problem)
+                        });
                     }
                     if self.state.problems.is_empty() && self.local_problem.is_none() {
                         ui.weak("No reported problems");
@@ -614,7 +636,7 @@ impl eframe::App for Workbench {
                 .show(ui, |ui| {
                     ui.label(LICENSE);
                 });
-            if ui.button("Accept OSL-3.0 and continue").clicked() {
+            if ui::primary(ui, "Accept and continue", None) {
                 self.prefs.accepted_osl3 = true;
                 self.start_requested = true;
                 ctx.request_repaint();
@@ -630,7 +652,7 @@ impl eframe::App for Workbench {
                     ui.toggle_value(&mut self.compact_tree, "Models");
                 }
                 if wide {
-                    ui.weak("Native workbench · development");
+                    ui.weak("Development");
                 }
                 ui.menu_button("Project", |ui| {
                     for action in [
@@ -692,7 +714,9 @@ impl eframe::App for Workbench {
                     self.button(ui, Action::License);
                     self.button(ui, Action::Gallery);
                 });
-                ui.separator();
+            });
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
                 for (index, label) in ["Inspect", "Prepare", "Review", "Finish", "Study"]
                     .into_iter()
                     .enumerate()
@@ -708,16 +732,35 @@ impl eframe::App for Workbench {
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(format!("{:?}", self.state.phase));
-                ui.separator();
+                if self
+                    .state
+                    .project
+                    .as_ref()
+                    .is_some_and(|p| p.save_uncertain)
+                {
+                    ui.colored_label(self.prefs.theme.tokens().warning, "Save outcome uncertain");
+                }
+                let problems =
+                    self.state.problems.len() + usize::from(self.local_problem.is_some());
+                ui.toggle_value(
+                    &mut self.show_feedback,
+                    format!(
+                        "Activity · {} jobs · {problems} problems",
+                        self.state.jobs.len()
+                    ),
+                );
                 ui.add(egui::Label::new(&self.state.message).truncate())
                     .on_hover_text(&self.state.message);
             });
         });
-        egui::Panel::bottom("feedback")
-            .resizable(true)
-            .default_size(160.0)
-            .min_size(72.0)
-            .show(ui, |ui| self.feedback(ui));
+        if self.show_feedback {
+            egui::Panel::bottom("feedback")
+                .resizable(true)
+                .default_size(200.0)
+                .min_size(100.0)
+                .max_size((ui.available_height() * 0.5).max(100.0))
+                .show(ui, |ui| self.feedback(ui));
+        }
         if self.analysis.open || !compact || !self.compact_tree {
             egui::Panel::right("project")
                 .resizable(true)
@@ -884,35 +927,74 @@ impl eframe::App for Workbench {
         if self.show_commands {
             let modal = egui::Modal::new(egui::Id::unique("command-palette")).show(&ctx, |ui| {
                 ui.set_width(360.0);
-                ui.heading("Commands");
+                ui.horizontal(|ui| {
+                    ui.heading("Commands");
+                    if ui::close(ui, "Close commands") {
+                        self.show_commands = false;
+                    }
+                });
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.command_query)
-                        .hint_text("Search commands · Enter runs first available")
+                        .hint_text("Search commands")
                         .char_limit(128),
                 );
+                let query = self.command_query.to_lowercase();
+                let actions: Vec<_> = Action::ALL
+                    .iter()
+                    .copied()
+                    .filter(|a| a.label().to_lowercase().contains(&query))
+                    .collect();
+                if self.command_focus || response.changed() {
+                    self.command_selection = actions.iter().position(|a| {
+                        self.disabled(*a).is_none() && !matches!(a, Action::Close | Action::Restart)
+                    });
+                }
                 if self.command_focus {
                     response.request_focus();
                     self.command_focus = false;
                 }
-                let query = self.command_query.to_lowercase();
-                let enter = ui.input(|i| i.key_pressed(Key::Enter));
-                let mut first = true;
+                if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown))
+                    && !actions.is_empty()
+                {
+                    self.command_selection = Some(
+                        self.command_selection
+                            .map_or(0, |n| (n + 1).min(actions.len() - 1)),
+                    );
+                }
+                if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp))
+                    && !actions.is_empty()
+                {
+                    self.command_selection =
+                        Some(self.command_selection.unwrap_or(1).saturating_sub(1));
+                }
+                let enter = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
                 egui::ScrollArea::vertical()
                     .max_height(360.0)
                     .show(ui, |ui| {
-                        for &action in Action::ALL {
-                            if !action.label().to_lowercase().contains(&query) {
-                                continue;
-                            }
+                        for (index, action) in actions.iter().copied().enumerate() {
+                            let selected = self.command_selection == Some(index);
                             let disabled = self.disabled(action);
-                            let run = ui::action(ui, action.label(), disabled);
-                            if disabled.is_none() {
-                                if run || (enter && first) {
-                                    self.queued = Some(action);
-                                    self.show_commands = false;
+                            let response = ui.add_enabled(
+                                disabled.is_none(),
+                                egui::Button::selectable(selected, action.label()),
+                            );
+                            if selected {
+                                if let Some(reason) = disabled {
+                                    ui.label(reason);
                                 }
-                                first = false;
+                                if ui.input(|i| {
+                                    i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::ArrowUp)
+                                }) {
+                                    response.scroll_to_me(None);
+                                }
                             }
+                            if response.clicked() || (enter && selected && disabled.is_none()) {
+                                self.queued = Some(action);
+                                self.show_commands = false;
+                            }
+                        }
+                        if actions.is_empty() {
+                            ui.label("No matching commands");
                         }
                     });
             });
@@ -928,7 +1010,7 @@ impl eframe::App for Workbench {
                 ui.label(format!("{} discards the current in-memory changes. Save first to preserve them.",confirmation.action));
                 if self.state.project.as_ref().is_some_and(|p| p.save_uncertain) { ui.colored_label(self.prefs.theme.tokens().warning,"The last save may already have reached disk. Inspect it before relying on its outcome."); }
                 ui.horizontal(|ui| {
-                    if ui.button("Keep editing").clicked() { self.confirmation = Some((id,false)); }
+                    if ui::primary(ui, "Keep editing", None) { self.confirmation = Some((id,false)); }
                     if ui.button(RichText::new("Discard changes").color(self.prefs.theme.tokens().warning)).clicked() { self.confirmation = Some((id,true)); }
                 });
             });
@@ -940,12 +1022,30 @@ impl eframe::App for Workbench {
             .open(&mut self.show_license)
             .vscroll(true)
             .show(&ctx, |ui| {
+                if ui::close(ui, "Close license") {
+                    ui.close();
+                }
                 ui.label(LICENSE);
+            })
+            .inspect(|r| {
+                if r.response.should_close() {
+                    self.show_license = false;
+                }
             });
         egui::Window::new("Component gallery")
             .open(&mut self.show_gallery)
             .vscroll(true)
-            .show(&ctx, |ui| ui::gallery(ui, &mut self.prefs.theme));
+            .show(&ctx, |ui| {
+                if ui::close(ui, "Close gallery") {
+                    ui.close();
+                }
+                ui::gallery(ui, &mut self.prefs.theme);
+            })
+            .inspect(|r| {
+                if r.response.should_close() {
+                    self.show_gallery = false;
+                }
+            });
         if previous_theme != self.prefs.theme {
             self.prefs.theme.apply(&ctx);
         }

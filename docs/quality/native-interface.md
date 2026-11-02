@@ -53,6 +53,19 @@ Preserve bounds, codes and witnesses instead of truncating the underlying eviden
 Never invent a native cause or remedy. Software verification remains distinct from
 physical qualification; **NOT MACHINE READY** belongs in Review/export context.
 
+Prepare separates setup, material, settings, placement and infill into named tasks.
+Applying a settings draft still commits the complete intent. Infill edits display
+percentages while retaining the engine fraction contract. Check/Compile describe
+committed inputs; unapplied drafts stay labelled. Review promotes Verify program,
+then Export after current passing inspection. Qualification and stale state remain
+visible beside the action.
+
+Activity details are dismissible. Closing the drawer never cancels work; cancellation
+and resumed observation remain separately named actions. The status strip retains
+problem counts and uncertain-save state. Commands show a selected result; Enter
+executes that result. Closing/restarting the application requires deliberate selection
+rather than becoming an incidental search default.
+
 ## Exercising a change
 
 Use the production gallery's complete panel specimen in each theme, including its

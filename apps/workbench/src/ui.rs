@@ -263,6 +263,16 @@ pub fn layer_height_goal(ui: &mut Ui, intent: &mut ManufacturingIntent, tokens: 
     }
 }
 
+/// Keep the contract fraction; use a percentage only as the local editor representation.
+pub fn percent(ui: &mut Ui, label: &str, fraction: &mut f64) -> egui::Response {
+    let mut value = *fraction * 100.0;
+    let response = number(ui, label, &mut value, 1.0);
+    if response.changed() {
+        *fraction = value / 100.0;
+    }
+    response
+}
+
 /// A local draft field; project mutation occurs only on its form's explicit Apply.
 pub fn number(ui: &mut Ui, label: &str, value: &mut f64, speed: f64) -> egui::Response {
     // Draft warnings can insert siblings while the user is typing. DragValue's
@@ -345,7 +355,7 @@ mod tests {
                         if fraction != 0.25 {
                             ui.weak("Apply or reload the full intent draft before applying a material profile.");
                         }
-                        field = Some(number(ui, "Sparse fraction", &mut fraction, 0.01).id);
+                        field = Some(percent(ui, "Infill (%)", &mut fraction).id);
                         number(ui, "Top skin (mm)", &mut skin, 0.01);
                     });
                 },
@@ -368,10 +378,9 @@ mod tests {
                     ..Default::default()
                 },
             },
-            egui::Event::Text("0".into()),
+            egui::Event::Text("3".into()),
         ]);
-        frame(vec![egui::Event::Text(".".into())]);
-        frame(vec![egui::Event::Text("3".into())]);
+        frame(vec![egui::Event::Text("0".into())]);
         assert_eq!(ctx.memory(|memory| memory.focused()), Some(field));
         assert_eq!(fraction, 0.3);
         assert_eq!(

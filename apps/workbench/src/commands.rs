@@ -68,8 +68,8 @@ impl Action {
     ];
     pub fn label(self) -> &'static str {
         match self {
-            Self::Analysis => "Section Analysis…",
-            Self::Library => "Materials and My library…",
+            Self::Analysis => "Section analysis",
+            Self::Library => "Library",
             Self::New => "New project",
             Self::Open => "Open project…",
             Self::OpenReadOnly => "Open read-only…",
@@ -80,10 +80,10 @@ impl Action {
             Self::LoadIntent => "Load intent JSON…",
             Self::LoadMaterial => "Load material profile…",
             Self::LoadMaterialCatalog => "Browse material catalog…",
-            Self::Preflight => "Preflight current inputs",
-            Self::Compile => "Compile current inputs",
-            Self::Verify => "Fresh Verify and load motion",
-            Self::Export => "Export verified output…",
+            Self::Preflight => "Check setup",
+            Self::Compile => "Compile program",
+            Self::Verify => "Verify program",
+            Self::Export => "Export…",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
             Self::Restart => "Restart engine",
