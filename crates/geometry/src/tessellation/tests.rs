@@ -18,6 +18,231 @@ fn fixture(name: &str) -> Definition {
         .unwrap_or_else(|error| panic!("original fixture {}: {error}", path.display()));
     crate::from_step_bytes_with_cancel(&bytes, &AtomicBool::new(false)).unwrap()
 }
+
+#[test]
+fn refinement_is_scoped_to_failing_faces_without_tightening_unrelated_carriers() {
+    let definition = fixture("box-mm.step");
+    let faces = definition.face_ids();
+    let mut options = TessellateOptions::default();
+    let work = GeometryWorkBudget::query();
+    let cancel = AtomicBool::new(false);
+    let mut refinements = FaceRefinements::new(faces.len(), &work, &cancel).unwrap();
+    let global = options.chord_tolerance;
+    refinements.refine(0, &work, &cancel).unwrap();
+    refinements.refine(1, &work, &cancel).unwrap();
+    refinements.refine(0, &work, &cancel).unwrap();
+    refinements
+        .install(&mut options, faces, &work, &cancel)
+        .unwrap();
+    assert_eq!(options.chord_tolerance, global);
+    let override_for = options.face_hook.as_ref().unwrap();
+    assert_eq!(
+        override_for(faces[0]).unwrap().chord_tolerance,
+        Some(MESH_CARRIER_TOLERANCE_MM * 0.25_f64.powi(3))
+    );
+    assert_eq!(
+        override_for(faces[1]).unwrap().chord_tolerance,
+        Some(MESH_CARRIER_TOLERANCE_MM * 0.25_f64.powi(2))
+    );
+    assert!(override_for(faces[2]).is_none());
+}
+
+#[test]
+fn refinement_round_admits_every_failing_face_and_preserves_narrow_refusals() {
+    let definition = fixture("independent-exporters/occt-rounded-housing-mm.step");
+    let faces = definition.face_ids();
+    assert!(faces.len() > 8);
+    let work = GeometryWorkBudget::query();
+    let cancel = AtomicBool::new(false);
+    let mut refinements = FaceRefinements::new(faces.len(), &work, &cancel).unwrap();
+    let mut options = TessellateOptions::default();
+    for ordinal in 0..faces.len() - 1 {
+        refinements.refine(ordinal, &work, &cancel).unwrap();
+    }
+    for round in 0..2 {
+        let bytes = refinements
+            .install(&mut options, faces, &work, &cancel)
+            .unwrap();
+        assert!(bytes > refinements.retained_bytes());
+        let override_for = options.face_hook.as_ref().unwrap();
+        for (ordinal, &face) in faces.iter().enumerate().take(faces.len() - 1) {
+            let power = if ordinal == 0 { round + 2 } else { 2 };
+            assert_eq!(
+                override_for(face).unwrap().chord_tolerance,
+                Some(MESH_CARRIER_TOLERANCE_MM * 0.25_f64.powi(power))
+            );
+        }
+        assert!(override_for(*faces.last().unwrap()).is_none());
+        refinements.refine(0, &work, &cancel).unwrap();
+    }
+    for (count, work, cancel, expected) in [
+        (
+            usize::MAX,
+            GeometryWorkBudget::query(),
+            false,
+            GeometryErrorCode::ResourceLimit,
+        ),
+        (
+            1,
+            GeometryWorkBudget::new(0),
+            false,
+            GeometryErrorCode::ResourceLimit,
+        ),
+        (
+            1,
+            GeometryWorkBudget::query(),
+            true,
+            GeometryErrorCode::Cancelled,
+        ),
+    ] {
+        assert_eq!(
+            FaceRefinements::new(count, &work, &AtomicBool::new(cancel))
+                .err()
+                .unwrap()
+                .code,
+            expected
+        );
+    }
+}
+
+#[test]
+fn refinement_round_batches_audits_and_requires_a_fresh_complete_pass() {
+    let work = GeometryWorkBudget::query();
+    let cancel = AtomicBool::new(false);
+    let mut refinements = FaceRefinements::new(16, &work, &cancel).unwrap();
+    let mut round = RefinementRound::new(0);
+    let mut packed = Vec::new();
+    for ordinal in 0..16 {
+        let result = if ordinal == 1 || ordinal == 12 {
+            Err(shape(format!("independent audit face {ordinal}")))
+        } else {
+            Ok(ordinal)
+        };
+        if let Some(data) = round
+            .audit(result, |_| refinements.refine(ordinal, &work, &cancel))
+            .unwrap()
+        {
+            packed.push(data);
+        }
+    }
+    assert_eq!(packed, [0]);
+    assert_eq!(
+        round.finish().unwrap_err(),
+        shape("independent audit face 1")
+    );
+    assert_eq!(
+        refinements
+            .tolerances
+            .iter()
+            .filter(|value| value.is_some())
+            .count(),
+        2
+    );
+    assert!(refinements.tolerances[1].is_some());
+    assert!(refinements.tolerances[12].is_some());
+    let mut fresh = RefinementRound::new(1);
+    let complete: Vec<_> = (0..16)
+        .map(|ordinal| {
+            fresh
+                .audit(Ok(ordinal), |_| panic!("successful audits never refine"))
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+    fresh.finish().unwrap();
+    assert_eq!(complete, (0..16).collect::<Vec<_>>());
+}
+
+#[test]
+fn refinement_round_preserves_retry_priority_and_terminal_operational_failures() {
+    let first = shape("first independent audit");
+    let mut round = RefinementRound::new(0);
+    round.audit::<()>(Err(first.clone()), |_| Ok(())).unwrap();
+    for code in [
+        GeometryErrorCode::InvalidGeometry,
+        GeometryErrorCode::AnalysisIndeterminate,
+    ] {
+        let later = GeometryError::new(code, "later candidate or audit failure");
+        assert_eq!(round.failure(later.clone()), first);
+        assert_eq!(
+            round
+                .audit::<()>(Err(later.clone()), |_| panic!("not a refinement request"))
+                .unwrap_err(),
+            first
+        );
+        assert_eq!(RefinementRound::new(0).failure(later.clone()), later);
+    }
+    for code in [
+        GeometryErrorCode::ResourceLimit,
+        GeometryErrorCode::Cancelled,
+    ] {
+        let terminal = GeometryError::new(code, "operational failure");
+        assert_eq!(round.failure(terminal.clone()), terminal);
+        assert_eq!(
+            round
+                .audit::<()>(Err(terminal.clone()), |_| panic!(
+                    "not a refinement request"
+                ))
+                .unwrap_err(),
+            terminal
+        );
+    }
+    assert_eq!(
+        RefinementRound::new(8)
+            .audit::<()>(Err(first.clone()), |_| panic!("last round must not retry"))
+            .unwrap_err(),
+        first
+    );
+}
+
+#[test]
+fn refinement_exhaustion_retains_source_attempt_and_original_audit_context() {
+    let definition = fixture("box-mm.step");
+    let work = GeometryWorkBudget::query();
+    let cancel = AtomicBool::new(false);
+    let mut refinements =
+        FaceRefinements::new(definition.face_ids().len(), &work, &cancel).unwrap();
+    refinements.refine(0, &work, &cancel).unwrap();
+    let exhausted = GeometryWorkBudget::new(0);
+    let failure = refinements
+        .install(
+            &mut TessellateOptions::default(),
+            definition.face_ids(),
+            &exhausted,
+            &cancel,
+        )
+        .unwrap_err();
+    let scoped = display_context(
+        failure,
+        &definition,
+        None,
+        1,
+        exhausted.consumed(),
+        Some("original independent audit"),
+    );
+    assert_eq!(scoped.code, GeometryErrorCode::ResourceLimit);
+    assert!(scoped.message.contains(definition.id().as_str()));
+    assert!(scoped.message.contains("attempt=1 work=0"));
+    assert!(
+        scoped
+            .message
+            .contains("first refinement: original independent audit")
+    );
+
+    let mut first_refinement = None;
+    let failure = RefinementRound::new(0)
+        .audit::<()>(Err(shape("original independent audit")), |cause| {
+            first_refinement.get_or_insert_with(|| cause.message.clone());
+            refinements.refine(0, &exhausted, &cancel)
+        })
+        .unwrap_err();
+    assert_eq!(failure.code, GeometryErrorCode::ResourceLimit);
+    assert_eq!(
+        first_refinement.as_deref(),
+        Some("original independent audit")
+    );
+}
+
 fn metadata(mesh: &MeshArtifact) -> Vec<MeshChunkMetadata> {
     let session = SessionId::new();
     let artifact = ArtifactId::new(1).unwrap();

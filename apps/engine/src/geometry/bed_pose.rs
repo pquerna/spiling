@@ -8,9 +8,6 @@ use spiling_contracts::{geometry::*, project::ProjectRevision};
 use spiling_geometry::{BoundsPolicy, Definition, GeometryWorkBudget};
 use std::sync::atomic::AtomicBool;
 
-// One cumulative allowance covers source preparation and all three queries.
-const MAX_CONTACT_WORK: u64 = spiling_geometry::QUERY_WORK_UNITS;
-
 pub(super) struct Request {
     pub session_id: SessionId,
     pub scene_revision: SceneRevision,
@@ -42,7 +39,7 @@ pub(super) fn prepare(
             "invalid native contact request",
         ));
     }
-    let mut work = GeometryWorkBudget::new(MAX_CONTACT_WORK);
+    let mut work = GeometryWorkBudget::query();
     let source = spiling_geometry::prepare_solid(
         definition,
         spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,

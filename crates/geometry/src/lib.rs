@@ -47,9 +47,8 @@ pub use analysis::{
     projected_bounds, projected_protected_void_envelopes,
 };
 pub use compute::{
-    COMPILE_WORK_UNITS, DISPLAY_PROOF_BYTES, MAX_DIRECTIONAL_SCRATCH_BYTES,
-    MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES, MAX_QUERY_PROOF_BYTES,
-    QUERY_WORK_UNITS,
+    DISPLAY_PROOF_BYTES, MAX_DIRECTIONAL_SCRATCH_BYTES, MAX_PREPARED_SECTION_BYTES,
+    MAX_PREPARED_SECTION_SOURCE_BYTES, MAX_QUERY_PROOF_BYTES,
 };
 pub use import::{
     from_step_bytes, from_step_bytes_with_cancel, from_step_bytes_with_limits, from_step_file,

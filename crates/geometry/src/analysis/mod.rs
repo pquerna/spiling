@@ -63,29 +63,38 @@ pub use voids::{
 /// subdividing an interval never resets this counter.
 #[derive(Debug)]
 pub struct GeometryWorkBudget {
-    remaining: AtomicU64,
+    maximum: Option<u64>,
     consumed: AtomicU64,
 }
 impl GeometryWorkBudget {
     pub fn new(maximum_work: u64) -> Self {
         Self {
-            remaining: AtomicU64::new(maximum_work),
+            maximum: Some(maximum_work),
             consumed: AtomicU64::new(0),
         }
     }
-    /// Default allowance for one interactive measurement, section or display query.
-    pub fn query() -> Self {
-        Self::new(crate::QUERY_WORK_UNITS)
+    /// Cancellable accounting without a work-unit capability ceiling. Memory,
+    /// allocation, structural convergence and host supervision remain independent.
+    pub fn monitored() -> Self {
+        Self {
+            maximum: None,
+            consumed: AtomicU64::new(0),
+        }
     }
-    /// Default cumulative allowance for one complete manufacturing compile.
+    /// Default accounting for one interactive measurement, section or display query.
+    pub fn query() -> Self {
+        Self::monitored()
+    }
+    /// Default cumulative accounting for one complete manufacturing compile.
     pub fn compile() -> Self {
-        Self::new(crate::COMPILE_WORK_UNITS)
+        Self::monitored()
     }
     pub fn consumed(&self) -> u64 {
         self.consumed.load(Ordering::Acquire)
     }
     pub fn remaining(&self) -> u64 {
-        self.remaining.load(Ordering::Acquire)
+        self.maximum
+            .map_or(u64::MAX, |maximum| maximum.saturating_sub(self.consumed()))
     }
     /// Add bounded, failure-only phase context without changing the error code or cause.
     pub(crate) fn annotate_error(
@@ -106,26 +115,29 @@ impl GeometryWorkBudget {
         )
     }
     pub fn charge(&self, amount: u64, cancel: &AtomicBool) -> Result<(), GeometryError> {
-        let mut current = self.remaining.load(Ordering::Acquire);
+        let mut current = self.consumed.load(Ordering::Acquire);
         loop {
-            if amount > current {
+            let next = current.saturating_add(amount);
+            if self
+                .maximum
+                .is_some_and(|maximum| amount > maximum.saturating_sub(current))
+            {
                 check_cancel(cancel)?;
                 return Err(GeometryError::new(
                     GeometryErrorCode::ResourceLimit,
                     format!(
-                        "cumulative geometry work exhausted: consumed={} requested={amount} remaining={current}",
-                        self.consumed()
+                        "cumulative geometry work exhausted: consumed={current} requested={amount} remaining={}",
+                        self.maximum.unwrap().saturating_sub(current)
                     ),
                 ));
             }
-            match self.remaining.compare_exchange_weak(
+            match self.consumed.compare_exchange_weak(
                 current,
-                current - amount,
+                next,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    self.consumed.fetch_add(amount, Ordering::AcqRel);
                     // Debit completed native work even when cancellation arrived inside it.
                     return check_cancel(cancel);
                 }
@@ -572,12 +584,54 @@ impl SlabAnalysis {
 mod work_tests {
     use super::*;
     #[test]
+    fn monitored_work_has_no_cap_and_saturates_without_losing_cancellation() {
+        for work in [GeometryWorkBudget::query(), GeometryWorkBudget::compile()] {
+            let cancel = AtomicBool::new(false);
+            for _ in 0..4 {
+                work.charge(8_000_000_000, &cancel).unwrap();
+            }
+            assert_eq!(work.consumed(), 32_000_000_000);
+            assert_eq!(work.remaining(), u64::MAX);
+            work.charge(u64::MAX, &cancel).unwrap();
+            work.charge(10, &cancel).unwrap();
+            assert_eq!(work.consumed(), u64::MAX);
+            assert_eq!(
+                work.charge(1, &AtomicBool::new(true)).unwrap_err().code,
+                GeometryErrorCode::Cancelled
+            );
+        }
+    }
+
+    #[test]
+    fn competing_limited_charges_never_over_admit() {
+        let work = std::sync::Arc::new(GeometryWorkBudget::new(1000));
+        let mut threads = Vec::new();
+        for _ in 0..16 {
+            let work = work.clone();
+            threads.push(std::thread::spawn(move || {
+                let mut admitted = 0;
+                while work.charge(37, &AtomicBool::new(false)).is_ok() {
+                    admitted += 37;
+                }
+                admitted
+            }));
+        }
+        let admitted: u64 = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .sum();
+        assert_eq!(admitted, 999);
+        assert_eq!(work.consumed(), admitted);
+        assert_eq!(work.remaining(), 1);
+    }
+    #[test]
     fn exhaustion_reports_cumulative_work_without_resetting_it() {
-        let work = GeometryWorkBudget::compile();
+        let maximum = 8_000_000_000;
+        let work = GeometryWorkBudget::new(maximum);
         let cancel = AtomicBool::new(false);
         let first_stage = 5_000_000_000;
         work.charge(first_stage, &cancel).unwrap();
-        let remaining = crate::COMPILE_WORK_UNITS - first_stage;
+        let remaining = maximum - first_stage;
         let requested = remaining + 1;
         let failure = work.charge(requested, &cancel).unwrap_err();
         assert_eq!(failure.code, GeometryErrorCode::ResourceLimit);
@@ -590,7 +644,7 @@ mod work_tests {
         assert_eq!(work.consumed(), first_stage);
         assert_eq!(work.remaining(), remaining);
         work.charge(remaining, &cancel).unwrap();
-        assert_eq!(work.consumed(), crate::COMPILE_WORK_UNITS);
+        assert_eq!(work.consumed(), maximum);
         assert_eq!(work.remaining(), 0);
     }
 

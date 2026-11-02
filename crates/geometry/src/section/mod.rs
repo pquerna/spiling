@@ -8,6 +8,7 @@ mod atlas;
 mod continuation;
 mod cuts;
 mod direct;
+mod incidence;
 mod roots;
 #[cfg(test)]
 mod tests;

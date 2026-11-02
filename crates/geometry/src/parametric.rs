@@ -363,9 +363,32 @@ impl<'a> AxisSpans<'a> {
         Self {
             knots: axis.values,
             range,
-            front: axis.degree,
-            back: axis.values.len().saturating_sub(axis.degree + 1),
+            front: axis
+                .values
+                .partition_point(|value| *value < range[0])
+                .saturating_sub(1)
+                .max(axis.degree),
+            back: axis
+                .values
+                .partition_point(|value| *value <= range[1])
+                .min(axis.values.len().saturating_sub(axis.degree + 1)),
             single: axis.values.is_empty(),
+        }
+    }
+    fn restricted(&self, range: [f64; 2]) -> Self {
+        Self {
+            knots: self.knots,
+            range,
+            front: self
+                .knots
+                .partition_point(|value| *value < range[0])
+                .saturating_sub(1)
+                .max(self.front),
+            back: self
+                .knots
+                .partition_point(|value| *value <= range[1])
+                .min(self.back),
+            single: self.single,
         }
     }
     pub(super) fn from_validated_curve(curve: &'a Curve, range: [f64; 2]) -> Self {

@@ -2,16 +2,10 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use super::{check_memory, invalid, resource};
+use super::{invalid, resource};
 use crate::{GeometryWorkBudget, compute};
 use spiling_contracts::geometry::GeometryError;
-use std::{mem::size_of, sync::atomic::AtomicBool};
-
-struct Entry {
-    minimum: [f64; 2],
-    maximum: [f64; 2],
-    index: usize,
-}
+use std::sync::atomic::AtomicBool;
 
 pub(super) fn pairs(
     count: usize,
@@ -19,57 +13,31 @@ pub(super) fn pairs(
     outside: usize,
     work: &GeometryWorkBudget,
     cancel: &AtomicBool,
-    mut visit: impl FnMut(usize, usize) -> Result<(), GeometryError>,
+    visit: impl FnMut(usize, usize) -> Result<(), GeometryError>,
 ) -> Result<(), GeometryError> {
     work.charge(1, cancel)?;
-    let bytes = count
-        .checked_mul(size_of::<Entry>())
-        .and_then(|bytes| outside.checked_add(bytes))
-        .ok_or_else(|| resource("display boundary sweep storage overflow"))?;
-    check_memory(bytes)?;
-    let mut entries = Vec::new();
-    entries
-        .try_reserve_exact(count)
-        .map_err(|_| resource("display boundary sweep allocation failed"))?;
-    check_memory(outside.saturating_add(entries.capacity().saturating_mul(size_of::<Entry>())))?;
-    for index in 0..count {
-        work.charge(1, cancel)?;
-        let points = endpoints(index);
-        if points.into_iter().flatten().any(|value| !value.is_finite()) {
-            return Err(invalid(
-                "display boundary sweep requires finite UV endpoints",
-            ));
-        }
-        entries.push(Entry {
-            minimum: std::array::from_fn(|axis| points[0][axis].min(points[1][axis])),
-            maximum: std::array::from_fn(|axis| points[0][axis].max(points[1][axis])),
-            index,
-        });
-    }
-    compute::sort_unstable_by(
-        &mut entries,
-        |left, right| {
-            left.minimum[0]
-                .total_cmp(&right.minimum[0])
-                .then(left.index.cmp(&right.index))
+    let bytes = super::PROOF_BYTES
+        .checked_sub(outside)
+        .ok_or_else(|| resource("display boundary sweep exceeds live storage allowance"))?;
+    compute::box_pairs(
+        count,
+        |index| {
+            let points = endpoints(index);
+            if points.into_iter().flatten().any(|value| !value.is_finite()) {
+                return Err(invalid(
+                    "display boundary sweep requires finite UV endpoints",
+                ));
+            }
+            Ok((
+                std::array::from_fn(|axis| points[0][axis].min(points[1][axis])),
+                std::array::from_fn(|axis| points[0][axis].max(points[1][axis])),
+            ))
         },
+        bytes,
         work,
         cancel,
-    )?;
-    for (index, left) in entries.iter().enumerate() {
-        work.charge(1, cancel)?;
-        for right in &entries[index + 1..] {
-            work.charge(1, cancel)?;
-            if right.minimum[0] > left.maximum[0] {
-                break;
-            }
-            if left.maximum[1] < right.minimum[1] || right.maximum[1] < left.minimum[1] {
-                continue;
-            }
-            visit(left.index.min(right.index), left.index.max(right.index))?;
-        }
-    }
-    Ok(())
+        visit,
+    )
 }
 
 #[cfg(test)]
@@ -177,5 +145,92 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(failure.code, GeometryErrorCode::ResourceLimit);
+    }
+
+    #[test]
+    fn sweep_prunes_axis_degenerate_and_rotated_boxes() {
+        let count = 32_768;
+        for axis in 0..2 {
+            let work = GeometryWorkBudget::new(10_000_000);
+            pairs(
+                count,
+                |index| {
+                    let mut endpoints = [
+                        [-100_000.0, index as f64 * 4.0],
+                        [100_000.0, index as f64 * 4.0 + 1.0],
+                    ];
+                    if axis == 1 {
+                        for point in &mut endpoints {
+                            point.swap(0, 1);
+                        }
+                    }
+                    endpoints
+                },
+                0,
+                &work,
+                &AtomicBool::new(false),
+                |_, _| panic!("disjoint boxes cannot need exact pair checks"),
+            )
+            .unwrap();
+            assert!(work.consumed() < count as u64 * (count as u64 - 1) / 100);
+            eprintln!(
+                "axis-degenerate boxes={count} axis={axis} work={}",
+                work.consumed()
+            );
+        }
+    }
+
+    #[test]
+    fn sweep_retains_dense_contacts_and_cancellation_during_publication() {
+        for count in [0, 1, 2, 3, 17, 128] {
+            let mut actual = Vec::new();
+            pairs(
+                count,
+                |_| [[-0.0, 0.0], [0.0, 0.0]],
+                0,
+                &GeometryWorkBudget::query(),
+                &AtomicBool::new(false),
+                |left, right| {
+                    actual.push((left, right));
+                    Ok(())
+                },
+            )
+            .unwrap();
+            actual.sort_unstable();
+            let expected: Vec<_> = (0..count)
+                .flat_map(|left| (left + 1..count).map(move |right| (left, right)))
+                .collect();
+            assert_eq!(actual, expected);
+        }
+        let cancel = AtomicBool::new(false);
+        let mut visits = 0;
+        let failure = pairs(
+            128,
+            |_| [[0.0, 0.0]; 2],
+            0,
+            &GeometryWorkBudget::query(),
+            &cancel,
+            |_, _| {
+                visits += 1;
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, GeometryErrorCode::Cancelled);
+        assert_eq!(visits, 1);
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                pairs(
+                    1,
+                    |_| [[invalid, 0.0], [0.0, 0.0]],
+                    0,
+                    &GeometryWorkBudget::query(),
+                    &AtomicBool::new(false),
+                    |_, _| Ok(())
+                )
+                .is_err()
+            );
+        }
     }
 }

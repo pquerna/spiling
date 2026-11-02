@@ -3361,6 +3361,7 @@ fn boundary_loop_confinement(
     tube: &NativeBoundaryTube,
     side: usize,
     interface: f64,
+    scratch: &mut Scratch,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
@@ -3403,33 +3404,75 @@ fn boundary_loop_confinement(
         // neither a full-slab promotion nor authority from a point/polygon.
         return Ok(());
     }
-    for (i, a) in leaf.sample_loops.iter().enumerate() {
-        if a.hole {
-            let mut owners = 0;
-            for b in leaf.sample_loops.iter() {
-                work.charge(1, cancel)?;
-                if !b.hole && shape_kernel_contains(&b.shape, &a.shape, margin)? {
-                    owners += 1;
+    capture_loop_confinement(&leaf.sample_loops, margin, scratch, work, cancel)
+}
+
+fn capture_loop_confinement(
+    captures: &[NativeSourceLoopCapture],
+    margin: f64,
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    let count = captures.len();
+    let mut owners = Vec::new();
+    scratch.reserve(&mut owners, count, work, cancel)?;
+    owners.resize(count, 0_usize);
+    let result = (|| {
+        crate::compute::box_pairs(
+            count,
+            |index| Ok(expanded_shape_bounds(captures[index].shape.bounds, margin)),
+            scratch.remaining(),
+            work,
+            cancel,
+            |first, second| {
+                let first_capture = &captures[first];
+                let second_capture = &captures[second];
+                if first_capture.hole == second_capture.hole {
+                    if !shape_regions_separated(
+                        &first_capture.shape,
+                        &second_capture.shape,
+                        margin,
+                    )? {
+                        return Err(error(
+                            GeometryErrorCode::AnalysisIndeterminate,
+                            "native distinct branch tubes do not exclude material/void braiding",
+                        ));
+                    }
+                } else {
+                    let (outer, inner, index) = if first_capture.hole {
+                        (second_capture, first_capture, first)
+                    } else {
+                        (first_capture, second_capture, second)
+                    };
+                    if shape_kernel_contains(&outer.shape, &inner.shape, margin)? {
+                        owners[index] += 1;
+                    }
                 }
-            }
-            if owners != 1 {
+                Ok(())
+            },
+        )?;
+        for (index, capture) in captures.iter().enumerate() {
+            work.charge(1, cancel)?;
+            if capture.hole && owners[index] != 1 {
                 return Err(error(
                     GeometryErrorCode::AnalysisIndeterminate,
                     "native hole motion is not confined within one original material branch kernel",
                 ));
             }
         }
-        for b in &leaf.sample_loops[i + 1..] {
-            work.charge(1, cancel)?;
-            if a.hole == b.hole && !shape_regions_separated(&a.shape, &b.shape, margin)? {
-                return Err(error(
-                    GeometryErrorCode::AnalysisIndeterminate,
-                    "native distinct branch tubes do not exclude material/void braiding",
-                ));
-            }
-        }
-    }
-    Ok(())
+        Ok(())
+    })();
+    scratch.bytes -= owners.capacity() * size_of::<usize>();
+    result
+}
+
+fn expanded_shape_bounds(bounds: [[f64; 2]; 2], margin: f64) -> ([f64; 2], [f64; 2]) {
+    let margin = Interval::point(margin);
+    (
+        bounds.map(|axis| Interval::point(axis[0]).sub(margin).lo),
+        bounds.map(|axis| Interval::point(axis[1]).add(margin).hi),
+    )
 }
 fn regular_loop_matching(
     before: &NativeSourceLeafReceipt,
@@ -3438,49 +3481,86 @@ fn regular_loop_matching(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<Vec<usize>>, GeometryError> {
-    if before.sample_loops.len() != after.sample_loops.len() {
+    match_loop_captures(
+        &before.sample_loops,
+        &after.sample_loops,
+        scratch,
+        work,
+        cancel,
+    )
+}
+
+fn match_loop_captures(
+    before: &[NativeSourceLoopCapture],
+    after: &[NativeSourceLoopCapture],
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<Vec<usize>>, GeometryError> {
+    work.charge(1, cancel)?;
+    if before.len() != after.len() {
         return Ok(None);
     }
-    let single = before.sample_loops.len() == 1
-        && !before.sample_loops[0].hole
-        && !after.sample_loops[0].hole;
+    let single = before.len() == 1 && !before[0].hole && !after[0].hole;
     let mut matching = Vec::new();
-    scratch.reserve(&mut matching, before.sample_loops.len(), work, cancel)?;
-    for a in before.sample_loops.iter() {
-        let mut found = None;
-        for (j, b) in after.sample_loops.iter().enumerate() {
-            work.charge(1, cancel)?;
-            if a.hole == b.hole
-                && (single
-                    || !a.source_face_ordinals.is_empty()
-                        && a.source_face_ordinals == b.source_face_ordinals)
-            {
-                if found.is_some() {
+    let mut before_order = Vec::new();
+    let mut after_order = Vec::new();
+    scratch.reserve(&mut matching, before.len(), work, cancel)?;
+    scratch.reserve(&mut before_order, before.len(), work, cancel)?;
+    scratch.reserve(&mut after_order, after.len(), work, cancel)?;
+    for index in 0..before.len() {
+        work.charge(1, cancel)?;
+        matching.push(usize::MAX);
+        before_order.push(index);
+        after_order.push(index);
+    }
+    fn key(capture: &NativeSourceLoopCapture) -> (bool, &[usize]) {
+        (capture.hole, &capture.source_face_ordinals)
+    }
+    let result = (|| {
+        for (order, captures) in [(&mut before_order, before), (&mut after_order, after)] {
+            crate::compute::sort_unstable_by(
+                order,
+                |&left, &right| key(&captures[left]).cmp(&key(&captures[right])),
+                work,
+                cancel,
+            )?;
+            for pair in order.windows(2) {
+                work.charge(1, cancel)?;
+                if key(&captures[pair[0]]) == key(&captures[pair[1]]) {
                     return Ok(None);
                 }
-                found = Some(j);
             }
         }
-        let Some(index) = found else {
-            return Ok(None);
-        };
-        for &previous in &matching {
+        for (&before_index, &after_index) in before_order.iter().zip(&after_order) {
             work.charge(1, cancel)?;
-            if previous == index {
+            if !single
+                && (before[before_index].source_face_ordinals.is_empty()
+                    || key(&before[before_index]) != key(&after[after_index]))
+            {
+                return Ok(None);
+            }
+            matching[before_index] = after_index;
+        }
+        for (index, capture) in before.iter().enumerate() {
+            work.charge(1, cancel)?;
+            let parent = match capture.registration.parent {
+                Some(parent) => {
+                    let Some(&mapped) = matching.get(parent) else {
+                        return Ok(None);
+                    };
+                    Some(mapped)
+                }
+                None => None,
+            };
+            if parent != after[matching[index]].registration.parent {
                 return Ok(None);
             }
         }
-        matching.push(index);
-    }
-    for (i, loop_) in before.sample_loops.iter().enumerate() {
-        work.charge(1, cancel)?;
-        if loop_.registration.parent.map(|parent| matching[parent])
-            != after.sample_loops[matching[i]].registration.parent
-        {
-            return Ok(None);
-        }
-    }
-    Ok(Some(matching))
+        Ok(Some(matching))
+    })();
+    scratch.bytes -= (before_order.capacity() + after_order.capacity()) * size_of::<usize>();
+    result
 }
 
 #[expect(
@@ -3524,8 +3604,8 @@ fn certify_regular_material_interface(
         identical &=
             before.sample_loops[i].shape.xy_sha256 == after.sample_loops[j].shape.xy_sha256;
     }
-    boundary_loop_confinement(before, before_tube, 1, interface, work, cancel)?;
-    boundary_loop_confinement(after, after_tube, 0, interface, work, cancel)?;
+    boundary_loop_confinement(before, before_tube, 1, interface, scratch, work, cancel)?;
+    boundary_loop_confinement(after, after_tube, 0, interface, scratch, work, cancel)?;
     // Exact actual geometry identity proves the printed interface, not native
     // incidence: the latter came from original branch flow and confinement.
     if identical {
@@ -3550,41 +3630,88 @@ fn certify_regular_material_interface(
         .add(Interval::point(after.sample_region_error_mm))
         .hi;
     for (i, a) in before.sample_loops.iter().enumerate() {
+        work.charge(1, cancel)?;
         let b = &after.sample_loops[matching[i]];
         if !shape_kernels_overlap(&a.shape, &b.shape, margin)? {
             return Err(unresolved());
         }
-        if a.hole {
-            let mut owners = 0;
-            for (k, outer) in before.sample_loops.iter().enumerate() {
-                work.charge(1, cancel)?;
-                if outer.hole {
-                    continue;
-                }
-                let next = &after.sample_loops[matching[k]];
-                if shape_kernel_contains(&outer.shape, &a.shape, margin)?
-                    && shape_kernel_contains(&outer.shape, &b.shape, margin)?
-                    && shape_kernel_contains(&next.shape, &a.shape, margin)?
-                    && shape_kernel_contains(&next.shape, &b.shape, margin)?
-                {
-                    owners += 1;
-                }
-            }
-            if owners != 1 {
-                return Err(unresolved());
-            }
-        }
-        for (j, other) in after.sample_loops.iter().enumerate() {
-            work.charge(1, cancel)?;
-            if j != matching[i]
-                && a.hole == other.hole
-                && !shape_regions_separated(&a.shape, &other.shape, margin)?
-            {
-                return Err(unresolved());
-            }
-        }
     }
-    Ok(())
+    let mut owners = Vec::new();
+    scratch.reserve(&mut owners, matching.len(), work, cancel)?;
+    owners.resize(matching.len(), 0_usize);
+    let result = (|| {
+        crate::compute::box_pairs(
+            matching.len(),
+            |index| {
+                let before_bounds = before.sample_loops[index].shape.bounds;
+                let after_bounds = after.sample_loops[matching[index]].shape.bounds;
+                Ok(expanded_shape_bounds(
+                    std::array::from_fn(|axis| {
+                        [
+                            before_bounds[axis][0].min(after_bounds[axis][0]),
+                            before_bounds[axis][1].max(after_bounds[axis][1]),
+                        ]
+                    }),
+                    margin,
+                ))
+            },
+            scratch.remaining(),
+            work,
+            cancel,
+            |first, second| {
+                let first_capture = &before.sample_loops[first];
+                let second_capture = &before.sample_loops[second];
+                let next_first = &after.sample_loops[matching[first]];
+                let next_second = &after.sample_loops[matching[second]];
+                if first_capture.hole == second_capture.hole {
+                    if !shape_regions_separated(&first_capture.shape, &next_second.shape, margin)?
+                        || !shape_regions_separated(
+                            &second_capture.shape,
+                            &next_first.shape,
+                            margin,
+                        )?
+                    {
+                        return Err(unresolved());
+                    }
+                } else {
+                    let (outer, next_outer, inner, next_inner, index) = if first_capture.hole {
+                        (
+                            second_capture,
+                            next_second,
+                            first_capture,
+                            next_first,
+                            first,
+                        )
+                    } else {
+                        (
+                            first_capture,
+                            next_first,
+                            second_capture,
+                            next_second,
+                            second,
+                        )
+                    };
+                    if shape_kernel_contains(&outer.shape, &inner.shape, margin)?
+                        && shape_kernel_contains(&outer.shape, &next_inner.shape, margin)?
+                        && shape_kernel_contains(&next_outer.shape, &inner.shape, margin)?
+                        && shape_kernel_contains(&next_outer.shape, &next_inner.shape, margin)?
+                    {
+                        owners[index] += 1;
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        for (index, capture) in before.sample_loops.iter().enumerate() {
+            work.charge(1, cancel)?;
+            if capture.hole && owners[index] != 1 {
+                return Err(unresolved());
+            }
+        }
+        Ok(())
+    })();
+    scratch.bytes -= owners.capacity() * size_of::<usize>();
+    result
 }
 
 /// Ordered, bounded atomic resolver. It retains only source identities, the
@@ -9985,6 +10112,148 @@ mod tests {
         .expect("actual immutable native slab and actual source-M polygon proof")
     }
 
+    fn circle_capture(
+        index: usize,
+        hole: bool,
+        center: [f64; 2],
+        radius: f64,
+    ) -> NativeSourceLoopCapture {
+        NativeSourceLoopCapture {
+            hole,
+            source_face_ordinals: vec![index],
+            port_branches: Vec::new(),
+            port_exclusions: Vec::new(),
+            shape: NativeLoopShape {
+                xy_sha256: [0; 32],
+                bounds: center.map(|value| [value - radius, value + radius]),
+                center,
+                cover_radius_mm: radius,
+                kernel_radius_mm: radius,
+                kernel_box: None,
+            },
+            registration: NativeLoopRegistration {
+                native_index: index,
+                parent: hole.then_some(0),
+            },
+        }
+    }
+
+    #[test]
+    fn indexed_loop_matching_keeps_unique_keys_parents_and_single_outer_exception() {
+        let count = 16_384;
+        let before: Vec<_> = (0..count)
+            .map(|index| circle_capture(index, index > 0, [0.0; 2], 1.0))
+            .collect();
+        let mut after: Vec<_> = (0..count)
+            .rev()
+            .map(|index| {
+                let mut capture = circle_capture(index, index > 0, [0.0; 2], 1.0);
+                capture.registration.parent = (index > 0).then_some(count - 1);
+                capture
+            })
+            .collect();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(10_000_000);
+        let mut scratch = Scratch { bytes: 0 };
+        let matching = match_loop_captures(&before, &after, &mut scratch, &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(matching, (0..count).rev().collect::<Vec<_>>());
+        assert_eq!(scratch.bytes, matching.capacity() * size_of::<usize>());
+        assert!(work.consumed() < (count as u64 * count as u64) / 100);
+        for corrupt in 0..3 {
+            let original = std::mem::take(&mut after[0].source_face_ordinals);
+            after[0].source_face_ordinals = match corrupt {
+                0 => vec![],
+                1 => after[1].source_face_ordinals.clone(),
+                _ => original.clone(),
+            };
+            after[0].registration.parent = if corrupt == 2 { None } else { Some(count - 1) };
+            assert!(
+                match_loop_captures(
+                    &before,
+                    &after,
+                    &mut Scratch { bytes: 0 },
+                    &mut GeometryWorkBudget::query(),
+                    &cancel
+                )
+                .unwrap()
+                .is_none()
+            );
+            after[0].source_face_ordinals = original;
+        }
+        let mut single = circle_capture(0, false, [0.0; 2], 1.0);
+        single.source_face_ordinals.clear();
+        assert_eq!(
+            match_loop_captures(
+                std::slice::from_ref(&single),
+                std::slice::from_ref(&single),
+                &mut Scratch { bytes: 0 },
+                &mut work,
+                &cancel
+            )
+            .unwrap(),
+            Some(vec![0])
+        );
+    }
+
+    #[test]
+    fn confinement_index_matches_all_pairs_and_scales_for_many_holes() {
+        let cancel = AtomicBool::new(false);
+        for count in [128, 16_384] {
+            let mut captures = vec![circle_capture(
+                0,
+                false,
+                [0.0; 2],
+                count as f64 * 4.0 + 10.0,
+            )];
+            captures.extend(
+                (1..count).map(|index| circle_capture(index, true, [index as f64 * 4.0, 0.0], 1.0)),
+            );
+            let mut work = GeometryWorkBudget::new(10_000_000);
+            let mut scratch = Scratch { bytes: 0 };
+            capture_loop_confinement(&captures, 0.1, &mut scratch, &mut work, &cancel).unwrap();
+            assert_eq!(scratch.bytes, 0);
+            if count == 128 {
+                for displacement in [0.0, 1.0, 2.1, 4.0, 1000.0] {
+                    captures[1] = circle_capture(1, true, [8.0 + displacement, 0.0], 1.0);
+                    let mut expected = true;
+                    for (index, capture) in captures.iter().enumerate() {
+                        if capture.hole {
+                            let owners = captures
+                                .iter()
+                                .filter(|outer| {
+                                    !outer.hole
+                                        && shape_kernel_contains(&outer.shape, &capture.shape, 0.1)
+                                            .unwrap()
+                                })
+                                .count();
+                            expected &= owners == 1;
+                        }
+                        for other in &captures[index + 1..] {
+                            if capture.hole == other.hole {
+                                expected &=
+                                    shape_regions_separated(&capture.shape, &other.shape, 0.1)
+                                        .unwrap();
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        capture_loop_confinement(
+                            &captures,
+                            0.1,
+                            &mut scratch,
+                            &mut GeometryWorkBudget::query(),
+                            &cancel
+                        )
+                        .is_ok(),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn same_definition_leaf_with_different_native_allowance_is_not_reusable() {
         let definition = original("box-mm.step");
@@ -12944,8 +13213,26 @@ mod tests {
         assert!(after_leaf.sample_loops.iter().any(|cycle| cycle.hole));
         let before_tube = source_boundary_tube(&before_leaf, &[], &mut work, &cancel).unwrap();
         let after_tube = source_boundary_tube(&after_leaf, &[], &mut work, &cancel).unwrap();
-        boundary_loop_confinement(&before_leaf, &before_tube, 1, cut, &mut work, &cancel).unwrap();
-        boundary_loop_confinement(&after_leaf, &after_tube, 0, cut, &mut work, &cancel).unwrap();
+        boundary_loop_confinement(
+            &before_leaf,
+            &before_tube,
+            1,
+            cut,
+            &mut Scratch { bytes: 0 },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        boundary_loop_confinement(
+            &after_leaf,
+            &after_tube,
+            0,
+            cut,
+            &mut Scratch { bytes: 0 },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let occurrences = [NativeUnionOccurrence {
             occurrence_id: id,
             source: &source,
@@ -13264,15 +13551,32 @@ mod tests {
             stationary: false,
             distance_mm: Some(clearance * 0.25),
         };
-        boundary_loop_confinement(&changed, &moving, 0, cut, &mut work, &cancel).unwrap();
+        boundary_loop_confinement(
+            &changed,
+            &moving,
+            0,
+            cut,
+            &mut Scratch { bytes: 0 },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let unavailable = NativeBoundaryTube {
             distance_mm: None,
             ..moving
         };
         assert_eq!(
-            boundary_loop_confinement(&changed, &unavailable, 0, cut, &mut work, &cancel)
-                .unwrap_err()
-                .code,
+            boundary_loop_confinement(
+                &changed,
+                &unavailable,
+                0,
+                cut,
+                &mut Scratch { bytes: 0 },
+                &mut work,
+                &cancel
+            )
+            .unwrap_err()
+            .code,
             GeometryErrorCode::AnalysisIndeterminate,
         );
         let exhausted = NativeBoundaryTube {
@@ -13280,9 +13584,17 @@ mod tests {
             ..moving
         };
         assert_eq!(
-            boundary_loop_confinement(&changed, &exhausted, 0, cut, &mut work, &cancel)
-                .unwrap_err()
-                .code,
+            boundary_loop_confinement(
+                &changed,
+                &exhausted,
+                0,
+                cut,
+                &mut Scratch { bytes: 0 },
+                &mut work,
+                &cancel
+            )
+            .unwrap_err()
+            .code,
             GeometryErrorCode::AnalysisIndeterminate,
             "nonpositive remaining whole-boundary clearance supplies no confinement",
         );

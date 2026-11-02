@@ -102,7 +102,7 @@ pub(super) fn certify(
         )
         .saturating_add(fu.loopuses.len().saturating_mul(size_of::<bool>()))
         .saturating_add(parametric::curve_prepared::PreparedValidatedCurve::scratch_bytes())
-        .saturating_add(2 * size_of::<PreparedValidatedCurve<'_>>())
+        .saturating_add(4 * size_of::<PreparedValidatedCurve<'_>>())
         .saturating_add(parametric::nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES);
     check_memory(outside.saturating_add(requested))?;
     let mut source = Vec::new();
@@ -162,6 +162,29 @@ pub(super) fn certify(
                 ));
             }
             let uv_curve = eu::uv_trim_curve(brep, edgeuse).map_err(native_error)?.0;
+            let owner_bytes = size_of::<PreparedValidatedCurve<'_>>()
+                .saturating_add(PreparedValidatedCurve::scratch_bytes());
+            let partition = PreparedValidatedCurve::partition(
+                curve,
+                [record.interval.min(), record.interval.max()],
+                1.0,
+                owner_bytes,
+                work,
+                cancel,
+            )?;
+            let uv_partition = uv_curve
+                .map(|curve| {
+                    let domain = curve.natural_interval();
+                    PreparedValidatedCurve::partition(
+                        curve,
+                        [domain.min(), domain.max()],
+                        1.0,
+                        owner_bytes,
+                        work,
+                        cancel,
+                    )
+                })
+                .transpose()?;
             for index in 0..poly.params.len() - 1 {
                 work.charge(1, cancel)?;
                 let range = [poly.params[index], poly.params[index + 1]];
@@ -196,17 +219,10 @@ pub(super) fn certify(
                         "native faceuse contains additional unowned trim intervals",
                     ));
                 }
-                // Retain one immutable coefficient binding for this exact
-                // original interval. Recursive trim leaves reuse its validated
-                // knots, not a frozen jet or a candidate parameter sample.
-                let owner_bytes = size_of::<PreparedValidatedCurve<'_>>()
-                    .saturating_add(PreparedValidatedCurve::scratch_bytes());
-                let prepared =
-                    PreparedValidatedCurve::new(curve, range, 1.0, owner_bytes, work, cancel)?;
-                let prepared_uv = uv_curve
-                    .map(|curve| {
-                        PreparedValidatedCurve::new(curve, uv_range, 1.0, owner_bytes, work, cancel)
-                    })
+                let prepared = partition.prepare(range, work, cancel)?;
+                let prepared_uv = uv_partition
+                    .as_ref()
+                    .map(|partition| partition.prepare(uv_range, work, cancel))
                     .transpose()?;
                 source.push(SourceSegment {
                     key: key(poly.vertices[index], poly.vertices[index + 1]),

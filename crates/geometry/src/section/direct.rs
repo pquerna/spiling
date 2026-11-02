@@ -1548,41 +1548,18 @@ fn assemble(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
-    // The manifold condition is exact degree one in each direction at each
-    // native edge root. Nearby endpoints are never clustered or repaired.
-    for a in arcs.iter() {
-        for endpoint in a
-            .span
-            .as_ref()
-            .ok_or_else(|| indeterminate("native section span was consumed before assembly"))?
-            .endpoints
-        {
-            work.charge(2 * arcs.len() as u64, cancel)?;
-            let incoming = arcs
-                .iter()
-                .filter(|b| {
-                    b.span
-                        .as_ref()
-                        .is_some_and(|span| span.endpoints[1] == endpoint)
-                })
-                .count();
-            let outgoing = arcs
-                .iter()
-                .filter(|b| {
-                    b.span
-                        .as_ref()
-                        .is_some_and(|span| span.endpoints[0] == endpoint)
-                })
-                .count();
-            if incoming != 1 || outgoing != 1 {
-                return Err(indeterminate(
-                    "native section shared-edge root does not have one material-left predecessor/successor",
-                ));
-            }
-        }
-    }
-    while let Some(start) = arcs.iter().position(|a| a.span.is_some()) {
+    let successors = super::incidence::successors(
+        arcs.len(),
+        |index| arcs[index].span.as_ref().map(|span| span.endpoints),
+        admission,
+        work,
+        cancel,
+    )?;
+    for start in 0..arcs.len() {
         work.charge(1, cancel)?;
+        if arcs[start].span.is_none() {
+            continue;
+        }
         let first_key = arcs[start]
             .span
             .as_ref()
@@ -1631,22 +1608,14 @@ fn assemble(
             if next_key == first_key {
                 break;
             }
-            work.charge(arcs.len() as u64, cancel)?;
-            current = arcs
-                .iter()
-                .position(|a| {
-                    a.span
-                        .as_ref()
-                        .is_some_and(|span| span.endpoints[0] == next_key)
-                })
-                .ok_or_else(|| indeterminate("native section incidence is open"))?;
+            current = successors[current];
         }
         if points.len() < 4 || points.last() != Some(&first_point) {
             return Err(indeterminate(
                 "native section polygon is not exactly closed through native endpoint identities",
             ));
         }
-        faces.sort_unstable();
+        crate::compute::sort_unstable_by(&mut faces, usize::cmp, work, cancel)?;
         faces.dedup();
         let area = signed_area(&points, result.frame, work, cancel)?;
         if sign(area) == 0 {
@@ -1676,7 +1645,9 @@ fn assemble(
         admission.push(&mut result.loop_chord_errors_mm, chord_errors)?;
         admission.push(&mut result.loop_chord_tangents, tangents)?;
     }
-    canonicalize_loops(result, work, cancel)?;
+    admission.used -= successors.capacity() * std::mem::size_of::<usize>();
+    drop(successors);
+    canonicalize_loops(result, admission, work, cancel)?;
     certify_polygons(result, admission, work, cancel)
 }
 
@@ -1738,37 +1709,55 @@ fn canonicalize_points(
 }
 fn canonicalize_loops(
     section: &mut NativeSection,
+    admission: &mut Admission,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
-    for i in 1..section.loops.len() {
-        let mut j = i;
-        while j > 0 {
+    let mut order = Vec::new();
+    for (index, boundary) in section.loops.iter().enumerate() {
+        work.charge(1, cancel)?;
+        admission.push(
+            &mut order,
+            (
+                boundary.is_hole,
+                project(boundary.points_mm[0], section.frame).map(Interval::mid),
+                index,
+            ),
+        )?;
+    }
+    crate::compute::sort_unstable_by(
+        &mut order,
+        |left, right| {
+            left.0
+                .cmp(&right.0)
+                .then(left.1[0].total_cmp(&right.1[0]))
+                .then(left.1[1].total_cmp(&right.1[1]))
+                .then(left.2.cmp(&right.2))
+        },
+        work,
+        cancel,
+    )?;
+    for start in 0..order.len() {
+        work.charge(1, cancel)?;
+        let mut current = start;
+        while order[current].2 != start {
             work.charge(1, cancel)?;
-            let a = &section.loops[j];
-            let b = &section.loops[j - 1];
-            let ap = project(a.points_mm[0], section.frame).map(Interval::mid);
-            let bp = project(b.points_mm[0], section.frame).map(Interval::mid);
-            let order = a
-                .is_hole
-                .cmp(&b.is_hole)
-                .then(ap[0].total_cmp(&bp[0]))
-                .then(ap[1].total_cmp(&bp[1]));
-            if !order.is_lt() {
-                break;
-            }
-            section.loops.swap(j, j - 1);
-            section.loop_source_faces.swap(j, j - 1);
-            section.loop_spans.swap(j, j - 1);
+            let next = order[current].2;
+            section.loops.swap(current, next);
+            section.loop_source_faces.swap(current, next);
+            section.loop_spans.swap(current, next);
             if section.is_native_intersection() {
-                section.loop_chord_errors_mm.swap(j, j - 1);
+                section.loop_chord_errors_mm.swap(current, next);
                 if !section.loop_chord_tangents.is_empty() {
-                    section.loop_chord_tangents.swap(j, j - 1);
+                    section.loop_chord_tangents.swap(current, next);
                 }
             }
-            j -= 1;
+            order[current].2 = current;
+            current = next;
         }
+        order[current].2 = current;
     }
+    admission.used -= order.capacity() * size_of::<(bool, [f64; 2], usize)>();
     Ok(())
 }
 fn project(point: [f64; 3], frame: PlaneFrameMm) -> [Interval; 2] {
@@ -1807,7 +1796,6 @@ struct CertifyChord {
     error_mm: f64,
     raw_minimum: [f64; 2],
     raw_maximum: [f64; 2],
-    cells: Option<[[i64; 2]; 2]>,
 }
 
 fn projected_chord_bounds(a: [[Interval; 2]; 2]) -> ([f64; 2], [f64; 2]) {
@@ -1822,25 +1810,6 @@ fn projected_chord_bounds(a: [[Interval; 2]; 2]) -> ([f64; 2], [f64; 2]) {
     (minimum, maximum)
 }
 
-fn cell_range(lo: f64, hi: f64, origin: f64, cell: f64) -> Option<(i64, i64)> {
-    let first = ((lo - origin) / cell).floor();
-    let last = ((hi - origin) / cell).floor();
-    if !first.is_finite() || !last.is_finite() {
-        return None;
-    }
-    let first = first.clamp(-1_000_000.0, 1_000_000.0) as i64;
-    let last = last.clamp(-1_000_000.0, 1_000_000.0) as i64;
-    Some((first.min(last), first.max(last)))
-}
-
-fn sort_grid_entries(
-    entries: &mut [(i64, i64, usize)],
-    work: &GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
-    crate::compute::sort_unstable_by(entries, Ord::cmp, work, cancel)
-}
-
 /// Check one nonadjacent chord pair. Adjacency and exact interval separation
 /// stay identical to the former all-pairs loop; only the broad phase that
 /// selects candidate pairs has changed.
@@ -1849,7 +1818,7 @@ fn certify_chord_pair(
     first: &CertifyChord,
     second: &CertifyChord,
     projection_scale: f64,
-    work: &mut GeometryWorkBudget,
+    work: &GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
     let (left, right) =
@@ -1936,7 +1905,7 @@ fn certify_chord_pair(
 
 /// Certify the actual returned polygons as disjoint simple cycles. No
 /// intersection is repaired and no sampled fill determines hole membership.
-/// A conservative grid selects only chord pairs whose error-expanded boxes can
+/// A closed-box index selects only chord pairs whose error-expanded boxes can
 /// meet; the exact interval predicate still decides every candidate pair.
 fn certify_polygons(
     section: &NativeSection,
@@ -1970,7 +1939,6 @@ fn certify_polygons(
                     error_mm,
                     raw_minimum,
                     raw_maximum,
-                    cells: None,
                 },
             )?;
         }
@@ -1998,111 +1966,57 @@ fn certify_polygons(
         Ok(())
     };
     let mut maximum_error = 0.0_f64;
-    let mut ground_minimum = [f64::INFINITY; 2];
-    let mut ground_maximum = [f64::NEG_INFINITY; 2];
     for chord in &chords {
         work.charge(1, cancel)?;
         maximum_error = maximum_error.max(chord.error_mm);
-        for axis in 0..2 {
-            ground_minimum[axis] = ground_minimum[axis].min(chord.raw_minimum[axis]);
-            ground_maximum[axis] = ground_maximum[axis].max(chord.raw_maximum[axis]);
-        }
     }
     let maximum_margin = Interval::point(maximum_error)
         .add(Interval::point(maximum_error))
         .mul(Interval::point(projection_scale))
         .hi;
-    let extent = (ground_maximum[0] - ground_minimum[0]).max(ground_maximum[1] - ground_minimum[1]);
-    let target_axis = (chords.len() as f64).sqrt().clamp(1.0, 512.0);
-    let cell = extent / target_axis;
-    if !maximum_margin.is_finite()
-        || !ground_minimum.iter().all(|value| value.is_finite())
-        || !ground_maximum.iter().all(|value| value.is_finite())
-        || !extent.is_finite()
-        || extent <= 0.0
-        || !cell.is_finite()
-        || cell <= 0.0
-    {
+    if !maximum_margin.is_finite() {
         return all_pairs(&chords, work, cancel);
     }
     let expansion = Interval::point(maximum_margin);
-    let mut grid = Vec::new();
-    for (index, chord) in chords.iter_mut().enumerate() {
+    let bounds = |index: usize| {
+        let chord = &chords[index];
+        (
+            chord
+                .raw_minimum
+                .map(|value| Interval::point(value).sub(expansion).lo),
+            chord
+                .raw_maximum
+                .map(|value| Interval::point(value).add(expansion).hi),
+        )
+    };
+    for index in 0..chords.len() {
         work.charge(1, cancel)?;
-        let minimum = chord
-            .raw_minimum
-            .map(|value| Interval::point(value).sub(expansion).lo);
-        let maximum = chord
-            .raw_maximum
-            .map(|value| Interval::point(value).add(expansion).hi);
-        let (Some((x0, x1)), Some((y0, y1))) = (
-            cell_range(minimum[0], maximum[0], ground_minimum[0], cell),
-            cell_range(minimum[1], maximum[1], ground_minimum[1], cell),
-        ) else {
-            continue;
-        };
-        if (x1 - x0 + 1).saturating_mul(y1 - y0 + 1) > 4096 {
-            continue;
-        }
-        chord.cells = Some([[x0, x1], [y0, y1]]);
-        for x in x0..=x1 {
-            for y in y0..=y1 {
-                work.charge(1, cancel)?;
-                admission.push(&mut grid, (x, y, index))?;
-            }
+        let (minimum, maximum) = bounds(index);
+        if minimum
+            .into_iter()
+            .chain(maximum)
+            .any(|value| !value.is_finite())
+        {
+            return all_pairs(&chords, work, cancel);
         }
     }
-    sort_grid_entries(&mut grid, work, cancel)?;
-    let mut start = 0;
-    while start < grid.len() {
-        let (x, y, _) = grid[start];
-        let mut end = start + 1;
-        while end < grid.len() && (grid[end].0, grid[end].1) == (x, y) {
-            work.charge(1, cancel)?;
-            end += 1;
-        }
-        for i in start..end {
-            for j in i + 1..end {
-                work.charge(1, cancel)?;
-                let first = &chords[grid[i].2];
-                let second = &chords[grid[j].2];
-                let (Some(first_cells), Some(second_cells)) = (first.cells, second.cells) else {
-                    return Err(indeterminate("native section grid lost its chord cells"));
-                };
-                if (x, y)
-                    != (
-                        first_cells[0][0].max(second_cells[0][0]),
-                        first_cells[1][0].max(second_cells[1][0]),
-                    )
-                {
-                    continue;
-                }
-                certify_chord_pair(section, first, second, projection_scale, work, cancel)?;
-            }
-        }
-        start = end;
-    }
-    for (i, chord) in chords.iter().enumerate() {
-        work.charge(1, cancel)?;
-        if chord.cells.is_some() {
-            continue;
-        }
-        for j in 0..chords.len() {
-            work.charge(1, cancel)?;
-            if i == j || (chords[j].cells.is_none() && j < i) {
-                continue;
-            }
+    crate::compute::box_pairs(
+        chords.len(),
+        |index| Ok(bounds(index)),
+        admission.limit.saturating_sub(admission.used),
+        work,
+        cancel,
+        |first, second| {
             certify_chord_pair(
                 section,
-                &chords[i],
-                &chords[j],
+                &chords[first],
+                &chords[second],
                 projection_scale,
                 work,
                 cancel,
-            )?;
-        }
-    }
-    Ok(())
+            )
+        },
+    )
 }
 
 /// A strictly ordered native chain and its actual polygon cannot cross
@@ -2116,7 +2030,7 @@ fn certify_monotone_chain(
     frame: PlaneFrameMm,
     first: usize,
     last: usize,
-    work: &mut GeometryWorkBudget,
+    work: &GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     let chord = |i: usize| {
@@ -2407,13 +2321,13 @@ pub(crate) fn canonicalize_section_in_place(
             tangents.rotate_left(first);
         }
     }
-    canonicalize_loops(section, work, cancel)?;
     let mut admission = Admission::new(byte_limit as usize)?;
     admission.used = admission
         .used
         .checked_add(section.retained_bytes())
         .filter(|bytes| *bytes <= admission.limit)
         .ok_or_else(|| resource_error("placed section leaves no polygon proof workspace"))?;
+    canonicalize_loops(section, &mut admission, work, cancel)?;
     certify_polygons(section, &mut admission, work, cancel)
 }
 
@@ -2589,6 +2503,48 @@ mod correspondence_tests {
     }
 
     #[test]
+    fn canonical_loop_sort_preserves_every_parallel_owner_and_stable_tie() {
+        let mut section = grid_section();
+        let count = section.loops.len();
+        section.loops[17].points_mm = section.loops[0].points_mm.clone();
+        section.loop_source_faces = (0..count).map(|index| vec![index]).collect();
+        section.loop_spans = (0..count).map(|_| Vec::new()).collect();
+        section.loop_chord_errors_mm = (0..count).map(|index| vec![index as f64; 4]).collect();
+        section.loop_chord_tangents = (0..count)
+            .map(|index| vec![[Interval::point(index as f64); 3]; 4])
+            .collect();
+        let mut expected: Vec<_> = (0..count).collect();
+        expected.sort_by(|&left, &right| {
+            let key = |index: usize| {
+                project(section.loops[index].points_mm[0], section.frame).map(Interval::mid)
+            };
+            let left_key = key(left);
+            let right_key = key(right);
+            left_key[0]
+                .total_cmp(&right_key[0])
+                .then(left_key[1].total_cmp(&right_key[1]))
+        });
+        let mut admission = Admission::new(crate::MAX_PREPARED_SECTION_BYTES).unwrap();
+        let before = admission.used;
+        canonicalize_loops(
+            &mut section,
+            &mut admission,
+            &mut GeometryWorkBudget::query(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(admission.used, before);
+        for (position, original) in expected.into_iter().enumerate() {
+            assert_eq!(section.loop_source_faces[position], [original]);
+            assert_eq!(section.loop_chord_errors_mm[position], [original as f64; 4]);
+            assert_eq!(
+                section.loop_chord_tangents[position][0],
+                [Interval::point(original as f64); 3]
+            );
+        }
+    }
+
+    #[test]
     fn grid_broad_phase_keeps_cross_loop_crossings() {
         let mut section = grid_section();
         let cancel = AtomicBool::new(false);
@@ -2647,13 +2603,14 @@ mod correspondence_tests {
         expected.sort_unstable();
         let mut actual = original.clone();
         let work = GeometryWorkBudget::query();
-        sort_grid_entries(&mut actual, &work, &cancel).unwrap();
+        crate::compute::sort_unstable_by(&mut actual, Ord::cmp, &work, &cancel).unwrap();
         assert_eq!(actual, expected);
         for cancelled in [false, true] {
             let mut actual = original.clone();
             let work = GeometryWorkBudget::new(32);
             cancel.store(cancelled, std::sync::atomic::Ordering::Release);
-            let failure = sort_grid_entries(&mut actual, &work, &cancel).unwrap_err();
+            let failure = crate::compute::sort_unstable_by(&mut actual, Ord::cmp, &work, &cancel)
+                .unwrap_err();
             assert_eq!(
                 failure.code,
                 if cancelled {
@@ -2728,7 +2685,6 @@ mod correspondence_tests {
                         error_mm: section.loop_chord_errors_mm[loop_index][edge_index],
                         raw_minimum,
                         raw_maximum,
-                        cells: None,
                     });
                 }
             }

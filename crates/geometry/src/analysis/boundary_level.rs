@@ -1083,7 +1083,7 @@ mod tests {
             (
                 crate::MAX_PREPARED_SECTION_BYTES,
                 true,
-                crate::QUERY_WORK_UNITS,
+                u64::MAX,
                 GeometryErrorCode::Cancelled,
             ),
             (
@@ -1092,12 +1092,7 @@ mod tests {
                 1,
                 GeometryErrorCode::ResourceLimit,
             ),
-            (
-                1024,
-                false,
-                crate::QUERY_WORK_UNITS,
-                GeometryErrorCode::ResourceLimit,
-            ),
+            (1024, false, u64::MAX, GeometryErrorCode::ResourceLimit),
         ] {
             let error = crate::intersect_native_section(
                 &definition,

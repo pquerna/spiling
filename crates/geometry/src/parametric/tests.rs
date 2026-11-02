@@ -107,6 +107,92 @@ fn rational_line() -> Curve {
 }
 
 #[test]
+fn partition_reuse_keeps_subrange_denominator_and_domain_proofs_independent() {
+    let curve = curve(
+        vec![
+            CPoint::new(0.0, 0.0, 0.0, -1.0),
+            CPoint::new(1.0, 0.0, 0.0, 1.0),
+        ],
+        1,
+        vec![0.0, 0.0, 1.0, 1.0],
+        3,
+    );
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::query();
+    let partition =
+        PreparedValidatedCurve::partition(&curve, [0.0, 1.0], 1.0, usize::MAX, &mut work, &cancel)
+            .unwrap();
+    assert!(
+        PreparedValidatedCurve::new(&curve, [0.0, 1.0], 1.0, usize::MAX, &mut work, &cancel)
+            .is_err()
+    );
+    for range in [[0.0, 0.1], [0.9, 1.0], [1.0, 0.9]] {
+        let restricted = partition.prepare(range, &mut work, &cancel).unwrap();
+        let independent =
+            PreparedValidatedCurve::new(&curve, range, 1.0, usize::MAX, &mut work, &cancel)
+                .unwrap();
+        let first = restricted.jet(range, &mut work, &cancel).unwrap();
+        let second = independent.jet(range, &mut work, &cancel).unwrap();
+        assert_eq!(first.position, second.position);
+        assert_eq!(first.derivative, second.derivative);
+    }
+    for range in [[0.4, 0.6], [-0.1, 0.1], [0.9, 1.1], [0.0, f64::NAN]] {
+        assert!(partition.prepare(range, &mut work, &cancel).is_err());
+    }
+    assert_eq!(
+        partition
+            .prepare([0.0, 0.1], &mut GeometryWorkBudget::new(0), &cancel)
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::ResourceLimit
+    );
+    assert_eq!(
+        partition
+            .prepare([0.0, 0.1], &mut work, &AtomicBool::new(true))
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::Cancelled
+    );
+}
+
+#[test]
+fn restricted_axis_spans_equal_exhaustive_closed_knot_inventory() {
+    let knots = [0.0, 0.0, 0.0, 0.5, 0.5, 1.0, 2.0, 2.0, 2.0];
+    let axis = KnotAxis {
+        values: &knots,
+        degree: 2,
+    };
+    for range in [
+        [0.0, 2.0],
+        [0.5, 0.5],
+        [1.0, 1.0],
+        [0.2, 0.8],
+        [0.0, 0.0],
+        [2.0, 2.0],
+    ] {
+        let expected: Vec<_> = (2..knots.len() - 3)
+            .filter_map(|index| {
+                let (lo, hi) = (knots[index], knots[index + 1]);
+                (lo < hi && lo <= range[1] && hi >= range[0])
+                    .then_some([lo.max(range[0]), hi.min(range[1])])
+            })
+            .collect();
+        assert_eq!(AxisSpans::new(axis, range).collect::<Vec<_>>(), expected);
+        assert_eq!(
+            AxisSpans::new(axis, [0.0, 2.0])
+                .restricted(range)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let reverse: Vec<_> = expected.iter().rev().copied().collect();
+        assert_eq!(
+            AxisSpans::new(axis, range).rev().collect::<Vec<_>>(),
+            reverse
+        );
+    }
+}
+
+#[test]
 fn native_line_support_retains_exact_caps_and_real_one_ulp_protrusions() {
     use solidcore::{curve::line::Line, geom::vector3d::Point3};
     let cancel = AtomicBool::new(false);

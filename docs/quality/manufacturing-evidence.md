@@ -94,11 +94,12 @@ separate from the native verifier and physical qualification.
 - [Manufacture](../../apps/workbench/src/manufacture.rs) retrieves checked bundles and fresh independent motion/report capture. Export rechecks session, observed revision, active record/resource and capture before the shared exclusive output transaction commits. History never restores fresh verification authority.
 - Native panels scroll independently around one [wgpu viewport](../../apps/workbench/src/viewport/). Layout/camera/filter changes do not request or regenerate source geometry/replay.
 
-Native geometry work has one fixed, whole-job cumulative 512-million-unit CPU
-envelope, including native coefficient, correspondence and closed-capture work.
+Native geometry work uses one whole-job cumulative monitored guard, including
+coefficient, correspondence and closed-capture work, without a work-unit ceiling.
+Explicit caller-selected guards retain deterministic cumulative exhaustion.
 Deposited-stroke anchor comparisons retain their cumulative 128-million-unit
 ceiling; planar construction/overlay work uses 16,384,000,000 cumulative units.
-These bound computation, not geometric
+The separate finite stroke/overlay allowances bound those operations, not geometric
 error: no per-source override, retry reset or geometric-accuracy relaxation is
 implied. The 100,000 emitted-segment limit is separate from the 64 MiB
 manufacturing retained-geometry/staging allowance. A coordinate-equivalent

@@ -176,12 +176,14 @@ pub(super) fn tighten_display_affine_tensor(
     validate_knots(uk, p, nu, uv[0], work, cancel)?;
     validate_knots(vk, q, nv, uv[1], work, cancel)?;
     let mut aggregate: Option<[RationalAffineAxis; 2]> = None;
-    for us in p..nu {
+    let u_spans = closed_span_range(uk, p, nu, uv[0], work, cancel)?;
+    let v_spans = closed_span_range(vk, q, nv, uv[1], work, cancel)?;
+    for us in u_spans {
         work.charge(1, cancel)?;
         if uk[us] == uk[us + 1] || uk[us] > uv[0][1] || uk[us + 1] < uv[0][0] {
             continue;
         }
-        for vs in q..nv {
+        for vs in v_spans.clone() {
             work.charge(1, cancel)?;
             if vk[vs] == vk[vs + 1] || vk[vs] > uv[1][1] || vk[vs + 1] < uv[1][0] {
                 continue;
@@ -479,6 +481,21 @@ pub(super) fn evaluate_nurbs_surface_order(
     })
 }
 
+fn closed_span_range(
+    knots: &[f64],
+    degree: usize,
+    count: usize,
+    range: [f64; 2],
+    work: &GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<std::ops::Range<usize>, GeometryError> {
+    work.charge(2 * (knots.len().max(1).ilog2() as u64 + 2), cancel)?;
+    Ok(knots
+        .partition_point(|value| *value < range[0])
+        .saturating_sub(1)
+        .max(degree)..knots.partition_point(|value| *value <= range[1]).min(count))
+}
+
 pub(super) fn evaluate_nurbs_surface_tensor(
     surface: &Surface,
     uv: [[f64; 2]; 2],
@@ -498,16 +515,18 @@ pub(super) fn evaluate_nurbs_surface_tensor(
     let rational = surface.is_rational();
     validate_knots(uk, p, nu, uv[0], work, cancel)?;
     validate_knots(vk, q, nv, uv[1], work, cancel)?;
+    let u_spans = closed_span_range(uk, p, nu, uv[0], work, cancel)?;
+    let v_spans = closed_span_range(vk, q, nv, uv[1], work, cancel)?;
     let mut result: Option<SurfaceTensor> = None;
     let mut derivative_controls = [[[ZERO; 3]; 4]; 4];
-    for us in p..nu {
+    for us in u_spans {
         work.charge(1, cancel)?;
         if uk[us] == uk[us + 1] || uk[us] > uv[0][1] || uk[us + 1] < uv[0][0] {
             continue;
         }
         let ur = [uv[0][0].max(uk[us]), uv[0][1].min(uk[us + 1])];
         let ub = basis_jet(uk, p, us, ur, order, work, cancel)?;
-        for vs in q..nv {
+        for vs in v_spans.clone() {
             work.charge(1, cancel)?;
             if vk[vs] == vk[vs + 1] || vk[vs] > uv[1][1] || vk[vs + 1] < uv[1][0] {
                 continue;
@@ -790,8 +809,10 @@ pub(super) fn evaluate_nurbs_surface_functionals<const N: usize>(
     let nv = surface.m() + 1;
     validate_knots(uk, p, nu, uv[0], work, cancel)?;
     validate_knots(vk, q, nv, uv[1], work, cancel)?;
+    let u_spans = closed_span_range(uk, p, nu, uv[0], work, cancel)?;
+    let v_spans = closed_span_range(vk, q, nv, uv[1], work, cancel)?;
     let mut result: Option<[super::SurfaceFunctionalEnclosure; N]> = None;
-    for us in p..nu {
+    for us in u_spans {
         work.charge(1, cancel)?;
         if uk[us] == uk[us + 1] || uk[us] > uv[0][1] || uk[us + 1] < uv[0][0] {
             continue;
@@ -805,7 +826,7 @@ pub(super) fn evaluate_nurbs_surface_functionals<const N: usize>(
             work,
             cancel,
         )?;
-        for vs in q..nv {
+        for vs in v_spans.clone() {
             work.charge(1, cancel)?;
             if vk[vs] == vk[vs + 1] || vk[vs] > uv[1][1] || vk[vs + 1] < uv[1][0] {
                 continue;

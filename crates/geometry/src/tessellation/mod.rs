@@ -13,7 +13,8 @@ mod trim;
 
 use crate::{GeometryWorkBudget, MeshArtifact, check_cancel, kernel::Definition};
 use solidcore_mesh::{
-    EdgeOptions, OutputOptions, QueryBudget, QueryError, QueryLimit, TessellateOptions, Tolerance,
+    EdgeOptions, FaceOverride, OutputOptions, QueryBudget, QueryError, QueryLimit,
+    TessellateOptions, Tolerance,
 };
 use spiling_contracts::display::{MeshBudget, MeshChunkBuilder};
 use spiling_contracts::geometry::{
@@ -22,6 +23,170 @@ use spiling_contracts::geometry::{
 use std::sync::atomic::AtomicBool;
 
 const PROOF_BYTES: usize = crate::compute::DISPLAY_PROOF_BYTES;
+
+struct RefinementRound {
+    attempt: i32,
+    retry_cause: Option<GeometryError>,
+}
+
+impl RefinementRound {
+    fn new(attempt: i32) -> Self {
+        Self {
+            attempt,
+            retry_cause: None,
+        }
+    }
+
+    fn audit<T>(
+        &mut self,
+        result: Result<T, GeometryError>,
+        refine: impl FnOnce(&GeometryError) -> Result<(), GeometryError>,
+    ) -> Result<Option<T>, GeometryError> {
+        match result {
+            Ok(data) => Ok(self.retry_cause.is_none().then_some(data)),
+            Err(cause)
+                if cause.code == GeometryErrorCode::ShapeErrorExceeded && self.attempt < 8 =>
+            {
+                refine(&cause)?;
+                self.retry_cause.get_or_insert(cause);
+                Ok(None)
+            }
+            Err(cause) => Err(self.failure(cause)),
+        }
+    }
+
+    fn failure(&self, cause: GeometryError) -> GeometryError {
+        if !matches!(
+            cause.code,
+            GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled
+        ) && let Some(previous) = &self.retry_cause
+        {
+            return previous.clone();
+        }
+        cause
+    }
+
+    fn finish(&self) -> Result<(), GeometryError> {
+        match &self.retry_cause {
+            Some(cause) => Err(cause.clone()),
+            None => Ok(()),
+        }
+    }
+}
+
+struct FaceRefinements {
+    tolerances: Vec<Option<f64>>,
+}
+
+impl FaceRefinements {
+    fn new(
+        count: usize,
+        work: &GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        work.charge(1, cancel)?;
+        let expected = count
+            .checked_mul(size_of::<Option<f64>>())
+            .and_then(|bytes| bytes.checked_add(size_of::<Self>()))
+            .ok_or_else(|| resource("native display refinement storage overflow"))?;
+        check_memory(expected)?;
+        let mut tolerances = Vec::new();
+        tolerances
+            .try_reserve_exact(count)
+            .map_err(|_| resource("native display refinement allocation failed"))?;
+        let result = Self { tolerances };
+        check_memory(result.retained_bytes())?;
+        let mut result = result;
+        for _ in 0..count {
+            work.charge(1, cancel)?;
+            result.tolerances.push(None);
+        }
+        Ok(result)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        size_of::<Self>().saturating_add(
+            self.tolerances
+                .capacity()
+                .saturating_mul(size_of::<Option<f64>>()),
+        )
+    }
+
+    fn refine(
+        &mut self,
+        ordinal: usize,
+        work: &GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), GeometryError> {
+        work.charge(1, cancel)?;
+        let tolerance = self
+            .tolerances
+            .get_mut(ordinal)
+            .ok_or_else(|| invalid("native display refinement has a foreign face ordinal"))?;
+        *tolerance = Some(tolerance.unwrap_or(MESH_CARRIER_TOLERANCE_MM * 0.25) * 0.25);
+        Ok(())
+    }
+
+    fn install(
+        &self,
+        options: &mut TessellateOptions,
+        faces: &[solidcore::FaceId],
+        work: &GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<usize, GeometryError> {
+        work.charge(1, cancel)?;
+        if faces.len() != self.tolerances.len() {
+            return Err(invalid("native display refinement face inventory differs"));
+        }
+        options.face_hook = None;
+        let mut count = 0;
+        for tolerance in &self.tolerances {
+            work.charge(1, cancel)?;
+            count += usize::from(tolerance.is_some());
+        }
+        if count == 0 {
+            return Ok(self.retained_bytes());
+        }
+        let outside = self
+            .retained_bytes()
+            .saturating_add(size_of::<Vec<(solidcore::FaceId, f64)>>() + 2 * size_of::<usize>());
+        check_memory(
+            outside.saturating_add(count.saturating_mul(size_of::<(solidcore::FaceId, f64)>())),
+        )?;
+        let mut overrides = Vec::new();
+        overrides
+            .try_reserve_exact(count)
+            .map_err(|_| resource("native display refinement hook allocation failed"))?;
+        let bytes = outside.saturating_add(
+            overrides
+                .capacity()
+                .saturating_mul(size_of::<(solidcore::FaceId, f64)>()),
+        );
+        check_memory(bytes)?;
+        for (&face, &tolerance) in faces.iter().zip(&self.tolerances) {
+            work.charge(1, cancel)?;
+            if let Some(tolerance) = tolerance {
+                overrides.push((face, tolerance));
+            }
+        }
+        crate::compute::sort_unstable_by(
+            &mut overrides,
+            |left, right| left.0.cmp(&right.0),
+            work,
+            cancel,
+        )?;
+        options.face_hook = Some(std::sync::Arc::new(move |face| {
+            overrides
+                .binary_search_by_key(&face, |&(id, _)| id)
+                .ok()
+                .map(|index| FaceOverride {
+                    chord_tolerance: Some(overrides[index].1),
+                    ..FaceOverride::default()
+                })
+        }));
+        Ok(bytes)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayStage {
@@ -96,8 +261,22 @@ pub(crate) fn tessellate_with_work(
         ..TessellateOptions::default()
     };
     let mut first_refinement = None;
+    let mut refinements = FaceRefinements::new(faces.len(), work, cancel)
+        .map_err(|cause| display_context(cause, definition, None, 0, work.consumed(), None))?;
     for attempt in 0..=8 {
-        work.charge(1, cancel)?;
+        let refinement_bytes = work
+            .charge(1, cancel)
+            .and_then(|()| refinements.install(&mut options, faces, work, cancel))
+            .map_err(|cause| {
+                display_context(
+                    cause,
+                    definition,
+                    None,
+                    attempt,
+                    work.consumed(),
+                    first_refinement.as_deref(),
+                )
+            })?;
         let mut phase = DisplayProgress {
             stage: DisplayStage::PreparingEdges,
             attempt: attempt as u32,
@@ -106,7 +285,7 @@ pub(crate) fn tessellate_with_work(
             consumed_work: work.consumed(),
         };
         progress(phase);
-        let edges = candidate_query(0, work, cancel, |native| {
+        let edges = candidate_query(refinement_bytes, work, cancel, |native| {
             solidcore_mesh::tessellate_edge_set_with_budget(&kernel, brep, &options, native)
         })
         .map_err(|cause| {
@@ -126,7 +305,7 @@ pub(crate) fn tessellate_with_work(
                 failure.error
             )));
         }
-        let edge_bytes = edges.retained_bytes();
+        let edge_bytes = edges.retained_bytes().saturating_add(refinement_bytes);
         check_memory(edge_bytes)?;
         let mut builder = MeshChunkBuilder::with_budget(
             definition.id().clone(),
@@ -134,6 +313,7 @@ pub(crate) fn tessellate_with_work(
             profile,
             budget,
         )?;
+        let mut round = RefinementRound::new(attempt);
         let result = (|| {
             for (ordinal, &face) in faces.iter().enumerate() {
                 work.charge(1, cancel)?;
@@ -159,14 +339,14 @@ pub(crate) fn tessellate_with_work(
                     )
                 })
                 .map_err(|cause| {
-                    display_context(
+                    round.failure(display_context(
                         cause,
                         definition,
                         Some(ordinal),
                         attempt,
                         work.consumed(),
                         None,
-                    )
+                    ))
                 })?;
                 check_cancel(cancel)?;
                 if candidate.face != face {
@@ -194,32 +374,50 @@ pub(crate) fn tessellate_with_work(
                         work.consumed(),
                         None,
                     )
+                });
+                let data = round.audit(data, |cause| {
+                    first_refinement.get_or_insert_with(|| cause.message.clone());
+                    refinements.refine(ordinal, work, cancel).map_err(|cause| {
+                        display_context(
+                            cause,
+                            definition,
+                            Some(ordinal),
+                            attempt,
+                            work.consumed(),
+                            None,
+                        )
+                    })
                 })?;
-                builder.push_face(
-                    ordinal as u32,
-                    &data.positions,
-                    &data.normals,
-                    &candidate.triangles,
-                    data.carrier_error,
-                    data.trim_error,
-                )?;
+                if let Some(data) = data {
+                    builder.push_face(
+                        ordinal as u32,
+                        &data.positions,
+                        &data.normals,
+                        &candidate.triangles,
+                        data.carrier_error,
+                        data.trim_error,
+                    )?;
+                }
                 phase.stage = DisplayStage::FaceComplete;
                 phase.completed_faces = ordinal as u32 + 1;
                 phase.consumed_work = work.consumed();
                 progress(phase);
             }
             check_cancel(cancel)?;
+            round.finish()?;
             builder.finish()
         })();
         match result {
-            Err(cause) if cause.code == GeometryErrorCode::ShapeErrorExceeded && attempt < 8 => {
+            Err(cause)
+                if cause.code == GeometryErrorCode::ShapeErrorExceeded
+                    && attempt < 8
+                    && round.retry_cause.is_some() =>
+            {
                 // A completed audit, never sampled mesher statistics, requests
                 // refinement. All attempts share the same cumulative allowance.
                 if first_refinement.is_none() {
                     first_refinement = Some(cause.message);
                 }
-                options.chord_tolerance =
-                    Tolerance::Absolute(MESH_CARRIER_TOLERANCE_MM * 0.25_f64.powi(attempt + 2));
             }
             Err(cause) => {
                 return Err(match first_refinement.as_deref() {

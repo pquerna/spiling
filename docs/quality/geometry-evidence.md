@@ -329,11 +329,11 @@ loop sorting and actual affine pose transport preserve derivative/chord pairing;
 no tiny chord is removed and no distance tolerance supplies ordering.
 Conservative slab envelopes retain their separate uniform polygon certificate.
 Returned section polygons are certified disjoint through a conservative
-outward-error-expanded grid broad phase. Deterministically sorted cell entries
-select each candidate chord pair once for the unchanged whole-interval
-separation/touch proof; wide or unindexable chords retain all-pairs checks.
-Projected chords and cell entries share live admission with source/output
-storage, and projection, insertion, sorting and candidate scans debit the same
+outward-error-expanded closed-box broad phase. Its active Y-interval index
+selects each candidate chord pair once for the unchanged whole-interval
+separation/touch proof; nonfinite expansions retain all-pairs checks.
+Projected chords and index buffers share live admission with source/output
+storage, and projection, insertion, sorting and candidate queries debit the same
 cancellable work guard. The broad phase cannot prune touching error tubes.
 All owned capacities coexist under the native query budget; packed SPLS bytes
 and its existing layout are unchanged. A raw intersection alone is not
@@ -489,10 +489,11 @@ output. Candidate deviation estimates and generated UV curves are not original
 STEP declarations or manufacturing authority. Unqualified collapsed/singular
 coverage refuses display rather than dropping triangles or publishing an empty mesh.
 
-Trim circuits use a conservative UV box sweep rather than checking every
+Trim circuits use the shared closed-box index rather than checking every
 boundary pair. Only strict closed-box separation skips the unchanged interval
 joint/crossing predicates; different source loops, touching boxes and degenerate
-bounds retain their checks. The sweep admits coexisting capacity and shares the
+bounds retain their checks. Overlapping X bounds alone do not require quadratic
+scans: active Y intervals prune strictly separated rows. The index admits coexisting capacity and shares the
 charged, cancellable heapsort with section certification. Failures retain trim
 and circuit phase work deltas so an exhausted allowance can be distinguished
 from avoidable candidate work. Physical error budgets are unchanged.

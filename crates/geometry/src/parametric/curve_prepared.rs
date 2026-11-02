@@ -302,6 +302,42 @@ pub struct PreparedValidatedCurve<'a> {
     /// knot inventory. Coefficients/denominators are still enclosed per query.
     native: Option<(&'a Curve, &'a crv_basic::Curve)>,
 }
+pub(crate) struct PreparedCurvePartition<'a> {
+    binding: PreparedValidatedCurve<'a>,
+}
+
+impl<'a> PreparedCurvePartition<'a> {
+    pub(crate) fn prepare(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<PreparedValidatedCurve<'a>, GeometryError> {
+        work.charge(1, cancel)?;
+        let query = [range[0].min(range[1]), range[0].max(range[1])];
+        Interval::new(range[0], range[0])?;
+        Interval::new(range[1], range[1])?;
+        let own = self.binding.range;
+        if query[0] < own[0].min(own[1]) || query[1] > own[0].max(own[1]) {
+            return Err(conditioning(
+                "curve restriction exceeds immutable partition binding",
+            ));
+        }
+        work.charge(
+            2 * (self.binding.spans.knots.len().max(1).ilog2() as u64 + 2),
+            cancel,
+        )?;
+        let owner = PreparedValidatedCurve {
+            curve: self.binding.curve,
+            range,
+            scale: self.binding.scale,
+            spans: self.binding.spans.restricted(query),
+            native: self.binding.native,
+        };
+        owner.jet(range, work, cancel)?;
+        Ok(owner)
+    }
+}
 impl std::fmt::Debug for PreparedValidatedCurve<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparedValidatedCurve")
@@ -319,6 +355,18 @@ impl<'a> PreparedValidatedCurve<'a> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
+        Self::partition(curve, range, scale, max_retained_bytes, work, cancel)?
+            .prepare(range, work, cancel)
+    }
+
+    pub(crate) fn partition(
+        curve: &'a dyn super::CurveEvaluator,
+        range: [f64; 2],
+        scale: f64,
+        max_retained_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<PreparedCurvePartition<'a>, GeometryError> {
         work.charge(1, cancel)?;
         for value in range {
             Interval::new(value, value)?;
@@ -348,8 +396,7 @@ impl<'a> PreparedValidatedCurve<'a> {
             spans,
             native,
         };
-        owner.jet(range, work, cancel)?;
-        Ok(owner)
+        Ok(PreparedCurvePartition { binding: owner })
     }
     pub const fn scratch_bytes() -> usize {
         16 * (CURVE_EVALUATION_SCRATCH_BYTES + super::nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES)
