@@ -16,6 +16,7 @@ use solidcore::topology::EdgeuseId;
 use solidcore::topology::shell::ShellMembers;
 use solidcore::{Brep, EdgeId, FaceId};
 use spiling_contracts::geometry::{MAX_SECTION_BYTES, SECTION_BOOLEAN_TOLERANCE_MM};
+use std::collections::HashMap;
 
 const Z: Interval = Interval::point(0.0);
 fn dot(a: [Interval; 3], b: [f64; 3]) -> Interval {
@@ -1758,8 +1759,128 @@ fn signed_area(
     }
     Ok(area)
 }
+#[derive(Clone, Copy)]
+struct CertifyChord {
+    loop_index: usize,
+    edge_index: usize,
+    a: [[Interval; 2]; 2],
+    error_mm: f64,
+    raw_minimum: [f64; 2],
+    raw_maximum: [f64; 2],
+    minimum: [f64; 2],
+    maximum: [f64; 2],
+}
+
+fn projected_chord_bounds(a: [[Interval; 2]; 2]) -> ([f64; 2], [f64; 2]) {
+    let mut minimum = [f64::INFINITY; 2];
+    let mut maximum = [f64::NEG_INFINITY; 2];
+    for endpoint in a {
+        for (axis, value) in endpoint.into_iter().enumerate() {
+            minimum[axis] = minimum[axis].min(value.lo);
+            maximum[axis] = maximum[axis].max(value.hi);
+        }
+    }
+    (minimum, maximum)
+}
+
+fn cell_range(lo: f64, hi: f64, origin: f64, cell: f64) -> Option<(i64, i64)> {
+    let first = ((lo - origin) / cell).floor();
+    let last = ((hi - origin) / cell).floor();
+    if !first.is_finite() || !last.is_finite() {
+        return None;
+    }
+    let first = first.clamp(-1_000_000.0, 1_000_000.0) as i64;
+    let last = last.clamp(-1_000_000.0, 1_000_000.0) as i64;
+    Some((first.min(last), first.max(last)))
+}
+
+/// Check one nonadjacent chord pair. Adjacency and exact interval separation
+/// stay identical to the former all-pairs loop; only the broad phase that
+/// selects candidate pairs has changed.
+fn certify_chord_pair(
+    section: &NativeSection,
+    first: &CertifyChord,
+    second: &CertifyChord,
+    projection_scale: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    let (left, right) =
+        if (first.loop_index, first.edge_index) > (second.loop_index, second.edge_index) {
+            (second, first)
+        } else {
+            (first, second)
+        };
+    let (li, ei) = (left.loop_index, left.edge_index);
+    let (lj, ej) = (right.loop_index, right.edge_index);
+    if li == lj && (ej <= ei + 1 || (ei == 0 && ej + 2 == section.loops[li].points_mm.len())) {
+        return Ok(());
+    }
+    work.charge(1, cancel)?;
+    let a = left.a;
+    let b = right.a;
+    let errors = [left.error_mm, right.error_mm];
+    let margin = Interval::point(errors[0])
+        .add(Interval::point(errors[1]))
+        .mul(Interval::point(projection_scale))
+        .hi;
+    let separated = (0..2).any(|axis| {
+        Interval::point(a[0][axis].hi.max(a[1][axis].hi))
+            .add(Interval::point(margin))
+            .hi
+            < b[0][axis].lo.min(b[1][axis].lo)
+            || Interval::point(b[0][axis].hi.max(b[1][axis].hi))
+                .add(Interval::point(margin))
+                .hi
+                < a[0][axis].lo.min(a[1][axis].lo)
+    });
+    if separated {
+        return Ok(());
+    }
+    let d = [determinant(a[0], a[1], b[0]), determinant(a[0], a[1], b[1])];
+    let e = [determinant(b[0], b[1], a[0]), determinant(b[0], b[1], a[1])];
+    let clear = |values: [Interval; 2], line: [[Interval; 2]; 2]| {
+        let same = sign(values[0]) != 0 && sign(values[0]) == sign(values[1]);
+        let length = Interval::point(line[1][0].sub(line[0][0]).abs_upper())
+            .add(Interval::point(line[1][1].sub(line[0][1]).abs_upper()));
+        same && values[0].abs_lower().min(values[1].abs_lower())
+            > length.mul(Interval::point(margin)).hi
+    };
+    if clear(d, a) || clear(e, b) {
+        return Ok(());
+    }
+    if li == lj
+        && let Some(tangents) = section.loop_chord_tangents.get(li)
+        && (certify_monotone_chain(
+            &section.loops[li],
+            tangents,
+            section.frame,
+            ei,
+            ej,
+            work,
+            cancel,
+        )? || certify_monotone_chain(
+            &section.loops[li],
+            tangents,
+            section.frame,
+            ej,
+            ei,
+            work,
+            cancel,
+        )?)
+    {
+        return Ok(());
+    }
+    Err(indeterminate(format!(
+        "nonadjacent native curve error tubes have an unresolved crossing/touch: loops={li},{lj} chords={ei},{ej} local_errors={errors:?} section_error={} margin={margin} a={a:?} b={b:?}",
+        section.achieved_chord_error_mm()
+    )))
+}
+
 /// Certify the actual returned polygons as disjoint simple cycles. No
 /// intersection is repaired and no sampled fill determines hole membership.
+/// A conservative grid selects only chord pairs whose error-expanded boxes can
+/// meet; the exact interval predicate still decides every candidate pair.
 fn certify_polygons(
     section: &NativeSection,
     work: &mut GeometryWorkBudget,
@@ -1768,81 +1889,142 @@ fn certify_polygons(
     section.validate_chord_errors(work, cancel)?;
     let projection_scale = norm(section.frame.x_axis.map(Interval::point))
         .max(norm(section.frame.y_axis.map(Interval::point)));
+    let mut chords = Vec::new();
     for (li, left) in section.loops.iter().enumerate() {
-        for (ei, a) in left.points_mm.windows(2).enumerate() {
-            let a = [project(a[0], section.frame), project(a[1], section.frame)];
-            for (lj, right) in section.loops.iter().enumerate().skip(li) {
-                for (ej, b) in right.points_mm.windows(2).enumerate() {
-                    work.charge(1, cancel)?;
-                    if li == lj && (ej <= ei + 1 || (ei == 0 && ej + 2 == left.points_mm.len())) {
-                        continue;
-                    }
-                    let b = [project(b[0], section.frame), project(b[1], section.frame)];
-                    let errors = if section.is_native_intersection() {
-                        [
-                            section.loop_chord_errors_mm[li][ei],
-                            section.loop_chord_errors_mm[lj][ej],
-                        ]
-                    } else {
-                        [section.achieved_chord_error_mm(); 2]
-                    };
-                    let margin = Interval::point(errors[0])
-                        .add(Interval::point(errors[1]))
-                        .mul(Interval::point(projection_scale))
-                        .hi;
-                    let separated = (0..2).any(|axis| {
-                        Interval::point(a[0][axis].hi.max(a[1][axis].hi))
-                            .add(Interval::point(margin))
-                            .hi
-                            < b[0][axis].lo.min(b[1][axis].lo)
-                            || Interval::point(b[0][axis].hi.max(b[1][axis].hi))
-                                .add(Interval::point(margin))
-                                .hi
-                                < a[0][axis].lo.min(a[1][axis].lo)
-                    });
-                    if separated {
-                        continue;
-                    }
-                    let d = [determinant(a[0], a[1], b[0]), determinant(a[0], a[1], b[1])];
-                    let e = [determinant(b[0], b[1], a[0]), determinant(b[0], b[1], a[1])];
-                    let clear = |values: [Interval; 2], line: [[Interval; 2]; 2]| {
-                        let same = sign(values[0]) != 0 && sign(values[0]) == sign(values[1]);
-                        let length = Interval::point(line[1][0].sub(line[0][0]).abs_upper())
-                            .add(Interval::point(line[1][1].sub(line[0][1]).abs_upper()));
-                        same && values[0].abs_lower().min(values[1].abs_lower())
-                            > length.mul(Interval::point(margin)).hi
-                    };
-                    if clear(d, a) || clear(e, b) {
-                        continue;
-                    }
-                    if li == lj
-                        && let Some(tangents) = section.loop_chord_tangents.get(li)
-                        && (certify_monotone_chain(
-                            left,
-                            tangents,
-                            section.frame,
-                            ei,
-                            ej,
-                            work,
-                            cancel,
-                        )? || certify_monotone_chain(
-                            left,
-                            tangents,
-                            section.frame,
-                            ej,
-                            ei,
-                            work,
-                            cancel,
-                        )?)
-                    {
-                        continue;
-                    }
-                    return Err(indeterminate(format!(
-                        "nonadjacent native curve error tubes have an unresolved crossing/touch: loops={li},{lj} chords={ei},{ej} local_errors={errors:?} section_error={} margin={margin} a={a:?} b={b:?}",
-                        section.achieved_chord_error_mm()
-                    )));
-                }
+        for (ei, pair) in left.points_mm.windows(2).enumerate() {
+            let a = [
+                project(pair[0], section.frame),
+                project(pair[1], section.frame),
+            ];
+            let error_mm = if section.is_native_intersection() {
+                section.loop_chord_errors_mm[li][ei]
+            } else {
+                section.achieved_chord_error_mm()
+            };
+            let (raw_minimum, raw_maximum) = projected_chord_bounds(a);
+            chords.push(CertifyChord {
+                loop_index: li,
+                edge_index: ei,
+                a,
+                error_mm,
+                raw_minimum,
+                raw_maximum,
+                minimum: raw_minimum,
+                maximum: raw_maximum,
+            });
+        }
+    }
+    if chords.is_empty() {
+        return Ok(());
+    }
+    work.charge(chords.len() as u64, cancel)?;
+    let all_pairs = |chords: &[CertifyChord],
+                     work: &mut GeometryWorkBudget,
+                     cancel: &AtomicBool|
+     -> Result<(), GeometryError> {
+        for i in 0..chords.len() {
+            for j in i + 1..chords.len() {
+                certify_chord_pair(
+                    section,
+                    &chords[i],
+                    &chords[j],
+                    projection_scale,
+                    work,
+                    cancel,
+                )?;
             }
+        }
+        Ok(())
+    };
+    let maximum_margin = chords.iter().fold(0.0_f64, |maximum, chord| {
+        maximum.max(
+            Interval::point(chord.error_mm)
+                .mul(Interval::point(projection_scale))
+                .hi,
+        )
+    });
+    let mut ground_minimum = [f64::INFINITY; 2];
+    let mut ground_maximum = [f64::NEG_INFINITY; 2];
+    for chord in &chords {
+        for axis in 0..2 {
+            ground_minimum[axis] = ground_minimum[axis].min(chord.raw_minimum[axis]);
+            ground_maximum[axis] = ground_maximum[axis].max(chord.raw_maximum[axis]);
+        }
+    }
+    let extent = (ground_maximum[0] - ground_minimum[0]).max(ground_maximum[1] - ground_minimum[1]);
+    let target_axis = (chords.len() as f64).sqrt().clamp(1.0, 512.0);
+    let cell = extent / target_axis;
+    if !maximum_margin.is_finite()
+        || !ground_minimum.iter().all(|value| value.is_finite())
+        || !ground_maximum.iter().all(|value| value.is_finite())
+        || !extent.is_finite()
+        || extent <= 0.0
+        || !cell.is_finite()
+        || cell <= 0.0
+    {
+        return all_pairs(&chords, work, cancel);
+    }
+    let expansion = maximum_margin.next_up();
+    for chord in &mut chords {
+        chord.minimum = [
+            chord.raw_minimum[0] - expansion,
+            chord.raw_minimum[1] - expansion,
+        ];
+        chord.maximum = [
+            chord.raw_maximum[0] + expansion,
+            chord.raw_maximum[1] + expansion,
+        ];
+    }
+    let mut grid = HashMap::<(i64, i64), Vec<usize>>::new();
+    let mut is_wide = vec![false; chords.len()];
+    let mut wide = Vec::new();
+    for (index, chord) in chords.iter().enumerate() {
+        let (Some((x0, x1)), Some((y0, y1))) = (
+            cell_range(chord.minimum[0], chord.maximum[0], ground_minimum[0], cell),
+            cell_range(chord.minimum[1], chord.maximum[1], ground_minimum[1], cell),
+        ) else {
+            is_wide[index] = true;
+            wide.push(index);
+            continue;
+        };
+        if (x1 - x0 + 1).saturating_mul(y1 - y0 + 1) > 4096 {
+            is_wide[index] = true;
+            wide.push(index);
+            continue;
+        }
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                grid.entry((x, y)).or_default().push(index);
+            }
+        }
+    }
+    for indices in grid.values() {
+        for i in 0..indices.len() {
+            for j in i + 1..indices.len() {
+                certify_chord_pair(
+                    section,
+                    &chords[indices[i]],
+                    &chords[indices[j]],
+                    projection_scale,
+                    work,
+                    cancel,
+                )?;
+            }
+        }
+    }
+    for &i in &wide {
+        for j in 0..chords.len() {
+            if i == j || (is_wide[j] && j < i) {
+                continue;
+            }
+            certify_chord_pair(
+                section,
+                &chords[i],
+                &chords[j],
+                projection_scale,
+                work,
+                cancel,
+            )?;
         }
     }
     Ok(())
@@ -2250,6 +2432,70 @@ mod correspondence_tests {
                 .unwrap_err()
                 .code,
             GeometryErrorCode::AnalysisIndeterminate
+        );
+    }
+
+    #[test]
+    fn grid_broad_phase_keeps_cross_loop_crossings() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let mut section = crate::section::section(
+            &definition,
+            PlaneMm {
+                origin_mm: [0.0, 0.0, 4.0],
+                normal: [0.0, 0.0, 1.0],
+            },
+            &cancel,
+            MAX_SECTION_BYTES,
+            &mut work,
+        )
+        .unwrap();
+        let mut loops = Vec::new();
+        let mut errors = Vec::new();
+        let mut square = |x: f64, y: f64| {
+            loops.push(SectionLoopMm {
+                is_hole: true,
+                points_mm: vec![
+                    [x, y, 4.0],
+                    [x + 1.0, y, 4.0],
+                    [x + 1.0, y + 1.0, 4.0],
+                    [x, y + 1.0, 4.0],
+                    [x, y, 4.0],
+                ],
+            });
+            errors.push(vec![0.0; 4]);
+        };
+        for index in 0..120 {
+            square((index % 20) as f64 * 2.0, (index / 20) as f64 * 2.0);
+        }
+        section.loops = loops;
+        section.loop_chord_errors_mm = errors;
+        section.loop_chord_tangents.clear();
+        section.certificate.maximum_chord_error_mm = 0.0;
+        certify_polygons(&section, &mut work, &cancel).unwrap();
+
+        section.loops.push(SectionLoopMm {
+            is_hole: true,
+            points_mm: vec![
+                [0.5, 0.5, 4.0],
+                [1.5, 0.5, 4.0],
+                [1.5, 1.5, 4.0],
+                [0.5, 1.5, 4.0],
+                [0.5, 0.5, 4.0],
+            ],
+        });
+        section.loop_chord_errors_mm.push(vec![0.0; 4]);
+        assert_eq!(
+            certify_polygons(&section, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::AnalysisIndeterminate,
+            "the grid broad phase must retain a nonadjacent cross-loop crossing"
         );
     }
 

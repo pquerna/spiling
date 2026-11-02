@@ -19,7 +19,7 @@
 
 /// Cumulative work for one explicit interactive geometry measurement or
 /// section query, including its native preparation.
-pub const QUERY_WORK_UNITS: u64 = 1_000_000_000;
+pub const QUERY_WORK_UNITS: u64 = 4_000_000_000;
 
 /// Cumulative work for one complete manufacturing compile. A compile retains
 /// one guard across preflight, height analysis, composition, sections, offsets

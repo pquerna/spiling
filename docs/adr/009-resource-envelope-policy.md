@@ -36,7 +36,7 @@ Default envelopes protect the third while allowing valid work to finish:
 
 | Envelope | Default |
 | --- | --- |
-| one interactive query or explicit section | `QUERY_WORK_UNITS` = 1B cumulative work |
+| one interactive query or explicit section | `QUERY_WORK_UNITS` = 4B cumulative work |
 | one complete compile | `COMPILE_WORK_UNITS` = 8B cumulative work |
 | prepared-section pool | `MAX_PREPARED_SECTION_BYTES` = 512 MiB live |
 | import query proof | `MAX_QUERY_PROOF_BYTES` = 256 MiB live |
@@ -64,10 +64,12 @@ not progress. A later engine-owned aggregate reservation still has to account
 for coexisting definitions, jobs, meshes and outputs rather than summing these
 independent maxima.
 
-The 512-hole plate remains a diagnosed cost problem: it exhausts a 10B
-diagnostic envelope and does not finish by lifting the query cap alone. It
-needs its own repeated-preparation/root-search diagnosis and optimization, not
-another blanket increase.
+The 512-hole plate section now completes under the 4B query envelope. Its
+former cost was dominated by a quadratic all-pairs chord-crossing scan; a
+conservative error-expanded broad phase now selects only candidate pairs and
+leaves the exact interval proof unchanged. This is a measured default, not a
+promise that every large section fits or a substitute for the remaining
+face/preparation optimization.
 
 These are software resource defaults, not measured hardware requirements,
 universal GPU/platform qualification, printability or machine readiness.
