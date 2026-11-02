@@ -178,6 +178,11 @@ At an authored coplanar edge, a complete spatial height identity and nearby
 UV trace do not identify their zero sets. Native edge/face ownership and complete
 endpoint-star continuation need their own section receipt; an endpoint-root
 exception or tolerance-based identification cannot replace that operation.
+Regular common-carrier coedge checks exhaust the complete closed native range
+through bounded interval subdivision. Every accepted piece independently retains
+paired correspondence, coherent normals and height transversality; an accepted
+prefix or exhausted depth grants no whole-edge result. This regularity proof is
+not the missing section attachment/completeness receipt.
 
 Closed material covers may intersect Cartesian positions and first derivatives
 with coefficient-first coordinate functionals centered on the same cell. A finite

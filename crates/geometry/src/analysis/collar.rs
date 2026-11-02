@@ -41,6 +41,12 @@ use std::sync::atomic::AtomicBool;
 
 const MAX_BYTES: usize = 32 * 1024 * 1024;
 const MAX_DEPTH: u8 = 64;
+const REGULAR_COEDGE_COVER_DEPTH: u8 = 16;
+type RegularCoedgeCell = ([f64; 2], u8);
+const REGULAR_COEDGE_INLINE_BYTES: usize = std::mem::size_of::<PairedMaterialLink<'_, '_>>()
+    + std::mem::size_of::<crate::parametric::CurveEnclosure>()
+    + std::mem::size_of::<[[Interval; 3]; 3]>()
+    + std::mem::size_of::<[RegularCoedgeCell; REGULAR_COEDGE_COVER_DEPTH as usize + 1]>();
 type Box2 = [[f64; 2]; 2];
 type Matrix = [[Interval; 3]; 3];
 
@@ -3297,14 +3303,14 @@ pub(super) fn regular_common_carrier_coedge(
     }
     // The paired owner reserves its existing UV/trace workspace. Admit its
     // borrowed inline link and genuine C3D jet alongside that same workspace.
-    let inline = std::mem::size_of::<PairedMaterialLink<'_, '_>>()
-        + std::mem::size_of::<crate::parametric::CurveEnclosure>();
-    let link_allowance = remaining_bytes.checked_sub(inline).ok_or_else(|| {
-        failure(
-            GeometryErrorCode::ResourceLimit,
-            "regular native seam inline scratch exhausted",
-        )
-    })?;
+    let link_allowance = remaining_bytes
+        .checked_sub(REGULAR_COEDGE_INLINE_BYTES)
+        .ok_or_else(|| {
+            failure(
+                GeometryErrorCode::ResourceLimit,
+                "regular native seam inline scratch exhausted",
+            )
+        })?;
     let available = link_allowance
         .checked_sub(UV_EMBEDDING_STACK_BYTES)
         .ok_or_else(|| {
@@ -3358,21 +3364,57 @@ pub(super) fn regular_common_carrier_coedge(
     else {
         return Ok(Err(NativeRegularCoedgeRefusal::NativeOwnership));
     };
-    let jet = crate::parametric::curve_enclosure(curve, (range[0], range[1]), work, cancel)?;
-    let (position, first, second) = match link.normals(range, &jet, work, cancel)? {
-        Ok(value) => value,
-        Err(reason) => return Ok(Err(NativeRegularCoedgeRefusal::PairedNormals(reason))),
-    };
-    let first_level = cross(first, functional.direction);
-    let second_level = cross(second, functional.direction);
-    if dot(first, second).lo <= 0.0
-        || !first_level.iter().any(|axis| !axis.contains_zero())
-        || !second_level.iter().any(|axis| !axis.contains_zero())
-        || dot(first_level, second_level).lo <= 0.0
-    {
-        return Ok(Err(NativeRegularCoedgeRefusal::HeightNotTransverse));
+    regular_common_carrier_cover(&link, curve, range, functional, work, cancel)
+}
+
+fn regular_common_carrier_cover(
+    link: &PairedMaterialLink<'_, '_>,
+    curve: &dyn crate::parametric::CurveEvaluator,
+    range: [f64; 2],
+    functional: HeightFunctional,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Result<Interval, NativeRegularCoedgeRefusal>, GeometryError> {
+    let mut pending = [([0.0; 2], 0_u8); REGULAR_COEDGE_COVER_DEPTH as usize + 1];
+    pending[0] = (range, 0);
+    let mut count = 1;
+    let mut image: Option<Interval> = None;
+    while count > 0 {
+        work.charge(1, cancel)?;
+        count -= 1;
+        let (cell, depth) = pending[count];
+        let jet = crate::parametric::curve_enclosure(curve, (cell[0], cell[1]), work, cancel)?;
+        let refusal = match link.normals(cell, &jet, work, cancel)? {
+            Ok((position, first, second)) => {
+                let first_level = cross(first, functional.direction);
+                let second_level = cross(second, functional.direction);
+                if dot(first, second).lo > 0.0
+                    && first_level.iter().any(|axis| !axis.contains_zero())
+                    && second_level.iter().any(|axis| !axis.contains_zero())
+                    && dot(first_level, second_level).lo > 0.0
+                {
+                    let height = functional.height(position);
+                    image = Some(image.map_or(height, |previous| previous.hull(height)));
+                    continue;
+                }
+                NativeRegularCoedgeRefusal::HeightNotTransverse
+            }
+            Err(MaterialLinkRefusal::NativeOwnership) => {
+                return Ok(Err(NativeRegularCoedgeRefusal::NativeOwnership));
+            }
+            Err(reason) => NativeRegularCoedgeRefusal::PairedNormals(reason),
+        };
+        let middle = cell[0] * 0.5 + cell[1] * 0.5;
+        if depth >= REGULAR_COEDGE_COVER_DEPTH || middle <= cell[0] || middle >= cell[1] {
+            return Ok(Err(refusal));
+        }
+        pending[count] = ([middle, cell[1]], depth + 1);
+        pending[count + 1] = ([cell[0], middle], depth + 1);
+        count += 2;
     }
-    Ok(Ok(functional.height(position)))
+    Ok(Ok(image.ok_or_else(|| {
+        unresolved("regular native coedge cover is empty")
+    })?))
 }
 fn hash_interval(hash: &mut Sha256, value: Interval) {
     hash.update(value.lo.to_bits().to_le_bytes());
@@ -9087,6 +9129,104 @@ mod tests {
             .unwrap()
             .is_none(),
             "a sub-tolerance jump is not whole-edge C0 or owned internal-knot incidence"
+        );
+    }
+
+    #[test]
+    fn common_carrier_cover_does_not_promote_a_regular_prefix_to_a_whole_edge() {
+        let definition = super::super::test_source::recipe("native-parity-ring-torus.step");
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::query();
+        let prepared = prepare_solid(&definition, MAX_BYTES, &mut work, &cancel).unwrap();
+        let source = prepared.source_view().unwrap();
+        let incidence =
+            SourceEdgeIncidence::new(&definition, MAX_BYTES, &mut work, &cancel).unwrap();
+        let domain = source
+            .face_domain(0, MAX_BYTES, &mut work, &cancel)
+            .unwrap();
+        let height = HeightFunctional::from_frame(frame());
+        let coedge = domain
+            .coedges()
+            .iter()
+            .find(|coedge| {
+                let curve = definition.edge_curve(coedge.edge).unwrap();
+                super::super::slab::constant_native_curve_height(curve, height, &mut work, &cancel)
+                    .unwrap()
+                    == Some(Interval::point(0.0))
+            })
+            .unwrap();
+        let pair = incidence.get(coedge.edge).unwrap();
+        let other = pair.second.unwrap();
+        let first = source
+            .face_domain(pair.first.face, MAX_BYTES, &mut work, &cancel)
+            .unwrap();
+        let second = source
+            .face_domain(other.face, MAX_BYTES, &mut work, &cancel)
+            .unwrap();
+        let curve = definition.edge_curve(coedge.edge).unwrap();
+        let link = PairedMaterialLink::new(
+            &definition,
+            (first, pair.first),
+            (second, other),
+            coedge.native_range,
+            MAX_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        let varying_height = HeightFunctional {
+            direction: [0.0, 1.0, 0.0].map(Interval::point),
+            offset: Interval::point(0.0),
+        };
+        let prefix = regular_common_carrier_cover(
+            &link,
+            curve,
+            [0.0, 0.25],
+            varying_height,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .expect("the first quarter of this native edge is height-regular");
+        assert!(prefix.lo < prefix.hi);
+        assert!(matches!(
+            regular_common_carrier_cover(
+                &link,
+                curve,
+                coedge.native_range,
+                varying_height,
+                &mut work,
+                &cancel
+            )
+            .unwrap(),
+            Err(NativeRegularCoedgeRefusal::HeightNotTransverse)
+        ));
+        assert_eq!(
+            regular_common_carrier_cover(
+                &link,
+                curve,
+                coedge.native_range,
+                height,
+                &mut GeometryWorkBudget::new(0),
+                &cancel
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(
+            regular_common_carrier_cover(
+                &link,
+                curve,
+                coedge.native_range,
+                height,
+                &mut work,
+                &AtomicBool::new(true)
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::Cancelled
         );
     }
 

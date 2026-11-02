@@ -2910,6 +2910,79 @@ mod correspondence_tests {
     }
 
     #[test]
+    fn positional_boundary_correspondence_does_not_identify_a_carrier_zero_set() {
+        let displacement = 2.0_f64.powi(-20);
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let plane = PlaneMm {
+            origin_mm: [0.0; 3],
+            normal: [0.0, 0.0, 1.0],
+        };
+        let spatial = curve(
+            vec![
+                CPoint::new(0.0, 0.0, 0.0, NOW),
+                CPoint::new(1.0, 0.0, 0.0, NOW),
+            ],
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+            3,
+        );
+        let chart = curve(
+            vec![
+                CPoint::new(0.0, 0.0, NOZ, NOW),
+                CPoint::new(1.0, 0.0, NOZ, NOW),
+            ],
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+            2,
+        );
+        for offset in [displacement, -displacement] {
+            let net = [0.0, 1.0]
+                .map(|parameter| {
+                    vec![
+                        CPoint::new(parameter, 0.0, offset, NOW),
+                        CPoint::new(parameter, 1.0, 1.0 + offset, NOW),
+                    ]
+                })
+                .to_vec();
+            let surface = Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(
+                srf_basic::Surface::new(
+                    net,
+                    1,
+                    1,
+                    vec![0.0, 0.0, 1.0, 1.0],
+                    vec![0.0, 0.0, 1.0, 1.0],
+                )
+                .unwrap(),
+                true,
+            )));
+            let boundary = Boundary {
+                surface: &surface,
+                curve: &spatial,
+                uv_curve: Some(&chart),
+                edge_range: [0.0, 1.0],
+                scale: 1.0,
+            };
+            let native = boundary.edge_jet([0.0, 1.0], &mut work, &cancel).unwrap();
+            assert_eq!(functional(native.position, plane), Interval::point(0.0));
+            boundary
+                .prove_correspondence(2.0 * displacement, 1024 * 1024, &mut work, &cancel)
+                .unwrap();
+            let (trace, _, _, _) = boundary.evaluate([0.0, 1.0], &mut work, &cancel).unwrap();
+            let trace_height = functional(trace, plane);
+            assert!(!trace_height.contains_zero());
+            assert_eq!(sign(trace_height), if offset > 0.0 { 1 } else { -1 });
+            let graph =
+                classify_graph(&surface, [[0.0, 1.0]; 2], 1.0, plane, &mut work, &cancel).unwrap();
+            assert_eq!(
+                graph.is_some(),
+                offset < 0.0,
+                "equal positional allowances can correspond to absent or present carrier sections"
+            );
+        }
+    }
+
+    #[test]
     fn native_boundary_calibrates_nonuniform_gauge_without_losing_trace() {
         let surface = carrier();
         let spatial = spatial();

@@ -6971,6 +6971,146 @@ mod tests {
     }
 
     #[test]
+    fn zero_torus_partitions_have_common_carriers_and_complete_regular_stars() {
+        let definition = parity_definition("native-parity-ring-torus.step");
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::query();
+        let prepared = super::super::material_source::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let source = prepared.source_view().unwrap();
+        let allowance = MAX_SLAB_SCRATCH_BYTES - prepared.retained_bytes();
+        let mut edges =
+            SourceEdgeIncidence::new(&definition, allowance, &mut work, &cancel).unwrap();
+        edges
+            .prepare_vertices(allowance, &mut work, &cancel)
+            .unwrap();
+        let functional = HeightFunctional::from_frame(frame());
+        let mut vertices = Vec::new();
+        let mut coincident = Vec::new();
+        for &edge in definition.brep().edge_list() {
+            let Some(curve) = definition.edge_curve(edge) else {
+                continue;
+            };
+            if constant_native_curve_height(curve, functional, &mut work, &cancel).unwrap()
+                != Some(Interval::point(0.0))
+            {
+                continue;
+            }
+            let pair = edges.get(edge).unwrap();
+            let other = pair.second.unwrap();
+            let first = source
+                .face_domain(pair.first.face, allowance, &mut work, &cancel)
+                .unwrap();
+            let second = source
+                .face_domain(other.face, allowance, &mut work, &cancel)
+                .unwrap();
+            let same = crate::parametric::same_surface_coefficients(
+                &first.surface_operand(),
+                &second.surface_operand(),
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            assert!(same);
+            assert_eq!(first.orientation(), second.orientation());
+            assert_ne!(pair.first.face, other.face);
+            assert_ne!(pair.first.orientation, other.orientation);
+            coincident.push(edge);
+            for &vertex in &pair.vertices {
+                if vertices.iter().any(|(owned, _)| *owned == vertex) {
+                    continue;
+                }
+                let regular = super::super::collar::regular_native_vertex(
+                    source, &edges, vertex, functional, allowance, &mut work, &cancel,
+                )
+                .unwrap();
+                assert!(
+                    regular,
+                    "every complete endpoint star must be height-regular: {vertex:?}"
+                );
+                vertices.push((
+                    vertex,
+                    super::super::collar::NativeCollarVertexProof::RegularHeight,
+                ));
+            }
+        }
+        assert_eq!(coincident.len(), 8);
+        assert_eq!(vertices.len(), 8);
+        for edge in coincident {
+            let curve = definition.edge_curve(edge).unwrap();
+            let pair = edges.get(edge).unwrap();
+            let native = definition.brep().edge(edge).unwrap();
+            let query = super::super::collar::RegularNativeCoedgeQuery {
+                source,
+                edges: &edges,
+                qualified_vertices: &vertices,
+                face: pair.first.face,
+                coedge: pair.first.coedge,
+                edge,
+                range: [native.interval.min(), native.interval.max()],
+                curve,
+                functional,
+                remaining_bytes: allowance,
+            };
+            for direction in [1.0, -1.0] {
+                let result = super::super::collar::regular_common_carrier_coedge(
+                    super::super::collar::RegularNativeCoedgeQuery {
+                        functional: HeightFunctional {
+                            direction: [0.0, 0.0, direction].map(Interval::point),
+                            offset: Interval::point(0.0),
+                        },
+                        ..query
+                    },
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .unwrap_or_else(|reason| panic!("whole original partition {edge:?}: {reason:?}"));
+                assert!(result.contains(0.0));
+                assert!(result.width() < 1e-8);
+            }
+            assert_eq!(
+                super::super::collar::regular_common_carrier_coedge(
+                    query,
+                    &mut GeometryWorkBudget::new(0),
+                    &cancel
+                )
+                .unwrap_err()
+                .code,
+                GeometryErrorCode::ResourceLimit
+            );
+            assert_eq!(
+                super::super::collar::regular_common_carrier_coedge(
+                    query,
+                    &mut work,
+                    &AtomicBool::new(true)
+                )
+                .unwrap_err()
+                .code,
+                GeometryErrorCode::Cancelled
+            );
+            assert_eq!(
+                super::super::collar::regular_common_carrier_coedge(
+                    super::super::collar::RegularNativeCoedgeQuery {
+                        remaining_bytes: 0,
+                        ..query
+                    },
+                    &mut work,
+                    &cancel
+                )
+                .unwrap_err()
+                .code,
+                GeometryErrorCode::ResourceLimit
+            );
+        }
+    }
+
+    #[test]
     fn native_scalar_height_retains_complete_torus_rings_and_oblique_drift() {
         let definition = parity_definition("native-parity-nurbs-torus.step");
         let cancel = AtomicBool::new(false);
