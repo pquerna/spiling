@@ -1442,7 +1442,29 @@ fn test_f32_corner_retained_bytes_reasonable() {
 fn test_f32_corner_plate_retained_bytes() {
     let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
     let sec = section_at_z(&def, 10.0).unwrap();
-    assert!(sec.retained_bytes() < 10_000_000);
+    assert_eq!(sec.loops().len(), 513);
+    assert_eq!(
+        sec.loops()
+            .iter()
+            .filter(|boundary| boundary.is_hole)
+            .count(),
+        512
+    );
+    let packed_bytes = spiling_contracts::display::packed_section_size(
+        sec.loops().iter().map(|boundary| boundary.points_mm.len()),
+        MAX_GEOMETRY_CHUNK_BYTES,
+    )
+    .unwrap();
+    assert!(
+        packed_bytes < 10_000_000,
+        "packed section: {packed_bytes} bytes"
+    );
+    assert!(sec.retained_bytes() <= MAX_PREPARED_SECTION_BYTES);
+    assert!(
+        sec.retained_bytes() < 10_000_000,
+        "native section: {} bytes; packed section: {packed_bytes} bytes",
+        sec.retained_bytes(),
+    );
 }
 
 // =========================================================================
