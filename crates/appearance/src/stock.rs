@@ -2,8 +2,49 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 //! Stock-wide composition of the existing D65 and finite-cycle reference evaluators.
-use spiling_contracts::{appearance::*, library::LibraryIdentity, optical::*, stock::*};
-use std::sync::Arc;
+use crate::prusa_v7::BaseColor;
+use spiling_contracts::project::ProjectError;
+use spiling_contracts::{library::LibraryIdentity, optical::*, stock::*};
+
+struct PreparedMaterial {
+    admission: Result<(), ProjectError>,
+    basis: Result<BaseColor, OpticalUnknownReason>,
+}
+
+/// Search geometry is independent of filament colors. Validate the disclosed
+/// grid once; retain arithmetic errors until their original visit boundary.
+struct PreparedGrid {
+    request: OpticalRequest,
+    exposures: Vec<Result<CycleExposure, ProjectError>>,
+}
+impl PreparedGrid {
+    fn new(query: &StockQuery, materials: Vec<String>) -> Result<Self, String> {
+        let recipe = LayerCycle {
+            slots: vec![
+                OpticalSlot {
+                    material: 0,
+                    height_mm: query.slot_height_mm,
+                },
+                OpticalSlot {
+                    material: 1,
+                    height_mm: query.slot_height_mm,
+                },
+            ],
+            phase_slot: 0,
+            origin_z_mm: query.patch.origin_mm[2],
+        };
+        let request = query.request(materials, recipe);
+        request.validate().map_err(|e| e.to_string())?;
+        let exposures = (0..request.candidate_count().map_err(|e| e.to_string())?)
+            .map(|index| {
+                request
+                    .candidate(index)
+                    .and_then(|cycle| crate::optical::resolve_cycle(&cycle, &request.patch))
+            })
+            .collect();
+        Ok(Self { request, exposures })
+    }
+}
 
 pub fn compare(
     query: StockQuery,
@@ -45,11 +86,17 @@ pub fn compare(
         return Ok(report);
     }
     let target = crate::color_to_d65_lab(report.query.target.color).map_err(|e| e.to_string())?;
+    let mut bases = Vec::with_capacity(report.candidates.len());
     for (i, candidate) in report.candidates.iter().enumerate() {
         if cancelled() {
             report.status = StockSearchStatus::Cancelled;
             return Ok(report);
         }
+        let row = candidate.palette_row(format!("{}/declared", candidate.filament.id.0));
+        bases.push(PreparedMaterial {
+            admission: row.validate(),
+            basis: crate::optical::base(&row.evidence),
+        });
         match candidate.appearance.as_ref().map(|a| a.color) {
             Some(color) => {
                 let lab = crate::color_to_d65_lab(color).map_err(|e| e.to_string())?;
@@ -74,6 +121,7 @@ pub fn compare(
             .then(a.candidate.cmp(&b.candidate))
     });
     report.singles.truncate(MAX_STOCK_RESULTS);
+    let mut grid = None;
     'pairs: for a in 0..report.candidates.len() {
         for b in (a + 1)..report.candidates.len() {
             if report.candidates[a].filament.id == report.candidates[b].filament.id {
@@ -88,61 +136,71 @@ pub fn compare(
                 report.status = StockSearchStatus::WorkLimit;
                 break 'pairs;
             }
-            let rows = vec![
-                report.candidates[a]
-                    .palette_row(format!("{}/declared", report.candidates[a].filament.id.0)),
-                report.candidates[b]
-                    .palette_row(format!("{}/declared", report.candidates[b].filament.id.0)),
+            // Palette row admission still belongs to the first visited pair
+            // containing that material, after cancellation and budget checks.
+            bases[a].admission.as_ref().map_err(|e| e.to_string())?;
+            bases[b].admission.as_ref().map_err(|e| e.to_string())?;
+            if grid.is_none() {
+                grid = Some(PreparedGrid::new(
+                    &report.query,
+                    vec![
+                        format!("{}/declared", report.candidates[a].filament.id.0),
+                        format!("{}/declared", report.candidates[b].filament.id.0),
+                    ],
+                )?);
+            }
+            let grid = grid.as_ref().expect("admitted grid is prepared");
+            let pair_bases = [
+                bases[a].basis,
+                bases[b].basis,
+                Err(OpticalUnknownReason::MissingEvidence),
             ];
-            let document = PaletteDocument {
-                name: "Saved stock reference pair".into(),
-                source_url: "https://github.com/pquerna/spiling/blob/main/docs/protocol/library.md"
-                    .into(),
-                source_revision: report.input_hash.as_str().into(),
-                license: "Captured operator/imported declarations; original rights retained".into(),
-                conversion: PALETTE_CONVERSION.into(),
-                rows,
-            };
-            let canonical = document.canonical_bytes().map_err(|e| e.to_string())?;
-            let palette = PreparedPalette::new(document, &canonical).map_err(|e| e.to_string())?;
-            let cycle = LayerCycle {
-                slots: vec![
-                    OpticalSlot {
-                        material: 0,
-                        height_mm: report.query.slot_height_mm,
-                    },
-                    OpticalSlot {
-                        material: 1,
-                        height_mm: report.query.slot_height_mm,
-                    },
-                ],
-                phase_slot: 0,
-                origin_z_mm: report.query.patch.origin_mm[2],
-            };
-            let request = Arc::new(report.query.request(
-                vec![
-                    format!("{}/declared", report.candidates[a].filament.id.0),
-                    format!("{}/declared", report.candidates[b].filament.id.0),
-                ],
-                cycle,
-            ));
-            let result =
-                crate::optical::compare(&palette, request, cancelled).map_err(|e| e.to_string())?;
-            report.evaluations += result.visits.len() as u32;
-            if !result.is_complete() {
-                report.status = StockSearchStatus::Cancelled;
-                break 'pairs;
+            // The requested cycle is also the first grid candidate. Preserve
+            // its pre-cancellation numerical admission, then reuse its result.
+            let requested = crate::optical::assess(
+                *grid.exposures[0].as_ref().map_err(|e| e.to_string())?,
+                &pair_bases,
+                &grid.request.observation,
+                &report.query.target,
+                target,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut best: Option<(usize, f64, OpticalAssessment)> = None;
+            for (index, exposure) in grid.exposures.iter().enumerate() {
+                if cancelled() {
+                    report.status = StockSearchStatus::Cancelled;
+                    break 'pairs;
+                }
+                let assessment = if index == 0 {
+                    requested.clone()
+                } else {
+                    crate::optical::assess(
+                        *exposure.as_ref().map_err(|e| e.to_string())?,
+                        &pair_bases,
+                        &grid.request.observation,
+                        &report.query.target,
+                        target,
+                    )
+                    .map_err(|e| e.to_string())?
+                };
+                report.evaluations += 1;
+                if let OpticalAssessment::Estimate { delta_e00, .. } = &assessment
+                    && best
+                        .as_ref()
+                        .is_none_or(|(_, previous, _)| delta_e00.total_cmp(previous).is_lt())
+                {
+                    best = Some((index, *delta_e00, assessment));
+                }
             }
             report.visited_pairs += 1;
-            if let Some(&index) = result.alternatives.first() {
-                let visit = &result.visits[index as usize];
+            if let Some((index, _, assessment)) = best {
                 report.pairs.push(StockPair {
                     candidates: [a as u16, b as u16],
-                    cycle: result
+                    cycle: grid
                         .request
-                        .candidate(visit.index)
+                        .candidate(index as u32)
                         .map_err(|e| e.to_string())?,
-                    assessment: visit.assessment.clone(),
+                    assessment,
                 });
                 let score = |p: &StockPair| match p.assessment {
                     OpticalAssessment::Estimate { delta_e00, .. } => delta_e00,

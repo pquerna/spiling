@@ -17,3 +17,7 @@ spiling-contracts.workspace = true
 sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[[bench]]
+name = "stock"
+harness = false

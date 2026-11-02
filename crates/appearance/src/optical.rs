@@ -97,7 +97,7 @@ fn resolve_slots(
     })
 }
 
-fn base(evidence: &AppearanceEvidence) -> Result<BaseColor, OpticalUnknownReason> {
+pub(crate) fn base(evidence: &AppearanceEvidence) -> Result<BaseColor, OpticalUnknownReason> {
     let rgb = match evidence {
         AppearanceEvidence::CatalogEstimate { srgb } => *srgb,
         AppearanceEvidence::Unknown { .. } => return Err(OpticalUnknownReason::MissingEvidence),
@@ -135,7 +135,7 @@ fn base(evidence: &AppearanceEvidence) -> Result<BaseColor, OpticalUnknownReason
     }
     Ok(BaseColor::new(rgb.map(|v| (v * 255.0).round() as u8)))
 }
-fn assess(
+pub(crate) fn assess(
     exposure: CycleExposure,
     bases: &[Result<BaseColor, OpticalUnknownReason>; 3],
     observation: &OpticalObservation,

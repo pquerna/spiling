@@ -29,7 +29,7 @@
 //! matrices, rounded base bytes, clamped display conversion, 0.9999 guard and
 //! coefficients deliberately differ from Spiling's unclipped CSS colorimetry.
 //! No upstream fitting-set or vendor measurement data is included.
-use std::f64::consts::PI;
+use std::{f64::consts::PI, sync::OnceLock};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BaseColor {
@@ -42,7 +42,7 @@ impl BaseColor {
         Self {
             rgb,
             lab: rgb_to_lab(rgb),
-            roots: rgb.map(|v| srgb_to_linear(v as f64).powf(1.0 / 3.0)),
+            roots: rgb.map(|v| srgb_to_linear(v).powf(1.0 / 3.0)),
         }
     }
 }
@@ -57,13 +57,20 @@ pub(crate) struct Prediction {
     pub rgb: [u8; 3],
 }
 
-fn srgb_to_linear(c: f64) -> f64 {
-    let v = c / 255.0;
-    if v <= 0.04045 {
-        v / 12.92
-    } else {
-        ((v + 0.055) / 1.055).powf(2.4)
-    }
+fn srgb_to_linear(c: u8) -> f64 {
+    // The reference consumes byte channels. Generate all transfer values with
+    // its original formula once, without rounded constants or approximations.
+    static LINEAR: OnceLock<[f64; 256]> = OnceLock::new();
+    LINEAR.get_or_init(|| {
+        std::array::from_fn(|index| {
+            let v = index as f64 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        })
+    })[usize::from(c)]
 }
 fn linear_to_srgb(c: f64) -> f64 {
     let x = c.clamp(0.0, 1.0);
@@ -77,7 +84,7 @@ fn byte(v: f64) -> u8 {
     v.round().clamp(0.0, 255.0) as u8
 }
 fn rgb_to_lab(rgb: [u8; 3]) -> [f64; 3] {
-    let [r, g, b] = rgb.map(|v| srgb_to_linear(v as f64));
+    let [r, g, b] = rgb.map(srgb_to_linear);
     let f = |t: f64| {
         if t > 0.008856 {
             t.cbrt()
