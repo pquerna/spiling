@@ -88,7 +88,8 @@ impl Workbench {
         let modal = egui::Modal::new(egui::Id::unique("draft-navigation")).show(ctx, |ui| {
             ui.set_max_width(420.0);
             ui.heading("Leave unapplied changes?");
-            ui.label("Back retains drafts. Apply normal drafts or explicitly Keep an evaluated alternative before leaving. Discarding leaves Current settings and kept options unchanged.");
+            ui.label("These changes have not been applied. Keep editing, or discard the drafts to continue.");
+            if self.manufacturing.trial.is_some() { ui.weak("Keep an alternative explicitly before leaving if you want to retain it."); }
             if let Some(Navigation::Action(action)) = &self.navigation { ui.label(format!("Next: {}", action.label())); }
             keep = ui::primary(ui, "Keep editing", None);
             discard = ui.button(egui::RichText::new("Discard drafts and continue").color(self.prefs.theme.tokens().warning)).clicked();

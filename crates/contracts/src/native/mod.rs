@@ -15,6 +15,7 @@ pub mod manufacturing;
 mod operation;
 mod optical;
 mod optical_construction;
+mod overview;
 mod process;
 pub mod project;
 mod recipe;

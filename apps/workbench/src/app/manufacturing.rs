@@ -29,7 +29,8 @@ pub(super) struct ManufacturingUi {
     draft: Option<IntentDraft>,
     ignored_nonce: Option<u64>,
     pub panel: usize,
-    prepare_section: u8,
+    pub(super) prepare_section: u8,
+    pub(super) replay_record: Option<SourceHash>,
     pub replay: crate::replay::View,
     pub layers: crate::layers::Browser,
     pub review_nonce: Option<u64>,
@@ -640,11 +641,14 @@ impl Workbench {
         };
         if self.manufacturing.review_nonce != Some(review.capture.nonce) {
             self.manufacturing.review_nonce = Some(review.capture.nonce);
-            self.manufacturing.replay.events = descriptor.info.event_count;
-            self.manufacturing.replay.layer = None;
-            self.manufacturing.replay.layer_end = None;
-            self.manufacturing.replay.role = None;
-            self.manufacturing.replay.tool = None;
+            if self.manufacturing.replay_record.as_ref() != Some(&review.capture.record.hash) {
+                self.manufacturing.replay.events = descriptor.info.event_count;
+                self.manufacturing.replay.layer = None;
+                self.manufacturing.replay.layer_end = None;
+                self.manufacturing.replay.role = None;
+                self.manufacturing.replay.tool = None;
+            }
+            self.manufacturing.replay_record = Some(review.capture.record.hash.clone());
             self.manufacturing.selected_seam = None;
         }
         let compact = ui.available_height() < 500.0 || ui.available_width() < 600.0;

@@ -78,11 +78,16 @@ message GeometryRequest {
     GetArtifactPageRequest get_artifact_page = 8;
     ReleaseArtifactRequest release_artifact = 9;
     ApplyLayoutRequest apply_layout = 10;
+    GetLayoutOverviewRequest get_layout_overview = 11;
   }
 }
 message AddInstanceRequest { string session_id = 1; uint32 base_revision = 2; string definition_id = 3; RigidPoseMm pose = 4; }
 message SetInstancePoseRequest { string session_id = 1; uint32 base_revision = 2; uint32 occurrence_id = 3; RigidPoseMm pose = 4; uint32 project_revision = 5; }
 message RemoveInstanceRequest { string session_id = 1; uint32 base_revision = 2; uint32 occurrence_id = 3; }
+message GetLayoutOverviewRequest { string session_id=1; uint32 scene_revision=2; uint32 project_revision=3; }
+message PrintLayoutOverview { string session_id=1; uint32 scene_revision=2; string project_id=3; uint32 project_revision=4; repeated LayoutOverview layouts=5; }
+message LayoutOverview { string layout_id=1; AabbMm build_area_mm=2; bool captured_plate=3; repeated LayoutPartBounds parts=4; }
+message LayoutPartBounds { uint32 occurrence_id=1; AabbMm source_bounds_mm=2; }
 message GetSceneRequest { string session_id = 1; }
 message GetScenePageRequest { string session_id = 1; uint32 revision = 2; ScenePageKind kind = 3; uint32 offset = 4; }
 message GetFaceIndexPageRequest { string session_id = 1; string definition_id = 2; uint32 offset = 3; }
@@ -100,6 +105,7 @@ message GeometryReply {
     FaceInspection face_inspection = 5;
     ArtifactPage artifact_page = 6;
     google.protobuf.Empty released = 7;
+    PrintLayoutOverview layout_overview = 8;
   }
 }
 message SceneSummary { string session_id = 1; uint32 revision = 2; uint32 definition_count = 3; uint32 occurrence_count = 4; AabbMm bounds_mm = 5; uint32 unique_mesh_bytes = 6; string layout_id=7; }

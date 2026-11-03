@@ -184,6 +184,39 @@ async fn independent_plate_jobs_transfer_history_replay_and_reopen_without_sourc
     );
     let info = status(&mut reader).await.0;
     assert_eq!(info.layouts.len(), 2);
+    let scene = scene(&mut reader).await;
+    let GeometryResponse::LayoutOverview { overview } = reader
+        .geometry(GeometryCommand::GetLayoutOverview {
+            session_id: reader.hello().session_id.clone(),
+            scene_revision: scene.revision,
+            project_revision: info.revision,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("overview")
+    };
+    assert_eq!(overview.layouts.len(), 2);
+    assert_eq!(
+        overview
+            .layouts
+            .iter()
+            .map(|l| l.parts.len())
+            .sum::<usize>(),
+        2
+    );
+    assert_eq!(
+        overview
+            .layouts
+            .iter()
+            .map(|l| l.layout_id.clone())
+            .collect::<Vec<_>>(),
+        info.layouts
+            .iter()
+            .map(|l| l.layout_id.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(overview.layouts.iter().all(|l| l.build_area_mm.is_some()));
     assert!(!info.dirty);
     select(&reader, &a).await;
     assert_eq!(inspect(&mut reader).await.0, a_original);
@@ -195,4 +228,85 @@ async fn independent_plate_jobs_transfer_history_replay_and_reopen_without_sourc
         matches!(reader.project(ProjectCommand::EditPrintLayout {session_id:reader.hello().session_id.clone(),base_revision:info.revision,edit:PrintLayoutEdit::Rename {layout_id:b,name:"Forbidden".into()}}).await.unwrap_err(),ClientError::Project(error) if error.code==ProjectErrorCode::ReadOnly)
     );
     reader.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn arrangement_excludes_other_plates_occurrence_process_contributions() {
+    let workspace = Workspace::new();
+    let source = workspace.0.join("part.step");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/geometry/independent-exporters/occt-box-mm.step"),
+        &source,
+    )
+    .unwrap();
+    let mut client = spawn().await;
+    import(&mut client, &source).await;
+    set_intent(
+        &mut client,
+        serde_json::from_str(include_str!(
+            "../../../../fixtures/manufacturing/complete-sparse.intent.json"
+        ))
+        .unwrap(),
+    )
+    .await;
+    let a = current_layout(&client).await;
+    edit(
+        &client,
+        PrintLayoutEdit::Duplicate {
+            source: a.clone(),
+            name: "Other process".into(),
+        },
+    )
+    .await;
+    let s = scene(&mut client).await;
+    let GeometryResponse::ScenePage { occurrences, .. } = client
+        .geometry(GeometryCommand::GetScenePage {
+            session_id: s.session_id,
+            revision: s.revision,
+            kind: ScenePageKind::Occurrences,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("parts")
+    };
+    let part = &occurrences[0];
+    edit_process(
+        &mut client,
+        spiling_contracts::process::ProcessEdit::SetSparseFraction {
+            scope: spiling_contracts::surface::SurfaceScope::Occurrence {
+                occurrence_id: part.occurrence_id,
+                expected_definition_id: part.definition_id.clone(),
+            },
+            fraction: 0.6,
+        },
+    )
+    .await;
+    select(&client, &a).await;
+    let s = scene(&mut client).await;
+    let revision = status(&mut client).await.0.revision;
+    let GeometryResponse::OperationAccepted { operation } = client
+        .geometry(GeometryCommand::PrepareLayout {
+            session_id: s.session_id,
+            base_revision: s.revision,
+            project_revision: revision,
+            request: LayoutRequest {
+                objective: LayoutObjective::Copies,
+                template: Some(OccurrenceId::new(1).unwrap()),
+                quantity: 2,
+                pinned: vec![],
+                spacing_mm: 3.0,
+                style: LayoutStyle::Balanced,
+            },
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("layout accepted")
+    };
+    let terminal = wait(&mut client, operation.name).await;
+    assert_eq!(terminal.status, JobStatus::Completed, "{terminal:?}");
+    client.shutdown().await.unwrap();
 }

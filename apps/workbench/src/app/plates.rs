@@ -12,6 +12,8 @@ pub(super) struct PlatesUi {
     views: Vec<PlateView>,
     sheet: Option<Sheet>,
     focus: Option<egui::Id>,
+    pub overview: bool,
+    overview_focus: Option<egui::Id>,
 }
 struct PlateView {
     layout: PrintLayoutId,
@@ -19,6 +21,10 @@ struct PlateView {
     section: crate::analysis::SectionView,
     replay: crate::replay::View,
     mode: crate::layers::Mode,
+    panel: usize,
+    prepare_section: u8,
+    record: Option<SourceHash>,
+    occurrence: Option<OccurrenceId>,
 }
 struct Sheet {
     revision: spiling_contracts::project::ProjectRevision,
@@ -116,6 +122,14 @@ impl Workbench {
                     section: self.analysis.view.clone(),
                     replay: self.manufacturing.replay,
                     mode: self.manufacturing.layers.mode,
+                    panel: if self.manufacturing.panel == 5 {
+                        2
+                    } else {
+                        self.manufacturing.panel
+                    },
+                    prepare_section: self.manufacturing.prepare_section,
+                    record: self.manufacturing.replay_record.clone(),
+                    occurrence: self.occurrence,
                 });
             }
         }
@@ -142,11 +156,103 @@ impl Workbench {
             self.analysis.view = view.section.clone();
             self.manufacturing.replay = view.replay;
             self.manufacturing.layers.mode = view.mode;
+            self.manufacturing.panel = view.panel;
+            self.manufacturing.prepare_section = view.prepare_section;
+            self.manufacturing.replay_record = view.record.clone();
+            self.occurrence = view.occurrence.filter(|id| {
+                self.state.layout_overview.as_ref().is_some_and(|o| {
+                    o.layouts.iter().any(|l| {
+                        l.layout_id == p.layout_id
+                            && l.parts.iter().any(|part| part.occurrence_id == *id)
+                    })
+                })
+            });
         } else {
             self.viewport.fit();
         }
     }
 
+    pub(super) fn close_plate_overview(&mut self, ctx: &egui::Context) {
+        self.plates.overview = false;
+        if let Some(id) = self.plates.overview_focus.take() {
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
+    }
+    pub(super) fn plate_overview_ui(&mut self, ui: &mut egui::Ui) {
+        ui::pane_header(ui, "Plates", "Source footprints · shared scale");
+        if ui::close(ui, "Back to plate") {
+            self.close_plate_overview(ui.ctx());
+            return;
+        }
+        ui::help(
+            ui,
+            "plate-overview-help",
+            "Plate overview",
+            "Boxes show source bounds, including parts outside the build area. They exclude additive finishes, supports and clearance. Focus a plate for geometry and manufacturing inspection. Drag a part from the model tree to another plate to review a transfer.",
+        );
+        let (Some(p), Some(overview)) = (
+            self.state.project.clone(),
+            self.state.layout_overview.clone(),
+        ) else {
+            ui.weak("Waiting for plate context");
+            return;
+        };
+        if overview.project_id != p.project_id || overview.project_revision != p.revision {
+            ui.weak("Plate context is stale");
+            return;
+        }
+        let idle = self.state.phase == Phase::Running
+            && !self.state.busy
+            && self.awaiting_serial.is_none();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            if let Some(event) = ui::plate_overview(
+                ui,
+                &p.layouts,
+                &overview,
+                &p.layout_id,
+                idle,
+                self.prefs.theme.tokens(),
+            ) {
+                self.plate_event(ui, event);
+            }
+        });
+    }
+    fn plate_event(&mut self, ui: &egui::Ui, event: ui::PlateEvent) {
+        match event {
+            ui::PlateEvent::Focus(id) => {
+                self.close_plate_overview(ui.ctx());
+                self.select_plate(id);
+            }
+            ui::PlateEvent::Drop { target, part } => {
+                let valid = self.state.project.as_ref().is_some_and(|p| {
+                    !p.read_only
+                        && p.project_id == part.project
+                        && p.revision == part.revision
+                        && p.layout_id == part.source
+                        && p.layouts.iter().any(|l| l.layout_id == target)
+                }) && self
+                    .state
+                    .scene
+                    .as_ref()
+                    .is_some_and(|s| s.session_id == part.session && s.revision == part.scene)
+                    && self.state.display.as_ref().is_some_and(|s| {
+                        s.occurrences.iter().any(|o| o.occurrence_id == part.part)
+                    });
+                if !valid || self.project_drafts() || self.subject_drafts() || self.state.busy {
+                    self.local_problem = Some(
+                        "Apply or discard drafts, then drag a current part to another plate."
+                            .into(),
+                    );
+                    return;
+                }
+                self.plate_sheet(ui, Mode::Move);
+                if let Some(sheet) = &mut self.plates.sheet {
+                    sheet.target = Some(target);
+                    sheet.parts = vec![part.part];
+                }
+            }
+        }
+    }
     pub(super) fn select_plate(&mut self, id: PrintLayoutId) {
         if self.project_drafts() || self.subject_drafts() {
             self.navigation = Some(super::navigation::Navigation::Plate(id));
@@ -196,8 +302,17 @@ impl Workbench {
         let idle = self.state.phase == Phase::Running
             && !self.state.busy
             && self.awaiting_serial.is_none();
-        if let Some(id) = ui::plate_navigator(ui, &p.layouts, &p.layout_id, idle) {
-            self.select_plate(id);
+        if let Some(event) = ui::plate_navigator(ui, &p.layouts, &p.layout_id, idle) {
+            self.plate_event(ui, event);
+        }
+        let overview = ui.selectable_label(self.plates.overview, "Overview");
+        if overview.clicked() {
+            if self.plates.overview {
+                self.close_plate_overview(ui.ctx());
+            } else {
+                self.plates.overview = true;
+                self.plates.overview_focus = Some(overview.id);
+            }
         }
         let reason = if !idle || p.read_only {
             Some("Open a writable project and wait for current work")

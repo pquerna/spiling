@@ -11,7 +11,7 @@ mod gallery;
 mod layout;
 mod plates;
 pub use layout::layout_fields;
-pub use plates::plate_navigator;
+pub use plates::{PlateEvent, PlatePartDrag, plate_navigator, plate_overview};
 mod seams;
 pub use gallery::gallery;
 pub use seams::{seam_policy_fields, seam_review, seam_summary};

@@ -341,8 +341,9 @@ pub(super) fn prepare(
         let attempt = (|| -> Result<_, JobError> {
             let trial = r.draft.preview(&placements)?;
             r.capture.occurrences = trial.occurrences.values().cloned().collect();
-            r.capture.surface_overlays = trial.surface_overlays;
-            r.capture.process_document = trial.process_document;
+            let (surface, process) = trial.scoped_documents();
+            r.capture.surface_overlays = Arc::new(surface);
+            r.capture.process_document = Arc::new(process);
             Ok(spiling_manufacturing::compile(
                 input(&r.capture, definitions),
                 cancel,

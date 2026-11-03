@@ -177,6 +177,14 @@ The tinted canvas preview cannot pick faces or act as a manufacturing result.
 Changing form inputs, project/session or captured revisions revokes preview/Apply.
 Verification details and search limits are disclosed below the essential result.
 
+The Plates overview shows source-bound boxes at a shared physical scale, with the
+focused plate emphasized. It is navigation context: it excludes finish growth,
+supports and clearance. Focus plate returns to the native geometry viewport.
+Dragging a model-tree part onto another plate opens the same explicit transfer
+review as Plate actions; drop never commits a move. Stale drags and unapplied drafts
+cannot authorize transfers. Camera, section, task and matching-program layer views
+are bounded per plate; a changed program resets playback selection.
+
 ## Exercising a change
 
 Use the production gallery's Panels, Fields, Color, Acquisition, Try / Compare, Build area, Arrange and Plates categories in each theme.

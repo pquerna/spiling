@@ -295,6 +295,37 @@ mod tests {
     }
 
     #[test]
+    fn plate_cards_keep_both_columns_inside_the_surface() {
+        for theme in [Theme::Graphite, Theme::Paper] {
+            for width in [240.0, 640.0, 900.0] {
+                let ctx = egui::Context::default();
+                theme.apply(&ctx);
+                for _ in 0..3 {
+                    let mut measured = (0.0, 0.0);
+                    ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(width, 1600.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ui| {
+                            let right = ui.max_rect().right();
+                            plates(ui);
+                            measured = (ui.min_rect().right(), right);
+                        },
+                    )
+                    .drop_without_applying_deltas();
+                    assert!(
+                        measured.0 <= measured.1 + 1.0,
+                        "{theme:?}/{width}: {measured:?}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
     fn review_and_build_area_controls_reflow_in_both_themes_and_scaled_panes() {
         for theme in [Theme::Graphite, Theme::Paper] {
             for width in [240.0, 320.0, 400.0] {
@@ -654,7 +685,69 @@ fn plates(ui: &mut Ui) {
         d.get_temp::<PrintLayoutId>(key)
             .unwrap_or_else(|| ids[0].clone())
     });
-    if let Some(id) = plate_navigator(ui, &rows, &selected, true) {
+    if let Some(PlateEvent::Focus(id)) = plate_navigator(ui, &rows, &selected, true) {
+        selected = id;
+    }
+    let mut next_part = 1;
+    let overview = spiling_contracts::geometry::PrintLayoutOverview {
+        session_id: spiling_contracts::geometry::SessionId::parse(
+            "550e8400-e29b-41d4-a716-446655440000",
+        )
+        .unwrap(),
+        scene_revision: spiling_contracts::geometry::SceneRevision(1),
+        project_id: spiling_contracts::project::ProjectId::parse(
+            "550e8400-e29b-41d4-a716-446655440001",
+        )
+        .unwrap(),
+        project_revision: spiling_contracts::project::ProjectRevision(1),
+        layouts: rows
+            .iter()
+            .map(|row| spiling_contracts::geometry::LayoutOverview {
+                layout_id: row.layout_id.clone(),
+                captured_plate: false,
+                build_area_mm: row
+                    .configured
+                    .then_some(spiling_contracts::geometry::AabbMm {
+                        min: [0.0; 3],
+                        max: [220.0, 220.0, 0.0],
+                    }),
+                parts: (0..row.occurrence_count)
+                    .map(|i| {
+                        let part = spiling_contracts::geometry::LayoutPartBounds {
+                            occurrence_id: spiling_contracts::geometry::OccurrenceId::new(
+                                next_part,
+                            )
+                            .unwrap(),
+                            source_bounds_mm: spiling_contracts::geometry::AabbMm {
+                                min: [
+                                    30.0 + f64::from(i % 4) * 40.0,
+                                    30.0 + f64::from(i / 4) * 40.0,
+                                    0.0,
+                                ],
+                                max: [
+                                    60.0 + f64::from(i % 4) * 40.0,
+                                    60.0 + f64::from(i / 4) * 40.0,
+                                    20.0,
+                                ],
+                            },
+                        };
+                        next_part += 1;
+                        part
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+    ui.label("Source footprints · shared scale");
+    let tokens = if ui.visuals().dark_mode {
+        Theme::Graphite
+    } else {
+        Theme::Paper
+    }
+    .tokens();
+    if let Some(PlateEvent::Focus(id)) =
+        plate_overview(ui, &rows, &overview, &selected, true, tokens)
+    {
         selected = id;
     }
     ui.data_mut(|d| d.insert_temp(key, selected.clone()));

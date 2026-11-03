@@ -1080,6 +1080,11 @@ impl TryFrom<rpc::GeometryRequest> for GeometryCommand {
             rpc::geometry_request::Command::AddInstance(v) => v.try_into(),
             rpc::geometry_request::Command::SetInstancePose(v) => v.try_into(),
             rpc::geometry_request::Command::RemoveInstance(v) => v.try_into(),
+            rpc::geometry_request::Command::GetLayoutOverview(v) => Ok(Self::GetLayoutOverview {
+                session_id: SessionId::parse(v.session_id).map_err(|e| e.to_string())?,
+                scene_revision: SceneRevision(v.scene_revision),
+                project_revision: crate::project::ProjectRevision(v.project_revision),
+            }),
             rpc::geometry_request::Command::GetScene(v) => v.try_into(),
             rpc::geometry_request::Command::GetScenePage(v) => v.try_into(),
             rpc::geometry_request::Command::GetFaceIndexPage(v) => v.try_into(),
@@ -1224,6 +1229,15 @@ pub fn geometry_call(command: GeometryCommand, id: &str) -> Result<GeometryCall,
             base_revision: base_revision.get(),
             occurrence_id: occurrence_id.get(),
         }),
+        GeometryCommand::GetLayoutOverview {
+            session_id,
+            scene_revision,
+            project_revision,
+        } => rpc::geometry_request::Command::GetLayoutOverview(rpc::GetLayoutOverviewRequest {
+            session_id: session_id.as_str().into(),
+            scene_revision: scene_revision.get(),
+            project_revision: project_revision.get(),
+        }),
         GeometryCommand::GetScene { session_id } => {
             rpc::geometry_request::Command::GetScene(rpc::GetSceneRequest {
                 session_id: session_id.into(),
@@ -1328,6 +1342,7 @@ fn sequential(ordinals: impl Iterator<Item = u32>, next: Option<u32>) -> Result<
 }
 fn validate_response(value: &GeometryResponse) -> Result<(), String> {
     match value {
+        GeometryResponse::LayoutOverview { overview } => checked(overview.validate())?,
         GeometryResponse::Scene { summary } | GeometryResponse::SceneChanged { summary } => {
             checked(summary.validate())?
         }
@@ -1522,6 +1537,9 @@ impl TryFrom<rpc::GeometryReply> for GeometryResponse {
     fn try_from(value: rpc::GeometryReply) -> Result<Self, String> {
         use rpc::geometry_reply::Response;
         let value = match required(value.response, "geometry reply response")? {
+            Response::LayoutOverview(overview) => Self::LayoutOverview {
+                overview: overview.try_into()?,
+            },
             Response::SceneChanged(summary) => Self::SceneChanged {
                 summary: summary.try_into()?,
             },
@@ -1612,6 +1630,9 @@ impl TryFrom<GeometryResponse> for rpc::GeometryReply {
         validate_response(&value)?;
         use rpc::geometry_reply::Response;
         let response = match value {
+            GeometryResponse::LayoutOverview { overview } => {
+                Response::LayoutOverview(overview.try_into()?)
+            }
             GeometryResponse::SceneChanged { summary } => {
                 Response::SceneChanged(summary.try_into()?)
             }

@@ -40,6 +40,11 @@ pub enum GeometryCommand {
         base_revision: SceneRevision,
         occurrence_id: OccurrenceId,
     },
+    GetLayoutOverview {
+        session_id: SessionId,
+        scene_revision: SceneRevision,
+        project_revision: crate::project::ProjectRevision,
+    },
     GetScene {
         session_id: SessionId,
     },
@@ -267,6 +272,9 @@ pub enum ArtifactChunkMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GeometryResponse {
+    LayoutOverview {
+        overview: PrintLayoutOverview,
+    },
     OperationAccepted {
         operation: crate::NativeOperationView,
     },

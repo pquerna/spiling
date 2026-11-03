@@ -8,6 +8,7 @@ mod execution;
 mod layout;
 mod manufacturing;
 mod optical;
+mod overview;
 mod placement;
 mod source;
 pub(crate) mod stock;
@@ -1529,6 +1530,21 @@ impl Runtime {
             } => {
                 self.base(&session_id, base_revision)?;
                 Ok(self.apply_edit(Edit::Remove { occurrence_id }))
+            }
+            GeometryCommand::GetLayoutOverview {
+                session_id,
+                scene_revision,
+                project_revision,
+            } => {
+                self.session(&session_id)?;
+                if scene_revision != self.revision
+                    || project_revision != self.project.info().revision
+                {
+                    return Err(stale());
+                }
+                Ok(Reply::Geometry(GeometryResponse::LayoutOverview {
+                    overview: self.layout_overview()?,
+                }))
             }
             GeometryCommand::GetScene { session_id } => {
                 self.session(&session_id)?;

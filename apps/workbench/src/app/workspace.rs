@@ -67,7 +67,7 @@ impl Workbench {
                         definition.record.provenance.source_name,
                         index + 1
                     );
-                    egui::CollapsingHeader::new(title)
+                    let row = egui::CollapsingHeader::new(title)
                         .id_salt(occurrence.occurrence_id)
                         .default_open(scene.occurrences.len() == 1)
                         .show(ui, |ui| {
@@ -112,6 +112,18 @@ impl Workbench {
                                     }
                                 });
                         });
+                    if let (Some(p), Some(h)) = (&self.state.project, &self.state.hello) {
+                        row.header_response
+                            .interact(egui::Sense::click_and_drag())
+                            .dnd_set_drag_payload(ui::PlatePartDrag {
+                                project: p.project_id.clone(),
+                                revision: p.revision,
+                                session: h.session_id.clone(),
+                                scene: scene.summary.revision,
+                                source: p.layout_id.clone(),
+                                part: occurrence.occurrence_id,
+                            });
+                    }
                 }
             });
         });

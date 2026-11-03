@@ -397,6 +397,8 @@ impl Workbench {
                 self.close_library(ctx);
             } else if self.layout.open {
                 self.close_layout(ctx);
+            } else if self.plates.overview {
+                self.close_plate_overview(ctx);
             } else if self.analysis.open {
                 self.close_analysis(ctx);
             } else if self.show_feedback {
@@ -979,6 +981,10 @@ impl eframe::App for Workbench {
                     egui::Frame::central_panel(ui.style()).fill(self.prefs.theme.tokens().canvas),
                 )
                 .show(ui, |ui| {
+                    if self.plates.overview {
+                        self.plate_overview_ui(ui);
+                        return;
+                    }
                     if self.state.display_loading {
                         ui.label("Updating source display · previous revision retained");
                         if ui.button("Pause transfer").clicked() {

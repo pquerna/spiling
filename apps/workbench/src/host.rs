@@ -83,6 +83,7 @@ pub struct Snapshot {
     pub hello: Option<Arc<Hello>>,
     pub project: Option<Arc<ProjectInfo>>,
     pub scene: Option<SceneSummary>,
+    pub layout_overview: Option<Arc<spiling_contracts::geometry::PrintLayoutOverview>>,
     pub display: Option<Arc<Scene>>,
     pub section: Option<Arc<Section>>,
     pub section_loading: bool,
@@ -118,6 +119,7 @@ impl Default for Snapshot {
             hello: None,
             project: None,
             scene: None,
+            layout_overview: None,
             display: None,
             section: None,
             section_loading: false,
@@ -1050,6 +1052,31 @@ impl Actor {
                 ));
             }
         };
+        let GeometryResponse::LayoutOverview { overview } = rpc
+            .geometry(GeometryCommand::GetLayoutOverview {
+                session_id: session_id.clone(),
+                scene_revision: scene.revision,
+                project_revision: project.revision,
+            })
+            .await?
+        else {
+            return Err(ClientError::Protocol(
+                "Unexpected plate overview reply".into(),
+            ));
+        };
+        if overview.project_id != project.project_id
+            || overview.session_id != session_id
+            || overview.project_revision != project.revision
+            || overview.scene_revision != scene.revision
+            || overview.layouts.len() != project.layouts.len()
+            || overview.layouts.iter().zip(&project.layouts).any(|(a, b)| {
+                a.layout_id != b.layout_id || a.parts.len() != b.occurrence_count as usize
+            })
+        {
+            return Err(ClientError::Protocol(
+                "Plate overview does not match the captured project".into(),
+            ));
+        }
         if self.state.scene.as_ref().is_none_or(|s| s != &scene) {
             self.cancel_display();
             self.section_cancel.store(true, Ordering::Relaxed);
@@ -1155,6 +1182,7 @@ impl Actor {
         m.resource = resource;
         self.state.project = Some(Arc::new(project));
         self.state.scene = Some(scene);
+        self.state.layout_overview = Some(Arc::new(overview));
         self.schedule_display();
         if self
             .state

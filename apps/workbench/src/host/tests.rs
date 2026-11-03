@@ -3503,6 +3503,29 @@ fn named_plate_refresh_empty_scope_and_edit_receipts_are_authoritative() {
     });
     assert!(displayed.display.as_ref().unwrap().occurrences.is_empty());
     assert_eq!(displayed.scene.as_ref().unwrap().definition_count, 0);
+    let overview = displayed.layout_overview.as_ref().unwrap();
+    assert_eq!(overview.layouts.len(), 2);
+    assert_eq!(
+        overview
+            .layouts
+            .iter()
+            .map(|l| l.parts.len())
+            .sum::<usize>(),
+        1
+    );
+    assert_eq!(
+        overview.project_revision,
+        displayed.project.as_ref().unwrap().revision
+    );
+    assert!(
+        overview
+            .layouts
+            .iter()
+            .find(|l| l.layout_id == empty)
+            .unwrap()
+            .parts
+            .is_empty()
+    );
     assert_eq!(displayed.manufacturing.layout_id.as_ref(), Some(&empty));
     assert!(displayed.project.as_ref().unwrap().dirty);
     let selected = project_edit(&host, |session_id, base_revision| {
