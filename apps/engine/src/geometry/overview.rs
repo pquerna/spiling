@@ -38,6 +38,8 @@ impl Runtime {
                         .map(|part| {
                             Ok(LayoutPartBounds {
                                 occurrence_id: part.occurrence_id,
+                                definition_id: part.definition_id.clone(),
+                                pose: part.pose,
                                 source_bounds_mm: placement::scene_bounds(
                                     part.pose,
                                     self.definitions[&part.definition_id].record.bounds_mm,
@@ -54,6 +56,11 @@ impl Runtime {
             project_id: self.project.info().project_id,
             project_revision: self.project.info().revision,
             layouts,
+            definitions: snapshot
+                .sources
+                .keys()
+                .map(|id| self.definitions[id].record.clone())
+                .collect(),
         };
         overview.validate()?;
         Ok(overview)

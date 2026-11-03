@@ -26,6 +26,10 @@ pub struct Scene {
     pub summary: SceneSummary,
     pub definitions: Vec<Arc<Definition>>,
     pub occurrences: Vec<OccurrenceRecord>,
+    /// Global source display closure, shared with the active definitions above.
+    pub context: Arc<PrintLayoutOverview>,
+    pub context_definitions: Vec<Arc<Definition>>,
+    pub context_error: Option<String>,
     pub raw_bytes: usize,
 }
 impl Scene {
@@ -75,6 +79,7 @@ pub async fn load(
     rpc: EngineRpc,
     summary: SceneSummary,
     previous: Option<Arc<Scene>>,
+    overview: Arc<PrintLayoutOverview>,
     cancel: Arc<AtomicBool>,
     reserved: usize,
 ) -> Result<Arc<Scene>, ClientError> {
@@ -121,19 +126,58 @@ pub async fn load(
     {
         return Err(invalid("Incomplete native scene pages"));
     }
+    if overview.session_id != summary.session_id || overview.scene_revision != summary.revision {
+        return Err(invalid("Plate display context does not match the scene"));
+    }
+    let active_ids = definitions
+        .iter()
+        .map(|d| d.definition_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if definitions
+        .iter()
+        .any(|d| !overview.definitions.contains(d))
+    {
+        return Err(invalid("Active and overview definitions disagree"));
+    }
+    let plate = overview
+        .layouts
+        .iter()
+        .find(|l| l.layout_id == summary.layout_id)
+        .ok_or_else(|| invalid("Active plate absent from overview"))?;
+    if plate.parts.len() != occurrences.len()
+        || occurrences.iter().any(|o| {
+            !plate.parts.iter().any(|p| {
+                p.occurrence_id == o.occurrence_id
+                    && p.definition_id == o.definition_id
+                    && p.pose == o.pose
+            })
+        })
+    {
+        return Err(invalid("Active and overview occurrences disagree"));
+    }
+    definitions.extend(
+        overview
+            .definitions
+            .iter()
+            .filter(|d| !active_ids.contains(&d.definition_id))
+            .cloned(),
+    );
+    let mut context_error = None;
     let mut loaded = Vec::new();
-    let mut raw_bytes = 0usize;
     let active_bytes = previous.as_ref().map_or(0, |s| s.raw_bytes);
     let mut newly_retained = 0usize;
-    for record in definitions {
+    'definitions: for record in definitions {
         check(&cancel)?;
         if let Some(existing) = previous
             .as_ref()
             .filter(|s| s.summary.session_id == summary.session_id)
-            .and_then(|s| s.definition(&record.definition_id))
+            .and_then(|s| {
+                s.context_definitions
+                    .iter()
+                    .find(|d| d.record.definition_id == record.definition_id)
+            })
             .filter(|d| d.record == record)
         {
-            raw_bytes += existing.chunks.iter().map(|c| c.bytes.len()).sum::<usize>();
             loaded.push(existing.clone());
             continue;
         }
@@ -208,15 +252,18 @@ pub async fn load(
                     if (active_bytes + next).saturating_mul(2) + occurrences.len() * 128 + reserved
                         > MAX_DISPLAY_BUFFER_BYTES as usize
                     {
-                        return Err(invalid(
-                            "Active and staged CPU/GPU display buffers exceed capacity; close the project before admitting this scene",
-                        ));
+                        if active_ids.contains(&record.definition_id) {
+                            return Err(invalid(
+                                "Active and staged CPU/GPU display buffers exceed capacity; close the project before admitting this scene",
+                            ));
+                        }
+                        context_error = Some("Additional plate previews exceed the shared display budget. Focus a plate to inspect it.".into());
+                        break 'definitions;
                     }
                     let bytes = rpc
                         .read_geometry_chunk(&resource, &metadata, &artifact)
                         .await?;
                     newly_retained = next;
-                    raw_bytes += bytes.len();
                     chunks.push(Chunk {
                         metadata: mesh.clone(),
                         bytes: bytes.into(),
@@ -244,7 +291,24 @@ pub async fn load(
             chunks,
         }));
     }
-    if raw_bytes != summary.unique_mesh_bytes as usize {
+    // The active view and every card share these exact immutable allocations.
+    let context_definitions = loaded;
+    let raw_bytes = context_definitions
+        .iter()
+        .flat_map(|d| &d.chunks)
+        .map(|c| c.bytes.len())
+        .sum();
+    let loaded: Vec<_> = context_definitions
+        .iter()
+        .filter(|d| active_ids.contains(&d.record.definition_id))
+        .cloned()
+        .collect();
+    let active_raw: usize = loaded
+        .iter()
+        .flat_map(|d| &d.chunks)
+        .map(|c| c.bytes.len())
+        .sum();
+    if active_raw != summary.unique_mesh_bytes as usize {
         return Err(invalid(
             "Scene mesh byte total disagrees with native summary",
         ));
@@ -335,6 +399,9 @@ pub async fn load(
         definitions: loaded,
         occurrences,
         raw_bytes,
+        context: overview,
+        context_definitions,
+        context_error,
     }))
 }
 

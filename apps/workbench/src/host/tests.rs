@@ -3475,7 +3475,13 @@ fn named_plate_refresh_empty_scope_and_edit_receipts_are_authoritative() {
     .unwrap();
     let initial = wait(&host, |s| s.phase != Phase::Starting);
     assert_eq!(initial.phase, Phase::Running);
-    let first = imported(&host);
+    imported(&host);
+    let first = wait(&host, |s| {
+        !s.display_loading
+            && s.display
+                .as_ref()
+                .is_some_and(|d| s.scene.as_ref().is_some_and(|scene| d.same_revision(scene)))
+    });
     let original = first.project.as_ref().unwrap().layout_id.clone();
     let edit = PrintLayoutEdit::Create {
         name: "Empty job".into(),
@@ -3502,6 +3508,20 @@ fn named_plate_refresh_empty_scope_and_edit_receipts_are_authoritative() {
             && !s.display_loading
     });
     assert!(displayed.display.as_ref().unwrap().occurrences.is_empty());
+    let context = displayed.display.as_ref().unwrap();
+    assert_eq!(
+        context.context_definitions.len(),
+        1,
+        "inactive source mesh must remain available to the overview"
+    );
+    assert!(context.context_error.is_none());
+    assert!(
+        Arc::ptr_eq(
+            &context.context_definitions[0],
+            &first.display.as_ref().unwrap().definitions[0]
+        ),
+        "focus must share existing immutable mesh bytes"
+    );
     assert_eq!(displayed.scene.as_ref().unwrap().definition_count, 0);
     let overview = displayed.layout_overview.as_ref().unwrap();
     assert_eq!(overview.layouts.len(), 2);
@@ -3541,7 +3561,46 @@ fn named_plate_refresh_empty_scope_and_edit_receipts_are_authoritative() {
     );
     assert_eq!(selected.scene.as_ref().unwrap().occurrence_count, 1);
     assert!(selected.problems.is_empty(), "{:?}", selected.problems);
-    let pid = selected.hello.as_ref().unwrap().pid;
+    let selected = wait(&host, |s| {
+        !s.display_loading
+            && s.display
+                .as_ref()
+                .is_some_and(|d| d.summary.layout_id == original)
+    });
+    let active = selected.display.as_ref().unwrap().clone();
+    let part = active.occurrences[0].clone();
+    let changed = project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::EditProcess {
+            session_id,
+            base_revision,
+            edit: spiling_contracts::process::ProcessEdit::SetSparseFraction {
+                scope: spiling_contracts::surface::SurfaceScope::Occurrence {
+                    occurrence_id: part.occurrence_id,
+                    expected_definition_id: part.definition_id,
+                },
+                fraction: 0.6,
+            },
+        }
+    });
+    assert!(
+        Arc::ptr_eq(changed.display.as_ref().unwrap(), &active),
+        "process edits must not reload source previews"
+    );
+    send(&host, Action::Undo);
+    let before = host.snapshot().scene.as_ref().unwrap().revision;
+    send(&host, Action::Undo); // Remove the inactive empty layout without changing the active geometry.
+    let reduced = wait(&host, |s| {
+        !s.display_loading
+            && s.display
+                .as_ref()
+                .is_some_and(|d| d.context.layouts.len() == 1)
+    });
+    assert_eq!(reduced.scene.as_ref().unwrap().revision, before);
+    assert!(Arc::ptr_eq(
+        &reduced.display.as_ref().unwrap().context_definitions[0],
+        &active.definitions[0]
+    ));
+    let pid = reduced.hello.as_ref().unwrap().pid;
     let closing = send(&host, Action::Close);
     host.confirm(closing.confirmation.unwrap().id, true)
         .unwrap();

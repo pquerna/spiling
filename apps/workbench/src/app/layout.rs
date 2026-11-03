@@ -104,6 +104,9 @@ impl Workbench {
             definitions: source.definitions.clone(),
             occurrences,
             raw_bytes: source.raw_bytes,
+            context: source.context.clone(),
+            context_definitions: source.context_definitions.clone(),
+            context_error: source.context_error.clone(),
         });
         self.layout.preview = Some((p.id.clone(), Arc::downgrade(source), preview.clone()));
         Some(preview)

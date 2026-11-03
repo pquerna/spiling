@@ -85,9 +85,9 @@ message AddInstanceRequest { string session_id = 1; uint32 base_revision = 2; st
 message SetInstancePoseRequest { string session_id = 1; uint32 base_revision = 2; uint32 occurrence_id = 3; RigidPoseMm pose = 4; uint32 project_revision = 5; }
 message RemoveInstanceRequest { string session_id = 1; uint32 base_revision = 2; uint32 occurrence_id = 3; }
 message GetLayoutOverviewRequest { string session_id=1; uint32 scene_revision=2; uint32 project_revision=3; }
-message PrintLayoutOverview { string session_id=1; uint32 scene_revision=2; string project_id=3; uint32 project_revision=4; repeated LayoutOverview layouts=5; }
+message PrintLayoutOverview { string session_id=1; uint32 scene_revision=2; string project_id=3; uint32 project_revision=4; repeated LayoutOverview layouts=5; repeated DefinitionRecord definitions=6; }
 message LayoutOverview { string layout_id=1; AabbMm build_area_mm=2; bool captured_plate=3; repeated LayoutPartBounds parts=4; }
-message LayoutPartBounds { uint32 occurrence_id=1; AabbMm source_bounds_mm=2; }
+message LayoutPartBounds { uint32 occurrence_id=1; AabbMm source_bounds_mm=2; uint32 definition_index=3; RigidPoseMm pose=4; }
 message GetSceneRequest { string session_id = 1; }
 message GetScenePageRequest { string session_id = 1; uint32 revision = 2; ScenePageKind kind = 3; uint32 offset = 4; }
 message GetFaceIndexPageRequest { string session_id = 1; string definition_id = 2; uint32 offset = 3; }

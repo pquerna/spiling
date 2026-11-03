@@ -13,6 +13,7 @@ pub struct PrintLayoutOverview {
     pub project_id: ProjectId,
     pub project_revision: ProjectRevision,
     pub layouts: Vec<LayoutOverview>,
+    pub definitions: Vec<DefinitionRecord>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -27,10 +28,31 @@ pub struct LayoutOverview {
 pub struct LayoutPartBounds {
     pub occurrence_id: OccurrenceId,
     pub source_bounds_mm: AabbMm,
+    pub definition_id: DefinitionId,
+    pub pose: RigidPoseMm,
 }
 impl PrintLayoutOverview {
+    /// Display identity excludes metadata-only project revisions.
+    pub fn same_geometry(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && self.project_id == other.project_id
+            && self.definitions == other.definitions
+            && self.layouts == other.layouts
+    }
+
     pub fn validate(&self) -> Result<(), GeometryError> {
         let mut layouts = std::collections::BTreeSet::new();
+        let mut definitions = std::collections::BTreeSet::new();
+        if self.definitions.len() > MAX_DEFINITIONS as usize {
+            return Err(resource("overview definition count exceeds limit"));
+        }
+        for definition in &self.definitions {
+            definition.validate()?;
+            if !definitions.insert(&definition.definition_id) {
+                return Err(invalid("duplicate overview definition"));
+            }
+        }
+        let mut used = std::collections::BTreeSet::new();
         let mut parts = std::collections::BTreeSet::new();
         if self.layouts.is_empty() || self.layouts.len() > MAX_PRINT_LAYOUTS {
             return Err(GeometryError::new(
@@ -62,6 +84,11 @@ impl PrintLayoutOverview {
             }
             for part in &layout.parts {
                 part.source_bounds_mm.validate()?;
+                part.pose.validate()?;
+                if !definitions.contains(&part.definition_id) {
+                    return Err(invalid("overview part references an absent definition"));
+                }
+                used.insert(&part.definition_id);
                 if !parts.insert(part.occurrence_id) {
                     return Err(GeometryError::new(
                         GeometryErrorCode::InvalidGeometry,
@@ -69,6 +96,9 @@ impl PrintLayoutOverview {
                     ));
                 }
             }
+        }
+        if used != definitions {
+            return Err(invalid("unreferenced overview definition"));
         }
         if parts.len() > MAX_OCCURRENCES as usize {
             return Err(GeometryError::new(

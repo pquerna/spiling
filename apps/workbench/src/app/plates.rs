@@ -179,7 +179,11 @@ impl Workbench {
         }
     }
     pub(super) fn plate_overview_ui(&mut self, ui: &mut egui::Ui) {
-        ui::pane_header(ui, "Plates", "Source footprints · shared scale");
+        ui::pane_header(
+            ui,
+            "Plates",
+            "Source geometry · three-quarter view · shared scale",
+        );
         if ui::close(ui, "Back to plate") {
             self.close_plate_overview(ui.ctx());
             return;
@@ -188,7 +192,7 @@ impl Workbench {
             ui,
             "plate-overview-help",
             "Plate overview",
-            "Boxes show source bounds, including parts outside the build area. They exclude additive finishes, supports and clearance. Focus a plate for geometry and manufacturing inspection. Drag a part from the model tree to another plate to review a transfer.",
+            "Previews show source geometry on the declared build area at a common scale and angle. They exclude additive finishes, supports and clearance. Focus a plate for geometry and manufacturing inspection. Drag a part from the model tree to another plate to review a transfer.",
         );
         let (Some(p), Some(overview)) = (
             self.state.project.clone(),
@@ -204,6 +208,12 @@ impl Workbench {
         let idle = self.state.phase == Phase::Running
             && !self.state.busy
             && self.awaiting_serial.is_none();
+        let display = self
+            .state
+            .display
+            .clone()
+            .filter(|s| s.context.same_geometry(&overview));
+        let tokens = self.prefs.theme.tokens();
         egui::ScrollArea::vertical().show(ui, |ui| {
             if let Some(event) = ui::plate_overview(
                 ui,
@@ -211,7 +221,17 @@ impl Workbench {
                 &overview,
                 &p.layout_id,
                 idle,
-                self.prefs.theme.tokens(),
+                tokens,
+                |ui, rect, index, active| {
+                    crate::viewport::overview::paint(
+                        ui,
+                        rect,
+                        display.as_ref(),
+                        index,
+                        active,
+                        tokens,
+                    )
+                },
             ) {
                 self.plate_event(ui, event);
             }

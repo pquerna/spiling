@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 mod beads;
+pub mod overview;
 pub mod plate;
 mod section;
 use crate::scene::{Scene, Section};
@@ -32,7 +33,6 @@ struct Draw {
     definition: DefinitionId,
     group: wgpu::BindGroup,
     _instances: wgpu::Buffer,
-    raw: Arc<wgpu::Buffer>,
     indices: u32,
     instances: u32,
 }
@@ -43,6 +43,8 @@ struct LineVertex {
     color: [f32; 3],
 }
 struct Resources {
+    meshes: HashMap<SourceHash, Arc<wgpu::Buffer>>,
+    overview: overview::Renderer,
     plate: plate::Renderer,
     replay: Option<Arc<crate::manufacture::Review>>,
     replay_buffers: Vec<wgpu::Buffer>,
@@ -368,7 +370,16 @@ impl Viewport {
             })
         });
         let plate = plate::Renderer::new(device, state.target_format, &line_pipeline_layout);
+        let overview = overview::Renderer::new(
+            device,
+            state.target_format,
+            &line_pipeline_layout,
+            line_layout.clone(),
+            line_pipeline.clone(),
+        );
         state.renderer.write().callback_resources.insert(Resources {
+            meshes: HashMap::new(),
+            overview,
             plate,
             replay: None,
             replay_buffers: Vec::new(),
@@ -931,6 +942,10 @@ impl egui_wgpu::CallbackTrait for Callback {
         let Some(r) = resources.get_mut::<Resources>() else {
             return vec![];
         };
+        r.overview.clear();
+        if self.scene.is_none() {
+            r.meshes.clear();
+        }
         r.plate
             .prepare(device, self.plate.as_ref(), self.plate_origin, self.dark);
         let changed = match (&r.scene, &self.scene) {
@@ -1213,6 +1228,33 @@ impl egui_wgpu::CallbackTrait for Callback {
     }
 }
 impl Resources {
+    fn retain_meshes(&mut self, scene: &Scene) {
+        let hashes: std::collections::HashSet<_> = scene
+            .context_definitions
+            .iter()
+            .flat_map(|d| d.chunks.iter().map(|c| &c.metadata.sha256))
+            .collect();
+        self.meshes.retain(|hash, _| hashes.contains(hash));
+    }
+    fn mesh_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        chunk: &crate::scene::Chunk,
+    ) -> Arc<wgpu::Buffer> {
+        self.meshes
+            .entry(chunk.metadata.sha256.clone())
+            .or_insert_with(|| {
+                Arc::new(
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Shared checked SPLM"),
+                        contents: &chunk.bytes,
+                        usage: wgpu::BufferUsages::STORAGE,
+                    }),
+                )
+            })
+            .clone()
+    }
+
     fn stage_section(
         &self,
         device: &wgpu::Device,
@@ -1306,24 +1348,18 @@ impl Resources {
         ))
     }
 
-    fn stage(&self, device: &wgpu::Device, scene: Option<Arc<Scene>>) -> Result<Vec<Draw>, String> {
+    fn stage(
+        &mut self,
+        device: &wgpu::Device,
+        scene: Option<Arc<Scene>>,
+    ) -> Result<Vec<Draw>, String> {
         let Some(scene) = scene else {
             return Ok(vec![]);
         };
         let center = scene.summary.bounds_mm.map_or(DVec3::ZERO, |b| {
             (DVec3::from_array(b.min) + DVec3::from_array(b.max)) * 0.5
         });
-        let mut previous = HashMap::new();
-        if let Some(old) = &self.scene {
-            for (chunk, draw) in old
-                .definitions
-                .iter()
-                .flat_map(|d| d.chunks.iter())
-                .zip(&self.draws)
-            {
-                previous.insert(chunk.metadata.sha256.as_str(), draw.raw.clone());
-            }
-        }
+        self.retain_meshes(&scene);
         let mut draws = Vec::new();
         let mut instance_bytes = 0usize;
         for definition in &scene.definitions {
@@ -1373,18 +1409,7 @@ impl Resources {
                     .checked_add(instances.len() * std::mem::size_of::<Instance>())
                     .filter(|n| *n <= crate::scene::MAX_INSTANCE_BUFFER_BYTES)
                     .ok_or("Source instance buffers exceed the reserved display pool")?;
-                let raw = previous
-                    .get(chunk.metadata.sha256.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        Arc::new(
-                            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("checked SPLM"),
-                                contents: &chunk.bytes,
-                                usage: wgpu::BufferUsages::STORAGE,
-                            }),
-                        )
-                    });
+                let raw = self.mesh_buffer(device, chunk);
                 let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("native shared occurrences"),
                     contents: bytemuck::cast_slice(&instances),
@@ -1412,7 +1437,6 @@ impl Resources {
                     definition: definition.record.definition_id.clone(),
                     group,
                     _instances: buffer,
-                    raw,
                     indices: view.indices.len() as u32,
                     instances: instances.len() as u32,
                 });

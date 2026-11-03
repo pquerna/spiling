@@ -766,11 +766,12 @@ impl Actor {
                 result = async { match &mut self.display_task { Some(task)=> task.await,None=>std::future::pending().await } } => {
                     self.display_task=None;
                     match result {
-                        Ok(Ok(scene)) if self.state.scene.as_ref().is_some_and(|s|scene.same_revision(s)) => { self.state.display=Some(scene);self.state.display_paused=false; },
+                        Ok(Ok(scene)) if self.state.scene.as_ref().is_some_and(|s|scene.same_revision(s)) && self.state.layout_overview.as_ref().is_some_and(|o| scene.context.same_geometry(o)) => { self.state.display=Some(scene);self.state.display_paused=false; },
                         Ok(Ok(_))=>{},
                         Ok(Err(error))=>{self.state.display_paused=true;self.failure(error).await;},
                         Err(error)=>{self.state.display_paused=true;self.problem(format!("Display transfer failed: {error}"));},
                     }
+                    self.schedule_display();
                 },
                 result=async {match &mut self.section_task {Some(task)=>task.await,None=>std::future::pending().await}}=>{
                     self.section_task=None;
@@ -812,14 +813,16 @@ impl Actor {
         if self.display_task.is_some() || self.state.display_paused {
             return;
         }
-        let (Some(client), Some(summary)) = (&self.client, &self.state.scene) else {
+        let (Some(client), Some(summary), Some(overview)) =
+            (&self.client, &self.state.scene, &self.state.layout_overview)
+        else {
             return;
         };
         if self
             .state
             .display
             .as_ref()
-            .is_some_and(|s| s.same_revision(summary))
+            .is_some_and(|s| s.same_revision(summary) && s.context.same_geometry(overview))
         {
             return;
         }
@@ -828,6 +831,7 @@ impl Actor {
             client.rpc(),
             summary.clone(),
             self.state.display.clone(),
+            overview.clone(),
             self.display_cancel.clone(),
             self.state.section.as_ref().map_or(0, |s| {
                 s.summary.total_bytes as usize * crate::scene::SECTION_DISPLAY_MULTIPLIER
@@ -1082,6 +1086,15 @@ impl Actor {
             self.section_cancel.store(true, Ordering::Relaxed);
             self.state.section = None;
             self.state.inspection = None;
+            self.state.display_paused = false;
+        }
+        if self
+            .state
+            .layout_overview
+            .as_ref()
+            .is_some_and(|old| !old.same_geometry(&overview))
+        {
+            self.cancel_display();
             self.state.display_paused = false;
         }
         let status = rpc

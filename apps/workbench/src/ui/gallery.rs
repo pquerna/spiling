@@ -701,6 +701,24 @@ fn plates(ui: &mut Ui) {
         )
         .unwrap(),
         project_revision: spiling_contracts::project::ProjectRevision(1),
+        definitions: vec![spiling_contracts::geometry::DefinitionRecord {
+            definition_id: spiling_contracts::geometry::DefinitionId::from_source_sha256(&[1; 32]),
+            provenance: spiling_contracts::geometry::SourceProvenance {
+                source_hash: spiling_contracts::geometry::SourceHash::parse("01".repeat(32))
+                    .unwrap(),
+                source_name: "Gallery specimen".into(),
+                source_unit: spiling_contracts::geometry::SourceUnit::Millimetre,
+                uncertainty_mm: None,
+            },
+            face_count: 6,
+            bounds_mm: spiling_contracts::geometry::AabbMm {
+                min: [0.0; 3],
+                max: [30.0, 30.0, 20.0],
+            },
+            display: spiling_contracts::geometry::DefinitionDisplay::Mesh {
+                artifact_id: spiling_contracts::geometry::ArtifactId::new(1).unwrap(),
+            },
+        }],
         layouts: rows
             .iter()
             .map(|row| spiling_contracts::geometry::LayoutOverview {
@@ -714,22 +732,27 @@ fn plates(ui: &mut Ui) {
                     }),
                 parts: (0..row.occurrence_count)
                     .map(|i| {
+                        let translation_mm = [
+                            30.0 + f64::from(i % 4) * 40.0,
+                            30.0 + f64::from(i / 4) * 40.0,
+                            0.0,
+                        ];
                         let part = spiling_contracts::geometry::LayoutPartBounds {
+                            definition_id:
+                                spiling_contracts::geometry::DefinitionId::from_source_sha256(
+                                    &[1; 32],
+                                ),
+                            pose: spiling_contracts::geometry::RigidPoseMm {
+                                translation_mm,
+                                ..spiling_contracts::geometry::RigidPoseMm::IDENTITY
+                            },
                             occurrence_id: spiling_contracts::geometry::OccurrenceId::new(
                                 next_part,
                             )
                             .unwrap(),
                             source_bounds_mm: spiling_contracts::geometry::AabbMm {
-                                min: [
-                                    30.0 + f64::from(i % 4) * 40.0,
-                                    30.0 + f64::from(i / 4) * 40.0,
-                                    0.0,
-                                ],
-                                max: [
-                                    60.0 + f64::from(i % 4) * 40.0,
-                                    60.0 + f64::from(i / 4) * 40.0,
-                                    20.0,
-                                ],
+                                min: translation_mm,
+                                max: [translation_mm[0] + 30.0, translation_mm[1] + 30.0, 20.0],
                             },
                         };
                         next_part += 1;
@@ -739,16 +762,30 @@ fn plates(ui: &mut Ui) {
             })
             .collect(),
     };
-    ui.label("Source footprints · shared scale");
+    ui.label("Source previews · shared scale");
     let tokens = if ui.visuals().dark_mode {
         Theme::Graphite
     } else {
         Theme::Paper
     }
     .tokens();
-    if let Some(PlateEvent::Focus(id)) =
-        plate_overview(ui, &rows, &overview, &selected, true, tokens)
-    {
+    if let Some(PlateEvent::Focus(id)) = plate_overview(
+        ui,
+        &rows,
+        &overview,
+        &selected,
+        true,
+        tokens,
+        |ui, rect, _, _| {
+            ui.painter_at(rect).text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Source preview in project",
+                egui::FontId::proportional(12.0),
+                tokens.muted,
+            );
+        },
+    ) {
         selected = id;
     }
     ui.data_mut(|d| d.insert_temp(key, selected.clone()));

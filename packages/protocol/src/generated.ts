@@ -360,11 +360,11 @@ export type FaceIndexRow = { ordinal: number, face_id: FaceId, };
 
 export type SceneSummary = { layout_id: PrintLayoutId, session_id: SessionId, revision: SceneRevision, definition_count: number, occurrence_count: number, bounds_mm: AabbMm | null, unique_mesh_bytes: number, };
 
-export type PrintLayoutOverview = { session_id: SessionId, scene_revision: SceneRevision, project_id: ProjectId, project_revision: ProjectRevision, layouts: Array<LayoutOverview>, };
+export type PrintLayoutOverview = { session_id: SessionId, scene_revision: SceneRevision, project_id: ProjectId, project_revision: ProjectRevision, layouts: Array<LayoutOverview>, definitions: Array<DefinitionRecord>, };
 
 export type LayoutOverview = { layout_id: PrintLayoutId, build_area_mm: AabbMm | null, captured_plate: boolean, parts: Array<LayoutPartBounds>, };
 
-export type LayoutPartBounds = { occurrence_id: OccurrenceId, source_bounds_mm: AabbMm, };
+export type LayoutPartBounds = { occurrence_id: OccurrenceId, source_bounds_mm: AabbMm, definition_id: DefinitionId, pose: RigidPoseMm, };
 
 export type DefinitionDisplay = { "kind": "mesh", artifact_id: ArtifactId, } | { "kind": "unavailable", error: GeometryError, };
 

@@ -38,8 +38,10 @@ Every retained job's program is independently inspected during native reopen.
 The native navigator and explicit move/copy sheets use the same Projects service as
 the CLI. Draft navigation requires deliberate resolution, and plate edits close on
 matching engine receipts. Per-plate cameras/section settings are bounded transient
-state; one current replay is decoded at a time. Overview positions must never become
-machine coordinates.
+state; one current replay is decoded at a time. The overview uses actual source
+meshes in a fixed three-quarter view at one physical scale. Per-card cameras and
+poses share checked immutable mesh buffers; a missing preview remains explicit.
+Overview positions must never become machine coordinates or picking authority.
 
 Quantity includes the selected original. The explicit **Use additional plates**
 choice extends the same bounded placement service to new single-tool jobs using the

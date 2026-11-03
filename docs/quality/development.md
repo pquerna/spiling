@@ -563,6 +563,12 @@ draft navigation, read-only focus, different setup captures, atomic Undo/Redo an
 source-independent save/reopen. Prepare and freshly inspect/export each plate;
 change B and confirm A's unchanged semantic result survives, while shared-definition
 contribution edits invalidate all affected jobs. Navigation itself must not dirty.
+In Overview, exercise distinct curved and perforated parts, rotated occurrences,
+a configured empty plate and an inactive-only source definition. Check three-quarter
+shape/depth, common physical scale, dimmed inactive context, both themes and narrow
+cards. Focus/return must preserve ordinary picking and sections; metadata edits
+reuse mesh allocations, while Undo of inactive membership refreshes the preview.
+Preview refusal never substitutes a box for unavailable source geometry.
 
 CLI operations are ordered and use the same typed Projects commands:
 
