@@ -477,6 +477,34 @@ pub(super) fn sin_cos_degrees_interval(angle: Interval) -> (Interval, Interval) 
     {
         return (full, full);
     }
+    let mut cursor = angle.lo;
+    let first_boundary = (angle.lo / 45.0).floor() as i64 + 1;
+    let mut enclosure: Option<(Interval, Interval)> = None;
+    for boundary in first_boundary..first_boundary + 10 {
+        let cut = (boundary as f64) * 45.0;
+        if cut <= cursor {
+            continue;
+        }
+        let end = cut.min(angle.hi);
+        let (sine, cosine) = sin_cos_degrees_piece(Interval {
+            lo: cursor,
+            hi: end,
+        });
+        enclosure = Some(match enclosure {
+            Some((previous_sine, previous_cosine)) => {
+                (previous_sine.hull(sine), previous_cosine.hull(cosine))
+            }
+            None => (sine, cosine),
+        });
+        if end == angle.hi {
+            return enclosure.unwrap();
+        }
+        cursor = end;
+    }
+    (full, full)
+}
+
+fn sin_cos_degrees_piece(angle: Interval) -> (Interval, Interval) {
     let quadrant = (angle.mid() / 90.0).round() as i64;
     let anchor = Interval::point((quadrant * 90) as f64);
     let residual = Interval {
@@ -766,6 +794,45 @@ pub fn debit_native_work(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn degree_trigonometry_covers_broad_monotone_sphere_latitudes() {
+        for turns in [-720.0, 0.0, 720.0] {
+            let latitude = Interval {
+                lo: turns - 36.87002871828874,
+                hi: turns + 36.87002871828874,
+            };
+            let (sine, cosine) = sin_cos_degrees_interval(latitude);
+            assert!(sine.lo <= -0.6 && sine.hi >= 0.6);
+            assert!(cosine.lo > 0.75 && cosine.contains(1.0), "{cosine:?}");
+        }
+        let (_, cosine) = sin_cos_degrees_interval(Interval {
+            lo: -90.0,
+            hi: 90.0,
+        });
+        assert!(cosine.contains(0.0) && cosine.contains(1.0));
+        let (sine, _) = sin_cos_degrees_interval(Interval { lo: 44.0, hi: 91.0 });
+        assert!(sine.contains(1.0));
+        for angle in [
+            Interval {
+                lo: -180.0,
+                hi: 180.0,
+            },
+            Interval { lo: 90.0, hi: 89.0 },
+            Interval {
+                lo: 0.0,
+                hi: f64::INFINITY,
+            },
+        ] {
+            assert_eq!(
+                sin_cos_degrees_interval(angle),
+                (
+                    Interval { lo: -1.0, hi: 1.0 },
+                    Interval { lo: -1.0, hi: 1.0 }
+                )
+            );
+        }
+    }
 
     #[test]
     fn test_float_stepping() {

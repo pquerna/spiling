@@ -589,6 +589,10 @@ a tolerance label does not replace a complete measured query bound.
   Actual affine coefficients, pose arithmetic, closed height limits and plane
   drift retain directed error accounting; process-scale padding is not a
   substitute for the placed query's arithmetic bound.
+  Native rational control support accumulates translated homogeneous numerators
+  before division. Exact coefficient signs can certify a closed-cut side, but
+  genuine residuals remain excursions; neither a small residual nor a narrow
+  support enclosure establishes constant height or native attachment.
 - **Regular slabs:** [`analysis/slab.rs`](../../crates/geometry/src/analysis/slab.rs)
   binds the actual material, closed interval, sample and shape policy. Complete
   native face, physical coedge and vertex coverage is required. Whole-control
@@ -610,6 +614,13 @@ a tolerance label does not replace a complete measured query bound.
   or loop count does not discharge births/deaths, a pocket floor, disappearing
   voids or attachment. Missing/ambiguous incidence refuses; this is not an
   independent original-STEP material-embedding claim.
+  A complete single-span native quadratic can be excluded only on its open
+  restriction when exact endpoint coefficients vanish at the literal cut and
+  the strict middle coefficient and uniform-sign denominator prove exteriority.
+  Both native curve endpoints and original vertices retain exact cut incidence;
+  whole ports, traces, metrics and root inventories remain independent. Reverse
+  paired ports between same-height, same-signed event cofaces stay in the native
+  graph but do not require an off-height sample branch of either event face.
   Exact regular vertical-tangent face cells have no transverse vertical-ray
   crossing: their boundary-point cover retains their own enclosed height image.
   Uncertain or degenerate normals retain the complete shadow. All other faces,
@@ -642,6 +653,12 @@ a tolerance label does not replace a complete measured query bound.
   Registered actual material/void loops and the complete collar predicates in
   [`joint/planar.rs`](../../crates/geometry/src/analysis/joint/planar.rs) remain
   necessary; a registered regular pair is not whole closed-cut incidence.
+  Registered graph/atlas ports may use actual nonlinear scalar height only when
+  complete coefficients prove one invariant parameter and strict monotonicity
+  in the other. Actual source/span/root binding, complete native joint and
+  foreign-boundary exclusion, whole-corridor regularity and retained interior
+  classification remain independent. These corridors do not close a critical
+  endpoint, attach noncoincident native germs or grant pole regularity.
   Endpoint-local products or conservative support-exclusion rectangles are not
   whole-leaf, no-void, anchor or deposited-support certificates.
 

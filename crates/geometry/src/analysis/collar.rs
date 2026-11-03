@@ -3088,6 +3088,61 @@ impl NativeCollarComplex {
         &self.boundary_critical_bands
     }
 
+    pub(super) fn is_internal_event_port(
+        &self,
+        port: &NativeCollarPort,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        work.charge(
+            (2 * self.ports.len() + 2 * self.events.len()) as u64 + 1,
+            cancel,
+        )?;
+        if !self.ports.iter().any(|owned| std::ptr::eq(owned, port))
+            || port.event_face == port.neighbor_face
+        {
+            return Ok(false);
+        }
+        let first = self
+            .events
+            .iter()
+            .find(|event| event.face == port.event_face);
+        let second = self
+            .events
+            .iter()
+            .find(|event| event.face == port.neighbor_face);
+        if !matches!((first, second), (Some(first), Some(second))
+            if first.height == second.height
+                && first.height[0] == first.height[1]
+                && port.height == first.height
+                && first.outward_height_sign != 0
+                && first.outward_height_sign == second.outward_height_sign
+                && port.outward_height_sign == first.outward_height_sign)
+        {
+            return Ok(false);
+        }
+        Ok(self
+            .ports
+            .iter()
+            .filter(|other| {
+                other.edge_id == port.edge_id
+                    && other.event_edgeuse == port.neighbor_edgeuse
+                    && other.neighbor_edgeuse == port.event_edgeuse
+                    && other.event_face == port.neighbor_face
+                    && other.event_wire == port.neighbor_wire
+                    && other.event_coedge == port.neighbor_coedge
+                    && other.neighbor_face == port.event_face
+                    && other.neighbor_wire == port.event_wire
+                    && other.neighbor_coedge == port.event_coedge
+                    && other.orientation != port.orientation
+                    && other.height == port.height
+                    && other.height_space == port.height_space
+                    && other.outward_height_sign == port.outward_height_sign
+            })
+            .count()
+            == 1)
+    }
+
     /// Reuse a sealed terminal Port stratum for THIS captured world sample.
     /// Such a stratum owns a definite transverse minimum/maximum, the complete
     /// longitudinal native port and endpoint links, and a whole-C1 regular
@@ -3311,6 +3366,39 @@ fn native_event_coedge_height_is_owned(
                     || (event.height[1] < request.sample_height_mm
                         && height.hi < request.sample_height_mm))
         })
+}
+
+fn native_event_coedge_height_in_closed_slab(
+    curve: &dyn crate::parametric::CurveEvaluator,
+    range: [f64; 2],
+    functional: HeightFunctional,
+    heights: [f64; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<Interval>, GeometryError> {
+    let Some(mut height) = native_event_coedge_height(curve, range, functional, work, cancel)?
+    else {
+        return Ok(None);
+    };
+    for side in 0..2 {
+        if side == 0 && height.lo >= heights[0] || side == 1 && height.hi <= heights[1] {
+            continue;
+        }
+        let relative = HeightFunctional {
+            offset: functional.offset.sub(Interval::point(heights[side])),
+            ..functional
+        };
+        let Some(bound) = native_event_coedge_height(curve, range, relative, work, cancel)? else {
+            continue;
+        };
+        if side == 0 && bound.lo >= 0.0 {
+            height.lo = height.lo.max(heights[0]);
+        }
+        if side == 1 && bound.hi <= 0.0 {
+            height.hi = height.hi.min(heights[1]);
+        }
+    }
+    Ok(Some(Interval::new(height.lo, height.hi)?))
 }
 
 /// A nonphysical native face partition can be regular even when its complete
@@ -6118,6 +6206,7 @@ fn certify_collar_complex(
         .saturating_add(8 * 1024) // Coexistent bounded critical-star stack/jet scratch.
         .saturating_add(ISOLATED_VERTEX_SCRATCH_BYTES)
         .saturating_add(NATIVE_TERMINAL_PORT_SCRATCH_BYTES)
+        .saturating_add(crate::parametric::NATIVE_CONTROL_FUNCTIONAL_SCRATCH_BYTES)
         .saturating_add(definition.id().allocated_bytes())
         .saturating_add(std::mem::size_of::<NativeCollarComplex>())
         .saturating_add(port_bytes)
@@ -6753,7 +6842,9 @@ fn certify_collar_complex(
                     // homogeneous rounding into a literal constant identity
                     // or manufacture isolated roots at every uncertain jet.
                     let port_height = if attached_event {
-                        native_event_coedge_height(curve, source_range, functional, work, cancel)?
+                        native_event_coedge_height_in_closed_slab(
+                            curve, source_range, functional, request.height_interval_mm, work, cancel,
+                        )?
                     } else { None };
                     if let Some(height) = port_height
                         && native_event_coedge_height_is_owned(
@@ -6765,6 +6856,37 @@ fn certify_collar_complex(
                             hash.update(parameter.to_bits().to_le_bytes());
                         }
                         return Ok(());
+                    }
+                    if attached_event {
+                        for (cut, sign) in [(request.height_interval_mm[0], -1), (request.height_interval_mm[1], 1)] {
+                            work.charge(events.len() as u64 + 1, cancel)?;
+                            if !events.iter().any(|event| incident_faces.contains(&event.face)
+                                && event.height == [cut; 2] && event.outward_height_sign == sign)
+                                || !crate::parametric::native_quadratic_open_exterior_at_cut(
+                                    curve, source_range, functional.direction, functional.offset,
+                                    (cut, sign), work, cancel,
+                                )?
+                            {
+                                continue;
+                            }
+                            let mut endpoints_owned = true;
+                            for (endpoint, vertex) in oriented_vertices(definition, edge)?.into_iter().enumerate() {
+                                let point = source.trim_source().native_vertex_point(vertex, work, cancel)?;
+                                let parameter = coedge.oriented_native_range()[endpoint];
+                                endpoints_owned &= functional.vertex(point) == Interval::point(cut)
+                                    && super::slab::native_endpoint_height(
+                                        curve, parameter, point, functional, work, cancel,
+                                    )? == Interval::point(cut);
+                            }
+                            if endpoints_owned {
+                                hash.update(b"native-open-exterior-coedge-closed-endpoints\0");
+                                hash_interval(&mut hash, Interval::point(cut));
+                                hash.update(sign.to_le_bytes());
+                                for parameter in source_range { hash.update(parameter.to_bits().to_le_bytes()); }
+                                world_regular_boundary_xy_speed = None;
+                                return Ok(());
+                            }
+                        }
                     }
                     let mut whole_coedge_gluing_checked=false;
                     // Reuse the bounded UV stack for curve intervals; its
@@ -9342,6 +9464,243 @@ mod tests {
             .code,
             GeometryErrorCode::Cancelled
         );
+    }
+
+    #[test]
+    fn exact_internal_event_ports_keep_original_reverse_incidence_and_refuse_drift() {
+        fn copied(port: &NativeCollarPort) -> NativeCollarPort {
+            NativeCollarPort {
+                edge_id: port.edge_id,
+                event_edgeuse: port.event_edgeuse,
+                neighbor_edgeuse: port.neighbor_edgeuse,
+                event_face: port.event_face,
+                event_wire: port.event_wire,
+                event_coedge: port.event_coedge,
+                neighbor_face: port.neighbor_face,
+                neighbor_wire: port.neighbor_wire,
+                neighbor_coedge: port.neighbor_coedge,
+                orientation: port.orientation,
+                height: port.height,
+                outward_height_sign: port.outward_height_sign,
+                height_space: port.height_space,
+            }
+        }
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/manufacturing/native/source-sphere-belt.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let prepared = prepare_solid(&definition, MAX_BYTES, &mut work, &cancel).unwrap();
+        let source = prepared.source_view().unwrap();
+        let request = super::super::SlabRequest {
+            frame: frame(),
+            height_interval_mm: [-3.0, -2.8],
+            sample_height_mm: -2.9,
+            native_shape_error_mm: 0.1,
+        };
+        let mut complex = certify_native_collar_complex(
+            source,
+            &request,
+            HeightFunctional::from_frame(frame()),
+            MAX_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        let mut internal = Vec::new();
+        for (index, port) in complex.ports.iter().enumerate() {
+            if complex
+                .is_internal_event_port(port, &mut work, &cancel)
+                .unwrap()
+            {
+                internal.push(index);
+            }
+        }
+        assert_eq!(internal.len(), 8);
+        let index = internal[0];
+        let original = copied(&complex.ports[index]);
+        assert!(
+            !complex
+                .is_internal_event_port(&original, &mut work, &cancel)
+                .unwrap()
+        );
+        let other_edge = complex
+            .ports
+            .iter()
+            .find(|port| port.edge_id != original.edge_id)
+            .unwrap()
+            .edge_id;
+        for drift in 0..8 {
+            let mut changed = copied(&original);
+            match drift {
+                0 => changed.event_face = changed.neighbor_face,
+                1 => changed.orientation = !changed.orientation,
+                2 => changed.event_edgeuse = changed.neighbor_edgeuse,
+                3 => changed.edge_id = other_edge,
+                4 => changed.height[0] = changed.height[0].next_down(),
+                5 => changed.outward_height_sign = -changed.outward_height_sign,
+                6 => changed.neighbor_wire = usize::MAX,
+                7 => changed.height_space = NativeCollarHeightSpace::World,
+                _ => unreachable!(),
+            }
+            Arc::get_mut(&mut complex.ports).unwrap()[index] = changed;
+            assert!(
+                !complex
+                    .is_internal_event_port(&complex.ports[index], &mut work, &cancel)
+                    .unwrap(),
+                "drift={drift}"
+            );
+        }
+        Arc::get_mut(&mut complex.ports).unwrap()[index] = copied(&original);
+        for (budget, stopped, expected) in [
+            (0, false, GeometryErrorCode::ResourceLimit),
+            (1_000_000, true, GeometryErrorCode::Cancelled),
+        ] {
+            assert_eq!(
+                complex
+                    .is_internal_event_port(
+                        &complex.ports[index],
+                        &mut GeometryWorkBudget::new(budget),
+                        &AtomicBool::new(stopped),
+                    )
+                    .unwrap_err()
+                    .code,
+                expected
+            );
+        }
+        complex
+            .events
+            .retain(|event| event.face != original.neighbor_face);
+        assert!(
+            !complex
+                .is_internal_event_port(&complex.ports[index], &mut work, &cancel)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn closed_native_event_support_retains_both_cut_sides_and_terminal_failures() {
+        let cancel = AtomicBool::new(false);
+        let functional = HeightFunctional::from_frame(frame());
+        for cut in [-3.0_f64, 3.0] {
+            let middle = cut * 0.75;
+            for control in [middle.next_down(), middle, middle.next_up()] {
+                let raw = crv_basic::Curve::new(
+                    vec![
+                        CPoint::new(0.0, 0.0, cut, 1.0),
+                        CPoint::new(0.5, 0.0, control, 0.75),
+                        CPoint::new(1.0, 0.0, cut, 1.0),
+                    ],
+                    2,
+                    vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                )
+                .unwrap();
+                let curve: Curve = BSplineCurve::from_nurb(raw, 3, true).into();
+                let mut work = GeometryWorkBudget::new(1_000_000);
+                let lower = native_event_coedge_height_in_closed_slab(
+                    &curve,
+                    [0.0, 1.0],
+                    functional,
+                    [cut, cut + 0.2],
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .unwrap();
+                let upper = native_event_coedge_height_in_closed_slab(
+                    &curve,
+                    [0.0, 1.0],
+                    functional,
+                    [cut - 0.2, cut],
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(lower.lo < cut, control < middle, "{lower:?} {control:?}");
+                assert_eq!(upper.hi > cut, control > middle, "{upper:?} {control:?}");
+                for (budget, stopped, expected) in [
+                    (0, false, GeometryErrorCode::ResourceLimit),
+                    (1_000_000, true, GeometryErrorCode::Cancelled),
+                ] {
+                    assert_eq!(
+                        native_event_coedge_height_in_closed_slab(
+                            &curve,
+                            [0.0, 1.0],
+                            functional,
+                            [cut, cut + 0.2],
+                            &mut GeometryWorkBudget::new(budget),
+                            &AtomicBool::new(stopped),
+                        )
+                        .unwrap_err()
+                        .code,
+                        expected
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sphere_belt_event_coedge_closed_cut_preserves_genuine_exterior_excursion() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/manufacturing/native/source-sphere-belt.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let prepared = prepare_solid(&definition, MAX_BYTES, &mut work, &cancel).unwrap();
+        let source = prepared.source_view().unwrap();
+        let domain = source
+            .face_domain(0, MAX_BYTES, &mut work, &cancel)
+            .unwrap();
+        let flat = source_coedge_index(domain, 0, 1, &mut work, &cancel).unwrap();
+        let coedge = &domain.coedges()[flat];
+        domain
+            .with_native_spatial_curve(
+                flat,
+                MAX_BYTES,
+                &mut work,
+                &cancel,
+                |curve, work, cancel| {
+                    let functional = HeightFunctional::from_frame(frame());
+                    let relative = native_event_coedge_height(
+                        curve,
+                        coedge.native_range,
+                        HeightFunctional {
+                            offset: Interval::point(3.0),
+                            ..functional
+                        },
+                        work,
+                        cancel,
+                    )?
+                    .unwrap();
+                    let closed = native_event_coedge_height_in_closed_slab(
+                        curve,
+                        coedge.native_range,
+                        functional,
+                        [-3.0, -2.8],
+                        work,
+                        cancel,
+                    )?
+                    .unwrap();
+                    assert!(relative.lo < 0.0, "{relative:?}");
+                    assert_eq!(relative.hi, 0.0);
+                    assert!(closed.lo < -3.0, "{closed:?}");
+                    assert!(
+                        super::super::slab::constant_native_curve_height(
+                            curve, functional, work, cancel,
+                        )?
+                        .is_none()
+                    );
+                    Ok(())
+                },
+            )
+            .unwrap();
     }
 
     #[test]

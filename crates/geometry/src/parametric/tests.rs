@@ -354,6 +354,209 @@ fn restricted_axis_spans_equal_exhaustive_closed_knot_inventory() {
 }
 
 #[test]
+fn native_quadratic_open_exterior_keeps_exact_closed_endpoints_and_entire_basis() {
+    let cancel = AtomicBool::new(false);
+    let direction = [0.0, 0.0, 1.0].map(Interval::point);
+    let make_curve = |cut: f64, middle: f64, weights: [f64; 3], endpoint: f64| -> Curve {
+        let raw = crv_basic::Curve::new(
+            vec![
+                CPoint::new(0.0, 0.0, endpoint * weights[0], weights[0]),
+                CPoint::new(0.5, 0.0, middle, weights[1]),
+                CPoint::new(1.0, 0.0, cut * weights[2], weights[2]),
+            ],
+            2,
+            vec![2.0, 2.0, 2.0, 5.0, 5.0, 5.0],
+        )
+        .unwrap();
+        BSplineCurve::from_nurb(raw, 3, true).into()
+    };
+    for cut in [-3.0_f64, 3.0] {
+        for sign in [-1_i8, 1] {
+            for weight_sign in [-1.0, 1.0] {
+                let weights = [weight_sign, 0.75 * weight_sign, weight_sign];
+                let center = cut * weights[1];
+                let middle = if (sign > 0) == (weight_sign > 0.0) {
+                    center.next_up()
+                } else {
+                    center.next_down()
+                };
+                let curve = make_curve(cut, middle, weights, cut);
+                let mut work = GeometryWorkBudget::new(1_000_000);
+                assert!(
+                    native_quadratic_open_exterior_at_cut(
+                        &curve,
+                        [2.0, 5.0],
+                        direction,
+                        Interval::point(0.0),
+                        (cut, sign),
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap()
+                );
+                for (range, height, side) in [
+                    ([2.0, 5.0], cut, -sign),
+                    ([2.0, 5.0], cut.next_up(), sign),
+                    ([2.0, 3.5], cut, sign),
+                    ([5.0, 2.0], cut, sign),
+                    ([2.0, 5.0], cut, 0),
+                ] {
+                    assert!(
+                        !native_quadratic_open_exterior_at_cut(
+                            &curve,
+                            range,
+                            direction,
+                            Interval::point(0.0),
+                            (height, side),
+                            &mut work,
+                            &cancel,
+                        )
+                        .unwrap()
+                    );
+                }
+                for changed in [
+                    make_curve(cut, center, weights, cut),
+                    make_curve(cut, middle, weights, cut.next_up()),
+                    make_curve(cut, middle, [weights[0], -weights[1], weights[2]], cut),
+                ] {
+                    assert!(
+                        !native_quadratic_open_exterior_at_cut(
+                            &changed,
+                            [2.0, 5.0],
+                            direction,
+                            Interval::point(0.0),
+                            (cut, sign),
+                            &mut work,
+                            &cancel,
+                        )
+                        .unwrap()
+                    );
+                }
+                for (budget, stopped, expected) in [
+                    (0, false, GeometryErrorCode::ResourceLimit),
+                    (1_000_000, true, GeometryErrorCode::Cancelled),
+                ] {
+                    assert_eq!(
+                        native_quadratic_open_exterior_at_cut(
+                            &curve,
+                            [2.0, 5.0],
+                            direction,
+                            Interval::point(0.0),
+                            (cut, sign),
+                            &mut GeometryWorkBudget::new(budget),
+                            &AtomicBool::new(stopped),
+                        )
+                        .unwrap_err()
+                        .code,
+                        expected
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn translated_native_rational_control_support_retains_both_exact_sides() {
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(1_000_000);
+    let direction = [0.0, 0.0, 1.0].map(Interval::point);
+    for weight in [1.0, 0.75, -1.0, -0.75] {
+        let center = -3.0 * weight;
+        for control in [down(center), center, up(center)] {
+            let bound = exact_control_functional_bound(
+                [0.0, 0.0, control],
+                weight,
+                direction,
+                Interval::point(3.0),
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .unwrap();
+            let expected_sign = if control == center {
+                0
+            } else if (control > center) == (weight > 0.0) {
+                1
+            } else {
+                -1
+            };
+            match expected_sign {
+                0 => assert_eq!(bound, Interval::point(0.0)),
+                1 => assert!(bound.lo > 0.0, "{control:?} {weight:?} {bound:?}"),
+                _ => assert!(bound.hi < 0.0, "{control:?} {weight:?} {bound:?}"),
+            }
+        }
+    }
+    let epsilon = f64::EPSILON;
+    let product_direction = [
+        Interval::point(1.0 + epsilon),
+        Interval::point(0.0),
+        Interval::point(0.0),
+    ];
+    for coefficient in [1.0 - epsilon, 1.0 + epsilon] {
+        let rounded = coefficient * (1.0 + epsilon);
+        let remainder = coefficient.mul_add(1.0 + epsilon, -rounded);
+        assert_ne!(remainder, 0.0);
+        let bound = exact_control_functional_bound(
+            [coefficient, 0.0, 0.0],
+            1.0,
+            product_direction,
+            Interval::point(-rounded),
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(bound.contains(remainder), "{bound:?} {remainder:?}");
+        assert_eq!(bound.lo.is_sign_positive(), remainder.is_sign_positive());
+        assert_eq!(bound.hi.is_sign_positive(), remainder.is_sign_positive());
+    }
+    assert!(
+        exact_control_functional_bound(
+            [f64::MIN_POSITIVE, 0.0, 0.0],
+            1.0,
+            [
+                Interval::point(f64::MIN_POSITIVE),
+                Interval::point(0.0),
+                Interval::point(0.0)
+            ],
+            Interval::point(0.0),
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        exact_control_functional_bound(
+            [0.0, 0.0, -2.25],
+            0.75,
+            direction,
+            Interval::point(3.0),
+            &mut GeometryWorkBudget::new(0),
+            &cancel,
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::ResourceLimit
+    );
+    assert_eq!(
+        exact_control_functional_bound(
+            [0.0, 0.0, -2.25],
+            0.75,
+            direction,
+            Interval::point(3.0),
+            &mut work,
+            &AtomicBool::new(true),
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::Cancelled
+    );
+}
+
+#[test]
 fn native_line_support_retains_exact_caps_and_real_one_ulp_protrusions() {
     use solidcore::{curve::line::Line, geom::vector3d::Point3};
     let cancel = AtomicBool::new(false);

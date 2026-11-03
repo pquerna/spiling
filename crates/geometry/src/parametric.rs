@@ -234,6 +234,132 @@ fn native_surface_functional_enclosures<const N: usize>(
     Ok(result)
 }
 
+pub(crate) const NATIVE_CONTROL_FUNCTIONAL_SCRATCH_BYTES: usize =
+    4 * std::mem::size_of::<crate::exact_coefficient::ExactCoefficient>()
+        + 8 * std::mem::size_of::<Interval>();
+
+fn exact_control_functional_bound(
+    coefficient: [f64; 3],
+    weight: f64,
+    direction: [Interval; 3],
+    offset: Interval,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<Interval>, GeometryError> {
+    use crate::exact_coefficient::ExactCoefficient;
+    if !offset.is_point() || direction.iter().any(|component| !component.is_point()) {
+        return Ok(None);
+    }
+    let Some(mut numerator) = ExactCoefficient::point(offset.lo).product(
+        &ExactCoefficient::point(weight),
+        work,
+        cancel,
+    )?
+    else {
+        return Ok(None);
+    };
+    for axis in 0..3 {
+        let Some(term) = ExactCoefficient::point(coefficient[axis]).product(
+            &ExactCoefficient::point(direction[axis].lo),
+            work,
+            cancel,
+        )?
+        else {
+            return Ok(None);
+        };
+        for component in &term.terms[..term.len] {
+            work.charge(1, cancel)?;
+            if numerator.push(*component).is_none() {
+                return Ok(None);
+            }
+        }
+    }
+    let mut bound = Interval::point(0.0);
+    for component in &numerator.terms[..numerator.len] {
+        work.charge(1, cancel)?;
+        bound = bound.add(Interval::point(*component));
+    }
+    bound = bound.div(Interval::point(weight))?;
+    let sign = numerator.sign() * if weight > 0.0 { 1 } else { -1 };
+    if sign >= 0 {
+        bound.lo = bound.lo.max(0.0);
+    }
+    if sign <= 0 {
+        bound.hi = bound.hi.min(0.0);
+    }
+    Ok(Some(bound))
+}
+
+pub(crate) fn native_quadratic_open_exterior_at_cut(
+    curve: &dyn CurveEvaluator,
+    range: [f64; 2],
+    direction: [Interval; 3],
+    offset: Interval,
+    cut: (f64, i8),
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
+    let (cut, exterior_sign) = cut;
+    let Some(native) = curve.native_curve() else {
+        return Ok(false);
+    };
+    let Some(nurbs) = native_curve_nurbs(curve)? else {
+        return Ok(false);
+    };
+    let knots = nurbs.knots();
+    if native.dim() != 3
+        || !matches!(exterior_sign, -1 | 1)
+        || !range[0].is_finite()
+        || !range[1].is_finite()
+        || !cut.is_finite()
+        || range[0] >= range[1]
+        || curve.active_range() != range
+        || native.natural_interval().min() != range[0]
+        || native.natural_interval().max() != range[1]
+        || nurbs.degree() != 2
+        || nurbs.cpts().len() != 3
+        || knots != [range[0], range[0], range[0], range[1], range[1], range[1]]
+    {
+        return Ok(false);
+    }
+    let relative_offset = offset.sub(Interval::point(cut));
+    let mut weight_sign = None;
+    for (index, point) in nurbs.cpts().iter().enumerate() {
+        work.charge(1, cancel)?;
+        let weight = if nurbs.is_rational() { point.w } else { 1.0 };
+        if !weight.is_finite()
+            || weight == 0.0
+            || weight_sign.is_some_and(|sign| sign != (weight > 0.0))
+            || [point.x, point.y, point.z]
+                .iter()
+                .any(|value| !value.is_finite())
+        {
+            return Ok(false);
+        }
+        weight_sign = Some(weight > 0.0);
+        let Some(relative) = exact_control_functional_bound(
+            [point.x, point.y, point.z],
+            weight,
+            direction,
+            relative_offset,
+            work,
+            cancel,
+        )?
+        else {
+            return Ok(false);
+        };
+        if index == 1 {
+            if exterior_sign < 0 && relative.hi >= 0.0 || exterior_sign > 0 && relative.lo <= 0.0 {
+                return Ok(false);
+            }
+        } else if relative != Interval::point(0.0) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Scalar enclosure from a native line's endpoint hull or rational controls.
 /// Ordinary native line gauges are affine; uniform-sign NURBS weights give a
 /// convex combination of Euclidean controls. This is an outer bound only;
@@ -291,12 +417,18 @@ pub(crate) fn native_curve_functional_control_bounds(
             return Ok(None);
         }
         weight_sign = Some(weight > 0.0);
-        let bound = (0..3)
-            .fold(Interval::point(0.0), |sum, axis| {
-                sum.add(direction[axis].mul(Interval::point(coefficient[axis])))
-            })
-            .div(Interval::point(weight))?
-            .add(offset);
+        let bound = if let Some(exact) =
+            exact_control_functional_bound(coefficient, weight, direction, offset, work, cancel)?
+        {
+            exact
+        } else {
+            (0..3)
+                .fold(Interval::point(0.0), |sum, axis| {
+                    sum.add(direction[axis].mul(Interval::point(coefficient[axis])))
+                })
+                .div(Interval::point(weight))?
+                .add(offset)
+        };
         support = Some(support.map_or(bound, |previous| previous.hull(bound)));
     }
     Ok(support)

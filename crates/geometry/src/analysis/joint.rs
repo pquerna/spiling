@@ -1035,6 +1035,14 @@ fn native_port_axis_corridor(
     ) {
         return Ok(false);
     }
+    if let Some(scalar) = chart.nonlinear
+        && (!std::ptr::eq(scalar.definition, domain.definition())
+            || scalar.face_index != domain.face_index()
+            || scalar.plane != span.definition_plane
+            || !native_port_scalar_span_bound(domain, span, work, cancel)?)
+    {
+        return Ok(false);
+    }
     const FIXED: usize = 8 * std::mem::size_of::<[Interval; 2]>()
         + 8 * std::mem::size_of::<[f64; 2]>()
         + std::mem::size_of::<NativePortHeightChart>();
@@ -1117,6 +1125,17 @@ fn native_port_axis_chart_corridor(
     {
         return Ok(false);
     }
+    if let Some(scalar) = chart.nonlinear {
+        let mut span_uv = [sample_dependent; 2];
+        span_uv[independent] = sample_independent;
+        if !(0..2).all(|axis| {
+            scalar.uv[axis][0] <= span_uv[axis][0]
+                && span_uv[axis][0] < span_uv[axis][1]
+                && span_uv[axis][1] <= scalar.uv[axis][1]
+        }) {
+            return Ok(false);
+        }
+    }
     let mut longitudinal = [Interval::point(0.0); 2];
     longitudinal[independent] = Interval::point(1.0);
     let Some(tangent) =
@@ -1159,7 +1178,7 @@ fn native_port_axis_chart_corridor(
         let center = Interval::point(sample.mid());
         let mut point = anchor;
         point[dependent] = center;
-        let height = chart.height(point);
+        let height = chart.height(domain, point, work, cancel)?;
         sample = sample.intersect(center.sub(height.div(chart.gradient[dependent])?))?;
     }
     if anchor[dependent].lo <= sample.hi && sample.lo <= anchor[dependent].hi {
@@ -1167,6 +1186,100 @@ fn native_port_axis_chart_corridor(
     }
     let mut corridor = anchor;
     corridor[dependent] = corridor[dependent].hull(sample);
+    if let Some(scalar) = chart.nonlinear {
+        if !(0..2).all(|axis| {
+            scalar.uv[axis][0] <= corridor[axis].lo && corridor[axis].hi <= scalar.uv[axis][1]
+        }) {
+            return Ok(false);
+        }
+        let [jet] = crate::parametric::surface_functional_enclosures(
+            domain.surface_evaluator(),
+            corridor.map(|value| [value.lo, value.hi]),
+            &[scalar.functional],
+            work,
+            cancel,
+        )?;
+        if native_port_single_height_axis([jet.du, jet.dv]) != Some(independent) {
+            return Ok(false);
+        }
+    }
+    if !native_port_corridor_clear(domain, port, corridor, work, cancel)?
+        || !native_port_strip_regular(
+            domain,
+            corridor.map(|value| [value.lo, value.hi]),
+            allowance,
+            work,
+            cancel,
+        )?
+    {
+        return Ok(false);
+    }
+    let mut interior = anchor;
+    interior[dependent] = anchor[dependent].add(sample).mul(Interval::point(0.5));
+    Ok(domain.classify_with_byte_limit(
+        interior.map(|value| [value.lo, value.hi]),
+        allowance,
+        work,
+        cancel,
+    )? == crate::kernel::TrimClassification::Inside)
+}
+
+fn native_port_scalar_span_bound(
+    domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
+    span: &crate::SectionSpan,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let crate::SectionSpanAttachments::TrimRoots {
+        edgeuses,
+        parameters,
+        native_parameters,
+    } = span.attachments
+    else {
+        return Ok(false);
+    };
+    if edgeuses[0] == edgeuses[1] {
+        return Ok(false);
+    }
+    for slot in 0..2 {
+        let mut found = None;
+        for coedge in domain.coedges() {
+            work.charge(1, cancel)?;
+            if coedge.edgeuse == edgeuses[slot] {
+                found = Some(coedge);
+                break;
+            }
+        }
+        let Some(coedge) = found else {
+            return Ok(false);
+        };
+        let root = native_parameters[slot];
+        let parameter = parameters[slot];
+        let endpoint = span.endpoints[if span.reversed { 1 - slot } else { slot }];
+        if !matches!(endpoint, crate::SectionEndpoint::EdgeRoot { edge, .. } if edge == coedge.edge)
+            || !(root[0].is_finite()
+                && root[1].is_finite()
+                && coedge.native_range[0] < root[0]
+                && root[0] <= root[1]
+                && root[1] < coedge.native_range[1]
+                && 0.0 <= parameter[0]
+                && parameter[0] <= parameter[1]
+                && parameter[1] <= 1.0)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn native_port_corridor_clear(
+    domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
+    port: usize,
+    corridor: [Interval; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
     for (index, _) in domain.coedges().iter().enumerate() {
         if index == port {
             continue;
@@ -1185,6 +1298,16 @@ fn native_port_axis_chart_corridor(
             }
         }
     }
+    native_port_corridor_joints_clear(domain, corridor, work, cancel)
+}
+
+fn native_port_corridor_joints_clear(
+    domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
+    corridor: [Interval; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
     for &[start, end] in domain.loops() {
         for incoming in start..end {
             let outgoing = if incoming + 1 == end {
@@ -1198,23 +1321,7 @@ fn native_port_axis_chart_corridor(
             }
         }
     }
-    if !native_port_strip_regular(
-        domain,
-        corridor.map(|value| [value.lo, value.hi]),
-        allowance,
-        work,
-        cancel,
-    )? {
-        return Ok(false);
-    }
-    let mut interior = anchor;
-    interior[dependent] = anchor[dependent].add(sample).mul(Interval::point(0.5));
-    Ok(domain.classify_with_byte_limit(
-        interior.map(|value| [value.lo, value.hi]),
-        allowance,
-        work,
-        cancel,
-    )? == crate::kernel::TrimClassification::Inside)
+    Ok(true)
 }
 
 fn native_chart_boxes_separated(first: [Interval; 2], second: [Interval; 2]) -> bool {
@@ -1384,32 +1491,117 @@ fn native_wire_material_side(
     Ok(Some(1))
 }
 
-/// Only the queried height is affine; XY may remain a literal curved native
-/// cone/cylinder chart. This narrow fact grants no affine material/profile,
-/// physical plane, embedding or inner-material authority.
+/// Height is affine or coefficient-proved strictly monotone in exactly one
+/// native coordinate. Nonlinear images always use the actual scalar evaluator;
+/// derivative intervals are not affine coefficients or embedding authority.
 #[derive(Clone, Copy)]
-struct NativePortHeightChart {
+struct NativePortHeightChart<'d> {
     reference_uv: [f64; 2],
     reference_height: Interval,
     gradient: [Interval; 2],
+    nonlinear: Option<NativePortScalarHeight<'d>>,
 }
-impl NativePortHeightChart {
-    fn height(self, uv: [Interval; 2]) -> Interval {
+
+#[derive(Clone, Copy)]
+struct NativePortScalarHeight<'d> {
+    definition: &'d crate::kernel::Definition,
+    face_index: usize,
+    plane: crate::PlaneMm,
+    uv: [[f64; 2]; 2],
+    functional: crate::parametric::SurfaceFunctional,
+}
+
+impl NativePortHeightChart<'_> {
+    fn affine_height(self, uv: [Interval; 2]) -> Interval {
+        assert!(self.nonlinear.is_none());
         (0..2).fold(self.reference_height, |height, axis| {
             height.add(
                 self.gradient[axis].mul(uv[axis].sub(Interval::point(self.reference_uv[axis]))),
             )
         })
     }
+
+    fn height(
+        self,
+        domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
+        uv: [Interval; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Interval, GeometryError> {
+        work.charge(1, cancel)?;
+        let Some(scalar) = self.nonlinear else {
+            return Ok(self.affine_height(uv));
+        };
+        if !std::ptr::eq(scalar.definition, domain.definition())
+            || scalar.face_index != domain.face_index()
+            || !domain.is_native_material()
+            || domain.surface_evaluator().native_surface().is_none()
+        {
+            return Err(error(
+                GeometryErrorCode::InvalidGeometry,
+                "native scalar height changed its source or face owner",
+            ));
+        }
+        let [image] = crate::parametric::surface_functional_enclosures(
+            domain.surface_evaluator(),
+            uv.map(|value| [value.lo, value.hi]),
+            &[scalar.functional],
+            work,
+            cancel,
+        )?;
+        Ok(image.position)
+    }
 }
 
-fn native_port_height_chart(
+fn native_port_single_height_axis(gradient: [Interval; 2]) -> Option<usize> {
+    (0..2).find(|&axis| {
+        gradient[axis].lo == 0.0 && gradient[axis].hi == 0.0 && !gradient[1 - axis].contains_zero()
+    })
+}
+
+fn native_port_scalar_cover_uv(
     domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
+    uv: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[[f64; 2]; 2], GeometryError> {
+    let mut cover = uv.map(|value| Interval {
+        lo: value[0],
+        hi: value[1],
+    });
+    for index in 0..domain.coedges().len() {
+        charge_native_boundary_enumeration(domain, work, cancel)?;
+        for range in domain.boundary_parameter_intervals(index)? {
+            work.charge(1, cancel)?;
+            let image = domain.boundary_position_enclosure(index, range, work, cancel)?;
+            for axis in 0..2 {
+                cover[axis] = cover[axis].hull(Interval::new(image[axis][0], image[axis][1])?);
+            }
+        }
+    }
+    for &[start, end] in domain.loops() {
+        for incoming in start..end {
+            let outgoing = if incoming + 1 == end {
+                start
+            } else {
+                incoming + 1
+            };
+            let (_, image) = domain.native_joint_cover(incoming, outgoing, work, cancel)?;
+            for axis in 0..2 {
+                cover[axis] = cover[axis].hull(image[axis]);
+            }
+        }
+    }
+    Ok(cover.map(|value| [value.lo, value.hi]))
+}
+
+fn native_port_height_chart<'d>(
+    domain: &crate::kernel::PreparedFaceTrimDomain<'d>,
     plane: crate::PlaneMm,
     remaining: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Option<NativePortHeightChart>, GeometryError> {
+) -> Result<Option<NativePortHeightChart<'d>>, GeometryError> {
     work.charge(1, cancel)?;
     let evaluator = domain.surface_evaluator();
     let Some(native) = evaluator.native_surface() else {
@@ -1419,18 +1611,23 @@ fn native_port_height_chart(
         direction: plane.normal.map(Interval::point),
         offset: Interval::point(0.0),
     };
-    if let Some(affine) = native_affine_face(native) {
+    if let Some(affine) = native_cap_affine_map(native) {
         let chart = NativePortHeightChart {
             reference_uv: [0.0; 2],
             reference_height: functional.dot(std::array::from_fn(|axis| {
                 Interval::point(affine.origin[axis]).sub(Interval::point(plane.origin_mm[axis]))
             })),
             gradient: [affine.u, affine.v].map(|row| functional.dot(row.map(Interval::point))),
+            nonlinear: None,
         };
         return Ok(Some(chart));
     }
     const SCRATCH: usize = crate::parametric::surface_functional_scratch_bytes::<1>()
+        + crate::parametric::PreparedValidatedCurve::scratch_bytes()
+        + 2 * std::mem::size_of::<crate::parametric::ChartCurveEnclosure>()
         + crate::parametric::SURFACE_AFFINE_FUNCTIONAL_SCRATCH_BYTES
+        + crate::parametric::SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+        + 17 * std::mem::size_of::<([[f64; 2]; 2], usize)>()
         + 2 * std::mem::size_of::<crate::parametric::SurfaceEnclosure>()
         + std::mem::size_of::<NativePortHeightChart>();
     if remaining < SCRATCH {
@@ -1443,6 +1640,12 @@ fn native_port_height_chart(
     let lo = face.uv_domain.min();
     let hi = face.uv_domain.max();
     let uv = [[lo.x, hi.x], [lo.y, hi.y]];
+    let scalar = crate::parametric::SurfaceFunctional {
+        direction: functional.direction,
+        origin: plane.origin_mm.map(Interval::point),
+        offset: Interval::point(0.0),
+    };
+    let mut nonlinear = None;
     let gradient = if let Some(gradient) = crate::parametric::surface_affine_functional_gradient(
         evaluator,
         uv,
@@ -1456,13 +1659,39 @@ fn native_port_height_chart(
             return Ok(None);
         }
         let jet = crate::parametric::surface_piecewise_enclosure(evaluator, uv, work, cancel)?;
-        for row in [jet.duu, jet.duv, jet.dvv] {
+        let affine = [jet.duu, jet.duv, jet.dvv].into_iter().all(|row| {
             let height = functional.dot(row);
-            if height.lo != 0.0 || height.hi != 0.0 {
+            height.lo == 0.0 && height.hi == 0.0
+        });
+        if affine {
+            [functional.dot(jet.du), functional.dot(jet.dv)]
+        } else {
+            let cover = native_port_scalar_cover_uv(domain, uv, work, cancel)?;
+            if !evaluator.smooth(cover, work, cancel)? {
                 return Ok(None);
             }
+            let [height] = crate::parametric::surface_functional_enclosures(
+                evaluator,
+                cover,
+                &[scalar],
+                work,
+                cancel,
+            )?;
+            let gradient = [height.du, height.dv];
+            if native_port_single_height_axis(gradient).is_none()
+                || !native_port_strip_regular(domain, cover, remaining, work, cancel)?
+            {
+                return Ok(None);
+            }
+            nonlinear = Some(NativePortScalarHeight {
+                definition: domain.definition(),
+                face_index: domain.face_index(),
+                plane,
+                uv: cover,
+                functional: scalar,
+            });
+            gradient
         }
-        [functional.dot(jet.du), functional.dot(jet.dv)]
     };
     if gradient.iter().all(|value| value.contains_zero()) {
         return Ok(None);
@@ -1471,11 +1700,7 @@ fn native_port_height_chart(
     let [anchor] = crate::parametric::surface_functional_enclosures(
         evaluator,
         reference_uv.map(|value| [value; 2]),
-        &[crate::parametric::SurfaceFunctional {
-            direction: functional.direction,
-            origin: plane.origin_mm.map(Interval::point),
-            offset: Interval::point(0.0),
-        }],
+        &[scalar],
         work,
         cancel,
     )?;
@@ -1483,6 +1708,7 @@ fn native_port_height_chart(
         reference_uv,
         reference_height: anchor.position,
         gradient,
+        nonlinear,
     }))
 }
 
@@ -1501,6 +1727,7 @@ fn charge_native_boundary_enumeration(
 const NATIVE_PORT_TANGENT_DEPTH: usize = 32;
 const NATIVE_PORT_TANGENT_SCRATCH: usize =
     crate::parametric::PreparedValidatedCurve::scratch_bytes()
+        + crate::parametric::surface_functional_scratch_bytes::<1>()
         + std::mem::size_of::<[([f64; 2], u8); NATIVE_PORT_TANGENT_DEPTH + 1]>()
         + 2 * std::mem::size_of::<crate::parametric::ChartCurveEnclosure>()
         + 5 * std::mem::size_of::<Interval>();
@@ -1624,7 +1851,7 @@ fn native_port_germ(
     let jet = coedge.chart_jet(coedge.uv_range, work, cancel)?;
     // Keep the complete height image when tangent restrictions refine; never
     // replace a slightly curved native trace by a constant-height line.
-    let height = chart.height(jet.position);
+    let height = chart.height(domain, jet.position, work, cancel)?;
     if height.contains_zero() {
         return Ok(None);
     }
@@ -1653,7 +1880,7 @@ fn opposite_native_port_germ(height: Interval, inward: Interval) -> bool {
 }
 
 /// A local germ reaches a unique sample branch only if no boundary-critical
-/// height intervenes. The scalar-affine carrier has no interior critical point.
+/// height intervenes. The whole scalar chart has no interior critical point.
 /// Each complete native boundary image must avoid the travel gap, or have a
 /// strict directed height derivative with its endpoints outside that gap.
 /// Same-band endpoints remain owned by the port, never moved to the sample.
@@ -1671,7 +1898,7 @@ fn native_port_regular_to_sample(
     for (index, coedge) in domain.coedges().iter().enumerate() {
         work.charge(64, cancel)?;
         let jet = coedge.chart_jet(coedge.uv_range, work, cancel)?;
-        let coedge_height = chart.height(jet.position);
+        let coedge_height = chart.height(domain, jet.position, work, cancel)?;
         if outside_native_port_height_gap(coedge_height, port_height) {
             continue;
         }
@@ -1690,7 +1917,7 @@ fn native_port_regular_to_sample(
             }
             let parameter = coedge.uv_range[endpoint];
             let uv = coedge.chart_jet([parameter; 2], work, cancel)?.position;
-            let height = chart.height(uv);
+            let height = chart.height(domain, uv, work, cancel)?;
             if !outside_native_port_height_gap(height, port_height) {
                 return Ok(false);
             }
@@ -1705,7 +1932,8 @@ fn native_port_regular_to_sample(
                 incoming + 1
             };
             let (_, uv) = domain.native_joint_cover(incoming, outgoing, work, cancel)?;
-            if !outside_native_port_height_gap(chart.height(uv), port_height) {
+            if !outside_native_port_height_gap(chart.height(domain, uv, work, cancel)?, port_height)
+            {
                 return Ok(false);
             }
         }
@@ -2001,6 +2229,10 @@ fn native_port_assignments(
                 GeometryErrorCode::InvalidGeometry,
                 "critical port was not recertified in actual world height",
             ));
+        }
+        if complex.is_internal_event_port(port, work, cancel)? {
+            assignments.push(pair);
+            continue;
         }
         let mut failure = None;
         for (side, material) in [before, after].into_iter().enumerate() {
@@ -10290,6 +10522,377 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nonlinear_sphere_belt_native_port_continuation_is_source_and_span_bound() {
+        let cancel = AtomicBool::new(false);
+        let bytes =
+            include_bytes!("../../../../fixtures/manufacturing/native/source-sphere-belt.step");
+        let definition = crate::from_step_bytes(bytes).unwrap();
+        let mut work = GeometryWorkBudget::new(200_000_000);
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        for (sample, port_offset) in [(-2.95, 0), (2.949999805771567, 2)] {
+            let plane = crate::PlaneMm {
+                origin_mm: [0.0, 0.0, sample],
+                normal: [0.0, 0.0, 1.0],
+            };
+            let section = source
+                .section_placed_with_work(
+                    RigidPoseMm::IDENTITY,
+                    plane,
+                    spiling_contracts::geometry::MAX_SECTION_BYTES,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+            for face in [1, 4, 7, 10] {
+                let domain = source
+                    .source_view()
+                    .unwrap()
+                    .face_domain(face, MAX_SCRATCH, &mut work, &cancel)
+                    .unwrap();
+                let chart =
+                    native_port_height_chart(domain, plane, MAX_SCRATCH, &mut work, &cancel)
+                        .unwrap()
+                        .unwrap();
+                assert!(chart.nonlinear.is_some());
+                assert!(native_port_single_height_axis(chart.gradient).is_some());
+                let port = domain.loops()[0][0] + port_offset;
+                let side = native_wire_material_side(domain, 0, &mut work, &cancel)
+                    .unwrap()
+                    .unwrap();
+                let (height, inward) =
+                    native_port_germ(domain, chart, port, side, MAX_SCRATCH, &mut work, &cancel)
+                        .unwrap()
+                        .unwrap();
+                assert!(
+                    height.hi < 0.0 && inward.lo > 0.0 || height.lo > 0.0 && inward.hi < 0.0,
+                    "face={face} sample={sample} height={height:?} inward={inward:?}"
+                );
+                let mut corridors = 0;
+                for loop_index in 0..section.loops.len() {
+                    for span in section.spans(loop_index).unwrap_or(&[]) {
+                        if span.source_face_ordinal != face
+                            || !native_port_axis_corridor(
+                                domain,
+                                span,
+                                chart,
+                                port,
+                                MAX_SCRATCH,
+                                &mut work,
+                                &cancel,
+                            )
+                            .unwrap()
+                        {
+                            continue;
+                        }
+                        corridors += 1;
+                        let mut changed_face = span.clone();
+                        changed_face.source_face_ordinal = definition.faces().len();
+                        let mut changed_plane = span.clone();
+                        changed_plane.definition_plane.origin_mm[2] += 0.01;
+                        let mut collapsed = span.clone();
+                        let crate::SectionCurve::SurfacePlaneGraph { independent, .. } =
+                            &mut collapsed.curve
+                        else {
+                            unreachable!()
+                        };
+                        independent[1] = independent[0];
+                        let mut changed_edges = span.clone();
+                        let crate::SectionSpanAttachments::TrimRoots { edgeuses, .. } =
+                            &mut changed_edges.attachments
+                        else {
+                            unreachable!()
+                        };
+                        edgeuses[1] = edgeuses[0];
+                        let mut changed_root = span.clone();
+                        let crate::SectionSpanAttachments::TrimRoots {
+                            native_parameters, ..
+                        } = &mut changed_root.attachments
+                        else {
+                            unreachable!()
+                        };
+                        native_parameters[0] = [f64::NEG_INFINITY, f64::INFINITY];
+                        let mut changed_endpoint = span.clone();
+                        changed_endpoint.endpoints[0] = crate::SectionEndpoint::Vertex(
+                            domain.coedge(port).unwrap().vertices[0],
+                        );
+                        let mut unbound_atlas = span.clone();
+                        unbound_atlas.curve =
+                            crate::SectionCurve::SurfacePlaneAtlas { charts: Vec::new() };
+                        for rejected in [
+                            changed_face,
+                            changed_plane,
+                            collapsed,
+                            changed_edges,
+                            changed_root,
+                            changed_endpoint,
+                            unbound_atlas,
+                        ] {
+                            assert!(
+                                !native_port_axis_corridor(
+                                    domain,
+                                    &rejected,
+                                    chart,
+                                    port,
+                                    MAX_SCRATCH,
+                                    &mut work,
+                                    &cancel,
+                                )
+                                .unwrap()
+                            );
+                        }
+                        for (allowance, limit, cancelled, expected) in [
+                            (0, 200_000_000, false, GeometryErrorCode::ResourceLimit),
+                            (MAX_SCRATCH, 0, false, GeometryErrorCode::ResourceLimit),
+                            (MAX_SCRATCH, 200_000_000, true, GeometryErrorCode::Cancelled),
+                        ] {
+                            assert_eq!(
+                                native_port_axis_corridor(
+                                    domain,
+                                    span,
+                                    chart,
+                                    port,
+                                    allowance,
+                                    &mut GeometryWorkBudget::new(limit),
+                                    &AtomicBool::new(cancelled),
+                                )
+                                .unwrap_err()
+                                .code,
+                                expected
+                            );
+                        }
+                    }
+                }
+                assert!(corridors > 0, "face={face} sample={sample}");
+                let foreign_domain = source
+                    .source_view()
+                    .unwrap()
+                    .face_domain(
+                        if face == 1 { 4 } else { 1 },
+                        MAX_SCRATCH,
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    chart
+                        .height(
+                            foreign_domain,
+                            [Interval::point(0.0); 2],
+                            &mut work,
+                            &cancel,
+                        )
+                        .unwrap_err()
+                        .code,
+                    GeometryErrorCode::InvalidGeometry
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nonlinear_native_port_keeps_whole_foreign_coedges_and_joint_covers() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes(include_bytes!(
+            "../../../../fixtures/manufacturing/native/source-sphere-belt.step"
+        ))
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(200_000_000);
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let domain = source
+            .source_view()
+            .unwrap()
+            .face_domain(1, MAX_SCRATCH, &mut work, &cancel)
+            .unwrap();
+        let [start, end] = domain.loops()[0];
+        let foreign = domain.coedge(start + 1).unwrap();
+        let middle = foreign.uv_range[0] * 0.5 + foreign.uv_range[1] * 0.5;
+        let corridor = foreign
+            .chart_jet([middle; 2], &mut work, &cancel)
+            .unwrap()
+            .position;
+        for endpoint in foreign.uv_range {
+            let position = foreign
+                .chart_jet([endpoint; 2], &mut work, &cancel)
+                .unwrap()
+                .position;
+            assert!(native_chart_boxes_separated(corridor, position));
+        }
+        assert!(!native_port_corridor_clear(domain, start, corridor, &mut work, &cancel).unwrap());
+        for incoming in start..end {
+            let outgoing = if incoming + 1 == end {
+                start
+            } else {
+                incoming + 1
+            };
+            let (_, image) = domain
+                .native_joint_cover(incoming, outgoing, &mut work, &cancel)
+                .unwrap();
+            assert!(!native_port_corridor_joints_clear(domain, image, &mut work, &cancel).unwrap());
+        }
+    }
+
+    #[test]
+    fn nonlinear_native_port_chart_refuses_memory_work_cancellation_and_nonmonotonicity() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes(include_bytes!(
+            "../../../../fixtures/manufacturing/native/source-sphere-belt.step"
+        ))
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(200_000_000);
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let domain = source
+            .source_view()
+            .unwrap()
+            .face_domain(1, MAX_SCRATCH, &mut work, &cancel)
+            .unwrap();
+        let plane = crate::PlaneMm {
+            origin_mm: [0.0; 3],
+            normal: [0.0, 0.0, 1.0],
+        };
+        for (allowance, limit, cancelled, expected) in [
+            (0, 200_000_000, false, GeometryErrorCode::ResourceLimit),
+            (MAX_SCRATCH, 0, false, GeometryErrorCode::ResourceLimit),
+            (MAX_SCRATCH, 200_000_000, true, GeometryErrorCode::Cancelled),
+        ] {
+            assert_eq!(
+                native_port_height_chart(
+                    domain,
+                    plane,
+                    allowance,
+                    &mut GeometryWorkBudget::new(limit),
+                    &AtomicBool::new(cancelled),
+                )
+                .err()
+                .unwrap()
+                .code,
+                expected
+            );
+        }
+        let nonmonotone = crate::PlaneMm {
+            normal: [1.0, 0.0, 0.0],
+            ..plane
+        };
+        assert!(
+            native_port_height_chart(domain, nonmonotone, MAX_SCRATCH, &mut work, &cancel)
+                .unwrap()
+                .is_none()
+        );
+        let chart = native_port_height_chart(domain, plane, MAX_SCRATCH, &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        let other_definition = crate::from_step_bytes(include_bytes!(
+            "../../../../fixtures/manufacturing/native/source-sphere-belt.step"
+        ))
+        .unwrap();
+        let other_source = crate::prepare_solid(
+            &other_definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let other_domain = other_source
+            .source_view()
+            .unwrap()
+            .face_domain(1, MAX_SCRATCH, &mut work, &cancel)
+            .unwrap();
+        assert_eq!(
+            chart
+                .height(other_domain, [Interval::point(0.0); 2], &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry
+        );
+    }
+
+    #[test]
+    fn nonlinear_native_port_scalar_completion_cannot_hide_an_endpoint_interior_maximum() {
+        use solidcore::{
+            nurbs::{b_spline_surface::BSplineSurface, math::CPoint, srf_basic},
+            surface::surface::{Surface, p2::SurfaceKind},
+        };
+        let raw = srf_basic::Surface::new(
+            [0.0, 1.0]
+                .into_iter()
+                .map(|horizontal| {
+                    [(-1.0, -5.0), (0.0, -3.0), (1.0, -5.0)]
+                        .into_iter()
+                        .map(|(vertical, height)| CPoint::new(horizontal, vertical, height, 1.0))
+                        .collect()
+                })
+                .collect(),
+            1,
+            2,
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![-1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let surface = Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(raw, true)));
+        let functional = crate::parametric::SurfaceFunctional {
+            direction: [0.0, 0.0, 1.0].map(Interval::point),
+            origin: [Interval::point(0.0); 3],
+            offset: Interval::point(0.0),
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let port = Interval {
+            lo: -5.25,
+            hi: -4.75,
+        };
+        for endpoint in [-1.0, 1.0] {
+            let [jet] = crate::parametric::surface_functional_enclosures(
+                &surface,
+                [[0.5; 2], [endpoint; 2]],
+                &[functional],
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            assert!(outside_native_port_height_gap(jet.position, port));
+        }
+        let [whole] = crate::parametric::surface_functional_enclosures(
+            &surface,
+            [[0.5; 2], [-1.0, 1.0]],
+            &[functional],
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(whole.position.hi >= -4.0 && whole.position.hi < 0.0);
+        assert!(!outside_native_port_height_gap(whole.position, port));
+        assert!(whole.dv.contains_zero());
+        assert!(native_port_single_height_axis([whole.du, whole.dv]).is_none());
+        assert_eq!(
+            native_port_single_height_axis([Interval::point(0.0), Interval { lo: 1.0, hi: 2.0 },]),
+            Some(0)
+        );
+        assert!(native_port_single_height_axis([Interval::point(0.0); 2]).is_none());
+        assert!(
+            native_port_single_height_axis([Interval { lo: -1.0, hi: 1.0 }, Interval::point(0.0),])
+                .is_none()
+        );
+        assert!(native_port_single_height_axis([Interval::point(1.0); 2]).is_none());
+    }
+
+    #[test]
     fn original_cone_and_equivalent_cylinder_encodings_keep_affine_port_corridors() {
         let fixtures: &[(&str, &[u8])] = &[
             (
@@ -10561,6 +11164,7 @@ mod tests {
             reference_uv: [0.0; 2],
             reference_height: Interval::point(0.0),
             gradient: [Interval::point(1.0), Interval::point(0.0)],
+            nonlinear: None,
         };
         let port = Interval {
             lo: -2.5e-12,
@@ -10571,7 +11175,7 @@ mod tests {
         assert!(
             endpoints
                 .into_iter()
-                .all(|point| outside_native_port_height_gap(chart.height(point), port))
+                .all(|point| outside_native_port_height_gap(chart.affine_height(point), port))
         );
         let connection = [
             Interval {
@@ -10581,7 +11185,7 @@ mod tests {
             Interval { lo: -1.0, hi: 1.0 },
         ];
         assert!(!outside_native_port_height_gap(
-            chart.height(connection),
+            chart.affine_height(connection),
             port
         ));
         let boundary_span = [
@@ -10592,7 +11196,7 @@ mod tests {
             Interval { lo: -1.0, hi: 1.0 },
         ];
         assert!(!outside_native_port_height_gap(
-            chart.height(boundary_span),
+            chart.affine_height(boundary_span),
             port
         ));
     }
