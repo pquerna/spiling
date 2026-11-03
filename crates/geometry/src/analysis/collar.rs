@@ -1780,7 +1780,8 @@ fn certify_native_critical_collar_using(
                     continue;
                 }
                 let bounds = [[world[0].lo, world[0].hi], [world[1].lo, world[1].hi]];
-                let target = choose_material_target(
+                let mut rectangle_metric = None;
+                let target = choose_material_target_with_metric(
                     MaterialTargetQuery {
                         coverage: MaterialCoverage::Rectangle(bounds),
                         inputs,
@@ -1794,6 +1795,10 @@ fn certify_native_critical_collar_using(
                     work,
                     cancel,
                 )
+                .map(|(target, metric)| {
+                    rectangle_metric = metric;
+                    target
+                })
                 .map_err(|error| {
                     cell_context(error, "face material coverage", Some(face_index), uv, depth)
                 });
@@ -1903,6 +1908,7 @@ fn certify_native_critical_collar_using(
                         let _ = other?;
                         for child in spatial_split(uv, depth, &jet, matrix, vertical_tangent)
                             .map_err(|error| {
+                                let error = material_cover_split_error(error, rectangle_metric);
                                 failure(
                                     error.code,
                                     format!(
@@ -2781,6 +2787,49 @@ fn choose_material_target(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<(usize, f64, f64)>, GeometryError> {
+    choose_material_target_with_metric(query, work, cancel).map(|(target, _)| target)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MaterialTargetMetricReason {
+    XyPolicyExceeded,
+    DistancePolicyExceeded,
+    Admitted,
+}
+
+type MaterialTargetMetric = (usize, f64, f64, Option<f64>, MaterialTargetMetricReason);
+type MaterialTargetSearch = (Option<(usize, f64, f64)>, Option<MaterialTargetMetric>);
+
+fn material_cover_split_error(
+    error: GeometryError,
+    metric: Option<MaterialTargetMetric>,
+) -> GeometryError {
+    if error.code == GeometryErrorCode::AnalysisIndeterminate
+        && metric.is_some_and(|(_, _, _, _, reason)| {
+            matches!(
+                reason,
+                MaterialTargetMetricReason::XyPolicyExceeded
+                    | MaterialTargetMetricReason::DistancePolicyExceeded
+            )
+        })
+    {
+        failure(
+            GeometryErrorCode::ShapeErrorExceeded,
+            format!(
+                "{}; conservative material cover exceeded policy: {metric:?}",
+                error.message,
+            ),
+        )
+    } else {
+        error
+    }
+}
+
+fn choose_material_target_with_metric(
+    query: MaterialTargetQuery<'_, '_>,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<MaterialTargetSearch, GeometryError> {
     let MaterialTargetQuery {
         coverage,
         inputs,
@@ -2792,7 +2841,7 @@ fn choose_material_target(
         native_policy,
     } = query;
     let mut best: Option<(usize, f64, f64)> = None;
-    let mut prior_metric: Option<(usize, f64, f64, Option<f64>, &str)> = None;
+    let mut prior_metric: Option<MaterialTargetMetric> = None;
     let mut eligible = false;
     for (index, (input, target)) in inputs.iter().zip(targets).enumerate() {
         work.charge(1, cancel)?;
@@ -2894,7 +2943,13 @@ fn choose_material_target(
             }
         };
         if dx > policy.maximum_xy_cover_error_mm {
-            prior_metric = Some((index, dx, dz, None, "xy-policy"));
+            prior_metric = Some((
+                index,
+                dx,
+                dz,
+                None,
+                MaterialTargetMetricReason::XyPolicyExceeded,
+            ));
             continue;
         }
         let distance = hypot(dx, dz)?;
@@ -2904,9 +2959,9 @@ fn choose_material_target(
             dz,
             Some(distance),
             if distance > policy.maximum_distance_mm || distance > native_policy {
-                "distance-policy"
+                MaterialTargetMetricReason::DistancePolicyExceeded
             } else {
-                "admitted"
+                MaterialTargetMetricReason::Admitted
             },
         ));
         if distance > policy.maximum_distance_mm || distance > native_policy {
@@ -2927,7 +2982,7 @@ fn choose_material_target(
             event.map(|event| (event.face, event.height, event.outward_height_sign)),
         )));
     }
-    Ok(best)
+    Ok((best, prior_metric))
 }
 
 /// An actual original trimmed event-face complex, with its paired original
@@ -8052,6 +8107,45 @@ mod tests {
             GeometryErrorCode::Cancelled
         );
         assert!(cancelled.consumed() > 0);
+    }
+
+    #[test]
+    fn material_cover_refinement_preserves_nonmetric_and_terminal_refusals() {
+        for reason in [
+            MaterialTargetMetricReason::XyPolicyExceeded,
+            MaterialTargetMetricReason::DistancePolicyExceeded,
+            MaterialTargetMetricReason::Admitted,
+        ] {
+            let metric = Some((0, 0.02500000056, 0.0, None, reason));
+            for code in [
+                GeometryErrorCode::AnalysisIndeterminate,
+                GeometryErrorCode::ConditioningFailure,
+                GeometryErrorCode::SingularGeometry,
+                GeometryErrorCode::ResourceLimit,
+                GeometryErrorCode::Cancelled,
+            ] {
+                let classified = material_cover_split_error(failure(code, "split refused"), metric);
+                let expected = if code == GeometryErrorCode::AnalysisIndeterminate
+                    && !matches!(reason, MaterialTargetMetricReason::Admitted)
+                {
+                    GeometryErrorCode::ShapeErrorExceeded
+                } else {
+                    code
+                };
+                assert_eq!(classified.code, expected);
+            }
+        }
+        assert_eq!(
+            material_cover_split_error(
+                failure(
+                    GeometryErrorCode::AnalysisIndeterminate,
+                    "incidence unresolved"
+                ),
+                None,
+            )
+            .code,
+            GeometryErrorCode::AnalysisIndeterminate,
+        );
     }
 
     #[test]

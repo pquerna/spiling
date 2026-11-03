@@ -3946,7 +3946,13 @@ impl NativeUnionBindingLedger {
             resolved_shape_error = resolved_shape_error.max(resolved_dependency_error(
                 dependency.owner_distance_mm,
                 dependency.owner_policy_mm,
-                pending.raw_leaf_to_candidate_error_mm,
+                source_raw_inclusion_error(
+                    &pending.preserved_source_occurrences,
+                    dependency.leaf.occurrence_id(),
+                    pending.raw_leaf_to_candidate_error_mm,
+                    work,
+                    cancel,
+                )?,
             )?);
         }
         let coexistent = self
@@ -4202,7 +4208,13 @@ impl NativeUnionBindingLedger {
                     resolved_shape_error = resolved_shape_error.max(resolved_dependency_error(
                         dependency.adjacent.achieved_shape_error_mm,
                         dependency.native_shape_error_policy_mm(),
-                        self.previous_raw_inclusion_error_mm,
+                        source_raw_inclusion_error(
+                            &self.previous_preserved_sources,
+                            dependency.adjacent.occurrence_id(),
+                            self.previous_raw_inclusion_error_mm,
+                            work,
+                            cancel,
+                        )?,
                     )?);
                 }
                 NativeOwnedEndpoint::Upper => scratch.push(
@@ -4239,7 +4251,13 @@ impl NativeUnionBindingLedger {
                         resolved_shape_error = resolved_shape_error.max(resolved_dependency_error(
                             distance,
                             native_policy,
-                            pending.raw_leaf_to_candidate_error_mm,
+                            source_raw_inclusion_error(
+                                &pending.preserved_source_occurrences,
+                                leaf.occurrence_id(),
+                                pending.raw_leaf_to_candidate_error_mm,
+                                work,
+                                cancel,
+                            )?,
                         )?);
                     }
                     NativeCriticalCollarTargetSide::Lower => {
@@ -4257,7 +4275,13 @@ impl NativeUnionBindingLedger {
                         resolved_shape_error = resolved_shape_error.max(resolved_dependency_error(
                             distance,
                             native_policy,
-                            self.previous_raw_inclusion_error_mm,
+                            source_raw_inclusion_error(
+                                &self.previous_preserved_sources,
+                                leaf.occurrence_id(),
+                                self.previous_raw_inclusion_error_mm,
+                                work,
+                                cancel,
+                            )?,
                         )?);
                     }
                     NativeCriticalCollarTargetSide::Upper => scratch.push(
@@ -4781,6 +4805,21 @@ fn source_material_preserved(
         }
     }
     Ok(false)
+}
+
+fn source_raw_inclusion_error(
+    preserved: &[OccurrenceId],
+    occurrence: OccurrenceId,
+    global_inclusion: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<f64, GeometryError> {
+    work.charge(1, cancel)?;
+    if source_material_preserved(preserved, occurrence, work, cancel)? {
+        Ok(0.0)
+    } else {
+        Ok(global_inclusion)
+    }
 }
 
 fn candidate_hash(
@@ -12642,6 +12681,56 @@ mod tests {
             point[2] = z;
         }
         vec![loop_]
+    }
+
+    #[test]
+    fn source_scoped_raw_inclusion_keeps_unpreserved_error_and_resource_gates() {
+        let preserved = OccurrenceId::new(1).unwrap();
+        let changed = OccurrenceId::new(2).unwrap();
+        let global = 8.259117275551152e-9;
+        let owned = 9.999999999999434e-2;
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100);
+        for (occurrence, expected) in [(preserved, 0.0), (changed, global)] {
+            let inclusion =
+                source_raw_inclusion_error(&[preserved], occurrence, global, &mut work, &cancel)
+                    .unwrap();
+            assert_eq!(inclusion, expected);
+            assert_eq!(
+                resolved_dependency_error(owned, 0.1, inclusion).is_ok(),
+                occurrence == preserved,
+            );
+        }
+        assert_eq!(
+            source_raw_inclusion_error(&[], preserved, global, &mut work, &cancel).unwrap(),
+            global,
+        );
+        for captured in [&[][..], &[preserved][..]] {
+            assert_eq!(
+                source_raw_inclusion_error(
+                    captured,
+                    preserved,
+                    global,
+                    &mut GeometryWorkBudget::new(0),
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+                GeometryErrorCode::ResourceLimit,
+            );
+            assert_eq!(
+                source_raw_inclusion_error(
+                    captured,
+                    preserved,
+                    global,
+                    &mut work,
+                    &AtomicBool::new(true),
+                )
+                .unwrap_err()
+                .code,
+                GeometryErrorCode::Cancelled,
+            );
+        }
     }
 
     #[test]
