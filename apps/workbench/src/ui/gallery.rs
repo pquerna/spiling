@@ -624,6 +624,7 @@ fn arrange(ui: &mut Ui) {
             objective: LayoutObjective::Copies,
             template: Some(OccurrenceId::new(1).unwrap()),
             quantity: 2,
+            use_additional_plates: false,
             pinned: vec![],
             spacing_mm: 3.0,
             style: LayoutStyle::Balanced,

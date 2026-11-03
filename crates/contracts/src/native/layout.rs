@@ -34,6 +34,7 @@ impl TryFrom<rpc::LayoutRequest> for LayoutRequest {
                 .transpose()
                 .map_err(|e| e.to_string())?,
             quantity: v.quantity,
+            use_additional_plates: v.use_additional_plates,
             pinned: v
                 .pinned
                 .into_iter()
@@ -62,6 +63,7 @@ impl TryFrom<LayoutRequest> for rpc::LayoutRequest {
             } as i32,
             template: v.template.map(OccurrenceId::get),
             quantity: v.quantity,
+            use_additional_plates: v.use_additional_plates,
             pinned: v.pinned.into_iter().map(OccurrenceId::get).collect(),
             spacing_mm: v.spacing_mm,
         })
@@ -116,6 +118,7 @@ impl TryFrom<rpc::LayoutProposal> for LayoutProposal {
     fn try_from(v: rpc::LayoutProposal) -> Result<Self, String> {
         if v.placements.len() > MAX_OCCURRENCES as usize
             || v.footprints_mm.len() > MAX_OCCURRENCES as usize
+            || v.additional_plates.len() >= crate::project::MAX_PRINT_LAYOUTS
         {
             return Err("layout proposal exceeds occurrence limit".into());
         }
@@ -136,6 +139,11 @@ impl TryFrom<rpc::LayoutProposal> for LayoutProposal {
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<_, _>>()?,
+            additional_plates: v
+                .additional_plates
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
             requested_count: v.requested_count,
             placed_count: v.placed_count,
             candidates_examined: v.candidates_examined,
@@ -145,6 +153,8 @@ impl TryFrom<rpc::LayoutProposal> for LayoutProposal {
                 Ok(rpc::LayoutLimit::LayoutBuildAreaLimit) => LayoutLimit::BuildArea,
                 Ok(rpc::LayoutLimit::LayoutSearchLimit) => LayoutLimit::SearchBudget,
                 Ok(rpc::LayoutLimit::LayoutManufacturingLimit) => LayoutLimit::ManufacturingBudget,
+                Ok(rpc::LayoutLimit::LayoutPlateLimit) => LayoutLimit::PlateBudget,
+                Ok(rpc::LayoutLimit::LayoutOccurrenceLimit) => LayoutLimit::OccurrenceBudget,
                 _ => return Err("invalid layout limit".into()),
             },
             verification: required(v.verification, "layout verification")?.try_into()?,
@@ -174,6 +184,11 @@ impl TryFrom<LayoutProposal> for rpc::LayoutProposal {
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<_, _>>()?,
+            additional_plates: v
+                .additional_plates
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
             requested_count: v.requested_count,
             placed_count: v.placed_count,
             candidates_examined: v.candidates_examined,
@@ -183,6 +198,8 @@ impl TryFrom<LayoutProposal> for rpc::LayoutProposal {
                 LayoutLimit::BuildArea => rpc::LayoutLimit::LayoutBuildAreaLimit,
                 LayoutLimit::SearchBudget => rpc::LayoutLimit::LayoutSearchLimit,
                 LayoutLimit::ManufacturingBudget => rpc::LayoutLimit::LayoutManufacturingLimit,
+                LayoutLimit::PlateBudget => rpc::LayoutLimit::LayoutPlateLimit,
+                LayoutLimit::OccurrenceBudget => rpc::LayoutLimit::LayoutOccurrenceLimit,
             } as i32,
             verification: Some(v.verification.try_into()?),
         })
@@ -320,6 +337,55 @@ impl TryFrom<crate::project::PrintLayoutEdit> for rpc::PrintLayoutEdit {
     }
 }
 
+impl TryFrom<rpc::AdditionalPlateProposal> for AdditionalPlateProposal {
+    type Error = String;
+    fn try_from(v: rpc::AdditionalPlateProposal) -> Result<Self, String> {
+        if v.placements.len() > MAX_OCCURRENCES as usize
+            || v.footprints_mm.len() > MAX_OCCURRENCES as usize
+        {
+            return Err("additional plate exceeds occurrence limit".into());
+        }
+        let r = Self {
+            placements: v
+                .placements
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            footprints_mm: v
+                .footprints_mm
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            candidates_examined: v.candidates_examined,
+            manufacturing_attempts: v.manufacturing_attempts,
+            verification: required(v.verification, "additional plate verification")?.try_into()?,
+        };
+        checked(r.validate())?;
+        Ok(r)
+    }
+}
+impl TryFrom<AdditionalPlateProposal> for rpc::AdditionalPlateProposal {
+    type Error = String;
+    fn try_from(v: AdditionalPlateProposal) -> Result<Self, String> {
+        checked(v.validate())?;
+        Ok(Self {
+            placements: v
+                .placements
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            footprints_mm: v
+                .footprints_mm
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            candidates_examined: v.candidates_examined,
+            manufacturing_attempts: v.manufacturing_attempts,
+            verification: Some(v.verification.try_into()?),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +401,7 @@ mod tests {
                 template: (objective != LayoutObjective::Arrange)
                     .then(|| OccurrenceId::new(3).unwrap()),
                 quantity: 2,
+                use_additional_plates: false,
                 pinned: vec![OccurrenceId::new(7).unwrap()],
                 spacing_mm: 3.5,
                 style: LayoutStyle::Dense,
@@ -358,6 +425,7 @@ mod tests {
             assert!(
                 LayoutRequest::try_from(rpc::LayoutRequest {
                     quantity: 0,
+                    use_additional_plates: false,
                     ..wire.clone()
                 })
                 .is_err()

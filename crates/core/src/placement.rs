@@ -5,6 +5,7 @@
 //! Shared atomic placement/copy semantics for detached trials and authoritative Apply.
 use super::*;
 
+#[derive(Clone)]
 pub struct PlacementDraft {
     snapshot: Arc<Snapshot>,
     next: [u32; 4],
@@ -20,6 +21,20 @@ impl PlacementDraft {
                 project.next_process_operation,
             ],
         }
+    }
+    /// Detached additional-job trial. Preserve global assets/history context, but compile
+    /// only the selected original and its scoped contributions.
+    pub fn template_only(&self, template: OccurrenceId) -> Result<Self, ProjectError> {
+        if !self.snapshot.occurrences.contains_key(&template) {
+            return Err(invalid("Unknown layout template"));
+        }
+        let mut snapshot = (*self.snapshot).clone();
+        snapshot.occurrences.retain(|id, _| *id == template);
+        snapshot.manufacturing_artifact = None;
+        Ok(Self {
+            snapshot: Arc::new(snapshot),
+            next: self.next,
+        })
     }
     pub fn snapshot(&self) -> &Arc<Snapshot> {
         &self.snapshot
@@ -42,6 +57,67 @@ impl PlacementDraft {
         snapshot.manufacturing_artifact = None;
         Ok(snapshot)
     }
+}
+/// One transaction applies Current and every additional job. Copy inheritance and
+/// allocator ownership remain identical to ordinary placement and plate transfer.
+pub(crate) fn apply_across_plates(
+    snapshot: &mut Snapshot,
+    placements: &[LayoutPlacement],
+    additional: &[Vec<LayoutPlacement>],
+    next: [&mut u32; 4],
+) -> Result<(), ProjectError> {
+    if placements.is_empty() && additional.is_empty() {
+        return Err(invalid("Layout has no placement changes"));
+    }
+    if snapshot.layouts.len() + additional.len() > MAX_PRINT_LAYOUTS {
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "Additional plates exceed the project plate budget",
+        ));
+    }
+    let [occurrence, surface, layer, operation] = next;
+    let source = snapshot.focused_layout.clone();
+    if !placements.is_empty() {
+        apply(snapshot, placements, occurrence, surface, layer, operation)?;
+    }
+    for rows in additional {
+        validate_layout_placements(rows).map_err(|e| invalid(e.message))?;
+        if rows.iter().any(|p| !p.copy) {
+            return Err(invalid("Additional plates may only contain new copies"));
+        }
+        let begin = *occurrence;
+        apply(snapshot, rows, occurrence, surface, layer, operation)?;
+        let copied = (begin..*occurrence)
+            .map(|id| OccurrenceId::new(id).expect("allocated occurrence"))
+            .collect();
+        print_layouts::apply(
+            snapshot,
+            PrintLayoutEdit::Create {
+                name: format!("Plate {}", snapshot.layouts.len() + 1),
+                copy_setup_from: Some(source.clone()),
+            },
+            occurrence,
+            surface,
+            layer,
+            operation,
+        )?;
+        let target = snapshot.focused_layout.clone();
+        print_layouts::apply(
+            snapshot,
+            PrintLayoutEdit::Transfer {
+                source: source.clone(),
+                target,
+                occurrences: copied,
+                copy: false,
+            },
+            occurrence,
+            surface,
+            layer,
+            operation,
+        )?;
+        snapshot.focused_layout = source.clone();
+    }
+    Ok(())
 }
 fn allocate(next: &mut u32) -> Result<u32, ProjectError> {
     let value = *next;
@@ -160,6 +236,7 @@ mod tests {
         assert_eq!(project.snapshot().occurrences.len(), 1);
         let prepared = project
             .prepare(Edit::ApplyPlacement {
+                additional: vec![],
                 placements: edits.clone(),
             })
             .unwrap();
@@ -200,7 +277,13 @@ mod tests {
         project.redo().unwrap();
         assert_eq!(project.snapshot().occurrences, copied.occurrences);
         project.undo().unwrap();
-        commit(&mut project, Edit::ApplyPlacement { placements: edits });
+        commit(
+            &mut project,
+            Edit::ApplyPlacement {
+                additional: vec![],
+                placements: edits,
+            },
+        );
         assert!(
             project
                 .snapshot()
@@ -224,6 +307,7 @@ mod tests {
         assert!(
             project
                 .prepare(Edit::ApplyPlacement {
+                    additional: vec![],
                     placements: vec![p.clone(), p]
                 })
                 .is_err()
@@ -236,6 +320,7 @@ mod tests {
         assert!(
             project
                 .prepare(Edit::ApplyPlacement {
+                    additional: vec![],
                     placements: vec![p.clone(); MAX_OCCURRENCES as usize]
                 })
                 .is_err()
@@ -244,6 +329,7 @@ mod tests {
         commit(
             &mut project,
             Edit::ApplyPlacement {
+                additional: vec![],
                 placements: vec![p],
             },
         );
@@ -253,5 +339,75 @@ mod tests {
                 .occurrences
                 .contains_key(&OccurrenceId::new(2).unwrap())
         );
+    }
+}
+
+#[cfg(test)]
+mod distribution_tests {
+    use super::*;
+    #[test]
+    fn additional_jobs_share_sources_and_one_undo_and_failed_admission_has_no_effect() {
+        let mut project = crate::tests::imported();
+        let original = project.snapshot();
+        let source = original.occurrences.values().next().unwrap().clone();
+        let copy = LayoutPlacement {
+            source: source.occurrence_id,
+            copy: true,
+            pose: source.pose,
+        };
+        let prepared = project
+            .prepare(Edit::ApplyPlacement {
+                placements: vec![],
+                additional: vec![vec![copy.clone()], vec![copy.clone()]],
+            })
+            .unwrap();
+        assert_eq!(project.snapshot().layouts.len(), 1);
+        project.commit(prepared).unwrap();
+        let distributed = project.snapshot();
+        assert_eq!(distributed.layouts.len(), 3);
+        assert_eq!(distributed.all_occurrences().count(), 3);
+        assert_eq!(distributed.focused_layout, original.focused_layout);
+        assert!(Arc::ptr_eq(
+            &distributed.sources[&source.definition_id],
+            &original.sources[&source.definition_id]
+        ));
+        let ids = distributed
+            .all_occurrences()
+            .map(|o| o.occurrence_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ids.len(), 3);
+        let before = project.info();
+        let mut bad = copy.clone();
+        bad.source = OccurrenceId::new(u32::MAX).unwrap();
+        assert!(
+            project
+                .prepare(Edit::ApplyPlacement {
+                    placements: vec![],
+                    additional: vec![vec![copy.clone()], vec![bad]],
+                })
+                .is_err()
+        );
+        assert_eq!(project.info(), before);
+        assert_eq!(project.snapshot().layouts.len(), 3);
+        project.undo().unwrap();
+        assert_eq!(
+            project.snapshot().layout_records(),
+            original.layout_records()
+        );
+        project.redo().unwrap();
+        assert_eq!(
+            project.snapshot().layout_records(),
+            distributed.layout_records()
+        );
+        let before = project.info();
+        assert!(
+            project
+                .prepare(Edit::ApplyPlacement {
+                    placements: vec![],
+                    additional: vec![vec![copy]; MAX_PRINT_LAYOUTS]
+                })
+                .is_err()
+        );
+        assert_eq!(project.info(), before);
     }
 }

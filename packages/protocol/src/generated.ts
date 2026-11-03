@@ -378,17 +378,19 @@ export type LayoutObjective = "arrange" | "copies" | "fill";
 
 export type LayoutStyle = "balanced" | "dense";
 
-export type LayoutLimit = "requested_quantity" | "build_area" | "search_budget" | "manufacturing_budget";
+export type LayoutLimit = "requested_quantity" | "build_area" | "search_budget" | "manufacturing_budget" | "plate_budget" | "occurrence_budget";
 
 export type LayoutRequest = { objective: LayoutObjective, template: OccurrenceId | null,
 /**
  * Total wanted quantity of the template, including the original. Fill uses this as its ceiling.
  */
-quantity: number, pinned: Array<OccurrenceId>, spacing_mm: number, style: LayoutStyle, };
+quantity: number, use_additional_plates: boolean, pinned: Array<OccurrenceId>, spacing_mm: number, style: LayoutStyle, };
 
 export type LayoutPlacement = { source: OccurrenceId, copy: boolean, pose: RigidPoseMm, };
 
-export type LayoutProposal = { id: SourceHash, session_id: SessionId, project_id: ProjectId, project_revision: ProjectRevision, scene_revision: SceneRevision, request: LayoutRequest, placements: Array<LayoutPlacement>, footprints_mm: Array<AabbMm>, requested_count: number, placed_count: number,
+export type AdditionalPlateProposal = { placements: Array<LayoutPlacement>, footprints_mm: Array<AabbMm>, candidates_examined: number, manufacturing_attempts: number, verification: VerificationReport, };
+
+export type LayoutProposal = { id: SourceHash, session_id: SessionId, project_id: ProjectId, project_revision: ProjectRevision, scene_revision: SceneRevision, request: LayoutRequest, placements: Array<LayoutPlacement>, additional_plates: Array<AdditionalPlateProposal>, footprints_mm: Array<AabbMm>, requested_count: number, placed_count: number,
 /**
  * Number of finite placement candidates examined. This never proves a global optimum.
  */

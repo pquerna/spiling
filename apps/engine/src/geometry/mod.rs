@@ -1033,9 +1033,16 @@ impl Runtime {
                     return Err(stale().into());
                 }
                 // Re-run Core admission against all retained history before exposing Apply.
-                if !self.project.info().read_only && !proposal.placements.is_empty() {
+                if !self.project.info().read_only
+                    && (!proposal.placements.is_empty() || !proposal.additional_plates.is_empty())
+                {
                     self.project.prepare(Edit::ApplyPlacement {
                         placements: proposal.placements.clone(),
+                        additional: proposal
+                            .additional_plates
+                            .iter()
+                            .map(|p| p.placements.clone())
+                            .collect(),
                     })?;
                 }
                 Ok(Publication {
@@ -1410,14 +1417,22 @@ impl Runtime {
                             && p.project_revision == project_revision
                     })
                     .ok_or_else(stale)?;
-                if proposal.placements.is_empty() {
+                if proposal.placements.is_empty() && proposal.additional_plates.is_empty() {
                     return Err(error(
                         GeometryErrorCode::InvalidGeometry,
                         "The proposal has no placement changes",
                     ));
                 }
                 let placements = proposal.placements.clone();
-                let reply = self.apply_edit(Edit::ApplyPlacement { placements });
+                let additional = proposal
+                    .additional_plates
+                    .iter()
+                    .map(|p| p.placements.clone())
+                    .collect();
+                let reply = self.apply_edit(Edit::ApplyPlacement {
+                    placements,
+                    additional,
+                });
                 if matches!(
                     reply,
                     Reply::Geometry(GeometryResponse::SceneChanged { .. })

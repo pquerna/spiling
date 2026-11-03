@@ -213,9 +213,16 @@ try {
   // Exercise independent plate publication through the real, normal-stack CLI.
   // In particular, full inspection/export must not overflow the entry future.
   const secondPlate = invoke([
-    "project", "open", movedProject,
-    "--plate-duplicate", "Second plate", "--compile", "--verify", "--save",
-    "--engine", engine,
+    "project",
+    "open",
+    movedProject,
+    "--plate-duplicate",
+    "Second plate",
+    "--compile",
+    "--verify",
+    "--save",
+    "--engine",
+    engine,
   ]);
   assert.equal(secondPlate.status, 0, secondPlate.stderr);
   const secondReport = JSON.parse(secondPlate.stdout);
@@ -223,9 +230,16 @@ try {
   const plateArtifacts = [];
   for (const plate of [1, 2]) {
     const replay = invoke([
-      "project", "inspect", movedProject, "--plate", String(plate),
-      "--verify", "--manufacturing-out", join(directory, `plate-${plate}-export`),
-      "--engine", engine,
+      "project",
+      "inspect",
+      movedProject,
+      "--plate",
+      String(plate),
+      "--verify",
+      "--manufacturing-out",
+      join(directory, `plate-${plate}-export`),
+      "--engine",
+      engine,
     ]);
     assert.equal(replay.status, 0, replay.stderr);
     const plateReport = JSON.parse(replay.stdout);
@@ -234,6 +248,82 @@ try {
     plateArtifacts.push(plateReport.manufacturing.artifact);
   }
   assert.notDeepEqual(plateArtifacts[0], plateArtifacts[1]);
+  // Explicit quantity overflow stays one atomic edit and requires fresh per-job output.
+  const quantitySource = join(directory, "quantity-source.step");
+  await copyFile(
+    resolve("fixtures/geometry/independent-exporters/occt-box-mm.step"),
+    quantitySource,
+  );
+  const quantityIntent = JSON.parse(
+    await readFile(resolve("fixtures/manufacturing/complete-sparse.intent.json"), "utf8"),
+  );
+  quantityIntent.printer.build_envelope.max = [30, 24, 220];
+  quantityIntent.printer.workflow.job.prime_start_mm = [5, 23, 0.2];
+  quantityIntent.printer.workflow.job.prime_end_mm = [25, 23, 0.2];
+  quantityIntent.printer.workflow.job.park_position_mm = [0, 23, 20];
+  const quantityProfile = join(directory, "quantity-intent.json");
+  await writeFile(quantityProfile, JSON.stringify(quantityIntent));
+  const quantityProject = join(directory, "quantity.spil");
+  const quantity = invoke([
+    "project",
+    "create",
+    quantityProject,
+    "--import",
+    quantitySource,
+    "--intent",
+    quantityProfile,
+    "--make-copies-across-plates",
+    "1",
+    "4",
+    "--apply-layout",
+    "--undo",
+    "--redo",
+    "--save",
+    "--engine",
+    engine,
+  ]);
+  assert.equal(quantity.status, 0, quantity.stderr);
+  const quantityReport = JSON.parse(quantity.stdout);
+  assert.equal(quantityReport.project.layouts.length, 4);
+  assert.equal(
+    quantityReport.project.layouts.reduce((n, p) => n + p.occurrence_count, 0),
+    4,
+  );
+  const proposal = quantityReport.layout_proposals[0];
+  assert.equal(proposal.requested_count, 4);
+  assert.equal(proposal.additional_plates.length, 3);
+  await rm(quantitySource);
+  for (const plate of [1, 2, 3, 4]) {
+    const prepared = invoke([
+      "project",
+      "open",
+      quantityProject,
+      "--plate",
+      String(plate),
+      "--compile",
+      "--verify",
+      "--save",
+      "--manufacturing-out",
+      join(directory, `quantity-${plate}-export`),
+      "--engine",
+      engine,
+    ]);
+    assert.equal(prepared.status, 0, prepared.stderr);
+    const result = JSON.parse(prepared.stdout);
+    assert.equal(result.manufacturing_export.verification.verified, true);
+    const fresh = invoke([
+      "project",
+      "inspect",
+      quantityProject,
+      "--plate",
+      String(plate),
+      "--verify",
+      "--engine",
+      engine,
+    ]);
+    assert.equal(fresh.status, 0, fresh.stderr);
+    assert.equal(JSON.parse(fresh.stdout).manufacturing.verification.verified, true);
+  }
   const compactProject = join(directory, "compact.spil");
   const maintained = invoke([
     "project",

@@ -10,7 +10,7 @@ pub use catalog_search::{CatalogChoice, CatalogSearch};
 mod gallery;
 mod layout;
 mod plates;
-pub use layout::layout_fields;
+pub use layout::{additional_layout_previews, layout_fields};
 pub use plates::{PlateEvent, PlatePartDrag, plate_navigator, plate_overview};
 mod seams;
 pub use gallery::gallery;

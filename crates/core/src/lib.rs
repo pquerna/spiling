@@ -297,6 +297,7 @@ pub enum Edit {
     },
     ApplyPlacement {
         placements: Vec<LayoutPlacement>,
+        additional: Vec<Vec<LayoutPlacement>>,
     },
     SetPose {
         occurrence_id: OccurrenceId,
@@ -1032,13 +1033,19 @@ impl Project {
                 }
                 add_occurrence(&mut snapshot, definition_id, pose, &mut next_occurrence)?;
             }
-            Edit::ApplyPlacement { placements } => placement::apply(
+            Edit::ApplyPlacement {
+                placements,
+                additional,
+            } => placement::apply_across_plates(
                 &mut snapshot,
                 &placements,
-                &mut next_occurrence,
-                &mut next_surface_layer,
-                &mut next_process_layer,
-                &mut next_process_operation,
+                &additional,
+                [
+                    &mut next_occurrence,
+                    &mut next_surface_layer,
+                    &mut next_process_layer,
+                    &mut next_process_operation,
+                ],
             )?,
             Edit::SetPose {
                 occurrence_id,

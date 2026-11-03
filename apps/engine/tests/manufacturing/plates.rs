@@ -3,7 +3,7 @@
 // Licensed under the Open Software License version 3.0
 use super::*;
 
-async fn select(client: &EngineClient, layout_id: &PrintLayoutId) {
+pub(super) async fn select(client: &EngineClient, layout_id: &PrintLayoutId) {
     let ProjectResponse::Status { info } = client
         .project(ProjectCommand::Get {
             session_id: client.hello().session_id.clone(),
@@ -28,7 +28,7 @@ async fn select(client: &EngineClient, layout_id: &PrintLayoutId) {
     assert_eq!(info.revision, revision, "navigation changed content");
     assert_eq!(&summary.layout_id, layout_id);
 }
-async fn edit(client: &EngineClient, edit: PrintLayoutEdit) -> ProjectInfo {
+pub(super) async fn edit(client: &EngineClient, edit: PrintLayoutEdit) -> ProjectInfo {
     let ProjectResponse::Status { info } = client
         .project(ProjectCommand::Get {
             session_id: client.hello().session_id.clone(),
@@ -296,6 +296,7 @@ async fn arrangement_excludes_other_plates_occurrence_process_contributions() {
                 objective: LayoutObjective::Copies,
                 template: Some(OccurrenceId::new(1).unwrap()),
                 quantity: 2,
+                use_additional_plates: false,
                 pinned: vec![],
                 spacing_mm: 3.0,
                 style: LayoutStyle::Balanced,

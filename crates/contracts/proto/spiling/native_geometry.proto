@@ -192,7 +192,7 @@ message ArtifactChunkMetadata { oneof kind { MeshChunkMetadata mesh = 1; Section
 
 enum LayoutObjective { LAYOUT_OBJECTIVE_UNSPECIFIED = 0; LAYOUT_ARRANGE = 1; LAYOUT_COPIES = 2; LAYOUT_FILL = 3; }
 enum LayoutStyle { LAYOUT_STYLE_UNSPECIFIED = 0; LAYOUT_BALANCED = 1; LAYOUT_DENSE = 2; }
-message LayoutRequest { LayoutObjective objective = 1; optional uint32 template = 2; uint32 quantity = 3; repeated uint32 pinned = 4; double spacing_mm = 5; LayoutStyle style = 6; }
+message LayoutRequest { LayoutObjective objective = 1; optional uint32 template = 2; uint32 quantity = 3; repeated uint32 pinned = 4; double spacing_mm = 5; LayoutStyle style = 6; bool use_additional_plates = 7; }
 message LayoutPlacement { uint32 source = 1; bool copy = 2; RigidPoseMm pose = 3; }
 message PrepareLayoutRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; uint32 project_revision = 4; LayoutRequest request = 5; }
 message ApplyLayoutRequest { string session_id = 1; uint32 base_revision = 2; uint32 project_revision = 3; string proposal_id = 4; }

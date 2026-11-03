@@ -41,6 +41,18 @@ matching engine receipts. Per-plate cameras/section settings are bounded transie
 state; one current replay is decoded at a time. Overview positions must never become
 machine coordinates.
 
+Quantity includes the selected original. The explicit **Use additional plates**
+choice extends the same bounded placement service to new single-tool jobs using the
+current setup; Arrange and Fill remain current-plate operations. Every proposed
+job passes ordinary compilation, independent replay and construction containment.
+One aggregate candidate budget and the project's membership/plate limits bound the
+search. The proposal accounts for the complete requested quantity and any shortfall;
+it does not promise optimal packing. One Core transaction applies all placements
+and creates the additional jobs, with fresh occurrence/contribution IDs and shared
+immutable assets. Undo reverses the whole distribution. Trial programs are not
+adopted: each resulting job still requires ordinary preparation and fresh inspection
+before export.
+
 Limits and schemas live in [project contracts](../protocol/project.md). Fixed-dual
 occurrence-bound routes refuse transfer/duplication until assignment remapping is
 qualified. No automatic printer dispatch, swept-tool clearance or physical print

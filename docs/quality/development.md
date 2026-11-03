@@ -541,7 +541,14 @@ The CLI uses the same engine proposal and explicit Apply:
 
 `--arrange` prepares existing parts; `--make-copies OCC TOTAL` includes the selected
 original; `--fill-plate OCC LIMIT` searches up to that total without claiming an optimum.
-`--layout REQUEST_JSON` accepts the bounded typed request with explicit pins, spacing
+`--make-copies-across-plates OCC TOTAL` permits overflow onto new plates with the
+same setup. In the native quantity form, select **Use additional plates** and review
+the accounted quantity and each proposed plate before Apply. Use a small admitted
+build area to force multiple jobs; Close leaves membership unchanged and one Undo
+reverses the full distribution. Compile, independently inspect and export each job
+after Apply, then save/reopen without the source file and repeat fresh inspection.
+`--layout REQUEST_JSON` accepts the bounded typed request with explicit
+`use_additional_plates`, pins, spacing
 and Balanced/Dense style. Inspection permits proposals, never Apply. Reports retain
 proposals and their captured revisions even if later ordered edits make them stale.
 No existing parts are silently removed to fit additional copies. Native/finish bounds

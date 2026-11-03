@@ -191,6 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         LayoutLimit::decl(&config),
         LayoutRequest::decl(&config),
         LayoutPlacement::decl(&config),
+        AdditionalPlateProposal::decl(&config),
         LayoutProposal::decl(&config),
         NativePath::decl(&config),
         MeshChunkMetadata::decl(&config),

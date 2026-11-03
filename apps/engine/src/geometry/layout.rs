@@ -69,6 +69,7 @@ fn candidate(
     occupied: &[Rect],
     style: LayoutStyle,
     work: &mut u32,
+    budget: u32,
     cancel: &AtomicBool,
 ) -> Result<Option<Rect>, JobError> {
     let size: [f64; 2] = std::array::from_fn(|a| shape.max[a] - shape.min[a]);
@@ -91,7 +92,7 @@ fn candidate(
     let mut best: Option<(f64, Rect)> = None;
     for y in &axes[1] {
         for x in &axes[0] {
-            if *work == 2_000_000 {
+            if *work >= budget {
                 return Ok(None);
             }
             *work += 1;
@@ -120,11 +121,12 @@ fn candidate(
     Ok(best.map(|(_, b)| b))
 }
 
-pub(super) fn prepare(
+fn prepare_single(
     mut r: Request,
     definitions: &BTreeMap<DefinitionId, Arc<spiling_geometry::Definition>>,
     cancel: &AtomicBool,
     progress: &dyn Fn(String),
+    budget: u32,
 ) -> Result<LayoutProposal, JobError> {
     r.request.validate()?;
     let current = r.draft.snapshot();
@@ -260,7 +262,15 @@ pub(super) fn prepare(
         ));
         let b = bounds[&id];
         let shape = Rect::from_bounds(b, padding);
-        let Some(placed) = candidate(shape, bed, &occupied, r.request.style, &mut work, cancel)?
+        let Some(placed) = candidate(
+            shape,
+            bed,
+            &occupied,
+            r.request.style,
+            &mut work,
+            budget,
+            cancel,
+        )?
         else {
             if index < originals {
                 return Err(fail(
@@ -326,7 +336,7 @@ pub(super) fn prepare(
     }
     let mut limited_by = if footprints.len() as u32 == desired {
         LayoutLimit::RequestedQuantity
-    } else if work == 2_000_000 {
+    } else if work >= budget {
         LayoutLimit::SearchBudget
     } else {
         LayoutLimit::BuildArea
@@ -342,6 +352,9 @@ pub(super) fn prepare(
             let trial = r.draft.preview(&placements)?;
             r.capture.occurrences = trial.occurrences.values().cloned().collect();
             let (surface, process) = trial.scoped_documents();
+            r.capture
+                .surface_images
+                .retain(|hash, _| surface.images.iter().any(|r| &r.image_hash == hash));
             r.capture.surface_overlays = Arc::new(surface);
             r.capture.process_document = Arc::new(process);
             Ok(spiling_manufacturing::compile(
@@ -429,6 +442,7 @@ pub(super) fn prepare(
         scene_revision: r.scene,
         request: r.request,
         placements,
+        additional_plates: vec![],
         footprints_mm: footprints,
         requested_count: desired,
         placed_count,
@@ -439,4 +453,139 @@ pub(super) fn prepare(
     };
     proposal.validate()?;
     Ok(proposal)
+}
+
+/// The same bounded search and independent replay for each proposed job, under
+/// one aggregate candidate budget. Nothing here changes the authoritative project.
+pub(super) fn prepare(
+    mut r: Request,
+    definitions: &BTreeMap<DefinitionId, Arc<spiling_geometry::Definition>>,
+    cancel: &AtomicBool,
+    progress: &dyn Fn(String),
+) -> Result<LayoutProposal, JobError> {
+    r.request.validate()?;
+    let request = r.request.clone();
+    let original_count = r.draft.snapshot().occurrences.len() as u32;
+    let other_count = r.draft.snapshot().all_occurrences().count() as u32 - original_count;
+    let available = MAX_OCCURRENCES
+        .saturating_sub(other_count + original_count)
+        .saturating_add(1);
+    if original_count == 0 {
+        return Err(fail("Import a part before arranging"));
+    }
+    let wanted = if request.objective == LayoutObjective::Arrange {
+        original_count
+    } else {
+        original_count + request.quantity - 1
+    };
+    // The quantity remains explicit in the returned request; this ceiling bounds trials.
+    if request.objective != LayoutObjective::Arrange {
+        r.request.quantity = request.quantity.min(available);
+    }
+    if wanted > MAX_OCCURRENCES {
+        return Err(fail(
+            "Requested total exceeds the project occurrence budget",
+        ));
+    }
+    let extra_slots =
+        spiling_contracts::project::MAX_PRINT_LAYOUTS - r.draft.snapshot().layouts.len();
+    let template_draft = if request.use_additional_plates {
+        Some(
+            r.draft.template_only(
+                request
+                    .template
+                    .ok_or_else(|| fail("Choose a copy template"))?,
+            )?,
+        )
+    } else {
+        None
+    };
+    let capture = r.capture.clone();
+    let session = r.session.clone();
+    let scene = r.scene;
+    let mut result = prepare_single(r, definitions, cancel, progress, 2_000_000)?;
+    let mut work = result.candidates_examined;
+    let target = wanted.min(MAX_OCCURRENCES - other_count);
+    if let Some(draft) = template_draft {
+        while result.total_placed() < target
+            && result.additional_plates.len() < extra_slots
+            && work < 2_000_000
+        {
+            super::check_cancel(cancel)?;
+            progress(format!(
+                "layout_additional_plate_{}",
+                result.additional_plates.len() + 1
+            ));
+            let remaining = target - result.total_placed();
+            let mut extra_request = request.clone();
+            extra_request.quantity = remaining;
+            extra_request.use_additional_plates = false;
+            extra_request.pinned.clear();
+            let mut extra_capture = capture.clone();
+            let snapshot = draft.snapshot();
+            extra_capture.occurrences = snapshot.occurrences.values().cloned().collect();
+            let (surface, process) = snapshot.scoped_documents();
+            let used: std::collections::BTreeSet<_> = extra_capture
+                .occurrences
+                .iter()
+                .map(|o| &o.definition_id)
+                .collect();
+            extra_capture
+                .stored_definitions
+                .retain(|d| used.contains(&d.definition_id));
+            extra_capture
+                .surface_images
+                .retain(|hash, _| surface.images.iter().any(|r| &r.image_hash == hash));
+            extra_capture.surface_overlays = Arc::new(surface);
+            extra_capture.process_document = Arc::new(process);
+            let extra = prepare_single(
+                Request {
+                    session: session.clone(),
+                    scene,
+                    request: extra_request,
+                    capture: extra_capture,
+                    draft: draft.clone(),
+                },
+                definitions,
+                cancel,
+                progress,
+                2_000_000 - work,
+            )?;
+            work += extra.candidates_examined;
+            result.additional_plates.push(AdditionalPlateProposal {
+                placements: extra
+                    .placements
+                    .into_iter()
+                    .map(|mut p| {
+                        p.copy = true;
+                        p
+                    })
+                    .collect(),
+                footprints_mm: extra.footprints_mm,
+                candidates_examined: extra.candidates_examined,
+                manufacturing_attempts: extra.manufacturing_attempts,
+                verification: extra.verification,
+            });
+        }
+    }
+    result.request = request;
+    result.requested_count = wanted;
+    result.limited_by = if result.total_placed() == wanted {
+        LayoutLimit::RequestedQuantity
+    } else if result.total_placed() == target && wanted > target {
+        LayoutLimit::OccurrenceBudget
+    } else if work >= 2_000_000 {
+        LayoutLimit::SearchBudget
+    } else if result.request.use_additional_plates && result.additional_plates.len() == extra_slots
+    {
+        LayoutLimit::PlateBudget
+    } else {
+        result.limited_by
+    };
+    result.id = SourceHash::from_bytes(
+        &serde_json::to_vec(&(&result.id, &result.request, &result.additional_plates))
+            .map_err(|_| fail("Layout identity encoding failed"))?,
+    );
+    result.validate()?;
+    Ok(result)
 }

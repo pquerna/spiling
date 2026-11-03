@@ -79,6 +79,7 @@ struct Opened {
     imports: Vec<Imported>,
     residents: BTreeMap<DefinitionId, Resident>,
 }
+#[derive(Clone)]
 pub struct CompileRequest {
     pub project_id: spiling_contracts::project::ProjectId,
     pub revision: spiling_contracts::project::ProjectRevision,

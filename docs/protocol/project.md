@@ -92,8 +92,22 @@ Manufacturing records bind project identity, source/occurrence records, explicit
 
 Core snapshots retain all layout records and shared sources, ordered contribution documents and canonical assets. Prepared edits validate before mutation and commit checks originating project/revision. Create/rename/reorder/remove/duplicate and batched move/copy are atomic history entries. Move preserves local poses and identity; copy allocates fresh occurrence-owned contribution IDs. Removing a plate prunes only globally unreferenced definitions/contributions. At least one plate remains. Fixed-dual occurrence assignments refuse transfer/duplication; creating an empty plate can copy hardware without copying occurrence-bound intent.
 
-Selected layout is transient; selection checks session and current project revision, does not dirty the project, and is permitted read-only. It advances scene identity and refuses while an engine job runs. ProjectInfo describes the selected layout plus bounded summaries of every layout. Geometry.GetLayoutOverview supplies session/scene/project-revision-bound build rectangles and source AABBs for all layouts, capped by the same global membership limits. These display bounds exclude construction/support/clearance and cannot authorize packing or geometry queries. Manufacturing/hardware/options commands carry a required layout ID and refuse another focus. A mutation recomputes each retained artifact's complete scoped input fingerprint: unchanged artifacts survive unrelated layout edits, changed artifacts clear atomically. Fresh actual replay remains mandatory. Undo restores coherent records/assets without allocator rewind. History is at most64 transactions with shared independent allocation budgets; save preserves history and revision. See [ADR011](../adr/011-print-layouts.md).
+Quantity proposals bind session, scene and project revisions through the existing
+PrepareLayout/ApplyLayout token. `LayoutRequest.use_additional_plates` is required in
+typed JSON and valid only for Copies. Quantity includes the selected original;
+existing unrelated parts remain. The top-level placements/footprints and
+`placed_count` describe the current plate. Each `additional_plates` row describes
+only new copies of the selected template, source reservation bounds, its independent
+verification, candidates and manufacturing attempts. `requested_count` includes all
+current parts plus requested new copies; total placed is the current count plus all
+additional rows. At most two million candidates are examined across the entire
+proposal, with at most four manufacturing attempts per plate, subject to the global
+16-plate/256-occurrence limits. Plate, occurrence, build-area, search and manufacturing
+limits remain explicit. Apply rechecks complete Core admission before creating all
+jobs as one history entry. No trial artifact becomes a current result. Fixed-dual
+routes do not gain automatic distribution support.
 
+Selected layout is transient; selection checks session and current project revision, does not dirty the project, and is permitted read-only. It advances scene identity and refuses while an engine job runs. ProjectInfo describes the selected layout plus bounded summaries of every layout. Geometry.GetLayoutOverview supplies session/scene/project-revision-bound build rectangles and source AABBs for all layouts, capped by the same global membership limits. These display bounds exclude construction/support/clearance and cannot authorize packing or geometry queries. Manufacturing/hardware/options commands carry a required layout ID and refuse another focus. A mutation recomputes each retained artifact's complete scoped input fingerprint: unchanged artifacts survive unrelated layout edits, changed artifacts clear atomically. Fresh actual replay remains mandatory. Undo restores coherent records/assets without allocator rewind. History is at most64 transactions with shared independent allocation budgets; save preserves history and revision. See [ADR011](../adr/011-print-layouts.md).
 
 Dirty compares source records, occurrences, intent, complete finish/process documents and artifact record with saved content, not revision/allocator numbers. Undoing to saved content may be clean at a later revision. A new project is clean but unattached; its first save requires a new target. Read-only rejects mutation, Compile publication, history and Save, while allowing effective-intent inspection and independent stored-program replay/export.
 

@@ -729,7 +729,9 @@ pub fn parse(
                 edit.validate()?;
                 operations.push(Operation::Plate(plates::Action::Edit(edit)));
             }
-            Some("--arrange" | "--make-copies" | "--fill-plate") => {
+            Some(
+                "--arrange" | "--make-copies" | "--make-copies-across-plates" | "--fill-plate",
+            ) => {
                 let template = if arg == "--arrange" {
                     None
                 } else {
@@ -737,7 +739,7 @@ pub fn parse(
                         text(&mut args, "layout occurrence")?.parse()?,
                     )?)
                 };
-                let quantity = if arg == "--make-copies" {
+                let quantity = if arg == "--make-copies" || arg == "--make-copies-across-plates" {
                     text(&mut args, "quantity")?.parse()?
                 } else if arg == "--fill-plate" {
                     text(&mut args, "quantity ceiling")?.parse()?
@@ -747,13 +749,14 @@ pub fn parse(
                 let request = LayoutRequest {
                     objective: if arg == "--arrange" {
                         LayoutObjective::Arrange
-                    } else if arg == "--make-copies" {
+                    } else if arg == "--make-copies" || arg == "--make-copies-across-plates" {
                         LayoutObjective::Copies
                     } else {
                         LayoutObjective::Fill
                     },
                     template,
                     quantity,
+                    use_additional_plates: arg == "--make-copies-across-plates",
                     pinned: vec![],
                     spacing_mm: 3.0,
                     style: if arg == "--fill-plate" {

@@ -24,6 +24,7 @@ impl Default for LayoutUi {
                 objective: LayoutObjective::Copies,
                 template: None,
                 quantity: 2,
+                use_additional_plates: false,
                 pinned: vec![],
                 spacing_mm: 3.0,
                 style: LayoutStyle::Balanced,
@@ -109,15 +110,18 @@ impl Workbench {
     }
     pub(super) fn layout_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        ui::pane_header(
-            ui,
-            "Arrange",
-            if self.layout_proposal().is_some() {
-                "Current plate · proposed layout"
-            } else {
-                "Current plate"
-            },
-        );
+        let name = self
+            .state
+            .project
+            .as_ref()
+            .and_then(|p| p.layouts.iter().find(|l| l.layout_id == p.layout_id))
+            .map_or("Current plate", |l| l.name.as_str());
+        let scope = if self.layout_proposal().is_some() {
+            format!("{name} · proposed layout")
+        } else {
+            name.to_owned()
+        };
+        ui::pane_header(ui, "Arrange", &scope);
         if ui::close(ui, "Close") {
             self.close_layout(&ctx);
             return;
@@ -171,22 +175,28 @@ impl Workbench {
             if p.request.objective == LayoutObjective::Arrange {
                 ui.label(format!("{} parts arranged", p.placed_count));
             } else {
-                let quantity = 1 + p.placements.iter().filter(|p| p.copy).count();
+                let quantity = 1 + p.copied_count();
                 ui.label(format!("{} of {} requested", quantity, p.request.quantity));
-                ui.weak(format!("{} total parts", p.placed_count));
+                ui.weak(format!(
+                    "{} parts · {} plates",
+                    p.total_placed(),
+                    1 + p.additional_plates.len()
+                ));
             }
-            if p.placed_count < p.requested_count {
+            if p.total_placed() < p.requested_count {
                 ui.colored_label(
                     self.prefs.theme.tokens().warning,
                     "Some requested copies were not placed",
                 );
             }
-            if p.placed_count < p.requested_count {
+            if p.total_placed() < p.requested_count {
                 ui.label(match p.limited_by {
                     LayoutLimit::BuildArea => "Build area limit reached",
                     LayoutLimit::ManufacturingBudget => "Manufacturing work limit reached",
                     LayoutLimit::SearchBudget => "Search limit reached",
                     LayoutLimit::RequestedQuantity => "Quantity limit reached",
+                    LayoutLimit::PlateBudget => "Project plate limit reached",
+                    LayoutLimit::OccurrenceBudget => "Project part limit reached",
                 });
             }
             ui.weak(format!(
@@ -198,7 +208,7 @@ impl Workbench {
                 "Apply layout",
                 if project.read_only {
                     Some("This project is read-only")
-                } else if p.placements.is_empty() {
+                } else if p.placements.is_empty() && p.additional_plates.is_empty() {
                     Some("Nothing to move or copy")
                 } else {
                     None
@@ -226,14 +236,29 @@ impl Workbench {
                     ui::layout_fields(ui, &mut self.layout.request, &parts)
                 });
                 if let Some(p) = &proposal {
+                    let bed = self.state.manufacturing.intent.as_ref().map(|i| {
+                        i.hardware
+                            .as_ref()
+                            .and_then(|h| h.selected_face().ok())
+                            .map_or(i.printer.build_envelope, |f| f.usable_mm)
+                    });
+                    ui::additional_layout_previews(ui, p, bed);
                     egui::CollapsingHeader::new("Details").show(ui, |ui| {
                         ui.label(format!(
                             "{} placement candidates examined",
                             p.candidates_examined
+                                + p.additional_plates
+                                    .iter()
+                                    .map(|p| p.candidates_examined)
+                                    .sum::<u32>()
                         ));
                         ui.label(format!(
                             "{} manufacturing attempts",
                             p.manufacturing_attempts
+                                + p.additional_plates
+                                    .iter()
+                                    .map(|p| p.manufacturing_attempts)
+                                    .sum::<u32>()
                         ));
                         ui.label(format!(
                             "{} deposition segments",
