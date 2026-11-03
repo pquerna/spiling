@@ -4344,10 +4344,62 @@ fn recover_critical_slab(
                 cancel,
             )
         })()? {
-            // A completed collar already supports this conservative metric.
-            // Refine an overlarge proposal instead of constructing a stronger
-            // critical cover just to seek a tighter bound. A failed collar
-            // remains indeterminate; it never authorizes refinement.
+            let one_sided = if one_sided > request.native_shape_error_mm
+                && !section.loops.is_empty()
+                && (request.frame.z_axis == [0.0, 0.0, 1.0]
+                    || request.frame.z_axis == [0.0, 0.0, -1.0])
+            {
+                let product = match source_vertical_boundary_flow(
+                    source,
+                    request.frame,
+                    [-f64::MAX, f64::MAX],
+                    remaining_scratch(reserved.saturating_add(complex.retained_bytes()))?,
+                    work,
+                    cancel,
+                ) {
+                    Ok(product) => Some(product),
+                    Err(failure)
+                        if matches!(
+                            failure.code,
+                            GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled
+                        ) =>
+                    {
+                        return Err(failure);
+                    }
+                    Err(_) => None,
+                };
+                if let Some(product) = product.filter(|product| {
+                    product.matches_native_material(definition)
+                        && product.frame() == request.frame
+                        && product.pose().is_none()
+                        && sample_height.lo >= product.height_interval_mm[0]
+                        && sample_height.hi <= product.height_interval_mm[1]
+                }) {
+                    let overhang = Interval::point(product.height_interval_mm[0])
+                        .sub(Interval::point(request.height_interval_mm[0]))
+                        .hi
+                        .max(
+                            Interval::point(request.height_interval_mm[1])
+                                .sub(Interval::point(product.height_interval_mm[1]))
+                                .hi,
+                        )
+                        .max(0.0);
+                    let vertical = Interval::point(overhang)
+                        .div(norm(request.frame.z_axis.map(Interval::point))?)?;
+                    one_sided.min(
+                        norm([
+                            Interval::point(approximation),
+                            vertical,
+                            Interval::point(0.0),
+                        ])?
+                        .hi,
+                    )
+                } else {
+                    one_sided
+                }
+            } else {
+                one_sided
+            };
             if one_sided > request.native_shape_error_mm {
                 return Err(error(
                     GeometryErrorCode::ShapeErrorExceeded,
@@ -7776,6 +7828,101 @@ mod tests {
     fn vertical_flow_does_not_snap_a_torus_into_exact_reuse() {
         assert_no_exact_vertical_reuse("native-parity-nurbs-torus.step");
     }
+    #[test]
+    fn original_vertical_product_cap_overhang_keeps_directed_metric_and_scope() {
+        let cancel = AtomicBool::new(false);
+        for bytes in [
+            include_bytes!("../../../../fixtures/geometry/box-mm.step").as_slice(),
+            include_bytes!("../../../../fixtures/geometry/cylinder.step").as_slice(),
+        ] {
+            let definition = crate::from_step_bytes_with_cancel(bytes, &cancel).unwrap();
+            let mut work = GeometryWorkBudget::new(300_000_000);
+            let source = super::super::material_source::prepare_solid(
+                &definition,
+                crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            for sign in [1.0, -1.0] {
+                let source_frame = PlaneFrameMm {
+                    x_axis: [sign, 0.0, 0.0],
+                    z_axis: [0.0, 0.0, sign],
+                    ..frame()
+                };
+                let interval = if sign > 0.0 {
+                    [7.6, up(8.0)]
+                } else {
+                    [-up(8.0), -7.6]
+                };
+                let request = SlabRequest {
+                    frame: source_frame,
+                    height_interval_mm: interval,
+                    sample_height_mm: sign * 7.8,
+                    native_shape_error_mm: 0.1,
+                };
+                let slab = analyze_slab(
+                    &source,
+                    request,
+                    crate::MAX_PREPARED_SECTION_BYTES - source.retained_bytes(),
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+                assert_eq!(slab.request().height_interval_mm, interval);
+                assert!(!slab.section.loops.is_empty());
+                assert!(slab.collar_complex.is_some());
+                assert!(slab.invariance.is_none());
+                assert!(slab.closed_shape_error_mm().is_none());
+                assert!(slab.sample_to_closed_source_shape_error_mm() < 0.1);
+                assert!(slab.sample_to_closed_source_shape_error_mm() >= up(8.0) - 8.0);
+                let outside = if sign > 0.0 { [7.6, 8.2] } else { [-8.2, -7.6] };
+                let failure = analyze_slab(
+                    &source,
+                    SlabRequest {
+                        height_interval_mm: outside,
+                        ..request
+                    },
+                    crate::MAX_PREPARED_SECTION_BYTES
+                        - source.retained_bytes()
+                        - slab.retained_bytes(),
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err();
+                assert_eq!(failure.code, GeometryErrorCode::ShapeErrorExceeded);
+                for (limit, budget, cancelled, expected) in [
+                    (0, 300_000_000, false, GeometryErrorCode::ResourceLimit),
+                    (
+                        crate::MAX_PREPARED_SECTION_BYTES - source.retained_bytes(),
+                        0,
+                        false,
+                        GeometryErrorCode::ResourceLimit,
+                    ),
+                    (
+                        crate::MAX_PREPARED_SECTION_BYTES - source.retained_bytes(),
+                        300_000_000,
+                        true,
+                        GeometryErrorCode::Cancelled,
+                    ),
+                ] {
+                    assert_eq!(
+                        analyze_slab(
+                            &source,
+                            request,
+                            limit,
+                            &mut GeometryWorkBudget::new(budget),
+                            &AtomicBool::new(cancelled),
+                        )
+                        .unwrap_err()
+                        .code,
+                        expected,
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn original_blind_floor_is_closed_stratum_not_the_ring_core_metric() {
         let cancel = AtomicBool::new(false);
