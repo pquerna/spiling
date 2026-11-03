@@ -54,6 +54,23 @@ fn rational_affine_axis(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<RationalAffineAxis, GeometryError> {
+    let degree = if axis == 0 { surface.q() } else { surface.p() };
+    rational_affine_axis_controls(
+        surface,
+        [span[1 - axis] - degree, span[1 - axis]],
+        axis,
+        work,
+        cancel,
+    )
+}
+
+fn rational_affine_axis_controls(
+    surface: &Surface,
+    controls: [usize; 2],
+    axis: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<RationalAffineAxis, GeometryError> {
     let degrees = [surface.p(), surface.q()];
     let counts = [surface.n() + 1, surface.m() + 1];
     if counts[axis] != 2 || degrees[axis] != 1 {
@@ -77,7 +94,7 @@ fn rational_affine_axis(
         let point = [c.x, c.y, c.z, c.w];
         point.iter().all(|value| value.is_finite()).then_some(point)
     };
-    let first = span[1 - axis] - degrees[1 - axis];
+    let first = controls[0];
     let (Some(a), Some(b)) = (at(0, first), at(1, first)) else {
         return Ok(RationalAffineAxis::default());
     };
@@ -95,7 +112,7 @@ fn rational_affine_axis(
             .ok()
             .filter(|value| value.lo.is_finite() && value.hi.is_finite());
     }
-    for other in first..=span[1 - axis] {
+    for other in first..=controls[1] {
         work.charge(1, cancel)?;
         let (Some(c), Some(d)) = (at(0, other), at(1, other)) else {
             return Ok(RationalAffineAxis::default());
@@ -149,6 +166,38 @@ fn rational_affine_axis(
         derivative: result,
         constant_base,
     })
+}
+
+pub(super) fn rational_affine_functional_gradient(
+    surface: &Surface,
+    direction: [Interval; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<[Interval; 2]>, GeometryError> {
+    if !surface.is_rational() {
+        return Ok(None);
+    }
+    let bounds = [
+        rational_affine_axis_controls(surface, [0, surface.m()], 0, work, cancel)?,
+        rational_affine_axis_controls(surface, [0, surface.n()], 1, work, cancel)?,
+    ];
+    let mut gradient = [ZERO; 2];
+    for (coordinate, coefficient) in direction.into_iter().enumerate() {
+        Interval::new(coefficient.lo, coefficient.hi)?;
+        if coefficient == ZERO {
+            continue;
+        }
+        let Some((axis, derivative)) = bounds.iter().enumerate().find_map(|(axis, bound)| {
+            bound.constant_base[coordinate]
+                .then_some(bound.derivative[coordinate])
+                .flatten()
+                .map(|derivative| (axis, derivative))
+        }) else {
+            return Ok(None);
+        };
+        gradient[axis] = gradient[axis].add(coefficient.mul(derivative));
+    }
+    Ok(Some(gradient))
 }
 
 /// Optional same-carrier derivative refinement for display interpolation.

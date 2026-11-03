@@ -927,12 +927,14 @@ fn native_port_strip(
             return Ok(false);
         }
         corners[3 - end] = side.native_chart_jet(root, work, cancel)?.position;
-        // Keep native endpoint/connector uncertainty in the complete corner;
-        // do not replace the port endpoint by a nearby side endpoint.
-        let side_end = side.oriented_uv_range()[1 - end];
-        let side_position = side.chart_jet([side_end; 2], work, cancel)?.position;
+        let (incoming, outgoing) = if end == 0 {
+            (sides[0], port)
+        } else {
+            (port, sides[1])
+        };
+        let (_, connection) = domain.native_joint_cover(incoming, outgoing, work, cancel)?;
         for axis in 0..2 {
-            corners[end][axis] = corners[end][axis].hull(side_position[axis]);
+            corners[end][axis] = corners[end][axis].hull(connection[axis]);
         }
     }
     let Some(orientation) = convex_native_strip(&corners) else {
@@ -953,6 +955,7 @@ fn native_port_strip(
         if index == port || sides.contains(&index) {
             continue;
         }
+        charge_native_boundary_enumeration(domain, work, cancel)?;
         for range in domain.boundary_parameter_intervals(index)? {
             work.charge(1, cancel)?;
             let image = domain
@@ -963,8 +966,6 @@ fn native_port_strip(
             }
         }
     }
-    // Nonincident native connector uncertainty is excluded as a whole endpoint
-    // hull too. It is never treated as additional filled material.
     for &[start, end] in domain.loops() {
         for index in start..end {
             let next = if index + 1 == end { start } else { index + 1 };
@@ -972,17 +973,271 @@ fn native_port_strip(
                 continue;
             }
             work.charge(1, cancel)?;
-            let a = domain.coedge(index)?;
-            let b = domain.coedge(next)?;
-            let a_end = a.oriented_uv_range()[1];
-            let b_start = b.oriented_uv_range()[0];
-            let a_image = a.chart_jet([a_end; 2], work, cancel)?.position;
-            let b_image = b.chart_jet([b_start; 2], work, cancel)?.position;
-            let image = std::array::from_fn(|axis| a_image[axis].hull(b_image[axis]));
+            let (_, image) = domain.native_joint_cover(index, next, work, cancel)?;
             if !outside_native_strip(&corners, orientation, image) {
                 return Ok(false);
             }
         }
+    }
+    Ok(true)
+}
+
+fn native_port_axis_corridor(
+    domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
+    span: &crate::SectionSpan,
+    chart: NativePortHeightChart,
+    port: usize,
+    allowance: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
+    if span.face != domain.face() || span.source_face_ordinal != domain.face_index() {
+        return Ok(false);
+    }
+    if !matches!(
+        span.attachments,
+        crate::SectionSpanAttachments::TrimRoots { .. }
+    ) {
+        return Ok(false);
+    }
+    const FIXED: usize = 8 * std::mem::size_of::<[Interval; 2]>()
+        + 8 * std::mem::size_of::<[f64; 2]>()
+        + std::mem::size_of::<NativePortHeightChart>();
+    let allowance = allowance.checked_sub(FIXED).ok_or_else(|| {
+        error(
+            GeometryErrorCode::ResourceLimit,
+            "native port chart corridor exceeds live query allowance",
+        )
+    })?;
+    let (_, face) = super::source_incidence::native_face(domain.definition(), domain.face_index())?;
+    let lo = face.uv_domain.min();
+    let hi = face.uv_domain.max();
+    if !super::critical::critical_face_gluing(
+        domain.surface_evaluator(),
+        [[lo.x, hi.x], [lo.y, hi.y]],
+        work,
+        cancel,
+    )? {
+        return Ok(false);
+    }
+    match &span.curve {
+        crate::SectionCurve::SurfacePlaneGraph {
+            independent_axis,
+            independent,
+            dependent,
+        } => native_port_axis_chart_corridor(
+            domain,
+            (*independent_axis, *independent, *dependent),
+            chart,
+            port,
+            allowance,
+            work,
+            cancel,
+        ),
+        crate::SectionCurve::SurfacePlaneAtlas { charts } => {
+            for graph in charts {
+                work.charge(1, cancel)?;
+                if native_port_axis_chart_corridor(
+                    domain,
+                    (graph.independent_axis, graph.independent, graph.dependent),
+                    chart,
+                    port,
+                    allowance,
+                    work,
+                    cancel,
+                )? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        crate::SectionCurve::NativeBoundaryLevel { .. } => Ok(false),
+    }
+}
+
+fn native_port_axis_chart_corridor(
+    domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
+    graph: (u8, [f64; 2], [f64; 2]),
+    chart: NativePortHeightChart,
+    port: usize,
+    allowance: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
+    let Some(independent) = chart
+        .gradient
+        .iter()
+        .position(|value| value.lo == 0.0 && value.hi == 0.0)
+    else {
+        return Ok(false);
+    };
+    let dependent = 1 - independent;
+    if chart.gradient[dependent].contains_zero() {
+        return Ok(false);
+    }
+    let (independent_axis, sample_independent, sample_dependent) = graph;
+    if usize::from(independent_axis) != independent
+        || sample_independent[0] >= sample_independent[1]
+    {
+        return Ok(false);
+    }
+    let mut longitudinal = [Interval::point(0.0); 2];
+    longitudinal[independent] = Interval::point(1.0);
+    let Some(tangent) =
+        native_coedge_strict_tangent(domain, port, longitudinal, allowance, work, cancel)?
+    else {
+        return Ok(false);
+    };
+    let coedge = domain.coedge(port)?;
+    let mut range = coedge.uv_range;
+    let target = sample_independent[0] * 0.5 + sample_independent[1] * 0.5;
+    let mut selected = None;
+    for _ in 0..=NATIVE_PORT_TANGENT_DEPTH {
+        work.charge(1, cancel)?;
+        let middle = range[0] * 0.5 + range[1] * 0.5;
+        if middle <= range[0] || middle >= range[1] {
+            break;
+        }
+        let anchor = coedge.chart_jet([middle; 2], work, cancel)?.position;
+        let coordinate = anchor[independent];
+        if coordinate.lo > sample_independent[0] && coordinate.hi < sample_independent[1] {
+            selected = Some(anchor);
+            break;
+        }
+        let below = coordinate.hi < target;
+        if !below && coordinate.lo <= target {
+            break;
+        }
+        if below == (tangent.lo > 0.0) {
+            range[0] = middle;
+        } else {
+            range[1] = middle;
+        }
+    }
+    let Some(anchor) = selected else {
+        return Ok(false);
+    };
+    let mut sample = Interval::new(sample_dependent[0], sample_dependent[1])?;
+    for _ in 0..8 {
+        work.charge(1, cancel)?;
+        let center = Interval::point(sample.mid());
+        let mut point = anchor;
+        point[dependent] = center;
+        let height = chart.height(point);
+        sample = sample.intersect(center.sub(height.div(chart.gradient[dependent])?))?;
+    }
+    if anchor[dependent].lo <= sample.hi && sample.lo <= anchor[dependent].hi {
+        return Ok(false);
+    }
+    let mut corridor = anchor;
+    corridor[dependent] = corridor[dependent].hull(sample);
+    for (index, _) in domain.coedges().iter().enumerate() {
+        if index == port {
+            continue;
+        }
+        charge_native_boundary_enumeration(domain, work, cancel)?;
+        for range in domain.boundary_parameter_intervals(index)? {
+            work.charge(1, cancel)?;
+            let image = domain
+                .boundary_position_enclosure(index, range, work, cancel)?
+                .map(|value| Interval {
+                    lo: value[0],
+                    hi: value[1],
+                });
+            if !native_chart_boxes_separated(corridor, image) {
+                return Ok(false);
+            }
+        }
+    }
+    for &[start, end] in domain.loops() {
+        for incoming in start..end {
+            let outgoing = if incoming + 1 == end {
+                start
+            } else {
+                incoming + 1
+            };
+            let (_, image) = domain.native_joint_cover(incoming, outgoing, work, cancel)?;
+            if !native_chart_boxes_separated(corridor, image) {
+                return Ok(false);
+            }
+        }
+    }
+    if !native_port_strip_regular(
+        domain,
+        corridor.map(|value| [value.lo, value.hi]),
+        allowance,
+        work,
+        cancel,
+    )? {
+        return Ok(false);
+    }
+    let mut interior = anchor;
+    interior[dependent] = anchor[dependent].add(sample).mul(Interval::point(0.5));
+    Ok(domain.classify_with_byte_limit(
+        interior.map(|value| [value.lo, value.hi]),
+        allowance,
+        work,
+        cancel,
+    )? == crate::kernel::TrimClassification::Inside)
+}
+
+fn native_chart_boxes_separated(first: [Interval; 2], second: [Interval; 2]) -> bool {
+    (0..2).any(|axis| first[axis].hi < second[axis].lo || second[axis].hi < first[axis].lo)
+}
+
+fn native_port_strip_regular(
+    domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
+    uv: [[f64; 2]; 2],
+    allowance: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    const DEPTH: usize = 16;
+    const SCRATCH: usize = (DEPTH + 1) * std::mem::size_of::<([[f64; 2]; 2], usize)>()
+        + crate::parametric::surface_functional_scratch_bytes::<3>()
+        + std::mem::size_of::<crate::parametric::SurfaceFirstEnclosure>();
+    work.charge(1, cancel)?;
+    if allowance < SCRATCH {
+        return Err(error(
+            GeometryErrorCode::ResourceLimit,
+            "native port strip regularity exceeds live query allowance",
+        ));
+    }
+    let mut stack = [(uv, 0_usize); DEPTH + 1];
+    let mut live = 1;
+    while live != 0 {
+        live -= 1;
+        let (cell, depth) = stack[live];
+        work.charge(1, cancel)?;
+        let jet = crate::parametric::surface_piecewise_first_enclosure(
+            domain.surface_evaluator(),
+            cell,
+            work,
+            cancel,
+        )?;
+        if crate::parametric::cross(jet.du, jet.dv)
+            .iter()
+            .any(|value| !value.contains_zero())
+        {
+            continue;
+        }
+        if depth == DEPTH {
+            return Ok(false);
+        }
+        let axis = usize::from(cell[1][1] - cell[1][0] > cell[0][1] - cell[0][0]);
+        let middle = cell[axis][0] * 0.5 + cell[axis][1] * 0.5;
+        if middle <= cell[axis][0] || middle >= cell[axis][1] {
+            return Ok(false);
+        }
+        let mut left = cell;
+        let mut right = cell;
+        left[axis][1] = middle;
+        right[axis][0] = middle;
+        stack[live] = (right, depth + 1);
+        stack[live + 1] = (left, depth + 1);
+        live += 2;
     }
     Ok(true)
 }
@@ -1121,6 +1376,7 @@ fn native_port_height_chart(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<NativePortHeightChart>, GeometryError> {
+    work.charge(1, cancel)?;
     let evaluator = domain.surface_evaluator();
     let Some(native) = evaluator.native_surface() else {
         return Ok(None);
@@ -1140,6 +1396,7 @@ fn native_port_height_chart(
         return Ok(Some(chart));
     }
     const SCRATCH: usize = crate::parametric::surface_functional_scratch_bytes::<1>()
+        + crate::parametric::SURFACE_AFFINE_FUNCTIONAL_SCRATCH_BYTES
         + 2 * std::mem::size_of::<crate::parametric::SurfaceEnclosure>()
         + std::mem::size_of::<NativePortHeightChart>();
     if remaining < SCRATCH {
@@ -1152,17 +1409,27 @@ fn native_port_height_chart(
     let lo = face.uv_domain.min();
     let hi = face.uv_domain.max();
     let uv = [[lo.x, hi.x], [lo.y, hi.y]];
-    if !evaluator.smooth(uv, work, cancel)? {
-        return Ok(None);
-    }
-    let jet = crate::parametric::surface_piecewise_enclosure(evaluator, uv, work, cancel)?;
-    for row in [jet.duu, jet.duv, jet.dvv] {
-        let height = functional.dot(row);
-        if height.lo != 0.0 || height.hi != 0.0 {
+    let gradient = if let Some(gradient) = crate::parametric::surface_affine_functional_gradient(
+        evaluator,
+        uv,
+        functional.direction,
+        work,
+        cancel,
+    )? {
+        gradient
+    } else {
+        if !evaluator.smooth(uv, work, cancel)? {
             return Ok(None);
         }
-    }
-    let gradient = [functional.dot(jet.du), functional.dot(jet.dv)];
+        let jet = crate::parametric::surface_piecewise_enclosure(evaluator, uv, work, cancel)?;
+        for row in [jet.duu, jet.duv, jet.dvv] {
+            let height = functional.dot(row);
+            if height.lo != 0.0 || height.hi != 0.0 {
+                return Ok(None);
+            }
+        }
+        [functional.dot(jet.du), functional.dot(jet.dv)]
+    };
     if gradient.iter().all(|value| value.contains_zero()) {
         return Ok(None);
     }
@@ -1183,6 +1450,18 @@ fn native_port_height_chart(
         reference_height: anchor.position,
         gradient,
     }))
+}
+
+fn charge_native_boundary_enumeration(
+    domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    work.charge(domain.coedges().len() as u64, cancel)?;
+    work.charge(
+        (domain.retained_bytes() / std::mem::size_of::<[f64; 2]>()) as u64,
+        cancel,
+    )
 }
 
 const NATIVE_PORT_TANGENT_DEPTH: usize = 32;
@@ -1224,6 +1503,7 @@ fn native_coedge_strict_tangent(
     let mut stack = [([0.0; 2], 0_u8); NATIVE_PORT_TANGENT_DEPTH + 1];
     let mut covered = coedge.uv_range[0];
     let mut result: Option<Interval> = None;
+    charge_native_boundary_enumeration(domain, work, cancel)?;
     for part in domain.boundary_parameter_intervals(index)? {
         work.charge(1, cancel)?;
         if part[0] != covered || part[1] < part[0] || part[1] > coedge.uv_range[1] {
@@ -1382,6 +1662,20 @@ fn native_port_regular_to_sample(
             }
         }
     }
+    for &[start, end] in domain.loops() {
+        for incoming in start..end {
+            work.charge(1, cancel)?;
+            let outgoing = if incoming + 1 == end {
+                start
+            } else {
+                incoming + 1
+            };
+            let (_, uv) = domain.native_joint_cover(incoming, outgoing, work, cancel)?;
+            if !outside_native_port_height_gap(chart.height(uv), port_height) {
+                return Ok(false);
+            }
+        }
+    }
     Ok(true)
 }
 
@@ -1455,7 +1749,7 @@ fn capture_native_port_branches(
                         height.lo > 0.0 && inward.hi < 0.0 || height.hi < 0.0 && inward.lo > 0.0;
                     if face_branches == 1
                         && toward_sample
-                        && native_port_regular_to_sample(
+                        && (native_port_regular_to_sample(
                             domain,
                             chart,
                             port,
@@ -1463,7 +1757,15 @@ fn capture_native_port_branches(
                             scratch.remaining(),
                             work,
                             cancel,
-                        )?
+                        )? || native_port_axis_corridor(
+                            domain,
+                            span,
+                            chart,
+                            port,
+                            scratch.remaining(),
+                            work,
+                            cancel,
+                        )?)
                     {
                         if !result.contains(&key) {
                             scratch.push(&mut result, key, work, cancel)?;
@@ -9324,6 +9626,314 @@ type NativePortBranches = (Vec<[usize; 3]>, Vec<[usize; 3]>);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_cone_and_equivalent_cylinder_encodings_keep_affine_port_corridors() {
+        let fixtures: &[(&str, &[u8])] = &[
+            (
+                "cone",
+                include_bytes!(
+                    "../../../../fixtures/manufacturing/native/source-cone-frustum.step"
+                ),
+            ),
+            (
+                "analytic cylinder",
+                include_bytes!(
+                    "../../../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step"
+                ),
+            ),
+            (
+                "rational cylinder",
+                include_bytes!(
+                    "../../../../fixtures/manufacturing/native/source-nurbs-cylinder.step"
+                ),
+            ),
+        ];
+        let cancel = AtomicBool::new(false);
+        for &(name, bytes) in fixtures {
+            let definition = crate::from_step_bytes_with_cancel(bytes, &cancel).unwrap();
+            let mut work = GeometryWorkBudget::new(200_000_000);
+            let source = crate::prepare_solid(
+                &definition,
+                crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            for sample in [0.05, 7.95] {
+                let plane = crate::PlaneMm {
+                    origin_mm: [0.0, 0.0, sample],
+                    normal: [0.0, 0.0, 1.0],
+                };
+                let section = source
+                    .section_placed_with_work(
+                        RigidPoseMm::IDENTITY,
+                        plane,
+                        spiling_contracts::geometry::MAX_SECTION_BYTES,
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap();
+                let mut corridors = 0;
+                for loop_index in 0..section.loops.len() {
+                    for span in section.spans(loop_index).unwrap_or(&[]) {
+                        let domain = source
+                            .source_view()
+                            .unwrap()
+                            .face_domain(span.source_face_ordinal, MAX_SCRATCH, &mut work, &cancel)
+                            .unwrap();
+                        assert!(
+                            native_affine_face(definition.face_surface(span.face).unwrap())
+                                .is_none()
+                        );
+                        let chart = native_port_height_chart(
+                            domain,
+                            plane,
+                            MAX_SCRATCH,
+                            &mut work,
+                            &cancel,
+                        )
+                        .unwrap()
+                        .expect("a complete affine height identity is required");
+                        for (wire, &[start, end]) in domain.loops().iter().enumerate() {
+                            let side = native_wire_material_side(domain, wire, &mut work, &cancel)
+                                .unwrap()
+                                .unwrap();
+                            for port in start..end {
+                                let Some((height, inward)) = native_port_germ(
+                                    domain,
+                                    chart,
+                                    port,
+                                    side,
+                                    MAX_SCRATCH,
+                                    &mut work,
+                                    &cancel,
+                                )
+                                .unwrap() else {
+                                    continue;
+                                };
+                                if !(height.hi < 0.0 && inward.lo > 0.0
+                                    || height.lo > 0.0 && inward.hi < 0.0)
+                                    || !native_port_axis_corridor(
+                                        domain,
+                                        span,
+                                        chart,
+                                        port,
+                                        MAX_SCRATCH,
+                                        &mut work,
+                                        &cancel,
+                                    )
+                                    .unwrap()
+                                {
+                                    continue;
+                                }
+                                corridors += 1;
+                                let mut foreign = span.clone();
+                                foreign.source_face_ordinal = definition.faces().len();
+                                assert!(
+                                    !native_port_axis_corridor(
+                                        domain,
+                                        &foreign,
+                                        chart,
+                                        port,
+                                        MAX_SCRATCH,
+                                        &mut work,
+                                        &cancel,
+                                    )
+                                    .unwrap()
+                                );
+                                let mut shortened = span.clone();
+                                match &mut shortened.curve {
+                                    crate::SectionCurve::SurfacePlaneGraph {
+                                        independent, ..
+                                    } => independent[1] = independent[0],
+                                    crate::SectionCurve::SurfacePlaneAtlas { charts } => {
+                                        for graph in charts {
+                                            graph.independent[1] = graph.independent[0];
+                                        }
+                                    }
+                                    crate::SectionCurve::NativeBoundaryLevel { .. } => {
+                                        unreachable!()
+                                    }
+                                }
+                                assert!(
+                                    !native_port_axis_corridor(
+                                        domain,
+                                        &shortened,
+                                        chart,
+                                        port,
+                                        MAX_SCRATCH,
+                                        &mut work,
+                                        &cancel,
+                                    )
+                                    .unwrap()
+                                );
+                                assert_eq!(
+                                    native_port_axis_corridor(
+                                        domain, span, chart, port, 0, &mut work, &cancel,
+                                    )
+                                    .unwrap_err()
+                                    .code,
+                                    GeometryErrorCode::ResourceLimit
+                                );
+                                assert_eq!(
+                                    native_port_axis_corridor(
+                                        domain,
+                                        span,
+                                        chart,
+                                        port,
+                                        MAX_SCRATCH,
+                                        &mut GeometryWorkBudget::new(0),
+                                        &cancel,
+                                    )
+                                    .unwrap_err()
+                                    .code,
+                                    GeometryErrorCode::ResourceLimit
+                                );
+                                assert_eq!(
+                                    native_port_axis_corridor(
+                                        domain,
+                                        span,
+                                        chart,
+                                        port,
+                                        MAX_SCRATCH,
+                                        &mut work,
+                                        &AtomicBool::new(true),
+                                    )
+                                    .unwrap_err()
+                                    .code,
+                                    GeometryErrorCode::Cancelled
+                                );
+                                let (independent_axis, independent, dependent) = match &span.curve {
+                                    crate::SectionCurve::SurfacePlaneGraph {
+                                        independent_axis,
+                                        independent,
+                                        dependent,
+                                    } => (*independent_axis, *independent, *dependent),
+                                    crate::SectionCurve::SurfacePlaneAtlas { charts } => (
+                                        charts[0].independent_axis,
+                                        charts[0].independent,
+                                        charts[0].dependent,
+                                    ),
+                                    crate::SectionCurve::NativeBoundaryLevel { .. } => {
+                                        unreachable!()
+                                    }
+                                };
+                                let axis = usize::from(independent_axis);
+                                let mut uv = [dependent; 2];
+                                uv[axis] = independent;
+                                assert_eq!(
+                                    native_port_strip_regular(domain, uv, 0, &mut work, &cancel,)
+                                        .unwrap_err()
+                                        .code,
+                                    GeometryErrorCode::ResourceLimit
+                                );
+                                assert_eq!(
+                                    native_port_strip_regular(
+                                        domain,
+                                        uv,
+                                        MAX_SCRATCH,
+                                        &mut GeometryWorkBudget::new(0),
+                                        &cancel,
+                                    )
+                                    .unwrap_err()
+                                    .code,
+                                    GeometryErrorCode::ResourceLimit
+                                );
+                                assert_eq!(
+                                    native_port_strip_regular(
+                                        domain,
+                                        uv,
+                                        MAX_SCRATCH,
+                                        &mut work,
+                                        &AtomicBool::new(true),
+                                    )
+                                    .unwrap_err()
+                                    .code,
+                                    GeometryErrorCode::Cancelled
+                                );
+                                assert!(
+                                    domain
+                                        .native_joint_cover(port, port, &mut work, &cancel)
+                                        .is_err()
+                                );
+                            }
+                        }
+                    }
+                }
+                assert!(
+                    corridors > 0,
+                    "{name} at {sample} has no actual registered-span corridor"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn affine_port_corridor_excludes_complete_foreign_and_joint_images() {
+        let corridor = [Interval { lo: 1.0, hi: 1.1 }, Interval { lo: 0.0, hi: 2.0 }];
+        let endpoints = [-1.0, 5.0].map(|value| [Interval::point(value), Interval::point(1.0)]);
+        assert!(
+            endpoints
+                .into_iter()
+                .all(|point| native_chart_boxes_separated(corridor, point))
+        );
+        let crossing = [Interval { lo: -1.0, hi: 5.0 }, Interval::point(1.0)];
+        assert!(!native_chart_boxes_separated(corridor, crossing));
+        let hole = [Interval { lo: 1.0, hi: 2.0 }, Interval { lo: 0.5, hi: 1.5 }];
+        assert!(!native_chart_boxes_separated(corridor, hole));
+        let joint = [
+            Interval { lo: 1.05, hi: 1.2 },
+            Interval { lo: 1.9, hi: 2.1 },
+        ];
+        assert!(!native_chart_boxes_separated(corridor, joint));
+        assert!(!native_chart_boxes_separated(
+            corridor,
+            [Interval::point(1.1), Interval::point(2.0)]
+        ));
+    }
+
+    #[test]
+    fn affine_height_joint_cover_cannot_hide_a_boundary_maximum_at_its_endpoints() {
+        let chart = NativePortHeightChart {
+            reference_uv: [0.0; 2],
+            reference_height: Interval::point(0.0),
+            gradient: [Interval::point(1.0), Interval::point(0.0)],
+        };
+        let port = Interval {
+            lo: -2.5e-12,
+            hi: -1.5e-12,
+        };
+        let endpoints =
+            [-1.0, 1.0].map(|value| [Interval::point(-2.0e-12), Interval::point(value)]);
+        assert!(
+            endpoints
+                .into_iter()
+                .all(|point| outside_native_port_height_gap(chart.height(point), port))
+        );
+        let connection = [
+            Interval {
+                lo: -2.0e-12,
+                hi: -1.0e-12,
+            },
+            Interval { lo: -1.0, hi: 1.0 },
+        ];
+        assert!(!outside_native_port_height_gap(
+            chart.height(connection),
+            port
+        ));
+        let boundary_span = [
+            Interval {
+                lo: -2.0e-12,
+                hi: 0.5e-12,
+            },
+            Interval { lo: -1.0, hi: 1.0 },
+        ];
+        assert!(!outside_native_port_height_gap(
+            chart.height(boundary_span),
+            port
+        ));
+    }
 
     fn rectangular_arrangement(
         boxes: &[NativeProfile<'_>],

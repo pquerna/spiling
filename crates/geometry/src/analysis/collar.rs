@@ -6313,7 +6313,7 @@ fn certify_collar_complex(
                 if matches!(domain.classify(uv, work, cancel)
                     .map_err(|error| critical_geometry_error(error, index, "source UV cell trim classification"))?,
                     TrimClassification::Outside) { continue; }
-                let jet = surface_enclosure(surface, uv, work, cancel)
+                let jet = surface_piecewise_enclosure(surface, uv, work, cancel)
                     .map_err(|error| critical_geometry_error(error, index, "source UV cell surface jet"))?;
                 let height=functional.height(jet.position);
                 if !(seed.is_some() && event_index.is_some()) && !active(height,request.height_interval_mm) { continue; }
@@ -7007,6 +7007,26 @@ mod tests {
     use solidcore::surface::surface::Surface;
     use solidcore::surface::surface::p2::SurfaceKind;
     use spiling_contracts::geometry::OccurrenceId;
+
+    #[test]
+    fn collar_piecewise_cell_jets_do_not_waive_the_whole_source_kink_gate() {
+        let surface = linear_spline_surface(
+            [(0.0, 0.0), (0.5, 0.5), (1.0, 1.5)]
+                .map(|(x, z)| vec![CPoint::new(x, 0.0, z, NOW), CPoint::new(x, 1.0, z, NOW)])
+                .to_vec(),
+            vec![0.0, 0.0, 0.5, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+        );
+        let uv = [[0.0, 1.0]; 2];
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        assert!(surface_piecewise_enclosure(&surface, uv, &mut work, &cancel).is_ok());
+        assert!(surface_enclosure(&surface, uv, &mut work, &cancel).is_err());
+        assert!(
+            !super::super::critical::critical_face_gluing(&surface, uv, &mut work, &cancel)
+                .unwrap()
+        );
+    }
 
     fn linear_spline_surface(
         points: Vec<Vec<CPoint>>,

@@ -67,6 +67,26 @@ pub(crate) const fn surface_functional_scratch_bytes<const N: usize>() -> usize 
 pub(crate) const SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES: usize =
     surface_functional_scratch_bytes::<3>() + std::mem::size_of::<SurfaceFirstEnclosure>();
 
+pub(crate) const SURFACE_AFFINE_FUNCTIONAL_SCRATCH_BYTES: usize =
+    SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES + nurbs_eval::DISPLAY_AFFINE_SCRATCH_BYTES;
+
+pub(crate) fn surface_affine_functional_gradient(
+    surface: &(impl SurfaceEvaluator + ?Sized),
+    uv: [[f64; 2]; 2],
+    direction: [Interval; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<[Interval; 2]>, GeometryError> {
+    let Some(native) = surface.native_surface() else {
+        return Ok(None);
+    };
+    let Some(nurbs) = analytic_eval::native_surface_nurbs(native)? else {
+        return Ok(None);
+    };
+    surface_piecewise_first_enclosure(surface, uv, work, cancel)?;
+    nurbs_eval::rational_affine_functional_gradient(nurbs, direction, work, cancel)
+}
+
 /// Full piecewise second-jet bounds; this grants no global differentiability.
 fn native_surface_piecewise_enclosure(
     surface: &Surface,

@@ -94,6 +94,167 @@ fn curve(points: Vec<CPoint>, degree: usize, knots: Vec<f64>, dim: u64) -> Curve
     // intervals smaller than native fixup tolerances.
     BSplineCurve::from_nurb(raw, dim, true).into()
 }
+#[test]
+fn complete_rational_affine_height_controls_do_not_grant_whole_surface_c1() {
+    use solidcore::{
+        nurbs::b_spline_surface::BSplineSurface,
+        surface::surface::{Surface, p2::SurfaceKind},
+    };
+    let raw = srf_basic::Surface::new(
+        [
+            (5.0, 0.0, 1.0),
+            (5.0, 5.0, 1.0),
+            (0.0, 5.0, 2.0),
+            (-5.0, 5.0, 2.0),
+            (-5.0, 0.0, 4.0),
+        ]
+        .into_iter()
+        .map(|(x, y, weight)| {
+            [0.0, 8.0]
+                .into_iter()
+                .map(|z| CPoint::new(x * weight, y * weight, z * weight, weight))
+                .collect()
+        })
+        .collect(),
+        2,
+        1,
+        vec![0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 2.0],
+        vec![0.0, 0.0, 8.0, 8.0],
+    )
+    .unwrap();
+    let mut perturbed = raw.clone();
+    perturbed.cpt_mut(4, 1).unwrap().z = up(8.0);
+    let surface = Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(raw, true)));
+    let mut work = GeometryWorkBudget::new(1_000_000);
+    let cancel = AtomicBool::new(false);
+    let domain = [[1.0, 1.0], [4.0, 4.0]];
+    assert!(!surface_parameter_span_smooth(&surface, domain, &mut work, &cancel).unwrap());
+    assert!(surface_enclosure(&surface, domain, &mut work, &cancel).is_err());
+    let jet = surface_piecewise_enclosure(&surface, domain, &mut work, &cancel).unwrap();
+    assert!(jet.du[0].contains(-5.0) && jet.du[0].contains(-10.0));
+    assert!(jet.dv[2].lo > 0.0);
+    let whole = [[0.0, 2.0], [0.0, 8.0]];
+    let gradient = surface_affine_functional_gradient(
+        &surface,
+        whole,
+        [
+            Interval::point(0.0),
+            Interval::point(0.0),
+            Interval::point(1.0),
+        ],
+        &mut work,
+        &cancel,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(gradient[0], Interval::point(0.0));
+    assert!(gradient[1].contains(1.0) && gradient[1].lo > 0.0);
+    let perturbed = Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(
+        perturbed, true,
+    )));
+    assert!(
+        surface_affine_functional_gradient(
+            &perturbed,
+            [[0.0, 0.25], [0.0, 8.0]],
+            [
+                Interval::point(0.0),
+                Interval::point(0.0),
+                Interval::point(1.0)
+            ],
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        surface_affine_functional_gradient(
+            &perturbed,
+            whole,
+            [
+                Interval::point(0.0),
+                Interval::point(0.0),
+                Interval::point(1.0)
+            ],
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        surface_affine_functional_gradient(
+            &surface,
+            whole,
+            [
+                Interval::point(1.0),
+                Interval::point(0.0),
+                Interval::point(1.0)
+            ],
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
+fn affine_height_coefficient_queries_retain_cumulative_work_and_cancellation() {
+    let definition = crate::analysis::test_source::recipe("native-parity-nurbs-cylinder.step");
+    let surface = definition.face_surface(definition.face_ids()[0]).unwrap();
+    let direction = [
+        Interval::point(0.0),
+        Interval::point(0.0),
+        Interval::point(1.0),
+    ];
+    let domain = [[0.0, 4.0], [0.0, 8.0]];
+    let cancel = AtomicBool::new(false);
+    let mut exhausted = GeometryWorkBudget::new(0);
+    assert_eq!(
+        surface_affine_functional_gradient(surface, domain, direction, &mut exhausted, &cancel)
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::ResourceLimit
+    );
+    assert_eq!(exhausted.remaining(), 0);
+    let mut work = GeometryWorkBudget::new(1_000_000);
+    assert_eq!(
+        surface_affine_functional_gradient(
+            surface,
+            domain,
+            direction,
+            &mut work,
+            &AtomicBool::new(true)
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::Cancelled
+    );
+    assert!(
+        surface_affine_functional_gradient(surface, domain, direction, &mut work, &cancel)
+            .unwrap()
+            .is_some()
+    );
+    let remaining = work.remaining();
+    assert!(
+        surface_affine_functional_gradient(surface, domain, direction, &mut work, &cancel)
+            .unwrap()
+            .is_some()
+    );
+    assert!(work.remaining() < remaining);
+    assert!(
+        surface_affine_functional_gradient(
+            surface,
+            [[-1.0, 4.0], [0.0, 8.0]],
+            direction,
+            &mut work,
+            &cancel
+        )
+        .is_err()
+    );
+}
+
 fn rational_line() -> Curve {
     curve(
         vec![
