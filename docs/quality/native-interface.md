@@ -137,6 +137,17 @@ problem counts and uncertain-save state. Commands show a selected result; Enter
 executes that result. Closing/restarting the application requires deliberate selection
 rather than becoming an incidental search default.
 
+## Build-area context
+
+The canvas shows the committed captured plate face's usable rectangle at its installed
+top-surface datum, declared keepouts and installed fixture bounds. Its dimensions are
+not a measured outer sheet outline. With only committed manufacturing intent, label
+the display as a declared print envelope; without either, do not fabricate a bed.
+Fit plate frames that area, Fit parts frames source geometry, and Height limits
+shows the declared machine envelope. These are inspection controls, never placement
+edits. Context geometry is excluded from source picking, sections, replay counts and
+manufacturing authority. Shared build-area controls appear in the production gallery.
+
 ## Exercising a change
 
 Use the production gallery's Panels, Fields, Color, Acquisition and Try / Compare categories in each theme.

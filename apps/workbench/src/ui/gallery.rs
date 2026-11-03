@@ -23,6 +23,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
             "Matching",
             "Wall starts",
             "Try / Compare",
+            "Build area",
         ]
         .iter()
         .enumerate()
@@ -49,6 +50,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
                 1 => fields(ui, theme.tokens()),
                 4 => matching(ui),
                 5 => wall_starts(ui),
+                7 => build_area(ui),
                 _ => colors(ui),
             }
         });
@@ -289,31 +291,39 @@ mod tests {
     }
 
     #[test]
-    fn seam_specimens_reflow_in_both_themes_and_scaled_panes() {
+    fn review_and_build_area_controls_reflow_in_both_themes_and_scaled_panes() {
         for theme in [Theme::Graphite, Theme::Paper] {
             for width in [240.0, 320.0, 400.0] {
                 for scale in [1.0, 1.5, 2.0] {
                     let ctx = egui::Context::default();
                     theme.apply(&ctx);
                     ctx.set_zoom_factor(scale);
-                    for _ in 0..2 {
-                        let mut overflow = false;
-                        ctx.run_ui(
-                            egui::RawInput {
-                                screen_rect: Some(egui::Rect::from_min_size(
-                                    egui::Pos2::ZERO,
-                                    egui::vec2(width * scale, 1600.0 * scale),
-                                )),
-                                ..Default::default()
-                            },
-                            |ui| {
-                                let right = ui.max_rect().right();
-                                wall_starts(ui);
-                                overflow = ui.min_rect().right() > right + 1.0;
-                            },
-                        )
-                        .drop_without_applying_deltas();
-                        assert!(!overflow, "{theme:?} / {width} points / {scale} scale");
+                    for (name, specimen) in [
+                        ("wall starts", wall_starts as fn(&mut Ui)),
+                        ("build area", build_area),
+                    ] {
+                        for _ in 0..2 {
+                            let mut measured = (0.0, 0.0);
+                            ctx.run_ui(
+                                egui::RawInput {
+                                    screen_rect: Some(egui::Rect::from_min_size(
+                                        egui::Pos2::ZERO,
+                                        egui::vec2(width * scale, 1600.0 * scale),
+                                    )),
+                                    ..Default::default()
+                                },
+                                |ui| {
+                                    let right = ui.max_rect().right();
+                                    specimen(ui);
+                                    measured = (ui.min_rect().right(), right);
+                                },
+                            )
+                            .drop_without_applying_deltas();
+                            assert!(
+                                measured.0 <= measured.1 + 1.0,
+                                "{name}: {theme:?} / {width} points / {scale} scale: {measured:?}"
+                            );
+                        }
                     }
                 }
             }
@@ -539,4 +549,27 @@ fn matching(ui: &mut Ui) {
         "Keep recipe",
         Some("Illustrative reference estimates · no project changes"),
     );
+}
+
+fn build_area(ui: &mut Ui) {
+    use crate::viewport::plate::Plate;
+    use spiling_contracts::hardware::{ProjectHardwareCapture, builtin_catalog};
+    use std::sync::Arc;
+    pane_header(
+        ui,
+        "Build area",
+        "Illustrative captured hardware · no project changes",
+    );
+    let catalog = builtin_catalog().expect("validated built-in hardware");
+    let plate = Plate::Hardware(Arc::new(ProjectHardwareCapture {
+        setup: catalog.setups[0].clone(),
+        plate: catalog.plates[0].clone(),
+        face: "textured".into(),
+        accessories: vec![],
+    }));
+    let id = ui.make_persistent_id("gallery-height-limits");
+    let mut height = ui.data_mut(|data| data.get_temp::<bool>(id).unwrap_or(false));
+    let _ = plate.controls(ui, &mut height);
+    ui.data_mut(|data| data.insert_temp(id, height));
+    ui.weak("Fit plate frames the canvas in the workbench. This specimen has no 3D scene.");
 }

@@ -61,6 +61,10 @@ fn check(cancel: &AtomicBool) -> Result<(), ClientError> {
     }
 }
 
+/// Fixed hardware primitives: CPU staging and two GPU generations (64 KiB each,
+/// allowing Vec capacity growth). Charged beside every source/section/replay load.
+pub const HARDWARE_DISPLAY_RESERVE_BYTES: usize = 256 * 1024;
+
 /// Fetch one checked chunk at a time. Reuse immutable definitions on pose-only revisions.
 /// Capacity includes active/staged raw bytes and their GPU copies, plus instance matrices.
 pub async fn load(

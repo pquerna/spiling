@@ -235,11 +235,18 @@ filesystem location (such as Home) before entering an absolute file path. Focus 
 location entry, submit it, and confirm the resulting engine Open receipt. Populated
 chooser text alone is not an opened project.
 
+The configured build area uses `viewport::plate`: verify a committed hardware capture,
+a declared intent without a sheet, and an unconfigured project. Exercise Fit plate,
+Fit parts, Height limits, empty beds, offset/non-square bounds and keepouts/fixtures
+in both themes. Source picking and sections exclude this context. The host reserves
+a fixed hardware-display pool beside source, section and replay transfers; rendering
+refuses excessive projected error instead of moving the plate or source.
+
 Native source inspection uses `scene` for revision-bound pages, complete face tables and
 checked SPLM/SPLS transfers, and `viewport` for shared raw GPU storage, f64-rebased
 placement, camera and native face picking. Import an admitted part, click a source
 face and compare the exact engine inspection with the tree selection. Add a copy
-at an explicit edited pose, fit the source, and request a native section at a declared
+at an explicit edited pose, use Fit parts, and request a native section at a declared
 Z. Metadata-only project edits do not reload meshes. Pause/resume retains the prior
 labelled source; stale revisions cannot pick or mutate. Geometry-only definitions
 retain native face-list inspection without invented display. A source projection

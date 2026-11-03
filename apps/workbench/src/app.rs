@@ -1025,6 +1025,18 @@ impl eframe::App for Workbench {
                                 picked = self.viewport.show(
                                     ui,
                                     crate::viewport::Input {
+                                        project_id: self
+                                            .state
+                                            .project
+                                            .as_ref()
+                                            .map(|p| p.project_id.clone()),
+                                        plate: crate::viewport::plate::Plate::current(
+                                            self.state
+                                                .project
+                                                .as_ref()
+                                                .and_then(|p| p.hardware.as_ref()),
+                                            self.state.manufacturing.intent.as_ref(),
+                                        ),
                                         scene: if review.is_some() && !current {
                                             None
                                         } else {

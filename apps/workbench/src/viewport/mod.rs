@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 mod beads;
+pub mod plate;
 mod section;
 use crate::scene::{Scene, Section};
 use egui_wgpu::wgpu::{self, util::DeviceExt};
@@ -42,6 +43,7 @@ struct LineVertex {
     color: [f32; 3],
 }
 struct Resources {
+    plate: plate::Renderer,
     replay: Option<Arc<crate::manufacture::Review>>,
     replay_buffers: Vec<wgpu::Buffer>,
     bead_buffers: Vec<wgpu::Buffer>,
@@ -73,6 +75,8 @@ struct Resources {
 }
 
 pub struct Input<'a> {
+    pub project_id: Option<spiling_contracts::project::ProjectId>,
+    pub plate: Option<plate::Plate>,
     pub scene: Option<Arc<Scene>>,
     pub section: Option<Arc<Section>>,
     pub review: Option<Arc<crate::manufacture::Review>>,
@@ -107,6 +111,9 @@ pub struct Viewport {
     pan: DVec3,
     fit: bool,
     had_source: bool,
+    had_plate: bool,
+    project_id: Option<spiling_contracts::project::ProjectId>,
+    show_height: bool,
     orthographic: bool,
 }
 impl Default for Viewport {
@@ -118,6 +125,9 @@ impl Default for Viewport {
             pan: DVec3::ZERO,
             fit: true,
             had_source: false,
+            had_plate: false,
+            project_id: None,
+            show_height: false,
             orthographic: false,
         }
     }
@@ -354,7 +364,9 @@ impl Viewport {
                 }],
             })
         });
+        let plate = plate::Renderer::new(device, state.target_format, &line_pipeline_layout);
         state.renderer.write().callback_resources.insert(Resources {
+            plate,
             replay: None,
             replay_buffers: Vec::new(),
             bead_buffers: Vec::new(),
@@ -457,6 +469,8 @@ impl Viewport {
         frame: &eframe::Frame,
     ) -> Option<FaceRef> {
         let Input {
+            project_id,
+            plate,
             scene,
             section,
             review,
@@ -467,13 +481,29 @@ impl Viewport {
             mut plane,
             scope,
         } = input;
+        if self.project_id != project_id {
+            self.project_id = project_id;
+            self.fit = true;
+            self.pan = DVec3::ZERO;
+            self.had_source = false;
+            self.had_plate = false;
+        }
         let mut hit = None;
         let mut fit_source = false;
+        let mut fit_plate = false;
         ui.horizontal_wrapped(|ui| {
             if ui.button("Fit").clicked() {
                 self.fit = true;
             }
-            if ui.button("Fit source").clicked() {
+            if ui
+                .add_enabled(
+                    scene
+                        .as_ref()
+                        .is_some_and(|s| s.summary.bounds_mm.is_some()),
+                    egui::Button::new("Fit parts"),
+                )
+                .clicked()
+            {
                 self.fit = true;
                 fit_source = true;
             }
@@ -494,6 +524,12 @@ impl Viewport {
             }
             ui.weak("Drag: orbit · right-drag: pan · wheel: zoom");
         });
+        if let Some(plate) = &plate
+            && plate.controls(ui, &mut self.show_height)
+        {
+            self.fit = true;
+            fit_plate = true;
+        }
         let (rect, response) = ui.allocate_exact_size(
             ui.available_size().max(egui::vec2(1.0, 1.0)),
             egui::Sense::click_and_drag(),
@@ -553,12 +589,23 @@ impl Viewport {
             }
         }
         let bounds = scene.as_ref().and_then(|s| s.summary.bounds_mm);
+        let plate_bounds = plate
+            .as_ref()
+            .filter(|p| p.usable())
+            .map(plate::Plate::bounds);
         let center = bounds.map_or_else(
             || {
                 review
                     .as_ref()
                     .and_then(|r| r.display.as_ref())
-                    .map_or(DVec3::ZERO, |r| r.origin)
+                    .map_or_else(
+                        || {
+                            plate_bounds.map_or(DVec3::ZERO, |b| {
+                                (DVec3::from_array(b.min) + DVec3::from_array(b.max)) * 0.5
+                            })
+                        },
+                        |r| r.origin,
+                    )
             },
             |b| (DVec3::from_array(b.min) + DVec3::from_array(b.max)) * 0.5,
         );
@@ -572,7 +619,7 @@ impl Viewport {
             .filter(|_| view.visible)
             .and_then(|r| r.capture.replay.as_ref())
             .map(|r| r.info.bounds_mm);
-        let display_radius = replay_bounds.map_or(radius, |b| {
+        let mut display_radius = replay_bounds.map_or(radius, |b| {
             let replay_center = (DVec3::from_array(b.min) + DVec3::from_array(b.max)) * 0.5;
             let replay_radius =
                 (DVec3::from_array(b.max) - DVec3::from_array(b.min)).length() * 0.5;
@@ -592,19 +639,41 @@ impl Viewport {
                 fit_pan = replay_center - center;
             }
         }
-        if bounds.is_some() && !self.had_source {
+        if let Some(b) = plate_bounds {
+            let c = (DVec3::from_array(b.min) + DVec3::from_array(b.max)) * 0.5;
+            let r = (DVec3::from_array(b.max) - DVec3::from_array(b.min)).length() * 0.5;
+            display_radius = display_radius.max((c - center).length() + r);
+            if fit_plate || (bounds.is_none() && replay_bounds.is_none()) {
+                radius = r;
+                fit_pan = c - center;
+            } else if !fit_source {
+                radius = display_radius;
+            }
+            if self.show_height {
+                let envelope = plate.as_ref().expect("plate bounds").envelope();
+                display_radius = display_radius
+                    .max((DVec3::from_array(envelope.max) - center).length())
+                    .max((DVec3::from_array(envelope.min) - center).length());
+                if !fit_plate && !fit_source {
+                    radius = display_radius;
+                }
+            }
+        }
+        if (bounds.is_some() && !self.had_source) || (plate.is_some() && !self.had_plate) {
             self.fit = true;
         }
         self.had_source = bounds.is_some();
-        if self.fit && bounds.is_some() {
-            self.distance = radius * 3.2;
+        self.had_plate = plate.is_some();
+        if self.fit && (bounds.is_some() || plate.is_some() || replay_bounds.is_some()) {
+            let aspect = f64::from(rect.width() / rect.height());
+            self.distance = radius * 3.2 / aspect.min(1.0);
             self.pan = fit_pan;
             self.fit = false;
         }
         // A separate handle moves the inspection plane; dragging the surrounding canvas orbits.
         let mut handle = None;
         if analysis.enabled {
-            let matrix = self.matrix(f64::from(rect.width() / rect.height()), radius);
+            let matrix = self.matrix(f64::from(rect.width() / rect.height()), display_radius);
             let n = DVec3::from_array(plane.normal);
             let point = n * n.dot(DVec3::from_array(plane.origin_mm) - center);
             let screen = |p: DVec3| {
@@ -662,7 +731,7 @@ impl Viewport {
                 .clamp(radius * 0.02, radius * 1000.0);
         }
         self.distance = self.distance.clamp(radius * 0.02, radius * 1000.0);
-        let matrix = self.matrix(f64::from(rect.width() / rect.height()), radius);
+        let matrix = self.matrix(f64::from(rect.width() / rect.height()), display_radius);
         if interactive
             && view.source
             && response.clicked()
@@ -730,6 +799,10 @@ impl Viewport {
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
             Callback {
+                plate: plate.clone(),
+                plate_origin: center,
+                dark: ui.visuals().dark_mode,
+                show_height: self.show_height,
                 scene,
                 section,
                 review,
@@ -790,6 +863,18 @@ impl Viewport {
         }
         if let Some(state) = frame.wgpu_render_state()
             && let Some(resources) = state.renderer.read().callback_resources.get::<Resources>()
+            && let Some(error) = resources.plate.error
+        {
+            ui.painter().text(
+                rect.left_top() + egui::vec2(12.0, 36.0),
+                egui::Align2::LEFT_TOP,
+                error,
+                egui::FontId::proportional(13.0),
+                ui.visuals().warn_fg_color,
+            );
+        }
+        if let Some(state) = frame.wgpu_render_state()
+            && let Some(resources) = state.renderer.read().callback_resources.get::<Resources>()
             && let Some(error) = &resources.failure
         {
             hit = None;
@@ -805,6 +890,10 @@ impl Viewport {
     }
 }
 struct Callback {
+    plate: Option<plate::Plate>,
+    plate_origin: DVec3,
+    dark: bool,
+    show_height: bool,
     scene: Option<Arc<Scene>>,
     section: Option<Arc<Section>>,
     review: Option<Arc<crate::manufacture::Review>>,
@@ -824,6 +913,8 @@ impl egui_wgpu::CallbackTrait for Callback {
         let Some(r) = resources.get_mut::<Resources>() else {
             return vec![];
         };
+        r.plate
+            .prepare(device, self.plate.as_ref(), self.plate_origin, self.dark);
         let changed = match (&r.scene, &self.scene) {
             (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
             (None, None) => false,
@@ -942,6 +1033,7 @@ impl egui_wgpu::CallbackTrait for Callback {
         let Some(r) = resources.get::<Resources>() else {
             return;
         };
+        r.plate.paint(pass, &r.line_group, self.show_height);
         pass.set_pipeline(&r.pipeline);
         for draw in r
             .draws

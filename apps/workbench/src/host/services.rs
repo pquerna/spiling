@@ -93,6 +93,7 @@ impl Actor {
             .as_ref()
             .map_or(0, |display| display.raw_bytes * 2)
             + self.state.manufacturing.display_bytes()
+            + crate::scene::HARDWARE_DISPLAY_RESERVE_BYTES
             + self.state.section.as_ref().map_or(0, |section| {
                 section.summary.total_bytes as usize * crate::scene::SECTION_DISPLAY_MULTIPLIER
             })
@@ -407,6 +408,7 @@ impl Actor {
                     s.summary.total_bytes as usize * crate::scene::SECTION_DISPLAY_MULTIPLIER
                 })
                 + self.state.manufacturing.display_bytes()
+                + crate::scene::HARDWARE_DISPLAY_RESERVE_BYTES
                 + if self.section_task.is_some() {
                     spiling_contracts::geometry::MAX_SECTION_BYTES as usize
                         * crate::scene::SECTION_DISPLAY_MULTIPLIER
