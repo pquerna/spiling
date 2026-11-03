@@ -1859,7 +1859,15 @@ fn projected_protected_void_envelopes_using(
         // A complete native disk-product query is independent of which local
         // continuation producer owns this sample, including an empty sample
         // outside a CLOSED birth. Missing sample Holes supply no authority.
-        if !captured_disk {
+        if !captured_disk
+            && !super::slab::vertical_product_excludes_slab(
+                source,
+                request,
+                storage.limit.saturating_sub(storage.used),
+                work,
+                cancel,
+            )?
+        {
             super::slab::native_closed_disk_product(
                 source,
                 storage.limit.saturating_sub(storage.used),
@@ -2845,6 +2853,140 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, GeometryErrorCode::InvalidGeometry);
+    }
+
+    #[test]
+    fn disjoint_annular_void_projection_binds_source_request_and_actual_pose() {
+        let cancel = AtomicBool::new(false);
+        let mut definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/geometry/through-hole.step"),
+            &cancel,
+        )
+        .unwrap();
+        for pose in [
+            RigidPoseMm::IDENTITY,
+            RigidPoseMm {
+                translation_mm: [7.0, -3.0, 2.0],
+                ..RigidPoseMm::IDENTITY
+            },
+        ] {
+            let mut work = GeometryWorkBudget::new(200_000_000);
+            let interval = [
+                8.0_f64.next_up() + pose.translation_mm[2],
+                8.333333000000001 + pose.translation_mm[2],
+            ];
+            let sample = interval[0] * 0.5 + interval[1] * 0.5;
+            let capture = captured(&definition, pose, interval, sample, &mut work);
+            assert!(capture.holes.is_empty());
+            let before = work.consumed();
+            let result = query(&definition, &capture, &mut work);
+            assert!(work.consumed() > before);
+            assert!(result.envelopes().is_empty());
+            assert!(result.is_compatible_with_definition(&definition));
+            assert_eq!(result.placed_pose(), Some(pose));
+            assert_eq!(result.world_height_interval_mm(), interval);
+            assert_eq!(result.sample_world_z_mm(), sample);
+            assert_eq!(result._source_request.frame, capture.request.frame);
+            assert_eq!(
+                result._source_request.height_interval_mm,
+                capture.request.height_interval_mm
+            );
+            assert_eq!(
+                result._source_request.sample_height_mm,
+                capture.request.sample_height_mm
+            );
+            assert_eq!(
+                result._source_request.native_shape_error_mm,
+                capture.request.native_shape_error_mm
+            );
+
+            let prepared = prepare_solid(&definition, MAX_BYTES, &mut work, &cancel).unwrap();
+            let policy = ProtectedVoidPolicy {
+                maximum_xy_error_mm: spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
+                byte_limit: MAX_BYTES as u32,
+            };
+            assert!(
+                prepared
+                    .projected_protected_void_envelopes(&capture, policy, &mut work, &cancel)
+                    .unwrap()
+                    .envelopes()
+                    .is_empty()
+            );
+            for (bytes, limit, cancelled, expected) in [
+                (0, 200_000_000, false, GeometryErrorCode::ResourceLimit),
+                (
+                    8 * 1024 * 1024,
+                    200_000_000,
+                    false,
+                    GeometryErrorCode::ResourceLimit,
+                ),
+                (MAX_BYTES as u32, 0, false, GeometryErrorCode::ResourceLimit),
+                (
+                    MAX_BYTES as u32,
+                    200_000_000,
+                    true,
+                    GeometryErrorCode::Cancelled,
+                ),
+            ] {
+                assert_eq!(
+                    prepared
+                        .projected_protected_void_envelopes(
+                            &capture,
+                            ProtectedVoidPolicy {
+                                byte_limit: bytes,
+                                ..policy
+                            },
+                            &mut GeometryWorkBudget::new(limit),
+                            &AtomicBool::new(cancelled),
+                        )
+                        .unwrap_err()
+                        .code,
+                    expected
+                );
+            }
+            let other = recipe("native-parity-nurbs-cylinder.step");
+            assert_eq!(
+                projected_protected_void_envelopes(&other, &capture, policy, &mut work, &cancel)
+                    .unwrap_err()
+                    .code,
+                GeometryErrorCode::InvalidGeometry
+            );
+            drop(prepared);
+            let uncertainty = definition.provenance.uncertainty_mm;
+            definition.provenance.uncertainty_mm = Some(0.125);
+            assert_eq!(
+                projected_protected_void_envelopes(
+                    &definition,
+                    &capture,
+                    policy,
+                    &mut work,
+                    &cancel
+                )
+                .unwrap_err()
+                .code,
+                GeometryErrorCode::InvalidGeometry
+            );
+            assert!(!result.is_compatible_with_definition(&definition));
+            definition.provenance.uncertainty_mm = uncertainty;
+
+            let interior_interval = [5.9 + pose.translation_mm[2], 6.1 + pose.translation_mm[2]];
+            let interior = captured(
+                &definition,
+                pose,
+                interior_interval,
+                6.0 + pose.translation_mm[2],
+                &mut work,
+            );
+            assert_eq!(interior.holes.len(), 1);
+            let protected = query(&definition, &interior, &mut work);
+            assert_eq!(protected.envelopes().len(), 1);
+            assert_eq!(
+                protected.envelopes()[0].height_scope(),
+                ProtectedVoidHeightScope::OpenBelow {
+                    upper_mm: interior_interval[1],
+                }
+            );
+        }
     }
 
     #[test]

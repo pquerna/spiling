@@ -4235,6 +4235,37 @@ fn directional_support_excludes_slab(
     .add(HeightFunctional::from_frame(request.frame).offset);
     Ok(request.height_interval_mm[1] < height.lo || request.height_interval_mm[0] > height.hi)
 }
+pub(super) fn vertical_product_excludes_slab(
+    source: super::material_source::MaterialSourceView<'_, '_>,
+    request: SlabRequest,
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let product = match source_vertical_boundary_flow(
+        source,
+        request.frame,
+        [-f64::MAX, f64::MAX],
+        remaining_bytes,
+        work,
+        cancel,
+    ) {
+        Ok(product) => product,
+        Err(failure)
+            if matches!(
+                failure.code,
+                GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled
+            ) =>
+        {
+            return Err(failure);
+        }
+        Err(_) => return Ok(false),
+    };
+    Ok(
+        request.height_interval_mm[1] < product.height_interval_mm[0]
+            || request.height_interval_mm[0] > product.height_interval_mm[1],
+    )
+}
 /// Enclose the height functional over the entire returned native plane/tube,
 /// including stored normal renormalization and achieved plane uncertainty.
 pub(super) fn native_sample_height_band(
@@ -9093,6 +9124,110 @@ mod tests {
         .unwrap();
         assert_eq!([result.lo, result.hi], [5.0, 5.0]);
     }
+    #[test]
+    fn complete_annular_product_excludes_disjoint_slabs_but_not_closed_cap_contact() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/geometry/through-hole.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let prepared = super::super::material_source::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let remaining = crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes();
+        let source = prepared.source_view().unwrap();
+        assert_eq!(
+            native_closed_disk_product(source, remaining, &mut work, &cancel)
+                .err()
+                .unwrap()
+                .code,
+            GeometryErrorCode::AnalysisIndeterminate
+        );
+        let shifted = PlaneFrameMm {
+            origin_mm: [0.0, 0.0, 1.0],
+            ..frame()
+        };
+        for (query_frame, range, excluded) in [
+            (frame(), [8.0_f64.next_up(), 8.333333000000001], true),
+            (frame(), [-0.2, 0.0_f64.next_down()], true),
+            (frame(), [8.0, 8.333333000000001], false),
+            (frame(), [-0.2, 0.0], false),
+            (frame(), [3.9, 4.1], false),
+            (shifted, [7.0_f64.next_up(), 7.2], true),
+            (shifted, [7.0, 7.2], false),
+            (shifted, [6.9, 7.1], false),
+        ] {
+            assert_eq!(
+                vertical_product_excludes_slab(
+                    source,
+                    SlabRequest {
+                        frame: query_frame,
+                        height_interval_mm: range,
+                        sample_height_mm: range[0] * 0.5 + range[1] * 0.5,
+                        native_shape_error_mm: 0.1,
+                    },
+                    remaining,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap(),
+                excluded,
+                "closed slab {range:?} in frame {query_frame:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn vertical_product_exclusion_requires_complete_source_and_terminal_budgets() {
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let definition = parity_definition("native-parity-blind-pocket.step");
+        let prepared = super::super::material_source::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let source = prepared.source_view().unwrap();
+        let remaining = crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes();
+        let request = SlabRequest {
+            frame: frame(),
+            height_interval_mm: [12.0, 13.0],
+            sample_height_mm: 12.5,
+            native_shape_error_mm: 0.1,
+        };
+        assert!(
+            !vertical_product_excludes_slab(source, request, remaining, &mut work, &cancel)
+                .unwrap()
+        );
+        for (bytes, limit, cancelled, expected) in [
+            (0, 100_000_000, false, GeometryErrorCode::ResourceLimit),
+            (remaining, 0, false, GeometryErrorCode::ResourceLimit),
+            (remaining, 1, false, GeometryErrorCode::ResourceLimit),
+            (remaining, 100_000_000, true, GeometryErrorCode::Cancelled),
+        ] {
+            assert_eq!(
+                vertical_product_excludes_slab(
+                    source,
+                    request,
+                    bytes,
+                    &mut GeometryWorkBudget::new(limit),
+                    &AtomicBool::new(cancelled),
+                )
+                .unwrap_err()
+                .code,
+                expected
+            );
+        }
+    }
+
     #[test]
     fn closed_support_excluded_empty_slab_has_exact_reuse_but_contact_does_not() {
         let cancel = AtomicBool::new(false);
