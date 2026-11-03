@@ -148,9 +148,22 @@ shows the declared machine envelope. These are inspection controls, never placem
 edits. Context geometry is excluded from source picking, sections, replay counts and
 manufacturing authority. Shared build-area controls appear in the production gallery.
 
+## Arrangement
+
+Arrange opens a scoped pane with Make copies, Arrange parts and Fill plate goals.
+Make copies starts at Quantity 2, including the selected original; Fill plate exposes
+an explicit quantity limit. Balanced/Dense and Spacing describe the search objective;
+Pinned parts stay at their committed poses. Orientation and height are preserved.
+Find layout is primary before evaluation. A matching result replaces it with Apply
+layout and shows requested/placed counts, including any shortfall without hover.
+Close/Escape restores Current display and focus without applying the proposal.
+The tinted canvas preview cannot pick faces or act as a manufacturing result.
+Changing form inputs, project/session or captured revisions revokes preview/Apply.
+Verification details and search limits are disclosed below the essential result.
+
 ## Exercising a change
 
-Use the production gallery's Panels, Fields, Color, Acquisition and Try / Compare categories in each theme.
+Use the production gallery's Panels, Fields, Color, Acquisition, Try / Compare, Build area and Arrange categories in each theme.
 The complete panel specimen includes ready, changed, blocked, pending, uncertain,
 invalid, read-only and stale states; its close/reopen path is interactive. Inspect narrow/normal panes,
 long names and scaled text. Test keyboard help, primary-action reasons, Escape,

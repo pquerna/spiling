@@ -18,6 +18,7 @@ pub(crate) mod support;
 mod surface;
 mod walls;
 mod zones;
+pub use preflight::layout_footprints;
 pub use preflight::preflight;
 #[cfg(test)]
 mod native_tests;

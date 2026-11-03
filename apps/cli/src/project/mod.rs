@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod layout;
+
 use crate::{
     Command, Error, Options, geometry,
     output::{OutputDirectory, OutputFile},
@@ -97,6 +99,8 @@ enum Operation {
     Add(DefinitionId, RigidPoseMm),
     Pose(OccurrenceId, RigidPoseMm),
     PrepareBed(OccurrenceId, bool),
+    PrepareLayout(LayoutRequest),
+    ApplyLayout,
     Remove(OccurrenceId),
     SurfaceFinish(OccurrenceId, FaceId, SurfaceScopeKind, SurfaceFinish),
     SurfaceImage(
@@ -677,6 +681,55 @@ pub fn parse(
                 operations.push(Operation::MaterialProfile(Box::new(selection)));
             }
             Some("--preflight") => operations.push(Operation::Preflight),
+            Some("--layout") => {
+                let path =
+                    PathBuf::from(args.next().ok_or("--layout requires a request JSON path")?);
+                let mut bytes = Vec::new();
+                File::open(path)?.take(16385).read_to_end(&mut bytes)?;
+                if bytes.len() > 16384 {
+                    return Err("layout request exceeds 16 KiB".into());
+                }
+                let request: LayoutRequest = serde_json::from_slice(&bytes)?;
+                request.validate()?;
+                operations.push(Operation::PrepareLayout(request));
+            }
+            Some("--arrange" | "--make-copies" | "--fill-plate") => {
+                let template = if arg == "--arrange" {
+                    None
+                } else {
+                    Some(OccurrenceId::new(
+                        text(&mut args, "layout occurrence")?.parse()?,
+                    )?)
+                };
+                let quantity = if arg == "--make-copies" {
+                    text(&mut args, "quantity")?.parse()?
+                } else if arg == "--fill-plate" {
+                    text(&mut args, "quantity ceiling")?.parse()?
+                } else {
+                    1
+                };
+                let request = LayoutRequest {
+                    objective: if arg == "--arrange" {
+                        LayoutObjective::Arrange
+                    } else if arg == "--make-copies" {
+                        LayoutObjective::Copies
+                    } else {
+                        LayoutObjective::Fill
+                    },
+                    template,
+                    quantity,
+                    pinned: vec![],
+                    spacing_mm: 3.0,
+                    style: if arg == "--fill-plate" {
+                        LayoutStyle::Dense
+                    } else {
+                        LayoutStyle::Balanced
+                    },
+                };
+                request.validate()?;
+                operations.push(Operation::PrepareLayout(request));
+            }
+            Some("--apply-layout") => operations.push(Operation::ApplyLayout),
             Some("--place-on-bed" | "--center-on-bed") => {
                 let center = arg == "--center-on-bed";
                 let id =
@@ -751,7 +804,8 @@ pub fn parse(
             || operations.iter().any(|operation| {
                 !matches!(
                     operation,
-                    Operation::LibraryLocation(_)
+                    Operation::PrepareLayout(_)
+                        | Operation::LibraryLocation(_)
                         | Operation::EvaluateAlternative(_)
                         | Operation::EvaluateOption(_)
                         | Operation::ListOptions
@@ -1180,6 +1234,8 @@ async fn execute(
     })];
     let mut verification = None;
     let mut alternative_evaluation: Option<ManufacturingAlternativeEvaluation> = None;
+    let mut layout_proposal: Option<LayoutProposal> = None;
+    let mut layout_evidence = vec![];
     let mut option_evidence = Vec::new();
     let mut export_evidence = None;
     let mut replay_evidence = None;
@@ -2566,6 +2622,20 @@ async fn execute(
                     return Err("unexpected pose response".into());
                 }
             }
+            Operation::PrepareLayout(request) => {
+                label = "prepare_layout";
+                let proposal = Box::pin(layout::prepare(client, request)).await?;
+                layout_evidence.push(proposal.clone());
+                layout_proposal = Some(proposal);
+            }
+            Operation::ApplyLayout => {
+                label = "apply_layout";
+                let p = layout_proposal
+                    .as_ref()
+                    .ok_or("prepare a layout before applying")?;
+                Box::pin(layout::apply(client, p)).await?;
+                layout_proposal = None;
+            }
             Operation::PrepareBed(occurrence_id, center) => {
                 label = if center {
                     "center_on_bed"
@@ -2774,6 +2844,7 @@ async fn execute(
     report["project"] = serde_json::to_value(&project)?;
     report["face_inspections"] = serde_json::to_value(inspections)?;
     report["operations"] = serde_json::json!(history);
+    report["layout_proposals"] = serde_json::json!(layout_evidence);
     report["process_inspections"] = serde_json::json!(process_inspections);
     report["manufacturing"] = manufacturing_status(client, true).await?;
     report["manufacturing_options"] = serde_json::json!(option_evidence);

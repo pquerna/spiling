@@ -77,6 +77,7 @@ struct Resources {
 pub struct Input<'a> {
     pub project_id: Option<spiling_contracts::project::ProjectId>,
     pub plate: Option<plate::Plate>,
+    pub layout_preview: bool,
     pub scene: Option<Arc<Scene>>,
     pub section: Option<Arc<Section>>,
     pub review: Option<Arc<crate::manufacture::Review>>,
@@ -471,6 +472,7 @@ impl Viewport {
         let Input {
             project_id,
             plate,
+            layout_preview,
             scene,
             section,
             review,
@@ -489,6 +491,9 @@ impl Viewport {
             self.had_plate = false;
         }
         let mut hit = None;
+        if layout_preview {
+            ui.label("Layout preview · not applied");
+        }
         let mut fit_source = false;
         let mut fit_plate = false;
         ui.horizontal_wrapped(|ui| {
@@ -821,7 +826,11 @@ impl Viewport {
                         (rect.height() * ui.ctx().pixels_per_point()) as u32,
                     ],
                     tool_color: [0.0; 4],
-                    context: [0.0; 4],
+                    context: if layout_preview {
+                        [0.36, 0.72, 0.77, 1.0]
+                    } else {
+                        [0.0; 4]
+                    },
                     plane: if cut_enabled {
                         projected
                     } else {
@@ -1307,6 +1316,7 @@ impl Resources {
             }
         }
         let mut draws = Vec::new();
+        let mut instance_bytes = 0usize;
         for definition in &scene.definitions {
             for chunk in &definition.chunks {
                 let view = validate_mesh_chunk(
@@ -1318,6 +1328,11 @@ impl Resources {
                     chunk.metadata.chunk_index,
                 )
                 .map_err(|e| e.to_string())?;
+                let radius = view
+                    .positions
+                    .iter()
+                    .map(|p| DVec3::from_array(p.map(f64::from)).length())
+                    .fold(0.0, f64::max);
                 let mut instances = Vec::new();
                 for (index, occurrence) in scene
                     .occurrences
@@ -1330,7 +1345,14 @@ impl Resources {
                         + DVec3::from_array(occurrence.pose.translation_mm)
                         - center;
                     let f = translated.as_vec3();
-                    if (f.as_dvec3() - translated).length() > 0.001 {
+                    let rounded = q.as_quat().as_dquat();
+                    let rotation_error = [DVec3::X, DVec3::Y, DVec3::Z]
+                        .iter()
+                        .map(|v| ((rounded * *v) - (q * *v)).length_squared())
+                        .sum::<f64>()
+                        .sqrt()
+                        * radius;
+                    if rotation_error + (f.as_dvec3() - translated).length() > 0.001 {
                         return Err("Display instance projection exceeds 0.001 mm; native geometry remains available".into());
                     }
                     instances.push(Instance {
@@ -1338,6 +1360,10 @@ impl Resources {
                         translation: [f.x, f.y, f.z, index as f32],
                     });
                 }
+                instance_bytes = instance_bytes
+                    .checked_add(instances.len() * std::mem::size_of::<Instance>())
+                    .filter(|n| *n <= crate::scene::MAX_INSTANCE_BUFFER_BYTES)
+                    .ok_or("Source instance buffers exceed the reserved display pool")?;
                 let raw = previous
                     .get(chunk.metadata.sha256.as_str())
                     .cloned()
@@ -1520,5 +1546,41 @@ mod depth_tests {
             far - near > 4.0 / 16_777_216.0,
             "fine layer depth needs several 24-bit steps"
         );
+    }
+}
+
+#[cfg(test)]
+mod shader_tests {
+    use super::*;
+    #[test]
+    fn native_shaders_parse_and_validate_with_the_shared_camera_layout() {
+        for (name, source) in [
+            ("source", include_str!("source.wgsl")),
+            ("lines", include_str!("lines.wgsl")),
+            ("plate", include_str!("plate.wgsl")),
+            ("beads", include_str!("beads.wgsl")),
+            ("section", include_str!("section.wgsl")),
+        ] {
+            let module = wgpu::naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+            wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            for (_, global) in module.global_variables.iter() {
+                if global.space == wgpu::naga::AddressSpace::Uniform {
+                    let wgpu::naga::TypeInner::Struct { span, .. } = module.types[global.ty].inner
+                    else {
+                        panic!("{name}: camera is not a struct");
+                    };
+                    assert!(
+                        span as usize <= size_of::<Uniform>(),
+                        "{name}: camera exceeds CPU allocation"
+                    );
+                }
+            }
+        }
     }
 }

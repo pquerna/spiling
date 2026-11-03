@@ -503,6 +503,7 @@ fn publish_terminal(
     if matches!(
         &private,
         geometry::JobResult::ManufacturingPreflight { .. }
+            | geometry::JobResult::LayoutPrepared { .. }
             | geometry::JobResult::BedPosePrepared { .. }
             | geometry::JobResult::OpticalConstructionApplied { .. }
             | geometry::JobResult::ProjectStorageMaintained { .. }
@@ -743,6 +744,7 @@ fn public_result(
             construction_index,
         },
         geometry::JobResult::Section { artifact_id } => Public::Section { artifact_id },
+        geometry::JobResult::LayoutPrepared { proposal } => Public::LayoutPrepared { proposal },
         geometry::JobResult::BedPosePrepared { preparation } => {
             Public::BedPosePrepared { preparation }
         }

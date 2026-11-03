@@ -239,7 +239,7 @@ The configured build area uses `viewport::plate`: verify a committed hardware ca
 a declared intent without a sheet, and an unconfigured project. Exercise Fit plate,
 Fit parts, Height limits, empty beds, offset/non-square bounds and keepouts/fixtures
 in both themes. Source picking and sections exclude this context. The host reserves
-a fixed hardware-display pool beside source, section and replay transfers; rendering
+a fixed context-display pool beside source, section and replay transfers; rendering
 refuses excessive projected error instead of moving the plate or source.
 
 Native source inspection uses `scene` for revision-bound pages, complete face tables and
@@ -521,6 +521,32 @@ Preflight is not manufacturing authority. Inspect/replay independently decode sa
 program bytes, never trust a stored `verified` flag. Export uses the common exclusive
 writer. [Manufacturing](manufacturing-evidence.md) maps the implementation and current
 refusals; [authoring](authoring-evidence.md) maps transactions and recovery.
+
+### Quantity and arrangement
+
+The native Model pane and Edit menu open Arrange. Request Quantity 2, inspect the
+unapplied tinted preview, Apply, Undo/Redo, save/reopen and prepare fresh output.
+Exercise a pinned part, declared fixture/keepout, a partial fit, cancellation and stale
+revision refusal. Use both themes, narrow/scaled panes and keyboard Close/Escape.
+The gallery uses the same fields. Preview shares source buffers and uses a bounded
+instance/context pool; redraw does not search or compile.
+
+The CLI uses the same engine proposal and explicit Apply:
+
+```sh
+"$CLI" project edit EXISTING.spil --make-copies 1 2 --apply-layout --undo --redo \
+  --preflight --compile --verify --save --manufacturing-out NEW_COPY_EXPORT --engine "$ENGINE"
+"$CLI" project inspect EXISTING.spil --fill-plate 1 12 --engine "$ENGINE"
+```
+
+`--arrange` prepares existing parts; `--make-copies OCC TOTAL` includes the selected
+original; `--fill-plate OCC LIMIT` searches up to that total without claiming an optimum.
+`--layout REQUEST_JSON` accepts the bounded typed request with explicit pins, spacing
+and Balanced/Dense style. Inspection permits proposals, never Apply. Reports retain
+proposals and their captured revisions even if later ordered edits make them stale.
+No existing parts are silently removed to fit additional copies. Native/finish bounds
+seed reservations; complete candidate compilation/replay and nominal-bead containment
+must pass before Apply is exposed. Physical clearance and printing remain unqualified.
 
 ### Fixed-dual software job
 

@@ -62,6 +62,18 @@ pub enum GeometryCommand {
         base_revision: SceneRevision,
         plane: PlaneMm,
     },
+    PrepareLayout {
+        session_id: SessionId,
+        base_revision: SceneRevision,
+        project_revision: crate::project::ProjectRevision,
+        request: LayoutRequest,
+    },
+    ApplyLayout {
+        session_id: SessionId,
+        base_revision: SceneRevision,
+        project_revision: crate::project::ProjectRevision,
+        proposal_id: SourceHash,
+    },
     PrepareBedPose {
         session_id: SessionId,
         base_revision: SceneRevision,
@@ -132,6 +144,9 @@ pub enum JobResult {
     },
     Section {
         artifact_id: ArtifactId,
+    },
+    LayoutPrepared {
+        proposal: LayoutProposal,
     },
     BedPosePrepared {
         preparation: BedPosePreparation,

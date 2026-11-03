@@ -12,7 +12,7 @@ pub(super) enum Navigation {
     ClearSelection,
 }
 impl Workbench {
-    fn project_drafts(&self) -> bool {
+    pub(super) fn project_drafts(&self) -> bool {
         self.state.project.as_ref().is_some_and(|p| {
             self.manufacturing.trial.is_some()
                 || self

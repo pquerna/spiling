@@ -432,6 +432,16 @@ pub fn native_operation_view(
                     }
                 }
             }
+            JobResult::LayoutPrepared { proposal } => {
+                proposal.validate().map_err(|e| e.to_string())?;
+                if proposal.session_id != session_id
+                    || proposal.scene_revision.get() != meta.captured_scene_revision
+                    || proposal.project_revision.get() != meta.captured_project_revision
+                    || !meta.outputs.is_empty()
+                {
+                    return Err("layout capture or outputs mismatch".into());
+                }
+            }
             JobResult::BedPosePrepared { preparation } => {
                 preparation.validate().map_err(|error| error.to_string())?;
                 if preparation.session_id != session_id
@@ -660,6 +670,9 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
             R::ManufacturingPreflight(v) => Self::ManufacturingPreflight {
                 report: required(v.report, "preflight report")?.try_into()?,
             },
+            R::LayoutPrepared(value) => Self::LayoutPrepared {
+                proposal: value.try_into()?,
+            },
             R::BedPosePrepared(value) => Self::BedPosePrepared {
                 preparation: value.try_into()?,
             },
@@ -791,6 +804,7 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
             }
             JobResult::Scene { summary } => R::Scene(summary.try_into()?),
             JobResult::Section { artifact_id } => R::SectionArtifactId(artifact_id.get()),
+            JobResult::LayoutPrepared { proposal } => R::LayoutPrepared(proposal.try_into()?),
             JobResult::BedPosePrepared { preparation } => {
                 R::BedPosePrepared(preparation.try_into()?)
             }

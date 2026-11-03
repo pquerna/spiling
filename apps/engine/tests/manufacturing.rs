@@ -2863,3 +2863,6 @@ async fn material_review_is_nonmutating_and_stale_selection_cannot_commit() {
     assert_eq!(status(&mut client).await, edited_state);
     client.shutdown().await.unwrap();
 }
+
+#[path = "manufacturing/layout.rs"]
+mod layout;

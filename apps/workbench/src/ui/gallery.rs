@@ -24,6 +24,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
             "Wall starts",
             "Try / Compare",
             "Build area",
+            "Arrange",
         ]
         .iter()
         .enumerate()
@@ -51,6 +52,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
                 4 => matching(ui),
                 5 => wall_starts(ui),
                 7 => build_area(ui),
+                8 => arrange(ui),
                 _ => colors(ui),
             }
         });
@@ -301,6 +303,7 @@ mod tests {
                     for (name, specimen) in [
                         ("wall starts", wall_starts as fn(&mut Ui)),
                         ("build area", build_area),
+                        ("arrange", arrange),
                     ] {
                         for _ in 0..2 {
                             let mut measured = (0.0, 0.0);
@@ -572,4 +575,41 @@ fn build_area(ui: &mut Ui) {
     let _ = plate.controls(ui, &mut height);
     ui.data_mut(|data| data.insert_temp(id, height));
     ui.weak("Fit plate frames the canvas in the workbench. This specimen has no 3D scene.");
+}
+
+fn arrange(ui: &mut Ui) {
+    use spiling_contracts::geometry::*;
+    pane_header(
+        ui,
+        "Arrange",
+        "Illustrative current plate · no project changes",
+    );
+    let id = ui.make_persistent_id("gallery-layout-request");
+    let mut request = ui
+        .data_mut(|d| d.get_temp::<LayoutRequest>(id))
+        .unwrap_or(LayoutRequest {
+            objective: LayoutObjective::Copies,
+            template: Some(OccurrenceId::new(1).unwrap()),
+            quantity: 2,
+            pinned: vec![],
+            spacing_mm: 3.0,
+            style: LayoutStyle::Balanced,
+        });
+    primary(
+        ui,
+        "Find layout",
+        Some("Illustrative controls · no engine request"),
+    );
+    super::layout_fields(
+        ui,
+        &mut request,
+        &[
+            (OccurrenceId::new(1).unwrap(), "Housing · 1".into()),
+            (
+                OccurrenceId::new(2).unwrap(),
+                "Long named bracket — 固定部品 · 2".into(),
+            ),
+        ],
+    );
+    ui.data_mut(|d| d.insert_temp(id, request));
 }

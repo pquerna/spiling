@@ -38,7 +38,7 @@ fn compilation_byte_budget(retained_bytes: u64) -> Result<u32, ManufacturingErro
         })
 }
 impl Runtime {
-    fn capture_surface_images(
+    pub(super) fn capture_surface_images(
         &self,
     ) -> Result<BTreeMap<SourceHash, Arc<spiling_surface_fields::HeightImage>>, ManufacturingError>
     {

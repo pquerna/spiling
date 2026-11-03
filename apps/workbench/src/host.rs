@@ -86,6 +86,7 @@ pub struct Snapshot {
     pub optical_report: Option<Arc<crate::assets::OpticalCapture>>,
     pub optical_loading: bool,
     pub stock: stock::State,
+    pub layout_proposal: Option<Arc<spiling_contracts::geometry::LayoutProposal>>,
     pub bed_proposal: Option<Arc<spiling_contracts::geometry::BedPosePreparation>>,
     pub busy: bool,
     pub active_operation: bool,
@@ -120,6 +121,7 @@ impl Default for Snapshot {
             optical_loading: false,
             stock: stock::State::default(),
             bed_proposal: None,
+            layout_proposal: None,
             busy: true,
             active_operation: false,
             picker_open: false,
@@ -817,7 +819,7 @@ impl Actor {
             self.state.section.as_ref().map_or(0, |s| {
                 s.summary.total_bytes as usize * crate::scene::SECTION_DISPLAY_MULTIPLIER
             }) + self.state.manufacturing.display_bytes()
-                + crate::scene::HARDWARE_DISPLAY_RESERVE_BYTES
+                + crate::scene::CONTEXT_DISPLAY_RESERVE_BYTES
                 + if self.section_task.is_some() {
                     spiling_contracts::geometry::MAX_SECTION_BYTES as usize
                         * crate::scene::SECTION_DISPLAY_MULTIPLIER
@@ -846,6 +848,7 @@ impl Actor {
         self.state.image_preview = None;
         self.state.manufacturing = Arc::default();
         self.state.bed_proposal = None;
+        self.state.layout_proposal = None;
         self.state.phase = Phase::Starting;
         self.state.generation += 1;
         self.state.hello = None;
@@ -973,6 +976,7 @@ impl Actor {
             let _ = task.await;
         }
         self.state.bed_proposal = None;
+        self.state.layout_proposal = None;
         if let Some(mut client) = self.client.take() {
             let _ = client.terminate().await;
         }
@@ -1093,6 +1097,7 @@ impl Actor {
                 self.clear_review();
             }
             self.state.bed_proposal = None;
+            self.state.layout_proposal = None;
             if self
                 .state
                 .optical_report
@@ -1740,6 +1745,9 @@ impl Actor {
                 )
                 .await;
             }
+            (Receipt::Geometry, Some(JobResult::LayoutPrepared { proposal })) if completed => {
+                self.state.layout_proposal = Some(Arc::new(proposal.clone()));
+            }
             (Receipt::Geometry, Some(JobResult::BedPosePrepared { preparation })) if completed => {
                 self.state.bed_proposal = Some(Arc::new(preparation.clone()));
             }
@@ -1841,7 +1849,7 @@ impl Actor {
                         self.section_cancel.clone(),
                         self.state.display.as_ref().map_or(0, |s| s.raw_bytes * 2)
                             + self.state.manufacturing.display_bytes()
-                            + crate::scene::HARDWARE_DISPLAY_RESERVE_BYTES
+                            + crate::scene::CONTEXT_DISPLAY_RESERVE_BYTES
                             + self.state.section.as_ref().map_or(0, |s| {
                                 s.summary.total_bytes as usize
                                     * crate::scene::SECTION_DISPLAY_MULTIPLIER

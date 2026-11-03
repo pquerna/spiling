@@ -71,6 +71,9 @@ pub(crate) enum JobResult {
     Section {
         artifact_id: ArtifactId,
     },
+    LayoutPrepared {
+        proposal: LayoutProposal,
+    },
     BedPosePrepared {
         preparation: BedPosePreparation,
     },

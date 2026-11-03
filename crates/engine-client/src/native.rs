@@ -188,6 +188,17 @@ impl EngineRpc {
                         .map_err(ClientError::Protocol)?,
                 })
             }
+            GeometryCall::PrepareLayout(request) => {
+                let operation = client
+                    .prepare_layout(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
+                Ok(GeometryResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
+                })
+            }
             GeometryCall::PrepareBedPose(request) => {
                 let operation = client
                     .prepare_bed_pose(self.request(bounded(request)?))

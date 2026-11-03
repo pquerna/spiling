@@ -977,6 +977,7 @@ pub enum GeometryCall {
     ImportPart(rpc::ImportPartRequest),
     StartSection(rpc::StartSectionRequest),
     PrepareBedPose(rpc::PrepareBedPoseRequest),
+    PrepareLayout(rpc::PrepareLayoutRequest),
 }
 impl TryFrom<rpc::AddInstanceRequest> for GeometryCommand {
     type Error = String;
@@ -1072,6 +1073,7 @@ impl TryFrom<rpc::GeometryRequest> for GeometryCommand {
     type Error = String;
     fn try_from(value: rpc::GeometryRequest) -> Result<Self, String> {
         match required(value.command, "geometry command")? {
+            rpc::geometry_request::Command::ApplyLayout(v) => v.try_into(),
             rpc::geometry_request::Command::AddInstance(v) => v.try_into(),
             rpc::geometry_request::Command::SetInstancePose(v) => v.try_into(),
             rpc::geometry_request::Command::RemoveInstance(v) => v.try_into(),
@@ -1136,6 +1138,31 @@ pub fn geometry_call(command: GeometryCommand, id: &str) -> Result<GeometryCall,
                 plane: Some(plane.try_into()?),
             }));
         }
+        GeometryCommand::PrepareLayout {
+            session_id,
+            base_revision,
+            project_revision,
+            request,
+        } => {
+            return Ok(GeometryCall::PrepareLayout(rpc::PrepareLayoutRequest {
+                parent: format!("sessions/{}", session_id.as_str()),
+                request_id: id.into(),
+                base_revision: base_revision.get(),
+                project_revision: project_revision.0,
+                request: Some(request.try_into()?),
+            }));
+        }
+        GeometryCommand::ApplyLayout {
+            session_id,
+            base_revision,
+            project_revision,
+            proposal_id,
+        } => rpc::geometry_request::Command::ApplyLayout(rpc::ApplyLayoutRequest {
+            session_id: session_id.into(),
+            base_revision: base_revision.get(),
+            project_revision: project_revision.0,
+            proposal_id: proposal_id.into(),
+        }),
         GeometryCommand::PrepareBedPose {
             session_id,
             base_revision,
@@ -1752,6 +1779,7 @@ mod tests {
                     assert_eq!(request.request_id, id.as_str());
                     GeometryCommand::try_from(request).unwrap()
                 }
+                GeometryCall::PrepareLayout(request) => request.try_into().unwrap(),
                 GeometryCall::PrepareBedPose(request) => {
                     assert_eq!(request.request_id, id.as_str());
                     GeometryCommand::try_from(request).unwrap()

@@ -57,6 +57,24 @@ Metadata contains state/version, phase, completed/total units, input revision/di
 
 Input revision is retained provenance only in the synthetic diagnostic, which never mutates a project. Native actions validate the active session and exact captured scene/project revision before admission/publication. Import, placement, source-backed open/save and manufacturing use core transaction authority; native objects/caches remain private. Manufacturing intent/geometry edits invalidate the active artifact, while coherent undo can restore it.
 
+`Geometry.PrepareLayout` captures the scene and persistent project revision, current
+printer/recipe, source-bound finishes/process data and explicit quantity/pins/spacing.
+It is a cancellable read-only operation, including on read-only projects. The engine
+searches finite rectangular reservations using native/finish bounds, then requires
+complete candidate compilation, independent emitted-program replay and whole-bead
+containment in disjoint construction reservations. The checked terminal proposal
+contains every move/copy, requested/placed totals and software verification. A best
+found fill or partial fit is not a maximum-count or physical-clearance claim.
+The result distinguishes build-area, finite-search and manufacturing-work limits.
+At most four complete manufacturing attempts may reduce only newly requested
+copies after a resource refusal; every existing occurrence remains included.
+`Geometry.Execute.ApplyLayout` accepts only the exact retained proposal identity and
+both captured revisions. Core atomically moves occurrences and copies their scoped
+finish/process layers with fresh IDs and shared source/image assets. Apply is one
+Undo transaction; preview does not mutate Current or publish its manufacturing
+artifact. Ordinary Compile/Inspect/Export remain required after Apply. Fixed-dual
+arrangement refuses until its explicit resource routing is qualified.
+
 ## Durable publication and limits
 
 An exclusive file lock permits one engine per store. SQLite WAL with FULL synchronization atomically commits operation admission, complete artifact blobs and output/state references. On reopen, unfinished operations become interrupted; they are never automatically replayed. Complete outputs remain retrievable after failure/cancellation/restart. Tests establish process-kill recovery, not a physical power-loss certification.

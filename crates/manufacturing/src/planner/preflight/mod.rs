@@ -38,6 +38,69 @@ pub fn preflight(
     Ok(admit(input, cancel)?.0.report)
 }
 
+/// Native/finish bounds for packing heuristics. Complete candidate compilation and
+/// independent replay remain mandatory; these bounds do not certify supports.
+pub fn layout_footprints(
+    input: &CompilerInput<'_>,
+    cancel: &AtomicBool,
+) -> Result<Vec<(OccurrenceId, AabbMm)>, ManufacturingError> {
+    if matches!(
+        input.intent.printer.workflow,
+        JobWorkflow::FixedDualMarlin { .. }
+    ) {
+        return Err(error(
+            ManufacturingErrorCode::UnsupportedGeometry,
+            "Automatic arrangement is not yet qualified for fixed-dual reservations",
+        ));
+    }
+    let (admission, _) = admit(input, cancel)?;
+    for check in &admission.report.checks {
+        if check.required
+            && matches!(
+                check.evidence,
+                PreflightEvidence::Unsupported
+                    | PreflightEvidence::Failed
+                    | PreflightEvidence::Indeterminate
+            )
+            && !matches!(
+                check.code.as_str(),
+                "outside_envelope"
+                    | "hardware_placement"
+                    | "surface_component_exclusion"
+                    | "surface_prime_exclusion"
+                    | "surface_occurrence_exclusion"
+            )
+        {
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                &check.message,
+            ));
+        }
+    }
+    input
+        .occurrences
+        .iter()
+        .map(|o| {
+            let b = *admission
+                .native_bounds
+                .get(&o.occurrence_id)
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                        "Layout source has no admitted native bounds",
+                    )
+                })?;
+            Ok((
+                o.occurrence_id,
+                admission
+                    .surface_fields
+                    .get(&o.occurrence_id)
+                    .map_or(b, |f| surface::expanded(b, f)),
+            ))
+        })
+        .collect()
+}
+
 pub(super) fn admit<'a>(
     input: &'a CompilerInput<'_>,
     cancel: &AtomicBool,

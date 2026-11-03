@@ -70,6 +70,7 @@ pub struct Workbench {
     navigation_focus: Option<egui::Id>,
     pose_revision: Option<SceneRevision>,
     analysis: analysis::AnalysisUi,
+    layout: layout::LayoutUi,
     queued_geometry: Option<GeometryCommand>,
     queued_host: Option<Command>,
     queued_picker: Option<Picker>,
@@ -141,6 +142,7 @@ impl Workbench {
             navigation_focus: None,
             pose_revision: None,
             analysis: analysis::AnalysisUi::default(),
+            layout: layout::LayoutUi::default(),
             queued_geometry: None,
             queued_host: None,
             queued_picker: None,
@@ -230,7 +232,12 @@ impl Workbench {
             }
         }
         match action {
+            Action::Arrange => {
+                self.open_layout(ctx);
+                return;
+            }
             Action::Analysis => {
+                self.close_layout(ctx);
                 self.close_library(ctx);
                 if !self.analysis.open {
                     self.surface_focus[0] = ctx.memory(|m| m.focused());
@@ -373,6 +380,8 @@ impl Workbench {
                 }
             } else if self.library.open {
                 self.close_library(ctx);
+            } else if self.layout.open {
+                self.close_layout(ctx);
             } else if self.analysis.open {
                 self.close_analysis(ctx);
             } else if self.show_feedback {
@@ -560,6 +569,7 @@ impl Workbench {
     }
 }
 mod analysis;
+mod layout;
 mod library;
 mod manufacturing;
 mod material;
@@ -772,7 +782,7 @@ impl eframe::App for Workbench {
                 });
                 self.button(ui, Action::Analysis);
                 ui.menu_button("Edit", |ui| {
-                    for action in [Action::Undo, Action::Redo] {
+                    for action in [Action::Undo, Action::Redo, Action::Arrange] {
                         self.button(ui, action);
                     }
                 });
@@ -898,7 +908,7 @@ impl eframe::App for Workbench {
         } else if self.manufacturing.panel == 4 {
             egui::CentralPanel::default_margins().show(ui, |ui| self.study_page(ui));
         } else {
-            if self.analysis.open || !compact || !self.compact_tree {
+            if self.layout.open || self.analysis.open || !compact || !self.compact_tree {
                 egui::Panel::right("project")
                     .resizable(true)
                     .default_size(if compact { 250.0 } else { 340.0 })
@@ -906,6 +916,10 @@ impl eframe::App for Workbench {
                     // A pasted numeric draft or long source label must retain a canvas.
                     .max_size((ui.available_width() * 0.5).max(210.0))
                     .show(ui, |ui| {
+                        if self.layout.open {
+                            self.layout_ui(ui);
+                            return;
+                        }
                         if self.analysis.open {
                             self.analysis_ui(ui);
                             return;
@@ -959,7 +973,9 @@ impl eframe::App for Workbench {
                             self.queued_host = Some(Command::ResumeDisplay);
                         }
                     }
-                    ui::replay_control_area(ui, |ui| self.replay_controls(ui));
+                    if !self.layout.open {
+                        ui::replay_control_area(ui, |ui| self.replay_controls(ui));
+                    }
                     let current = self.display_current();
                     if !current && self.state.display.is_some() {
                         ui.colored_label(
@@ -980,7 +996,12 @@ impl eframe::App for Workbench {
                         );
                         self.primary_button(ui, Action::Import);
                     }
-                    let review = self.selected_manufacturing_review();
+                    let layout_preview = self.layout_preview();
+                    let review = if self.layout.open {
+                        None
+                    } else {
+                        self.selected_manufacturing_review()
+                    };
                     let mut view = if review.is_some() {
                         self.manufacturing.replay
                     } else {
@@ -1037,7 +1058,10 @@ impl eframe::App for Workbench {
                                                 .and_then(|p| p.hardware.as_ref()),
                                             self.state.manufacturing.intent.as_ref(),
                                         ),
-                                        scene: if review.is_some() && !current {
+                                        layout_preview: layout_preview.is_some(),
+                                        scene: if let Some(preview) = &layout_preview {
+                                            Some(preview.clone())
+                                        } else if review.is_some() && !current {
                                             None
                                         } else {
                                             self.state.display.clone()
@@ -1059,8 +1083,12 @@ impl eframe::App for Workbench {
                                         }),
                                         review: review.clone(),
                                         view,
-                                        selected: self.selected.as_ref(),
-                                        interactive: current,
+                                        selected: if layout_preview.is_some() {
+                                            None
+                                        } else {
+                                            self.selected.as_ref()
+                                        },
+                                        interactive: current && layout_preview.is_none(),
                                         analysis: &mut analysis,
                                         plane,
                                         scope: self.occurrence,

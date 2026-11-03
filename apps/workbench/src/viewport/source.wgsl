@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
-struct Camera { view_projection: mat4x4<f32>, selected: vec4<u32>, tool_color:vec4<f32>, plane:vec4<f32>, cut:vec4<f32> };
+struct Camera { view_projection: mat4x4<f32>, selected: vec4<u32>, tool_color:vec4<f32>, plane:vec4<f32>, cut:vec4<f32>, context:vec4<f32> };
 struct Instance { rotation: vec4<f32>, translation: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<storage,read> mesh: array<u32>;
@@ -30,5 +30,5 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) normal:vec3<
     let normal=normalize(input.normal)*select(-1.0,1.0,front);
     let light=0.28+0.72*max(dot(normal,normalize(vec3<f32>(0.4,-0.5,0.8))),0.0);
     let base=select(vec3<f32>(0.52,0.64,0.77),vec3<f32>(1.0,0.67,0.22),input.selected!=0u);
-    return vec4<f32>(base*light,1.0);
+    return vec4<f32>(select(base,camera.context.rgb,camera.context.a>0.0)*light,1.0);
 }

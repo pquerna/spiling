@@ -9,6 +9,7 @@ mod color_naming;
 mod error;
 pub mod geometry;
 mod hardware;
+mod layout;
 mod library;
 pub mod manufacturing;
 mod operation;

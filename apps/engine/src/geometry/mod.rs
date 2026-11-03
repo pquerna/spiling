@@ -5,6 +5,7 @@
 mod appearance;
 mod bed_pose;
 mod execution;
+mod layout;
 mod manufacturing;
 mod optical;
 mod placement;
@@ -119,6 +120,7 @@ enum Purpose {
     },
     Section,
     PrepareBedPose,
+    PrepareLayout,
     Open,
     Save,
     StorageMaintenance,
@@ -191,6 +193,7 @@ enum PublicationKind {
         replay: spiling_manufacturing::EncodedReplayDisplay,
     },
     BedPosePrepared(BedPosePreparation),
+    LayoutPrepared(LayoutProposal),
     Verified {
         record: ManufacturingArtifactRecord,
         inspection: spiling_manufacturing::ManufacturingInspection,
@@ -241,6 +244,7 @@ pub struct Runtime {
     released: VecDeque<ArtifactId>,
     jobs: BTreeMap<JobId, EngineJob>,
     terminal: VecDeque<JobId>,
+    layout_proposal: Option<LayoutProposal>,
     next_job: u32,
     next_artifact: u32,
     active: Option<Active>,
@@ -270,6 +274,7 @@ impl Runtime {
             optical_comparison: None,
             jobs: BTreeMap::new(),
             terminal: VecDeque::new(),
+            layout_proposal: None,
             next_job: 0,
             next_artifact: 0,
             active: None,
@@ -440,6 +445,7 @@ impl Runtime {
                                 | Purpose::Verify
                                 | Purpose::ImportSurfaceImage { .. }
                                 | Purpose::GetSurfaceImage
+                                | Purpose::PrepareLayout
                                 | Purpose::PrepareBedPose
                                 | Purpose::ImportAppearancePalette
                                 | Purpose::CompareAppearance
@@ -760,6 +766,10 @@ impl Runtime {
                             self.replay_publication = Some((job, replay));
                             Some(JobResult::ManufacturingAlternativeEvaluated { evaluation })
                         }
+                        PublicationKind::LayoutPrepared(proposal) => {
+                            self.layout_proposal = Some(proposal.clone());
+                            Some(JobResult::LayoutPrepared { proposal })
+                        }
                         PublicationKind::BedPosePrepared(preparation) => {
                             Some(JobResult::BedPosePrepared { preparation })
                         }
@@ -1009,6 +1019,26 @@ impl Runtime {
                         asset,
                         replay,
                     },
+                    artifact: None,
+                })
+            }
+            (Purpose::PrepareLayout, Product::LayoutPrepared(proposal)) => {
+                proposal.validate()?;
+                if proposal.session_id != self.session_id
+                    || proposal.project_id != self.project.info().project_id
+                    || proposal.scene_revision != active.base
+                    || proposal.project_revision != active.project_base
+                {
+                    return Err(stale().into());
+                }
+                // Re-run Core admission against all retained history before exposing Apply.
+                if !self.project.info().read_only && !proposal.placements.is_empty() {
+                    self.project.prepare(Edit::ApplyPlacement {
+                        placements: proposal.placements.clone(),
+                    })?;
+                }
+                Ok(Publication {
+                    kind: PublicationKind::LayoutPrepared(proposal),
                     artifact: None,
                 })
             }
@@ -1319,6 +1349,97 @@ impl Runtime {
                         occurrences,
                     },
                 )
+            }
+            GeometryCommand::PrepareLayout {
+                session_id,
+                base_revision,
+                project_revision,
+                request,
+            } => {
+                self.base(&session_id, base_revision)?;
+                if self.active.is_some() {
+                    return Err(busy());
+                }
+                if project_revision != self.project.info().revision {
+                    return Err(stale());
+                }
+                request.validate()?;
+                let snapshot = self.project.snapshot();
+                let intent = snapshot.manufacturing_intent.clone().ok_or_else(|| {
+                    error(
+                        GeometryErrorCode::InvalidGeometry,
+                        "Apply a printer and recipe before arranging",
+                    )
+                })?;
+                let surface_images = self
+                    .capture_surface_images()
+                    .map_err(|e| error(GeometryErrorCode::InvalidGeometry, e.message))?;
+                let capture = worker::CompileRequest {
+                    project_id: self.project.info().project_id,
+                    revision: project_revision,
+                    definition_ids: snapshot.sources.keys().cloned().collect(),
+                    stored_definitions: snapshot
+                        .sources
+                        .values()
+                        .map(|s| s.record.clone())
+                        .collect(),
+                    occurrences: snapshot.occurrences.values().cloned().collect(),
+                    intent,
+                    surface_overlays: snapshot.surface_overlays.clone(),
+                    process_document: snapshot.process_document.clone(),
+                    byte_budget: 0,
+                    surface_images,
+                };
+                let request = layout::Request {
+                    session: self.session_id.clone(),
+                    scene: self.revision,
+                    request,
+                    capture,
+                    draft: self.project.placement_draft(),
+                };
+                self.layout_proposal = None;
+                self.start(Purpose::PrepareLayout, 0, move |_, _, _| {
+                    Work::PrepareLayout(request)
+                })
+            }
+            GeometryCommand::ApplyLayout {
+                session_id,
+                base_revision,
+                project_revision,
+                proposal_id,
+            } => {
+                self.base(&session_id, base_revision)?;
+                if self.active.is_some() {
+                    return Err(busy());
+                }
+                if project_revision != self.project.info().revision {
+                    return Err(stale());
+                }
+                let proposal = self
+                    .layout_proposal
+                    .as_ref()
+                    .filter(|p| {
+                        p.id == proposal_id
+                            && p.session_id == session_id
+                            && p.scene_revision == base_revision
+                            && p.project_revision == project_revision
+                    })
+                    .ok_or_else(stale)?;
+                if proposal.placements.is_empty() {
+                    return Err(error(
+                        GeometryErrorCode::InvalidGeometry,
+                        "The proposal has no placement changes",
+                    ));
+                }
+                let placements = proposal.placements.clone();
+                let reply = self.apply_edit(Edit::ApplyPlacement { placements });
+                if matches!(
+                    reply,
+                    Reply::Geometry(GeometryResponse::SceneChanged { .. })
+                ) {
+                    self.layout_proposal = None;
+                }
+                Ok(reply)
             }
             GeometryCommand::PrepareBedPose {
                 session_id,
@@ -2259,6 +2380,7 @@ impl Runtime {
         let stage = match &purpose {
             Purpose::Import { .. } => "importing",
             Purpose::Section => "sectioning",
+            Purpose::PrepareLayout => "finding_and_verifying_layout",
             Purpose::PrepareBedPose => "preparing_native_bed_pose",
             Purpose::Open => "opening",
             Purpose::Save => "saving",

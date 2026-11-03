@@ -4,6 +4,8 @@
 
 //! Runtime-independent authoring authority. Native caches are engine-owned.
 mod hardware;
+mod placement;
+pub use placement::PlacementDraft;
 mod manufacturing_options;
 pub use manufacturing_options::{context_hash, trial_snapshot};
 pub mod materials;
@@ -290,6 +292,9 @@ pub enum Edit {
     Add {
         definition_id: DefinitionId,
         pose: RigidPoseMm,
+    },
+    ApplyPlacement {
+        placements: Vec<LayoutPlacement>,
     },
     SetPose {
         occurrence_id: OccurrenceId,
@@ -794,6 +799,10 @@ impl Project {
         }
         Ok(())
     }
+    /// Detached placement trials share immutable inputs and never reserve live IDs.
+    pub fn placement_draft(&self) -> PlacementDraft {
+        PlacementDraft::new(self)
+    }
     pub fn prepare(&self, edit: Edit) -> Result<PreparedEdit, ProjectError> {
         self.writable()?;
         self.revision.next()?;
@@ -1042,6 +1051,14 @@ impl Project {
                 }
                 add_occurrence(&mut snapshot, definition_id, pose, &mut next_occurrence)?;
             }
+            Edit::ApplyPlacement { placements } => placement::apply(
+                &mut snapshot,
+                &placements,
+                &mut next_occurrence,
+                &mut next_surface_layer,
+                &mut next_process_layer,
+                &mut next_process_operation,
+            )?,
             Edit::SetPose {
                 occurrence_id,
                 pose,

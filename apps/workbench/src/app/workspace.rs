@@ -39,7 +39,10 @@ impl Workbench {
     }
     pub(super) fn tree_ui(&mut self, ui: &mut egui::Ui) {
         ui::pane_header(ui, "Model", "Source parts and faces");
-        self.button(ui, crate::commands::Action::Analysis);
+        ui.horizontal_wrapped(|ui| {
+            self.button(ui, crate::commands::Action::Analysis);
+            self.button(ui, crate::commands::Action::Arrange);
+        });
         if self.analysis.view.enabled {
             ui.weak(format!(
                 "Section {:?} · {:.3} mm",

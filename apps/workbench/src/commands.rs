@@ -15,6 +15,7 @@ mod tests {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Analysis,
+    Arrange,
     Library,
     New,
     Open,
@@ -42,6 +43,7 @@ pub enum Action {
 impl Action {
     pub const ALL: &[Self] = &[
         Self::Analysis,
+        Self::Arrange,
         Self::Library,
         Self::New,
         Self::Open,
@@ -69,6 +71,7 @@ impl Action {
     pub fn label(self) -> &'static str {
         match self {
             Self::Analysis => "Section analysis",
+            Self::Arrange => "Arrange…",
             Self::Library => "Library",
             Self::New => "New project",
             Self::Open => "Open project…",
@@ -137,6 +140,9 @@ impl Action {
         }
         let m = &state.manufacturing;
         match self {
+            Self::Arrange if state.scene.as_ref().is_none_or(|s| s.occurrence_count == 0) => {
+                Some("Import a part first")
+            }
             Self::LoadMaterial | Self::LoadMaterialCatalog
                 if !m.intent.as_ref().is_some_and(|i| {
                     matches!(

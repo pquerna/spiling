@@ -8,6 +8,8 @@ mod color;
 pub use catalog_review::{CatalogReviewAction, catalog_review};
 pub use catalog_search::{CatalogChoice, CatalogSearch};
 mod gallery;
+mod layout;
+pub use layout::layout_fields;
 mod seams;
 pub use gallery::gallery;
 pub use seams::{seam_policy_fields, seam_review, seam_summary};

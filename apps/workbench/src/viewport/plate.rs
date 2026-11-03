@@ -477,7 +477,7 @@ mod tests {
         let bytes = (g.surface.capacity() + g.lines.capacity() + g.height.capacity())
             * std::mem::size_of::<LineVertex>();
         // CPU staging plus two GPU generations fit the host's permanent reservation.
-        assert!(bytes * 3 < crate::scene::HARDWARE_DISPLAY_RESERVE_BYTES);
+        assert!(bytes * 3 < crate::scene::CONTEXT_DISPLAY_RESERVE_BYTES);
         assert!(Plate::current(None, None).is_none());
     }
     #[test]

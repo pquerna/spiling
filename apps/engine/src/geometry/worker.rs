@@ -171,6 +171,7 @@ pub enum Work {
         occurrences: Vec<OccurrenceRecord>,
     },
     PrepareBedPose(super::bed_pose::Request),
+    PrepareLayout(super::layout::Request),
 }
 /// The single bounded control slot keeps owned work inline, without per-job boxing.
 /// Private fields and constructors enforce that only Run carries work.
@@ -243,6 +244,7 @@ pub enum Product {
     },
     Preflight(PreflightReport),
     BedPosePrepared(BedPosePreparation),
+    LayoutPrepared(LayoutProposal),
     Verified {
         record: ManufacturingArtifactRecord,
         inspection: spiling_manufacturing::ManufacturingInspection,
@@ -539,6 +541,14 @@ fn run(
             }
             Work::Preflight(request) => {
                 preflight(request, &definitions, &cancel).map(Product::Preflight)
+            }
+            Work::PrepareLayout(request) => {
+                let natives = definitions
+                    .iter()
+                    .map(|(id, r)| (id.clone(), r.definition.clone()))
+                    .collect();
+                super::layout::prepare(request, &natives, &cancel, &report)
+                    .map(Product::LayoutPrepared)
             }
             Work::PrepareBedPose(request) => definitions
                 .get(&request.definition_id)
