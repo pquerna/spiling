@@ -10,8 +10,10 @@ mod beading;
 mod contours;
 mod fitting;
 mod qualification;
+mod schedule;
 mod separation;
 mod skeleton;
+pub(super) use schedule::source_command_height_limit;
 use skeleton::{BoundarySupport, MedialEdge};
 #[cfg(test)]
 mod tests;

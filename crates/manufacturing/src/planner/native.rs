@@ -2270,6 +2270,59 @@ fn capture_base(
         if let Some(material) = Arc::get_mut(&mut material) {
             region::canonicalize(material);
         }
+        let mut command_height_limit = super::walls::source_command_height_limit(
+            &material,
+            input.intent.printer.nozzle_diameter_mm,
+            surface_work,
+            cancel,
+        )?;
+        for (_, original) in &finished {
+            if let Some(limit) = super::walls::source_command_height_limit(
+                original,
+                input.intent.printer.nozzle_diameter_mm,
+                surface_work,
+                cancel,
+            )? && command_height_limit
+                .as_ref()
+                .is_none_or(|current| limit.maximum_mm < current.maximum_mm)
+            {
+                command_height_limit = Some(limit);
+            }
+        }
+        if let Some(limit) = command_height_limit {
+            if let Some(target) =
+                limit.first_violating(schedule, index..end, surface_work, cancel)?
+            {
+                if target > index {
+                    end = target;
+                    sizing.tighten(partition_end_z_bits, end - index);
+                    continue;
+                }
+                let layer = &schedule[index as usize];
+                let limits = input.intent.effective_deposition_limits();
+                let midpoint = layer.lower_z + (layer.z - layer.lower_z) * 0.5;
+                if limits.min_bead_width_mm > limit.maximum_mm
+                    || [midpoint - layer.lower_z, layer.z - midpoint]
+                        .into_iter()
+                        .any(|height| {
+                            height <= 2.0 * spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM
+                                || !input
+                                    .intent
+                                    .admits_deposition(input.intent.recipe.bead_width_mm, height)
+                        })
+                {
+                    return Err(error(
+                        ManufacturingErrorCode::UnsupportedGeometry,
+                        "source wall command-height constraint cannot preserve the captured process minima",
+                    ));
+                }
+                preflight::charge_capture_proposal_work(surface_work, schedule.len(), cancel)?;
+                split_layer(schedule, index, "source wall command-height constraint")?;
+                end = index + 1;
+                sizing.tighten(partition_end_z_bits, 1);
+                continue;
+            }
+        }
         source_area_mm2 += material.unsigned_area();
         let point_count = native_points
             .checked_add(

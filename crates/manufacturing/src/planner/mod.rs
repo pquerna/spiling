@@ -169,6 +169,23 @@ pub(crate) fn plan(
     let mut support_work = support::SupportWork::default();
     let mut span_sizing = native::NativeSpanSizing::default();
     let mut slab_pool = native::NativeSlabPool::default();
+    let schedule_bytes = MAX_PRINT_LAYERS as usize * std::mem::size_of::<LayerElevation>();
+    let outside = native_retry_outside_bytes(
+        &prepared_sources,
+        &admission,
+        &schedule,
+        &process_captures,
+        &span_sizing,
+    )?;
+    remaining_geometry_units(0, geometry_bytes(&[outside, schedule_bytes])?)?;
+    schedule
+        .try_reserve_exact(MAX_PRINT_LAYERS as usize - schedule.len())
+        .map_err(|_| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "source-owned schedule capacity reservation refused",
+            )
+        })?;
     // Freeze the original startup pair's physical scope. Retrying by current
     // layer count would shrink that scope each time one interval is split.
     let probe_scope = match input.intent.recipe.supports {
