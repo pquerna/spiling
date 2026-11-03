@@ -235,6 +235,40 @@ struct NativeRegularInterfacePairReceipt {
     matching: [u8; 32],
     geometry: [u8; 32],
 }
+#[derive(Debug)]
+struct NativeConvexCapAttachment {
+    endpoint: [u8; 32],
+    current: [u8; 32],
+    cut_bits: u64,
+    native_cap_bits: u64,
+    incidence_sha256: [u8; 32],
+    clearance_mm: f64,
+}
+
+fn convex_cap_attachment_matches(
+    attachments: &[NativeConvexCapAttachment],
+    previous: &NativeSourceLeafReceipt,
+    current: &NativeSourceLeafReceipt,
+    cut: f64,
+    allowance: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
+    let previous = leaf_fingerprint(previous);
+    let current = leaf_fingerprint(current);
+    for attachment in attachments {
+        work.charge(1, cancel)?;
+        if attachment.endpoint == previous
+            && attachment.current == current
+            && attachment.cut_bits == cut.to_bits()
+            && allowance < attachment.clearance_mm
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 impl NativeSourceLeafReceipt {
     pub(crate) fn material_realization_identity(
         &self,
@@ -2971,6 +3005,7 @@ pub struct PendingNativeUnionProof {
     endpoint_dependencies: Vec<NativeEndpointOwnership>,
     positive_leaves: Vec<NativeSourceLeafReceipt>,
     interface_attachments: Vec<NativeInterfaceAttachment>,
+    convex_cap_attachments: Vec<NativeConvexCapAttachment>,
     collar_dependencies: Vec<NativeCriticalCollarIncidence>,
     regular_interfaces: Vec<NativeRegularInterfacePairReceipt>,
     owned_critical_slab_count: usize,
@@ -3211,6 +3246,10 @@ impl PendingNativeUnionProof {
             .saturating_add(
                 self.interface_attachments.capacity()
                     * std::mem::size_of::<NativeInterfaceAttachment>(),
+            )
+            .saturating_add(
+                self.convex_cap_attachments.capacity()
+                    * std::mem::size_of::<NativeConvexCapAttachment>(),
             )
             .saturating_add(
                 self.interface_attachments
@@ -4055,6 +4094,7 @@ pub struct NativeUnionBindingLedger {
     last_upper: Option<f64>,
     sources: Vec<NativeUnionSourceCapture>,
     previous_positive: Vec<NativeSourceLeafReceipt>,
+    previous_cap_attachments: Vec<NativeConvexCapAttachment>,
     next_upper_dependencies: Vec<NativeUnionLeafDependency>,
     next_upper_empty: Vec<OccurrenceId>,
     previous_raw_inclusion_error_mm: f64,
@@ -4135,6 +4175,7 @@ impl NativeUnionBindingLedger {
             last_upper: None,
             sources: Vec::new(),
             previous_positive: Vec::new(),
+            previous_cap_attachments: Vec::new(),
             next_upper_dependencies: Vec::new(),
             next_upper_empty: Vec::new(),
             previous_raw_inclusion_error_mm: 0.0,
@@ -4160,6 +4201,8 @@ impl NativeUnionBindingLedger {
                 .iter()
                 .map(source_retained_bytes)
                 .sum::<usize>()
+            + self.previous_cap_attachments.capacity()
+                * std::mem::size_of::<NativeConvexCapAttachment>()
             + self.previous_positive.capacity() * std::mem::size_of::<NativeSourceLeafReceipt>()
             + self
                 .previous_positive
@@ -4383,6 +4426,24 @@ impl NativeUnionBindingLedger {
                         if !bounds_separated(a, b, margin)
                             && !rectangle_leaf_contact(
                                 previous, current, interface, allowance, work, cancel,
+                            )?
+                            && !convex_cap_attachment_matches(
+                                &pending.convex_cap_attachments,
+                                previous,
+                                current,
+                                interface,
+                                allowance,
+                                work,
+                                cancel,
+                            )?
+                            && !convex_cap_attachment_matches(
+                                &self.previous_cap_attachments,
+                                previous,
+                                current,
+                                interface,
+                                allowance,
+                                work,
+                                cancel,
                             )?
                         {
                             return Err(error(
@@ -4748,6 +4809,16 @@ impl NativeUnionBindingLedger {
             }
             digest.update(attachment.native_cell_incidence);
         }
+        digest.update((pending.convex_cap_attachments.len() as u64).to_le_bytes());
+        for attachment in &pending.convex_cap_attachments {
+            work.charge(1, cancel)?;
+            digest.update(attachment.endpoint);
+            digest.update(attachment.current);
+            digest.update(attachment.cut_bits.to_le_bytes());
+            digest.update(attachment.native_cap_bits.to_le_bytes());
+            digest.update(attachment.incidence_sha256);
+            digest.update(attachment.clearance_mm.to_bits().to_le_bytes());
+        }
         digest.update((pending.collar_dependencies.len() as u64).to_le_bytes());
         for collar in &pending.collar_dependencies {
             work.charge(1, cancel)?;
@@ -4781,6 +4852,7 @@ impl NativeUnionBindingLedger {
             self.sources = std::mem::take(&mut pending.sources);
         }
         self.previous_positive = std::mem::take(&mut pending.positive_leaves);
+        self.previous_cap_attachments = std::mem::take(&mut pending.convex_cap_attachments);
         self.next_upper_dependencies = next_upper;
         self.next_upper_empty = next_upper_empty;
         self.previous_raw_inclusion_error_mm = pending.raw_leaf_to_candidate_error_mm;
@@ -6546,6 +6618,7 @@ pub fn certify_native_union(
         prepare_target_envelopes(occurrences, &active, &mut scratch, work, cancel)?;
     let CollarCrossIncidenceAttachments {
         rectangular: collar_attachments,
+        convex: convex_cap_attachments,
         source_products,
     } = certify_collar_cross_incidence(
         &CollarCrossIncidenceQuery {
@@ -6592,6 +6665,7 @@ pub fn certify_native_union(
             active: &active,
             candidate: candidate_union_loops,
             source_products: &source_products,
+            cap_attachments: &convex_cap_attachments,
             policy,
         },
         target_envelopes,
@@ -6618,7 +6692,8 @@ pub fn certify_native_union(
                 .directed_sample_to_closed_source_error_mm(),
         );
     }
-    let mut requires_interface_complex = mixed_varying || !interface_attachments.is_empty();
+    let mut requires_interface_complex =
+        mixed_varying || !interface_attachments.is_empty() || !convex_cap_attachments.is_empty();
     for dependency in &endpoint_dependencies {
         work.charge(1, cancel)?;
         let mut same_current_product = false;
@@ -6670,6 +6745,7 @@ pub fn certify_native_union(
         endpoint_dependencies,
         positive_leaves,
         interface_attachments,
+        convex_cap_attachments,
         owned_critical_slab_count,
         collar_dependencies,
         regular_interfaces: Vec::new(),
@@ -6829,7 +6905,462 @@ struct CollarCrossIncidenceQuery<'a, 'source> {
 
 struct CollarCrossIncidenceAttachments {
     rectangular: Vec<NativeInterfaceAttachment>,
+    convex: Vec<NativeConvexCapAttachment>,
     source_products: Vec<[u8; 32]>,
+}
+
+fn native_trim_controls_in_support(
+    curve: &dyn crate::parametric::CurveEvaluator,
+    range: [f64; 2],
+    direction: [Interval; 3],
+    offset: Interval,
+    supports: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    use crate::exact_coefficient::ExactCoefficient as Coefficient;
+    work.charge(1, cancel)?;
+    if direction
+        .iter()
+        .chain([&offset])
+        .any(|value| !value.is_point())
+    {
+        return Ok(false);
+    }
+    let Some(spline) = crate::parametric::native_curve_nurbs(curve)? else {
+        return Ok(false);
+    };
+    let mut weight_sign = None;
+    for point in spline.cpts() {
+        work.charge(1, cancel)?;
+        let weight = if spline.is_rational() { point.w } else { 1.0 };
+        if weight == 0.0 || weight_sign.is_some_and(|sign| sign != (weight > 0.0)) {
+            return Ok(false);
+        }
+        weight_sign = Some(weight > 0.0);
+        let coordinates = [point.x, point.y, point.z];
+        Interval::new(weight, weight)?;
+        for (side, support) in supports.into_iter().enumerate() {
+            let Some(mut reference) = Coefficient::difference(offset.lo, support[0]) else {
+                return Ok(false);
+            };
+            if reference.push(-support[1]).is_none() {
+                return Ok(false);
+            }
+            let Some(mut residual) =
+                reference.product(&Coefficient::point(weight), work, cancel)?
+            else {
+                return Ok(false);
+            };
+            for (axis, &component) in direction.iter().enumerate() {
+                if component.lo == 0.0 {
+                    continue;
+                }
+                Interval::new(coordinates[axis], coordinates[axis])?;
+                let Some(term) = Coefficient::point(coordinates[axis]).product(
+                    &Coefficient::point(component.lo),
+                    work,
+                    cancel,
+                )?
+                else {
+                    return Ok(false);
+                };
+                for &value in &term.terms[..term.len] {
+                    if residual.push(value).is_none() {
+                        return Ok(false);
+                    }
+                }
+            }
+            let sign = residual.sign() * if weight > 0.0 { 1 } else { -1 };
+            if side == 0 && sign < 0 || side == 1 && sign > 0 {
+                return Ok(false);
+            }
+        }
+    }
+    if weight_sign.is_none() {
+        return Ok(false);
+    }
+    crate::parametric::curve_parameter_span_continuous(curve, range, work, cancel)
+}
+
+fn native_cap_affine_map(surface: &solidcore::surface::surface::Surface) -> Option<AffineFace> {
+    if let Some(spline) = crate::parametric::native_surface_nurbs(surface).ok()?
+        && (spline.u_knots() != [0.0, 0.0, 1.0, 1.0] || spline.v_knots() != [0.0, 0.0, 1.0, 1.0])
+    {
+        return None;
+    }
+    native_affine_face(surface)
+}
+
+fn native_cap_in_rectangle(
+    source: &SlabOccurrence<'_, '_>,
+    face_index: usize,
+    rectangle: &NativeRectangleLeafWitness,
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let checkpoint = scratch.bytes;
+    let result = (|| {
+        scratch.owned(
+            8 * std::mem::size_of::<crate::exact_coefficient::ExactCoefficient>()
+                + crate::kernel::trim::NATIVE_SPATIAL_QUERY_SCRATCH_BYTES,
+            work,
+            cancel,
+        )?;
+        let Some((axes, signs)) = signed_axis_pose(source.pose) else {
+            return Ok(false);
+        };
+        let view = source.source.source_view()?;
+        let domain = view.face_domain(face_index, scratch.remaining(), work, cancel)?;
+        let Some(surface) = domain.surface_evaluator().native_surface() else {
+            return Ok(false);
+        };
+        let Some(affine) = native_cap_affine_map(surface) else {
+            return Ok(false);
+        };
+        let determinant = Interval::point(affine.u[axes[0]])
+            .mul(Interval::point(affine.v[axes[1]]))
+            .sub(Interval::point(affine.u[axes[1]]).mul(Interval::point(affine.v[axes[0]])));
+        if determinant.contains_zero() {
+            return Ok(false);
+        }
+        let functionals: [(Interval, [Interval; 3]); 2] = std::array::from_fn(|axis| {
+            let row = axes[axis];
+            (
+                Interval::point(signs[axis])
+                    .mul(Interval::point(affine.origin[row]))
+                    .add(Interval::point(source.pose.translation_mm[axis])),
+                [
+                    Interval::point(signs[axis]).mul(Interval::point(affine.u[row])),
+                    Interval::point(signs[axis]).mul(Interval::point(affine.v[row])),
+                    Interval::point(0.0),
+                ],
+            )
+        });
+        let contained = |image: Interval, axis: usize| {
+            native_support_interval([
+                rectangle.bounds[axis][0],
+                rectangle.support_residuals[axis][0],
+            ])
+            .hi <= image.lo
+                && image.hi
+                    <= native_support_interval([
+                        rectangle.bounds[axis][1],
+                        rectangle.support_residuals[axis][1],
+                    ])
+                    .lo
+        };
+        for (wire, &[start, end]) in domain.loops().iter().enumerate() {
+            work.charge(1, cancel)?;
+            if start == end {
+                return Ok(false);
+            }
+            for index in start..end {
+                work.charge(1, cancel)?;
+                let coedge = domain.coedge(index)?;
+                if coedge.identity().wire_index != wire {
+                    return Ok(false);
+                }
+                for (axis, &(offset, direction)) in functionals.iter().enumerate() {
+                    let Some(image) = crate::parametric::native_curve_functional_control_bounds(
+                        coedge.curve(),
+                        coedge.uv_range,
+                        direction,
+                        offset,
+                        work,
+                        cancel,
+                    )?
+                    else {
+                        return Ok(false);
+                    };
+                    if !contained(image, axis)
+                        && !native_trim_controls_in_support(
+                            coedge.curve(),
+                            coedge.uv_range,
+                            direction,
+                            offset,
+                            std::array::from_fn(|side| {
+                                [
+                                    rectangle.bounds[axis][side],
+                                    rectangle.support_residuals[axis][side],
+                                ]
+                            }),
+                            work,
+                            cancel,
+                        )?
+                    {
+                        return Ok(false);
+                    }
+                }
+                let next = if index + 1 == end { start } else { index + 1 };
+                let (_, connection) = domain.native_joint_cover(index, next, work, cancel)?;
+                for (axis, &(offset, direction)) in functionals.iter().enumerate() {
+                    let image = offset
+                        .add(direction[0].mul(connection[0]))
+                        .add(direction[1].mul(connection[1]));
+                    if !contained(image, axis) {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(!domain.loops().is_empty())
+    })();
+    scratch.bytes = checkpoint;
+    result
+}
+
+fn native_cap_overlap_clearance(
+    rectangle_leaf: &NativeSourceLeafReceipt,
+    rectangle: &NativeRectangleLeafWitness,
+    target: &NativeSourceLeafReceipt,
+    policy: NativeUnionPolicy,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<f64>, GeometryError> {
+    if target.sample_loops.len() != 1 || target.sample_loops[0].hole {
+        return Ok(None);
+    }
+    let shape = &target.sample_loops[0].shape;
+    let margin = Interval::point(rectangle_leaf.native_shape_error_policy_mm())
+        .add(Interval::point(target.native_shape_error_policy_mm()))
+        .add(Interval::point(policy.candidate_coordinate_error_mm))
+        .add(Interval::point(rectangle.coordinate_error_mm));
+    let mut clearance = Interval::point(shape.kernel_radius_mm).sub(margin).lo;
+    for halfplane in rectangle.actual_material_left_halfplanes {
+        work.charge(1, cancel)?;
+        let normal = halfplane[0].square().add(halfplane[1].square()).sqrt()?;
+        if normal.lo <= 0.0 {
+            return Ok(None);
+        }
+        clearance = clearance.min(
+            halfplane[0]
+                .mul(Interval::point(shape.center[0]))
+                .add(halfplane[1].mul(Interval::point(shape.center[1])))
+                .add(halfplane[2])
+                .div(normal)?
+                .sub(margin)
+                .lo,
+        );
+    }
+    Ok((clearance.is_finite() && clearance > 0.0).then_some(clearance))
+}
+
+fn rectangle_owned_cap_interface(
+    contact: &NativeEndpointOwnership,
+    source: &SlabOccurrence<'_, '_>,
+    policy: NativeUnionPolicy,
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<NativeConvexCapAttachment>, GeometryError> {
+    work.charge(1, cancel)?;
+    let previous = &contact.adjacent;
+    let Some(rectangle) = &previous.rectangle else {
+        return Ok(None);
+    };
+    let Some(current) = source.leaf else {
+        return Ok(None);
+    };
+    let cut = contact.world_height_interval_mm[0];
+    if contact.endpoint != NativeOwnedEndpoint::Lower
+        || rectangle.height_supports[1] != [cut, 0.0]
+        || previous.world_height_interval_mm()[1] != cut
+        || current.world_height_interval_mm() != contact.world_height_interval_mm
+        || current.sample_world_z_mm() <= cut
+        || !current.is_positive()
+        || current.proof_kind != NativeSourceLeafProofKind::ClosedSlab
+        || !current.native_endpoint_closure[0]
+        || current.critical_interfaces[1]
+        || current.closed_shape_error_mm().is_none()
+        || current.pose() != source.pose
+        || source.analysis.placed_pose() != Some(source.pose)
+        || source.analysis.world_height_interval_mm() != Some(current.world_height_interval_mm())
+        || source.analysis.sample_world_z_mm() != Some(current.sample_world_z_mm())
+        || source.analysis.world_shape_error_policy_mm()
+            != Some(current.native_shape_error_policy_mm())
+        || !source
+            .analysis
+            .matches_native_material(source.source.definition())
+        || !current
+            .source
+            .matches_native_material(source.source.definition())
+    {
+        return Ok(None);
+    }
+    let Some((axes, signs)) = signed_axis_pose(source.pose) else {
+        return Ok(None);
+    };
+    let row = super::placed::rotation(source.pose)?[2];
+    let functional = super::HeightFunctional {
+        direction: row,
+        offset: Interval::point(source.pose.translation_mm[2]),
+    };
+    let definition = source.source.definition();
+    let mut cap = None;
+    for face_index in 0..definition.face_ids().len() {
+        work.charge(1, cancel)?;
+        if super::slab::constant_source_face_height(
+            definition, face_index, functional, work, cancel,
+        )? != Some(Interval::point(cut))
+        {
+            continue;
+        }
+        if cap.is_some() {
+            return Ok(None);
+        }
+        let (_, face) = super::source_incidence::native_face(definition, face_index)?;
+        let Some(affine) = face.surface.as_ref().and_then(native_cap_affine_map) else {
+            return Ok(None);
+        };
+        let transverse = axes[2];
+        let first = (transverse + 1) % 3;
+        let second = (transverse + 2) % 3;
+        let normal = Interval::point(affine.u[first])
+            .mul(Interval::point(affine.v[second]))
+            .sub(Interval::point(affine.u[second]).mul(Interval::point(affine.v[first])))
+            .mul(Interval::point(signs[2]));
+        let orientation =
+            super::source_incidence::face_orientation(definition, face_index, work, cancel)?;
+        let outward = if orientation { normal } else { normal.neg() };
+        if outward.hi >= 0.0
+            || !native_cap_in_rectangle(source, face_index, rectangle, scratch, work, cancel)?
+        {
+            return Ok(None);
+        }
+        cap = Some(face_index);
+    }
+    let Some(face_index) = cap else {
+        return Ok(None);
+    };
+    let Some(clearance_mm) =
+        native_cap_overlap_clearance(previous, rectangle, current, policy, work, cancel)?
+    else {
+        return Ok(None);
+    };
+    let endpoint = leaf_fingerprint(previous);
+    let current = leaf_fingerprint(current);
+    let mut digest = Sha256::new();
+    digest.update(b"native-exact-cut-rectangle-cap-v1");
+    digest.update(endpoint);
+    digest.update(current);
+    digest.update(cut.to_bits().to_le_bytes());
+    digest.update((face_index as u64).to_le_bytes());
+    Ok(Some(NativeConvexCapAttachment {
+        endpoint,
+        current,
+        cut_bits: cut.to_bits(),
+        native_cap_bits: cut.to_bits(),
+        incidence_sha256: digest.finalize().into(),
+        clearance_mm,
+    }))
+}
+
+fn rectangle_collar_cap_interface(
+    rectangle_leaf: &NativeSourceLeafReceipt,
+    source: &SlabOccurrence<'_, '_>,
+    collar: &NativeCriticalCollarIncidence,
+    policy: NativeUnionPolicy,
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<NativeConvexCapAttachment>, GeometryError> {
+    work.charge(1, cancel)?;
+    let Some(rectangle) = &rectangle_leaf.source_rectangle else {
+        return Ok(None);
+    };
+    let Some(complex) = &source.analysis.collar_complex else {
+        return Ok(None);
+    };
+    let mut events = complex.event_faces();
+    let Some((face, height, sign)) = events.next() else {
+        return Ok(None);
+    };
+    let row = super::placed::rotation(source.pose)?[2];
+    let exact_height = super::slab::constant_source_face_height(
+        source.source.definition(),
+        face,
+        super::HeightFunctional {
+            direction: row,
+            offset: Interval::point(source.pose.translation_mm[2]),
+        },
+        work,
+        cancel,
+    )?;
+    if events.next().is_some()
+        || !complex.boundary_critical_bands().is_empty()
+        || height[0] != height[1]
+        || sign != -1
+        || exact_height != Some(Interval::point(height[0]))
+        || rectangle.height_supports[1] != [height[0], 0.0]
+        || rectangle_leaf.sample_world_z_mm() >= height[0]
+        || rectangle_leaf.world_height_interval_mm()[1] < height[0]
+        || collar.used_source_leaves().len() != 1
+    {
+        return Ok(None);
+    }
+    let target = &collar.used_source_leaves()[0];
+    let current = collar.current_leaf();
+    let Some(source_leaf) = source.leaf else {
+        return Ok(None);
+    };
+    if !same_leaf(source_leaf, current)
+        || !source
+            .analysis
+            .matches_native_material(source.source.definition())
+        || !current
+            .source
+            .matches_native_material(source.source.definition())
+        || !target.source.same_native_material(&current.source)
+        || target.occurrence_id() != current.occurrence_id()
+        || current.pose() != source.pose
+        || target.pose() != source.pose
+        || source.analysis.placed_pose() != Some(source.pose)
+        || source.analysis.world_height_interval_mm() != Some(current.world_height_interval_mm())
+        || source.analysis.sample_world_z_mm() != Some(current.sample_world_z_mm())
+        || source.analysis.world_shape_error_policy_mm()
+            != Some(current.native_shape_error_policy_mm())
+    {
+        return Ok(None);
+    }
+    let cut = if current.is_positive() {
+        if !same_leaf(current, target) || current.world_height_interval_mm()[0] != height[0] {
+            return Ok(None);
+        }
+        height[0]
+    } else {
+        let upper = current.world_height_interval_mm()[1];
+        if current.sample_world_z_mm() >= height[0]
+            || target.world_height_interval_mm()[0] != upper
+            || !collar.inner.proved_interfaces[1]
+        {
+            return Ok(None);
+        }
+        upper
+    };
+    if rectangle_leaf.world_height_interval_mm()[1] != cut
+        || target.closed_shape_error_mm().is_none()
+        || target.sample_world_z_mm() <= height[0]
+        || target.sample_loops.len() != 1
+        || target.sample_loops[0].hole
+        || !native_cap_in_rectangle(source, face, rectangle, scratch, work, cancel)?
+    {
+        return Ok(None);
+    }
+    let Some(clearance) =
+        native_cap_overlap_clearance(rectangle_leaf, rectangle, target, policy, work, cancel)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(NativeConvexCapAttachment {
+        endpoint: leaf_fingerprint(rectangle_leaf),
+        current: leaf_fingerprint(target),
+        cut_bits: cut.to_bits(),
+        native_cap_bits: height[0].to_bits(),
+        incidence_sha256: *collar.incidence_sha256(),
+        clearance_mm: clearance,
+    }))
 }
 
 fn certify_collar_cross_incidence(
@@ -6847,6 +7378,7 @@ fn certify_collar_cross_incidence(
         policy,
     } = query;
     let mut attachments = Vec::new();
+    let mut convex_attachments = Vec::new();
     let mut source_products = Vec::new();
     for collar in collars {
         let own = collar.current_leaf();
@@ -6966,6 +7498,85 @@ fn certify_collar_cross_incidence(
                 }
                 continue;
             }
+            let mut convex = None;
+            if let Some(contact) = &own_contact {
+                convex =
+                    rectangle_owned_cap_interface(contact, other, policy, scratch, work, cancel)?;
+            }
+            if convex.is_none()
+                && let Some(other_collar) = other_collar
+            {
+                let rectangle_leaf = own_contact
+                    .as_ref()
+                    .map_or(own, |contact| &contact.adjacent);
+                convex = rectangle_collar_cap_interface(
+                    rectangle_leaf,
+                    other,
+                    other_collar,
+                    policy,
+                    scratch,
+                    work,
+                    cancel,
+                )?;
+            }
+            if convex.is_none()
+                && (other_leaf.source_rectangle.is_some() || other_contact.is_some())
+            {
+                work.charge(active.len() as u64, cancel)?;
+                let own_source = active
+                    .iter()
+                    .find(|value| value.occurrence_index == source)
+                    .ok_or_else(|| {
+                        error(
+                            GeometryErrorCode::InvalidGeometry,
+                            "critical native cap lost its active original source",
+                        )
+                    })?;
+                if let Some(contact) = &other_contact {
+                    convex = rectangle_owned_cap_interface(
+                        contact, own_source, policy, scratch, work, cancel,
+                    )?;
+                }
+                let rectangle_leaf = other_contact
+                    .as_ref()
+                    .map_or(other_leaf, |contact| &contact.adjacent);
+                if convex.is_none() {
+                    convex = rectangle_collar_cap_interface(
+                        rectangle_leaf,
+                        own_source,
+                        collar,
+                        policy,
+                        scratch,
+                        work,
+                        cancel,
+                    )?;
+                }
+            }
+            if let Some(proof) = convex {
+                for leaf in [own, other_leaf] {
+                    if leaf.source_rectangle.is_some() {
+                        let fingerprint = leaf_fingerprint(leaf);
+                        work.charge(source_products.len() as u64, cancel)?;
+                        if !source_products.contains(&fingerprint) {
+                            scratch.push(&mut source_products, fingerprint, work, cancel)?;
+                        }
+                    }
+                }
+                work.charge(convex_attachments.len() as u64, cancel)?;
+                if !convex_attachments
+                    .iter()
+                    .any(|old: &NativeConvexCapAttachment| {
+                        old.endpoint == proof.endpoint
+                            && old.current == proof.current
+                            && old.cut_bits == proof.cut_bits
+                            && old.native_cap_bits == proof.native_cap_bits
+                            && old.incidence_sha256 == proof.incidence_sha256
+                    })
+                {
+                    scratch.push(&mut convex_attachments, proof, work, cancel)?;
+                }
+                continue;
+            }
             return Err(native_pair_error(
                 occurrences,
                 source,
@@ -7002,6 +7613,7 @@ fn certify_collar_cross_incidence(
     }
     Ok(CollarCrossIncidenceAttachments {
         rectangular: attachments,
+        convex: convex_attachments,
         source_products,
     })
 }
@@ -7652,6 +8264,7 @@ struct InteractionGroupsQuery<'a, 'source> {
     active: &'a [SlabOccurrence<'source, 'source>],
     candidate: &'a [SectionLoopMm],
     source_products: &'a [[u8; 32]],
+    cap_attachments: &'a [NativeConvexCapAttachment],
     policy: NativeUnionPolicy,
 }
 
@@ -7667,6 +8280,7 @@ fn certify_interaction_groups(
         active,
         candidate,
         source_products,
+        cap_attachments,
         policy,
     } = query;
     let mut parents = Vec::new();
@@ -7782,8 +8396,52 @@ fn certify_interaction_groups(
                 indices: Some(&indices),
             };
             let mut profiles = Vec::new();
-            let multi = members.len() > 1;
-            let leaf = members[0].leaf.unwrap();
+            let mut positive_member = None;
+            let mut positive_count = 0;
+            for member in &members {
+                work.charge(1, cancel)?;
+                if member.leaf.unwrap().is_positive() {
+                    positive_count += 1;
+                    positive_member = Some(member);
+                }
+            }
+            let mut cap_closed_singleton = members.len() > 1 && positive_count == 1;
+            if cap_closed_singleton {
+                let positive = positive_member.unwrap().leaf.unwrap();
+                for member in &members {
+                    work.charge(1, cancel)?;
+                    if member.leaf.unwrap().is_positive() {
+                        continue;
+                    }
+                    let contact = match &original[member.occurrence_index].evidence {
+                        NativeUnionOccurrenceEvidence::SlabWithCollar { collar, .. } => {
+                            collar_endpoint_contact(collar)
+                        }
+                        _ => None,
+                    };
+                    let proved = if let Some(contact) = contact {
+                        contact.endpoint == NativeOwnedEndpoint::Lower
+                            && convex_cap_attachment_matches(
+                                cap_attachments,
+                                &contact.adjacent,
+                                positive,
+                                contact.world_height_interval_mm[0],
+                                0.0,
+                                work,
+                                cancel,
+                            )?
+                    } else {
+                        false
+                    };
+                    cap_closed_singleton &= proved;
+                }
+            }
+            let multi = members.len() > 1 && !cap_closed_singleton;
+            let leaf = if cap_closed_singleton {
+                positive_member.unwrap().leaf.unwrap()
+            } else {
+                members[0].leaf.unwrap()
+            };
             let source_material_preserved = !multi
                 && leaf.is_positive()
                 && preserves_source_material(leaf, view, scratch, work, cancel)?;
@@ -7844,7 +8502,11 @@ fn certify_interaction_groups(
             } else {
                 group_stationary = leaf.native_world_z_invariant;
                 let bound = if source_material_preserved
-                    && members[0].source_metric == leaf.proof_kind
+                    && (if cap_closed_singleton {
+                        positive_member.unwrap().source_metric
+                    } else {
+                        members[0].source_metric
+                    }) == leaf.proof_kind
                     && policy.candidate_coordinate_error_mm
                         == leaf.policy.candidate_coordinate_error_mm
                 {
@@ -13080,6 +13742,639 @@ mod tests {
             .unwrap();
         let completed = ledger.finalize(&mut work, &cancel).unwrap();
         assert_eq!(completed.sources().len(), 2);
+    }
+
+    #[test]
+    fn exact_cut_owned_rectangle_attaches_only_to_complete_native_bottom_cap() {
+        let box_definition = original("box-mm.step");
+        let cylinder_definition = original("cylinder.step");
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(300_000_000);
+        let box_source = crate::prepare_solid(
+            &box_definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let cylinder_source = crate::prepare_solid(
+            &cylinder_definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let pose = RigidPoseMm {
+            translation_mm: [10.0, 5.0, 8.0],
+            ..RigidPoseMm::IDENTITY
+        };
+        let previous = ranged_slab(
+            &box_source,
+            RigidPoseMm::IDENTITY,
+            [7.6, 8.0],
+            7.8,
+            0,
+            &mut work,
+        );
+        let empty = ranged_slab(
+            &box_source,
+            RigidPoseMm::IDENTITY,
+            [8.0, 8.4],
+            8.2,
+            0,
+            &mut work,
+        );
+        let current = ranged_slab(&cylinder_source, pose, [8.0, 8.4], 8.2, 0, &mut work);
+        let previous_material = xy_candidate(&previous, 7.8);
+        let current_material = xy_candidate(&current, 8.2);
+        let previous_leaf =
+            source_leaf(&box_source, 1, RigidPoseMm::IDENTITY, &previous, &mut work);
+        let empty_leaf = source_leaf(&box_source, 1, RigidPoseMm::IDENTITY, &empty, &mut work);
+        let current_leaf = source_leaf(&cylinder_source, 2, pose, &current, &mut work);
+        let collar = collar_for(
+            &box_source,
+            &empty,
+            &empty_leaf,
+            &[],
+            &[NativeCriticalCollarTarget {
+                leaf: &previous_leaf,
+                actual_material: &previous_material,
+            }],
+            &mut work,
+        )
+        .unwrap();
+        let contact = collar_endpoint_contact(&collar).unwrap();
+        let source = SlabOccurrence {
+            occurrence_index: 1,
+            source: &cylinder_source,
+            pose,
+            analysis: &current,
+            source_metric: current_leaf.proof_kind,
+            leaf: Some(&current_leaf),
+        };
+        let mut scratch = Scratch { bytes: 0 };
+        let proof = rectangle_owned_cap_interface(
+            &contact,
+            &source,
+            policy(0.0),
+            &mut scratch,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            convex_cap_attachment_matches(
+                std::slice::from_ref(&proof),
+                &previous_leaf,
+                &current_leaf,
+                8.0,
+                0.0,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        assert!(current_leaf.rectangle.is_none());
+        for changed in [
+            {
+                let mut value = contact.clone();
+                value.endpoint = NativeOwnedEndpoint::Upper;
+                value
+            },
+            {
+                let mut value = contact.clone();
+                value.world_height_interval_mm[0] = up(8.0);
+                value
+            },
+            {
+                let mut value = contact.clone();
+                value.adjacent.rectangle = None;
+                value
+            },
+        ] {
+            assert!(
+                rectangle_owned_cap_interface(
+                    &changed,
+                    &source,
+                    policy(0.0),
+                    &mut scratch,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+        let mut changed_source = source;
+        changed_source.pose.translation_mm[0] += 1.0;
+        assert!(
+            rectangle_owned_cap_interface(
+                &contact,
+                &changed_source,
+                policy(0.0),
+                &mut scratch,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .is_none()
+        );
+        for (mut budget, cancelled, expected) in [
+            (
+                GeometryWorkBudget::new(0),
+                AtomicBool::new(false),
+                GeometryErrorCode::ResourceLimit,
+            ),
+            (
+                GeometryWorkBudget::new(300_000_000),
+                AtomicBool::new(true),
+                GeometryErrorCode::Cancelled,
+            ),
+        ] {
+            assert_eq!(
+                rectangle_owned_cap_interface(
+                    &contact,
+                    &source,
+                    policy(0.0),
+                    &mut scratch,
+                    &mut budget,
+                    &cancelled,
+                )
+                .unwrap_err()
+                .code,
+                expected
+            );
+        }
+        assert_eq!(
+            rectangle_owned_cap_interface(
+                &contact,
+                &source,
+                policy(0.0),
+                &mut Scratch {
+                    bytes: MAX_SCRATCH - 1
+                },
+                &mut work,
+                &cancel,
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(scratch.bytes, 0);
+        for reversed in [false, true] {
+            let mut occurrences = [
+                sampled_occurrence(&box_source, &empty, &empty_leaf, Some(&collar)),
+                sampled_occurrence(&cylinder_source, &current, &current_leaf, None),
+            ];
+            if reversed {
+                occurrences.reverse();
+            }
+            let pending = certify_native_union(
+                &occurrences,
+                &current_material,
+                policy(0.0),
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            assert_eq!(pending.convex_cap_attachments.len(), 1);
+            assert_eq!(
+                pending.coverage(),
+                NativeUnionCoverage::NativeInterfaceComplex
+            );
+        }
+    }
+
+    #[test]
+    fn exact_native_cap_attaches_through_straddling_collar_without_promoting_leaf_scope() {
+        let box_definition = original("box-mm.step");
+        let cylinder_definition = original("cylinder.step");
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(300_000_000);
+        let box_source = crate::prepare_solid(
+            &box_definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let cylinder_source = crate::prepare_solid(
+            &cylinder_definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let pose = RigidPoseMm {
+            translation_mm: [10.0, 5.0, 8.0],
+            ..RigidPoseMm::IDENTITY
+        };
+        let cut = up(8.0);
+        let lower = ranged_slab(
+            &box_source,
+            RigidPoseMm::IDENTITY,
+            [7.9, cut],
+            7.95,
+            0,
+            &mut work,
+        );
+        let empty = ranged_slab(&cylinder_source, pose, [7.9, cut], 7.95, 0, &mut work);
+        let upper = ranged_slab(&cylinder_source, pose, [cut, 8.4], 8.2, 0, &mut work);
+        let lower_material = xy_candidate(&lower, 7.95);
+        let upper_material = xy_candidate(&upper, 8.2);
+        let lower_leaf = source_leaf(&box_source, 1, RigidPoseMm::IDENTITY, &lower, &mut work);
+        let empty_leaf = source_leaf(&cylinder_source, 2, pose, &empty, &mut work);
+        let upper_leaf = source_leaf(&cylinder_source, 2, pose, &upper, &mut work);
+        let box_collar = collar_for(
+            &box_source,
+            &lower,
+            &lower_leaf,
+            &lower_material,
+            &[],
+            &mut work,
+        )
+        .unwrap();
+        let upper_collar = collar_for(
+            &cylinder_source,
+            &empty,
+            &empty_leaf,
+            &[],
+            &[NativeCriticalCollarTarget {
+                leaf: &upper_leaf,
+                actual_material: &upper_material,
+            }],
+            &mut work,
+        )
+        .unwrap();
+        assert!(upper_leaf.rectangle.is_none());
+        assert!(lower_leaf.rectangle.is_none());
+        assert!(lower_leaf.source_rectangle.is_some());
+        assert_eq!(
+            lower_leaf.proof_kind,
+            NativeSourceLeafProofKind::SampleToClosedSource
+        );
+        let cap_source = SlabOccurrence {
+            occurrence_index: 1,
+            source: &cylinder_source,
+            pose,
+            analysis: &empty,
+            source_metric: empty_leaf.proof_kind,
+            leaf: Some(&empty_leaf),
+        };
+        let mut scratch = Scratch { bytes: 0 };
+        let attachment = rectangle_collar_cap_interface(
+            &lower_leaf,
+            &cap_source,
+            &upper_collar,
+            policy(0.0),
+            &mut scratch,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let attachment = attachment.unwrap();
+        assert_eq!(attachment.native_cap_bits, 8.0_f64.to_bits());
+        assert_eq!(attachment.cut_bits, cut.to_bits());
+        assert_eq!(
+            attachment.incidence_sha256,
+            *upper_collar.incidence_sha256()
+        );
+        for (cut, allowance, expected) in [
+            (cut, 0.0, true),
+            (8.0, 0.0, false),
+            (cut, attachment.clearance_mm, false),
+        ] {
+            assert_eq!(
+                convex_cap_attachment_matches(
+                    std::slice::from_ref(&attachment),
+                    &lower_leaf,
+                    &upper_leaf,
+                    cut,
+                    allowance,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap(),
+                expected
+            );
+        }
+        let mut stale = upper_leaf.clone();
+        stale.sample_world_z_mm += 1e-7;
+        assert!(
+            !convex_cap_attachment_matches(
+                std::slice::from_ref(&attachment),
+                &lower_leaf,
+                &stale,
+                cut,
+                0.0,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        let changed_source = |occurrence_id, pose| NativeUnionSourceCapture {
+            identity: Arc::new(NativeUnionSourceIdentity {
+                occurrence_id,
+                definition_id: lower_leaf.definition_id().clone(),
+                material_realization: lower_leaf.source.material_realization_identity(),
+                pose,
+            }),
+            native_shape_error_policy_mm: lower_leaf.native_shape_error_policy_mm(),
+        };
+        for changed in [
+            {
+                let mut changed = lower_leaf.clone();
+                let mut pose = changed.pose();
+                pose.translation_mm[0] += 1.0;
+                changed.source = changed_source(changed.occurrence_id(), pose);
+                changed
+            },
+            {
+                let mut changed = lower_leaf.clone();
+                changed.candidate_geometry_sha256[0] ^= 1;
+                changed
+            },
+            {
+                let mut changed = lower_leaf.clone();
+                changed.source = changed_source(OccurrenceId::new(3).unwrap(), changed.pose());
+                changed
+            },
+        ] {
+            assert!(
+                !convex_cap_attachment_matches(
+                    std::slice::from_ref(&attachment),
+                    &changed,
+                    &upper_leaf,
+                    cut,
+                    0.0,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+            );
+        }
+        let mut stale_source = cap_source;
+        stale_source.pose.translation_mm[0] += 1.0;
+        assert!(
+            rectangle_collar_cap_interface(
+                &lower_leaf,
+                &stale_source,
+                &upper_collar,
+                policy(0.0),
+                &mut scratch,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            rectangle_collar_cap_interface(
+                &lower_leaf,
+                &cap_source,
+                &upper_collar,
+                policy(0.0),
+                &mut Scratch {
+                    bytes: MAX_SCRATCH - 1
+                },
+                &mut work,
+                &cancel,
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        assert_eq!(scratch.bytes, 0);
+        let mut missing = lower_leaf.clone();
+        missing.source_rectangle = None;
+        assert!(
+            rectangle_collar_cap_interface(
+                &missing,
+                &cap_source,
+                &upper_collar,
+                policy(0.0),
+                &mut scratch,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none()
+        );
+        let mut wrong_cut = lower_leaf.clone();
+        wrong_cut.world_height_interval_mm[1] = 8.0;
+        assert!(
+            rectangle_collar_cap_interface(
+                &wrong_cut,
+                &cap_source,
+                &upper_collar,
+                policy(0.0),
+                &mut scratch,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none()
+        );
+        let occurrences = [
+            sampled_occurrence(&box_source, &lower, &lower_leaf, Some(&box_collar)),
+            sampled_occurrence(&cylinder_source, &empty, &empty_leaf, Some(&upper_collar)),
+        ];
+        assert_eq!(
+            rectangle_collar_cap_interface(
+                &lower_leaf,
+                &cap_source,
+                &upper_collar,
+                policy(0.0),
+                &mut scratch,
+                &mut GeometryWorkBudget::new(0),
+                &cancel
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        assert_eq!(
+            rectangle_collar_cap_interface(
+                &lower_leaf,
+                &cap_source,
+                &upper_collar,
+                policy(0.0),
+                &mut scratch,
+                &mut work,
+                &AtomicBool::new(true)
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::Cancelled,
+        );
+        let mut pending = super::certify_native_union(
+            &occurrences,
+            &lower_material,
+            policy(0.0),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(pending.convex_cap_attachments.len(), 1);
+        assert_eq!(
+            pending.coverage(),
+            NativeUnionCoverage::NativeInterfaceComplex
+        );
+        assert_eq!(pending.material_component_count(), 1);
+        let reversed = [
+            sampled_occurrence(&cylinder_source, &empty, &empty_leaf, Some(&upper_collar)),
+            sampled_occurrence(&box_source, &lower, &lower_leaf, Some(&box_collar)),
+        ];
+        let reversed_pending = super::certify_native_union(
+            &reversed,
+            &lower_material,
+            policy(0.0),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(reversed_pending.convex_cap_attachments.len(), 1);
+        let reversed_attachment = &reversed_pending.convex_cap_attachments[0];
+        assert_eq!(reversed_attachment.endpoint, attachment.endpoint);
+        assert_eq!(reversed_attachment.current, attachment.current);
+        assert_eq!(reversed_attachment.cut_bits, attachment.cut_bits);
+        assert_eq!(
+            reversed_attachment.native_cap_bits,
+            attachment.native_cap_bits
+        );
+        assert_eq!(
+            reversed_attachment.incidence_sha256,
+            attachment.incidence_sha256,
+        );
+        let retained = pending.retained_bytes();
+        let attachments = std::mem::take(&mut pending.convex_cap_attachments);
+        assert_eq!(
+            retained - pending.retained_bytes(),
+            attachments.capacity() * std::mem::size_of::<NativeConvexCapAttachment>(),
+        );
+        pending.convex_cap_attachments = attachments;
+        let mut ledger = NativeUnionBindingLedger::new([7.9, cut], MAX_SCRATCH).unwrap();
+        ledger
+            .record(pending, &lower_material, &[&lower_leaf], &mut work, &cancel)
+            .unwrap();
+        assert_eq!(ledger.previous_cap_attachments.len(), 1);
+        assert_eq!(
+            ledger.finalize(&mut work, &cancel).unwrap_err().code,
+            GeometryErrorCode::AnalysisIndeterminate,
+        );
+    }
+
+    #[test]
+    fn native_cap_affine_map_refuses_unscaled_or_shifted_nurbs_parameters() {
+        use solidcore::{
+            nurbs::{b_spline_surface::BSplineSurface, math::CPoint, srf_basic},
+            surface::surface::{Surface, p2::SurfaceKind},
+        };
+        for domain in [[0.0, 0.5], [2.0, 3.0], [0.0, 1.0]] {
+            let raw = srf_basic::Surface::new(
+                [0.0, 20.0]
+                    .into_iter()
+                    .map(|coordinate_x| {
+                        [0.0, 20.0]
+                            .into_iter()
+                            .map(|coordinate_y| CPoint::new(coordinate_x, coordinate_y, 0.0, 1.0))
+                            .collect()
+                    })
+                    .collect(),
+                1,
+                1,
+                vec![domain[0], domain[0], domain[1], domain[1]],
+                vec![domain[0], domain[0], domain[1], domain[1]],
+            )
+            .unwrap();
+            let surface = Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(raw, true)));
+            assert!(native_affine_face(&surface).is_some());
+            assert_eq!(
+                native_cap_affine_map(&surface).is_some(),
+                domain == [0.0, 1.0]
+            );
+        }
+    }
+
+    #[test]
+    fn native_cap_boundary_containment_rejects_positive_overlap_outside_rectangle() {
+        let box_definition = original("box-mm.step");
+        let cylinder_definition = original("cylinder.step");
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(300_000_000);
+        let box_source = crate::prepare_solid(
+            &box_definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let cylinder_source = crate::prepare_solid(
+            &cylinder_definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let lower = ranged_slab(
+            &box_source,
+            RigidPoseMm::IDENTITY,
+            [7.9, up(8.0)],
+            7.95,
+            0,
+            &mut work,
+        );
+        let lower_leaf = source_leaf(&box_source, 1, RigidPoseMm::IDENTITY, &lower, &mut work);
+        let pose = RigidPoseMm {
+            translation_mm: [10.0, 5.0, 8.0],
+            ..RigidPoseMm::IDENTITY
+        };
+        let empty = ranged_slab(&cylinder_source, pose, [7.9, up(8.0)], 7.95, 0, &mut work);
+        let mut events = empty.collar_complex.as_ref().unwrap().event_faces();
+        let (face, height, sign) = events.next().unwrap();
+        assert!(events.next().is_none());
+        assert_eq!(height, [8.0, 8.0]);
+        assert_eq!(sign, -1);
+        let rectangle = lower_leaf.source_rectangle.as_ref().unwrap();
+        let mut scratch = Scratch { bytes: 0 };
+        for (translation, expected) in [
+            ([10.0, 5.0, 8.0], true),
+            ([16.0, 5.0, 8.0], false),
+            ([10.0, 6.0, 8.0], false),
+        ] {
+            let cap_source = SlabOccurrence {
+                occurrence_index: 1,
+                source: &cylinder_source,
+                pose: RigidPoseMm {
+                    translation_mm: translation,
+                    ..RigidPoseMm::IDENTITY
+                },
+                analysis: &empty,
+                source_metric: NativeSourceLeafProofKind::SampleToClosedSource,
+                leaf: None,
+            };
+            for halfplane in rectangle.actual_material_left_halfplanes {
+                let signed = halfplane[0]
+                    .mul(Interval::point(translation[0]))
+                    .add(halfplane[1].mul(Interval::point(translation[1])))
+                    .add(halfplane[2]);
+                assert!(signed.lo > 0.0);
+            }
+            assert_eq!(
+                native_cap_in_rectangle(
+                    &cap_source,
+                    face,
+                    rectangle,
+                    &mut scratch,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap(),
+                expected,
+            );
+            assert_eq!(scratch.bytes, 0);
+        }
     }
 
     #[test]
