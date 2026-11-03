@@ -182,6 +182,7 @@ pub struct NativeSourceLeafReceipt {
     /// a LOWER bound, not a kernel radius or a source-motion estimate.
     sample_loop_clearance_mm: Option<f64>,
     rectangle: Option<Arc<NativeRectangleLeafWitness>>,
+    source_rectangle: Option<Arc<NativeRectangleLeafWitness>>,
 }
 #[derive(Debug)]
 struct NativeSourceLoopCapture {
@@ -314,7 +315,7 @@ impl NativeSourceLeafReceipt {
                     .sum::<usize>(),
             )
             .saturating_add(
-                self.rectangle
+                self.source_rectangle
                     .as_ref()
                     .map_or(0, |rectangle| rectangle_retained_bytes(rectangle)),
             )
@@ -332,7 +333,7 @@ impl NativeSourceLeafReceipt {
 }
 /// Fixed-size algebraic evidence derived from the actual four-edge source-M
 /// contributor. These are certified supporting halfplanes, not copied contours.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct NativeRectangleLeafWitness {
     bounds: [[f64; 2]; 2],
     /// Inward bracket in which the original native product contains material.
@@ -344,6 +345,7 @@ struct NativeRectangleLeafWitness {
     support_residuals: [[f64; 2]; 2],
     height_supports: [[f64; 2]; 2],
     coordinate_error_mm: f64,
+    sample_error_mm: f64,
 }
 fn rectangle_retained_bytes(rectangle: &NativeRectangleLeafWitness) -> usize {
     std::mem::size_of::<NativeRectangleLeafWitness>()
@@ -2969,6 +2971,8 @@ fn same_leaf(a: &NativeSourceLeafReceipt, b: &NativeSourceLeafReceipt) -> bool {
         && a.regular_boundary_tube_mm == b.regular_boundary_tube_mm
         && a.native_world_z_invariant == b.native_world_z_invariant
         && a.native_convex_section_topology == b.native_convex_section_topology
+        && a.rectangle.is_some() == b.rectangle.is_some()
+        && a.source_rectangle == b.source_rectangle
         && a.radial_product == b.radial_product
         && a.endpoint_radial_products == b.endpoint_radial_products
         && a.sample_loop_clearance_mm == b.sample_loop_clearance_mm
@@ -3022,6 +3026,32 @@ fn hash_leaf(hash: &mut Sha256, leaf: &NativeSourceLeafReceipt) {
     hash.update(leaf.native_endpoint_closure.map(u8::from));
     hash.update([u8::from(leaf.native_world_z_invariant)]);
     hash.update([u8::from(leaf.native_convex_section_topology)]);
+    hash.update([u8::from(leaf.rectangle.is_some())]);
+    hash.update([u8::from(leaf.source_rectangle.is_some())]);
+    if let Some(product) = &leaf.source_rectangle {
+        for value in product
+            .bounds
+            .into_iter()
+            .flatten()
+            .chain(product.world_material_height_interval_mm)
+            .chain(product.support_residuals.into_iter().flatten())
+            .chain(product.height_supports.into_iter().flatten())
+            .chain([product.coordinate_error_mm, product.sample_error_mm])
+        {
+            hash.update(value.to_bits().to_le_bytes());
+        }
+        for halfplane in product.actual_material_left_halfplanes {
+            for coefficient in halfplane {
+                hash.update(coefficient.lo.to_bits().to_le_bytes());
+                hash.update(coefficient.hi.to_bits().to_le_bytes());
+            }
+        }
+        hash.update(product.source_sides);
+        for face in product.source_faces.iter().chain(&product.source_caps) {
+            hash.update((face.as_str().len() as u64).to_le_bytes());
+            hash.update(face.as_str().as_bytes());
+        }
+    }
     hash.update([u8::from(leaf.regular_boundary_tube_mm.is_some())]);
     if let Some(bound) = leaf.regular_boundary_tube_mm {
         hash.update(bound.to_bits().to_le_bytes());
@@ -5217,9 +5247,9 @@ fn certify_source_leaf(
     let profile = if analysis.section.loops.is_empty() {
         None
     } else {
-        native_profile(&occurrence, &mut scratch, work, cancel)?
+        native_original_profile(&occurrence, &mut scratch, work, cancel)?
     };
-    let rectangle = if let Some(profile) = profile {
+    let source_rectangle = if let Some(profile) = profile {
         if let Some(bounds) = profile_rectangle(&profile) {
             if actual_used_source_loops.len() != 1 {
                 return Err(error(
@@ -5261,7 +5291,7 @@ fn certify_source_leaf(
                     }
                 }
                 // Original native coefficients/trim incidence prove a constant
-                // rectangle on the WHOLE interval. Compare actual contributor
+                // rectangle over its material height. Compare actual contributor
                 // edges directly to those true straight supports, rather than
                 // requiring a sampled SSI polygon to have identical vertices.
                 let corners = [
@@ -5296,7 +5326,11 @@ fn certify_source_leaf(
                         "actual source-M rectangle edges exceed native whole-interval fidelity policy",
                     ));
                 }
-                exact_rectangle_bound = Some(achieved);
+                if profile.world_height_interval_mm[0] <= interval[0]
+                    && profile.world_height_interval_mm[1] >= interval[1]
+                {
+                    exact_rectangle_bound = Some(achieved);
+                }
                 scratch.owned(
                     std::mem::size_of::<NativeRectangleLeafWitness>()
                         + 2 * std::mem::size_of::<usize>(),
@@ -5355,6 +5389,7 @@ fn certify_source_leaf(
                     support_residuals,
                     height_supports: profile.height_supports,
                     coordinate_error_mm: profile.coordinate_error_mm,
+                    sample_error_mm: source_bound,
                 }))
             }
         } else {
@@ -5363,6 +5398,7 @@ fn certify_source_leaf(
     } else {
         None
     };
+    let rectangle = exact_rectangle_bound.and(source_rectangle.clone());
     let achieved = match exact_rectangle_bound {
         Some(bound) => {
             // Whole native cap/side incidence establishes a true product over
@@ -5573,6 +5609,7 @@ fn certify_source_leaf(
         regular_boundary_tube_mm,
         native_world_z_invariant: analysis.invariance.is_some() || rectangle.is_some(),
         rectangle,
+        source_rectangle,
         native_convex_section_topology: analysis.has_native_convex_section_topology_proof(),
         radial_product,
         sample_loop_clearance_mm,
@@ -6205,7 +6242,10 @@ pub fn certify_native_union(
     }
     let target_envelopes =
         prepare_target_envelopes(occurrences, &active, &mut scratch, work, cancel)?;
-    let collar_attachments = certify_collar_cross_incidence(
+    let CollarCrossIncidenceAttachments {
+        rectangular: collar_attachments,
+        source_products,
+    } = certify_collar_cross_incidence(
         &CollarCrossIncidenceQuery {
             occurrences,
             active: &active,
@@ -6249,6 +6289,7 @@ pub fn certify_native_union(
             original: occurrences,
             active: &active,
             candidate: candidate_union_loops,
+            source_products: &source_products,
             policy,
         },
         target_envelopes,
@@ -6375,7 +6416,7 @@ fn rectangle_leaf_contact(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    let (Some(left), Some(right)) = (&a.rectangle, &b.rectangle) else {
+    let (Some(left), Some(right)) = (&a.source_rectangle, &b.source_rectangle) else {
         return Ok(false);
     };
     if [left, right].iter().any(|w| {
@@ -6484,12 +6525,17 @@ struct CollarCrossIncidenceQuery<'a, 'source> {
     policy: NativeUnionPolicy,
 }
 
+struct CollarCrossIncidenceAttachments {
+    rectangular: Vec<NativeInterfaceAttachment>,
+    source_products: Vec<[u8; 32]>,
+}
+
 fn certify_collar_cross_incidence(
     query: &CollarCrossIncidenceQuery<'_, '_>,
     scratch: &mut Scratch,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Vec<NativeInterfaceAttachment>, GeometryError> {
+) -> Result<CollarCrossIncidenceAttachments, GeometryError> {
     let &CollarCrossIncidenceQuery {
         occurrences,
         active,
@@ -6499,6 +6545,7 @@ fn certify_collar_cross_incidence(
         policy,
     } = query;
     let mut attachments = Vec::new();
+    let mut source_products = Vec::new();
     for collar in collars {
         let own = collar.current_leaf();
         let source = source_index(occurrences, own.occurrence_id(), work, cancel)?;
@@ -6565,6 +6612,38 @@ fn certify_collar_cross_incidence(
             {
                 continue;
             }
+            if let (Some(left), Some(right)) = (&own.source_rectangle, &other_leaf.source_rectangle)
+                && left.height_supports == right.height_supports
+                && !collar.used_source_leaves().is_empty()
+                && collar
+                    .used_source_leaves()
+                    .iter()
+                    .all(|leaf| same_leaf(leaf, own))
+                && other_collar.is_some_and(|value| {
+                    !value.used_source_leaves().is_empty()
+                        && value
+                            .used_source_leaves()
+                            .iter()
+                            .all(|leaf| same_leaf(leaf, other_leaf))
+                })
+                && rectangle_leaf_contact(
+                    own,
+                    other_leaf,
+                    own.sample_world_z_mm(),
+                    policy.candidate_coordinate_error_mm,
+                    work,
+                    cancel,
+                )?
+            {
+                for leaf in [own, other_leaf] {
+                    let fingerprint = leaf_fingerprint(leaf);
+                    work.charge(source_products.len() as u64, cancel)?;
+                    if !source_products.contains(&fingerprint) {
+                        scratch.push(&mut source_products, fingerprint, work, cancel)?;
+                    }
+                }
+                continue;
+            }
             let own_contact = collar_endpoint_contact(collar);
             let other_contact = other_collar.and_then(collar_endpoint_contact);
             let proof = if let Some(contact) = &own_contact {
@@ -6619,7 +6698,10 @@ fn certify_collar_cross_incidence(
             }
         }
     }
-    Ok(attachments)
+    Ok(CollarCrossIncidenceAttachments {
+        rectangular: attachments,
+        source_products,
+    })
 }
 fn profile_rectangle(profile: &NativeProfile<'_>) -> Option<[[f64; 2]; 2]> {
     if profile.edges.len() != 4 {
@@ -7267,6 +7349,7 @@ struct InteractionGroupsQuery<'a, 'source> {
     original: &'a [NativeUnionOccurrence<'source, 'source>],
     active: &'a [SlabOccurrence<'source, 'source>],
     candidate: &'a [SectionLoopMm],
+    source_products: &'a [[u8; 32]],
     policy: NativeUnionPolicy,
 }
 
@@ -7281,6 +7364,7 @@ fn certify_interaction_groups(
         original,
         active,
         candidate,
+        source_products,
         policy,
     } = query;
     let mut parents = Vec::new();
@@ -7416,10 +7500,27 @@ fn certify_interaction_groups(
                     let other = neighbors[i];
                     let a = source.occurrence_index;
                     let b = active[other].occurrence_index;
-                    let profile=native_profile(source,scratch,work,cancel)
-                        .map_err(|failure|native_pair_error(original,a,b,failure))?
-                        .ok_or_else(||native_pair_error(original,a,b,unresolved(a,b,
-                            "uncertain native pair requires exact orthogonal face/trim products; general shared continuation is unavailable")))?;
+                    work.charge(source_products.len() as u64, cancel)?;
+                    let scoped_product = source_products.contains(&leaf_fingerprint(leaf));
+                    group_stationary &= !scoped_product;
+                    let profile = if scoped_product {
+                        native_original_profile(source, scratch, work, cancel)
+                    } else {
+                        native_profile(source, scratch, work, cancel)
+                    }
+                    .map_err(|failure| native_pair_error(original, a, b, failure))?
+                    .ok_or_else(|| {
+                        native_pair_error(
+                            original,
+                            a,
+                            b,
+                            unresolved(
+                                a,
+                                b,
+                                "uncertain native pair requires exact orthogonal face/trim products; general shared continuation is unavailable",
+                            ),
+                        )
+                    })?;
                     scratch.push(&mut profiles, profile, work, cancel)?;
                 }
                 let other = neighbors[root];
@@ -7464,15 +7565,19 @@ fn certify_interaction_groups(
                     continue;
                 }
                 let input = if multi {
-                    // A native product makes the true section constant in Z.
-                    // The frozen whole-curve error therefore bounds raw M's
+                    // Original products are constant within their material heights.
+                    // The captured sample error therefore bounds raw M's
                     // distance to that true footprint, without a slab-height
                     // padding falsely used as an overlay theorem.
-                    leaf.sample_coordinate_error_mm
-                        .map(|coordinate| {
-                            Interval::point(coordinate)
-                                .add(Interval::point(leaf.sample_region_error_mm))
-                                .hi
+                    leaf.source_rectangle
+                        .as_ref()
+                        .map(|product| product.sample_error_mm)
+                        .or_else(|| {
+                            leaf.sample_coordinate_error_mm.map(|coordinate| {
+                                Interval::point(coordinate)
+                                    .add(Interval::point(leaf.sample_region_error_mm))
+                                    .hi
+                            })
                         })
                         .unwrap_or(leaf.achieved_shape_error_mm)
                 } else if let Some(coordinate) = leaf.sample_coordinate_error_mm {
@@ -8459,8 +8564,30 @@ fn native_profile<'a>(
     cancel: &AtomicBool,
 ) -> Result<Option<NativeProfile<'a>>, GeometryError> {
     let checkpoint = scratch.bytes;
+    let profile = native_original_profile(occurrence, scratch, work, cancel)?;
+    let height = occurrence.analysis.world_height_interval_mm().unwrap();
+    let profile = profile.filter(|profile| {
+        profile.world_height_interval_mm[0] <= height[0]
+            && profile.world_height_interval_mm[1] >= height[1]
+    });
+    if profile.is_none() {
+        scratch.bytes = checkpoint;
+    }
+    Ok(profile)
+}
+
+fn native_original_profile<'a>(
+    occurrence: &SlabOccurrence<'a, '_>,
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<NativeProfile<'a>>, GeometryError> {
+    let checkpoint = scratch.bytes;
     let result: Result<Option<NativeProfile<'a>>, GeometryError> = (|| {
-        if let Some(rectangle) = occurrence.leaf.and_then(|leaf| leaf.rectangle.as_deref()) {
+        if let Some(rectangle) = occurrence
+            .leaf
+            .and_then(|leaf| leaf.source_rectangle.as_deref())
+        {
             // Reuse the opaque six-original-face proof made by the leaf factory:
             // EVERY source face's native trim was already prepared and charged.
             return cached_rectangle_profile(
@@ -8763,9 +8890,8 @@ fn native_profile<'a>(
             return Ok(None);
         }
         // Every original side is a full-height affine rectangle, both caps and
-        // every original pcurve/edge have been proved above. This opaque native
-        // product is itself a world-Z invariance proof, not polygon invariance.
-        let height = occurrence.analysis.world_height_interval_mm().unwrap();
+        // every original pcurve/edge have been proved above. This proves the
+        // original product, not containment of the consumer's CLOSED request.
         let Some(mut bottom) = native_sum(signs[2] * heights[0], occurrence.pose.translation_mm[2])
         else {
             return Ok(None);
@@ -8782,9 +8908,6 @@ fn native_profile<'a>(
             native_support_interval(bottom).hi,
             native_support_interval(top).lo,
         ];
-        if material_height[0] > height[0] || material_height[1] < height[1] {
-            return Ok(None);
-        }
         // This closes original native side-face incidence, not a nearest-lineage
         // stitching of sampled sections. Hole cycles retain their inward winding.
         for edge in &edges {
@@ -12778,6 +12901,14 @@ mod tests {
                     [([0.0, 0.02], 0.01), ([0.02, 0.04], 0.03)],
                     true,
                 ),
+                (
+                    [7.800000000000006, 8.000000000000005],
+                    [
+                        ([7.800000000000006, 7.900000000000006], 7.850000000000006),
+                        ([7.900000000000006, 8.000000000000005], 7.9500000000000055),
+                    ],
+                    false,
+                ),
             ] {
                 let mut expected_hashes: [Option<[u8; 32]>; 2] = [None; 2];
                 // Also change ORIGINAL IDs so the curved singleton precedes both boxes;
@@ -12939,6 +13070,312 @@ mod tests {
                                 .preserved_source_occurrences
                                 .contains(&cl.occurrence_id())
                         );
+                        for leaf in [&al, &bl] {
+                            assert!(
+                                !pending
+                                    .preserved_source_occurrences
+                                    .contains(&leaf.occurrence_id())
+                            );
+                            assert!(
+                                pending.raw_leaf_to_candidate_error_mm()
+                                    >= leaf.source_rectangle.as_ref().unwrap().sample_error_mm
+                            );
+                        }
+                        assert!(pending.raw_leaf_to_candidate_error_mm().is_finite());
+                        assert!(pending.raw_leaf_to_candidate_error_mm() > 0.0);
+                        assert!(pending.raw_leaf_to_candidate_error_mm() <= 0.1);
+                        if domain[0] == 3.98 && layer == 0 && order == [0, 1, 2] {
+                            let mut changed = copy_loops(&actual);
+                            for boundary in &mut changed[1..] {
+                                for point in &mut boundary.points_mm {
+                                    point[0] += 0.0001;
+                                }
+                            }
+                            let changed_pending = super::certify_native_union(
+                                &occurrences,
+                                &changed,
+                                policy(0.001),
+                                &mut work,
+                                &cancel,
+                            )
+                            .unwrap();
+                            assert!(changed_pending.preserved_source_occurrences.is_empty());
+                            assert!(
+                                changed_pending.raw_leaf_to_candidate_error_mm()
+                                    > pending.raw_leaf_to_candidate_error_mm()
+                            );
+                            assert!(changed_pending.achieved_shape_error_mm() <= 0.1);
+                            assert_ne!(
+                                changed_pending.candidate_geometry_sha256(),
+                                pending.candidate_geometry_sha256()
+                            );
+                        }
+                        if interval[1] > 8.0 && order == [0, 1, 2] {
+                            let box_occurrences = [
+                                sampled_occurrence(&boxes_source, &a, &al, ac.as_ref()),
+                                sampled_occurrence(&boxes_source, &b, &bl, bc.as_ref()),
+                            ];
+                            let box_material = actual_box_union(dx, dy, z);
+                            let box_pending = super::certify_native_union(
+                                &box_occurrences,
+                                &box_material,
+                                policy(0.0),
+                                &mut work,
+                                &cancel,
+                            )
+                            .unwrap();
+                            assert_eq!(
+                                box_pending.coverage(),
+                                NativeUnionCoverage::NativeInterfaceComplex
+                            );
+                            assert!(box_pending.material_core_shape_error_mm().is_none());
+                            for (analysis, leaf, pose, collar) in [
+                                (&a, &al, RigidPoseMm::IDENTITY, ac.as_ref().unwrap()),
+                                (&b, &bl, box_pose, bc.as_ref().unwrap()),
+                            ] {
+                                assert!(leaf.source_rectangle.is_some());
+                                assert!(leaf.rectangle.is_none());
+                                assert!(!leaf.native_world_z_invariant);
+                                assert_eq!(
+                                    leaf.proof_kind(),
+                                    NativeSourceLeafProofKind::SampleToClosedSource
+                                );
+                                assert!(leaf.closed_shape_error_mm().is_none());
+                                assert!(!collar.used_source_leaves().is_empty());
+                                assert!(
+                                    collar
+                                        .used_source_leaves()
+                                        .iter()
+                                        .all(|used| same_leaf(used, leaf))
+                                );
+                                assert!(box_pending.collar_dependencies.iter().any(|captured| {
+                                    same_leaf(captured.current_leaf(), leaf)
+                                        && captured
+                                            .used_source_leaves()
+                                            .iter()
+                                            .any(|used| same_leaf(used, leaf))
+                                }));
+                                let source = SlabOccurrence {
+                                    occurrence_index: 0,
+                                    source: &boxes_source,
+                                    pose,
+                                    analysis,
+                                    source_metric: leaf.proof_kind,
+                                    leaf: Some(leaf),
+                                };
+                                let mut scratch = Scratch { bytes: 0 };
+                                assert!(
+                                    native_profile(&source, &mut scratch, &mut work, &cancel)
+                                        .unwrap()
+                                        .is_none()
+                                );
+                                assert_eq!(scratch.bytes, 0);
+                                let profile = native_original_profile(
+                                    &source,
+                                    &mut scratch,
+                                    &mut work,
+                                    &cancel,
+                                )
+                                .unwrap()
+                                .unwrap();
+                                assert_eq!(profile.world_height_interval_mm, [0.0, 8.0]);
+                            }
+                            assert!(pending.material_core_shape_error_mm().is_none());
+                            assert!(
+                                rectangle_leaf_contact(&al, &bl, z, 0.0, &mut work, &cancel)
+                                    .unwrap()
+                            );
+                            assert!(
+                                !rectangle_leaf_contact(
+                                    &al,
+                                    &bl,
+                                    interval[1],
+                                    0.0,
+                                    &mut work,
+                                    &cancel,
+                                )
+                                .unwrap()
+                            );
+                            assert!(
+                                !rectangle_leaf_contact(&al, &bl, z, 20.0, &mut work, &cancel)
+                                    .unwrap()
+                            );
+                            let different_pose = RigidPoseMm {
+                                translation_mm: [dx, dy, 0.02],
+                                ..RigidPoseMm::IDENTITY
+                            };
+                            let different = ranged_slab(
+                                &boxes_source,
+                                different_pose,
+                                interval,
+                                z,
+                                0,
+                                &mut work,
+                            );
+                            let different_leaf = source_leaf(
+                                &boxes_source,
+                                ids[1],
+                                different_pose,
+                                &different,
+                                &mut work,
+                            );
+                            let different_collar = collar_for(
+                                &boxes_source,
+                                &different,
+                                &different_leaf,
+                                &xy_candidate(&different, z),
+                                &[],
+                                &mut work,
+                            );
+                            assert_ne!(
+                                al.source_rectangle.as_ref().unwrap().height_supports,
+                                different_leaf
+                                    .source_rectangle
+                                    .as_ref()
+                                    .unwrap()
+                                    .height_supports
+                            );
+                            assert_eq!(
+                                super::certify_native_union(
+                                    &[
+                                        sampled_occurrence(&boxes_source, &a, &al, ac.as_ref()),
+                                        sampled_occurrence(
+                                            &boxes_source,
+                                            &different,
+                                            &different_leaf,
+                                            different_collar.as_ref(),
+                                        ),
+                                    ],
+                                    &box_material,
+                                    policy(0.0),
+                                    &mut work,
+                                    &cancel,
+                                )
+                                .unwrap_err()
+                                .code,
+                                GeometryErrorCode::AnalysisIndeterminate,
+                            );
+                            let mut wrong_cut = al.clone();
+                            wrong_cut.world_height_interval_mm[1] = 8.0;
+                            let mut wrong_scope = al.clone();
+                            wrong_scope.proof_kind = NativeSourceLeafProofKind::ClosedSlab;
+                            let mut missing_product = al.clone();
+                            missing_product.source_rectangle = None;
+                            for altered in [&wrong_cut, &wrong_scope, &missing_product] {
+                                assert!(!same_leaf(altered, &al));
+                                assert_ne!(leaf_fingerprint(altered), leaf_fingerprint(&al));
+                            }
+                            let wrong_pose = RigidPoseMm {
+                                translation_mm: [0.25, 0.0, 0.0],
+                                ..RigidPoseMm::IDENTITY
+                            };
+                            for (id, source, pose, leaf, collar, expected) in [
+                                (
+                                    OccurrenceId::new(99).unwrap(),
+                                    &boxes_source,
+                                    RigidPoseMm::IDENTITY,
+                                    &al,
+                                    ac.as_ref(),
+                                    GeometryErrorCode::InvalidGeometry,
+                                ),
+                                (
+                                    al.occurrence_id(),
+                                    &cone_source,
+                                    RigidPoseMm::IDENTITY,
+                                    &al,
+                                    ac.as_ref(),
+                                    GeometryErrorCode::InvalidGeometry,
+                                ),
+                                (
+                                    al.occurrence_id(),
+                                    &boxes_source,
+                                    wrong_pose,
+                                    &al,
+                                    ac.as_ref(),
+                                    GeometryErrorCode::InvalidGeometry,
+                                ),
+                                (
+                                    al.occurrence_id(),
+                                    &boxes_source,
+                                    RigidPoseMm::IDENTITY,
+                                    &wrong_cut,
+                                    ac.as_ref(),
+                                    GeometryErrorCode::InvalidGeometry,
+                                ),
+                                (
+                                    al.occurrence_id(),
+                                    &boxes_source,
+                                    RigidPoseMm::IDENTITY,
+                                    &wrong_scope,
+                                    ac.as_ref(),
+                                    GeometryErrorCode::InvalidGeometry,
+                                ),
+                                (
+                                    al.occurrence_id(),
+                                    &boxes_source,
+                                    RigidPoseMm::IDENTITY,
+                                    &missing_product,
+                                    ac.as_ref(),
+                                    GeometryErrorCode::InvalidGeometry,
+                                ),
+                                (
+                                    al.occurrence_id(),
+                                    &boxes_source,
+                                    RigidPoseMm::IDENTITY,
+                                    &al,
+                                    None,
+                                    GeometryErrorCode::AnalysisIndeterminate,
+                                ),
+                            ] {
+                                let invalid = [
+                                    NativeUnionOccurrence {
+                                        occurrence_id: id,
+                                        source,
+                                        pose,
+                                        evidence: source_evidence(&a, leaf, collar),
+                                    },
+                                    sampled_occurrence(&boxes_source, &b, &bl, bc.as_ref()),
+                                    sampled_occurrence(&cone_source, &c, &cl, cc.as_ref()),
+                                ];
+                                assert_eq!(
+                                    super::certify_native_union(
+                                        &invalid,
+                                        &actual,
+                                        policy(0.0),
+                                        &mut work,
+                                        &cancel,
+                                    )
+                                    .unwrap_err()
+                                    .code,
+                                    expected,
+                                );
+                            }
+                            for (mut limited, cancelled, expected) in [
+                                (
+                                    GeometryWorkBudget::new(0),
+                                    AtomicBool::new(false),
+                                    GeometryErrorCode::ResourceLimit,
+                                ),
+                                (
+                                    GeometryWorkBudget::new(100),
+                                    AtomicBool::new(true),
+                                    GeometryErrorCode::Cancelled,
+                                ),
+                            ] {
+                                assert_eq!(
+                                    super::certify_native_union(
+                                        &occurrences,
+                                        &actual,
+                                        policy(0.0),
+                                        &mut limited,
+                                        &cancelled,
+                                    )
+                                    .unwrap_err()
+                                    .code,
+                                    expected,
+                                );
+                            }
+                        }
                         assert!(!pending.boundary_sources().is_empty());
                         for source in pending.boundary_sources() {
                             let original = occurrences[source.occurrence_index].source.definition();
