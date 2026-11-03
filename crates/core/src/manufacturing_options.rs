@@ -23,6 +23,7 @@ pub(crate) const MAX_RETAINED_OPTION_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Serialize)]
 struct Context<'a> {
     domain: &'static str,
+    layout_id: &'a spiling_contracts::project::PrintLayoutId,
     definitions: Vec<&'a StoredDefinition>,
     occurrences: Vec<&'a OccurrenceRecord>,
     surface: &'a spiling_contracts::surface::SurfaceOverlays,
@@ -34,21 +35,18 @@ struct Context<'a> {
 
 pub fn context_hash(snapshot: &Snapshot) -> Result<SourceHash, ProjectError> {
     validate_context(snapshot)?;
+    let (surfaces, process) = snapshot.scoped_documents();
     let context = Context {
         domain: "spiling.manufacturing-option-context.v1",
+        layout_id: &snapshot.layout_id,
         definitions: snapshot
-            .sources
-            .values()
+            .active_sources()
             .map(|source| &source.record)
             .collect(),
         occurrences: snapshot.occurrences.values().collect(),
-        surface: &snapshot.surface_overlays,
-        process: &snapshot.process_document,
-        images: snapshot
-            .surface_images
-            .values()
-            .map(|image| image.record())
-            .collect(),
+        surface: &surfaces,
+        process: &process,
+        images: surfaces.images.iter().collect(),
         materials: snapshot.materials.as_ref().map(|asset| asset.record()),
         hardware: snapshot.hardware.as_deref(),
     };
@@ -98,23 +96,14 @@ fn validate_context(snapshot: &Snapshot) -> Result<(), ProjectError> {
             .map_err(|error| invalid(error.message))?;
         used.insert(&occurrence.definition_id);
     }
-    if used.len() != snapshot.sources.len() {
-        return Err(invalid(
-            "manufacturing option context has unreferenced definitions",
-        ));
-    }
     let definitions: Vec<_> = snapshot
-        .sources
-        .values()
+        .active_sources()
         .map(|source| source.record.clone())
         .collect();
     let occurrences: Vec<_> = snapshot.occurrences.values().cloned().collect();
-    snapshot
-        .surface_overlays
-        .validate_targets(&definitions, &occurrences, u32::MAX)?;
-    snapshot
-        .process_document
-        .validate_targets(&definitions, &occurrences, u32::MAX, u32::MAX)?;
+    let (surfaces, process) = snapshot.scoped_documents();
+    surfaces.validate_targets(&definitions, &occurrences, u32::MAX)?;
+    process.validate_targets(&definitions, &occurrences, u32::MAX, u32::MAX)?;
     for asset in snapshot.surface_images.values() {
         asset.record().validate_content(asset.bytes())?;
     }
@@ -217,16 +206,21 @@ pub(crate) fn retain_option(
 
 pub(crate) fn retained_bytes<'a>(
     snapshots: impl Iterator<Item = &'a Snapshot>,
-    saved: Option<&Arc<Vec<ManufacturingOption>>>,
+    saved: impl IntoIterator<Item = &'a Vec<ManufacturingOption>>,
 ) -> Result<usize, ProjectError> {
     let mut allocations = BTreeMap::new();
     let mut intents = BTreeMap::new();
     for options in snapshots
-        .map(|snapshot| &snapshot.manufacturing_options)
+        .flat_map(|snapshot| {
+            snapshot
+                .layouts
+                .iter()
+                .map(|l| l.manufacturing_options.as_ref())
+        })
         .chain(saved)
     {
         if let std::collections::btree_map::Entry::Vacant(entry) =
-            allocations.entry(Arc::as_ptr(options))
+            allocations.entry(options.as_ptr())
         {
             validate_manufacturing_options(options)?;
             entry.insert(

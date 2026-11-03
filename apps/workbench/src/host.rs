@@ -64,6 +64,15 @@ pub struct JobView {
 }
 
 #[derive(Debug, Clone)]
+pub struct PlateEditReceipt {
+    pub nonce: u64,
+    pub session: spiling_contracts::geometry::SessionId,
+    pub project: spiling_contracts::project::ProjectId,
+    pub base_revision: spiling_contracts::project::ProjectRevision,
+    pub revision: spiling_contracts::project::ProjectRevision,
+    pub edit: spiling_contracts::project::PrintLayoutEdit,
+}
+#[derive(Debug, Clone)]
 pub struct Snapshot {
     pub library: Arc<library::State>,
     pub diagnostic: Option<Arc<spiling_contracts::OperationView>>,
@@ -86,6 +95,7 @@ pub struct Snapshot {
     pub optical_report: Option<Arc<crate::assets::OpticalCapture>>,
     pub optical_loading: bool,
     pub stock: stock::State,
+    pub plate_edit: Option<Arc<PlateEditReceipt>>,
     pub layout_proposal: Option<Arc<spiling_contracts::geometry::LayoutProposal>>,
     pub bed_proposal: Option<Arc<spiling_contracts::geometry::BedPosePreparation>>,
     pub busy: bool,
@@ -121,6 +131,7 @@ impl Default for Snapshot {
             optical_loading: false,
             stock: stock::State::default(),
             bed_proposal: None,
+            plate_edit: None,
             layout_proposal: None,
             busy: true,
             active_operation: false,
@@ -1047,7 +1058,10 @@ impl Actor {
             self.state.display_paused = false;
         }
         let status = rpc
-            .manufacturing(ManufacturingCommand::Get { session_id })
+            .manufacturing(ManufacturingCommand::Get {
+                session_id,
+                layout_id: project.layout_id.clone(),
+            })
             .await?;
         let ManufacturingResponse::Status {
             info,
@@ -1061,17 +1075,24 @@ impl Actor {
                 "Unexpected manufacturing status".into(),
             ));
         };
-        if info.project_id != project.project_id || info.revision != project.revision {
+        if info.project_id != project.project_id
+            || info.revision != project.revision
+            || info.layout_id != project.layout_id
+            || scene.layout_id != project.layout_id
+        {
             return Err(ClientError::InvalidRequest(
                 "Project changed during status retrieval".into(),
             ));
         }
-        let changed = self
-            .state
-            .manufacturing
-            .revision
-            .as_ref()
-            .is_none_or(|(id, r)| *id != project.project_id || *r != project.revision)
+        let layout_changed =
+            self.state.manufacturing.layout_id.as_ref() != Some(&project.layout_id);
+        let changed = layout_changed
+            || self
+                .state
+                .manufacturing
+                .revision
+                .as_ref()
+                .is_none_or(|(id, r)| *id != project.project_id || *r != project.revision)
             || self.state.manufacturing.artifact != artifact
             || self.state.manufacturing.resource != resource;
         if changed {
@@ -1110,9 +1131,10 @@ impl Actor {
         }
         let m = Arc::make_mut(&mut self.state.manufacturing);
         m.context_hash = Some(context_hash);
-        if m.revision
-            .as_ref()
-            .is_some_and(|(id, _)| *id != project.project_id)
+        if layout_changed
+            || m.revision
+                .as_ref()
+                .is_some_and(|(id, _)| *id != project.project_id)
         {
             m.loaded = None;
             m.loaded_material = None;
@@ -1126,6 +1148,7 @@ impl Actor {
                 task.abort();
             }
         }
+        m.layout_id = Some(project.layout_id.clone());
         m.revision = Some((project.project_id.clone(), project.revision));
         m.intent = intent;
         m.artifact = artifact;

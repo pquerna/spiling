@@ -360,6 +360,8 @@ impl TryFrom<rpc::LocalProjectHardwareBinding> for LocalProjectHardwareBinding {
     fn try_from(v: rpc::LocalProjectHardwareBinding) -> Result<Self, String> {
         let value = Self {
             project_id: v.project_id,
+            layout_id: crate::project::PrintLayoutId::parse(v.layout_id)
+                .map_err(|e| e.to_string())?,
             attachment: required(v.attachment, "LocalProjectHardwareBinding.attachment")?
                 .try_into()?,
             capture_hash: SourceHash::parse(v.capture_hash).map_err(|e| e.to_string())?,
@@ -377,6 +379,7 @@ impl TryFrom<LocalProjectHardwareBinding> for rpc::LocalProjectHardwareBinding {
         v.validate()?;
         let value = Self {
             project_id: v.project_id,
+            layout_id: v.layout_id.as_str().into(),
             attachment: Some(v.attachment.try_into()?),
             capture_hash: v.capture_hash.as_str().into(),
             machine_id: v.machine_id,

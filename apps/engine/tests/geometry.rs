@@ -1611,6 +1611,7 @@ async fn native_bed_contact_is_nonpenetrating_read_only_and_revision_bound() {
     assert!(matches!(
         client
             .manufacturing(ManufacturingCommand::SetIntent {
+                layout_id: captured.layout_id.clone(),
                 session_id: captured.session_id.clone(),
                 base_revision: revision,
                 intent: intent.into(),

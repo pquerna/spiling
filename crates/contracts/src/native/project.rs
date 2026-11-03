@@ -86,46 +86,76 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
     request_id(id)?;
     use rpc::project_request::Command as C;
     let (session_id, command) = match command {
+        ProjectCommand::SelectPrintLayout {
+            session_id,
+            base_revision,
+            layout_id,
+        } => (
+            session_id,
+            C::SelectPrintLayout(rpc::SelectPrintLayoutRequest {
+                base_revision: base_revision.get(),
+                layout_id: layout_id.as_str().into(),
+            }),
+        ),
+        ProjectCommand::EditPrintLayout {
+            session_id,
+            base_revision,
+            edit,
+        } => (
+            session_id,
+            C::EditPrintLayout(rpc::EditPrintLayoutRequest {
+                base_revision: base_revision.get(),
+                edit: Some(edit.try_into()?),
+            }),
+        ),
         ProjectCommand::GetManufacturingOption {
+            layout_id,
             session_id,
             base_revision,
             id,
         } => (
             session_id,
             C::GetManufacturingOption(rpc::ManufacturingOptionRequest {
+                layout_id: layout_id.as_str().into(),
                 base_revision: base_revision.get(),
                 id: id.as_str().into(),
             }),
         ),
         ProjectCommand::RetainManufacturingOption {
+            layout_id,
             session_id,
             base_revision,
             option,
         } => (
             session_id,
             C::RetainManufacturingOption(rpc::RetainManufacturingOptionRequest {
+                layout_id: layout_id.as_str().into(),
                 base_revision: base_revision.get(),
                 option: Some(option.try_into()?),
             }),
         ),
         ProjectCommand::RemoveManufacturingOption {
+            layout_id,
             session_id,
             base_revision,
             id,
         } => (
             session_id,
             C::RemoveManufacturingOption(rpc::ManufacturingOptionRequest {
+                layout_id: layout_id.as_str().into(),
                 base_revision: base_revision.get(),
                 id: id.as_str().into(),
             }),
         ),
         ProjectCommand::ApplyManufacturingOption {
+            layout_id,
             session_id,
             base_revision,
             id,
         } => (
             session_id,
             C::ApplyManufacturingOption(rpc::ManufacturingOptionRequest {
+                layout_id: layout_id.as_str().into(),
                 base_revision: base_revision.get(),
                 id: id.as_str().into(),
             }),
@@ -221,12 +251,14 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
             )
         }
         ProjectCommand::SetHardware {
+            layout_id,
             session_id,
             base_revision,
             capture,
         } => (
             session_id,
             C::SetHardware(rpc::ProjectSetHardwareRequest {
+                layout_id: layout_id.as_str().into(),
                 base_revision: base_revision.0,
                 capture: capture.map(|c| (*c).clone().try_into()).transpose()?,
             }),
@@ -575,22 +607,36 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
         let session_id = session_parent(&v.parent)?;
         use rpc::project_request::Command as C;
         Ok(match required(v.command, "project command")? {
+            C::SelectPrintLayout(v) => Self::SelectPrintLayout {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                layout_id: PrintLayoutId::parse(v.layout_id).map_err(|e| e.to_string())?,
+            },
+            C::EditPrintLayout(v) => Self::EditPrintLayout {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                edit: required(v.edit, "plate edit")?.try_into()?,
+            },
             C::GetManufacturingOption(value) => Self::GetManufacturingOption {
+                layout_id: PrintLayoutId::parse(value.layout_id).map_err(|e| e.to_string())?,
                 session_id,
                 base_revision: ProjectRevision(value.base_revision),
                 id: SourceHash::parse(value.id).map_err(|error| error.to_string())?,
             },
             C::RetainManufacturingOption(value) => Self::RetainManufacturingOption {
+                layout_id: PrintLayoutId::parse(value.layout_id).map_err(|e| e.to_string())?,
                 session_id,
                 base_revision: ProjectRevision(value.base_revision),
                 option: required(value.option, "manufacturing option")?.try_into()?,
             },
             C::RemoveManufacturingOption(value) => Self::RemoveManufacturingOption {
+                layout_id: PrintLayoutId::parse(value.layout_id).map_err(|e| e.to_string())?,
                 session_id,
                 base_revision: ProjectRevision(value.base_revision),
                 id: SourceHash::parse(value.id).map_err(|error| error.to_string())?,
             },
             C::ApplyManufacturingOption(value) => Self::ApplyManufacturingOption {
+                layout_id: PrintLayoutId::parse(value.layout_id).map_err(|e| e.to_string())?,
                 session_id,
                 base_revision: ProjectRevision(value.base_revision),
                 id: SourceHash::parse(value.id).map_err(|error| error.to_string())?,
@@ -646,6 +692,7 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
                 }
             }
             C::SetHardware(v) => Self::SetHardware {
+                layout_id: PrintLayoutId::parse(v.layout_id).map_err(|e| e.to_string())?,
                 session_id,
                 base_revision: ProjectRevision(v.base_revision),
                 capture: v.capture.map(|c| c.try_into().map(Arc::new)).transpose()?,
@@ -864,6 +911,27 @@ impl TryFrom<rpc::GetOpticalReportRequest> for ProjectCommand {
     }
 }
 pub fn validate_project_info(v: &ProjectInfo) -> Result<(), String> {
+    if v.layouts.is_empty()
+        || v.layouts.len() > MAX_PRINT_LAYOUTS
+        || !v.layouts.iter().any(|l| l.layout_id == v.layout_id)
+        || v.layouts
+            .iter()
+            .map(|l| &l.layout_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != v.layouts.len()
+        || v.layouts
+            .iter()
+            .map(|l| u64::from(l.occurrence_count))
+            .sum::<u64>()
+            > u64::from(MAX_OCCURRENCES)
+    {
+        return Err("inconsistent plate summaries".into());
+    }
+    for l in &v.layouts {
+        validate_layout_name(&l.name).map_err(|e| e.to_string())?;
+    }
+
     if v.manufacturing_options.len() > MAX_MANUFACTURING_OPTIONS {
         return Err("manufacturing option summary count exceeds limit".into());
     }
@@ -925,7 +993,16 @@ impl TryFrom<rpc::ProjectInfo> for ProjectInfo {
         if v.resolved_process.len() > MAX_OCCURRENCES as usize {
             return Err("resolved process occurrence budget exceeded".into());
         }
+        if v.layouts.len() > MAX_PRINT_LAYOUTS {
+            return Err("plate count exceeds limit".into());
+        }
         let info = Self {
+            layout_id: PrintLayoutId::parse(v.layout_id).map_err(|e| e.to_string())?,
+            layouts: v
+                .layouts
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
             manufacturing_options: v
                 .manufacturing_options
                 .into_iter()
@@ -964,6 +1041,12 @@ impl TryFrom<ProjectInfo> for rpc::ProjectInfo {
     fn try_from(v: ProjectInfo) -> Result<Self, String> {
         validate_project_info(&v)?;
         Ok(Self {
+            layout_id: v.layout_id.as_str().into(),
+            layouts: v
+                .layouts
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
             manufacturing_options: v
                 .manufacturing_options
                 .into_iter()

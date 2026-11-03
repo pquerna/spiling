@@ -129,7 +129,7 @@ message OwnedPlate {string id=1;string nickname=2;PlateDefinition definition=3;o
 message OwnedAccessory {string id=1;string nickname=2;AccessoryDefinition definition=3;optional string installed_machine=4;}
 message CredentialRef {string slot_id=1;string role=2;string backend=3;}
 message EndpointRoute {string id=1;string machine_id=2;string family=3;string endpoint=4;string expected_identity=5;uint64 generation=6;CredentialRef credential=7;}
-message LocalProjectHardwareBinding {string project_id=1;NativePath attachment=2;string capture_hash=3;string machine_id=4;string plate_id=5;uint64 machine_generation=6;}
+message LocalProjectHardwareBinding {string project_id=1;NativePath attachment=2;string capture_hash=3;string machine_id=4;string plate_id=5;uint64 machine_generation=6;string layout_id=7;}
 message HardwareLibrary {repeated OwnedMachine machines=1;repeated OwnedPlate plates=2;repeated OwnedAccessory accessories=3;repeated EndpointRoute routes=4;repeated LocalProjectHardwareBinding bindings=5;}
 message LibraryHardware {LibraryIdentity identity=1;HardwareLibrary hardware=2;}
 

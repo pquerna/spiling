@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 mod layout;
+mod plates;
 
 use crate::{
     Command, Error, Options, geometry,
@@ -79,6 +80,7 @@ enum OpticalChoice {
     reason = "Bounded ordered controls retain complete recipe operands inline without per-operation boxing"
 )]
 enum Operation {
+    Plate(plates::Action),
     StockMatch(spiling_contracts::stock::StockQuery),
     StockKeepPair(usize, String),
     StockKeepSingle(usize),
@@ -693,6 +695,40 @@ pub fn parse(
                 request.validate()?;
                 operations.push(Operation::PrepareLayout(request));
             }
+            Some("--plate" | "--plate-create" | "--plate-rename" | "--plate-duplicate") => {
+                let value = text(&mut args, "plate")?;
+                operations.push(Operation::Plate(match arg.to_str().unwrap() {
+                    "--plate" => plates::Action::Select(value),
+                    "--plate-create" => plates::Action::Create(value),
+                    "--plate-rename" => plates::Action::Rename(value),
+                    _ => plates::Action::Duplicate(value),
+                }));
+            }
+            Some("--plate-remove") => operations.push(Operation::Plate(plates::Action::Remove)),
+            Some("--plate-move" | "--plate-copy") => {
+                let target = text(&mut args, "destination plate")?;
+                let occurrence = OccurrenceId::new(text(&mut args, "occurrence")?.parse()?)?;
+                operations.push(Operation::Plate(plates::Action::Transfer {
+                    target,
+                    occurrence,
+                    copy: arg == "--plate-copy",
+                }));
+            }
+            Some("--plate-edit") => {
+                let file = args.next().ok_or("--plate-edit requires a JSON path")?;
+                NativePath::from_os_str(&file)?;
+                let mut bytes = Vec::new();
+                File::open(PathBuf::from(file))?
+                    .take(16385)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() > 16 * 1024 {
+                    return Err("plate edit exceeds 16 KiB".into());
+                }
+                let edit: spiling_contracts::project::PrintLayoutEdit =
+                    serde_json::from_slice(&bytes)?;
+                edit.validate()?;
+                operations.push(Operation::Plate(plates::Action::Edit(edit)));
+            }
             Some("--arrange" | "--make-copies" | "--fill-plate") => {
                 let template = if arg == "--arrange" {
                     None
@@ -805,6 +841,7 @@ pub fn parse(
                 !matches!(
                     operation,
                     Operation::PrepareLayout(_)
+                        | Operation::Plate(plates::Action::Select(_))
                         | Operation::LibraryLocation(_)
                         | Operation::EvaluateAlternative(_)
                         | Operation::EvaluateOption(_)
@@ -1037,8 +1074,10 @@ async fn manufacturing_status(
     client: &mut EngineClient,
     include_intent: bool,
 ) -> Result<serde_json::Value, Error> {
+    let current_layout = info(client).await?.layout_id;
     match client
         .manufacturing(ManufacturingCommand::Get {
+            layout_id: current_layout.clone(),
             session_id: client.hello().session_id.clone(),
         })
         .await?
@@ -1081,9 +1120,12 @@ async fn verify(
     output: VerificationOutput,
 ) -> Result<FreshInspection, Error> {
     let session = client.hello().session_id.clone();
-    let base_revision = info(client).await?.revision;
+    let captured = info(client).await?;
+    let base_revision = captured.revision;
+    let current_layout = captured.layout_id;
     match client
         .manufacturing(ManufacturingCommand::Inspect {
+            layout_id: current_layout.clone(),
             session_id: session.clone(),
             base_revision,
             output,
@@ -1130,9 +1172,12 @@ async fn verify(
 
 async fn preflight(client: &mut EngineClient) -> Result<PreflightReport, Error> {
     let session = client.hello().session_id.clone();
-    let base_revision = info(client).await?.revision;
+    let captured = info(client).await?;
+    let base_revision = captured.revision;
+    let current_layout = captured.layout_id;
     match client
         .manufacturing(ManufacturingCommand::Preflight {
+            layout_id: current_layout.clone(),
             session_id: session.clone(),
             base_revision,
         })
@@ -1261,6 +1306,7 @@ async fn execute(
     let mut stock_saved = None;
     let mut stock_evidence = Vec::new();
     for operation in workflow.operations {
+        let current_layout = info(client).await?.layout_id;
         let base_revision = geometry::scene(client, &session).await?.revision;
         let label;
         let mut process_resolution = None;
@@ -1274,6 +1320,7 @@ async fn execute(
                     ..
                 } = client
                     .manufacturing(ManufacturingCommand::Get {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                     })
                     .await?
@@ -1285,6 +1332,7 @@ async fn execute(
                     Operation::EvaluateOption(id) => {
                         let ProjectResponse::ManufacturingOption { option } = client
                             .project(ProjectCommand::GetManufacturingOption {
+                                layout_id: current_layout.clone(),
                                 session_id: session.clone(),
                                 base_revision: captured.revision,
                                 id,
@@ -1299,6 +1347,7 @@ async fn execute(
                 };
                 let ManufacturingResponse::OperationAccepted { operation } = client
                     .manufacturing(ManufacturingCommand::EvaluateAlternative {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision: captured.revision,
                         expected_context_hash: expected_context_hash.clone(),
@@ -1346,6 +1395,7 @@ async fn execute(
                 let base_revision = info(client).await?.revision;
                 let ProjectResponse::ManufacturingOption { option } = client
                     .project(ProjectCommand::GetManufacturingOption {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision,
                         id,
@@ -1374,6 +1424,7 @@ async fn execute(
                 )?;
                 let response = client
                     .project(ProjectCommand::RetainManufacturingOption {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision: captured.revision,
                         option,
@@ -1386,6 +1437,7 @@ async fn execute(
                 let base_revision = info(client).await?.revision;
                 let response = client
                     .project(ProjectCommand::RemoveManufacturingOption {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision,
                         id,
@@ -1398,6 +1450,7 @@ async fn execute(
                 let base_revision = info(client).await?.revision;
                 let response = client
                     .project(ProjectCommand::ApplyManufacturingOption {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision,
                         id,
@@ -1753,6 +1806,7 @@ async fn execute(
                 };
                 match client
                     .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision,
                         selection,
@@ -2329,6 +2383,7 @@ async fn execute(
                 let base_revision = info(client).await?.revision;
                 client
                     .project(ProjectCommand::SetHardware {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision,
                         capture,
@@ -2341,6 +2396,7 @@ async fn execute(
                 let capture = personal.hardware.capture(&machine, &plate, &face)?;
                 let project = info(client).await?;
                 let binding = spiling_contracts::hardware::LocalProjectHardwareBinding {
+                    layout_id: project.layout_id.clone(),
                     project_id: project.project_id.as_str().into(),
                     attachment: workflow.path.clone(),
                     capture_hash: capture.hash()?,
@@ -2357,6 +2413,7 @@ async fn execute(
                 let base_revision = project.revision;
                 client
                     .project(ProjectCommand::SetHardware {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision,
                         capture: Some(Arc::new(capture)),
@@ -2369,6 +2426,7 @@ async fn execute(
                 let base_revision = info(client).await?.revision;
                 match client
                     .manufacturing(ManufacturingCommand::SetIntent {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision,
                         intent,
@@ -2411,6 +2469,7 @@ async fn execute(
                 let base_revision = info(client).await?.revision;
                 match client
                     .manufacturing(ManufacturingCommand::ReviewMaterials {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision,
                         request: request.clone(),
@@ -2445,6 +2504,7 @@ async fn execute(
                 }
                 match client
                     .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision: review.input_revision,
                         selection: candidate.selection.clone(),
@@ -2460,6 +2520,7 @@ async fn execute(
                 let base_revision = info(client).await?.revision;
                 match client
                     .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision,
                         selection: *selection,
@@ -2482,6 +2543,7 @@ async fn execute(
                 let base_revision = info(client).await?.revision;
                 match client
                     .manufacturing(ManufacturingCommand::Compile {
+                        layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision,
                     })
@@ -2508,7 +2570,7 @@ async fn execute(
                 } else {
                     "verify"
                 };
-                let inspection = verify(client, VerificationOutput::ReportOnly).await?;
+                let inspection = Box::pin(verify(client, VerificationOutput::ReportOnly)).await?;
                 let FreshInspection {
                     record,
                     report,
@@ -2542,7 +2604,8 @@ async fn execute(
             }
             Operation::ExportReplay => {
                 label = "replay_export";
-                let inspection = verify(client, VerificationOutput::ReportAndMotion).await?;
+                let inspection =
+                    Box::pin(verify(client, VerificationOutput::ReportAndMotion)).await?;
                 if !inspection.report.verified {
                     return Err("manufacturing replay did not verify the emitted program".into());
                 }
@@ -2622,6 +2685,12 @@ async fn execute(
                     return Err("unexpected pose response".into());
                 }
             }
+            Operation::Plate(action) => {
+                label = "plate";
+                Box::pin(plates::execute(client, action)).await?;
+                layout_proposal = None;
+                alternative_evaluation = None;
+            }
             Operation::PrepareLayout(request) => {
                 label = "prepare_layout";
                 let proposal = Box::pin(layout::prepare(client, request)).await?;
@@ -2648,7 +2717,7 @@ async fn execute(
                     .iter()
                     .find(|row| row.occurrence_id == occurrence_id)
                     .ok_or("bed preparation occurrence not in project")?;
-                let (intent, project_revision) = match client.manufacturing(ManufacturingCommand::Get { session_id: session.clone() }).await? {
+                let (intent, project_revision) = match client.manufacturing(ManufacturingCommand::Get { session_id: session.clone(), layout_id: current_layout.clone() }).await? {
                     ManufacturingResponse::Status { intent: Some(intent), info, .. } => (intent, info.revision),
                     ManufacturingResponse::Status { intent: None, .. } => return Err("bed preparation requires --intent with a complete explicit printer/recipe profile first".into()),
                     ManufacturingResponse::Error { error } => return Err(spiling_engine_client::ClientError::Manufacturing(error).into()),
@@ -2737,12 +2806,13 @@ async fn execute(
                 attachment = saved_attachment;
                 if let (Some(binding), Some(path)) = (&hardware_selection, &attachment) {
                     let project = info(client).await?;
-                    if project
-                        .hardware
-                        .as_ref()
-                        .and_then(|c| c.hash().ok())
-                        .as_ref()
-                        == Some(&binding.capture_hash)
+                    if project.layout_id == binding.layout_id
+                        && project
+                            .hardware
+                            .as_ref()
+                            .and_then(|c| c.hash().ok())
+                            .as_ref()
+                            == Some(&binding.capture_hash)
                     {
                         let result: Result<LibraryWriteReceipt, Error> = async {
                             let mut personal = client.rpc().library_hardware().await?;
@@ -2750,6 +2820,7 @@ async fn execute(
                             binding.attachment = path.clone();
                             personal.hardware.bindings.retain(|b| {
                                 b.project_id != binding.project_id
+                                    || b.layout_id != binding.layout_id
                                     || b.attachment != binding.attachment
                             });
                             personal.hardware.bindings.push(binding);

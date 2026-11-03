@@ -189,6 +189,137 @@ impl TryFrom<LayoutProposal> for rpc::LayoutProposal {
     }
 }
 
+impl TryFrom<rpc::PrintLayoutInfo> for crate::project::PrintLayoutInfo {
+    type Error = String;
+    fn try_from(v: rpc::PrintLayoutInfo) -> Result<Self, String> {
+        crate::project::validate_layout_name(&v.name).map_err(|e| e.to_string())?;
+        if v.occurrence_count > MAX_OCCURRENCES {
+            return Err("layout occurrence count exceeds limit".into());
+        }
+        Ok(Self {
+            layout_id: crate::project::PrintLayoutId::parse(v.layout_id)
+                .map_err(|e| e.to_string())?,
+            name: v.name,
+            occurrence_count: v.occurrence_count,
+            configured: v.configured,
+            has_result: v.has_result,
+        })
+    }
+}
+impl TryFrom<crate::project::PrintLayoutInfo> for rpc::PrintLayoutInfo {
+    type Error = String;
+    fn try_from(v: crate::project::PrintLayoutInfo) -> Result<Self, String> {
+        crate::project::validate_layout_name(&v.name).map_err(|e| e.to_string())?;
+        if v.occurrence_count > MAX_OCCURRENCES {
+            return Err("layout occurrence count exceeds limit".into());
+        }
+        Ok(Self {
+            layout_id: v.layout_id.as_str().into(),
+            name: v.name,
+            occurrence_count: v.occurrence_count,
+            configured: v.configured,
+            has_result: v.has_result,
+        })
+    }
+}
+impl TryFrom<rpc::PrintLayoutEdit> for crate::project::PrintLayoutEdit {
+    type Error = String;
+    fn try_from(v: rpc::PrintLayoutEdit) -> Result<Self, String> {
+        use rpc::print_layout_edit::Edit;
+        let id = |s| crate::project::PrintLayoutId::parse(s).map_err(|e| e.to_string());
+        let edit = match required(v.edit, "print layout edit")? {
+            Edit::Create(v) => Self::Create {
+                name: v.name,
+                copy_setup_from: v.copy_setup_from.map(id).transpose()?,
+            },
+            Edit::Duplicate(v) => Self::Duplicate {
+                source: id(v.source)?,
+                name: v.name,
+            },
+            Edit::Rename(v) => Self::Rename {
+                layout_id: id(v.layout_id)?,
+                name: v.name,
+            },
+            Edit::Remove(v) => Self::Remove {
+                layout_id: id(v.layout_id)?,
+            },
+            Edit::Reorder(v) => {
+                if v.layout_ids.len() > crate::project::MAX_PRINT_LAYOUTS {
+                    return Err("plate order exceeds limit".into());
+                }
+                Self::Reorder {
+                    layout_ids: v.layout_ids.into_iter().map(id).collect::<Result<_, _>>()?,
+                }
+            }
+            Edit::Transfer(v) => {
+                if v.occurrences.len() > MAX_OCCURRENCES as usize {
+                    return Err("part transfer exceeds limit".into());
+                }
+                Self::Transfer {
+                    source: id(v.source)?,
+                    target: id(v.target)?,
+                    occurrences: v
+                        .occurrences
+                        .into_iter()
+                        .map(OccurrenceId::new)
+                        .collect::<Result<_, _>>()
+                        .map_err(|e| e.to_string())?,
+                    copy: v.copy,
+                }
+            }
+        };
+        edit.validate().map_err(|e| e.to_string())?;
+        Ok(edit)
+    }
+}
+impl TryFrom<crate::project::PrintLayoutEdit> for rpc::PrintLayoutEdit {
+    type Error = String;
+    fn try_from(v: crate::project::PrintLayoutEdit) -> Result<Self, String> {
+        use crate::project::PrintLayoutEdit as D;
+        use rpc::print_layout_edit::Edit;
+        v.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            edit: Some(match v {
+                D::Create {
+                    name,
+                    copy_setup_from,
+                } => Edit::Create(rpc::CreatePrintLayout {
+                    name,
+                    copy_setup_from: copy_setup_from.map(|id| id.as_str().into()),
+                }),
+                D::Duplicate { source, name } => Edit::Duplicate(rpc::DuplicatePrintLayout {
+                    source: source.as_str().into(),
+                    name,
+                }),
+                D::Rename { layout_id, name } => Edit::Rename(rpc::RenamePrintLayout {
+                    layout_id: layout_id.as_str().into(),
+                    name,
+                }),
+                D::Remove { layout_id } => Edit::Remove(rpc::RemovePrintLayout {
+                    layout_id: layout_id.as_str().into(),
+                }),
+                D::Reorder { layout_ids } => Edit::Reorder(rpc::ReorderPrintLayouts {
+                    layout_ids: layout_ids
+                        .into_iter()
+                        .map(|id| id.as_str().into())
+                        .collect(),
+                }),
+                D::Transfer {
+                    source,
+                    target,
+                    occurrences,
+                    copy,
+                } => Edit::Transfer(rpc::TransferPrintParts {
+                    source: source.as_str().into(),
+                    target: target.as_str().into(),
+                    occurrences: occurrences.into_iter().map(OccurrenceId::get).collect(),
+                    copy,
+                }),
+            }),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

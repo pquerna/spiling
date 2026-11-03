@@ -1320,6 +1320,7 @@ pub struct FaceIndexRow {
 #[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SceneSummary {
+    pub layout_id: crate::project::PrintLayoutId,
     pub session_id: SessionId,
     pub revision: SceneRevision,
     pub definition_count: u32,
@@ -1330,6 +1331,7 @@ pub struct SceneSummary {
 #[derive(Deserialize)]
 #[serde(remote = "SceneSummary", deny_unknown_fields)]
 struct RawSceneSummary {
+    layout_id: crate::project::PrintLayoutId,
     session_id: SessionId,
     revision: SceneRevision,
     definition_count: u32,

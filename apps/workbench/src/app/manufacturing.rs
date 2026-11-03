@@ -93,8 +93,27 @@ impl Workbench {
         let prepare = self.manufacturing.panel == 1;
         ui::pane_header(
             ui,
-            if prepare { "Prepare" } else { "Program review" },
-            "Project · committed inputs and explicit drafts",
+            if prepare { "Prepare" } else { "Review layers" },
+            &self
+                .state
+                .project
+                .as_ref()
+                .and_then(|p| p.layouts.iter().find(|l| l.layout_id == p.layout_id))
+                .map_or_else(
+                    || "Selected plate".into(),
+                    |l| {
+                        format!(
+                            "{} · {} {}",
+                            l.name,
+                            l.occurrence_count,
+                            if l.occurrence_count == 1 {
+                                "part"
+                            } else {
+                                "parts"
+                            }
+                        )
+                    },
+                ),
         );
         if ui::close(ui, "Back to Inspect") {
             self.manufacturing.panel = 0;
@@ -121,11 +140,11 @@ impl Workbench {
                 "Independent replay checks the emitted program. Physical printability, collisions and machine execution remain unqualified.",
             );
         }
-        if !prepare || self.manufacturing.prepare_section == 2 {
-            self.try_alternative_entry(ui);
-        }
-        // Keep the action strip outside the body's single scroll owner.
+        // Keep the primary action above optional comparison controls and outside scrolling.
         self.manufacturing_actions(ui);
+        if !prepare || self.manufacturing.prepare_section == 2 {
+            ui.collapsing("Compare settings", |ui| self.try_alternative_entry(ui));
+        }
         ui.separator();
         egui::ScrollArea::vertical()
             .id_salt((
@@ -201,6 +220,7 @@ impl Workbench {
                         let value = prepared.expect("validated intent");
                         d.value = value.clone();
                         self.queued_manufacturing = Some(ManufacturingCommand::SetIntent {
+                            layout_id: project.layout_id.clone(),
                             session_id: hello.session_id.clone(),
                             base_revision: d.revision,
                             intent: Arc::new(value),

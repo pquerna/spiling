@@ -446,7 +446,12 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
     )
     .unwrap();
     assert_eq!(
-        loaded.manufacturing_artifact.as_ref().unwrap().bytes.len(),
+        loaded.layouts[0]
+            .manufacturing_artifact
+            .as_ref()
+            .unwrap()
+            .bytes
+            .len(),
         count
     );
 }
@@ -1200,7 +1205,12 @@ fn corrupt_current_recovery_is_dirty_fresh_and_retains_valid_previous_on_save() 
     ));
     let previous = open(&sandbox.target(), true, true, &flag()).unwrap();
     assert_eq!(previous.saved_revision, ProjectRevision(2));
-    assert_eq!(previous.manifest.occurrences[0].pose.translation_mm[0], 0.0);
+    assert_eq!(
+        previous.manifest.layouts[0].occurrences[0]
+            .pose
+            .translation_mm[0],
+        0.0
+    );
 }
 
 #[test]
@@ -1502,7 +1512,7 @@ fn saveas_is_exclusive_selfcontained_and_retains_last_independent_save() {
     assert_eq!(project.storage().unwrap().path(), copy);
     let recovery = open(&copy, true, true, &flag()).unwrap();
     assert_eq!(recovery.saved_revision, previous_revision);
-    assert!(recovery.manufacturing_artifact.is_none());
+    assert!(recovery.layouts[0].manufacturing_artifact.is_none());
     assert!(!recovery.surface_images.is_empty());
     assert!(!recovery.appearance_palettes.is_empty());
     let foreign = sandbox.0.join("foreign.spil");
@@ -1795,7 +1805,11 @@ fn manufacturing_metadata_is_checked_beyond_container_hash_and_role_integrity() 
     save_project(&mut project, Some(sandbox.target()));
     let (root, members) = captured_root(&sandbox.target());
     let mut manifest = parse_manifest(&root).unwrap();
-    manifest.manufacturing_artifact.as_mut().unwrap().byte_count += 1;
+    manifest.layouts[0]
+        .manufacturing_artifact
+        .as_mut()
+        .unwrap()
+        .byte_count += 1;
     manifest.validate().unwrap();
     drop(project);
     rewrite_current(
@@ -1820,9 +1834,7 @@ fn root_parsing_is_strict_without_legacy_or_missing_field_defaults() {
         "next_surface_layer",
         "next_process_layer",
         "next_process_operation",
-        "manufacturing_intent",
-        "manufacturing_options",
-        "manufacturing_artifact",
+        "layouts",
     ] {
         let mut value = original.clone();
         value.as_object_mut().unwrap().remove(missing);
@@ -1831,6 +1843,22 @@ fn root_parsing_is_strict_without_legacy_or_missing_field_defaults() {
                 .unwrap_err()
                 .code,
             ProjectErrorCode::InvalidProject
+        );
+    }
+    for missing in [
+        "manufacturing_intent",
+        "manufacturing_options",
+        "manufacturing_artifact",
+        "hardware",
+        "occurrences",
+        "layout_id",
+        "name",
+    ] {
+        let mut value = original.clone();
+        value["layouts"][0].as_object_mut().unwrap().remove(missing);
+        assert!(
+            parse_manifest(&serde_json::to_vec(&value).unwrap()).is_err(),
+            "missing {missing}"
         );
     }
     let mut unknown = original.clone();
@@ -2016,27 +2044,30 @@ fn option_domain_corruption_refuses_even_with_rehashed_closed_ptac_root() {
         let mut value: serde_json::Value = serde_json::from_slice(&root).unwrap();
         match change {
             0 => {
-                value["manufacturing_options"][0]["id"] =
+                value["layouts"][0]["manufacturing_options"][0]["id"] =
                     serde_json::json!(SourceHash::from_bytes(b"forged identity"))
             }
-            1 => value["manufacturing_options"][0]["name"] = serde_json::json!("Rebound name"),
+            1 => {
+                value["layouts"][0]["manufacturing_options"][0]["name"] =
+                    serde_json::json!("Rebound name")
+            }
             2 => {
-                value["manufacturing_options"][0]["intent"]["recipe"]["print_speed_mm_s"] =
+                value["layouts"][0]["manufacturing_options"][0]["intent"]["recipe"]["print_speed_mm_s"] =
                     serde_json::json!(9.0)
             }
             3 => {
-                value["manufacturing_options"][0]["context_hash"] =
+                value["layouts"][0]["manufacturing_options"][0]["context_hash"] =
                     serde_json::json!(SourceHash::from_bytes(b"foreign context"))
             }
             4 => {
-                let duplicate = value["manufacturing_options"][0].clone();
-                value["manufacturing_options"]
+                let duplicate = value["layouts"][0]["manufacturing_options"][0].clone();
+                value["layouts"][0]["manufacturing_options"]
                     .as_array_mut()
                     .unwrap()
                     .push(duplicate);
             }
             _ => {
-                value["manufacturing_options"][0]
+                value["layouts"][0]["manufacturing_options"][0]
                     .as_object_mut()
                     .unwrap()
                     .remove("intent");

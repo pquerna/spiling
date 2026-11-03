@@ -210,6 +210,30 @@ try {
   assert.equal(reopenedReport.manufacturing_export.software_only, true);
   assert.equal(reopenedReport.manufacturing_export.not_machine_ready, true);
   assert.equal(reopenedReport.manufacturing_export.verification.verified, true);
+  // Exercise independent plate publication through the real, normal-stack CLI.
+  // In particular, full inspection/export must not overflow the entry future.
+  const secondPlate = invoke([
+    "project", "open", movedProject,
+    "--plate-duplicate", "Second plate", "--compile", "--verify", "--save",
+    "--engine", engine,
+  ]);
+  assert.equal(secondPlate.status, 0, secondPlate.stderr);
+  const secondReport = JSON.parse(secondPlate.stdout);
+  assert.equal(secondReport.project.layouts.length, 2);
+  const plateArtifacts = [];
+  for (const plate of [1, 2]) {
+    const replay = invoke([
+      "project", "inspect", movedProject, "--plate", String(plate),
+      "--verify", "--manufacturing-out", join(directory, `plate-${plate}-export`),
+      "--engine", engine,
+    ]);
+    assert.equal(replay.status, 0, replay.stderr);
+    const plateReport = JSON.parse(replay.stdout);
+    assert.equal(plateReport.project.dirty, false);
+    assert.equal(plateReport.manufacturing_export.verification.verified, true);
+    plateArtifacts.push(plateReport.manufacturing.artifact);
+  }
+  assert.notDeepEqual(plateArtifacts[0], plateArtifacts[1]);
   const compactProject = join(directory, "compact.spil");
   const maintained = invoke([
     "project",
@@ -232,7 +256,7 @@ try {
     const receipt = maintenanceOperations[index].storage_maintenance;
     assert.equal(receipt.action, action);
     assert.equal(receipt.stats.limits.chunk_bytes, 262144);
-    assert.equal(maintenanceOperations[index].project.revision, createdReport.project.revision);
+    assert.equal(maintenanceOperations[index].project.revision, secondReport.project.revision);
     assert.equal(maintenanceOperations[index].project.dirty, false);
   }
   assert.equal((await stat(compactProject)).isFile(), true);
@@ -240,6 +264,8 @@ try {
     "project",
     "inspect",
     compactProject,
+    "--plate",
+    "1",
     "--storage-stats",
     "--verify",
     "--engine",

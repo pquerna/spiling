@@ -77,10 +77,25 @@ async fn scene(client: &mut EngineClient) -> SceneSummary {
     };
     summary
 }
+async fn current_layout(client: &EngineClient) -> PrintLayoutId {
+    let ProjectResponse::Status { info } = client
+        .project(ProjectCommand::Get {
+            session_id: client.hello().session_id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("project info")
+    };
+    info.layout_id
+}
 async fn status(client: &mut EngineClient) -> (ProjectInfo, Option<ManufacturingArtifactRecord>) {
     let session_id = client.hello().session_id.clone();
     let ManufacturingResponse::Status { info, artifact, .. } = client
-        .manufacturing(ManufacturingCommand::Get { session_id })
+        .manufacturing(ManufacturingCommand::Get {
+            layout_id: current_layout(client).await,
+            session_id,
+        })
         .await
         .unwrap()
     else {
@@ -97,7 +112,10 @@ async fn fetch_bundle(
         resource: Some(resource),
         ..
     } = client
-        .manufacturing(ManufacturingCommand::Get { session_id })
+        .manufacturing(ManufacturingCommand::Get {
+            layout_id: current_layout(client).await,
+            session_id,
+        })
         .await?
     else {
         panic!("expected immutable manufacturing ByteStream descriptor");
@@ -139,6 +157,7 @@ async fn set_intent(client: &mut EngineClient, intent: ManufacturingIntent) {
     assert!(matches!(
         client
             .manufacturing(ManufacturingCommand::SetIntent {
+                layout_id: current_layout(client).await,
                 session_id,
                 base_revision: info.revision,
                 intent: intent.into(),
@@ -153,6 +172,7 @@ async fn start_compile(client: &mut EngineClient) -> String {
     let session_id = client.hello().session_id.clone();
     let ManufacturingResponse::OperationAccepted { operation } = client
         .manufacturing(ManufacturingCommand::Compile {
+            layout_id: current_layout(client).await,
             session_id,
             base_revision: info.revision,
         })
@@ -177,6 +197,7 @@ async fn start_alternative(client: &mut EngineClient, intent: ManufacturingInten
         info, context_hash, ..
     } = client
         .manufacturing(ManufacturingCommand::Get {
+            layout_id: current_layout(client).await,
             session_id: client.hello().session_id.clone(),
         })
         .await
@@ -186,6 +207,7 @@ async fn start_alternative(client: &mut EngineClient, intent: ManufacturingInten
     };
     let ManufacturingResponse::OperationAccepted { operation } = client
         .manufacturing(ManufacturingCommand::EvaluateAlternative {
+            layout_id: current_layout(client).await,
             session_id: client.hello().session_id.clone(),
             base_revision: info.revision,
             expected_context_hash: context_hash,
@@ -271,6 +293,7 @@ async fn alternatives_preserve_current_replay_and_survive_named_option_reopen() 
     let session_id = client.hello().session_id.clone();
     let ProjectResponse::Status { info: retained } = client
         .project(ProjectCommand::RetainManufacturingOption {
+            layout_id: current_layout(&client).await,
             session_id: session_id.clone(),
             base_revision: baseline.0.revision,
             option: option.clone(),
@@ -284,6 +307,7 @@ async fn alternatives_preserve_current_replay_and_survive_named_option_reopen() 
     assert_eq!(retained.manufacturing_options, vec![option.info()]);
     let ProjectResponse::Status { info: removed } = client
         .project(ProjectCommand::RemoveManufacturingOption {
+            layout_id: current_layout(&client).await,
             session_id: session_id.clone(),
             base_revision: retained.revision,
             id: id.clone(),
@@ -307,6 +331,7 @@ async fn alternatives_preserve_current_replay_and_survive_named_option_reopen() 
     assert_eq!(retained.manufacturing_options, vec![option.info()]);
     let ProjectResponse::Status { info: adopted } = client
         .project(ProjectCommand::ApplyManufacturingOption {
+            layout_id: current_layout(&client).await,
             session_id: session_id.clone(),
             base_revision: retained.revision,
             id: id.clone(),
@@ -345,6 +370,7 @@ async fn alternatives_preserve_current_replay_and_survive_named_option_reopen() 
     let changed_context = status(&mut client).await;
     let ManufacturingResponse::OperationAccepted { operation } = client
         .manufacturing(ManufacturingCommand::EvaluateAlternative {
+            layout_id: current_layout(&client).await,
             session_id: session_id.clone(),
             base_revision: changed_context.0.revision,
             expected_context_hash: option.context_hash.clone(),
@@ -363,6 +389,7 @@ async fn alternatives_preserve_current_replay_and_survive_named_option_reopen() 
     assert!(refused.result.is_none() && refused.outputs.is_empty());
     let adoption = client
         .project(ProjectCommand::ApplyManufacturingOption {
+            layout_id: current_layout(&client).await,
             session_id: session_id.clone(),
             base_revision: changed_context.0.revision,
             id: id.clone(),
@@ -408,6 +435,7 @@ async fn alternatives_preserve_current_replay_and_survive_named_option_reopen() 
     assert_eq!(state.0.manufacturing_options, vec![option.info()]);
     let ProjectResponse::ManufacturingOption { option: fetched } = reader
         .project(ProjectCommand::GetManufacturingOption {
+            layout_id: current_layout(&reader).await,
             session_id: reader.hello().session_id.clone(),
             base_revision: state.0.revision,
             id,
@@ -436,6 +464,7 @@ async fn alternatives_cancel_and_reject_stale_revision_or_context_without_public
     let before = status(&mut client).await;
     let ManufacturingResponse::OperationAccepted { operation } = client
         .manufacturing(ManufacturingCommand::EvaluateAlternative {
+            layout_id: current_layout(&client).await,
             session_id: client.hello().session_id.clone(),
             base_revision: before.0.revision,
             expected_context_hash: SourceHash::from_bytes(b"wrong captured source context"),
@@ -505,6 +534,7 @@ async fn inspect(client: &mut EngineClient) -> (ManufacturingArtifactRecord, Ver
     let session_id = client.hello().session_id.clone();
     let ManufacturingResponse::OperationAccepted { operation } = client
         .manufacturing(ManufacturingCommand::Inspect {
+            layout_id: current_layout(client).await,
             session_id,
             base_revision: info.revision,
             output: VerificationOutput::ReportOnly,
@@ -589,6 +619,7 @@ async fn preflight(client: &mut EngineClient) -> NativeOperationView {
     let session_id = client.hello().session_id.clone();
     let ManufacturingResponse::OperationAccepted { operation } = client
         .manufacturing(ManufacturingCommand::Preflight {
+            layout_id: current_layout(client).await,
             session_id,
             base_revision: info.revision,
         })
@@ -673,6 +704,7 @@ async fn seam_motion(
     let before = status(client).await;
     let ManufacturingResponse::OperationAccepted { operation } = client
         .manufacturing(ManufacturingCommand::Inspect {
+            layout_id: current_layout(client).await,
             session_id: client.hello().session_id.clone(),
             base_revision: before.0.revision,
             output: VerificationOutput::ReportAndMotion,
@@ -885,6 +917,7 @@ async fn preferred_goal_survives_history_and_source_independent_fresh_replay() {
     typed(
         client
             .manufacturing(ManufacturingCommand::SetIntent {
+                layout_id: current_layout(&client).await,
                 session_id: client.hello().session_id.clone(),
                 base_revision: before.0.revision,
                 intent: protected.into(),
@@ -997,6 +1030,7 @@ async fn queued_preflight_cancellation_and_revision_staleness_do_not_publish() {
     .unwrap();
     let before = status(&mut client).await;
     let command = ManufacturingCommand::Preflight {
+        layout_id: current_layout(&client).await,
         session_id: client.hello().session_id.clone(),
         base_revision: before.0.revision,
     };
@@ -1175,6 +1209,7 @@ async fn compiled_bundle_survives_source_deletion_and_fresh_read_only_replay() {
         typed(
             client
                 .manufacturing(ManufacturingCommand::SetIntent {
+                    layout_id: current_layout(&client).await,
                     session_id: client.hello().session_id.clone(),
                     base_revision: before_invalid.0.revision,
                     intent: invalid.into(),
@@ -1201,6 +1236,7 @@ async fn compiled_bundle_survives_source_deletion_and_fresh_read_only_replay() {
     typed(
         client
             .manufacturing(ManufacturingCommand::Get {
+                layout_id: current_layout(&client).await,
                 session_id: SessionId::new(),
             })
             .await,
@@ -1271,6 +1307,7 @@ async fn compiled_bundle_survives_source_deletion_and_fresh_read_only_replay() {
     let session_id = reopened.hello().session_id.clone();
     let ManufacturingResponse::OperationAccepted { operation } = reopened
         .manufacturing(ManufacturingCommand::Compile {
+            layout_id: current_layout(&reopened).await,
             session_id: session_id.clone(),
             base_revision: info.revision,
         })
@@ -1289,6 +1326,7 @@ async fn compiled_bundle_survives_source_deletion_and_fresh_read_only_replay() {
     typed(
         reopened
             .manufacturing(ManufacturingCommand::SetIntent {
+                layout_id: current_layout(&reopened).await,
                 session_id,
                 base_revision: info.revision,
                 intent: intent().into(),
@@ -1440,7 +1478,7 @@ async fn reopen_rejects_hash_corruption_and_hashed_program_tampering_without_rep
     let bytes = serde_json::to_vec(&bundle).unwrap();
     let hash = SourceHash::from_bytes(&bytes);
     let mut manifest = support::manifest(&checkpoint);
-    let artifact = manifest.manufacturing_artifact.as_mut().unwrap();
+    let artifact = manifest.layouts[0].manufacturing_artifact.as_mut().unwrap();
     artifact.hash = hash;
     artifact.byte_count = bytes.len() as u32;
     support::write_root(
@@ -1540,6 +1578,7 @@ async fn queued_save_rejects_intent_only_revision_change_before_snapshot_or_comm
     );
     let ManufacturingResponse::Status { intent: stored, .. } = client
         .manufacturing(ManufacturingCommand::Get {
+            layout_id: current_layout(&client).await,
             session_id: captured_scene.session_id,
         })
         .await
@@ -1666,6 +1705,7 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
     let original_scene = scene(&mut reader).await;
     let session = reader.hello().session_id.clone();
     let command = ManufacturingCommand::Inspect {
+        layout_id: current_layout(&reader).await,
         session_id: session.clone(),
         base_revision: before.0.revision,
         output: VerificationOutput::ReportAndMotion,
@@ -2333,6 +2373,7 @@ async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fr
         assert_eq!(before.1, Some(record.clone()));
         let ManufacturingResponse::OperationAccepted { operation } = client
             .manufacturing(ManufacturingCommand::Inspect {
+                layout_id: current_layout(&client).await,
                 session_id: client.hello().session_id.clone(),
                 base_revision: before.0.revision,
                 output: VerificationOutput::ReportAndMotion,
@@ -2722,11 +2763,13 @@ async fn queued_process_pose_and_source_changes_reject_stale_compile_and_preflig
             let session_id = client.hello().session_id.clone();
             let command = if preflight_only {
                 ManufacturingCommand::Preflight {
+                    layout_id: current_layout(&client).await,
                     session_id,
                     base_revision: input.revision,
                 }
             } else {
                 ManufacturingCommand::Compile {
+                    layout_id: current_layout(&client).await,
                     session_id,
                     base_revision: input.revision,
                 }
@@ -2825,6 +2868,7 @@ async fn material_review_is_nonmutating_and_stale_selection_cannot_commit() {
     let session_id = client.hello().session_id.clone();
     let ManufacturingResponse::MaterialReview { report } = client
         .manufacturing(ManufacturingCommand::ReviewMaterials {
+            layout_id: current_layout(&client).await,
             session_id: session_id.clone(),
             base_revision: before.0.revision,
             request: MaterialReviewRequest {
@@ -2851,6 +2895,7 @@ async fn material_review_is_nonmutating_and_stale_selection_cannot_commit() {
     assert_ne!(edited_state.0.revision, report.input_revision);
     let error = client
         .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+            layout_id: current_layout(&client).await,
             session_id,
             base_revision: report.input_revision,
             selection: report.candidates[0].selection.clone(),
@@ -2866,3 +2911,5 @@ async fn material_review_is_nonmutating_and_stale_selection_cannot_commit() {
 
 #[path = "manufacturing/layout.rs"]
 mod layout;
+#[path = "manufacturing/plates.rs"]
+mod plates;

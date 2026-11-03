@@ -434,7 +434,8 @@ impl projects_server::Projects for Service {
             request_id: id,
             digest,
             command: Control::Project(command),
-            reservation: 80 * 1024 * 1024,
+            // Open can publish all 64 MiB of retained per-layout bundles alongside the scene.
+            reservation: 128 * 1024 * 1024,
         };
         Ok(Response::new(
             self.jobs.start_native(self.native.clone(), input).await?,

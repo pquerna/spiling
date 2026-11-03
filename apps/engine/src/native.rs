@@ -559,8 +559,8 @@ fn publish_terminal(
     if let geometry::JobResult::Section { artifact_id } = &private {
         publish_geometry(runtime, jobs, *artifact_id, resources, &mut outputs)?;
     }
-    let asset = runtime.current_manufacturing_asset();
-    if let Some(asset) = &asset {
+    let assets = runtime.layout_manufacturing_assets();
+    for asset in &assets {
         let descriptor = jobs.describe_native_artifact(
             asset.bytes.as_slice(),
             "application/x-spiling-manufacturing-bundle",

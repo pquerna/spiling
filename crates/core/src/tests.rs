@@ -474,7 +474,12 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
 }
 pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
     let manifest = project.capture().manifest;
-    let intent = manifest.manufacturing_intent.unwrap().as_ref().clone();
+    let intent = manifest.layouts[0]
+        .manufacturing_intent
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .clone();
     let recipe = &intent.recipe;
     let path_length_mm = 1.0;
     let section_area_mm2 = path_length_mm * recipe.bead_width_mm;
@@ -514,7 +519,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             input_hash: input_fingerprint(
                 &manifest.project_id,
                 &manifest.definitions,
-                &manifest.occurrences,
+                &manifest.layouts[0].occurrences,
                 &intent,
                 &manifest.surface_overlays,
                 &manifest.process_document,
@@ -523,7 +528,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             project_id: manifest.project_id,
             input_revision: manifest.revision,
             definitions: manifest.definitions,
-            occurrences: manifest.occurrences,
+            occurrences: manifest.layouts[0].occurrences.clone(),
             intent,
             surface_overlays: manifest.surface_overlays,
             process_document: manifest.process_document,
@@ -912,7 +917,7 @@ fn manufacturing_retained_history_budget_is_separate_and_failed_publish_is_atomi
             intent: (manufacturing_intent()).into(),
         },
     );
-    for _ in 0..4 {
+    for index in 0..4 {
         let mut bundle = manufacturing_bundle(&project);
         bundle.program.push(';');
         bundle
@@ -923,7 +928,11 @@ fn manufacturing_retained_history_budget_is_separate_and_failed_publish_is_atomi
         edit(
             &mut project,
             Edit::SetManufacturingIntent {
-                intent: (manufacturing_intent()).into(),
+                intent: {
+                    let mut changed = manufacturing_intent();
+                    changed.recipe.print_speed_mm_s += index as f64 + 1.;
+                    changed.into()
+                },
             },
         );
     }

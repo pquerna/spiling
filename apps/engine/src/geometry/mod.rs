@@ -1243,15 +1243,15 @@ impl Runtime {
             }
         }
         SceneSummary {
+            layout_id: snapshot.layout_id.clone(),
             session_id: self.session_id.clone(),
             revision: self.revision,
-            definition_count: snapshot.sources.len() as u32,
+            definition_count: snapshot.active_sources().count() as u32,
             occurrence_count: snapshot.occurrences.len() as u32,
             bounds_mm: bounds,
             unique_mesh_bytes: snapshot
-                .sources
-                .keys()
-                .map(|id| self.definitions[id].bytes)
+                .active_sources()
+                .map(|a| self.definitions[&a.record.definition_id].bytes)
                 .sum(),
         }
     }
@@ -1371,25 +1371,9 @@ impl Runtime {
                         "Apply a printer and recipe before arranging",
                     )
                 })?;
-                let surface_images = self
-                    .capture_surface_images()
+                let capture = self
+                    .capture_compile_input(&snapshot, project_revision, intent, 0)
                     .map_err(|e| error(GeometryErrorCode::InvalidGeometry, e.message))?;
-                let capture = worker::CompileRequest {
-                    project_id: self.project.info().project_id,
-                    revision: project_revision,
-                    definition_ids: snapshot.sources.keys().cloned().collect(),
-                    stored_definitions: snapshot
-                        .sources
-                        .values()
-                        .map(|s| s.record.clone())
-                        .collect(),
-                    occurrences: snapshot.occurrences.values().cloned().collect(),
-                    intent,
-                    surface_overlays: snapshot.surface_overlays.clone(),
-                    process_document: snapshot.process_document.clone(),
-                    byte_budget: 0,
-                    surface_images,
-                };
                 let request = layout::Request {
                     session: self.session_id.clone(),
                     scene: self.revision,
@@ -1564,17 +1548,16 @@ impl Runtime {
                 }
                 let snapshot = self.project.snapshot();
                 let count = match kind {
-                    ScenePageKind::Definitions => snapshot.sources.len(),
+                    ScenePageKind::Definitions => snapshot.active_sources().count(),
                     ScenePageKind::Occurrences => snapshot.occurrences.len(),
                 };
                 let (start, end, next_offset) = page(count, offset, SCENE_PAGE_SIZE)?;
                 let definitions = if kind == ScenePageKind::Definitions {
                     snapshot
-                        .sources
-                        .keys()
+                        .active_sources()
                         .skip(start)
                         .take(end - start)
-                        .map(|id| self.definitions[id].record.clone())
+                        .map(|a| self.definitions[&a.record.definition_id].record.clone())
                         .collect()
                 } else {
                     vec![]
@@ -1725,6 +1708,18 @@ impl Runtime {
             return Err(project_error(
                 ProjectErrorCode::Busy,
                 "a project job or promotion is active",
+            ));
+        }
+        Ok(())
+    }
+    fn check_layout(
+        &self,
+        layout: &spiling_contracts::project::PrintLayoutId,
+    ) -> Result<(), ProjectError> {
+        if layout != &self.project.snapshot().layout_id {
+            return Err(project_error(
+                ProjectErrorCode::StaleRevision,
+                "the addressed print layout is not the current scene",
             ));
         }
         Ok(())
@@ -1889,11 +1884,64 @@ impl Runtime {
                     next_offset: (end < total).then_some(end),
                 }))
             }
+            ProjectCommand::SelectPrintLayout {
+                session_id,
+                base_revision,
+                layout_id,
+            } => {
+                if session_id != self.session_id || base_revision != self.project.info().revision {
+                    return Err(project_error(
+                        ProjectErrorCode::StaleRevision,
+                        "print layout navigation is stale",
+                    ));
+                }
+                if self.active.is_some() {
+                    return Err(ProjectError::new(
+                        ProjectErrorCode::Busy,
+                        "an engine job is active",
+                    ));
+                }
+                if self.project.snapshot().layout_id != layout_id {
+                    let revision = project_scene_revision(self.revision)?;
+                    self.project.select_layout(&layout_id)?;
+                    self.revision = revision;
+                    self.layout_proposal = None;
+                }
+                Ok(Reply::Project(ProjectResponse::SceneChanged {
+                    info: self.project.info(),
+                    summary: self.summary(),
+                }))
+            }
+            ProjectCommand::EditPrintLayout {
+                session_id,
+                base_revision,
+                edit,
+            } => {
+                self.metadata_base(&session_id, base_revision)?;
+                if self.active.is_some() {
+                    return Err(ProjectError::new(
+                        ProjectErrorCode::Busy,
+                        "an engine job is active",
+                    ));
+                }
+                let revision = project_scene_revision(self.revision)?;
+                let prepared = self.project.prepare(Edit::PrintLayout { edit })?;
+                self.project.commit(prepared)?;
+                self.revision = revision;
+                self.layout_proposal = None;
+                self.synchronize_native_pins();
+                Ok(Reply::Project(ProjectResponse::SceneChanged {
+                    info: self.project.info(),
+                    summary: self.summary(),
+                }))
+            }
             ProjectCommand::SetHardware {
+                layout_id,
                 session_id,
                 base_revision,
                 capture,
             } => {
+                self.check_layout(&layout_id)?;
                 self.metadata_base(&session_id, base_revision)?;
                 if self.project.info().hardware == capture {
                     Ok(Reply::Project(ProjectResponse::Status {
@@ -1904,10 +1952,12 @@ impl Runtime {
                 }
             }
             ProjectCommand::GetManufacturingOption {
+                layout_id,
                 session_id,
                 base_revision,
                 id,
             } => {
+                self.check_layout(&layout_id)?;
                 if session_id != self.session_id || base_revision != self.project.info().revision {
                     return Err(project_error(
                         ProjectErrorCode::StaleRevision,
@@ -1932,26 +1982,32 @@ impl Runtime {
                 }))
             }
             ProjectCommand::RetainManufacturingOption {
+                layout_id,
                 session_id,
                 base_revision,
                 option,
             } => {
+                self.check_layout(&layout_id)?;
                 self.metadata_base(&session_id, base_revision)?;
                 self.commit_metadata_edit(Edit::RetainManufacturingOption { option })
             }
             ProjectCommand::RemoveManufacturingOption {
+                layout_id,
                 session_id,
                 base_revision,
                 id,
             } => {
+                self.check_layout(&layout_id)?;
                 self.metadata_base(&session_id, base_revision)?;
                 self.commit_metadata_edit(Edit::RemoveManufacturingOption { id })
             }
             ProjectCommand::ApplyManufacturingOption {
+                layout_id,
                 session_id,
                 base_revision,
                 id,
             } => {
+                self.check_layout(&layout_id)?;
                 self.metadata_base(&session_id, base_revision)?;
                 self.commit_metadata_edit(Edit::ApplyManufacturingOption { id })
             }
@@ -2538,7 +2594,8 @@ fn page(count: usize, offset: u32, size: u32) -> Domain<(usize, usize, Option<u3
 }
 
 fn same_geometry(left: &spiling_core::Snapshot, right: &spiling_core::Snapshot) -> bool {
-    left.occurrences == right.occurrences
+    left.layout_id == right.layout_id
+        && left.occurrences == right.occurrences
         && left.sources.len() == right.sources.len()
         && left
             .sources

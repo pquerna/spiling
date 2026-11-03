@@ -636,6 +636,7 @@ async fn manufacturing_rejections_preserve_pid_session_and_unwritten_preflight()
     let session = client.hello().session_id.clone();
     let status = client
         .manufacturing(ManufacturingCommand::Get {
+            layout_id: current_layout(&client).await,
             session_id: session.clone(),
         })
         .await
@@ -652,10 +653,12 @@ async fn manufacturing_rejections_preserve_pid_session_and_unwritten_preflight()
     };
     for command in [
         ManufacturingCommand::Compile {
+            layout_id: current_layout(&client).await,
             session_id: session.clone(),
             base_revision: info.revision,
         },
         ManufacturingCommand::Inspect {
+            layout_id: current_layout(&client).await,
             session_id: session.clone(),
             base_revision: info.revision,
             output: VerificationOutput::ReportOnly,
@@ -750,6 +753,7 @@ async fn manufacturing_bundle_survives_save_restart_and_source_removal() {
     let session = client.hello().session_id.clone();
     let ManufacturingResponse::Status { info, .. } = client
         .manufacturing(ManufacturingCommand::Get {
+            layout_id: current_layout(&client).await,
             session_id: session.clone(),
         })
         .await
@@ -763,6 +767,7 @@ async fn manufacturing_bundle_survives_save_restart_and_source_removal() {
     .unwrap();
     let ManufacturingResponse::Status { info, .. } = client
         .manufacturing(ManufacturingCommand::SetIntent {
+            layout_id: current_layout(&client).await,
             session_id: session.clone(),
             base_revision: info.revision,
             intent: intent.into(),
@@ -774,6 +779,7 @@ async fn manufacturing_bundle_survives_save_restart_and_source_removal() {
     };
     let request_id = Uuid::new_v4().to_string();
     let compile = ManufacturingCommand::Compile {
+        layout_id: current_layout(&client).await,
         session_id: session.clone(),
         base_revision: info.revision,
     };
@@ -831,6 +837,7 @@ async fn manufacturing_bundle_survives_save_restart_and_source_removal() {
     client.ping().await.unwrap();
     let ManufacturingResponse::OperationAccepted { operation: verify } = client
         .manufacturing(ManufacturingCommand::Inspect {
+            layout_id: current_layout(&client).await,
             session_id: session.clone(),
             base_revision: info.revision,
             output: VerificationOutput::ReportOnly,
@@ -872,6 +879,7 @@ async fn manufacturing_bundle_survives_save_restart_and_source_removal() {
         ..
     } = reopened
         .manufacturing(ManufacturingCommand::Get {
+            layout_id: current_layout(&reopened).await,
             session_id: reopened.hello().session_id.clone(),
         })
         .await
@@ -888,6 +896,7 @@ async fn manufacturing_bundle_survives_save_restart_and_source_removal() {
     assert_eq!(reopened_bundle.provenance, bundle.provenance);
     let ManufacturingResponse::OperationAccepted { operation: replay } = reopened
         .manufacturing(ManufacturingCommand::Inspect {
+            layout_id: current_layout(&reopened).await,
             session_id: reopened.hello().session_id.clone(),
             base_revision: info.revision,
             output: VerificationOutput::ReportOnly,
@@ -976,4 +985,17 @@ async fn appearance_descriptor_and_allocation_refusals_preserve_supervised_child
     assert_eq!(client.pid(), pid);
     assert_eq!(client.hello().session_id, session);
     client.shutdown().await.unwrap();
+}
+
+async fn current_layout(client: &EngineClient) -> spiling_contracts::project::PrintLayoutId {
+    let ProjectResponse::Status { info } = client
+        .project(ProjectCommand::Get {
+            session_id: client.hello().session_id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("project")
+    };
+    info.layout_id
 }

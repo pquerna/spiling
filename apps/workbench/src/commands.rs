@@ -86,7 +86,7 @@ impl Action {
             Self::Preflight => "Check setup",
             Self::Compile => "Compile program",
             Self::Verify => "Verify program",
-            Self::Export => "Export…",
+            Self::Export => "Export plate…",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
             Self::Restart => "Restart engine",

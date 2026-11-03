@@ -987,19 +987,21 @@ async fn invalid_manifests_assets_and_native_admission_preserve_the_entire_live_
                 write_manifest(&path, &changed);
             }
             "duplicate-occurrence" => {
-                changed.occurrences.push(changed.occurrences[0].clone());
+                let duplicate = changed.layouts[0].occurrences[0].clone();
+                changed.layouts[0].occurrences.push(duplicate);
                 write_manifest(&path, &changed);
             }
             "invalid-pose" => {
-                changed.occurrences[0].pose.rotation_xyzw = [0.0; 4];
+                changed.layouts[0].occurrences[0].pose.rotation_xyzw = [0.0; 4];
                 write_manifest(&path, &changed);
             }
             "invalid-counter" => {
-                changed.next_occurrence = changed.occurrences[0].occurrence_id.get();
+                changed.next_occurrence = changed.layouts[0].occurrences[0].occurrence_id.get();
                 write_manifest(&path, &changed);
             }
             "dangling-definition" => {
-                changed.occurrences[0].definition_id = DefinitionId::parse("a".repeat(64)).unwrap();
+                changed.layouts[0].occurrences[0].definition_id =
+                    DefinitionId::parse("a".repeat(64)).unwrap();
                 write_manifest(&path, &changed);
             }
             "provenance-mismatch" => {
@@ -2634,9 +2636,11 @@ async fn optical_application_uses_ack_revision_fences_and_no_scene_outputs() {
     construction.definition_id = definitions[0].definition_id.clone();
     construction.source_hash = definitions[0].provenance.source_hash.clone();
     let tools = job.tools.clone();
-    let base = info(&mut client).await.revision;
+    let current = info(&mut client).await;
+    let base = current.revision;
     client
         .manufacturing(ManufacturingCommand::SetIntent {
+            layout_id: current.layout_id,
             session_id: session.clone(),
             base_revision: base,
             intent: Arc::new(intent),

@@ -1218,7 +1218,16 @@ mod public_state_tests {
                 }],
             }],
         };
+        let layout_id = crate::project::PrintLayoutId::new();
         let info = ProjectInfo {
+            layout_id: layout_id.clone(),
+            layouts: vec![crate::project::PrintLayoutInfo {
+                layout_id,
+                name: "Plate 1".into(),
+                occurrence_count: 1,
+                configured: true,
+                has_result: false,
+            }],
             manufacturing_options: vec![],
             hardware: None,
             project_id: ProjectId::new(),

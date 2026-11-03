@@ -76,6 +76,7 @@ impl Actor {
         self.nonce += 1;
         let capture = Arc::new(manufacture::Capture {
             nonce: self.nonce,
+            layout_id: project.layout_id.clone(),
             session: client.hello().session_id.clone(),
             observed_revision: evaluation.captured_revision,
             record: evaluation.record.clone(),
@@ -201,6 +202,7 @@ impl Actor {
                 session_id,
                 base_revision,
                 request,
+                ..
             } => Some((
                 session_id.clone(),
                 *base_revision,
@@ -280,6 +282,14 @@ impl Actor {
         }
     }
     pub(super) async fn project_edit(&mut self, command: ProjectCommand) -> Option<ProjectInfo> {
+        let plate_edit = match &command {
+            ProjectCommand::EditPrintLayout {
+                session_id,
+                base_revision,
+                edit,
+            } => Some((session_id.clone(), *base_revision, edit.clone())),
+            _ => None,
+        };
         let settings_apply = match &command {
             ProjectCommand::ApplyManufacturingOption {
                 session_id,
@@ -298,6 +308,7 @@ impl Actor {
                 session_id,
                 base_revision,
                 id,
+                ..
             } => Some((session_id.clone(), *base_revision, id.clone())),
             _ => None,
         };
@@ -340,7 +351,7 @@ impl Actor {
                         }));
                 }
             }
-            Ok(ProjectResponse::SceneChanged { .. }) => {}
+            Ok(ProjectResponse::SceneChanged { info, .. }) => receipt = Some(info),
             Ok(
                 ProjectResponse::Filament { .. }
                 | ProjectResponse::Filaments { .. }
@@ -349,6 +360,17 @@ impl Actor {
             ) => self.problem("Unexpected material query response to project edit"),
             Ok(ProjectResponse::Error { error }) => self.problem(error.to_string()),
             Err(error) => self.failure(error).await,
+        }
+        if let (Some((session, base_revision, edit)), Some(info)) = (plate_edit, receipt.as_ref()) {
+            self.nonce += 1;
+            self.state.plate_edit = Some(Arc::new(PlateEditReceipt {
+                nonce: self.nonce,
+                session,
+                project: info.project_id.clone(),
+                base_revision,
+                revision: info.revision,
+                edit,
+            }));
         }
         if self.pending.is_none() {
             self.preserve_current_for_option_edit = option_metadata_edit && receipt.is_some();
@@ -380,6 +402,13 @@ impl Actor {
         self.nonce += 1;
         let capture = Arc::new(manufacture::Capture {
             nonce: self.nonce,
+            layout_id: self
+                .state
+                .project
+                .as_ref()
+                .expect("refreshed project")
+                .layout_id
+                .clone(),
             session: client.hello().session_id.clone(),
             observed_revision: self
                 .state

@@ -6,7 +6,7 @@
 use crate::{
     geometry::{DefinitionId, OccurrenceId, SourceHash},
     manufacturing::*,
-    project::ProjectRevision,
+    project::{PrintLayoutId, ProjectRevision},
     rpc,
 };
 use std::sync::Arc;
@@ -65,11 +65,13 @@ impl TryFrom<ManufacturingCommand> for rpc::ManufacturingRequest {
     type Error = String;
     fn try_from(value: ManufacturingCommand) -> Result<Self, String> {
         use rpc::manufacturing_request::Command;
+        let layout_id = value.layout_id().as_str().to_owned();
         let (session_id, command) = match value {
-            ManufacturingCommand::Get { session_id } => {
+            ManufacturingCommand::Get { session_id, .. } => {
                 (session_id, Command::Get(rpc::GetManufacturingRequest {}))
             }
             ManufacturingCommand::SetIntent {
+                layout_id: _,
                 session_id,
                 base_revision,
                 intent,
@@ -81,6 +83,7 @@ impl TryFrom<ManufacturingCommand> for rpc::ManufacturingRequest {
                 }),
             ),
             ManufacturingCommand::ReviewMaterials {
+                layout_id: _,
                 session_id,
                 base_revision,
                 request,
@@ -92,6 +95,7 @@ impl TryFrom<ManufacturingCommand> for rpc::ManufacturingRequest {
                 }),
             ),
             ManufacturingCommand::ApplyMaterialProfile {
+                layout_id: _,
                 session_id,
                 base_revision,
                 selection,
@@ -107,6 +111,7 @@ impl TryFrom<ManufacturingCommand> for rpc::ManufacturingRequest {
         let parent = format!("sessions/{}", session_id.as_str());
         super::session_parent(&parent)?;
         Ok(Self {
+            layout_id,
             parent,
             command: Some(command),
         })
@@ -117,19 +122,26 @@ impl TryFrom<rpc::ManufacturingRequest> for ManufacturingCommand {
     fn try_from(value: rpc::ManufacturingRequest) -> Result<Self, String> {
         use rpc::manufacturing_request::Command;
         let session_id = super::session_parent(&value.parent)?;
+        let layout_id = PrintLayoutId::parse(value.layout_id).map_err(|e| e.to_string())?;
         match required(value.command, "manufacturing command")? {
-            Command::Get(_) => Ok(Self::Get { session_id }),
+            Command::Get(_) => Ok(Self::Get {
+                session_id,
+                layout_id,
+            }),
             Command::ReviewMaterials(request) => Ok(Self::ReviewMaterials {
+                layout_id,
                 session_id,
                 base_revision: ProjectRevision(request.base_revision),
                 request: required(request.request, "material review request")?.try_into()?,
             }),
             Command::ApplyMaterialProfile(request) => Ok(Self::ApplyMaterialProfile {
+                layout_id,
                 session_id,
                 base_revision: ProjectRevision(request.base_revision),
                 selection: required(request.selection, "material profile selection")?.try_into()?,
             }),
             Command::SetIntent(request) => Ok(Self::SetIntent {
+                layout_id,
                 session_id,
                 base_revision: ProjectRevision(request.base_revision),
                 intent: Arc::new(required(request.intent, "manufacturing intent")?.try_into()?),
@@ -141,6 +153,7 @@ impl TryFrom<ManufacturingCommand> for rpc::CompileManufacturingRequest {
     type Error = String;
     fn try_from(value: ManufacturingCommand) -> Result<Self, String> {
         let ManufacturingCommand::Compile {
+            layout_id,
             session_id,
             base_revision,
         } = value
@@ -151,6 +164,7 @@ impl TryFrom<ManufacturingCommand> for rpc::CompileManufacturingRequest {
         super::session_parent(&parent)?;
         Ok(Self {
             parent,
+            layout_id: layout_id.as_str().into(),
             request_id: String::new(),
             base_revision: base_revision.get(),
         })
@@ -160,6 +174,7 @@ impl TryFrom<ManufacturingCommand> for rpc::EvaluateManufacturingAlternativeRequ
     type Error = String;
     fn try_from(value: ManufacturingCommand) -> Result<Self, String> {
         let ManufacturingCommand::EvaluateAlternative {
+            layout_id,
             session_id,
             base_revision,
             expected_context_hash,
@@ -170,6 +185,7 @@ impl TryFrom<ManufacturingCommand> for rpc::EvaluateManufacturingAlternativeRequ
         };
         Ok(Self {
             parent: format!("sessions/{}", session_id.as_str()),
+            layout_id: layout_id.as_str().into(),
             request_id: String::new(),
             base_revision: base_revision.get(),
             expected_context_hash: expected_context_hash.as_str().into(),
@@ -182,6 +198,7 @@ impl TryFrom<rpc::EvaluateManufacturingAlternativeRequest> for ManufacturingComm
     fn try_from(value: rpc::EvaluateManufacturingAlternativeRequest) -> Result<Self, String> {
         super::request_id(&value.request_id)?;
         Ok(Self::EvaluateAlternative {
+            layout_id: PrintLayoutId::parse(value.layout_id).map_err(|e| e.to_string())?,
             session_id: super::session_parent(&value.parent)?,
             base_revision: ProjectRevision(value.base_revision),
             expected_context_hash: SourceHash::parse(value.expected_context_hash)
@@ -299,6 +316,7 @@ impl TryFrom<rpc::CompileManufacturingRequest> for ManufacturingCommand {
     fn try_from(value: rpc::CompileManufacturingRequest) -> Result<Self, String> {
         super::request_id(&value.request_id)?;
         Ok(Self::Compile {
+            layout_id: PrintLayoutId::parse(value.layout_id).map_err(|e| e.to_string())?,
             session_id: super::session_parent(&value.parent)?,
             base_revision: ProjectRevision(value.base_revision),
         })
@@ -308,6 +326,7 @@ impl TryFrom<ManufacturingCommand> for rpc::VerifyManufacturingRequest {
     type Error = String;
     fn try_from(value: ManufacturingCommand) -> Result<Self, String> {
         let ManufacturingCommand::Inspect {
+            layout_id,
             session_id,
             base_revision,
             output,
@@ -319,6 +338,7 @@ impl TryFrom<ManufacturingCommand> for rpc::VerifyManufacturingRequest {
         super::session_parent(&parent)?;
         Ok(Self {
             parent,
+            layout_id: layout_id.as_str().into(),
             request_id: String::new(),
             base_revision: base_revision.get(),
             output: rpc::VerificationOutput::try_from(output)? as i32,
@@ -330,6 +350,7 @@ impl TryFrom<rpc::VerifyManufacturingRequest> for ManufacturingCommand {
     fn try_from(value: rpc::VerifyManufacturingRequest) -> Result<Self, String> {
         super::request_id(&value.request_id)?;
         Ok(Self::Inspect {
+            layout_id: PrintLayoutId::parse(value.layout_id).map_err(|e| e.to_string())?,
             session_id: super::session_parent(&value.parent)?,
             base_revision: ProjectRevision(value.base_revision),
             output: rpc::VerificationOutput::try_from(value.output)
@@ -342,6 +363,7 @@ impl TryFrom<ManufacturingCommand> for rpc::PreflightManufacturingRequest {
     type Error = String;
     fn try_from(value: ManufacturingCommand) -> Result<Self, String> {
         let ManufacturingCommand::Preflight {
+            layout_id,
             session_id,
             base_revision,
         } = value
@@ -352,6 +374,7 @@ impl TryFrom<ManufacturingCommand> for rpc::PreflightManufacturingRequest {
         super::session_parent(&parent)?;
         Ok(Self {
             parent,
+            layout_id: layout_id.as_str().into(),
             request_id: String::new(),
             base_revision: base_revision.get(),
         })
@@ -362,6 +385,7 @@ impl TryFrom<rpc::PreflightManufacturingRequest> for ManufacturingCommand {
     fn try_from(value: rpc::PreflightManufacturingRequest) -> Result<Self, String> {
         super::request_id(&value.request_id)?;
         Ok(Self::Preflight {
+            layout_id: PrintLayoutId::parse(value.layout_id).map_err(|e| e.to_string())?,
             session_id: super::session_parent(&value.parent)?,
             base_revision: ProjectRevision(value.base_revision),
         })
@@ -1766,6 +1790,7 @@ mod tests {
     fn preflight_request_report_and_operation_round_trip_are_checked() {
         let session = SessionId::new();
         let command = ManufacturingCommand::Preflight {
+            layout_id: crate::project::PrintLayoutId::new(),
             session_id: session,
             base_revision: ProjectRevision(7),
         };
@@ -1922,6 +1947,7 @@ mod tests {
     fn typed_dispatch_preserves_project_revision_and_request_id() {
         let session_id = SessionId::new();
         let command = ManufacturingCommand::SetIntent {
+            layout_id: crate::project::PrintLayoutId::new(),
             session_id: session_id.clone(),
             base_revision: ProjectRevision(17),
             intent: Arc::new(intent()),
@@ -1932,6 +1958,7 @@ mod tests {
         };
         assert_eq!(ManufacturingCommand::try_from(request).unwrap(), command);
         let command = ManufacturingCommand::Inspect {
+            layout_id: crate::project::PrintLayoutId::new(),
             session_id,
             base_revision: ProjectRevision(19),
             output: VerificationOutput::ReportOnly,
@@ -1953,6 +1980,7 @@ mod tests {
         assert!(manufacturing_call(command, "invalid").is_err());
         assert!(
             ManufacturingCommand::try_from(rpc::ManufacturingRequest {
+                layout_id: crate::project::PrintLayoutId::new().as_str().into(),
                 parent: "sessions/not-a-session".into(),
                 command: None
             })

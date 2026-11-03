@@ -148,6 +148,22 @@ shows the declared machine envelope. These are inspection controls, never placem
 edits. Context geometry is excluded from source picking, sections, replay counts and
 manufacturing authority. Shared build-area controls appear in the production gallery.
 
+## Plate navigation
+
+The persistent Plates navigator selects one independent print job. Show its name and
+part count, including empty plates; Prepare/Review and window title retain the same
+scope. Add plate is a quiet structural action. Plate actions contain rename, duplicate,
+reorder, remove and explicit Move/Copy parts sheets. Physical sheet inventory stays
+in My Hardware. Names truncate in navigation and remain complete in the editor.
+
+Each sheet shows its source, destination when relevant, one named primary action and
+Cancel/Escape. Keep a submitted sheet until its matching session/project/base/edit
+receipt is observed; refusal retains its contents. Switching with unapplied drafts
+opens the existing deliberate discard/keep-editing guard. Cameras and section/replay
+view settings remain bounded per plate; decoded output does not accumulate per tab.
+Removing the final plate is unavailable. A context menu Delete or canvas shortcut
+must not silently remove a whole job.
+
 ## Arrangement
 
 Arrange opens a scoped pane with Make copies, Arrange parts and Fill plate goals.
@@ -163,7 +179,7 @@ Verification details and search limits are disclosed below the essential result.
 
 ## Exercising a change
 
-Use the production gallery's Panels, Fields, Color, Acquisition, Try / Compare, Build area and Arrange categories in each theme.
+Use the production gallery's Panels, Fields, Color, Acquisition, Try / Compare, Build area, Arrange and Plates categories in each theme.
 The complete panel specimen includes ready, changed, blocked, pending, uncertain,
 invalid, read-only and stale states; its close/reopen path is interactive. Inspect narrow/normal panes,
 long names and scaled text. Test keyboard help, primary-action reasons, Escape,

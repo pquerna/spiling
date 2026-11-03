@@ -3,6 +3,8 @@
 // Licensed under the Open Software License version 3.0
 
 //! Persistent source-backed project contracts, independent of storage and BREP.
+mod layouts;
+pub use layouts::*;
 mod manufacturing_options;
 mod recovery;
 mod storage;
@@ -178,15 +180,8 @@ pub struct ProjectManifest {
     pub appearance_study: AppearanceStudy,
     #[serde(deserialize_with = "required_option")]
     pub materials: Option<crate::library::MaterialCollectionRecord>,
-    #[serde(deserialize_with = "required_option")]
-    pub hardware: Option<Arc<crate::hardware::ProjectHardwareCapture>>,
     pub definitions: Vec<StoredDefinition>,
-    pub occurrences: Vec<OccurrenceRecord>,
-    #[serde(deserialize_with = "required_option")]
-    pub manufacturing_intent: Option<Arc<ManufacturingIntent>>,
-    pub manufacturing_options: Vec<ManufacturingOption>,
-    #[serde(deserialize_with = "required_option")]
-    pub manufacturing_artifact: Option<ManufacturingArtifactRecord>,
+    pub layouts: Vec<PrintLayoutRecord>,
 }
 fn required_option<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
@@ -201,25 +196,32 @@ impl ProjectManifest {
                 "unsupported project manifest format",
             ));
         }
-        if self.definitions.len() > MAX_DEFINITIONS as usize
-            || self.occurrences.len() > MAX_OCCURRENCES as usize
+        let records: Vec<_> = self
+            .layouts
+            .iter()
+            .flat_map(|l| l.occurrences.iter().cloned())
+            .collect();
+        if self.layouts.is_empty()
+            || self.layouts.len() > MAX_PRINT_LAYOUTS
+            || self.definitions.len() > MAX_DEFINITIONS as usize
+            || records.len() > MAX_OCCURRENCES as usize
         {
             return Err(ProjectError::new(
                 ProjectErrorCode::ResourceLimit,
                 "project record budget exceeded",
             ));
         }
-        if let Some(h) = &self.hardware {
-            h.validate().map_err(|e| invalid(&e))?;
-        }
-        if self
-            .manufacturing_intent
-            .as_ref()
-            .is_some_and(|m| m.hardware != self.hardware)
-        {
-            return Err(invalid(
-                "hardware capture differs from manufacturing intent",
-            ));
+        let mut layouts = BTreeSet::new();
+        for layout in &self.layouts {
+            layout.validate(
+                &self.project_id,
+                &self.definitions,
+                &self.surface_overlays,
+                &self.process_document,
+            )?;
+            if !layouts.insert(&layout.layout_id) {
+                return Err(invalid("duplicate print layout identity"));
+            }
         }
         if let Some(materials) = &self.materials {
             materials.validate().map_err(|e| invalid(&e))?;
@@ -246,7 +248,7 @@ impl ProjectManifest {
         }
         let mut occurrences = BTreeSet::new();
         let mut used = BTreeSet::new();
-        for occurrence in &self.occurrences {
+        for occurrence in &records {
             occurrence
                 .pose
                 .validate()
@@ -268,44 +270,16 @@ impl ProjectManifest {
         }
         self.surface_overlays.validate_targets(
             &self.definitions,
-            &self.occurrences,
+            &records,
             self.next_surface_layer,
         )?;
         self.process_document.validate_targets(
             &self.definitions,
-            &self.occurrences,
+            &records,
             self.next_process_layer,
             self.next_process_operation,
         )?;
         self.appearance_study.validate()?;
-        validate_manufacturing_options(&self.manufacturing_options)?;
-        if let Some(intent) = &self.manufacturing_intent {
-            intent.validate().map_err(|e| invalid(&e.message))?;
-        }
-        if let Some(record) = &self.manufacturing_artifact {
-            if self.definitions.is_empty() || self.occurrences.is_empty() {
-                return Err(invalid(
-                    "manufacturing artifact requires nonempty project geometry",
-                ));
-            }
-            record.validate().map_err(|e| invalid(&e.message))?;
-            let intent = self
-                .manufacturing_intent
-                .as_ref()
-                .ok_or_else(|| invalid("manufacturing artifact requires intent"))?;
-            let hash = input_fingerprint(
-                &self.project_id,
-                &self.definitions,
-                &self.occurrences,
-                intent,
-                &self.surface_overlays,
-                &self.process_document,
-            )
-            .map_err(|e| invalid(&e.message))?;
-            if hash != record.input_hash {
-                return Err(invalid("manufacturing artifact input hash is not current"));
-            }
-        }
         Ok(())
     }
 }
@@ -314,6 +288,8 @@ impl ProjectManifest {
 pub struct ProjectInfo {
     pub project_id: ProjectId,
     pub revision: ProjectRevision,
+    pub layout_id: PrintLayoutId,
+    pub layouts: Vec<PrintLayoutInfo>,
     pub saved_revision: Option<ProjectRevision>,
     pub path_label: Option<String>,
     pub dirty: bool,
@@ -334,22 +310,36 @@ pub struct ProjectInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectCommand {
+    SelectPrintLayout {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        layout_id: PrintLayoutId,
+    },
+    EditPrintLayout {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        edit: PrintLayoutEdit,
+    },
     GetManufacturingOption {
+        layout_id: PrintLayoutId,
         session_id: SessionId,
         base_revision: ProjectRevision,
         id: SourceHash,
     },
     RetainManufacturingOption {
+        layout_id: PrintLayoutId,
         session_id: SessionId,
         base_revision: ProjectRevision,
         option: ManufacturingOption,
     },
     RemoveManufacturingOption {
+        layout_id: PrintLayoutId,
         session_id: SessionId,
         base_revision: ProjectRevision,
         id: SourceHash,
     },
     ApplyManufacturingOption {
+        layout_id: PrintLayoutId,
         session_id: SessionId,
         base_revision: ProjectRevision,
         id: SourceHash,
@@ -360,6 +350,7 @@ pub enum ProjectCommand {
         query: crate::stock::StockQuery,
     },
     SetHardware {
+        layout_id: PrintLayoutId,
         session_id: SessionId,
         base_revision: ProjectRevision,
         capture: Option<Arc<crate::hardware::ProjectHardwareCapture>>,

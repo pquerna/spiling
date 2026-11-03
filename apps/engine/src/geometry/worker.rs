@@ -1017,7 +1017,11 @@ fn open(
         }
     }
     check_cancel(cancel)?;
-    if let Some(asset) = &loaded.manufacturing_artifact {
+    for asset in loaded
+        .layouts
+        .iter()
+        .filter_map(|l| l.manufacturing_artifact.as_ref())
+    {
         inspect_asset(asset, VerificationOutput::ReportOnly, cancel)?;
     }
     let project = Project::from_loaded(loaded)?;

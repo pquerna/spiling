@@ -102,7 +102,7 @@ message GeometryReply {
     google.protobuf.Empty released = 7;
   }
 }
-message SceneSummary { string session_id = 1; uint32 revision = 2; uint32 definition_count = 3; uint32 occurrence_count = 4; AabbMm bounds_mm = 5; uint32 unique_mesh_bytes = 6; }
+message SceneSummary { string session_id = 1; uint32 revision = 2; uint32 definition_count = 3; uint32 occurrence_count = 4; AabbMm bounds_mm = 5; uint32 unique_mesh_bytes = 6; string layout_id=7; }
 message ScenePage { repeated DefinitionRecord definitions = 1; repeated OccurrenceRecord occurrences = 2; optional uint32 next_offset = 3; }
 message FaceIndexPage { repeated FaceIndexRow faces = 1; optional uint32 next_offset = 2; }
 message ArtifactPage {

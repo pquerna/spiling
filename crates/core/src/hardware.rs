@@ -13,9 +13,10 @@ pub(crate) fn bytes<'a>(
 ) -> Result<usize, ProjectError> {
     let mut allocations = BTreeMap::new();
     for capture in snapshots
-        .flat_map(|snapshot| {
-            snapshot.hardware.iter().cloned().chain(
-                snapshot
+        .flat_map(|snapshot| snapshot.layouts.iter())
+        .flat_map(|layout| {
+            layout.hardware.iter().cloned().chain(
+                layout
                     .manufacturing_options
                     .iter()
                     .filter_map(|option| option.intent.hardware.clone()),
@@ -36,8 +37,10 @@ pub(crate) fn bytes<'a>(
 }
 /// Strict readers validate equality first; retain a single capture allocation per snapshot.
 pub(crate) fn share_capture(snapshot: &mut Snapshot) {
-    if let Some(intent) = &mut snapshot.manufacturing_intent {
-        Arc::make_mut(intent).hardware = snapshot.hardware.clone();
+    for layout in &mut snapshot.layouts {
+        if let Some(intent) = &mut layout.manufacturing_intent {
+            Arc::make_mut(intent).hardware = layout.hardware.clone();
+        }
     }
 }
 #[cfg(test)]
@@ -110,10 +113,7 @@ mod tests {
         ));
         assert!(Arc::ptr_eq(
             hardware,
-            p.saved
-                .as_ref()
-                .unwrap()
-                .1
+            p.saved.as_ref().unwrap().1.layouts[0]
                 .manufacturing_intent
                 .as_ref()
                 .unwrap()

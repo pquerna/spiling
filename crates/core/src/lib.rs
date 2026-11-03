@@ -4,6 +4,8 @@
 
 //! Runtime-independent authoring authority. Native caches are engine-owned.
 mod hardware;
+mod print_layouts;
+pub use print_layouts::PrintLayoutSnapshot;
 mod placement;
 pub use placement::PlacementDraft;
 mod manufacturing_options;
@@ -222,23 +224,23 @@ fn manufacturing_error(value: ManufacturingError) -> ProjectError {
         value.message,
     )
 }
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Snapshot {
+    pub focused_layout: PrintLayoutId,
+    pub layouts: Vec<PrintLayoutSnapshot>,
     pub sources: BTreeMap<DefinitionId, Arc<SourceAsset>>,
-    pub occurrences: BTreeMap<OccurrenceId, OccurrenceRecord>,
-    pub manufacturing_intent: Option<Arc<ManufacturingIntent>>,
-    pub manufacturing_options: Arc<Vec<ManufacturingOption>>,
-    pub manufacturing_artifact: Option<Arc<ManufacturingAsset>>,
     pub surface_overlays: Arc<SurfaceOverlays>,
     pub process_document: Arc<ProcessDocument>,
     pub surface_images: BTreeMap<SourceHash, Arc<SurfaceImageAsset>>,
     pub appearance_study: Arc<AppearanceStudy>,
     pub materials: Option<Arc<materials::MaterialAsset>>,
-    pub hardware: Option<Arc<spiling_contracts::hardware::ProjectHardwareCapture>>,
     pub appearance_palettes: BTreeMap<SourceHash, Arc<PaletteAsset>>,
 }
 #[derive(Debug, Clone)]
 pub enum Edit {
+    PrintLayout {
+        edit: PrintLayoutEdit,
+    },
     SetHardware {
         capture: Option<Arc<spiling_contracts::hardware::ProjectHardwareCapture>>,
     },
@@ -368,24 +370,17 @@ pub struct SaveSnapshot {
 }
 #[derive(Debug, Clone, PartialEq)]
 struct Content {
+    layouts: Vec<PrintLayoutRecord>,
     definitions: BTreeMap<DefinitionId, StoredDefinition>,
-    occurrences: BTreeMap<OccurrenceId, OccurrenceRecord>,
-    manufacturing_intent: Option<Arc<ManufacturingIntent>>,
-    manufacturing_options: Arc<Vec<ManufacturingOption>>,
-    manufacturing_artifact: Option<ManufacturingArtifactRecord>,
     surface_overlays: Arc<SurfaceOverlays>,
     process_document: Arc<ProcessDocument>,
     appearance_study: AppearanceStudyInfo,
     materials: Option<spiling_contracts::library::MaterialCollectionRecord>,
-    hardware: Option<Arc<spiling_contracts::hardware::ProjectHardwareCapture>>,
 }
 impl Content {
     fn matches(&self, snapshot: &Snapshot) -> bool {
-        self.hardware == snapshot.hardware
+        self.layouts == snapshot.layout_records()
             && self.materials.as_ref() == snapshot.materials.as_ref().map(|a| a.record())
-            && self.occurrences == snapshot.occurrences
-            && self.manufacturing_intent == snapshot.manufacturing_intent
-            && self.manufacturing_options == snapshot.manufacturing_options
             && self.surface_overlays == snapshot.surface_overlays
             && self.process_document == snapshot.process_document
             && self.appearance_study.palette == snapshot.appearance_study.palette
@@ -399,11 +394,6 @@ impl Content {
                     .optical
                     .as_ref()
                     .map(OpticalStudy::info)
-            && self.manufacturing_artifact.as_ref()
-                == snapshot
-                    .manufacturing_artifact
-                    .as_ref()
-                    .map(|asset| &asset.record)
             && self.definitions.len() == snapshot.sources.len()
             && self.definitions.iter().all(|(id, record)| {
                 snapshot
@@ -419,19 +409,11 @@ impl Content {
                 .iter()
                 .map(|r| (r.definition_id.clone(), r.clone()))
                 .collect(),
-            occurrences: manifest
-                .occurrences
-                .iter()
-                .map(|r| (r.occurrence_id, r.clone()))
-                .collect(),
-            manufacturing_intent: manifest.manufacturing_intent.clone(),
-            manufacturing_options: Arc::new(manifest.manufacturing_options.clone()),
-            manufacturing_artifact: manifest.manufacturing_artifact.clone(),
+            layouts: manifest.layouts.clone(),
             surface_overlays: Arc::new(manifest.surface_overlays.clone()),
             process_document: Arc::new(manifest.process_document.clone()),
             appearance_study: manifest.appearance_study.info(),
             materials: manifest.materials.clone(),
-            hardware: manifest.hardware.clone(),
         }
     }
 }
@@ -486,29 +468,18 @@ impl Project {
             save_uncertain: false,
         }
     }
-    pub fn from_loaded(mut loaded: LoadedProject) -> Result<Self, ProjectError> {
+    pub fn from_loaded(loaded: LoadedProject) -> Result<Self, ProjectError> {
         loaded.manifest.validate()?;
-        if let Some(intent) = &mut loaded.manifest.manufacturing_intent {
-            Arc::make_mut(intent).hardware = loaded.manifest.hardware.clone();
-        }
         let mut snapshot = Snapshot {
             sources: loaded.sources,
-            occurrences: loaded
-                .manifest
-                .occurrences
-                .iter()
-                .map(|r| (r.occurrence_id, r.clone()))
-                .collect(),
-            manufacturing_intent: loaded.manifest.manufacturing_intent.clone(),
-            manufacturing_options: Arc::new(loaded.manifest.manufacturing_options.clone()),
-            manufacturing_artifact: loaded.manufacturing_artifact,
+            focused_layout: loaded.manifest.layouts[0].layout_id.clone(),
+            layouts: loaded.layouts,
             surface_overlays: Arc::new(loaded.manifest.surface_overlays.clone()),
             process_document: Arc::new(loaded.manifest.process_document.clone()),
             surface_images: loaded.surface_images,
             appearance_study: Arc::new(loaded.manifest.appearance_study.clone()),
             appearance_palettes: loaded.appearance_palettes,
             materials: loaded.materials,
-            hardware: loaded.manifest.hardware.clone(),
         };
         validate_snapshot(&snapshot, &loaded.manifest)?;
         hardware::share_capture(&mut snapshot);
@@ -521,7 +492,10 @@ impl Project {
         project.next_process_operation = loaded.manifest.next_process_operation;
         project.saved = Some((
             loaded.saved_revision,
-            Content::from_manifest(&loaded.manifest),
+            Content {
+                layouts: snapshot.layout_records(),
+                ..Content::from_manifest(&loaded.manifest)
+            },
         ));
         project.current = Arc::new(snapshot);
         project.storage = Some(loaded.storage);
@@ -534,9 +508,14 @@ impl Project {
         let dirty = self.save_uncertain
             || self.recovered_previous
             || self.saved.as_ref().map_or(
-                !self.current.occurrences.is_empty()
-                    || self.current.manufacturing_intent.is_some()
-                    || !self.current.manufacturing_options.is_empty()
+                self.current.layouts.len() != 1
+                    || self.current.layouts[0].name != "Plate 1"
+                    || self.current.layouts.iter().any(|l| {
+                        !l.occurrences.is_empty()
+                            || l.manufacturing_intent.is_some()
+                            || !l.manufacturing_options.is_empty()
+                            || l.hardware.is_some()
+                    })
                     || !self.current.surface_overlays.layers.is_empty()
                     || !self.current.process_document.layers.is_empty()
                     || *self.current.appearance_study != AppearanceStudy::default()
@@ -544,9 +523,17 @@ impl Project {
                     || self.current.hardware.is_some(),
                 |(_, content)| !content.matches(&self.current),
             );
+        let (surface_overlays, process_document) = self.current.scoped_documents();
         ProjectInfo {
             project_id: self.project_id.clone(),
             revision: self.revision,
+            layout_id: self.current.layout_id.clone(),
+            layouts: self
+                .current
+                .layouts
+                .iter()
+                .map(PrintLayoutSnapshot::info)
+                .collect(),
             saved_revision: self.saved.as_ref().map(|(r, _)| *r),
             path_label: self
                 .storage
@@ -558,8 +545,8 @@ impl Project {
             save_uncertain: self.save_uncertain,
             can_undo: !read_only && !self.undo.is_empty(),
             can_redo: !read_only && !self.redo.is_empty(),
-            surface_overlays: (*self.current.surface_overlays).clone(),
-            process_document: (*self.current.process_document).clone(),
+            surface_overlays,
+            process_document,
             appearance_study: self.current.appearance_study.info(),
             materials: self.current.materials.as_ref().map(|a| a.record().clone()),
             hardware: self.current.hardware.clone(),
@@ -711,7 +698,11 @@ impl Project {
             .chain(self.undo.iter())
             .chain(self.redo.iter())
         {
-            if let Some(asset) = &snapshot.manufacturing_artifact {
+            for asset in snapshot
+                .layouts
+                .iter()
+                .filter_map(|l| l.manufacturing_artifact.as_ref())
+            {
                 assets
                     .entry(asset.record.hash.clone())
                     .or_insert_with(|| asset.clone());
@@ -819,25 +810,15 @@ impl Project {
             Edit::ImportAppearancePalette { asset } => Some(asset.clone()),
             _ => None,
         };
-        // Invalidation is part of the same atomic edit; history keeps the coherent old pair.
-        if !matches!(
-            &edit,
-            Edit::PutRecipe { .. }
-                | Edit::LoadRecipeStudy { .. }
-                | Edit::CaptureRecipe { .. }
-                | Edit::PutFilament { .. }
-                | Edit::PublishManufacturing { .. }
-                | Edit::ImportAppearancePalette { .. }
-                | Edit::SetAppearanceTarget { .. }
-                | Edit::AcceptAppearanceReport { .. }
-                | Edit::SetOpticalStudy { .. }
-                | Edit::AcceptOpticalReport { .. }
-                | Edit::RetainManufacturingOption { .. }
-                | Edit::RemoveManufacturingOption { .. }
-        ) {
-            snapshot.manufacturing_artifact = None;
-        }
         match edit {
+            Edit::PrintLayout { edit } => print_layouts::apply(
+                &mut snapshot,
+                edit,
+                &mut next_occurrence,
+                &mut next_surface_layer,
+                &mut next_process_layer,
+                &mut next_process_operation,
+            )?,
             Edit::PutRecipe { transfer, expected } => {
                 self.store_recipe(&mut snapshot, &transfer, expected.as_ref())?;
             }
@@ -1076,8 +1057,7 @@ impl Project {
                     .remove(&occurrence_id)
                     .ok_or_else(|| invalid("unknown occurrence"))?;
                 if !snapshot
-                    .occurrences
-                    .values()
+                    .all_occurrences()
                     .any(|r| r.definition_id == removed.definition_id)
                 {
                     snapshot.sources.remove(&removed.definition_id);
@@ -1176,7 +1156,11 @@ impl Project {
                 if let Some(retained) = std::iter::once(&self.current)
                     .chain(self.undo.iter())
                     .chain(self.redo.iter())
-                    .filter_map(|s| s.manufacturing_artifact.as_ref())
+                    .flat_map(|s| {
+                        s.layouts
+                            .iter()
+                            .filter_map(|l| l.manufacturing_artifact.as_ref())
+                    })
                     .find(|old| old.record.hash == asset.record.hash)
                 {
                     if retained.record != asset.record
@@ -1272,10 +1256,10 @@ impl Project {
                 SurfaceScope::Occurrence {
                     occurrence_id,
                     expected_definition_id,
-                } => snapshot
-                    .occurrences
-                    .get(occurrence_id)
-                    .is_some_and(|record| &record.definition_id == expected_definition_id),
+                } => snapshot.all_occurrences().any(|record| {
+                    &record.occurrence_id == occurrence_id
+                        && &record.definition_id == expected_definition_id
+                }),
             };
             if !target_exists || layer.layer_id.get() >= next_surface_layer {
                 return Err(invalid("unknown surface target or invalid layer allocator"));
@@ -1290,10 +1274,10 @@ impl Project {
                 SurfaceScope::Occurrence {
                     occurrence_id,
                     expected_definition_id,
-                } => snapshot
-                    .occurrences
-                    .get(occurrence_id)
-                    .is_some_and(|record| &record.definition_id == expected_definition_id),
+                } => snapshot.all_occurrences().any(|record| {
+                    &record.occurrence_id == occurrence_id
+                        && &record.definition_id == expected_definition_id
+                }),
             };
             if !valid
                 || layer.layer_id.get() >= next_process_layer
@@ -1307,6 +1291,7 @@ impl Project {
                 ));
             }
         }
+        snapshot.invalidate_changed_layout_results(&self.project_id)?;
         let skip = usize::from(self.undo.len() == MAX_PROJECT_HISTORY);
         validate_pins(
             std::iter::once(&snapshot)
@@ -1325,9 +1310,9 @@ impl Project {
                 .chain(self.undo.iter().map(Arc::as_ref))
                 .chain(self.redo.iter().map(Arc::as_ref)),
             staged_hardware.iter().filter_map(Weak::upgrade).chain(
-                self.saved
-                    .as_ref()
-                    .and_then(|(_, content)| content.hardware.clone()),
+                self.saved.as_ref().into_iter().flat_map(|(_, content)| {
+                    content.layouts.iter().filter_map(|l| l.hardware.clone())
+                }),
             ),
         )? > hardware::MAX_RETAINED_BYTES
         {
@@ -1415,7 +1400,6 @@ impl Project {
         }
         let mut candidate = self.manifest();
         candidate.materials = snapshot.materials.as_ref().map(|a| a.record().clone());
-        candidate.hardware = snapshot.hardware.clone();
         candidate.revision = self.revision.next()?;
         candidate.next_occurrence = next_occurrence;
         candidate.next_surface_layer = next_surface_layer;
@@ -1426,13 +1410,7 @@ impl Project {
             .values()
             .map(|asset| asset.record.clone())
             .collect();
-        candidate.occurrences = snapshot.occurrences.values().cloned().collect();
-        candidate.manufacturing_intent = snapshot.manufacturing_intent.clone();
-        candidate.manufacturing_options = snapshot.manufacturing_options.as_ref().clone();
-        candidate.manufacturing_artifact = snapshot
-            .manufacturing_artifact
-            .as_ref()
-            .map(|asset| asset.record.clone());
+        candidate.layouts = snapshot.layout_records();
         candidate.surface_overlays = (*snapshot.surface_overlays).clone();
         candidate.process_document = (*snapshot.process_document).clone();
         candidate.appearance_study = (*snapshot.appearance_study).clone();
@@ -1452,7 +1430,8 @@ impl Project {
                 .chain(live.iter().map(Arc::as_ref)),
             self.saved
                 .as_ref()
-                .map(|(_, content)| &content.manufacturing_options),
+                .into_iter()
+                .flat_map(|(_, content)| content.layouts.iter().map(|l| &l.manufacturing_options)),
         )? > manufacturing_options::MAX_RETAINED_OPTION_BYTES
         {
             return Err(error(
@@ -1467,10 +1446,11 @@ impl Project {
                 .chain(self.redo.iter().map(Arc::as_ref))
                 .chain(live.iter().map(Arc::as_ref)),
             self.saved.iter().flat_map(|(_, content)| {
-                content
-                    .manufacturing_options
-                    .iter()
-                    .filter_map(|option| option.intent.hardware.clone())
+                content.layouts.iter().flat_map(|l| {
+                    l.manufacturing_options
+                        .iter()
+                        .filter_map(|option| option.intent.hardware.clone())
+                })
             }),
         )? > hardware::MAX_RETAINED_BYTES
         {
@@ -1578,7 +1558,6 @@ impl Project {
             process_document: (*self.current.process_document).clone(),
             appearance_study: (*self.current.appearance_study).clone(),
             materials: self.current.materials.as_ref().map(|a| a.record().clone()),
-            hardware: self.current.hardware.clone(),
             next_process_layer: self.next_process_layer,
             next_process_operation: self.next_process_operation,
             definitions: self
@@ -1587,14 +1566,7 @@ impl Project {
                 .values()
                 .map(|s| s.record.clone())
                 .collect(),
-            occurrences: self.current.occurrences.values().cloned().collect(),
-            manufacturing_intent: self.current.manufacturing_intent.clone(),
-            manufacturing_options: self.current.manufacturing_options.as_ref().clone(),
-            manufacturing_artifact: self
-                .current
-                .manufacturing_artifact
-                .as_ref()
-                .map(|a| a.record.clone()),
+            layouts: self.current.layout_records(),
         }
     }
     pub fn capture(&self) -> SaveSnapshot {
@@ -1845,7 +1817,7 @@ fn add_occurrence(
     next: &mut u32,
 ) -> Result<(), ProjectError> {
     pose.validate().map_err(|e| invalid(e.message))?;
-    if snapshot.occurrences.len() >= MAX_OCCURRENCES as usize {
+    if snapshot.all_occurrences().count() >= MAX_OCCURRENCES as usize {
         return Err(error(
             ProjectErrorCode::ResourceLimit,
             "occurrence budget exceeded",
@@ -2042,12 +2014,17 @@ fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<()
                 return Err(invalid("conflicting retained source identity"));
             }
         }
-        if let Some(asset) = &snapshot.manufacturing_artifact
-            && let Some(old) = manufacturing.insert(&asset.record.hash, asset)
-            && !Arc::ptr_eq(old, asset)
-            && (old.record != asset.record || old.bytes.as_slice() != asset.bytes.as_slice())
+        for asset in snapshot
+            .layouts
+            .iter()
+            .filter_map(|l| l.manufacturing_artifact.as_ref())
         {
-            return Err(invalid("conflicting retained manufacturing identity"));
+            if let Some(old) = manufacturing.insert(&asset.record.hash, asset)
+                && !Arc::ptr_eq(old, asset)
+                && (old.record != asset.record || old.bytes.as_slice() != asset.bytes.as_slice())
+            {
+                return Err(invalid("conflicting retained manufacturing identity"));
+            }
         }
     }
     if image_allocations.values().sum::<usize>() > MAX_SURFACE_IMAGE_RETAINED_BYTES {
@@ -2103,11 +2080,6 @@ pub(crate) fn validate_snapshot(
     snapshot: &Snapshot,
     manifest: &ProjectManifest,
 ) -> Result<(), ProjectError> {
-    if manifest.hardware != snapshot.hardware {
-        return Err(invalid(
-            "project hardware capture differs from retained snapshot",
-        ));
-    }
     if manifest.materials.as_ref() != snapshot.materials.as_ref().map(|a| a.record()) {
         return Err(invalid(
             "project material descriptor and captured asset disagree",
@@ -2117,7 +2089,12 @@ pub(crate) fn validate_snapshot(
     manifest.validate()?;
     if !Content::from_manifest(manifest).matches(snapshot)
         || snapshot.sources.len() != manifest.definitions.len()
-        || snapshot.occurrences.len() != manifest.occurrences.len()
+        || snapshot.all_occurrences().count()
+            != manifest
+                .layouts
+                .iter()
+                .map(|l| l.occurrences.len())
+                .sum::<usize>()
     {
         return Err(invalid("captured snapshot does not match manifest"));
     }
@@ -2127,9 +2104,18 @@ pub(crate) fn validate_snapshot(
         }
         source.validate()?;
     }
-    if let Some(asset) = &snapshot.manufacturing_artifact {
-        let bundle = asset.validate()?;
-        validate_manufacturing_input(&bundle, snapshot, &manifest.project_id, manifest.revision)?;
+    for l in &snapshot.layouts {
+        if let Some(asset) = &l.manufacturing_artifact {
+            let bundle = asset.validate()?;
+            let mut scoped = snapshot.clone();
+            scoped.focused_layout = l.layout_id.clone();
+            validate_manufacturing_input(
+                &bundle,
+                &scoped,
+                &manifest.project_id,
+                manifest.revision,
+            )?;
+        }
     }
     validate_pins(std::iter::once(snapshot))
 }
@@ -2141,8 +2127,7 @@ fn validate_manufacturing_input(
 ) -> Result<(), ProjectError> {
     let provenance = &bundle.provenance;
     let definitions: Vec<_> = snapshot
-        .sources
-        .values()
+        .active_sources()
         .map(|a| a.record.clone())
         .collect();
     let occurrences: Vec<_> = snapshot.occurrences.values().cloned().collect();
@@ -2150,24 +2135,25 @@ fn validate_manufacturing_input(
         .manufacturing_intent
         .as_deref()
         .ok_or_else(|| invalid("manufacturing artifact has no current intent"))?;
+    let (surfaces, process) = snapshot.scoped_documents();
     let input_hash = input_fingerprint(
         project_id,
         &definitions,
         &occurrences,
         intent,
-        &snapshot.surface_overlays,
-        &snapshot.process_document,
+        &surfaces,
+        &process,
     )
     .map_err(manufacturing_error)?;
     if &provenance.project_id != project_id
         || provenance.input_revision > revision
         || provenance.input_hash != input_hash
         || &provenance.intent != intent
-        || provenance.surface_overlays != *snapshot.surface_overlays
-        || provenance.process_document != *snapshot.process_document
+        || provenance.surface_overlays != surfaces
+        || provenance.process_document != process
         || provenance.definitions.len() != definitions.len()
         || provenance.occurrences.len() != occurrences.len()
-        || provenance.surface_images.len() != snapshot.surface_images.len()
+        || provenance.surface_images.len() != surfaces.images.len()
         || provenance.surface_images.iter().any(|content| {
             snapshot
                 .surface_images

@@ -38,6 +38,39 @@ fn compilation_byte_budget(retained_bytes: u64) -> Result<u32, ManufacturingErro
         })
 }
 impl Runtime {
+    pub(super) fn capture_compile_input(
+        &self,
+        snapshot: &spiling_core::Snapshot,
+        revision: ProjectRevision,
+        intent: Arc<ManufacturingIntent>,
+        byte_budget: u32,
+    ) -> Result<super::worker::CompileRequest, ManufacturingError> {
+        let (surfaces, process) = snapshot.scoped_documents();
+        let surface_images = self
+            .capture_surface_images()?
+            .into_iter()
+            .filter(|(hash, _)| surfaces.images.iter().any(|i| &i.image_hash == hash))
+            .collect();
+        Ok(super::worker::CompileRequest {
+            project_id: self.project.info().project_id,
+            revision,
+            definition_ids: snapshot
+                .active_sources()
+                .map(|a| a.record.definition_id.clone())
+                .collect(),
+            stored_definitions: snapshot
+                .active_sources()
+                .map(|a| a.record.clone())
+                .collect(),
+            occurrences: snapshot.occurrences.values().cloned().collect(),
+            intent,
+            surface_overlays: Arc::new(surfaces),
+            process_document: Arc::new(process),
+            surface_images,
+            byte_budget,
+        })
+    }
+
     pub(super) fn capture_surface_images(
         &self,
     ) -> Result<BTreeMap<SourceHash, Arc<spiling_surface_fields::HeightImage>>, ManufacturingError>
@@ -121,12 +154,19 @@ impl Runtime {
         &mut self,
         command: ManufacturingCommand,
     ) -> Result<Reply, ManufacturingError> {
+        if command.layout_id() != &self.project.snapshot().layout_id {
+            return Err(ManufacturingError::new(
+                ManufacturingErrorCode::StaleRevision,
+                "the addressed print layout is not the current scene",
+            ));
+        }
         match command {
-            ManufacturingCommand::Get { session_id } => {
+            ManufacturingCommand::Get { session_id, .. } => {
                 self.manufacturing_session(&session_id)?;
                 Ok(self.manufacturing_status())
             }
             ManufacturingCommand::SetIntent {
+                layout_id: _,
                 session_id,
                 base_revision,
                 intent,
@@ -144,6 +184,7 @@ impl Runtime {
                 Ok(self.manufacturing_status())
             }
             ManufacturingCommand::ReviewMaterials {
+                layout_id: _,
                 session_id,
                 base_revision,
                 request,
@@ -167,6 +208,7 @@ impl Runtime {
                 ))
             }
             ManufacturingCommand::ApplyMaterialProfile {
+                layout_id: _,
                 session_id,
                 base_revision,
                 selection,
@@ -186,6 +228,7 @@ impl Runtime {
                 Ok(self.manufacturing_status())
             }
             ManufacturingCommand::Preflight {
+                layout_id: _,
                 session_id,
                 base_revision,
             } => {
@@ -203,29 +246,14 @@ impl Runtime {
                         "an explicit printer specification and recipe are required",
                     )
                 })?;
-                let surface_images = self.capture_surface_images()?;
-                let request = super::worker::CompileRequest {
-                    project_id: self.project.info().project_id,
-                    revision: base_revision,
-                    definition_ids: snapshot.sources.keys().cloned().collect(),
-                    stored_definitions: snapshot
-                        .sources
-                        .values()
-                        .map(|source| source.record.clone())
-                        .collect(),
-                    occurrences: snapshot.occurrences.values().cloned().collect(),
-                    intent,
-                    surface_overlays: snapshot.surface_overlays.clone(),
-                    process_document: snapshot.process_document.clone(),
-                    byte_budget: 0,
-                    surface_images,
-                };
+                let request = self.capture_compile_input(&snapshot, base_revision, intent, 0)?;
                 self.start(Purpose::Preflight, 0, move |_, _, _| {
                     Work::Preflight(request)
                 })
                 .map_err(geometry_error)
             }
             ManufacturingCommand::EvaluateAlternative {
+                layout_id: _,
                 session_id,
                 base_revision,
                 expected_context_hash,
@@ -256,23 +284,12 @@ impl Runtime {
                         "manufacturing requires source-backed occurrences",
                     ));
                 }
-                let surface_images = self.capture_surface_images()?;
-                let request = super::worker::CompileRequest {
-                    project_id: self.project.info().project_id,
-                    revision: base_revision,
-                    definition_ids: snapshot.sources.keys().cloned().collect(),
-                    stored_definitions: snapshot
-                        .sources
-                        .values()
-                        .map(|source| source.record.clone())
-                        .collect(),
-                    occurrences: snapshot.occurrences.values().cloned().collect(),
+                let request = self.capture_compile_input(
+                    &snapshot,
+                    base_revision,
                     intent,
-                    surface_overlays: snapshot.surface_overlays.clone(),
-                    process_document: snapshot.process_document.clone(),
-                    byte_budget: compilation_byte_budget(self.manufacturing_bytes())?,
-                    surface_images,
-                };
+                    compilation_byte_budget(self.manufacturing_bytes())?,
+                )?;
                 self.start(Purpose::EvaluateAlternative, 0, move |_, _, _| {
                     Work::EvaluateAlternative {
                         request,
@@ -284,6 +301,7 @@ impl Runtime {
                 .map_err(geometry_error)
             }
             ManufacturingCommand::Compile {
+                layout_id: _,
                 session_id,
                 base_revision,
             } => {
@@ -313,37 +331,19 @@ impl Runtime {
                         "manufacturing requires source-backed occurrences",
                     ));
                 }
-                let project_id = self.project.info().project_id;
-                let definition_ids = snapshot.sources.keys().cloned().collect();
-                let stored_definitions = snapshot
-                    .sources
-                    .values()
-                    .map(|source| source.record.clone())
-                    .collect();
-                let occurrences = snapshot.occurrences.values().cloned().collect();
-                let surface_overlays = snapshot.surface_overlays.clone();
-                let process_document = snapshot.process_document.clone();
-                let surface_images = self.capture_surface_images()?;
-                let byte_budget = compilation_byte_budget(self.manufacturing_bytes())?;
+                let request = self.capture_compile_input(
+                    &snapshot,
+                    base_revision,
+                    intent,
+                    compilation_byte_budget(self.manufacturing_bytes())?,
+                )?;
                 let response = self
-                    .start(Purpose::Compile, 0, move |_, _, _| {
-                        Work::Compile(super::worker::CompileRequest {
-                            project_id,
-                            revision: base_revision,
-                            definition_ids,
-                            stored_definitions,
-                            occurrences,
-                            intent,
-                            surface_overlays,
-                            process_document,
-                            surface_images,
-                            byte_budget,
-                        })
-                    })
+                    .start(Purpose::Compile, 0, move |_, _, _| Work::Compile(request))
                     .map_err(geometry_error)?;
                 Ok(response)
             }
             ManufacturingCommand::Inspect {
+                layout_id: _,
                 session_id,
                 base_revision,
                 output,
@@ -376,8 +376,13 @@ impl Runtime {
             }
         }
     }
-    pub fn current_manufacturing_asset(&self) -> Option<Arc<spiling_core::ManufacturingAsset>> {
-        self.project.snapshot().manufacturing_artifact.clone()
+    pub fn layout_manufacturing_assets(&self) -> Vec<Arc<spiling_core::ManufacturingAsset>> {
+        self.project
+            .snapshot()
+            .layouts
+            .iter()
+            .filter_map(|layout| layout.manufacturing_artifact.clone())
+            .collect()
     }
 }
 

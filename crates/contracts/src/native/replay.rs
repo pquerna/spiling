@@ -194,6 +194,7 @@ mod tests {
     fn replay_wire_rejects_unspecified_output_frames_sizes_hashes_and_counts() {
         assert!(VerificationOutput::try_from(rpc::VerificationOutput::Unspecified).is_err());
         let command = crate::manufacturing::ManufacturingCommand::Inspect {
+            layout_id: crate::project::PrintLayoutId::new(),
             session_id: crate::geometry::SessionId::new(),
             base_revision: ProjectRevision(7),
             output: VerificationOutput::ReportAndMotion,

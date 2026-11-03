@@ -25,6 +25,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
             "Try / Compare",
             "Build area",
             "Arrange",
+            "Plates",
         ]
         .iter()
         .enumerate()
@@ -53,6 +54,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
                 5 => wall_starts(ui),
                 7 => build_area(ui),
                 8 => arrange(ui),
+                9 => plates(ui),
                 _ => colors(ui),
             }
         });
@@ -612,4 +614,59 @@ fn arrange(ui: &mut Ui) {
         ],
     );
     ui.data_mut(|d| d.insert_temp(id, request));
+}
+
+fn plates(ui: &mut Ui) {
+    use spiling_contracts::project::{PrintLayoutId, PrintLayoutInfo};
+    pane_header(ui, "Plates", "Independent print jobs · illustrative values");
+    let ids = [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+    ]
+    .map(|id| PrintLayoutId::parse(id).unwrap());
+    let rows = [
+        ("Housing", 2, true, true),
+        ("Spare parts — 接口", 12, true, false),
+        ("New plate", 0, false, false),
+        (
+            "Long production plate name with several parts",
+            3,
+            true,
+            true,
+        ),
+    ]
+    .into_iter()
+    .zip(&ids)
+    .map(
+        |((name, count, configured, has_result), id)| PrintLayoutInfo {
+            layout_id: id.clone(),
+            name: name.into(),
+            occurrence_count: count,
+            configured,
+            has_result,
+        },
+    )
+    .collect::<Vec<_>>();
+    let key = ui.make_persistent_id("gallery-plate");
+    let mut selected = ui.data_mut(|d| {
+        d.get_temp::<PrintLayoutId>(key)
+            .unwrap_or_else(|| ids[0].clone())
+    });
+    if let Some(id) = plate_navigator(ui, &rows, &selected, true) {
+        selected = id;
+    }
+    ui.data_mut(|d| d.insert_temp(key, selected.clone()));
+    ui.separator();
+    ui.label(format!(
+        "Current: {}",
+        rows.iter().find(|p| p.layout_id == selected).unwrap().name
+    ));
+    help(
+        ui,
+        "plate-gallery-scope",
+        "Print jobs",
+        "Each plate owns its setup, parts and prepared output. Physical sheets remain My Hardware inventory. Switching never moves parts or applies a draft.",
+    );
 }

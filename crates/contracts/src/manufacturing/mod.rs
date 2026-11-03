@@ -4058,43 +4058,66 @@ pub fn input_fingerprint(
 )]
 pub enum ManufacturingCommand {
     Get {
+        layout_id: crate::project::PrintLayoutId,
         session_id: SessionId,
     },
     SetIntent {
+        layout_id: crate::project::PrintLayoutId,
         session_id: SessionId,
         base_revision: ProjectRevision,
         intent: Arc<ManufacturingIntent>,
     },
     ReviewMaterials {
+        layout_id: crate::project::PrintLayoutId,
         session_id: SessionId,
         base_revision: ProjectRevision,
         request: MaterialReviewRequest,
     },
     ApplyMaterialProfile {
+        layout_id: crate::project::PrintLayoutId,
         session_id: SessionId,
         base_revision: ProjectRevision,
         selection: MaterialProfileSelection,
     },
     Compile {
+        layout_id: crate::project::PrintLayoutId,
         session_id: SessionId,
         base_revision: ProjectRevision,
     },
     EvaluateAlternative {
+        layout_id: crate::project::PrintLayoutId,
         session_id: SessionId,
         base_revision: ProjectRevision,
         expected_context_hash: SourceHash,
         intent: Arc<ManufacturingIntent>,
     },
     Preflight {
+        layout_id: crate::project::PrintLayoutId,
         session_id: SessionId,
         base_revision: ProjectRevision,
     },
     Inspect {
+        layout_id: crate::project::PrintLayoutId,
         session_id: SessionId,
         base_revision: ProjectRevision,
         output: VerificationOutput,
     },
 }
+impl ManufacturingCommand {
+    pub fn layout_id(&self) -> &crate::project::PrintLayoutId {
+        match self {
+            Self::Get { layout_id, .. }
+            | Self::SetIntent { layout_id, .. }
+            | Self::ReviewMaterials { layout_id, .. }
+            | Self::ApplyMaterialProfile { layout_id, .. }
+            | Self::Compile { layout_id, .. }
+            | Self::EvaluateAlternative { layout_id, .. }
+            | Self::Preflight { layout_id, .. }
+            | Self::Inspect { layout_id, .. } => layout_id,
+        }
+    }
+}
+
 #[expect(
     clippy::large_enum_variant,
     reason = "Bounded control replies stay inline; boxing adds an allocation to each operation observation"

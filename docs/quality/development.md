@@ -548,6 +548,30 @@ No existing parts are silently removed to fit additional copies. Native/finish b
 seed reservations; complete candidate compilation/replay and nominal-bead containment
 must pass before Apply is exposed. Physical clearance and printing remain unqualified.
 
+### Named plate workflows
+
+Use the native Plates navigator to add/rename/duplicate/reorder jobs and the Plate
+actions Move/Copy parts sheet to transfer explicit occurrences. Verify empty plates,
+draft navigation, read-only focus, different setup captures, atomic Undo/Redo and
+source-independent save/reopen. Prepare and freshly inspect/export each plate;
+change B and confirm A's unchanged semantic result survives, while shared-definition
+contribution edits invalidate all affected jobs. Navigation itself must not dirty.
+
+CLI operations are ordered and use the same typed Projects commands:
+
+```sh
+"$CLI" project edit EXISTING.spil --plate-duplicate 'Spare parts' --plate 1 --verify --save --engine "$ENGINE"
+"$CLI" project edit EXISTING.spil --plate 2 --plate-move 1 2 --undo --redo --save --engine "$ENGINE"
+"$CLI" project inspect EXISTING.spil --plate 2 --verify --manufacturing-out NEW_PLATE_EXPORT --engine "$ENGINE"
+```
+
+`--plate` accepts a one-based current order index or exact layout UUID. `--plate-create
+NAME`, `--plate-rename NAME`, `--plate-duplicate NAME`, `--plate-remove`, and
+`--plate-move TARGET OCC` / `--plate-copy TARGET OCC` edit explicitly. `--plate-edit
+JSON` admits a bounded typed batched edit, including reorder/multi-part transfer.
+Read-only inspection permits selection, never structural edits. Recreate old
+single-job development roots; missing layout records are not migrated.
+
 ### Fixed-dual software job
 
 Use two upright occurrences of the same committed box, not a global layer-color

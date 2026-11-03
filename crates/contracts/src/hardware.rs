@@ -537,6 +537,7 @@ impl EndpointRoute {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LocalProjectHardwareBinding {
+    pub layout_id: crate::project::PrintLayoutId,
     pub project_id: String,
     pub attachment: NativePath,
     pub capture_hash: SourceHash,
@@ -618,6 +619,7 @@ impl HardwareLibrary {
             if !self.plates.iter().any(|p| p.id == b.plate_id)
                 || !bindings.insert((
                     &b.project_id,
+                    &b.layout_id,
                     serde_json::to_string(&b.attachment).map_err(|e| e.to_string())?,
                 ))
             {

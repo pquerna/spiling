@@ -373,12 +373,14 @@ impl Workbench {
                     })
                 {
                     self.queued_project = Some(ProjectCommand::ApplyManufacturingOption {
+                        layout_id: project.layout_id.clone(),
                         session_id: trial.session.clone(),
                         base_revision: project.revision,
                         id: id.clone(),
                     });
                 } else {
                     self.queued_manufacturing = Some(ManufacturingCommand::SetIntent {
+                        layout_id: project.layout_id.clone(),
                         session_id: trial.session.clone(),
                         base_revision: project.revision,
                         intent: Arc::new(prepared.as_ref().expect("evaluated intent").clone()),
@@ -404,6 +406,7 @@ impl Workbench {
                 trial.candidate = false;
                 trial.editing = false;
                 self.queued_manufacturing = Some(ManufacturingCommand::EvaluateAlternative {
+                    layout_id: project.layout_id.clone(),
                     session_id: trial.session.clone(),
                     base_revision: project.revision,
                     expected_context_hash: trial.context.clone(),
@@ -467,6 +470,7 @@ impl Workbench {
                 .clicked()
             {
                 self.queued_project = Some(ProjectCommand::RetainManufacturingOption {
+                    layout_id: project.layout_id.clone(),
                     session_id: trial.session.clone(),
                     base_revision: project.revision,
                     option: option.expect("checked option"),
@@ -572,6 +576,7 @@ impl Workbench {
                     self.manufacturing.inspected_option = Some(option.id.clone());
                     self.manufacturing.panel = 6;
                     self.queued_project = Some(ProjectCommand::GetManufacturingOption {
+                        layout_id: project.layout_id.clone(),
                         session_id: hello.session_id.clone(),
                         base_revision: project.revision,
                         id: option.id.clone(),
@@ -657,6 +662,13 @@ impl Workbench {
             .clicked()
         {
             self.queued_project = Some(ProjectCommand::RemoveManufacturingOption {
+                layout_id: self
+                    .state
+                    .project
+                    .as_ref()
+                    .expect("writable project")
+                    .layout_id
+                    .clone(),
                 session_id: option.session.clone(),
                 base_revision: option.revision,
                 id: option.option.id.clone(),

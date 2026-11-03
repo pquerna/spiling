@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Pinned {
     project: ProjectId,
+    layout_id: spiling_contracts::project::PrintLayoutId,
     name: String,
     view: SectionView,
     occurrence: Option<OccurrenceId>,
@@ -29,7 +30,7 @@ pub(super) struct AnalysisUi {
     contour_problem: Option<String>,
     pub view: SectionView,
     name: String,
-    project: Option<ProjectId>,
+    pub(super) project: Option<ProjectId>,
     changed: Option<Instant>,
     last_query: Option<(SessionId, SceneRevision, PlaneMm)>,
     pub contours: Option<crate::analysis::ContourPreview>,
@@ -405,6 +406,7 @@ impl Workbench {
             {
                 self.prefs.analysis_pins.push(Pinned {
                     project: self.analysis.project.clone().expect("checked project"),
+                    layout_id: self.state.project.as_ref().unwrap().layout_id.clone(),
                     name: if self.analysis.name.trim().is_empty() {
                         format!("Section {}", self.prefs.analysis_pins.len() + 1)
                     } else {
@@ -422,7 +424,14 @@ impl Workbench {
             .analysis_pins
             .iter()
             .enumerate()
-            .filter(|(_, p)| Some(&p.project) == self.analysis.project.as_ref())
+            .filter(|(_, p)| {
+                Some(&p.project) == self.analysis.project.as_ref()
+                    && self
+                        .state
+                        .project
+                        .as_ref()
+                        .is_some_and(|project| project.layout_id == p.layout_id)
+            })
         {
             ui.horizontal(|ui| {
                 if ui.button(&pin.name).clicked() && pin.view.valid() && pin.camera.valid() {

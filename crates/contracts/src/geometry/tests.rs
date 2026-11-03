@@ -156,6 +156,7 @@ fn face_refs_reject_every_stale_or_cross_identity() {
     let definition = DefinitionId::from_source_sha256(&[1; 32]);
     let bounds = AabbMm::new([0.0; 3], [1.0; 3]).unwrap();
     let scene = SceneSummary {
+        layout_id: crate::project::PrintLayoutId::new(),
         session_id: session.clone(),
         revision: SceneRevision(1),
         definition_count: 1,
@@ -362,6 +363,7 @@ fn analytic_metadata_rejects_invalid_frames_conventions_and_trim_counts() {
 #[test]
 fn geometry_only_scene_retains_bounded_definition_and_native_face_identity() {
     let summary = SceneSummary {
+        layout_id: crate::project::PrintLayoutId::new(),
         session_id: SessionId::new(),
         revision: SceneRevision(1),
         definition_count: 1,

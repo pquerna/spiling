@@ -51,6 +51,7 @@ impl MaterialReview {
 }
 #[derive(Debug, Clone)]
 pub struct Capture {
+    pub layout_id: spiling_contracts::project::PrintLayoutId,
     pub nonce: u64,
     pub session: SessionId,
     pub observed_revision: spiling_contracts::project::ProjectRevision,
@@ -85,6 +86,7 @@ pub struct AppliedSettings {
 }
 #[derive(Debug, Clone, Default)]
 pub struct State {
+    pub layout_id: Option<spiling_contracts::project::PrintLayoutId>,
     pub context_hash: Option<spiling_contracts::geometry::SourceHash>,
     pub alternative: Option<Arc<ManufacturingAlternativeEvaluation>>,
     pub alternative_review: Option<Arc<Review>>,
@@ -119,6 +121,8 @@ impl State {
     ) -> Option<&Arc<Capture>> {
         self.capture.as_ref().filter(|c| {
             &c.session == session
+                && c.layout_id == project.layout_id
+                && self.layout_id.as_ref() == Some(&project.layout_id)
                 && c.provenance.project_id == project.project_id
                 && c.observed_revision == project.revision
                 && self.artifact.as_ref() == Some(&c.record)
@@ -212,6 +216,7 @@ pub async fn check_current(rpc: &EngineRpc, capture: &Capture) -> Result<(), Cli
     capture.provenance.validate_for_record(&capture.record)?;
     match rpc
         .manufacturing(ManufacturingCommand::Get {
+            layout_id: capture.layout_id.clone(),
             session_id: capture.session.clone(),
         })
         .await?
@@ -221,7 +226,8 @@ pub async fn check_current(rpc: &EngineRpc, capture: &Capture) -> Result<(), Cli
             artifact: Some(record),
             resource: Some(resource),
             ..
-        } if info.project_id == capture.provenance.project_id
+        } if info.layout_id == capture.layout_id
+            && info.project_id == capture.provenance.project_id
             && info.revision == capture.observed_revision
             && record == capture.record
             && resource == capture.resource =>

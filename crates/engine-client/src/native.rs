@@ -257,7 +257,9 @@ impl EngineRpc {
             ProjectCommand::Save {
                 target: Some(path), ..
             } => path.validate(),
-            ProjectCommand::SetHardware { .. }
+            ProjectCommand::SelectPrintLayout { .. }
+            | ProjectCommand::EditPrintLayout { .. }
+            | ProjectCommand::SetHardware { .. }
             | ProjectCommand::GetManufacturingOption { .. }
             | ProjectCommand::RemoveManufacturingOption { .. }
             | ProjectCommand::ApplyManufacturingOption { .. }

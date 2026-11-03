@@ -414,6 +414,7 @@ async fn compile_export(c: &EngineClient, path: &Path) -> String {
     let ManufacturingResponse::OperationAccepted { operation } = c
         .rpc()
         .manufacturing(ManufacturingCommand::Compile {
+            layout_id: info(c).await.layout_id,
             session_id: session.clone(),
             base_revision: info(c).await.revision,
         })
@@ -428,6 +429,7 @@ async fn compile_export(c: &EngineClient, path: &Path) -> String {
     let ManufacturingResponse::OperationAccepted { operation } = c
         .rpc()
         .manufacturing(ManufacturingCommand::Inspect {
+            layout_id: info(c).await.layout_id,
             session_id: session,
             base_revision: info(c).await.revision,
             output: VerificationOutput::ReportAndMotion,
@@ -556,6 +558,7 @@ async fn matched_stock_recipe_reaches_actual_replay_export_and_source_free_recom
     }
     c.rpc()
         .manufacturing(ManufacturingCommand::SetIntent {
+            layout_id: info(&c).await.layout_id,
             session_id: session.clone(),
             base_revision: info(&c).await.revision,
             intent: std::sync::Arc::new(intent),

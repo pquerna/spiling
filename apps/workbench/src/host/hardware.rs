@@ -16,6 +16,7 @@ pub struct State {
 #[derive(Debug, Clone)]
 pub struct Selection {
     pub project: ProjectId,
+    pub layout_id: spiling_contracts::project::PrintLayoutId,
     pub capture_hash: spiling_contracts::geometry::SourceHash,
     pub machine_id: String,
     pub plate_id: String,
@@ -27,6 +28,7 @@ pub enum HardwareAction {
     Refresh,
     Select {
         project: ProjectId,
+        layout_id: spiling_contracts::project::PrintLayoutId,
         base: ProjectRevision,
         expected: Option<LibraryIdentity>,
         machine: String,
@@ -54,6 +56,7 @@ impl Actor {
             HardwareAction::Refresh => self.refresh_hardware().await?,
             HardwareAction::Select {
                 project,
+                layout_id,
                 base,
                 expected,
                 machine,
@@ -64,11 +67,9 @@ impl Actor {
                 let rpc = client.rpc();
                 let mut personal = rpc.library_hardware().await?;
                 if personal.identity != expected
-                    || self
-                        .state
-                        .project
-                        .as_ref()
-                        .is_none_or(|p| p.project_id != project || p.revision != base)
+                    || self.state.project.as_ref().is_none_or(|p| {
+                        p.project_id != project || p.layout_id != layout_id || p.revision != base
+                    })
                 {
                     return Err(ClientError::InvalidRequest(
                         "Hardware selection changed; refresh and review the retained choice".into(),
@@ -88,6 +89,7 @@ impl Actor {
                     .generation;
                 if self
                     .project_edit(ProjectCommand::SetHardware {
+                        layout_id: layout_id.clone(),
                         session_id: client.hello().session_id.clone(),
                         base_revision: base,
                         capture: Some(Arc::new(capture)),
@@ -101,6 +103,7 @@ impl Actor {
                     .hardware
                     .local_selection = Some(Selection {
                     project: project.clone(),
+                    layout_id: layout_id.clone(),
                     capture_hash: hash.clone(),
                     machine_id: machine.clone(),
                     plate_id: plate.clone(),
@@ -109,15 +112,17 @@ impl Actor {
                 });
                 // A private association failure cannot undo or misreport the committed project edit.
                 if let Some(route) = self.route.as_ref().filter(|r| !r.uncertain) {
-                    personal
-                        .hardware
-                        .bindings
-                        .retain(|b| b.project_id != project.as_str() || b.attachment != route.path);
+                    personal.hardware.bindings.retain(|b| {
+                        b.project_id != project.as_str()
+                            || b.layout_id != layout_id
+                            || b.attachment != route.path
+                    });
                     personal
                         .hardware
                         .bindings
                         .push(LocalProjectHardwareBinding {
                             project_id: project.as_str().into(),
+                            layout_id: layout_id.clone(),
                             attachment: route.path.clone(),
                             capture_hash: hash,
                             machine_id: machine,
@@ -307,6 +312,7 @@ impl Actor {
             return;
         };
         if project.project_id != selection.project
+            || project.layout_id != selection.layout_id
             || project
                 .hardware
                 .as_ref()
@@ -320,10 +326,13 @@ impl Actor {
         let result = async {
             let mut p = rpc.library_hardware().await?;
             p.hardware.bindings.retain(|b| {
-                b.project_id != project.project_id.as_str() || b.attachment != route.path
+                b.project_id != project.project_id.as_str()
+                    || b.layout_id != project.layout_id
+                    || b.attachment != route.path
             });
             p.hardware.bindings.push(LocalProjectHardwareBinding {
                 project_id: project.project_id.as_str().into(),
+                layout_id: project.layout_id.clone(),
                 attachment: route.path,
                 capture_hash: selection.capture_hash,
                 machine_id: selection.machine_id,
@@ -363,11 +372,14 @@ impl Actor {
             let hash = capture.hash().ok()?;
             let b = self.route.as_ref().and_then(|route| {
                 personal.hardware.bindings.iter().find(|b| {
-                    b.project_id == project.project_id.as_str() && b.attachment == route.path
+                    b.project_id == project.project_id.as_str()
+                        && b.layout_id == project.layout_id
+                        && b.attachment == route.path
                 })
             });
             b.map(|b| Selection {
                 project: project.project_id.clone(),
+                layout_id: project.layout_id.clone(),
                 capture_hash: b.capture_hash.clone(),
                 machine_id: b.machine_id.clone(),
                 plate_id: b.plate_id.clone(),

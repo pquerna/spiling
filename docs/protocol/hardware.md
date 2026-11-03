@@ -72,7 +72,7 @@ A confirmed selection on an attached project records its private association.
 The workbench carries an unsaved selection through confirmed Save and Save As.
 CLI `--hardware-local` records the association after confirmed save. Failure to
 publish this separate association does not undo or misreport a successful project
-save. Reopen matches project UUID, exact local attachment, capture hash and
+save. Reopen matches project UUID, print-layout UUID, exact local attachment, capture hash and
 installed generation/content. A changed installation is shown as different;
 opening never adopts it. A missing, locked or corrupt personal store cannot
 prevent opening, compiling or independently replaying a standalone project.

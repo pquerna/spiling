@@ -9,7 +9,6 @@ fn manifest() -> ProjectManifest {
     let digest: [u8; 32] = Sha256::digest(b"original immutable source").into();
     let definition_id = DefinitionId::from_source_sha256(&digest);
     ProjectManifest {
-        hardware: None,
         next_process_layer: 1,
         next_process_operation: 1,
         process_document: crate::process::ProcessDocument::empty(),
@@ -32,14 +31,19 @@ fn manifest() -> ProjectManifest {
                 uncertainty_mm: Some(1e-6),
             },
         }],
-        occurrences: vec![OccurrenceRecord {
-            occurrence_id: OccurrenceId::new(1).unwrap(),
-            definition_id,
-            pose: RigidPoseMm::IDENTITY,
+        layouts: vec![PrintLayoutRecord {
+            layout_id: PrintLayoutId::new(),
+            name: "Plate 1".into(),
+            hardware: None,
+            occurrences: vec![OccurrenceRecord {
+                occurrence_id: OccurrenceId::new(1).unwrap(),
+                definition_id,
+                pose: RigidPoseMm::IDENTITY,
+            }],
+            manufacturing_intent: None,
+            manufacturing_options: vec![],
+            manufacturing_artifact: None,
         }],
-        manufacturing_intent: None,
-        manufacturing_options: vec![],
-        manufacturing_artifact: None,
     }
 }
 
@@ -60,7 +64,8 @@ fn manifest_rejects_inconsistent_sources_references_and_allocator_rewind() {
         ProjectErrorCode::InvalidProject
     );
     changed = valid.clone();
-    changed.occurrences.push(changed.occurrences[0].clone());
+    let duplicate = changed.layouts[0].occurrences[0].clone();
+    changed.layouts[0].occurrences.push(duplicate);
     assert_eq!(
         changed.validate().unwrap_err().code,
         ProjectErrorCode::InvalidProject
@@ -72,7 +77,7 @@ fn manifest_rejects_inconsistent_sources_references_and_allocator_rewind() {
         ProjectErrorCode::InvalidProject
     );
     changed = valid.clone();
-    changed.occurrences.clear();
+    changed.layouts[0].occurrences.clear();
     assert_eq!(
         changed.validate().unwrap_err().code,
         ProjectErrorCode::InvalidProject
@@ -111,8 +116,7 @@ fn manifest_does_not_admit_runtime_handles_or_incompatible_coordinate_contracts(
 fn manifest_requires_explicit_current_format_manufacturing_fields() {
     let valid = serde_json::to_value(manifest()).unwrap();
     for field in [
-        "manufacturing_intent",
-        "manufacturing_artifact",
+        "layouts",
         "surface_overlays",
         "next_surface_layer",
         "next_process_layer",
@@ -165,7 +169,7 @@ fn surface_manifest_references_counter_and_expected_source_are_authoritative() {
         layer_id: SurfaceLayerId::new(1).unwrap(),
         enabled: false,
         scope: SurfaceScope::Occurrence {
-            occurrence_id: value.occurrences[0].occurrence_id,
+            occurrence_id: value.layouts[0].occurrences[0].occurrence_id,
             expected_definition_id: value.definitions[0].definition_id.clone(),
         },
         face_id: FaceId::from_step_entity(7).unwrap(),
@@ -177,7 +181,7 @@ fn surface_manifest_references_counter_and_expected_source_are_authoritative() {
     assert!(changed.validate().is_err());
     changed = value.clone();
     changed.surface_overlays.layers[0].scope = SurfaceScope::Occurrence {
-        occurrence_id: value.occurrences[0].occurrence_id,
+        occurrence_id: value.layouts[0].occurrences[0].occurrence_id,
         expected_definition_id: DefinitionId::from_source_sha256(&[1; 32]),
     };
     assert!(

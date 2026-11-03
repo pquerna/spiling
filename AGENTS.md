@@ -115,6 +115,7 @@ Keep backend, packager, connector interfaces, and verifier as distinct logical m
 
 ### Authority, identity, and recovery
 
+- Core owns 1–16 named print layouts with independent membership, setup/intent/options/result; immutable source/image assets remain shared. Focus is transient, manufacturing/hardware/options address the layout explicitly, and unchanged scoped semantic inputs preserve output pending fresh actual replay. See [ADR011](docs/adr/011-print-layouts.md).
 - The engine is the single project writer. Transactions own mutation, undo, and revision changes; the UI owns only transient interaction state.
 - Initially use one engine per open project; CLI operations start an engine. An exclusive writer lock prevents concurrent project mutation. Read-only inspection uses a committed snapshot.
 - Mutations carry base revisions. Jobs carry input revisions and cancellation. Stale results may populate immutable caches but cannot replace the active plan or preview.

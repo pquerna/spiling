@@ -908,6 +908,7 @@ impl Workbench {
         };
         if ui::primary(ui, "Apply setup", reason) {
             self.queue_hardware(HardwareAction::Select {
+                layout_id: project.layout_id.clone(),
                 project: project.project_id.clone(),
                 base: project.revision,
                 expected: p.identity.clone(),
@@ -925,6 +926,7 @@ impl Workbench {
             && let (Some(host), Some(hello)) = (&self.host, &self.state.hello)
         {
             match host.project(spiling_contracts::project::ProjectCommand::SetHardware {
+                layout_id: project.layout_id.clone(),
                 session_id: hello.session_id.clone(),
                 base_revision: project.revision,
                 capture: None,

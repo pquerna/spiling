@@ -357,6 +357,7 @@ fn stale_prepared_and_inspection_revisions_refuse_without_changing_options() {
     );
     assert_eq!(project.info(), before);
     let foreign = imported();
+    let option = self::option(&foreign, "Foreign owner");
     let prepared = foreign
         .prepare(Edit::RetainManufacturingOption { option })
         .unwrap();
@@ -554,7 +555,7 @@ fn complete_options_and_trials_cannot_replace_or_inherit_current_hardware() {
 fn options_still_fit_the_complete_manifest_envelope_not_just_their_own_budget() {
     let project = imported();
     let mut manifest = project.capture().manifest;
-    manifest
+    manifest.layouts[0]
         .manufacturing_options
         .push(option(&project, "Retained settings"));
     manifest.appearance_study.selection = Some(String::new());
@@ -562,7 +563,7 @@ fn options_still_fit_the_complete_manifest_envelope_not_just_their_own_budget() 
     manifest.appearance_study.selection = Some(
         "x".repeat(spiling_contracts::project::MAX_PROJECT_MANIFEST_BYTES as usize - base - 44),
     );
-    validate_manufacturing_options(&manifest.manufacturing_options).unwrap();
+    validate_manufacturing_options(&manifest.layouts[0].manufacturing_options).unwrap();
     assert_eq!(
         crate::validate_manifest_size(&manifest).unwrap_err().code,
         ProjectErrorCode::ResourceLimit

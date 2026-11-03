@@ -130,7 +130,7 @@ pub struct LoadedProject {
     pub manifest: ProjectManifest,
     pub saved_revision: ProjectRevision,
     pub sources: BTreeMap<DefinitionId, Arc<SourceAsset>>,
-    pub manufacturing_artifact: Option<Arc<ManufacturingAsset>>,
+    pub layouts: Vec<super::PrintLayoutSnapshot>,
     pub surface_images: BTreeMap<SourceHash, Arc<SurfaceImageAsset>>,
     pub appearance_palettes: BTreeMap<SourceHash, Arc<PaletteAsset>>,
     pub materials: Option<Arc<super::materials::MaterialAsset>>,
@@ -308,8 +308,10 @@ fn expected_members(manifest: &ProjectManifest) -> BTreeSet<Member> {
     for definition in &manifest.definitions {
         result.insert(member(SOURCE, &definition.provenance.source_hash));
     }
-    if let Some(artifact) = &manifest.manufacturing_artifact {
-        result.insert(member(MANUFACTURING, &artifact.hash));
+    for layout in &manifest.layouts {
+        if let Some(artifact) = &layout.manufacturing_artifact {
+            result.insert(member(MANUFACTURING, &artifact.hash));
+        }
     }
     for image in &manifest.surface_overlays.images {
         result.insert(member(IMAGE, &image.image_hash));
@@ -368,14 +370,24 @@ fn load_assets(
 ) -> Result<Snapshot, ProjectError> {
     validate_closure(manifest, capture)?;
     let mut snapshot = Snapshot {
-        occurrences: manifest
-            .occurrences
+        focused_layout: manifest.layouts[0].layout_id.clone(),
+        layouts: manifest
+            .layouts
             .iter()
-            .map(|record| (record.occurrence_id, record.clone()))
+            .map(|l| super::PrintLayoutSnapshot {
+                layout_id: l.layout_id.clone(),
+                name: l.name.clone(),
+                occurrences: l
+                    .occurrences
+                    .iter()
+                    .map(|o| (o.occurrence_id, o.clone()))
+                    .collect(),
+                manufacturing_intent: l.manufacturing_intent.clone(),
+                manufacturing_options: Arc::new(l.manufacturing_options.clone()),
+                hardware: l.hardware.clone(),
+                manufacturing_artifact: None,
+            })
             .collect(),
-        manufacturing_intent: manifest.manufacturing_intent.clone(),
-        manufacturing_options: Arc::new(manifest.manufacturing_options.clone()),
-        hardware: manifest.hardware.clone(),
         surface_overlays: Arc::new(manifest.surface_overlays.clone()),
         process_document: Arc::new(manifest.process_document.clone()),
         appearance_study: Arc::new(manifest.appearance_study.clone()),
@@ -426,19 +438,32 @@ fn load_assets(
             Arc::new(SurfaceImageAsset::new(record.clone(), bytes)?),
         );
     }
-    if let Some(record) = &manifest.manufacturing_artifact {
-        let bytes = read_asset(
-            capture,
-            &record.hash,
-            budgets
-                .manufacturing_bytes
-                .min(MAX_MANUFACTURING_RETAINED_BYTES as usize)
-                .min(MAX_MANUFACTURING_BUNDLE_BYTES as usize),
-            Some(record.byte_count as usize),
-            cancel,
-        )?;
-        snapshot.manufacturing_artifact =
-            Some(Arc::new(ManufacturingAsset::new(record.clone(), bytes)?));
+    let mut remaining_manufacturing = budgets
+        .manufacturing_bytes
+        .min(MAX_MANUFACTURING_RETAINED_BYTES as usize);
+    let mut loaded_manufacturing = BTreeMap::<SourceHash, Arc<ManufacturingAsset>>::new();
+    for (layout, record) in snapshot.layouts.iter_mut().zip(&manifest.layouts) {
+        if let Some(record) = &record.manufacturing_artifact {
+            let asset = if let Some(asset) = loaded_manufacturing.get(&record.hash) {
+                if asset.record != *record {
+                    return Err(invalid("shared layout artifact metadata differs"));
+                }
+                asset.clone()
+            } else {
+                let bytes = read_asset(
+                    capture,
+                    &record.hash,
+                    remaining_manufacturing.min(MAX_MANUFACTURING_BUNDLE_BYTES as usize),
+                    Some(record.byte_count as usize),
+                    cancel,
+                )?;
+                remaining_manufacturing -= bytes.capacity();
+                let asset = Arc::new(ManufacturingAsset::new(record.clone(), bytes)?);
+                loaded_manufacturing.insert(record.hash.clone(), asset.clone());
+                asset
+            };
+            layout.manufacturing_artifact = Some(asset);
+        }
     }
     let metadata = super::appearance_bytes_with_incoming(std::iter::once(&snapshot), None, None)?;
     let mut appearance_budget = budgets
@@ -565,7 +590,7 @@ pub fn open_reusing(
         manifest,
         saved_revision,
         sources: snapshot.sources,
-        manufacturing_artifact: snapshot.manufacturing_artifact,
+        layouts: snapshot.layouts,
         surface_images: snapshot.surface_images,
         appearance_palettes: snapshot.appearance_palettes,
         materials: snapshot.materials,
@@ -614,7 +639,11 @@ fn snapshot_objects(snapshot: &Snapshot) -> BTreeMap<Member, Arc<Vec<u8>>> {
             asset.bytes.clone(),
         );
     }
-    if let Some(asset) = &snapshot.manufacturing_artifact {
+    for asset in snapshot
+        .layouts
+        .iter()
+        .filter_map(|l| l.manufacturing_artifact.as_ref())
+    {
         objects.insert(
             member(MANUFACTURING, &asset.record.hash),
             asset.bytes.clone(),
@@ -669,7 +698,11 @@ pub(crate) fn remaining_budgets(project: &Project) -> Result<LoadBudgets, Projec
         for asset in snapshot.sources.values() {
             sources.insert(Arc::as_ptr(&asset.bytes), asset.bytes.capacity());
         }
-        if let Some(asset) = &snapshot.manufacturing_artifact {
+        for asset in snapshot
+            .layouts
+            .iter()
+            .filter_map(|l| l.manufacturing_artifact.as_ref())
+        {
             manufacturing.insert(Arc::as_ptr(&asset.bytes), asset.bytes.capacity());
         }
     }

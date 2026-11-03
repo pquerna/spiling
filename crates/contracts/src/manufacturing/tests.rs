@@ -1462,8 +1462,6 @@ fn manifest_artifact_must_reference_current_explicit_intent_and_input_hash() {
     let p = &bundle.provenance;
     let bytes = serde_json::to_vec(&bundle).unwrap();
     let mut manifest = ProjectManifest {
-        manufacturing_options: Vec::new(),
-        hardware: None,
         next_process_layer: 1,
         next_process_operation: 1,
         process_document: crate::process::ProcessDocument::empty(),
@@ -1478,21 +1476,27 @@ fn manifest_artifact_must_reference_current_explicit_intent_and_input_hash() {
         next_surface_layer: 1,
         surface_overlays: SurfaceOverlays::empty(),
         definitions: p.definitions.clone(),
-        occurrences: p.occurrences.clone(),
-        manufacturing_intent: Some((p.intent.clone()).into()),
-        manufacturing_artifact: Some(ManufacturingArtifactRecord {
-            hash: SourceHash::from_bytes(&bytes),
-            input_hash: p.input_hash.clone(),
-            byte_count: bytes.len() as u32,
-            summary: bundle.summary(),
-        }),
+        layouts: vec![crate::project::PrintLayoutRecord {
+            layout_id: crate::project::PrintLayoutId::new(),
+            name: "Plate 1".into(),
+            manufacturing_options: vec![],
+            hardware: None,
+            occurrences: p.occurrences.clone(),
+            manufacturing_intent: Some((p.intent.clone()).into()),
+            manufacturing_artifact: Some(ManufacturingArtifactRecord {
+                hash: SourceHash::from_bytes(&bytes),
+                input_hash: p.input_hash.clone(),
+                byte_count: bytes.len() as u32,
+                summary: bundle.summary(),
+            }),
+        }],
     };
     manifest.validate().unwrap();
-    Arc::make_mut(manifest.manufacturing_intent.as_mut().unwrap())
+    Arc::make_mut(manifest.layouts[0].manufacturing_intent.as_mut().unwrap())
         .recipe
         .print_speed_mm_s += 1.0;
     assert!(manifest.validate().is_err());
-    manifest.manufacturing_intent = None;
+    manifest.layouts[0].manufacturing_intent = None;
     assert!(manifest.validate().is_err());
 }
 
@@ -3446,6 +3450,7 @@ fn material_capture_is_required_nullable_and_typed_profile_adapters_reject_unkno
     bad.setup.as_mut().unwrap().abrasion_resistant_nozzle = None;
     assert!(MaterialProfileSelection::try_from(bad).is_err());
     let command = ManufacturingCommand::ApplyMaterialProfile {
+        layout_id: crate::project::PrintLayoutId::new(),
         session_id: SessionId::new(),
         base_revision: crate::project::ProjectRevision(5),
         selection,

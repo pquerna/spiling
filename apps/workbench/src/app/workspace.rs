@@ -38,7 +38,8 @@ impl Workbench {
         self.queued_geometry = Some(GeometryCommand::InspectFace { reference });
     }
     pub(super) fn tree_ui(&mut self, ui: &mut egui::Ui) {
-        ui::pane_header(ui, "Model", "Source parts and faces");
+        self.plates_ui(ui);
+        ui::pane_header(ui, "Model", "Selected plate · parts and faces");
         ui.horizontal_wrapped(|ui| {
             self.button(ui, crate::commands::Action::Analysis);
             self.button(ui, crate::commands::Action::Arrange);

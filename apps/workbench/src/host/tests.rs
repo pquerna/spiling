@@ -4,6 +4,13 @@
 
 use super::*;
 use std::time::Instant;
+fn layout_id(host: &Host) -> spiling_contracts::project::PrintLayoutId {
+    host.snapshot()
+        .project
+        .expect("observed project")
+        .layout_id
+        .clone()
+}
 
 fn wait(host: &Host, predicate: impl Fn(&Snapshot) -> bool) -> Snapshot {
     let mut receiver = host.receiver.clone();
@@ -677,6 +684,7 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
     let h = s.hello.as_ref().unwrap();
     let serial = host.snapshot().serial;
     host.manufacturing(ManufacturingCommand::SetIntent {
+        layout_id: layout_id(&host),
         session_id: h.session_id.clone(),
         base_revision: s.project.as_ref().unwrap().revision,
         intent: intent.clone(),
@@ -746,6 +754,7 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
     assert!(!s.problems.is_empty());
     let serial = s.serial;
     host.manufacturing(ManufacturingCommand::Preflight {
+        layout_id: layout_id(&host),
         session_id: h.session_id.clone(),
         base_revision: revision,
     })
@@ -763,6 +772,7 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
     );
     let serial = s.serial;
     host.manufacturing(ManufacturingCommand::Compile {
+        layout_id: layout_id(&host),
         session_id: h.session_id.clone(),
         base_revision: revision,
     })
@@ -773,6 +783,7 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
         let s = host.snapshot();
         let serial = s.serial;
         host.manufacturing(ManufacturingCommand::Inspect {
+            layout_id: layout_id(host),
             session_id: s.hello.as_ref().unwrap().session_id.clone(),
             base_revision: s.project.as_ref().unwrap().revision,
             output: VerificationOutput::ReportAndMotion,
@@ -973,6 +984,7 @@ fn manufacture_control(
 fn inspect_current_program(host: &Host) -> Snapshot {
     manufacture_control(host, |session_id, base_revision| {
         ManufacturingCommand::Inspect {
+            layout_id: layout_id(host),
             session_id,
             base_revision,
             output: spiling_contracts::manufacturing::VerificationOutput::ReportAndMotion,
@@ -991,6 +1003,7 @@ fn evaluate_alternative_program(
     let revision = host.snapshot().project.as_ref().unwrap().revision;
     let submitted = manufacture_control(host, |session_id, base_revision| {
         ManufacturingCommand::EvaluateAlternative {
+            layout_id: layout_id(host),
             session_id,
             base_revision,
             expected_context_hash: context,
@@ -1061,6 +1074,7 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
     );
     manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::SetIntent {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             intent: original.clone(),
@@ -1069,12 +1083,14 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
     place_on_bed(&host, &original);
     manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::Preflight {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
         }
     });
     manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::Compile {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
         }
@@ -1150,6 +1166,7 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
     .unwrap();
     let kept = project_edit(&host, |session_id, base_revision| {
         ProjectCommand::RetainManufacturingOption {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             option: option.clone(),
@@ -1178,6 +1195,7 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
     );
     let inspected = project_edit(&host, |session_id, base_revision| {
         ProjectCommand::GetManufacturingOption {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             id: option.id.clone(),
@@ -1211,6 +1229,7 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
         .clone();
     let applied = project_edit(&host, |session_id, base_revision| {
         ProjectCommand::ApplyManufacturingOption {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             id: option.id.clone(),
@@ -1246,6 +1265,7 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
     );
     let stale = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::EvaluateAlternative {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             expected_context_hash: SourceHash::from_bytes(b"wrong context"),
@@ -1289,6 +1309,7 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
     );
     let inspected = project_edit(&host, |session_id, base_revision| {
         ProjectCommand::GetManufacturingOption {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             id: option.id.clone(),
@@ -1300,16 +1321,19 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
     assert_eq!(fresh.project, reopened.project);
     for command in [
         ProjectCommand::ApplyManufacturingOption {
+            layout_id: fresh.project.as_ref().unwrap().layout_id.clone(),
             session_id: fresh.hello.as_ref().unwrap().session_id.clone(),
             base_revision: fresh.project.as_ref().unwrap().revision,
             id: option.id.clone(),
         },
         ProjectCommand::RemoveManufacturingOption {
+            layout_id: fresh.project.as_ref().unwrap().layout_id.clone(),
             session_id: fresh.hello.as_ref().unwrap().session_id.clone(),
             base_revision: fresh.project.as_ref().unwrap().revision,
             id: option.id.clone(),
         },
         ProjectCommand::RetainManufacturingOption {
+            layout_id: fresh.project.as_ref().unwrap().layout_id.clone(),
             session_id: fresh.hello.as_ref().unwrap().session_id.clone(),
             base_revision: fresh.project.as_ref().unwrap().revision,
             option: option.clone(),
@@ -1352,6 +1376,7 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
     evaluate_alternative_program(&host, option.intent.clone(), option.context_hash.clone());
     let applied = project_edit(&host, |session_id, base_revision| {
         ProjectCommand::ApplyManufacturingOption {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             id: option.id.clone(),
@@ -1367,12 +1392,14 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
     assert!(applied.project.as_ref().unwrap().dirty);
     manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::Preflight {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
         }
     });
     manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::Compile {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
         }
@@ -1419,6 +1446,7 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
     );
     let removed = project_edit(&host, |session_id, base_revision| {
         ProjectCommand::RemoveManufacturingOption {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             id: option.id.clone(),
@@ -1543,6 +1571,7 @@ fn finish_layers_canonical_image_preview_and_recovery() {
     );
     manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::SetIntent {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             intent: intent.clone(),
@@ -1572,6 +1601,7 @@ fn finish_layers_canonical_image_preview_and_recovery() {
     );
     let preflight = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::Preflight {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
         }
@@ -1589,6 +1619,7 @@ fn finish_layers_canonical_image_preview_and_recovery() {
     );
     let s = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::Compile {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
         }
@@ -1596,6 +1627,7 @@ fn finish_layers_canonical_image_preview_and_recovery() {
     assert!(s.manufacturing.artifact.is_some(), "{:?}", s.problems);
     manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::Inspect {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             output: VerificationOutput::ReportAndMotion,
@@ -1702,6 +1734,7 @@ fn checked_review(host: &Host) -> Snapshot {
     use spiling_contracts::manufacturing::*;
     let preflight = manufacture_control(host, |session_id, base_revision| {
         ManufacturingCommand::Preflight {
+            layout_id: layout_id(host),
             session_id,
             base_revision,
         }
@@ -1719,6 +1752,7 @@ fn checked_review(host: &Host) -> Snapshot {
     );
     let s = manufacture_control(host, |session_id, base_revision| {
         ManufacturingCommand::Compile {
+            layout_id: layout_id(host),
             session_id,
             base_revision,
         }
@@ -1726,6 +1760,7 @@ fn checked_review(host: &Host) -> Snapshot {
     assert!(s.manufacturing.artifact.is_some(), "{:?}", s.problems);
     manufacture_control(host, |session_id, base_revision| {
         ManufacturingCommand::Inspect {
+            layout_id: layout_id(host),
             session_id,
             base_revision,
             output: VerificationOutput::ReportAndMotion,
@@ -1780,6 +1815,7 @@ fn native_h1_housing_and_physical_plate_parity() {
         );
         manufacture_control(&host, |session_id, base_revision| {
             ManufacturingCommand::SetIntent {
+                layout_id: layout_id(&host),
                 session_id,
                 base_revision,
                 intent: intent.clone(),
@@ -1910,6 +1946,7 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
         );
         manufacture_control(&host, |session_id, base_revision| {
             ManufacturingCommand::SetIntent {
+                layout_id: layout_id(&host),
                 session_id,
                 base_revision,
                 intent: intent.clone(),
@@ -2047,6 +2084,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
             .unwrap();
     manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::SetIntent {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             intent: Arc::new(original),
@@ -2088,6 +2126,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     oversized.profile.material.product = "oversized".repeat(8192);
     assert!(
         host.manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+            layout_id: layout_id(&host),
             session_id: before.hello.as_ref().unwrap().session_id.clone(),
             base_revision: before.project.as_ref().unwrap().revision,
             selection: oversized,
@@ -2097,6 +2136,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     assert_eq!(host.snapshot().serial, before.serial);
     let s = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::ApplyMaterialProfile {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             selection: selection.clone(),
@@ -2109,6 +2149,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     let accepted_revision = s.project.as_ref().unwrap().revision;
     let reviewed = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::ReviewMaterials {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             request: MaterialReviewRequest {
@@ -2156,6 +2197,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     incompatible.profile.printer_revision = "different-printer".into();
     let rejected = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::ApplyMaterialProfile {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             selection: incompatible,
@@ -2169,6 +2211,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     assert!(!rejected.problems.is_empty());
     let stale_serial = rejected.serial;
     host.manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+        layout_id: layout_id(&host),
         session_id: rejected.hello.as_ref().unwrap().session_id.clone(),
         base_revision: accepted_revision,
         selection: selection.clone(),
@@ -2190,6 +2233,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     draft.recipe.infill_fraction = 0.2;
     let s = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::SetIntent {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             intent: Arc::new(draft.clone()),
@@ -2200,6 +2244,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     inconsistent.recipe.print_speed_mm_s += 1.0;
     assert!(
         host.manufacturing(ManufacturingCommand::SetIntent {
+            layout_id: layout_id(&host),
             session_id: s.hello.as_ref().unwrap().session_id.clone(),
             base_revision: s.project.as_ref().unwrap().revision,
             intent: Arc::new(inconsistent)
@@ -2250,6 +2295,7 @@ fn catalog_review_is_nonmutating_bound_and_available_read_only() {
             .unwrap();
     let before = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::SetIntent {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             intent: Arc::new(intent),
@@ -2305,6 +2351,7 @@ fn catalog_review_is_nonmutating_bound_and_available_read_only() {
     idle_after(&host, failed.serial);
     let reviewed = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::ReviewMaterials {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             request: MaterialReviewRequest {
@@ -2332,6 +2379,7 @@ fn catalog_review_is_nonmutating_bound_and_available_read_only() {
     assert_eq!(candidate.settings.len(), MaterialSettingField::ALL.len());
     let last = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::ReviewMaterials {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             request: MaterialReviewRequest {
@@ -2348,6 +2396,7 @@ fn catalog_review_is_nonmutating_bound_and_available_read_only() {
     assert!(report.candidates[1].settings.is_empty());
     let applied = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::ApplyMaterialProfile {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             selection: candidate.selection,
@@ -2365,6 +2414,7 @@ fn catalog_review_is_nonmutating_bound_and_available_read_only() {
     ));
     assert!(applied.manufacturing.loaded_catalog.is_some());
     host.manufacturing(ManufacturingCommand::ReviewMaterials {
+        layout_id: layout_id(&host),
         session_id: applied.hello.as_ref().unwrap().session_id.clone(),
         base_revision: review.report.input_revision,
         request: (*review.request).clone(),
@@ -2409,6 +2459,7 @@ fn catalog_review_is_nonmutating_bound_and_available_read_only() {
     std::fs::remove_file(&path).unwrap();
     let readonly = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::ReviewMaterials {
+            layout_id: layout_id(&host),
             session_id,
             base_revision,
             request: MaterialReviewRequest {
@@ -3213,6 +3264,7 @@ fn hardware_selection_save_as_restart_and_missing_library_keep_portable_authorit
     let s = act(
         &host,
         LibraryAction::Hardware(HardwareAction::Select {
+            layout_id: project.layout_id.clone(),
             project: project.project_id.clone(),
             base: project.revision,
             expected: s
@@ -3265,6 +3317,7 @@ fn hardware_selection_save_as_restart_and_missing_library_keep_portable_authorit
     let s = act(
         &host,
         LibraryAction::Hardware(HardwareAction::Select {
+            layout_id: project.layout_id.clone(),
             project: project.project_id.clone(),
             base: project.revision,
             expected: refreshed
@@ -3313,6 +3366,7 @@ fn hardware_selection_save_as_restart_and_missing_library_keep_portable_authorit
     let s = act(
         &host,
         LibraryAction::Hardware(HardwareAction::Select {
+            layout_id: project.layout_id.clone(),
             project: s.project.as_ref().unwrap().project_id.clone(),
             base: revision,
             expected: s
@@ -3404,4 +3458,70 @@ fn hardware_selection_save_as_restart_and_missing_library_keep_portable_authorit
             );
         }
     }
+}
+
+#[test]
+#[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
+fn named_plate_refresh_empty_scope_and_edit_receipts_are_authoritative() {
+    use spiling_contracts::project::PrintLayoutEdit;
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    let initial = wait(&host, |s| s.phase != Phase::Starting);
+    assert_eq!(initial.phase, Phase::Running);
+    let first = imported(&host);
+    let original = first.project.as_ref().unwrap().layout_id.clone();
+    let edit = PrintLayoutEdit::Create {
+        name: "Empty job".into(),
+        copy_setup_from: None,
+    };
+    let created = project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::EditPrintLayout {
+            session_id,
+            base_revision,
+            edit: edit.clone(),
+        }
+    });
+    assert_eq!(created.plate_edit.as_ref().unwrap().edit, edit);
+    assert_eq!(
+        created.plate_edit.as_ref().unwrap().base_revision,
+        first.project.as_ref().unwrap().revision
+    );
+    let empty = created.project.as_ref().unwrap().layout_id.clone();
+    assert_ne!(empty, original);
+    let displayed = wait(&host, |s| {
+        s.display
+            .as_ref()
+            .is_some_and(|d| d.summary.layout_id == empty)
+            && !s.display_loading
+    });
+    assert!(displayed.display.as_ref().unwrap().occurrences.is_empty());
+    assert_eq!(displayed.scene.as_ref().unwrap().definition_count, 0);
+    assert_eq!(displayed.manufacturing.layout_id.as_ref(), Some(&empty));
+    assert!(displayed.project.as_ref().unwrap().dirty);
+    let selected = project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::SelectPrintLayout {
+            session_id,
+            base_revision,
+            layout_id: original.clone(),
+        }
+    });
+    assert_eq!(
+        selected.project.as_ref().unwrap().revision,
+        displayed.project.as_ref().unwrap().revision
+    );
+    assert_eq!(selected.scene.as_ref().unwrap().occurrence_count, 1);
+    assert!(selected.problems.is_empty(), "{:?}", selected.problems);
+    let pid = selected.hello.as_ref().unwrap().pid;
+    let closing = send(&host, Action::Close);
+    host.confirm(closing.confirmation.unwrap().id, true)
+        .unwrap();
+    wait(&host, |s| s.phase == Phase::Closed);
+    assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
 }

@@ -18,6 +18,17 @@ Preflight checks conservative material placement, and independent replay checks
 actual deposition bead bounds. The personal inventory and network route never
 supply manufacturing authority.
 
+## Print-job scope
+
+Every manufacturing control carries the required `PrintLayoutId` in addition to session
+and revision. The engine refuses an address different from selected focus and blocks
+focus changes during active work. Captures contain only that job's occurrences,
+referenced sources and applicable definition/occurrence surface/process/image closure.
+Each plate owns intent, options and current output; project-level libraries remain
+shared. A retained result can have an older input revision when its exact semantic
+inputs remain unchanged. Fresh Inspect independently decodes the stored program and
+binds its descriptor before export; input equality never substitutes for replay.
+
 ## Authoring and trust boundary
 
 An operator may author a TypeScript data module against generated Rust-defined types. Build tooling may execute that explicitly trusted local authoring module to produce JSON; executing authoring code has the operator's permissions and is not a sandbox. The engine never executes TypeScript: it receives bounded inert JSON, rejects unknown/duplicate fields and trailing JSON, and validates it in Rust. A schema capability declaration does not enable unsupported behavior. Ordinary printer data does not require a new backend; genuinely custom behavior requires separately reviewed Rust implementation.

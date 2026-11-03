@@ -10,6 +10,7 @@ pub(super) enum Navigation {
     Occurrence(OccurrenceId),
     InfillScope(bool, bool),
     ClearSelection,
+    Plate(spiling_contracts::project::PrintLayoutId),
 }
 impl Workbench {
     pub(super) fn project_drafts(&self) -> bool {
@@ -48,7 +49,9 @@ impl Workbench {
         }
         if matches!(
             action,
-            Action::New
+            Action::Undo
+                | Action::Redo
+                | Action::New
                 | Action::Open
                 | Action::OpenReadOnly
                 | Action::Recover
@@ -117,6 +120,17 @@ impl Workbench {
                             .map(|m| m.nonce),
                     );
                     self.queued = Some(action);
+                }
+                Navigation::Plate(id) => {
+                    self.discard_preparation_drafts();
+                    self.material.discard(
+                        self.state
+                            .manufacturing
+                            .loaded_material
+                            .as_ref()
+                            .map(|m| m.nonce),
+                    );
+                    self.select_plate(id);
                 }
                 Navigation::Face(reference) => self.select_face(reference),
                 Navigation::Occurrence(id) => self.choose_occurrence(id),

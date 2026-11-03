@@ -84,21 +84,25 @@ fn options_use_typed_revision_bound_commands_not_activation_on_read() {
     let option = option("Reference");
     let commands = [
         ProjectCommand::RetainManufacturingOption {
+            layout_id: PrintLayoutId::parse("1ccf1bc1-590b-4fe2-88b5-7e8de3da1fcb").unwrap(),
             session_id: session_id.clone(),
             base_revision: ProjectRevision(12),
             option: option.clone(),
         },
         ProjectCommand::GetManufacturingOption {
+            layout_id: PrintLayoutId::parse("1ccf1bc1-590b-4fe2-88b5-7e8de3da1fcb").unwrap(),
             session_id: session_id.clone(),
             base_revision: ProjectRevision(12),
             id: option.id.clone(),
         },
         ProjectCommand::RemoveManufacturingOption {
+            layout_id: PrintLayoutId::parse("1ccf1bc1-590b-4fe2-88b5-7e8de3da1fcb").unwrap(),
             session_id: session_id.clone(),
             base_revision: ProjectRevision(12),
             id: option.id.clone(),
         },
         ProjectCommand::ApplyManufacturingOption {
+            layout_id: PrintLayoutId::parse("1ccf1bc1-590b-4fe2-88b5-7e8de3da1fcb").unwrap(),
             session_id,
             base_revision: ProjectRevision(12),
             id: option.id,
@@ -143,6 +147,7 @@ fn comparison_diff_reports_exact_changes_without_conferring_authority() {
 #[test]
 fn evaluation_native_request_requires_original_context_and_complete_intent() {
     let command = ManufacturingCommand::EvaluateAlternative {
+        layout_id: PrintLayoutId::parse("1ccf1bc1-590b-4fe2-88b5-7e8de3da1fcb").unwrap(),
         session_id: SessionId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
         base_revision: ProjectRevision(12),
         expected_context_hash: SourceHash::from_bytes(b"original context"),

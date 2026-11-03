@@ -38,6 +38,7 @@ service Manufacturing {
 }
 
 message ManufacturingRequest {
+  string layout_id = 6;
   string parent = 1; // sessions/{session_uuid}
   oneof command {
     GetManufacturingRequest get = 2;
@@ -48,6 +49,7 @@ message ManufacturingRequest {
 }
 message GetManufacturingRequest {}
 message EvaluateManufacturingAlternativeRequest {
+  string layout_id = 6;
   string parent = 1;
   string request_id = 2;
   uint32 base_revision = 3;
@@ -93,11 +95,13 @@ message SetManufacturingIntentRequest {
   ManufacturingIntent intent = 2;
 }
 message CompileManufacturingRequest {
+  string layout_id = 4;
   string parent = 1;
   string request_id = 2; // Optional canonical nonnil UUID.
   uint32 base_revision = 3;
 }
 message PreflightManufacturingRequest {
+  string layout_id = 4;
   string parent = 1;
   string request_id = 2;
   uint32 base_revision = 3;
@@ -141,6 +145,7 @@ message ManufacturingPreflightResult {
   PreflightReport report = 1;
 }
 message VerifyManufacturingRequest {
+  string layout_id = 5;
   string parent = 1;
   string request_id = 2;
   uint32 base_revision = 3;

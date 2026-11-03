@@ -139,6 +139,8 @@ impl TryFrom<rpc::SceneSummary> for SceneSummary {
     type Error = String;
     fn try_from(value: rpc::SceneSummary) -> Result<Self, String> {
         let value = Self {
+            layout_id: crate::project::PrintLayoutId::parse(value.layout_id)
+                .map_err(|e| e.to_string())?,
             session_id: checked(SessionId::parse(value.session_id))?,
             revision: SceneRevision(value.revision),
             definition_count: value.definition_count,
@@ -156,6 +158,7 @@ impl TryFrom<SceneSummary> for rpc::SceneSummary {
     fn try_from(value: SceneSummary) -> Result<Self, String> {
         checked(value.validate())?;
         let value = Self {
+            layout_id: value.layout_id.as_str().into(),
             session_id: value.session_id.into(),
             revision: value.revision.get(),
             definition_count: value.definition_count,
@@ -1955,6 +1958,7 @@ mod tests {
         };
         assert!(rpc::GeometryReply::try_from(error).is_err());
         let summary = SceneSummary {
+            layout_id: crate::project::PrintLayoutId::new(),
             session_id: SessionId::new(),
             revision: SceneRevision::ZERO,
             definition_count: 0,

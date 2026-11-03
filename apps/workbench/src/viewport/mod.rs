@@ -113,6 +113,7 @@ pub struct Viewport {
     fit: bool,
     had_source: bool,
     had_plate: bool,
+    camera_restored: bool,
     project_id: Option<spiling_contracts::project::ProjectId>,
     show_height: bool,
     orthographic: bool,
@@ -127,6 +128,7 @@ impl Default for Viewport {
             fit: true,
             had_source: false,
             had_plate: false,
+            camera_restored: false,
             project_id: None,
             show_height: false,
             orthographic: false,
@@ -416,9 +418,11 @@ impl Viewport {
             self.pan = DVec3::from_array(c.pan);
             self.orthographic = c.orthographic;
             self.fit = false;
+            self.camera_restored = true;
         }
     }
     pub fn fit(&mut self) {
+        self.camera_restored = false;
         self.fit = true;
     }
     pub fn normal_to(&mut self, normal: DVec3) {
@@ -664,11 +668,16 @@ impl Viewport {
                 }
             }
         }
-        if (bounds.is_some() && !self.had_source) || (plate.is_some() && !self.had_plate) {
+        if !self.camera_restored
+            && ((bounds.is_some() && !self.had_source) || (plate.is_some() && !self.had_plate))
+        {
             self.fit = true;
         }
         self.had_source = bounds.is_some();
         self.had_plate = plate.is_some();
+        if bounds.is_some() || plate.is_some() {
+            self.camera_restored = false;
+        }
         if self.fit && (bounds.is_some() || plate.is_some() || replay_bounds.is_some()) {
             let aspect = f64::from(rect.width() / rect.height());
             self.distance = radius * 3.2 / aspect.min(1.0);

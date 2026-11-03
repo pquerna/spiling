@@ -213,6 +213,7 @@ impl Workbench {
         }
         if let Some(request) = request {
             self.queued_manufacturing = Some(ManufacturingCommand::ReviewMaterials {
+                layout_id: project.layout_id.clone(),
                 session_id: session.clone(),
                 base_revision: project.revision,
                 request,

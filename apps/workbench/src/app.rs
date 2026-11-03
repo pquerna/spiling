@@ -71,6 +71,7 @@ pub struct Workbench {
     pose_revision: Option<SceneRevision>,
     analysis: analysis::AnalysisUi,
     layout: layout::LayoutUi,
+    plates: plates::PlatesUi,
     queued_geometry: Option<GeometryCommand>,
     queued_host: Option<Command>,
     queued_picker: Option<Picker>,
@@ -143,6 +144,7 @@ impl Workbench {
             pose_revision: None,
             analysis: analysis::AnalysisUi::default(),
             layout: layout::LayoutUi::default(),
+            plates: Default::default(),
             queued_geometry: None,
             queued_host: None,
             queued_picker: None,
@@ -322,16 +324,26 @@ impl Workbench {
                     .as_ref()
                     .expect("checked project")
                     .revision;
+                let layout_id = self
+                    .state
+                    .project
+                    .as_ref()
+                    .expect("checked project")
+                    .layout_id
+                    .clone();
                 host.manufacturing(match action {
                     Action::Preflight => ManufacturingCommand::Preflight {
+                        layout_id,
                         session_id,
                         base_revision,
                     },
                     Action::Compile => ManufacturingCommand::Compile {
+                        layout_id,
                         session_id,
                         base_revision,
                     },
                     _ => ManufacturingCommand::Inspect {
+                        layout_id,
                         session_id,
                         base_revision,
                         output: VerificationOutput::ReportAndMotion,
@@ -356,6 +368,9 @@ impl Workbench {
         }
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.plate_sheet_open() {
+            return;
+        }
         if self.navigation.is_some() {
             return;
         }
@@ -574,6 +589,7 @@ mod library;
 mod manufacturing;
 mod material;
 mod navigation;
+mod plates;
 mod policies;
 mod process;
 mod review;
@@ -597,6 +613,7 @@ impl eframe::App for Workbench {
                 self.awaiting_serial = None;
             }
         }
+        self.reconcile_plate(ctx);
         self.reconcile_alternative_receipt();
         if self.state.phase == Phase::Running
             && !self.state.busy
@@ -690,10 +707,14 @@ impl eframe::App for Workbench {
             .as_ref()
             .map(|p| {
                 format!(
-                    "{}{}{} · Spiling",
+                    "{}{}{} · {} · Spiling",
                     if p.dirty { "● " } else { "" },
                     p.path_label.as_deref().unwrap_or("Unsaved project"),
-                    if p.read_only { " [read-only]" } else { "" }
+                    if p.read_only { " [read-only]" } else { "" },
+                    p.layouts
+                        .iter()
+                        .find(|l| l.layout_id == p.layout_id)
+                        .map_or("Plate", |l| l.name.as_str())
                 )
             })
             .unwrap_or_else(|| "Spiling".into());
@@ -991,8 +1012,16 @@ impl eframe::App for Workbench {
                     {
                         ui::pane_header(
                             ui,
-                            "No source geometry",
-                            "Import a STEP part or open a saved project",
+                            if self.state.project.is_some() {
+                                "This plate is empty"
+                            } else {
+                                "No source geometry"
+                            },
+                            if self.state.project.is_some() {
+                                "Import a part, or move or copy parts from another plate"
+                            } else {
+                                "Import a STEP part or open a saved project"
+                            },
                         );
                         self.primary_button(ui, Action::Import);
                     }
@@ -1201,6 +1230,7 @@ impl eframe::App for Workbench {
             }
         }
         self.navigation_dialog(&ctx);
+        self.plate_dialog(&ctx);
         if let Some(confirmation) = &self.state.confirmation {
             let id = confirmation.id;
             let modal = egui::Modal::new(egui::Id::unique("discard-project")).show(&ctx,|ui| {

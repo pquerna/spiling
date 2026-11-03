@@ -662,6 +662,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
     client
         .rpc()
         .project(ProjectCommand::SetHardware {
+            layout_id: info(&client).await.layout_id,
             session_id: client.hello().session_id.clone(),
             base_revision: original.revision,
             capture: Some(capture.clone()),
@@ -691,6 +692,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
     client
         .rpc()
         .manufacturing(ManufacturingCommand::SetIntent {
+            layout_id: info(&client).await.layout_id,
             session_id: client.hello().session_id.clone(),
             base_revision: info(&client).await.revision,
             intent: Arc::new(intent),
@@ -700,6 +702,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
     let ManufacturingResponse::OperationAccepted { operation } = client
         .rpc()
         .manufacturing(ManufacturingCommand::Compile {
+            layout_id: info(&client).await.layout_id,
             session_id: client.hello().session_id.clone(),
             base_revision: info(&client).await.revision,
         })
@@ -714,6 +717,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
     let ManufacturingResponse::OperationAccepted { operation } = client
         .rpc()
         .manufacturing(ManufacturingCommand::Inspect {
+            layout_id: info(&client).await.layout_id,
             session_id: client.hello().session_id.clone(),
             base_revision: info(&client).await.revision,
             output: VerificationOutput::ReportOnly,
@@ -734,6 +738,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
     client
         .rpc()
         .project(ProjectCommand::SetHardware {
+            layout_id: info(&client).await.layout_id,
             session_id: client.hello().session_id.clone(),
             base_revision: before.revision,
             capture: Some(capture.clone()),
@@ -750,6 +755,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
     client
         .rpc()
         .project(ProjectCommand::SetHardware {
+            layout_id: info(&client).await.layout_id,
             session_id: client.hello().session_id.clone(),
             base_revision: before.revision,
             capture: Some(Arc::new(changed)),
@@ -759,6 +765,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
     let ManufacturingResponse::Status { artifact, .. } = client
         .rpc()
         .manufacturing(ManufacturingCommand::Get {
+            layout_id: info(&client).await.layout_id,
             session_id: client.hello().session_id.clone(),
         })
         .await
@@ -778,6 +785,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
     let ManufacturingResponse::Status { artifact, .. } = client
         .rpc()
         .manufacturing(ManufacturingCommand::Get {
+            layout_id: info(&client).await.layout_id,
             session_id: client.hello().session_id.clone(),
         })
         .await
@@ -794,6 +802,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
     client
         .rpc()
         .project(ProjectCommand::SetHardware {
+            layout_id: info(&client).await.layout_id,
             session_id: client.hello().session_id.clone(),
             base_revision: info(&client).await.revision,
             capture: Some(Arc::new(blocked)),
@@ -803,6 +812,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
     let ManufacturingResponse::OperationAccepted { operation } = client
         .rpc()
         .manufacturing(ManufacturingCommand::Preflight {
+            layout_id: info(&client).await.layout_id,
             session_id: client.hello().session_id.clone(),
             base_revision: info(&client).await.revision,
         })
@@ -884,6 +894,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
     let ManufacturingResponse::OperationAccepted { operation } = reopened
         .rpc()
         .manufacturing(ManufacturingCommand::Inspect {
+            layout_id: info(&reopened).await.layout_id,
             session_id: reopened.hello().session_id.clone(),
             base_revision: info(&reopened).await.revision,
             output: VerificationOutput::ReportOnly,

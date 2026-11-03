@@ -4,6 +4,19 @@
 use prost::Message;
 use spiling_contracts::{geometry::*, project::*, *};
 
+fn plate_id() -> PrintLayoutId {
+    PrintLayoutId::parse("1ccf1bc1-590b-4fe2-88b5-7e8de3da1fcb").unwrap()
+}
+fn plates() -> Vec<PrintLayoutInfo> {
+    vec![PrintLayoutInfo {
+        layout_id: plate_id(),
+        name: "Plate 1".into(),
+        occurrence_count: 0,
+        configured: false,
+        has_result: false,
+    }]
+}
+
 fn operation() -> google::longrunning::Operation {
     let meta = rpc::NativeOperationMetadata {
         state: rpc::NativeOperationState::NativeRunning as i32,
@@ -63,6 +76,7 @@ fn geometry_only_scene_accepts_saved_programs_but_rejects_display_outputs() {
     meta.completed_units = meta.total_units;
     meta.end_time = meta.update_time;
     let summary = SceneSummary {
+        layout_id: plate_id(),
         session_id: SessionId::parse(meta.session_id.clone()).unwrap(),
         revision: SceneRevision(1),
         definition_count: 1,
@@ -170,6 +184,8 @@ fn artifact_limits_are_class_specific_and_sizes_are_canonical() {
 #[test]
 fn clean_new_and_semantically_clean_undo_project_info_are_valid() {
     let info = ProjectInfo {
+        layout_id: plate_id(),
+        layouts: plates(),
         manufacturing_options: vec![],
         hardware: None,
         project_id: ProjectId::new(),
@@ -245,6 +261,8 @@ fn project_typed_dispatch_preserves_scene_revision_and_native_paths() {
 fn failed_committed_save_keeps_operation_specific_uncertain_receipt() {
     let mut op = operation();
     let info = ProjectInfo {
+        layout_id: plate_id(),
+        layouts: plates(),
         hardware: None,
         project_id: ProjectId::new(),
         revision: ProjectRevision(7),
@@ -475,6 +493,8 @@ fn surface_commands_have_checked_typed_roundtrips_and_no_missing_kind_defaults()
         }
     }
     let info = ProjectInfo {
+        layout_id: plate_id(),
+        layouts: plates(),
         hardware: None,
         project_id: ProjectId::new(),
         revision: ProjectRevision(0),
@@ -642,6 +662,8 @@ fn imported_image_receipt_matches_authoritative_metadata_and_new_layer() {
     let image = canonical_image_record();
     let layer_id = SurfaceLayerId::new(1).unwrap();
     let info = ProjectInfo {
+        layout_id: plate_id(),
+        layouts: plates(),
         hardware: None,
         project_id: ProjectId::new(),
         revision: ProjectRevision(1),

@@ -150,6 +150,7 @@ impl Workbench {
         };
         if changed && ui::primary(ui, "Apply profile", disabled) {
             self.queued_manufacturing = Some(ManufacturingCommand::ApplyMaterialProfile {
+                layout_id: project.layout_id.clone(),
                 session_id: hello.session_id.clone(),
                 base_revision: d.revision,
                 selection: d.value.clone(),

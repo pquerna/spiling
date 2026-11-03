@@ -54,7 +54,7 @@ fn apply(proposal: &LayoutProposal) -> GeometryCommand {
         proposal_id: proposal.id.clone(),
     }
 }
-async fn placement_history(client: &mut EngineClient, undo: bool, count: u32) {
+pub(super) async fn placement_history(client: &mut EngineClient, undo: bool, count: u32) {
     let scene = scene(client).await;
     let command = if undo {
         ProjectCommand::Undo {

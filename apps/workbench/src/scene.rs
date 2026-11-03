@@ -45,7 +45,9 @@ impl Scene {
         })
     }
     pub fn same_revision(&self, summary: &SceneSummary) -> bool {
-        self.summary.session_id == summary.session_id && self.summary.revision == summary.revision
+        self.summary.layout_id == summary.layout_id
+            && self.summary.session_id == summary.session_id
+            && self.summary.revision == summary.revision
     }
 }
 fn invalid(message: &str) -> ClientError {

@@ -67,6 +67,7 @@ async fn manufacturing_bytestream_rejections_leave_actual_child_healthy() {
     completed(&client, &operation.name).await;
     let ManufacturingResponse::Status { info, .. } = client
         .manufacturing(ManufacturingCommand::Get {
+            layout_id: current_layout(&client).await,
             session_id: session_id.clone(),
         })
         .await
@@ -80,6 +81,7 @@ async fn manufacturing_bytestream_rejections_leave_actual_child_healthy() {
     .unwrap();
     let ManufacturingResponse::Status { info, .. } = client
         .manufacturing(ManufacturingCommand::SetIntent {
+            layout_id: current_layout(&client).await,
             session_id: session_id.clone(),
             base_revision: info.revision,
             intent: intent.into(),
@@ -91,6 +93,7 @@ async fn manufacturing_bytestream_rejections_leave_actual_child_healthy() {
     };
     let ManufacturingResponse::OperationAccepted { operation } = client
         .manufacturing(ManufacturingCommand::Compile {
+            layout_id: current_layout(&client).await,
             session_id,
             base_revision: info.revision,
         })
@@ -114,9 +117,11 @@ async fn manufacturing_bytestream_rejections_leave_actual_child_healthy() {
     assert!(record.summary.software_only);
 
     // Session validation stays on the typed domain service, not immutable resource names.
-    assert!(matches!(client.manufacturing(ManufacturingCommand::Get {
+    assert!(
+        matches!(client.manufacturing(ManufacturingCommand::Get { layout_id: current_layout(&client).await,
         session_id: SessionId::new(),
-    }).await, Err(ClientError::Manufacturing(error)) if error.code == ManufacturingErrorCode::StaleRevision));
+    }).await, Err(ClientError::Manufacturing(error)) if error.code == ManufacturingErrorCode::StaleRevision)
+    );
     client.ping().await.unwrap();
 
     // The removed max_bytes control is replaced by descriptor and aggregate bundle bounds.
@@ -194,4 +199,19 @@ async fn manufacturing_bytestream_rejections_leave_actual_child_healthy() {
     }
     client.shutdown().await.unwrap();
     assert!(!client.status().await.unwrap());
+}
+
+async fn current_layout(
+    client: &spiling_engine_client::EngineClient,
+) -> spiling_contracts::project::PrintLayoutId {
+    let spiling_contracts::project::ProjectResponse::Status { info } = client
+        .project(spiling_contracts::project::ProjectCommand::Get {
+            session_id: client.hello().session_id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("project")
+    };
+    info.layout_id
 }
