@@ -99,7 +99,7 @@ fn conditioning(e: spiling_contracts::geometry::GeometryError) -> ManufacturingE
         format!("support wall command conditioning: {}", e.message),
     )
 }
-fn command_length(a: Coord<f64>, b: Coord<f64>) -> Result<bool, ManufacturingError> {
+pub(super) fn command_length(a: Coord<f64>, b: Coord<f64>) -> Result<bool, ManufacturingError> {
     // Use the same declared XYZ6 command floor as final realization. Interval
     // rounding must not turn an exactly minimum-length straight command into
     // a newly unsupported path; geometric deviation is enclosed separately.
@@ -175,51 +175,72 @@ pub(super) fn fit(
         }
         selected.clear();
         let live_bytes = outside_bytes.saturating_add(super::super::vec_bytes(&selected));
-        super::super::super::remaining_geometry_units(outside_units, live_bytes)?;
+        super::super::super::remaining_geometry_units(
+            outside_units.saturating_add(points.len().max(selected.capacity())),
+            live_bytes,
+        )?;
         super::super::reserve_owned(&mut selected, points.len(), live_bytes)?;
         super::super::super::remaining_geometry_units(
-            outside_units,
+            outside_units.saturating_add(selected.capacity()),
             outside_bytes.saturating_add(super::super::vec_bytes(&selected)),
         )?;
-        selected.push(0);
         let last = points.len() - 1;
-        while *selected.last().unwrap() < last {
-            let start = *selected.last().unwrap();
-            let mut accepted = None;
+        fit.charge(points.len())?;
+        selected.resize(points.len(), usize::MAX);
+        selected[last] = last;
+        for start in (0..last).rev() {
             for end in start + 1..=last {
-                if fit.chord(points, start, end)? {
-                    accepted = Some(end);
+                fit.charge(1)?;
+                if selected[end] != usize::MAX && fit.chord(points, start, end)? {
+                    selected[start] = end;
                     break;
                 }
-            }
-            if let Some(end) = accepted {
-                selected.push(end);
-                continue;
-            }
-            // A short final remainder can join the preceding span. Qualify it
-            // against the untouched original samples, including the closed seam.
-            // Never merge across paths or a Support/SupportInterface boundary.
-            selected.pop();
-            while let Some(&start) = selected.last() {
-                if fit.chord(points, start, last)? {
-                    selected.push(last);
-                    break;
-                }
-                selected.pop();
-            }
-            if selected.last() != Some(&last) {
-                return Err(error(
-                    ManufacturingErrorCode::UnsupportedGeometry,
-                    "support wall cannot fit the minimum command length inside its original center domain and error bound",
-                ));
             }
         }
-        let removed = points.len() - selected.len();
-        for (output, &source) in selected.iter().enumerate() {
+        if selected[0] == usize::MAX {
+            let reachable = selected
+                .iter()
+                .position(|&next| next != usize::MAX)
+                .expect("retained final endpoint");
+            let first = reachable.saturating_sub(3);
+            let end = (reachable + 3).min(points.len());
+            let mut original_vertices = [false; 6];
+            for (index, point) in points[first..end].iter().enumerate() {
+                for polygon in &centers.0 {
+                    for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+                        for vertex in &ring.0 {
+                            fit.charge(1)?;
+                            original_vertices[index] |= *vertex == xy(*point);
+                        }
+                    }
+                }
+            }
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                format!(
+                    "support wall cannot fit the minimum command length inside its original center domain and error bound; role {:?}, physical {:?}, proposal points {}, domain points {}, first suffix {reachable}, samples {:?}, original domain vertices {:?}",
+                    path.kind,
+                    path.physical_z_mm,
+                    points.len(),
+                    region::point_count(centers),
+                    &points[first..end],
+                    &original_vertices[..end - first],
+                ),
+            ));
+        }
+        let mut source = 0;
+        let mut output = 0;
+        loop {
             fit.charge(1)?;
             points[output] = points[source];
+            output += 1;
+            if source == last {
+                break;
+            }
+            source = selected[source];
         }
-        points.truncate(selected.len());
+        let removed = points.len() - output;
+        points.truncate(output);
         *segments -= removed;
     }
     Ok(())
@@ -321,6 +342,38 @@ mod tests {
             4
         );
         assert_eq!(paths, original);
+    }
+
+    #[test]
+    fn wall_fit_selects_a_complete_suffix_instead_of_a_greedy_dead_end() {
+        let centers = MultiPolygon(vec![Polygon::new(
+            LineString::from(vec![
+                (-1.0, -1.0),
+                (1.0, -1.0),
+                (1.0, 1.0),
+                (-1.0, 1.0),
+                (-1.0, -1.0),
+            ]),
+            vec![],
+        )]);
+        let ring = LineString::from(vec![(0.0, 0.0), (0.021, 0.0), (0.03, 0.0), (0.03, 0.03)]);
+        let original = path(&ring, DepositionKind::SupportInterface);
+        let mut paths = vec![original.clone()];
+        assert_eq!(
+            attempt(&centers, &mut paths, 0, &mut 0, &AtomicBool::new(false)).unwrap(),
+            2,
+        );
+        assert_eq!(
+            paths[0].points_mm,
+            vec![
+                original.points_mm[0],
+                original.points_mm[2],
+                original.points_mm[3]
+            ],
+        );
+        assert_eq!(paths[0].kind, original.kind);
+        assert_eq!(paths[0].width, original.width);
+        assert_eq!(paths[0].physical_z_mm, original.physical_z_mm);
     }
 
     #[test]

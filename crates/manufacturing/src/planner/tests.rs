@@ -8,6 +8,106 @@ use geo::{Coord, LineString, Polygon};
 use spiling_contracts::geometry::PlaneMm;
 use std::collections::BTreeSet;
 
+#[test]
+fn image_contact_floor_encloses_post_event_physical_gap_without_moving_event() {
+    for event in [-12.3, 0.0, 4.6, 76.3] {
+        let floor = image_support_contact_floor(event, 0.2, 0.6).unwrap();
+        let lower = project_xyz6_bead_height_mm(floor, 0.0).unwrap()[0];
+        let upper = project_xyz6_bead_height_mm(event, 0.0).unwrap()[1];
+        assert!(program_coordinates::enclosed_vertical_gap_mm(lower, upper).unwrap() >= 0.2);
+        assert!(floor > event + 0.2 && floor < event + 0.200003);
+        let schedule = layer_schedule(event, event + 0.5, 0.6, &[event, floor]).unwrap();
+        assert_eq!(schedule[0].lower_z, event);
+        assert_eq!(schedule[0].z, floor);
+        assert_eq!(schedule.last().unwrap().z, event + 0.5);
+    }
+}
+
+#[test]
+fn image_contact_floor_separates_native_anchor_bootstrap_from_real_contact_demand() {
+    let recipe = recipe(1.0);
+    let cancel = AtomicBool::new(false);
+    let stroke = |y: f64, physical: [f64; 2], kind| DepositionPath {
+        material_domain: None,
+        kind,
+        width: WidthProfile::Constant { width_mm: 0.6 },
+        physical_z_mm: physical,
+        owner: None,
+        points_mm: vec![[2.531302, y, physical[1]], [17.535041, y, physical[1]]],
+    };
+    let previous = stroke(0.3, [4.399999, 4.6], DepositionKind::Perimeter);
+    let contact = stroke(-0.5, [4.1, 4.399999], DepositionKind::SupportInterface);
+    let stranded = stroke(-0.0125, [4.6, 4.84999975], DepositionKind::Perimeter);
+    let mut anchors = support::AnchorWorkspace::default();
+    assert!(
+        support::strokes::analyze(
+            std::slice::from_ref(&stranded),
+            std::iter::once(&previous),
+            std::iter::once(&contact),
+            &recipe,
+            &mut anchors,
+            &mut 0,
+            &cancel,
+        )
+        .unwrap()
+        .failure
+        .is_some()
+    );
+    let floor = image_support_contact_floor(4.6, 0.2, 0.6).unwrap();
+    let schedule = layer_schedule(4.6, 5.1, 0.6, &[floor]).unwrap();
+    assert_eq!(schedule.len(), 2);
+    let bootstrap = stroke(
+        0.3 - (schedule[0].sample - 4.6) * 2.5,
+        [schedule[0].lower_z, schedule[0].z],
+        DepositionKind::Perimeter,
+    );
+    let supported = stroke(
+        0.3 - (schedule[1].sample - 4.6) * 2.5,
+        [schedule[1].lower_z, schedule[1].z],
+        DepositionKind::Perimeter,
+    );
+    let first = support::strokes::analyze(
+        std::slice::from_ref(&bootstrap),
+        std::iter::once(&previous),
+        std::iter::empty(),
+        &recipe,
+        &mut anchors,
+        &mut 0,
+        &cancel,
+    )
+    .unwrap();
+    assert!(first.failure.is_none() && first.bridges.is_empty());
+    let without_contact = support::strokes::analyze(
+        std::slice::from_ref(&supported),
+        std::iter::once(&bootstrap),
+        std::iter::empty(),
+        &recipe,
+        &mut anchors,
+        &mut 0,
+        &cancel,
+    )
+    .unwrap();
+    assert!(without_contact.failure.is_some());
+    let with_contact = support::strokes::analyze(
+        std::slice::from_ref(&supported),
+        std::iter::once(&bootstrap),
+        std::iter::once(&contact),
+        &recipe,
+        &mut anchors,
+        &mut 0,
+        &cancel,
+    )
+    .unwrap();
+    assert!(with_contact.failure.is_none() && with_contact.bridges.is_empty());
+}
+
+#[test]
+fn image_contact_floor_refuses_nonfinite_source_events() {
+    for event in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(image_support_contact_floor(event, 0.2, 0.6).is_err());
+    }
+}
+
 pub(super) fn recipe(fraction: f64) -> PlanarPrintRecipe {
     PlanarPrintRecipe {
         native_shape_error_mm: 0.1,

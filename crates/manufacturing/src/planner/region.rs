@@ -1245,7 +1245,21 @@ pub(super) fn append_hatch_row(
     segments: &mut usize,
 ) -> Result<(), ManufacturingError> {
     for pair in hits.as_chunks::<2>().0 {
-        if pair[1] - pair[0] <= 0.000002 {
+        let length = pair[1] - pair[0];
+        if matches!(
+            kind,
+            DepositionKind::Support | DepositionKind::SupportInterface
+        ) && length.is_finite()
+            && length >= 0.0
+        {
+            let start = program_coordinates::project_xyz6_coordinate_mm(pair[0])?;
+            let end = program_coordinates::project_xyz6_coordinate_mm(pair[1])?;
+            if end - start < program_coordinates::MIN_DEPOSITION_COMMAND_MM {
+                continue;
+            }
+        }
+        let mandatory_skin = matches!(kind, DepositionKind::BottomSkin | DepositionKind::TopSkin);
+        if !length.is_finite() || length <= 0.0 || (length <= 0.000002 && !mandatory_skin) {
             return Err(error(
                 ManufacturingErrorCode::UnsupportedGeometry,
                 format!(
@@ -1289,10 +1303,13 @@ fn push_path(
     bead_width_mm: f64,
     physical_z_mm: [f64; 2],
 ) -> Result<(), ManufacturingError> {
-    if let Some(edge) = points_mm
-        .windows(2)
-        .find(|edge| (edge[1][0] - edge[0][0]).hypot(edge[1][1] - edge[0][1]) <= 0.000002)
-    {
+    if let Some(edge) = points_mm.windows(2).find(|edge| {
+        let length = (edge[1][0] - edge[0][0]).hypot(edge[1][1] - edge[0][1]);
+        !length.is_finite()
+            || length <= 0.0
+            || (length <= 0.000002
+                && !matches!(kind, DepositionKind::BottomSkin | DepositionKind::TopSkin))
+    }) {
         return Err(error(
             ManufacturingErrorCode::UnsupportedGeometry,
             format!(
@@ -1374,6 +1391,65 @@ fn resource(message: &str) -> ManufacturingError {
 }
 fn zero(x: f64) -> f64 {
     if x == 0.0 { 0.0 } else { x }
+}
+
+#[cfg(test)]
+#[test]
+fn optional_support_rows_omit_uncommandable_proposals_but_preserve_required_skin() {
+    let recipe = super::tests::recipe(1.0);
+    for axis in [HatchAxis::X, HatchAxis::Y] {
+        let layer = HatchLayer {
+            z: recipe.layer_height_mm,
+            lower_z: 0.0,
+            height: recipe.layer_height_mm,
+            axis,
+            top_axis: axis,
+            recipe: &recipe,
+        };
+        for kind in [DepositionKind::Support, DepositionKind::SupportInterface] {
+            let mut paths = Vec::new();
+            let mut segments = 7;
+            append_hatch_row(
+                &[0.0, 0.0000001, 1.0, 1.01, 2.0, 2.1],
+                3.0,
+                kind,
+                &layer,
+                false,
+                &mut paths,
+                &mut segments,
+            )
+            .unwrap();
+            assert_eq!(segments, 8);
+            assert_eq!(paths.len(), 1);
+            assert_eq!(paths[0].kind, kind);
+            let along = usize::from(axis == HatchAxis::Y);
+            assert_eq!(paths[0].points_mm[0][along], 2.0);
+            assert_eq!(paths[0].points_mm[1][along], 2.1);
+        }
+        for kind in [DepositionKind::BottomSkin, DepositionKind::TopSkin] {
+            let mut paths = Vec::new();
+            let mut segments = 0;
+            append_hatch_row(
+                &[2.0, 2.0000001],
+                3.0,
+                kind,
+                &layer,
+                true,
+                &mut paths,
+                &mut segments,
+            )
+            .unwrap();
+            assert_eq!(segments, 1);
+            assert_eq!(paths.len(), 1);
+            let along = usize::from(axis == HatchAxis::Y);
+            assert_eq!(paths[0].points_mm[0][along], 2.0000001);
+            assert_eq!(paths[0].points_mm[1][along], 2.0);
+            assert!(matches!(
+                paths[0].owner,
+                Some(DepositionOwner::MandatorySkin { .. })
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 
 mod commands;
+mod proposal;
 
 use super::{
     AnchorCandidate, AnchorWorkspace, StrokeRuns, candidate_budget, charge_boolean, region, strokes,
@@ -16,6 +17,7 @@ use std::sync::atomic::AtomicBool;
 /// In particular a sub-bead interface strip must not erase the union's wall.
 pub(super) struct Domains {
     centers: MultiPolygon<f64>,
+    wall_centers: Option<MultiPolygon<f64>>,
     ordinary: Option<MultiPolygon<f64>>,
     interface: Option<MultiPolygon<f64>>,
     all_interface: bool,
@@ -61,6 +63,7 @@ impl Domains {
         let center_bytes = super::super::native::material_bytes(&mut centers);
         let mut result = Self {
             centers,
+            wall_centers: None,
             ordinary: None,
             interface: None,
             all_interface,
@@ -69,6 +72,21 @@ impl Domains {
             anchor_owned_bytes,
         };
         result.admit()?;
+        result.wall_centers = proposal::construct(
+            &result.centers,
+            (!all_interface && !interface.0.is_empty()).then_some(interface),
+            result.admit()?,
+            result.owned_bytes,
+            work,
+            foreign_work,
+            cancel,
+        )?;
+        if let Some(walls) = &mut result.wall_centers {
+            result.owned_bytes = result
+                .owned_bytes
+                .saturating_add(super::super::native::material_bytes(walls));
+            result.admit()?;
+        }
         if !interface.0.is_empty() && !all_interface {
             charge_boolean(&result.centers, interface, work, foreign_work, cancel)?;
             result.interface = Some(result.centers.intersection(interface));
@@ -97,6 +115,7 @@ impl Domains {
 
     fn admit(&self) -> Result<usize, ManufacturingError> {
         let points = std::iter::once(&self.centers)
+            .chain(self.wall_centers.iter())
             .chain(self.ordinary.iter())
             .chain(self.interface.iter())
             .try_fold(self.retained, |total, domain| {
@@ -176,6 +195,7 @@ impl Domains {
             .min((MAX_MANUFACTURING_RETAINED_BYTES as usize - live_bytes) / output_stride);
         let mut segments = MAX_DEPOSITION_SEGMENTS as usize - allowance;
         let mut paths = Vec::new();
+        let wall_centers = self.wall_centers.as_ref().unwrap_or(&self.centers);
         if interface.0.is_empty() || self.all_interface {
             let kind = if self.all_interface {
                 DepositionKind::SupportInterface
@@ -183,7 +203,7 @@ impl Domains {
                 DepositionKind::Support
             };
             region::support_contour_paths(
-                &self.centers,
+                wall_centers,
                 layer.z,
                 layer.lower_z,
                 layer.recipe.bead_width_mm,
@@ -197,7 +217,7 @@ impl Domains {
             // vertex. Only process-role crossings split it; no seam is offset.
             walls(
                 WallContours {
-                    centers: &self.centers,
+                    centers: wall_centers,
                     interface,
                 },
                 layer,
@@ -326,6 +346,75 @@ struct WallRing {
 
 #[expect(
     clippy::too_many_arguments,
+    reason = "Shared role-cut construction keeps immutable ownership, reusable scratch and live resource/work limits explicit"
+)]
+fn role_cuts(
+    [first, last]: [Coord<f64>; 2],
+    interface: &MultiPolygon<f64>,
+    cuts: &mut Vec<(f64, Coord<f64>)>,
+    point_budget: usize,
+    owned_bytes: usize,
+    work: &mut usize,
+    foreign_work: usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    cuts.clear();
+    let delta = Coord {
+        x: last.x - first.x,
+        y: last.y - first.y,
+    };
+    let length2 = delta.x * delta.x + delta.y * delta.y;
+    let mut add_cut = |point: Coord<f64>| -> Result<(), ManufacturingError> {
+        let parameter = ((point.x - first.x) * delta.x + (point.y - first.y) * delta.y) / length2;
+        if !parameter.is_finite() {
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "nonfinite support wall role crossing",
+            ));
+        }
+        if parameter > 0.0 && parameter < 1.0 {
+            if cuts.len() >= point_budget {
+                return Err(resource(
+                    "combined support wall/crossing point budget exceeded",
+                ));
+            }
+            let live = owned_bytes.saturating_add(super::vec_bytes(cuts));
+            super::reserve_owned(cuts, 1, live)?;
+            cuts.push((parameter, point));
+        }
+        Ok(())
+    };
+    for owner in &interface.0 {
+        for boundary in std::iter::once(owner.exterior()).chain(owner.interiors()) {
+            for side in boundary.0.windows(2) {
+                charge(work, 1, foreign_work, cancel)?;
+                match line_intersection(Line::new(first, last), Line::new(side[0], side[1])) {
+                    Some(LineIntersection::SinglePoint { intersection, .. }) => {
+                        add_cut(intersection)?
+                    }
+                    Some(LineIntersection::Collinear { intersection }) => {
+                        add_cut(intersection.start)?;
+                        add_cut(intersection.end)?;
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+    charge(
+        work,
+        cuts.len()
+            .saturating_mul((usize::BITS - cuts.len().max(1).leading_zeros()) as usize + 1),
+        foreign_work,
+        cancel,
+    )?;
+    cuts.sort_unstable_by(|left, right| left.0.total_cmp(&right.0));
+    cuts.dedup_by(|left, right| left.1 == right.1);
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
     reason = "Wall raster construction explicitly charges live geometry, output segments and foreign work"
 )]
 fn walls(
@@ -353,57 +442,18 @@ fn walls(
             };
             for edge in ring.0.windows(2) {
                 check_cancel(cancel)?;
-                cuts.clear();
                 let a = edge[0];
                 let b = edge[1];
-                let delta = Coord {
-                    x: b.x - a.x,
-                    y: b.y - a.y,
-                };
-                let length2 = delta.x * delta.x + delta.y * delta.y;
-                let mut add_cut = |point: Coord<f64>| -> Result<(), ManufacturingError> {
-                    let t = ((point.x - a.x) * delta.x + (point.y - a.y) * delta.y) / length2;
-                    if !t.is_finite() {
-                        return Err(error(
-                            ManufacturingErrorCode::UnsupportedGeometry,
-                            "nonfinite support wall role crossing",
-                        ));
-                    }
-                    if t > 0.0 && t < 1.0 {
-                        if cuts.len() + path_points
-                            >= super::super::MAX_RETAINED_GEOMETRY_UNITS - retained
-                        {
-                            return Err(resource(
-                                "combined support wall/crossing point budget exceeded",
-                            ));
-                        }
-                        let live = owned_bytes
-                            .saturating_add(super::super::bonds::path_bytes(paths))
-                            .saturating_add(super::vec_bytes(&cuts));
-                        super::reserve_owned(&mut cuts, 1, live)?;
-                        cuts.push((t, point));
-                    }
-                    Ok(())
-                };
-                for owner in &interface.0 {
-                    for boundary in std::iter::once(owner.exterior()).chain(owner.interiors()) {
-                        for side in boundary.0.windows(2) {
-                            charge(work, 1, foreign_work, cancel)?;
-                            match line_intersection(Line::new(a, b), Line::new(side[0], side[1])) {
-                                Some(LineIntersection::SinglePoint { intersection, .. }) => {
-                                    add_cut(intersection)?
-                                }
-                                Some(LineIntersection::Collinear { intersection }) => {
-                                    add_cut(intersection.start)?;
-                                    add_cut(intersection.end)?;
-                                }
-                                None => {}
-                            }
-                        }
-                    }
-                }
-                cuts.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-                cuts.dedup_by(|a, b| a.1 == b.1);
+                role_cuts(
+                    [a, b],
+                    interface,
+                    &mut cuts,
+                    super::super::MAX_RETAINED_GEOMETRY_UNITS - retained - path_points,
+                    owned_bytes.saturating_add(super::super::bonds::path_bytes(paths)),
+                    work,
+                    foreign_work,
+                    cancel,
+                )?;
                 let mut start = a;
                 let mut owned_start = a;
                 let mut owned_kind = None;

@@ -91,6 +91,33 @@ fn minimum_skin_keeps_complete_requirement_and_extends_only_toward_ordinary_mate
     domain.validate().unwrap();
 }
 #[test]
+fn collapsed_xyz6_skin_proposal_keeps_raw_requirement_and_gets_real_command_length() {
+    for skin in [ProcessSkinKind::BottomSkin, ProcessSkinKind::TopSkin] {
+        let mut domain = domain();
+        domain.skin = skin;
+        domain.mandatory = vec![rectangle([2.0, 2.0000001], [1.0, 3.0])];
+        domain.regional = vec![rectangle([2.0000001, 8.0], [0.0, 4.0])];
+        domain.region.area_mm2 = (8.0 - 2.0000001) * 4.0;
+        let mut paths = paths();
+        paths[0].kind = match skin {
+            ProcessSkinKind::BottomSkin => DepositionKind::BottomSkin,
+            ProcessSkinKind::TopSkin => DepositionKind::TopSkin,
+        };
+        paths[0].owner = Some(DepositionOwner::MandatorySkin { skin });
+        paths[0].points_mm[1][0] = 2.0000001;
+        let fitted = select(&domain, &paths).unwrap();
+        assert!(fitted[0][0] <= 2.0 && fitted[1][0] >= 2.0000001);
+        let actual = fitted.map(|point| project_xyz6_point_mm(point).unwrap());
+        assert!(actual[1][0] - actual[0][0] >= MIN_DEPOSITION_COMMAND_MM);
+        domain.fits.push(SkinCommandFit {
+            required_mm: [paths[0].points_mm[0], paths[0].points_mm[1]],
+            fitted_mm: fitted,
+        });
+        domain.validate().unwrap();
+    }
+}
+
+#[test]
 fn minimum_skin_never_extends_through_a_protected_source_hole() {
     let mut domain = domain();
     domain.source_owner[0]

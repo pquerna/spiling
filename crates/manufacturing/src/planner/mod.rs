@@ -2756,6 +2756,28 @@ fn refine_deposition_pair(
     Ok(())
 }
 
+fn image_support_contact_floor(
+    event: f64,
+    z_gap_mm: f64,
+    nominal_height_mm: f64,
+) -> Result<f64, ManufacturingError> {
+    let scale = event.abs().max(nominal_height_mm).max(z_gap_mm).max(1.0);
+    let arithmetic = (8.0 * f64::EPSILON * scale).next_up();
+    let half_quantum = (0.5 / 1_000_000.0f64).next_up();
+    let lower = (((event + half_quantum).next_up() + arithmetic).next_up() + z_gap_mm).next_up();
+    let mut floor = project_xyz6_coordinate_mm(lower + half_quantum)?;
+    if project_xyz6_bead_height_mm(floor, 0.0)?[0] < lower {
+        floor = project_xyz6_coordinate_mm(floor + 1.0 / 1_000_000.0)?;
+    }
+    if !floor.is_finite() || project_xyz6_bead_height_mm(floor, 0.0)?[0] < lower {
+        return Err(error(
+            ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
+            "image contact floor cannot enclose the emitter's coordinate representation",
+        ));
+    }
+    Ok(floor)
+}
+
 fn scheduled_layers(
     input: &CompilerInput<'_>,
     admission: &preflight::Admission,
@@ -2777,6 +2799,7 @@ fn scheduled_layers(
     events.sort_by(f64::total_cmp);
     events.dedup_by(|a, b| *a == *b);
     let mut row_events = Vec::new();
+    let mut image_contact_floors = Vec::new();
     for fields in admission.surface_fields.values() {
         for field in fields {
             row_events.clear();
@@ -2785,6 +2808,28 @@ fn scheduled_layers(
             // event budget repeatedly. Reuse the native event insertion pattern.
             for event in row_events.drain(..) {
                 check_cancel(cancel)?;
+                if let SupportPolicy::Breakaway { z_gap_mm, .. } = recipe.supports {
+                    let floor = image_support_contact_floor(
+                        event,
+                        z_gap_mm,
+                        input.intent.select_layer_height()?.height_mm,
+                    )?;
+                    if floor > bed
+                        && floor < top
+                        && let Err(position) =
+                            image_contact_floors.binary_search_by(|old: &f64| old.total_cmp(&floor))
+                    {
+                        if events.len() + image_contact_floors.len()
+                            >= 3 * MAX_PRINT_LAYERS as usize
+                        {
+                            return Err(error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "combined native/image/contact event budget exceeded",
+                            ));
+                        }
+                        image_contact_floors.insert(position, floor);
+                    }
+                }
                 if let Err(position) = events.binary_search_by(|old| old.total_cmp(&event)) {
                     if events.len() >= 3 * MAX_PRINT_LAYERS as usize {
                         return Err(error(
@@ -2886,6 +2931,15 @@ fn scheduled_layers(
                 }
             }
         }
+        if row_events.len() + image_contact_floors.len() + events.len()
+            > 3 * MAX_PRINT_LAYERS as usize
+        {
+            return Err(error(
+                ManufacturingErrorCode::ResourceLimit,
+                "combined native/field/support/contact event budget exceeded",
+            ));
+        }
+        row_events.append(&mut image_contact_floors);
         row_events.sort_by(f64::total_cmp);
         row_events.dedup_by(|a, b| *a == *b);
         for stop in row_events.drain(..) {

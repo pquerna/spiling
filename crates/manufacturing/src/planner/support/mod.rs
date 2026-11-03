@@ -16,6 +16,8 @@ pub(crate) use anchors::{AnchorCandidate, AnchorWorkspace, endpoint_bond, projec
 pub(in crate::planner) mod strokes;
 pub(crate) use strokes::StrokeRuns;
 pub(crate) use strokes::{GapKind, gap_kind};
+#[cfg(test)]
+mod contact_extensions;
 mod raster;
 
 struct Demand {
@@ -201,7 +203,9 @@ pub(super) fn component_admission<'a>(
                 strokes::GapKind::Supported => {}
                 // Only an explicit demand-rooted orthogonal construction may
                 // use a real bounded gap ending on eligible support contacts.
-                strokes::GapKind::Contact => bridge |= contact_bridge,
+                strokes::GapKind::Contact => {
+                    bridge |= contact_bridge || path.kind == DepositionKind::Bridge;
+                }
                 strokes::GapKind::Bridge => bridge = true,
                 strokes::GapKind::Demand => {
                     demand = true;
@@ -1948,10 +1952,11 @@ pub(super) fn realize(
                 return Err(error(
                     ManufacturingErrorCode::UnsupportedGeometry,
                     format!(
-                        "layer {index} Z {:.6}: no raster satisfies both authored normal-fill axis {authored_axis:?} (policy {:?}) and bounded actual deposited/contact anchors; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; contact layer {:?}, nearest contact {:?}, nearest previous object {:?}",
+                        "layer {index} Z {:.6}: no raster satisfies both authored normal-fill axis {authored_axis:?} (policy {:?}) and bounded actual deposited/contact anchors; role {:?}, physical {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; contact layer {:?}, nearest contact {:?}, nearest previous object {:?}",
                         layer.z_mm,
                         recipe.rectilinear_axis,
                         path.kind,
+                        path.physical_z_mm,
                         a,
                         b,
                         failure.start,
@@ -1959,7 +1964,7 @@ pub(super) fn realize(
                         failure.span,
                         contact_tops[index],
                         nearest_contact,
-                        nearest_object
+                        nearest_object,
                     ),
                 ));
             }
@@ -2563,6 +2568,8 @@ fn coalesce_bridge_rows_on_axis<'a>(
             row.points_mm[0][along] = required_start;
             row.points_mm[1][along] = required_end;
             row.owner = core_owner;
+            let contact_extension = demanded_reorientation
+                && matches!(core_owner, Some(DepositionOwner::MandatorySkin { .. }));
             let required_proof = strokes::analyze(
                 std::slice::from_ref(&row),
                 previous.clone(),
@@ -2610,7 +2617,11 @@ fn coalesce_bridge_rows_on_axis<'a>(
                     previous
                         .clone()
                         .filter(|lower| lower.physical_z_mm[1] == row.physical_z_mm[0]),
-                    std::iter::empty(),
+                    contacts.clone().filter(|lower| {
+                        contact_extension
+                            && support_role(lower.kind)
+                            && lower.physical_z_mm[1] <= row.physical_z_mm[0]
+                    }),
                     work,
                     cancel,
                 )?;
@@ -2735,6 +2746,7 @@ pub(in crate::planner) fn object_volumes(
 struct NearestStroke {
     distance_mm: f64,
     kind: DepositionKind,
+    physical_z_mm: [f64; 2],
     endpoints_mm: [[f64; 3]; 2],
 }
 
@@ -2744,6 +2756,7 @@ impl std::fmt::Debug for NearestStroke {
             .debug_struct("NearestStroke")
             .field("distance_mm", &self.distance_mm)
             .field("kind", &self.kind)
+            .field("physical_z_mm", &self.physical_z_mm)
             .field("endpoints_mm", &self.endpoints_mm)
             .finish()
     }
@@ -2780,6 +2793,7 @@ fn nearest_stroke<'a>(
                 nearest = Some(NearestStroke {
                     distance_mm: distance,
                     kind: path.kind,
+                    physical_z_mm: path.physical_z_mm,
                     endpoints_mm: [edge[0], edge[1]],
                 });
             }
