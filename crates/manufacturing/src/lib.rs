@@ -54,8 +54,7 @@ pub fn compile(
     let mut plan = planner::plan(&input, cancel)?;
     let mut definitions = input.stored_definitions.to_vec();
     definitions.sort_by(|a, b| a.definition_id.cmp(&b.definition_id));
-    let mut occurrences = input.occurrences.to_vec();
-    occurrences.sort_by_key(|o| o.occurrence_id);
+    let occurrences = input.occurrences.to_vec();
     let input_hash = input_fingerprint(
         input.project_id,
         &definitions,

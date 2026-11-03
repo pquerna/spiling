@@ -2091,6 +2091,30 @@ fn native_cylinder_and_through_hole_replay_keep_nominal_material_and_voids() {
 }
 
 #[test]
+fn compilation_preserves_authored_occurrence_order_through_fresh_replay() {
+    let mut scene = Scene::new(BOX, &[RigidPoseMm::IDENTITY, pose(30.0, 0.0, 0.0)]);
+    scene.occurrences.reverse();
+    let bundle = scene.compile(&intent()).unwrap();
+    assert_eq!(bundle.provenance.occurrences, scene.occurrences);
+    bundle.validate().unwrap();
+    let encoded = serde_json::to_vec(&bundle).unwrap();
+    let reopened = decode_bundle(&encoded).unwrap();
+    let inspection = inspect_bundle(
+        &reopened,
+        &SourceHash::from_bytes(&encoded),
+        VerificationOutput::ReportOnly,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(reopened.provenance.occurrences, scene.occurrences);
+    assert_eq!(
+        inspection.provenance.input_hash,
+        bundle.provenance.input_hash
+    );
+    assert!(inspection.report.deposited_volume_mm3 > 0.0);
+}
+
+#[test]
 fn repeated_definition_placements_and_overlap_union_are_material_not_duplicates() {
     let data = intent();
     let one = Scene::new(BOX, &[RigidPoseMm::IDENTITY])
