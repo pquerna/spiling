@@ -85,6 +85,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "The test also guards the independent public storage envelopes"
+    )]
     fn default_work_is_monitored_and_storage_remains_bounded() {
         assert_eq!(crate::GeometryWorkBudget::query().remaining(), u64::MAX);
         assert_eq!(crate::GeometryWorkBudget::compile().remaining(), u64::MAX);

@@ -489,7 +489,7 @@ mod tests {
                     .iter()
                     .all(|value| *value == [Some(false), Some(true)])
             );
-            let mut retained: Vec<_> = ring.0[..count].iter().copied().collect();
+            let mut retained = ring.0[..count].to_vec();
             retained.remove(vertex);
             for (index, origin) in retained.iter().enumerate() {
                 let target = retained[(index + 1) % retained.len()];

@@ -2688,7 +2688,7 @@ mod correspondence_tests {
                     });
                 }
             }
-            let mut work = GeometryWorkBudget::query();
+            let work = GeometryWorkBudget::query();
             for first in 0..chords.len() {
                 for second in first + 1..chords.len() {
                     certify_chord_pair(
@@ -2696,7 +2696,7 @@ mod correspondence_tests {
                         &chords[first],
                         &chords[second],
                         projection_scale,
-                        &mut work,
+                        &work,
                         &cancel,
                     )?;
                 }

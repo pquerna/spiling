@@ -2380,7 +2380,7 @@ mod tests {
 
     #[test]
     fn torus_carrier_contains_complete_lifted_face_windows() {
-        let mut kernel = Kernel::default();
+        let kernel = Kernel::default();
         let surface = b::Surface::Torus {
             frame: b::Frame {
                 origin: [0.0; 3],
@@ -2399,7 +2399,7 @@ mod tests {
             [PI - 1e-6, 1.5 * PI + 1e-6],
         ] {
             let (native, face, _) = build_surface(
-                &mut kernel,
+                &kernel,
                 &surface,
                 [[-1e-6, FRAC_PI_2 + 1e-6], vertical],
                 true,

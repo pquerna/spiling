@@ -21,7 +21,7 @@ fn centered_first_jet_retains_rational_height_and_original_hessians() {
     let mut work = GeometryWorkBudget::query();
     let domain = [[0.703125, 0.703369140625], [0.994140625, 0.99462890625]];
     let original = surface_enclosure(surface, domain, &mut work, &cancel).unwrap();
-    let mut jet = original.clone();
+    let mut jet = original;
     tighten_surface_first_enclosure(surface, domain, &mut jet, &mut work, &cancel).unwrap();
     assert!(jet.position[2].width() < 1e-4, "{jet:?}");
     assert!(jet.du[2].abs_upper() < 1e-3, "{jet:?}");
@@ -80,7 +80,7 @@ fn centered_first_jet_retains_rational_height_and_original_hessians() {
         .code,
         GeometryErrorCode::Cancelled
     );
-    let mut inconsistent = original.clone();
+    let mut inconsistent = original;
     inconsistent.position[2] = Interval::point(0.0);
     assert!(
         tighten_surface_first_enclosure(surface, domain, &mut inconsistent, &mut work, &cancel)

@@ -974,9 +974,9 @@ fn circuits(
             {
                 return Ok(());
             }
-            return Err(invalid(
+            Err(invalid(
                 "native display trim circuits cross, touch or have uncertain separation",
-            ));
+            ))
         },
     )
 }

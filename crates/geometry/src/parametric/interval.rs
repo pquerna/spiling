@@ -988,6 +988,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::approx_constant,
+        reason = "Independent high-precision reference endpoints retain their literal binary64 values"
+    )]
     fn degree_trigonometry_contains_independent_150_digit_reference_intervals() {
         for [
             lower,

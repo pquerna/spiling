@@ -73,6 +73,10 @@ pub use spiling_contracts::geometry::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Native section dispatch keeps material authority, prepared ownership and both independent byte quotas explicit"
+)]
 fn intersect_native_section(
     definition: &Definition,
     prepared: Option<&PreparedSectionSource<'_>>,

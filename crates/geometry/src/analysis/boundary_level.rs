@@ -60,12 +60,11 @@ pub(crate) fn has_candidate(
     let functional = slab::HeightFunctional::from_frame(PlaneFrameMm::from_plane(plane)?);
     for &edge in definition.brep().edge_list() {
         work.charge(1, cancel)?;
-        if let Some(curve) = definition.edge_curve(edge) {
-            if slab::constant_native_curve_height(curve, functional, work, cancel)?
+        if let Some(curve) = definition.edge_curve(edge)
+            && slab::constant_native_curve_height(curve, functional, work, cancel)?
                 == Some(Interval::point(0.0))
-            {
-                return Ok(true);
-            }
+        {
+            return Ok(true);
         }
     }
     Ok(false)
