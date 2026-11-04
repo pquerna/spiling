@@ -3714,10 +3714,119 @@ fn regular_common_carrier_vertex(
     Ok(cycle && regular)
 }
 
+fn coherent_vertex_projection(
+    normals: &[[Interval; 3]],
+    rows: [[Interval; 3]; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
+    if normals.is_empty()
+        || rows
+            .iter()
+            .flatten()
+            .any(|axis| !axis.lo.is_finite() || !axis.hi.is_finite())
+    {
+        return Ok(false);
+    }
+    let projection_normal = cross(rows[0], rows[1]);
+    let mut sign = 0i8;
+    for normal in normals {
+        work.charge(1, cancel)?;
+        let determinant = dot(projection_normal, *normal);
+        let next = if determinant.lo > 0.0 {
+            1
+        } else if determinant.hi < 0.0 {
+            -1
+        } else {
+            0
+        };
+        if next == 0 || (sign != 0 && sign != next) {
+            return Ok(false);
+        }
+        sign = next;
+    }
+    Ok(true)
+}
+
+fn projected_normal_proposal(normal: [Interval; 3], height: [Interval; 3]) -> Option<[f64; 3]> {
+    let normal = normal.map(Interval::mid);
+    let height = height.map(Interval::mid);
+    let normal_scale = normal.into_iter().map(f64::abs).fold(0.0_f64, f64::max);
+    let height_norm = height[0].hypot(height[1]).hypot(height[2]);
+    if !normal_scale.is_finite()
+        || normal_scale <= 0.0
+        || !height_norm.is_finite()
+        || height_norm <= 0.0
+    {
+        return None;
+    }
+    let normal = normal.map(|value| value / normal_scale);
+    let height = height.map(|value| value / height_norm);
+    let along = (0..3).map(|axis| normal[axis] * height[axis]).sum::<f64>();
+    let projected: [f64; 3] = std::array::from_fn(|axis| normal[axis] - along * height[axis]);
+    let norm = projected[0].hypot(projected[1]).hypot(projected[2]);
+    if !norm.is_finite() || norm <= 0.0 {
+        return None;
+    }
+    let proposal = projected.map(|value| value / norm);
+    proposal
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(proposal)
+}
+
+fn try_vertex_height_projections(
+    normals: &[[Interval; 3]],
+    height: [Interval; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+    mut qualify: impl FnMut(
+        [[Interval; 3]; 2],
+        &mut GeometryWorkBudget,
+        &AtomicBool,
+    ) -> Result<bool, GeometryError>,
+) -> Result<bool, GeometryError> {
+    let mut sum = [Interval::point(0.0); 3];
+    for normal in normals {
+        work.charge(1, cancel)?;
+        for axis in 0..3 {
+            sum[axis] = sum[axis].add(normal[axis]);
+        }
+    }
+    let rows = [cross(height, sum), height];
+    if coherent_vertex_projection(normals, rows, work, cancel)? && qualify(rows, work, cancel)? {
+        return Ok(true);
+    }
+    let proposal_count = normals.len().min(8);
+    for first in 0..proposal_count {
+        work.charge(1, cancel)?;
+        let Some(first_normal) = projected_normal_proposal(normals[first], height) else {
+            continue;
+        };
+        for second in first + 1..proposal_count {
+            work.charge(1, cancel)?;
+            let Some(second_normal) = projected_normal_proposal(normals[second], height) else {
+                continue;
+            };
+            let sum = std::array::from_fn(|axis| {
+                Interval::point(first_normal[axis] + second_normal[axis])
+            });
+            let rows = [cross(height, sum), height];
+            if coherent_vertex_projection(normals, rows, work, cancel)?
+                && qualify(rows, work, cancel)?
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Height is the SECOND coordinate of this same projection family on every
 /// germ and closed joint. Coherent nonzero joint Jacobians plus the existing
 /// complete degree-one native fan make height a local regular coordinate.
-/// The oriented normal sum proposes only the transverse row: no midpoint,
+/// Bounded normal proposals select only the transverse row: no midpoint,
 /// radial/metric receipt, foreign event or vertex-zone exclusion is inferred.
 pub(super) fn regular_native_vertex(
     source: MaterialSourceView<'_, '_>,
@@ -3811,38 +3920,16 @@ pub(super) fn regular_native_vertex(
     if !cycle || !regular || normals.len() != count {
         return Ok(false);
     }
-    let mut sum = [Interval::point(0.0); 3];
-    for normal in &normals {
-        for axis in 0..3 {
-            sum[axis] = sum[axis].add(normal[axis]);
-        }
-    }
-    let rows = [cross(functional.direction, sum), functional.direction];
-    if rows
-        .iter()
-        .flatten()
-        .any(|axis| !axis.lo.is_finite() || !axis.hi.is_finite())
-    {
-        return Ok(false);
-    }
-    let projection_normal = cross(rows[0], rows[1]);
-    let mut sign = 0i8;
-    for normal in &normals {
-        let determinant = dot(projection_normal, *normal);
-        let next = if determinant.lo > 0.0 {
-            1
-        } else if determinant.hi < 0.0 {
-            -1
-        } else {
-            0
-        };
-        if next == 0 || (sign != 0 && sign != next) {
-            return Ok(false);
-        }
-        sign = next;
-    }
-    super::critical::material_link::qualify_native_vertex(
-        source, edges, vertex, rows, available, work, cancel,
+    try_vertex_height_projections(
+        &normals,
+        functional.direction,
+        work,
+        cancel,
+        |rows, work, cancel| {
+            super::critical::material_link::qualify_native_vertex(
+                source, edges, vertex, rows, available, work, cancel,
+            )
+        },
     )
 }
 
@@ -9701,6 +9788,90 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn height_projection_proposals_remove_parameter_scale_bias_without_granting_a_fan() {
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        let height = [
+            -0.012340714939826924,
+            0.012340714939826924,
+            0.9998476951563913,
+        ]
+        .map(Interval::point);
+        for scale in [1.0, 1e-12, 1e12] {
+            let normals = [
+                [0.0, 0.0, -scale].map(Interval::point),
+                [0.08726646259971646, 0.0, 0.0].map(Interval::point),
+                [0.08726646259971646, 0.0, 0.0].map(Interval::point),
+            ];
+            let mut valid_proposals = 0;
+            assert!(
+                try_vertex_height_projections(
+                    &normals,
+                    height,
+                    &mut work,
+                    &cancel,
+                    |rows, _, _| {
+                        assert_eq!(rows[1], height);
+                        valid_proposals += 1;
+                        Ok(true)
+                    }
+                )
+                .unwrap()
+            );
+            assert!(valid_proposals > 0);
+            assert!(
+                !try_vertex_height_projections(&normals, height, &mut work, &cancel, |_, _, _| Ok(
+                    false
+                ))
+                .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn height_projection_acceptance_keeps_all_repeated_and_unproposed_cofaces() {
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        let height = [0.0, 0.0, 1.0].map(Interval::point);
+        let mut normals = vec![[1.0, 0.0, 0.0].map(Interval::point); 16];
+        normals.push([-1.0, 0.0, 0.0].map(Interval::point));
+        assert!(
+            !try_vertex_height_projections(&normals, height, &mut work, &cancel, |_, _, _| panic!(
+                "an unproposed opposite coface must still prevent acceptance"
+            ))
+            .unwrap()
+        );
+        assert!(projected_normal_proposal([Interval::point(0.0); 3], height).is_none());
+        assert!(
+            !try_vertex_height_projections(
+                &[height],
+                height,
+                &mut work,
+                &cancel,
+                |_, _, _| panic!("a height-normal coface is not transverse")
+            )
+            .unwrap()
+        );
+        for (budget, cancelled, expected) in [
+            (0, false, GeometryErrorCode::ResourceLimit),
+            (100_000, true, GeometryErrorCode::Cancelled),
+        ] {
+            assert_eq!(
+                try_vertex_height_projections(
+                    &normals,
+                    height,
+                    &mut GeometryWorkBudget::new(budget),
+                    &AtomicBool::new(cancelled),
+                    |_, _, _| Ok(true)
+                )
+                .unwrap_err()
+                .code,
+                expected
+            );
+        }
     }
 
     #[test]
