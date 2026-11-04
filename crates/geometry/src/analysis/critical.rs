@@ -1249,6 +1249,82 @@ enum RootIsolation {
     ConvexCriticalCover,
 }
 
+fn expanded_stationary_curve_height(
+    curve: &(impl crate::parametric::CurveEvaluator + ?Sized),
+    active: [f64; 2],
+    cell: [f64; 2],
+    functional: HeightFunctional,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<Interval>, GeometryError> {
+    work.charge(1, cancel)?;
+    let authorized = curve.active_range();
+    if authorized
+        .into_iter()
+        .chain(active)
+        .chain(cell)
+        .any(|value| !value.is_finite())
+        || authorized[0] > active[0]
+        || active[1] > authorized[1]
+        || active[0] > cell[0]
+        || cell[1] > active[1]
+        || cell[0] >= cell[1]
+    {
+        return Ok(None);
+    }
+    let width = cell[1] - cell[0];
+    let range = [
+        (cell[0] - width).max(active[0]),
+        (cell[1] + width).min(active[1]),
+    ];
+    let proof = (|| -> Result<Option<Interval>, GeometryError> {
+        if !crate::parametric::curve_parameter_span_smooth(curve, range, work, cancel)? {
+            return Ok(None);
+        }
+        let jet = crate::parametric::curve_enclosure(curve, (range[0], range[1]), work, cancel)?;
+        let second = functional.dot(jet.second_derivative);
+        if second.contains_zero() {
+            return Ok(None);
+        }
+        let lower = functional.dot(
+            crate::parametric::curve_enclosure(curve, (range[0], range[0]), work, cancel)?
+                .derivative,
+        );
+        let upper = functional.dot(
+            crate::parametric::curve_enclosure(curve, (range[1], range[1]), work, cancel)?
+                .derivative,
+        );
+        if !((lower.hi < 0.0 && upper.lo > 0.0) || (lower.lo > 0.0 && upper.hi < 0.0)) {
+            return Ok(None);
+        }
+        let midpoint = range[0] * 0.5 + range[1] * 0.5;
+        let value = functional.dot(
+            crate::parametric::curve_enclosure(curve, (midpoint, midpoint), work, cancel)?
+                .derivative,
+        );
+        let root = Interval::point(midpoint).sub(value.div(second)?);
+        if !strictly_contains(Interval::new(range[0], range[1])?, root) {
+            return Ok(None);
+        }
+        Ok(Some(functional.height(
+            crate::parametric::curve_enclosure(curve, (root.lo, root.hi), work, cancel)?.position,
+        )))
+    })();
+    match proof {
+        Err(error)
+            if matches!(
+                error.code,
+                GeometryErrorCode::ConditioningFailure
+                    | GeometryErrorCode::AnalysisIndeterminate
+                    | GeometryErrorCode::ParameterCorrespondenceUnavailable
+            ) =>
+        {
+            Ok(None)
+        }
+        result => result,
+    }
+}
+
 /// Finite Krawczyk inclusion for (d.Su,d.Sv). The midpoint inverse is merely
 /// a preconditioner; every residual and Jacobian product remains an interval,
 /// including an enclosed placed direction. No approximate root grants existence.
@@ -3378,6 +3454,13 @@ pub(super) fn certify_critical_slab(
                             crate::parametric::curve_enclosure(curve, (root.lo, root.hi), work, cancel)?.position,
                         );
                     } else { continue; }
+                }
+                if !root_proved
+                    && let Some(height) = expanded_stationary_curve_height(
+                        curve, central_range, [lo, hi], functional, work, cancel,
+                    )? {
+                    neighborhood = height;
+                    root_proved = true;
                 }
                 add_neighborhood(&mut events, &capture, NeighborhoodInput {
                     face: Some(first.face),

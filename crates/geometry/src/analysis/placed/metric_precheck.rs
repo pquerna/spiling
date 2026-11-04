@@ -321,6 +321,13 @@ mod tests {
             &cancel,
         )
         .unwrap();
+        assert!(!analysis.event_neighborhoods().is_empty());
+        assert!(
+            analysis
+                .event_neighborhoods()
+                .iter()
+                .all(|event| event.stationary_root_proved())
+        );
         assert_eq!(analysis.placed_pose(), Some(request.pose));
         assert_eq!(
             analysis.world_height_interval_mm(),

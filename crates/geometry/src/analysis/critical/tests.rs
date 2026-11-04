@@ -45,6 +45,162 @@ fn native_curve(knots: Vec<f64>, points: Vec<CPoint>, dimension: u64) -> Curve {
 }
 
 #[test]
+fn expanded_curve_root_proves_both_sides_of_an_adaptive_cut() {
+    let curve = native_curve(
+        bezier_knots(2),
+        vec![
+            CPoint::new(0.0, 0.0, 0.25, NOW),
+            CPoint::new(0.5, 0.0, -0.25, NOW),
+            CPoint::new(1.0, 0.0, 0.25, NOW),
+        ],
+        3,
+    );
+    let functional = HeightFunctional {
+        direction: [0.0, 0.0, 1.0].map(Interval::point),
+        offset: Interval::point(0.0),
+    };
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(100_000);
+    for cell in [[0.499, 0.5], [0.5, 0.501]] {
+        let height = expanded_stationary_curve_height(
+            &curve,
+            [0.0, 1.0],
+            cell,
+            functional,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(height.contains_zero());
+        assert!(height.abs_upper() < 0.00001);
+    }
+    for (active, cell) in [
+        ([0.0, 0.5], [0.499, 0.5]),
+        ([0.5, 1.0], [0.5, 0.501]),
+        ([0.0, 0.49], [0.499, 0.5]),
+        ([-0.1, 1.0], [0.499, 0.5]),
+    ] {
+        assert!(
+            expanded_stationary_curve_height(&curve, active, cell, functional, &mut work, &cancel,)
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert!(work.consumed() > 0);
+    let mut measured = GeometryWorkBudget::new(100_000);
+    expanded_stationary_curve_height(
+        &curve,
+        [0.0, 1.0],
+        [0.499, 0.5],
+        functional,
+        &mut measured,
+        &cancel,
+    )
+    .unwrap()
+    .unwrap();
+    for limit in [2, measured.consumed() / 2, measured.consumed() - 1] {
+        let mut limited = GeometryWorkBudget::new(limit);
+        assert_eq!(
+            expanded_stationary_curve_height(
+                &curve,
+                [0.0, 1.0],
+                [0.499, 0.5],
+                functional,
+                &mut limited,
+                &cancel,
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert!(limited.consumed() > 0);
+    }
+    assert_eq!(
+        expanded_stationary_curve_height(
+            &curve,
+            [0.0, 1.0],
+            [0.499, 0.5],
+            functional,
+            &mut GeometryWorkBudget::new(0),
+            &cancel,
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::ResourceLimit
+    );
+    assert_eq!(
+        expanded_stationary_curve_height(
+            &curve,
+            [0.0, 1.0],
+            [0.499, 0.5],
+            functional,
+            &mut work,
+            &AtomicBool::new(true),
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::Cancelled
+    );
+}
+
+#[test]
+fn expanded_curve_root_preserves_nonsmooth_flat_and_singular_refusals() {
+    let kink = native_curve(
+        vec![0.0, 0.0, 0.5, 1.0, 1.0],
+        vec![
+            CPoint::new(0.0, 0.0, 0.5, NOW),
+            CPoint::new(0.5, 0.0, 0.0, NOW),
+            CPoint::new(1.0, 0.0, 0.5, NOW),
+        ],
+        3,
+    );
+    let flat = native_curve(
+        bezier_knots(4),
+        (0..5)
+            .map(|index| {
+                CPoint::new(
+                    f64::from(index) * 0.25,
+                    0.0,
+                    if index % 2 == 0 { 0.0625 } else { -0.0625 },
+                    NOW,
+                )
+            })
+            .collect(),
+        3,
+    );
+    let singular = native_curve(
+        bezier_knots(2),
+        vec![
+            CPoint::new(0.0, 0.0, 0.25, 1.0),
+            CPoint::new(-0.5, 0.0, 0.25, -1.0),
+            CPoint::new(1.0, 0.0, 0.25, 1.0),
+        ],
+        3,
+    );
+    let functional = HeightFunctional {
+        direction: [0.0, 0.0, 1.0].map(Interval::point),
+        offset: Interval::point(0.0),
+    };
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(100_000);
+    for curve in [&kink, &flat, &singular] {
+        assert!(
+            expanded_stationary_curve_height(
+                curve,
+                [0.0, 1.0],
+                [0.499, 0.5],
+                functional,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+}
+
+#[test]
 fn reference_centroid_is_invariant_to_native_boundary_sampling_density() {
     let frame = PlaneFrameMm {
         origin_mm: [0.0; 3],
