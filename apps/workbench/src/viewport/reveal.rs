@@ -191,6 +191,26 @@ mod tests {
         );
     }
     #[test]
+    fn canceling_an_area_removes_the_previous_cut_and_owner_attention() {
+        let mut viewport = Viewport::default();
+        let target = crate::scene::FocusTarget {
+            bounds_mm: AabbMm {
+                min: [0.0; 3],
+                max: [10.0; 3],
+            },
+            normal: Some(DVec3::Z),
+        };
+        viewport.reveal = Some(Reveal::new(target, viewport.camera(), false));
+        viewport.attention = Some([[1, 0, 0, 0], [0; 4]]);
+        viewport.dim_context = true;
+        viewport.cancel_area();
+        assert!(viewport.reveal.is_none());
+        assert!(viewport.attention.is_none());
+        assert!(viewport.motion.is_none());
+        assert!(viewport.pending_focus.is_none());
+        assert!(!viewport.dim_context);
+    }
+    #[test]
     fn fresh_area_request_survives_first_show_and_selection_change_as_one_unit() {
         let mut viewport = Viewport::default();
         let summary = SceneSummary {

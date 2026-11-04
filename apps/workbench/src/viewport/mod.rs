@@ -78,9 +78,12 @@ struct Resources {
     line_count: u32,
     section: Option<Arc<Section>>,
     section_scope: Option<OccurrenceId>,
+    inspection: Option<Arc<crate::inspection::Area>>,
+    inspection_buffer: Option<wgpu::Buffer>,
 }
 
 pub struct Input<'a> {
+    pub inspection: Option<Arc<crate::inspection::Area>>,
     pub project_id: Option<spiling_contracts::project::ProjectId>,
     pub plate: Option<plate::Plate>,
     pub layout_preview: bool,
@@ -433,6 +436,8 @@ impl Viewport {
             line_count: 0,
             section: None,
             section_scope: None,
+            inspection: None,
+            inspection_buffer: None,
         });
         Self::default()
     }
@@ -511,7 +516,18 @@ impl Viewport {
             return false;
         }
         self.pending_focus.as_mut().unwrap().participants = Some(mask);
+        self.pending_focus.as_mut().unwrap().reveal = self.reveal.is_some();
         true
+    }
+    pub fn clear_attention(&mut self) {
+        self.attention = None;
+    }
+    pub fn cancel_area(&mut self) {
+        self.interrupt_focus();
+        if let Some(reveal) = self.reveal.take() {
+            self.dim_context = reveal.dim_context;
+        }
+        self.attention = None;
     }
     pub fn reveal_area(
         &mut self,
@@ -626,6 +642,7 @@ impl Viewport {
         frame: &eframe::Frame,
     ) -> Option<FaceRef> {
         let Input {
+            inspection,
             project_id,
             plate,
             layout_preview,
@@ -1088,6 +1105,7 @@ impl Viewport {
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
             Callback {
+                inspection,
                 plate: plate.clone(),
                 plate_origin: center,
                 dark: ui.visuals().dark_mode,
@@ -1196,6 +1214,7 @@ impl Viewport {
     }
 }
 struct Callback {
+    inspection: Option<Arc<crate::inspection::Area>>,
     plate: Option<plate::Plate>,
     plate_origin: DVec3,
     dark: bool,
@@ -1219,6 +1238,24 @@ impl egui_wgpu::CallbackTrait for Callback {
         let Some(r) = resources.get_mut::<Resources>() else {
             return vec![];
         };
+        let inspection_changed = match (&r.inspection, &self.inspection) {
+            (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
+            (None, None) => false,
+            _ => true,
+        };
+        if inspection_changed {
+            r.inspection_buffer = None;
+            r.inspection = self.inspection.clone();
+            if let Some(area) = &self.inspection {
+                r.inspection_buffer = Some(device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("Bounded compiled construction outline"),
+                        contents: bytemuck::cast_slice(&area.vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    },
+                ));
+            }
+        }
         r.overview.clear();
         if self.scene.is_none() {
             r.meshes.clear();
@@ -1509,6 +1546,12 @@ impl egui_wgpu::CallbackTrait for Callback {
                     pass.draw(range, 0..1);
                 }
             }
+        }
+        if let (Some(area), Some(buffer)) = (&r.inspection, &r.inspection_buffer) {
+            pass.set_pipeline(&r.line_pipeline);
+            pass.set_bind_group(0, &r.line_group, &[]);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..area.vertices.len() as u32, 0..1);
         }
         if self.uniform.cut[0] > 0.0 {
             pass.set_pipeline(&r.clear_stencil);

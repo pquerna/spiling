@@ -75,6 +75,17 @@ surface and cut, not apparent transparency; display caps never become source fac
 Section parity uses the complete surface independently of ghost coverage. This is
 reusable navigation/inspection, not contact discovery or interlock construction.
 
+Review's Construction interfaces lists the selected physical layer's compiled
+separator and permanent-plate records. Selecting a row highlights its retained
+centerlines or plate outline, including hole boundaries, and focuses its physical
+extent. Focus interface and Reveal interface reuse the same camera/cut controls.
+Outlines describe compiled construction, not deposited bead surfaces or measured
+bond strength; actual layer/tool filters remain independent. Selection is bound to
+the exact source display, inspected capture and layer and clears on replacement.
+Oversized or imprecise outlines refuse without publishing partial geometry;
+ordinary actual-program review remains available. These density-region interfaces
+are not material-contact discovery, TPU placement or mixed-polymer interlocking.
+
 Workspace switching hides and retains drafts. Slice plate uses the existing compile
 operation and refuses unapplied changes; Check setup is offered when preflight is
 required. The active editor owns Apply, and Review promotes Verify program followed

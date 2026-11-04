@@ -622,6 +622,7 @@ impl Workbench {
                         },
                     );
                 });
+                self.construction_interfaces_ui(ui, &review);
             } else {
                 ui.weak(if m.artifact.is_some() {
                     "Verify the current output to review layers and export."

@@ -17,6 +17,7 @@ mod chrome;
 use crate::commands::Workspace;
 use chrome::{Panel, WorkArea};
 mod alternative;
+mod interfaces;
 pub(crate) use alternative::gallery as alternative_gallery;
 
 const LICENSE: &str = include_str!("../../../LICENSE.md");
@@ -65,6 +66,7 @@ pub struct Workbench {
     gpu: String,
     title: String,
     viewport: Viewport,
+    interfaces: interfaces::InterfacesUi,
     selected: Option<FaceRef>,
     occurrence: Option<OccurrenceId>,
     pose: [f64; 6],
@@ -139,6 +141,7 @@ impl Workbench {
             gpu,
             title: String::new(),
             viewport: Viewport::new(cc),
+            interfaces: Default::default(),
             selected: None,
             occurrence: None,
             pose: [0.0; 6],
@@ -1011,6 +1014,8 @@ impl eframe::App for Workbench {
                         }
                     }
                     let mut picked = None;
+                    let inspection = self
+                        .interface_overlay(self.state.display.clone().as_ref(), review.as_ref());
                     ui.horizontal_top(|ui| {
                         let rail = if review.is_some() { 84.0 } else { 0.0 };
                         let size = egui::vec2(
@@ -1024,6 +1029,7 @@ impl eframe::App for Workbench {
                                 picked = self.viewport.show(
                                     ui,
                                     crate::viewport::Input {
+                                        inspection: inspection.clone(),
                                         project_id: self
                                             .state
                                             .project

@@ -1888,6 +1888,37 @@ fn native_h1_housing_and_physical_plate_parity() {
         let s = checked_review(&host);
         let review = s.manufacturing.review.as_ref().unwrap();
         assert!(review.capture.report.verified);
+        let source = displayed(&host).display.unwrap();
+        let bounds = source.summary.bounds_mm.unwrap();
+        let origin =
+            glam::DVec3::from_array(bounds.min) * 0.5 + glam::DVec3::from_array(bounds.max) * 0.5;
+        let mut inspected_interfaces = 0;
+        for layer in &review.bundle.plan.layers {
+            for separator in &layer.region_coverage.process_interfaces {
+                let area = crate::inspection::Area::separator(
+                    separator,
+                    [layer.lower_z_mm, layer.z_mm],
+                    origin,
+                )
+                .unwrap();
+                assert!(area.target.valid());
+                assert_eq!(area.target.bounds_mm.min[2], layer.lower_z_mm);
+                assert_eq!(area.target.bounds_mm.max[2], layer.z_mm);
+                assert!(area.vertices.len() <= crate::inspection::MAX_INSPECTION_VERTICES);
+                inspected_interfaces += 1;
+            }
+            for plate in &layer.region_coverage.process_diaphragms {
+                let area = crate::inspection::Area::plate(plate, origin).unwrap();
+                assert!(area.target.valid());
+                assert_eq!(area.target.bounds_mm.min[2], plate.physical_z_mm[0]);
+                assert_eq!(area.target.bounds_mm.max[2], plate.physical_z_mm[1]);
+                inspected_interfaces += 1;
+            }
+        }
+        assert!(
+            inspected_interfaces > 0,
+            "fixture must exercise an actual construction interface"
+        );
         let bead_display = review
             .display
             .as_ref()

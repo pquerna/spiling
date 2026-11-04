@@ -254,6 +254,26 @@ exceeding the additional 0.001 mm display budget refuses publication and retains
 the previous scene; native queries remain authoritative. This is not exact display
 measurement or general STEP qualification.
 
+Exercise Focus on selection from Properties, View, command search and a face-tree
+double-click. In the focused canvas, G starts focus and Escape stops it without
+clearing the subject. Orbit, pan and zoom interrupt motion; disable Animate focus
+to check immediate navigation and Back. Reveal selection adds a reversible display
+cut, offset slider and ghosted context. Check an off-center posed occurrence,
+Normal to section, handle dragging, exit restoration and source/plate replacement;
+underlying native section settings and project revisions must remain unchanged.
+
+For compiled construction inspection, run the actual-child
+`native_h1_housing_and_physical_plate_parity` workbench test with
+`SPILING_TEST_ENGINE` pointing to the matching engine. An optional
+`SPILING_NATIVE_EVIDENCE_ROOT` retains its saved housing/plate projects. Open one
+read-only, freshly Verify program, select a physical layer containing construction,
+and expand Construction interfaces in Review. Select a separator or plate, inspect
+its cyan centerlines/outline and holes, and exercise Focus interface, Reveal
+interface and Clear highlight. Single, Through and Range follow the same upper
+physical layer; changing it or the source/capture clears the selection. Outline
+refusal must also end any previous reveal. This is density-region inspection,
+not material-contact discovery or mixed-polymer interlock manufacture.
+
 For the manufacturing journey, import an unchanged admitted housing from an owned
 copy and load a full intent JSON through its native file picker. Apply a consumed
 sparse value, select the occurrence, prepare and review native placement, explicitly

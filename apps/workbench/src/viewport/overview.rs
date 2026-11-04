@@ -255,6 +255,8 @@ impl egui_wgpu::CallbackTrait for Frame {
             r.draws.clear();
             r.section = None;
             r.lines = None;
+            r.inspection = None;
+            r.inspection_buffer = None;
             r.replay = None;
             r.replay_buffers.clear();
             r.bead_buffers.clear();

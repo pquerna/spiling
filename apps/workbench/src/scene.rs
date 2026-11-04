@@ -69,10 +69,11 @@ fn check(cancel: &AtomicBool) -> Result<(), ClientError> {
     }
 }
 
-/// Hardware primitives, bounded layout preview metadata, and source instance matrices
-/// (up to 1 MiB per GPU generation plus CPU staging). Shared raw meshes are charged
+/// Hardware primitives, bounded layout previews, source instance matrices and
+/// active/staged CPU/GPU construction outlines. Shared raw meshes are charged
 /// separately. This pool is reserved beside every source/section/replay load.
-pub const CONTEXT_DISPLAY_RESERVE_BYTES: usize = 4 * 1024 * 1024;
+pub const CONTEXT_DISPLAY_RESERVE_BYTES: usize =
+    4 * 1024 * 1024 + crate::inspection::INSPECTION_RESERVE_BYTES;
 pub const MAX_INSTANCE_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// Fetch one checked chunk at a time. Reuse immutable definitions on pose-only revisions.
