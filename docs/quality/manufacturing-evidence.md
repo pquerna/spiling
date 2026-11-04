@@ -146,6 +146,14 @@ refinements recompute proposals from the same schedule. Retained proposal storag
 coexists with source promotion and later query scratch; all allowance calculations
 charge it.
 
+A geometry-owned global-lower terminal role may omit its numerical band from
+required physical cuts only inside the existing bed envelope and shape budget.
+It binds the original unique edge root, complete event census, placed native
+support, source, pose and policy. Raw event/proposal bands and other occurrences'
+required cuts remain intact. This scheduling role grants no corner, transport or
+slab authority; the complete first CLOSED slab still needs independent material,
+void, incidence, metric, deposited-anchor and fresh-replay qualification.
+
 ## Source material and reuse
 
 [`PreparedGeometrySource` → `PreparedMaterialSource`](../../crates/geometry/src/analysis/material_source.rs)

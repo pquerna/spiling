@@ -50,7 +50,7 @@ const MAX_DEPTH: u8 = 64;
 const MAX_EVENT_BRACKETS: usize = 65_536;
 pub(super) const MAX_SLAB_SCRATCH_BYTES: usize = 32 * 1024 * 1024;
 const STACK_SCRATCH_BYTES: usize = 128 * 1024;
-const HEIGHT_EVENT_SCRATCH_BYTES: usize = 2 * MAX_EVENT_BRACKETS * std::mem::size_of::<[f64; 2]>();
+const HEIGHT_EVENT_SCRATCH_BYTES: usize = 3 * MAX_EVENT_BRACKETS * std::mem::size_of::<[f64; 2]>();
 
 pub(super) fn remaining_scratch(occupied: usize) -> Result<usize, GeometryError> {
     crate::MAX_PREPARED_SECTION_BYTES
@@ -554,7 +554,7 @@ fn height(position: [Interval; 3], frame: PlaneFrameMm) -> Interval {
         frame.z_axis,
     )
 }
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct HeightFunctional {
     pub(crate) direction: [Interval; 3],
     pub(crate) offset: Interval,
@@ -2116,6 +2116,7 @@ fn analyze_height_functional(
     )?;
     let mut events = Vec::new();
     let mut proved_events = Vec::new();
+    let mut curve_roots = Vec::new();
     let source_before = work.consumed();
     if let Some(round) = if nominal_fast_paths {
         source_round_continuation(
@@ -2156,6 +2157,8 @@ fn analyze_height_functional(
         return Ok(HeightAnalysis {
             event_brackets_mm: events,
             proved_event_brackets_mm: proved_events,
+            lower_terminal_candidate: None,
+            global_terminal_scope: None,
             invariance: None,
             capture: super::HeightCapture {
                 definition_id: definition.id().clone(),
@@ -2164,6 +2167,7 @@ fn analyze_height_functional(
                 height_interval_mm,
                 policy,
                 pose: None,
+                functional,
             },
         });
     }
@@ -2177,8 +2181,10 @@ fn analyze_height_functional(
                 format_args!("material height census source_face={index} begin face"),
             )
         })?;
-        let face_reserved =
-            HEIGHT_EVENT_SCRATCH_BYTES.saturating_add(edge_scratch(definition, index)?);
+        let face_base = HEIGHT_EVENT_SCRATCH_BYTES.saturating_add(edge_scratch(definition, index)?);
+        let face_reserved = face_base.saturating_add(
+            curve_roots.capacity() * std::mem::size_of::<super::height_terminal::CurveRoot>(),
+        );
         let reserved = face_reserved.saturating_add(
             source_links
                 .as_ref()
@@ -2397,6 +2403,8 @@ fn analyze_height_functional(
             }
         }
         for (flat, coedge) in domain.coedges().iter().enumerate() {
+                let root_bytes = curve_roots.capacity() * std::mem::size_of::<super::height_terminal::CurveRoot>();
+                let face_reserved = face_base.saturating_add(root_bytes);
                 let identity = coedge.identity();
                 let oriented = coedge.oriented_native_range();
                 let active = [oriented[0].min(oriented[1]), oriented[0].max(oriented[1])];
@@ -2476,7 +2484,12 @@ fn analyze_height_functional(
                         let occupied = face_reserved
                             .saturating_add(source_links.as_ref().map_or(0, HeightSourceLinks::owned_bytes));
                         let prepared = crate::parametric::prepare_curve_enclosure(curve, curve_range, remaining_scratch_with_limit(scratch_limit, occupied)?, work, cancel)?;
-                        isolate_curve_events(&OriginalCurveSpan { curve: &prepared, range: curve_range }, &HeightEventQuery { functional, heights: height_interval_mm, uncertainty: policy.maximum_height_uncertainty_mm }, &mut events, &mut proved_events, work, cancel)
+                        let root_limit = remaining_scratch_with_limit(scratch_limit, occupied.saturating_sub(root_bytes)
+                            .saturating_add(prepared.retained_bytes())
+                            .saturating_add(PreparedValidatedCurve::scratch_bytes())
+                            .saturating_add(crate::kernel::trim::NATIVE_SPATIAL_QUERY_SCRATCH_BYTES))?;
+                        remaining_scratch_with_limit(root_limit, root_bytes)?;
+                        isolate_curve_events_with_roots(&OriginalCurveSpan { curve: &prepared, range: curve_range }, &HeightEventQuery { functional, heights: height_interval_mm, uncertainty: policy.maximum_height_uncertainty_mm }, &mut events, &mut proved_events, Some(CurveRootInventory { edge: coedge.edge, original_range: active, roots: &mut curve_roots, byte_limit: root_limit }), work, cancel)
                     })().map_err(|error| height_face_context(error, index, "isolate original coedge heights"))?;
                 }
                 Ok(())
@@ -2494,15 +2507,38 @@ fn analyze_height_functional(
             "native material height census stage={stage} face={index} wire_coedge={curve_owner:?} curve_window={curve_window:?} uv_window={surface_window:?} vertex_mm={vertex_point:?}"
         )))?;
     }
-    events.sort_unstable_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    let lower_terminal_candidate = super::height_terminal::lower_terminal_candidate(
+        &events,
+        &curve_roots,
+        policy
+            .maximum_height_uncertainty_mm
+            .min(policy.maximum_shape_error_mm),
+        work,
+        cancel,
+    )?;
+    crate::compute::sort_unstable_by(
+        &mut events,
+        |a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])),
+        work,
+        cancel,
+    )?;
     // Only identical enclosures are deduplicated. Proximity is not proof that
     // different critical strata are one event, so uncertain neighbors survive.
+    work.charge(events.len() as u64, cancel)?;
     events.dedup();
-    proved_events.sort_unstable_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    crate::compute::sort_unstable_by(
+        &mut proved_events,
+        |a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])),
+        work,
+        cancel,
+    )?;
+    work.charge(proved_events.len() as u64, cancel)?;
     proved_events.dedup();
     Ok(HeightAnalysis {
         event_brackets_mm: events,
         proved_event_brackets_mm: proved_events,
+        lower_terminal_candidate,
+        global_terminal_scope: None,
         invariance,
         capture: super::HeightCapture {
             definition_id: definition.id().clone(),
@@ -2511,6 +2547,7 @@ fn analyze_height_functional(
             height_interval_mm,
             policy,
             pose: None,
+            functional,
         },
     })
 }
@@ -2523,6 +2560,88 @@ struct HeightEventQuery {
 struct OriginalCurveSpan<'q, 'c> {
     curve: &'q PreparedValidatedCurve<'c>,
     range: (f64, f64),
+}
+
+struct CurveRootInventory<'a> {
+    edge: EdgeId,
+    original_range: [f64; 2],
+    roots: &'a mut Vec<super::height_terminal::CurveRoot>,
+    byte_limit: usize,
+}
+impl CurveRootInventory<'_> {
+    fn record(
+        &mut self,
+        event_indices: std::ops::Range<usize>,
+        uniqueness_range: [f64; 2],
+        second_sign: i8,
+        root_exists: bool,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), GeometryError> {
+        for event_index in event_indices {
+            work.charge(1, cancel)?;
+            if self
+                .roots
+                .capacity()
+                .saturating_mul(std::mem::size_of::<super::height_terminal::CurveRoot>())
+                > self.byte_limit
+            {
+                return Err(error(
+                    GeometryErrorCode::ResourceLimit,
+                    "native root provenance live capacity exceeds query allowance",
+                ));
+            }
+            if self.roots.len() >= MAX_EVENT_BRACKETS {
+                return Err(error(
+                    GeometryErrorCode::ResourceLimit,
+                    "native root provenance capacity exhausted",
+                ));
+            }
+            if self.roots.len() == self.roots.capacity() {
+                let next_capacity = self
+                    .roots
+                    .capacity()
+                    .max(4)
+                    .saturating_mul(2)
+                    .min(MAX_EVENT_BRACKETS);
+                let bytes = self
+                    .roots
+                    .capacity()
+                    .saturating_add(next_capacity)
+                    .saturating_mul(std::mem::size_of::<super::height_terminal::CurveRoot>());
+                if bytes > self.byte_limit {
+                    return Err(error(
+                        GeometryErrorCode::ResourceLimit,
+                        "native root provenance exceeds coexisting query capacity",
+                    ));
+                }
+                work.charge(self.roots.len() as u64, cancel)?;
+                self.roots
+                    .try_reserve_exact(next_capacity - self.roots.len())
+                    .map_err(|_| {
+                        error(
+                            GeometryErrorCode::ResourceLimit,
+                            "native root provenance allocation refused",
+                        )
+                    })?;
+                if self.roots.capacity() > next_capacity {
+                    return Err(error(
+                        GeometryErrorCode::ResourceLimit,
+                        "native root provenance allocator exceeds capacity",
+                    ));
+                }
+            }
+            self.roots.push(super::height_terminal::CurveRoot {
+                event_index,
+                edge: self.edge,
+                original_range: self.original_range,
+                uniqueness_range,
+                second_sign,
+                root_exists,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Necessary height cover of derivative roots in a separately qualified C1
@@ -2642,11 +2761,24 @@ fn inventory_curve_joint_height(
     ))
 }
 
+#[cfg(test)]
 fn isolate_curve_events(
     source: &OriginalCurveSpan<'_, '_>,
     query: &HeightEventQuery,
     events: &mut Vec<[f64; 2]>,
     proved: &mut Vec<[f64; 2]>,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    isolate_curve_events_with_roots(source, query, events, proved, None, work, cancel)
+}
+
+fn isolate_curve_events_with_roots(
+    source: &OriginalCurveSpan<'_, '_>,
+    query: &HeightEventQuery,
+    events: &mut Vec<[f64; 2]>,
+    proved: &mut Vec<[f64; 2]>,
+    mut roots: Option<CurveRootInventory<'_>>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
@@ -2670,6 +2802,7 @@ fn isolate_curve_events(
                 false,
                 events,
                 proved,
+                &mut roots,
                 work,
                 cancel,
             )?;
@@ -2725,6 +2858,7 @@ fn isolate_curve_events(
                     true,
                     events,
                     proved,
+                    &mut roots,
                     work,
                     cancel,
                 )?;
@@ -2761,6 +2895,7 @@ fn isolate_curve_events(
             true,
             events,
             proved,
+            &mut roots,
             work,
             cancel,
         )?;
@@ -2775,6 +2910,7 @@ fn isolate_curve_events(
         true,
         events,
         proved,
+        &mut roots,
         work,
         cancel,
     )
@@ -2782,12 +2918,17 @@ fn isolate_curve_events(
 
 /// The caller proved this COMPLETE original span C1. Its closed endpoints may
 /// be actual C0 joints with independently inventoried position/height strata.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Original events, independently proved heights and native root provenance retain separate bounded ownership"
+)]
 fn isolate_smooth_curve_span_events(
     source: &OriginalCurveSpan<'_, '_>,
     query: &HeightEventQuery,
     one_sided_endpoints: bool,
     events: &mut Vec<[f64; 2]>,
     proved: &mut Vec<[f64; 2]>,
+    roots: &mut Option<CurveRootInventory<'_>>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
@@ -2869,10 +3010,32 @@ fn isolate_smooth_curve_span_events(
                 );
                 }
                 if root_height.is_none_or(|root| root.width() <= uncertainty) {
+                    let event_start = events.len();
                     add_event(events, h, heights, uncertainty, work, cancel)?;
                     if let Some(root) = root_height {
                         add_event(events, root, heights, uncertainty, work, cancel)?;
                         add_event(proved, root, heights, uncertainty, work, cancel)?;
+                    }
+                    if let Some(inventory) = roots {
+                        let expanded_jet = curve.jet([expanded.0, expanded.1], work, cancel)?;
+                        let second = functional.dot(expanded_jet.second_derivative);
+                        let sign = if second.lo > 0.0 {
+                            1
+                        } else if second.hi < 0.0 {
+                            -1
+                        } else {
+                            0
+                        };
+                        if sign != 0 {
+                            inventory.record(
+                                event_start..events.len(),
+                                [expanded.0, expanded.1],
+                                sign,
+                                root_height.is_some(),
+                                work,
+                                cancel,
+                            )?;
+                        }
                     }
                     continue;
                 }
@@ -8317,6 +8480,74 @@ mod tests {
         assert!(slab.closed_shape_error_mm().is_none());
         assert!(slab.material_core_shape_error_mm() <= 0.05);
     }
+    #[test]
+    fn terminal_root_storage_admits_live_capacity_and_growth() {
+        let definition = parity_definition("native-parity-ring-torus.step");
+        let edge = definition.brep().edge_list()[0];
+        let mut records = Vec::new();
+        let mut work = GeometryWorkBudget::query();
+        let cancel = AtomicBool::new(false);
+        let record_bytes = std::mem::size_of::<super::super::height_terminal::CurveRoot>();
+        let mut inventory = CurveRootInventory {
+            edge,
+            original_range: [0.0, 1.0],
+            roots: &mut records,
+            byte_limit: 8 * record_bytes - 1,
+        };
+        assert_eq!(
+            inventory
+                .record(0..1, [0.25, 0.75], 1, true, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(inventory.roots.capacity(), 0);
+        inventory.byte_limit = 8 * record_bytes;
+        inventory
+            .record(0..8, [0.25, 0.75], 1, true, &mut work, &cancel)
+            .unwrap();
+        assert_eq!(inventory.roots.capacity(), 8);
+        inventory.byte_limit = 24 * record_bytes - 1;
+        assert_eq!(
+            inventory
+                .record(8..9, [0.25, 0.75], 1, true, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(inventory.roots.len(), 8);
+        inventory.byte_limit = 24 * record_bytes;
+        assert_eq!(
+            inventory
+                .record(
+                    8..9,
+                    [0.25, 0.75],
+                    1,
+                    true,
+                    &mut work,
+                    &AtomicBool::new(true)
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::Cancelled
+        );
+        assert_eq!(inventory.roots.capacity(), 8);
+        inventory
+            .record(8..9, [0.25, 0.75], 1, true, &mut work, &cancel)
+            .unwrap();
+        assert_eq!(inventory.roots.capacity(), 16);
+        assert_eq!(inventory.roots.len(), 9);
+        inventory.byte_limit = 16 * record_bytes - 1;
+        assert_eq!(
+            inventory
+                .record(9..10, [0.25, 0.75], 1, true, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(inventory.roots.len(), 9);
+    }
+
     #[test]
     fn height_analysis_honors_job_remaining_scratch_and_preserves_real_events() {
         let cancel = AtomicBool::new(false);

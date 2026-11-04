@@ -6,6 +6,7 @@ pub(crate) mod boundary_level;
 mod bounds;
 mod collar;
 mod critical;
+mod height_terminal;
 mod joint;
 mod material_source;
 mod placed;
@@ -206,6 +207,8 @@ pub struct HeightAnalysis {
     pub(crate) invariance: Option<InvariantHeightDomain>,
     proved_event_brackets_mm: Vec<[f64; 2]>,
     capture: HeightCapture,
+    lower_terminal_candidate: Option<height_terminal::TerminalRoot>,
+    global_terminal_scope: Option<height_terminal::GlobalTerminalScope>,
 }
 
 #[derive(Debug)]
@@ -216,6 +219,7 @@ struct HeightCapture {
     height_interval_mm: [f64; 2],
     policy: AnalysisPolicy,
     pose: Option<spiling_contracts::geometry::RigidPoseMm>,
+    functional: HeightFunctional,
 }
 impl HeightAnalysis {
     /// A native census is complete only inside its captured height scope.
@@ -234,6 +238,15 @@ impl HeightAnalysis {
                 .invariance
                 .as_ref()
                 .map_or(0, |proof| proof.definition_id.allocated_bytes())
+            + self
+                .lower_terminal_candidate
+                .iter()
+                .map(|root| root.event_brackets_mm.capacity() * std::mem::size_of::<[f64; 2]>())
+                .sum::<usize>()
+            + self
+                .global_terminal_scope
+                .as_ref()
+                .map_or(0, |scope| scope.definition_id.allocated_bytes())
     }
     pub(crate) fn material_realization_identity(
         &self,
@@ -251,6 +264,43 @@ impl HeightAnalysis {
             .iter()
             .filter(|band| !self.requires_closed_material_capture(**band))
             .copied()
+    }
+    /// A complete native census, same-edge unique root and independently bound
+    /// global material support identify this event as the global lower terminal.
+    /// The literal candidate remains retained and requires actual closed-slab
+    /// material/void/incidence/metric qualification, not an exact contact snap.
+    pub fn is_global_lower_terminal_event_mm(
+        &self,
+        bracket: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        work.charge(1, cancel)?;
+        if !self
+            .global_terminal_scope
+            .as_ref()
+            .is_some_and(|scope| scope.matches(&self.capture))
+        {
+            return Ok(false);
+        }
+        self.lower_terminal_candidate
+            .as_ref()
+            .map_or(Ok(false), |root| root.owns_event(bracket, work, cancel))
+    }
+    pub fn global_lower_terminal_bracket_mm(&self) -> Option<[f64; 2]> {
+        if !self.global_terminal_scope.as_ref()?.matches(&self.capture) {
+            return None;
+        }
+        self.lower_terminal_candidate
+            .as_ref()
+            .map(|root| root.height_bracket_mm)
+    }
+    /// Independent native support bound in the identical complete placed scope.
+    pub fn global_lower_terminal_support_bracket_mm(&self) -> Option<[f64; 2]> {
+        let scope = self.global_terminal_scope.as_ref()?;
+        scope
+            .matches(&self.capture)
+            .then_some(scope.support.minimum)
     }
     pub fn invariance(&self) -> Option<&InvariantHeightDomain> {
         self.invariance.as_ref()

@@ -866,6 +866,7 @@ pub(super) fn analyze_placed_height_domain_with_scratch_limit(
             work,
             cancel,
         )?;
+        map_terminal_candidates(&mut source, &map, policy, work, cancel)?;
         for event in source
             .event_brackets_mm
             .iter_mut()
@@ -928,8 +929,198 @@ pub(super) fn analyze_placed_height_domain_with_scratch_limit(
         height_interval_mm: world_height_interval_mm,
         policy,
         pose: Some(pose),
+        functional: HeightFunctional {
+            direction: map.matrix[2],
+            offset: Interval::point(pose.translation_mm[2]),
+        },
     };
+    if result.lower_terminal_candidate.is_some() {
+        let support_bytes = query_byte_limit
+            .checked_sub(result.retained_bytes())
+            .ok_or_else(|| {
+                error(
+                    GeometryErrorCode::ResourceLimit,
+                    "global terminal support exhausts coexisting query capacity",
+                )
+            })?;
+        let support = placed_material_bounds_with_scratch_limit(
+            source_context,
+            pose,
+            [0.0, 0.0, 1.0],
+            BoundsPolicy {
+                maximum_endpoint_uncertainty_mm: policy
+                    .maximum_height_uncertainty_mm
+                    .min(policy.maximum_shape_error_mm),
+            },
+            support_bytes,
+            work,
+            cancel,
+        )?;
+        bind_global_lower_terminal(
+            source_context,
+            &mut result,
+            &support,
+            query_byte_limit,
+            work,
+            cancel,
+        )?;
+    }
     Ok(result)
+}
+
+fn map_terminal_candidates(
+    analysis: &mut HeightAnalysis,
+    map: &HeightMap,
+    policy: AnalysisPolicy,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    let Some(root) = analysis.lower_terminal_candidate.as_mut() else {
+        return Ok(());
+    };
+    let height = map.world_value(root.height_bracket_mm)?;
+    let mut ordered = height[1] - height[0]
+        <= policy
+            .maximum_height_uncertainty_mm
+            .min(policy.maximum_shape_error_mm);
+    for event in &analysis.event_brackets_mm {
+        work.charge(1, cancel)?;
+        if !root.owns_event(*event, work, cancel)? {
+            ordered &= map.world_value(*event)?[0] > height[1];
+        }
+    }
+    if !ordered {
+        analysis.lower_terminal_candidate = None;
+        return Ok(());
+    }
+    root.height_bracket_mm = height;
+    for event in &mut root.event_brackets_mm {
+        work.charge(1, cancel)?;
+        *event = map.world_value(*event)?;
+    }
+    crate::compute::sort_unstable_by(
+        &mut root.event_brackets_mm,
+        |left, right| {
+            left[0]
+                .total_cmp(&right[0])
+                .then(left[1].total_cmp(&right[1]))
+        },
+        work,
+        cancel,
+    )?;
+    work.charge(root.event_brackets_mm.len() as u64, cancel)?;
+    root.event_brackets_mm.dedup();
+    Ok(())
+}
+
+fn bind_global_lower_terminal(
+    source: super::material_source::MaterialSourceView<'_, '_>,
+    analysis: &mut HeightAnalysis,
+    support: &PlacedMaterialProjectedBounds,
+    query_byte_limit: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    analysis.global_terminal_scope = None;
+    work.charge(1, cancel)?;
+    let definition = source.definition();
+    let Some(pose) = analysis.pose() else {
+        return Ok(());
+    };
+    let functional = HeightFunctional {
+        direction: rotation(pose)?[2],
+        offset: Interval::point(pose.translation_mm[2]),
+    };
+    let bounds = support.bounds();
+    let support_policy_mm = analysis
+        .policy()
+        .maximum_height_uncertainty_mm
+        .min(analysis.policy().maximum_shape_error_mm);
+    if analysis.definition_id() != definition.id()
+        || analysis.material_realization_identity()
+            != crate::kernel::MaterialRealizationIdentity::new(definition)
+        || !support.is_compatible_with_definition(definition)
+        || support.placed_pose() != pose
+        || support.world_direction() != [0.0, 0.0, 1.0]
+        || support.policy().maximum_endpoint_uncertainty_mm != support_policy_mm
+        || analysis.frame() != world_frame()
+        || analysis.capture.functional != functional
+        || analysis.height_interval_mm()[0] > bounds.minimum[0]
+        || analysis.height_interval_mm()[1] < bounds.maximum[1]
+    {
+        return Ok(());
+    }
+    let Some(root) = analysis.lower_terminal_candidate.as_ref() else {
+        return Ok(());
+    };
+    if root.height_bracket_mm[1] < bounds.minimum[0]
+        || root.height_bracket_mm[0] > bounds.minimum[1]
+    {
+        return Ok(());
+    }
+    let Some(curve) = definition.edge_curve(root.edge) else {
+        return Ok(());
+    };
+    let Ok(edge) = definition.brep().edge(root.edge) else {
+        return Ok(());
+    };
+    let original_range = [edge.interval.min(), edge.interval.max()];
+    if root.original_range != original_range
+        || root.uniqueness_range[0] < original_range[0]
+        || root.uniqueness_range[1] > original_range[1]
+        || root.uniqueness_range[0] >= root.uniqueness_range[1]
+    {
+        return Ok(());
+    }
+    let remaining = query_byte_limit
+        .checked_sub(analysis.retained_bytes())
+        .and_then(|bytes| bytes.checked_sub(support.retained_bytes()))
+        .and_then(|bytes| bytes.checked_sub(definition.id().allocated_bytes()))
+        .ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "global terminal root exhausts coexisting query capacity",
+            )
+        })?;
+    let prepared = crate::parametric::prepare_curve_enclosure(
+        curve,
+        (original_range[0], original_range[1]),
+        remaining,
+        work,
+        cancel,
+    )?;
+    let range = root.uniqueness_range;
+    if !prepared.is_smooth_on(range, work, cancel)? {
+        return Ok(());
+    }
+    let second = functional.dot(prepared.jet(range, work, cancel)?.second_derivative);
+    let left = functional.dot(prepared.jet([range[0]; 2], work, cancel)?.derivative);
+    let right = functional.dot(prepared.jet([range[1]; 2], work, cancel)?.derivative);
+    if second.lo <= 0.0 || left.hi >= 0.0 || right.lo <= 0.0 {
+        return Ok(());
+    }
+    for event in analysis.event_brackets_mm() {
+        work.charge(1, cancel)?;
+        if !root.owns_event(*event, work, cancel)? && event[0] <= root.height_bracket_mm[1] {
+            return Ok(());
+        }
+    }
+    work.charge(1, cancel)?;
+    analysis.global_terminal_scope = Some(super::height_terminal::GlobalTerminalScope {
+        definition_id: definition.id().clone(),
+        material_realization: analysis.material_realization_identity(),
+        pose,
+        frame: analysis.frame(),
+        functional,
+        height_interval_mm: analysis.height_interval_mm(),
+        policy: [
+            analysis.policy().maximum_height_uncertainty_mm,
+            analysis.policy().maximum_shape_error_mm,
+        ],
+        support_policy_mm,
+        support: bounds,
+    });
+    Ok(())
 }
 
 /// sqrt(||R^T R||_infinity) bounds the Euclidean operator norm even when R is
@@ -2192,6 +2383,185 @@ mod tests {
                 .code,
             GeometryErrorCode::Cancelled
         );
+    }
+
+    #[test]
+    fn global_terminal_binding_requires_full_census_exact_pose_and_original_root() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/geometry/cylinder.step"),
+            &cancel,
+        )
+        .unwrap();
+        let angle = 1.0_f64.to_radians();
+        let component = (angle * 0.5).sin() / 2.0_f64.sqrt();
+        let pose = RigidPoseMm {
+            translation_mm: [0.0, 0.0, 1.0],
+            rotation_xyzw: [component, component, 0.0, (angle * 0.5).cos()],
+        };
+        let mut work = GeometryWorkBudget::query();
+        let owner = super::super::material_source::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let remaining = crate::MAX_PREPARED_SECTION_BYTES - owner.retained_bytes();
+        let policy = AnalysisPolicy {
+            maximum_height_uncertainty_mm: 1e-6,
+            maximum_shape_error_mm: 0.05,
+        };
+        let support = owner
+            .placed_material_bounds(
+                pose,
+                [0.0, 0.0, 1.0],
+                BoundsPolicy {
+                    maximum_endpoint_uncertainty_mm: 1e-6,
+                },
+                remaining,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        let bounds = support.bounds();
+        let range = [bounds.minimum[0], bounds.maximum[1]];
+        let mut analysis = owner
+            .analyze_placed_height_domain(pose, range, policy, remaining, &mut work, &cancel)
+            .unwrap();
+        let terminal = analysis
+            .global_lower_terminal_bracket_mm()
+            .expect("complete same-native-edge minimum has global terminal identity");
+        let events = analysis.event_brackets_mm().to_vec();
+        assert!(events.iter().any(|band| {
+            analysis
+                .is_global_lower_terminal_event_mm(*band, &mut work, &cancel)
+                .unwrap()
+        }));
+        assert!(events.iter().any(|band| {
+            band[0] > terminal[1]
+                && !analysis
+                    .is_global_lower_terminal_event_mm(*band, &mut work, &cancel)
+                    .unwrap()
+        }));
+        let source = owner.source_view().unwrap();
+        let partial = owner
+            .analyze_placed_height_domain(
+                pose,
+                [range[0], range[0] * 0.5 + range[1] * 0.5],
+                policy,
+                remaining,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        assert!(partial.global_lower_terminal_bracket_mm().is_none());
+        let foreign_pose = RigidPoseMm {
+            translation_mm: [0.0, 0.0, 2.0],
+            ..pose
+        };
+        let foreign_support = owner
+            .placed_material_bounds(
+                foreign_pose,
+                [0.0, 0.0, 1.0],
+                BoundsPolicy {
+                    maximum_endpoint_uncertainty_mm: 1e-6,
+                },
+                remaining,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        bind_global_lower_terminal(
+            source,
+            &mut analysis,
+            &foreign_support,
+            remaining,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(analysis.global_lower_terminal_bracket_mm().is_none());
+        bind_global_lower_terminal(
+            source,
+            &mut analysis,
+            &support,
+            remaining,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(analysis.global_lower_terminal_bracket_mm().is_some());
+        let captured_functional = analysis.capture.functional;
+        analysis.capture.functional.offset = Interval::point(2.0);
+        assert!(analysis.global_lower_terminal_bracket_mm().is_none());
+        assert!(
+            analysis
+                .global_lower_terminal_support_bracket_mm()
+                .is_none()
+        );
+        analysis.capture.functional = captured_functional;
+        let captured_policy = analysis.capture.policy;
+        analysis.capture.policy.maximum_shape_error_mm *= 2.0;
+        assert!(analysis.global_lower_terminal_bracket_mm().is_none());
+        analysis.capture.policy = captured_policy;
+        let root = analysis.lower_terminal_candidate.as_mut().unwrap();
+        let window = root.uniqueness_range;
+        root.uniqueness_range = [window[0], window[0].next_up()];
+        bind_global_lower_terminal(
+            source,
+            &mut analysis,
+            &support,
+            remaining,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            analysis.global_lower_terminal_bracket_mm().is_none(),
+            "a monotone endpoint is not an interior root"
+        );
+        analysis
+            .lower_terminal_candidate
+            .as_mut()
+            .unwrap()
+            .uniqueness_range = window;
+        for (mut budget, cancellation, limit, expected) in [
+            (
+                GeometryWorkBudget::new(0),
+                AtomicBool::new(false),
+                remaining,
+                GeometryErrorCode::ResourceLimit,
+            ),
+            (
+                GeometryWorkBudget::query(),
+                AtomicBool::new(true),
+                remaining,
+                GeometryErrorCode::Cancelled,
+            ),
+            (
+                GeometryWorkBudget::query(),
+                AtomicBool::new(false),
+                0,
+                GeometryErrorCode::ResourceLimit,
+            ),
+        ] {
+            assert_eq!(
+                bind_global_lower_terminal(
+                    source,
+                    &mut analysis,
+                    &support,
+                    limit,
+                    &mut budget,
+                    &cancellation
+                )
+                .unwrap_err()
+                .code,
+                expected
+            );
+            assert!(analysis.global_lower_terminal_bracket_mm().is_none());
+        }
+        assert_eq!(analysis.event_brackets_mm(), events);
     }
 
     #[test]
