@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
-struct Camera { view_projection: mat4x4<f32>, selected: vec4<u32>, tool_color:vec4<f32>, plane:vec4<f32>, cut:vec4<f32>, context:vec4<f32> };
+struct Camera { view_projection: mat4x4<f32>, selected: vec4<u32>, tool_color:vec4<f32>, plane:vec4<f32>, cut:vec4<f32>, context:vec4<f32>,emphasis:vec4<f32>,participants:array<vec4<u32>,2> };
 struct Instance { rotation: vec4<f32>, translation: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<storage,read> mesh: array<u32>;
@@ -30,5 +30,19 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) normal:vec3<
     let normal=normalize(input.normal)*select(-1.0,1.0,front);
     let light=0.28+0.72*max(dot(normal,normalize(vec3<f32>(0.4,-0.5,0.8))),0.0);
     let base=select(vec3<f32>(0.52,0.64,0.77),vec3<f32>(1.0,0.67,0.22),input.selected!=0u);
-    return vec4<f32>(select(base,camera.context.rgb,camera.context.a>0.0)*light,1.0);
+    var color=select(base,camera.context.rgb,camera.context.a>0.0);
+    if camera.emphasis.w>0.0 && input.selected==0u {
+        let word=camera.participants[input.occurrence/128u][(input.occurrence/32u)%4u];
+        let participant=(word & (1u << (input.occurrence%32u)))!=0u;
+        let pattern=array<u32,16>(0u,8u,2u,10u,12u,4u,14u,6u,3u,11u,1u,9u,15u,7u,13u,5u);
+        let pixel=(u32(input.position.x)%4u)+(u32(input.position.y)%4u)*4u;
+        if pattern[pixel]>=select(3u,12u,participant) { discard; }
+        color=select(camera.emphasis.rgb,color,participant);
+    }
+    return vec4<f32>(color*select(light,max(light,0.72),input.selected!=0u),1.0);
+}
+@fragment fn fs_stencil(input:Output)->@location(0) vec4<f32> {
+    if camera.cut.x>0.0 && dot(camera.plane,vec4(input.world,1.0))>0.000001 { discard; }
+    if camera.cut.z>0.0 && input.occurrence!=u32(camera.cut.z-1.0) { discard; }
+    return vec4<f32>(0.0);
 }

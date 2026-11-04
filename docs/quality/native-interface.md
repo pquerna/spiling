@@ -63,6 +63,18 @@ Back to previous view restores the pre-focus camera. Source/session/plate change
 discard transient focus history. Focusing does not prove visibility through other
 material, remove an existing section cut or grant geometric/material authority.
 
+Reveal selection temporarily replaces the display cut with a plane through the
+focused area. Its millimetre offset slider and plane handle are inspection only;
+native contours for the underlying analysis plane are hidden during reveal.
+Exit reveal or Escape restores the prior camera and context emphasis, while the
+underlying section settings remain untouched. Selection/source changes end reveal.
+Dim surroundings uses depth-tested screen-door coverage rather than order-dependent
+alpha blending: selected faces stay solid, participating parts remain readable,
+and other source parts become neutral ghosts. Picking still uses the checked source
+surface and cut, not apparent transparency; display caps never become source faces.
+Section parity uses the complete surface independently of ghost coverage. This is
+reusable navigation/inspection, not contact discovery or interlock construction.
+
 Workspace switching hides and retains drafts. Slice plate uses the existing compile
 operation and refuses unapplied changes; Check setup is offered when preflight is
 required. The active editor owns Apply, and Review promotes Verify program followed

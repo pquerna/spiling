@@ -217,6 +217,8 @@ pub fn paint(
                 plane: [0.0; 4],
                 cut: [0.0; 4],
                 context: tint,
+                emphasis: [0.0; 4],
+                participants: [[0; 4]; 2],
             },
             dark: ui.visuals().dark_mode,
         },

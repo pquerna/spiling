@@ -6,6 +6,7 @@ mod beads;
 mod focus;
 pub mod overview;
 pub mod plate;
+mod reveal;
 mod section;
 use crate::scene::{Scene, Section};
 use egui_wgpu::wgpu::{self, util::DeviceExt};
@@ -23,6 +24,8 @@ struct Uniform {
     cut: [f32; 4],
     /// Neutral RGB/alpha for contextual lines; zero alpha keeps normal colors.
     context: [f32; 4],
+    emphasis: [f32; 4],
+    participants: [[u32; 4]; 2],
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -121,11 +124,15 @@ pub struct Viewport {
     show_height: bool,
     orthographic: bool,
     motion: Option<focus::Motion>,
-    pending_focus: Option<(SceneSummary, crate::scene::FocusTarget)>,
+    pending_focus: Option<focus::Request>,
     previous_camera: Option<CameraState>,
     focus_scene: Option<SceneSummary>,
     smooth_focus: bool,
     focus_problem: Option<&'static str>,
+    dim_context: bool,
+    reveal: Option<reveal::Reveal>,
+    last_selection: Option<(Option<FaceRef>, Option<OccurrenceId>)>,
+    attention: Option<[[u32; 4]; 2]>,
 }
 impl Default for Viewport {
     fn default() -> Self {
@@ -147,6 +154,10 @@ impl Default for Viewport {
             focus_scene: None,
             smooth_focus: true,
             focus_problem: None,
+            dim_context: false,
+            reveal: None,
+            last_selection: None,
+            attention: None,
         }
     }
 }
@@ -436,6 +447,10 @@ impl Viewport {
     }
     pub fn restore_camera(&mut self, c: &CameraState) {
         self.interrupt_focus();
+        if let Some(reveal) = self.reveal.take() {
+            self.dim_context = reveal.dim_context;
+        }
+        self.attention = None;
         self.previous_camera = None;
         self.apply_camera(c);
     }
@@ -468,13 +483,85 @@ impl Viewport {
         if !target.valid() {
             return false;
         }
-        self.pending_focus = Some((scene.summary.clone(), target));
+        self.pending_focus = Some(focus::Request {
+            summary: scene.summary.clone(),
+            target,
+            participants: None,
+            reveal: false,
+            started_reveal: false,
+            area_applied: false,
+        });
         self.focus_problem = None;
         true
     }
     fn interrupt_focus(&mut self) {
         self.motion = None;
         self.pending_focus = None;
+    }
+    pub fn focus_area(
+        &mut self,
+        scene: &Scene,
+        target: crate::scene::FocusTarget,
+        participants: &[OccurrenceId],
+    ) -> bool {
+        let Some(mask) = reveal::participant_mask(scene, participants) else {
+            return false;
+        };
+        if !self.focus_on(scene, target) {
+            return false;
+        }
+        self.pending_focus.as_mut().unwrap().participants = Some(mask);
+        true
+    }
+    pub fn reveal_area(
+        &mut self,
+        scene: &Scene,
+        target: crate::scene::FocusTarget,
+        participants: &[OccurrenceId],
+    ) -> bool {
+        if !self.focus_area(scene, target, participants) {
+            return false;
+        }
+        self.pending_focus.as_mut().unwrap().reveal = true;
+        true
+    }
+    pub fn close_reveal(&mut self, now: f64, animations_enabled: bool) -> bool {
+        let Some(reveal) = self.reveal.take() else {
+            return false;
+        };
+        self.interrupt_focus();
+        self.previous_camera = reveal.previous_camera;
+        self.dim_context = reveal.dim_context;
+        self.attention = reveal.attention;
+        self.animate_to(reveal.camera, now, animations_enabled);
+        true
+    }
+    fn apply_focus_area(&mut self) {
+        let Some(mut request) = self.pending_focus.take() else {
+            return;
+        };
+        if !request.area_applied {
+            if let Some(participants) = request.participants {
+                if request.reveal {
+                    let mut reveal =
+                        reveal::Reveal::new(request.target, self.camera(), self.dim_context);
+                    reveal.attention = self.attention;
+                    reveal.previous_camera = self.previous_camera.clone();
+                    if let Some(active) = &mut self.reveal {
+                        active.target = request.target;
+                        active.normal = reveal.normal;
+                        active.offset_mm = reveal.offset_mm;
+                    } else {
+                        self.reveal = Some(reveal);
+                        request.started_reveal = true;
+                    }
+                }
+                self.attention = Some(participants);
+                self.dim_context = true;
+            }
+            request.area_applied = true;
+        }
+        self.pending_focus = Some(request);
     }
     pub fn stop_focus(&mut self) -> bool {
         let active = self.motion.is_some() || self.pending_focus.is_some();
@@ -543,7 +630,7 @@ impl Viewport {
             plate,
             layout_preview,
             scene,
-            section,
+            mut section,
             review,
             view,
             selected,
@@ -552,23 +639,13 @@ impl Viewport {
             mut plane,
             scope,
         } = input;
-        let same_focus_scene = match (&self.focus_scene, &scene) {
-            (Some(old), Some(current)) => current.same_revision(old),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same_focus_scene || !interactive || layout_preview {
-            self.motion = None;
-            self.previous_camera = None;
-            self.pending_focus = self.pending_focus.take().filter(|(summary, _)| {
-                interactive
-                    && !layout_preview
-                    && scene
-                        .as_ref()
-                        .is_some_and(|scene| scene.same_revision(summary))
-            });
-            self.focus_scene = scene.as_ref().map(|scene| scene.summary.clone());
-        }
+        self.reconcile_inspection(
+            scene.as_ref().map(|scene| &scene.summary),
+            interactive && !layout_preview,
+            (selected.cloned(), scope),
+            ui.input(|input| input.time),
+            ui.style().animation_time > 0.0,
+        );
         if self.project_id != project_id {
             self.project_id = project_id;
             self.fit = true;
@@ -608,7 +685,18 @@ impl Viewport {
                     Err(error) => { self.focus_problem = Some(error); }
                 }
             }
-            if ui.add_enabled(self.previous_camera.is_some(), egui::Button::new("Back to previous view")).clicked()
+            if self.reveal.is_some() {
+                if ui.button("Exit reveal").clicked() { self.close_reveal(ui.input(|input| input.time),ui.style().animation_time>0.0); }
+            } else if ui.add_enabled(focus_available,egui::Button::new("Reveal selection")).clicked()
+                && let Some(scene) = &scene
+            {
+                match scene.focus_target(selected,scope) {
+                    Ok(target) => { self.reveal_area(scene,target,&[scope.unwrap()]); }
+                    Err(error) => { self.focus_problem=Some(error); }
+                }
+            }
+            ui.checkbox(&mut self.dim_context,"Dim surroundings");
+            if ui.add_enabled(self.previous_camera.is_some() && self.reveal.is_none(), egui::Button::new("Back to previous view")).clicked()
                 && let Some(previous) = self.previous_camera.take()
             {
                 self.pending_focus = None;
@@ -629,13 +717,35 @@ impl Viewport {
             if ui.checkbox(&mut self.smooth_focus, "Animate focus").changed() && !self.smooth_focus {
                 self.advance_focus(ui.input(|input| input.time) + focus::DURATION_SECONDS);
             }
-            if analysis.enabled && ui.button("Normal to section").clicked() {
-                self.normal_to(
-                    DVec3::from_array(plane.normal) * if analysis.flipped { -1.0 } else { 1.0 },
-                );
+            if (analysis.enabled || self.reveal.is_some()) && ui.button("Normal to section").clicked() {
+                let normal=self.reveal.as_ref().map_or_else(||DVec3::from_array(plane.normal) * if analysis.flipped { -1.0 } else { 1.0 },|reveal|reveal.normal);
+                self.normal_to(normal);
             }
             crate::ui::help(ui, "viewport-navigation", "Viewport navigation", "Drag to orbit; right-drag to pan; wheel to zoom. Focus the canvas: arrows orbit, Shift+arrows pan, plus/minus zoom, F fits, G focuses selection, Escape stops focus, 1 selects Top and 0 Isometric. Focus uses display bounds and a stable face normal when available; it does not prove visibility or change the part pose. Turn off Animate focus for immediate navigation.");
         });
+        self.apply_focus_area();
+        if let Some(reveal) = &mut self.reveal {
+            let radius = reveal.radius();
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Display cutaway · no material edit");
+                ui.add(
+                    egui::Slider::new(&mut reveal.offset_mm, -radius..=radius)
+                        .text("Cut offset (mm)"),
+                );
+            });
+        }
+        let mut reveal_analysis = crate::analysis::SectionView {
+            enabled: true,
+            offset_mm: self.reveal.as_ref().map_or(0.0, |reveal| reveal.offset_mm),
+            ..Default::default()
+        };
+        let analysis = if let Some(reveal) = &self.reveal {
+            plane = reveal.plane();
+            section = None;
+            &mut reveal_analysis
+        } else {
+            analysis
+        };
         if let Some(problem) = self.focus_problem {
             ui.colored_label(ui.visuals().warn_fg_color, problem);
         }
@@ -804,17 +914,23 @@ impl Viewport {
             self.fit = false;
         }
         let now = ui.input(|input| input.time);
-        if let Some((summary, target)) = self.pending_focus.take()
+        if let Some(request) = self.pending_focus.take()
             && scene
                 .as_ref()
-                .is_some_and(|scene| scene.same_revision(&summary))
+                .is_some_and(|scene| scene.same_revision(&request.summary))
             && let Some(destination) = focus::plan(
                 &self.camera(),
-                target,
+                request.target,
                 center,
                 f64::from(rect.width() / rect.height()),
             )
         {
+            if request.started_reveal {
+                let camera = self.camera();
+                if let Some(reveal) = &mut self.reveal {
+                    reveal.camera = camera;
+                }
+            }
             if self.previous_camera.is_none() {
                 self.previous_camera = Some(self.camera());
             }
@@ -828,7 +944,10 @@ impl Viewport {
         if analysis.enabled {
             let matrix = self.matrix(f64::from(rect.width() / rect.height()), display_radius);
             let n = DVec3::from_array(plane.normal);
-            let point = n * n.dot(DVec3::from_array(plane.origin_mm) - center);
+            let point = self.reveal.as_ref().map_or_else(
+                || n * n.dot(DVec3::from_array(plane.origin_mm) - center),
+                |reveal| reveal.target.center() + n * reveal.offset_mm - center,
+            );
             let screen = |p: DVec3| {
                 let p = matrix.project_point3(p);
                 rect.center()
@@ -856,6 +975,9 @@ impl Viewport {
                     };
                     let delta = f64::from(r.drag_motion().dot(mm_per_pixel));
                     analysis.offset_mm += delta;
+                    if let Some(reveal) = &mut self.reveal {
+                        reveal.offset_mm += delta;
+                    }
                     plane.origin_mm = (DVec3::from_array(plane.origin_mm) + n * delta).to_array();
                 }
                 handle = Some((position, r.dragged()));
@@ -955,6 +1077,14 @@ impl Viewport {
                 selection[0] = i as u32;
             }
         }
+        let participants = self
+            .attention
+            .or_else(|| {
+                scene
+                    .as_ref()
+                    .and_then(|scene| reveal::participant_mask(scene, &[scope?]))
+            })
+            .unwrap_or([[0; 4]; 2]);
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
             Callback {
@@ -985,6 +1115,19 @@ impl Viewport {
                     } else {
                         [0.0; 4]
                     },
+                    emphasis: if self.dim_context
+                        && view.source
+                        && (scope.is_some() || self.attention.is_some())
+                    {
+                        if ui.visuals().dark_mode {
+                            [0.45, 0.50, 0.58, 1.0]
+                        } else {
+                            [0.40, 0.44, 0.50, 1.0]
+                        }
+                    } else {
+                        [0.0; 4]
+                    },
+                    participants,
                     plane: if cut_enabled {
                         projected
                     } else {
@@ -1215,7 +1358,17 @@ impl egui_wgpu::CallbackTrait for Callback {
             // All mesh chunks of one occurrence contribute to the same parity.
             // Resolve coincident occurrences separately so their holes cannot cancel.
             for chunks in r.draws.chunk_by(|a, b| a.definition == b.definition) {
-                for instance in 0..chunks[0].instances {
+                let Some(scene) = &r.scene else {
+                    continue;
+                };
+                for (instance, (occurrence, _)) in scene
+                    .occurrences
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| item.definition_id == chunks[0].definition)
+                    .enumerate()
+                {
+                    let instance = instance as u32;
                     pass.set_pipeline(&r.clear_stencil);
                     pass.set_bind_group(0, &r.line_group, &[]);
                     pass.draw(0..3, 0..1);
@@ -1226,9 +1379,12 @@ impl egui_wgpu::CallbackTrait for Callback {
                     }
                     pass.set_pipeline(&r.source_cap);
                     pass.set_bind_group(0, &r.line_group, &[]);
-                    pass.draw(0..6, 0..1);
+                    pass.draw(0..6, occurrence as u32..occurrence as u32 + 1);
                 }
             }
+            pass.set_pipeline(&r.clear_stencil);
+            pass.set_bind_group(0, &r.line_group, &[]);
+            pass.draw(0..3, 0..1);
         }
         if self.view.source
             && let Some(lines) = &r.lines

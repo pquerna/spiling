@@ -8,6 +8,15 @@ use glam::DVec3;
 
 pub(super) const DURATION_SECONDS: f64 = 0.55;
 
+pub(super) struct Request {
+    pub summary: spiling_contracts::geometry::SceneSummary,
+    pub target: FocusTarget,
+    pub participants: Option<[[u32; 4]; 2]>,
+    pub reveal: bool,
+    pub started_reveal: bool,
+    pub area_applied: bool,
+}
+
 pub(super) fn direction(yaw: f64, pitch: f64) -> DVec3 {
     DVec3::new(
         yaw.cos() * pitch.cos(),

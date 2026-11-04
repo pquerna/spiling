@@ -180,7 +180,7 @@ impl Workbench {
         }
     }
     fn disabled(&self, action: Action) -> Option<&'static str> {
-        if action == Action::FocusSelection
+        if matches!(action, Action::FocusSelection | Action::RevealSelection)
             && (!self.display_current()
                 || self.occurrence.is_none()
                 || self.layout.open
@@ -257,6 +257,11 @@ impl Workbench {
             }
         }
         match action {
+            Action::RevealSelection => {
+                self.reveal_selection();
+                ctx.request_repaint();
+                return;
+            }
             Action::FocusSelection => {
                 self.focus_selection();
                 ctx.request_repaint();
@@ -427,7 +432,11 @@ impl Workbench {
                 self.close_layout(ctx);
             } else if self.plates.overview {
                 self.close_plate_overview(ctx);
-            } else if self.viewport.stop_focus() {
+            } else if self.viewport.close_reveal(
+                ctx.input(|input| input.time),
+                ctx.global_style().animation_time > 0.0,
+            ) || self.viewport.stop_focus()
+            {
                 ctx.request_repaint();
             } else if self.analysis.open {
                 self.close_analysis(ctx);

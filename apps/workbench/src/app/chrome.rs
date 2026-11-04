@@ -225,6 +225,7 @@ impl Workbench {
                     for action in [
                         Action::Properties,
                         Action::FocusSelection,
+                        Action::RevealSelection,
                         Action::Analysis,
                         Action::Study,
                     ] {

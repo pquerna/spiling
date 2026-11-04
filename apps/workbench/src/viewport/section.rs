@@ -57,7 +57,7 @@ pub(super) fn source_stencil(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs"),
+            entry_point: Some("fs_stencil"),
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: target,

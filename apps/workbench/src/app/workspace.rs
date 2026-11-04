@@ -36,6 +36,22 @@ impl Workbench {
             }
         }
     }
+    pub(super) fn reveal_selection(&mut self) {
+        if !self.display_current() || !self.source_display_visible() {
+            return;
+        }
+        if let Some(scene) = &self.state.display {
+            match scene.focus_target(self.selected.as_ref(), self.occurrence) {
+                Ok(target) => {
+                    self.viewport
+                        .reveal_area(scene, target, &[self.occurrence.unwrap()]);
+                }
+                Err(error) => {
+                    self.local_problem = Some(error.into());
+                }
+            }
+        }
+    }
     pub(super) fn clear_selection(&mut self) {
         if self.subject_drafts() {
             self.navigation = Some(super::navigation::Navigation::ClearSelection);
@@ -180,6 +196,7 @@ impl Workbench {
             return;
         }
         self.button(ui, super::Action::FocusSelection);
+        self.button(ui, super::Action::RevealSelection);
         if self.pose_revision != Some(scene.summary.revision) {
             self.pose[..3].copy_from_slice(&occurrence.pose.translation_mm);
             let (x, y, z) = glam::DQuat::from_array(occurrence.pose.rotation_xyzw)
