@@ -179,11 +179,7 @@ impl Workbench {
         }
     }
     pub(super) fn plate_overview_ui(&mut self, ui: &mut egui::Ui) {
-        ui::pane_header(
-            ui,
-            "Plates",
-            "Source geometry · three-quarter view · shared scale",
-        );
+        ui::pane_header(ui, "Plates", "");
         if ui::close(ui, "Back to plate") {
             self.close_plate_overview(ui.ctx());
             return;
@@ -192,7 +188,7 @@ impl Workbench {
             ui,
             "plate-overview-help",
             "Plate overview",
-            "Previews show source geometry on the declared build area at a common scale and angle. They exclude additive finishes, supports and clearance. Focus a plate for geometry and manufacturing inspection. Drag a part from the model tree to another plate to review a transfer.",
+            "Source previews exclude finishes, supports and clearance. Focus a plate to inspect it. Drag a part from the model tree to another plate to review a transfer.",
         );
         let (Some(p), Some(overview)) = (
             self.state.project.clone(),

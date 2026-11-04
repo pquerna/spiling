@@ -13,8 +13,10 @@ transactions and observed receipts retain mutation authority.
 
 ## Surface anatomy
 
-Every surface has a title, subject/scope, grouped body, one clear next action and a
-visible close/back path. The persistent workbench home is the return destination,
+Every surface has a title, clear subject/scope, grouped body, one clear next action and a
+visible close/back path. Use the title, selection and layout to establish scope;
+add a subtitle only when it contributes information those do not convey.
+The persistent workbench home is the return destination,
 not another temporary dialog. Clear selection ends contextual part inspection. Pane titles are subordinate to page/dialog titles; group
 labels are subordinate to pane titles. Preserve Graphite/Paper, readable secondary
 text and the canvas. Use aligned fields and whitespace before adding containers. Cap a form to the
@@ -29,7 +31,9 @@ Do not infer readiness or duplicate engine validation to choose a visual action.
 
 Labels use sentence case and concise operator terms. Aim for one to four words;
 meaning, units and localization take priority over word counts. Optional short
-hints explain one control. Longer explanations use a deliberately opened help or
+hints explain one control. Labels identify subjects, choices, state or consequences;
+do not narrate an obvious camera angle, layout or other visible presentation.
+Longer explanations use a deliberately opened help or
 named details surface. Essential scope, errors, save uncertainty, incompleteness,
 current verification and consequential qualification remain visible.
 
@@ -177,7 +181,7 @@ The tinted canvas preview cannot pick faces or act as a manufacturing result.
 Changing form inputs, project/session or captured revisions revokes preview/Apply.
 Verification details and search limits are disclosed below the essential result.
 
-The Plates overview shows source-bound boxes at a shared physical scale, with the
+The Plates overview shows source geometry at a shared physical scale, with the
 focused plate emphasized. It is navigation context: it excludes finish growth,
 supports and clearance. Focus plate returns to the native geometry viewport.
 Dragging a model-tree part onto another plate opens the same explicit transfer

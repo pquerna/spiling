@@ -762,7 +762,6 @@ fn plates(ui: &mut Ui) {
             })
             .collect(),
     };
-    ui.label("Source previews · shared scale");
     let tokens = if ui.visuals().dark_mode {
         Theme::Graphite
     } else {
