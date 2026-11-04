@@ -21,6 +21,7 @@ const MAX_LIVE_CELLS: usize = 131_072;
 const MAX_CREATED_CELLS: u64 = 2_000_000;
 pub(crate) use crate::compute::MAX_DIRECTIONAL_SCRATCH_BYTES as MAX_SCRATCH_ALLOCATION_BYTES;
 const MAX_DEPTH: u16 = 96;
+const MAX_BOUNDARY_PROBES: usize = 4096;
 
 /// Enclose the minimum and maximum of mathematically normalized `direction`
 /// on the native, literally trimmed authoring faces. This is not material proof.
@@ -204,7 +205,9 @@ fn native_projected_bounds(
             parametric::SurfaceFirstEnclosure,
             [parametric::SurfaceFunctionalEnclosure; 2],
         )>())
-    .max(crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES);
+    .max(crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES)
+        + std::mem::size_of::<parametric::ChartCurveEnclosure>()
+        + 3 * std::mem::size_of::<parametric::SurfaceFunctionalEnclosure>();
     let byte_limit = remaining_bytes.min(MAX_SCRATCH_ALLOCATION_BYTES);
     if evaluator_bytes > byte_limit {
         return Err(error(
@@ -309,6 +312,158 @@ fn native_projected_bounds(
         };
         let before = work.consumed();
         let uv = trim.support_uv_cover(work, cancel)?;
+        if trim.is_native_material()
+            && trim.carrier_is_c1()
+            && !trim.loops().is_empty()
+            && !trim.coedges().is_empty()
+        {
+            let boundary_attempt = (|| -> Result<bool, GeometryError> {
+                let functional = parametric::SurfaceFunctional {
+                    direction,
+                    origin: [Interval::point(0.0); 3],
+                    offset: Interval::point(0.0),
+                };
+                let [whole] = parametric::surface_functional_enclosures(
+                    surface,
+                    uv,
+                    &[functional],
+                    work,
+                    cancel,
+                )?;
+                let mut boundary_probes = 0usize;
+                if !whole.du.contains_zero() || !whole.dv.contains_zero() {
+                    for index in 0..trim.coedges().len() {
+                        work.charge(trim.coedges().len() as u64, cancel)?;
+                        work.charge(
+                            (trim.retained_bytes() / std::mem::size_of::<[f64; 2]>()) as u64,
+                            cancel,
+                        )?;
+                        let domains = trim
+                            .boundary_parameter_intervals(index)?
+                            .map(|range| [range, [0.0, 0.0]]);
+                        aggregate = Some(search_domains(
+                            domains,
+                            1,
+                            tolerance,
+                            aggregate,
+                            &mut scratch,
+                            work,
+                            cancel,
+                            |cell, work, cancel| {
+                                boundary_probes += 1;
+                                if boundary_probes > MAX_BOUNDARY_PROBES {
+                                    return Err(error(
+                                        GeometryErrorCode::AnalysisIndeterminate,
+                                        "optional native boundary support needs complete interior refinement",
+                                    ));
+                                }
+                                let chart = trim
+                                    .boundary_piecewise_enclosure(index, cell[0], work, cancel)?;
+                                let [image] = parametric::surface_functional_enclosures(
+                                    surface,
+                                    chart.position.map(|value| [value.lo, value.hi]),
+                                    &[functional],
+                                    work,
+                                    cancel,
+                                )?;
+                                let cartesian = parametric::surface_piecewise_first_enclosure(
+                                    surface,
+                                    chart.position.map(|value| [value.lo, value.hi]),
+                                    work,
+                                    cancel,
+                                )?;
+                                let height = intersect(
+                                    intersect(image.position, whole.position)?,
+                                    project(cartesian.position, direction)?,
+                                )?;
+                                let middle = cell[0][0] * 0.5 + cell[0][1] * 0.5;
+                                let point = trim.boundary_position_enclosure(
+                                    index,
+                                    [middle; 2],
+                                    work,
+                                    cancel,
+                                )?;
+                                let [point] = parametric::surface_functional_enclosures(
+                                    surface,
+                                    point,
+                                    &[functional],
+                                    work,
+                                    cancel,
+                                )?;
+                                let derivative = image
+                                    .du
+                                    .mul(chart.derivative[0])
+                                    .add(image.dv.mul(chart.derivative[1]));
+                                let delta = Interval {
+                                    lo: parametric::down(cell[0][0] - middle),
+                                    hi: parametric::up(cell[0][1] - middle),
+                                };
+                                Ok(Some(Evaluation {
+                                    height: intersect(
+                                        height,
+                                        point.position.add(derivative.mul(delta)),
+                                    )?,
+                                    witness: None,
+                                    split_axis: 0,
+                                }))
+                            },
+                        )?);
+                    }
+                    let mut complete = true;
+                    for &[start, end] in trim.loops() {
+                        for incoming in start..end {
+                            let outgoing = if incoming + 1 == end {
+                                start
+                            } else {
+                                incoming + 1
+                            };
+                            let (_, joint) =
+                                trim.native_joint_cover(incoming, outgoing, work, cancel)?;
+                            let [image] = parametric::surface_functional_enclosures(
+                                surface,
+                                joint.map(|value| [value.lo, value.hi]),
+                                &[functional],
+                                work,
+                                cancel,
+                            )?;
+                            let cartesian = parametric::surface_piecewise_first_enclosure(
+                                surface,
+                                joint.map(|value| [value.lo, value.hi]),
+                                work,
+                                cancel,
+                            )?;
+                            let height = intersect(
+                                intersect(image.position, whole.position)?,
+                                project(cartesian.position, direction)?,
+                            )?;
+                            let Some(seed) = aggregate else {
+                                complete = false;
+                                continue;
+                            };
+                            if resolved_by_feasible_extrema(
+                                height,
+                                seed.minimum[1],
+                                seed.maximum[0],
+                                tolerance,
+                            ) {
+                                aggregate = Some(ProjectedBounds {
+                                    minimum: [seed.minimum[0].min(height.lo), seed.minimum[1]],
+                                    maximum: [seed.maximum[0], seed.maximum[1].max(height.hi)],
+                                    achieved_uncertainty_mm: 0.0,
+                                });
+                            } else {
+                                complete = false;
+                            }
+                        }
+                    }
+                    return Ok(complete);
+                }
+                Ok(false)
+            })();
+            if optional_boundary_support_result(boundary_attempt)? {
+                continue;
+            }
+        }
         let boxes = parametric::surface_parameter_boxes(surface, uv, work, cancel)?;
         // Prior faces supply independently feasible points of this same source
         // under the same covector. The query needs global support, not tight
@@ -802,6 +957,22 @@ fn resolved_by_feasible_extrema(
         && parametric::up(height.hi - feasible_max) <= tolerance
 }
 
+fn optional_boundary_support_result(
+    attempt: Result<bool, GeometryError>,
+) -> Result<bool, GeometryError> {
+    match attempt {
+        Err(cause)
+            if matches!(
+                cause.code,
+                GeometryErrorCode::ConditioningFailure | GeometryErrorCode::AnalysisIndeterminate
+            ) =>
+        {
+            Ok(false)
+        }
+        result => result,
+    }
+}
+
 fn uncertainty(value: &ProjectedBounds) -> f64 {
     parametric::up(value.minimum[1] - value.minimum[0])
         .max(parametric::up(value.maximum[1] - value.maximum[0]))
@@ -832,6 +1003,219 @@ fn error(code: GeometryErrorCode, message: &str) -> GeometryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tilted_native_cylinder_material_support_fits_existing_work_allowance() {
+        let definition = crate::from_step_bytes(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/geometry/cylinder.step"
+        )))
+        .unwrap();
+        let angle = 1.0_f64.to_radians();
+        let direction = [
+            -angle.sin() / 2.0_f64.sqrt(),
+            angle.sin() / 2.0_f64.sqrt(),
+            angle.cos(),
+        ];
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let policy = BoundsPolicy {
+            maximum_endpoint_uncertainty_mm: 0.000001,
+        };
+        let receipt =
+            material_projected_bounds(&definition, direction, policy, &mut work, &cancel).unwrap();
+        let bounds = receipt.bounds();
+        let minimum = -5.0 * angle.sin();
+        let maximum = 8.0 * angle.cos() + 5.0 * angle.sin();
+        assert!(bounds.minimum[0] <= minimum && minimum <= bounds.minimum[1]);
+        assert!(bounds.maximum[0] <= maximum && maximum <= bounds.maximum[1]);
+        assert!(bounds.achieved_uncertainty_mm <= policy.maximum_endpoint_uncertainty_mm);
+        assert!(work.consumed() > 0 && work.remaining() > 0);
+        for (budget, stopped, expected) in [
+            (0, false, GeometryErrorCode::ResourceLimit),
+            (20_000_000, true, GeometryErrorCode::Cancelled),
+        ] {
+            assert_eq!(
+                material_projected_bounds(
+                    &definition,
+                    direction,
+                    policy,
+                    &mut GeometryWorkBudget::new(budget),
+                    &AtomicBool::new(stopped),
+                )
+                .unwrap_err()
+                .code,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn native_boundary_shortcut_preserves_interior_critical_extrema() {
+        let definition = super::super::test_source::original_definition(
+            super::super::test_source::sphere_belt(),
+        );
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let receipt = material_projected_bounds(
+            &definition,
+            [1.0, 1.0, 0.0],
+            BoundsPolicy {
+                maximum_endpoint_uncertainty_mm: 0.00001,
+            },
+            &mut work,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let bounds = receipt.bounds();
+        assert!(bounds.minimum[0] <= -5.0 && -5.0 <= bounds.minimum[1]);
+        assert!(bounds.maximum[0] <= 5.0 && 5.0 <= bounds.maximum[1]);
+    }
+
+    #[test]
+    fn native_boundary_shortcut_recovers_from_whole_cover_rational_conditioning() {
+        use solidcore::{
+            nurbs::{b_spline_surface::BSplineSurface, math::CPoint, srf_basic},
+            surface::surface::{Surface, SurfaceKind},
+        };
+        let weights = [1.25, -1.0 / 12.0, -1.0 / 12.0, 1.25];
+        let numerators = [0.0, 5.0 / 12.0, -0.5, 1.25];
+        let points = weights
+            .into_iter()
+            .zip(numerators)
+            .map(|(weight, numerator)| {
+                [0.0, 1.0]
+                    .map(|parameter| {
+                        CPoint::new(20.0 * numerator, 10.0 * parameter * weight, 0.0, weight)
+                    })
+                    .to_vec()
+            })
+            .collect();
+        let raw = srf_basic::Surface::new(
+            points,
+            3,
+            1,
+            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let surface = Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(raw, true)));
+        let functional = parametric::SurfaceFunctional {
+            direction: [1.0, 0.0, 0.0].map(Interval::point),
+            origin: [Interval::point(0.0); 3],
+            offset: Interval::point(0.0),
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let probe = parametric::surface_functional_enclosures(
+            &surface,
+            [[0.0, 1.0]; 2],
+            &[functional],
+            &mut work,
+            &cancel,
+        );
+        assert_eq!(
+            probe.as_ref().unwrap_err().code,
+            GeometryErrorCode::ConditioningFailure
+        );
+        assert!(!optional_boundary_support_result(probe.map(|_| true)).unwrap());
+        let bounds = search(
+            [[0.0, 1.0]; 2],
+            2,
+            0.00001,
+            &mut Scratch::default(),
+            &mut work,
+            &cancel,
+            |cell, work, cancel| {
+                let [image] = parametric::surface_functional_enclosures(
+                    &surface,
+                    cell,
+                    &[functional],
+                    work,
+                    cancel,
+                )?;
+                let middle = cell.map(|range| [range[0] * 0.5 + range[1] * 0.5; 2]);
+                let [point] = parametric::surface_functional_enclosures(
+                    &surface,
+                    middle,
+                    &[functional],
+                    work,
+                    cancel,
+                )?;
+                let cartesian =
+                    parametric::surface_piecewise_first_enclosure(&surface, cell, work, cancel)?;
+                let du = image
+                    .du
+                    .intersect(project(cartesian.du, functional.direction)?)?;
+                let dv = image
+                    .dv
+                    .intersect(project(cartesian.dv, functional.direction)?)?;
+                let delta = [0, 1].map(|axis| Interval {
+                    lo: parametric::down(cell[axis][0] - middle[axis][0]),
+                    hi: parametric::up(cell[axis][1] - middle[axis][0]),
+                });
+                Ok(Some(Evaluation {
+                    height: image
+                        .position
+                        .intersect(point.position.add(du.mul(delta[0])).add(dv.mul(delta[1])))?,
+                    witness: Some(point.position),
+                    split_axis: usize::from(
+                        du.abs_upper() * width(cell[0]) < dv.abs_upper() * width(cell[1]),
+                    ),
+                }))
+            },
+        )
+        .unwrap();
+        assert!(bounds.minimum[0] <= 0.0 && 0.0 <= bounds.minimum[1]);
+        assert!(bounds.maximum[0] <= 20.0 && 20.0 <= bounds.maximum[1]);
+        for code in [
+            GeometryErrorCode::ResourceLimit,
+            GeometryErrorCode::Cancelled,
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+        ] {
+            assert_eq!(
+                optional_boundary_support_result(Err(error(code, "terminal support failure")))
+                    .unwrap_err()
+                    .code,
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn native_boundary_shortcut_falls_back_when_spatial_seed_cannot_bound_carrier() {
+        use solidcraft_geom::brep;
+        let mut source = super::super::test_source::box_source(20.0, 10.0, 8.0);
+        let mut changed = false;
+        let displacement = 2.0_f64.powi(-30);
+        for face in &mut source.faces {
+            if let brep::Surface::Plane { origin, .. } = &mut face.surface
+                && origin[2] == 8.0
+            {
+                origin[2] += displacement;
+                changed = true;
+            }
+        }
+        assert!(changed);
+        let definition = super::super::test_source::original_definition(source);
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let bounds = material_projected_bounds(
+            &definition,
+            [1.0, 0.0, 1.0],
+            BoundsPolicy {
+                maximum_endpoint_uncertainty_mm: displacement / 8.0,
+            },
+            &mut work,
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+        .bounds();
+        let expected = (28.0 + displacement) / 2.0_f64.sqrt();
+        assert!(
+            bounds.maximum[0] <= expected && expected <= bounds.maximum[1],
+            "{bounds:?}"
+        );
+        assert!(bounds.maximum[0] > 28.0 / 2.0_f64.sqrt());
+    }
 
     fn exact_scalar_bounds() -> ProjectedBounds {
         ProjectedBounds {

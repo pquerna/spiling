@@ -600,7 +600,7 @@ fn tilted_native_cylinder_uses_analytic_extrema_and_native_sections() {
         rotation_xyzw: [component, component, 0.0, (angle * 0.5).cos()],
     };
     let mut work = spiling_geometry::GeometryWorkBudget::new(20_000_000);
-    let bounds = spiling_geometry::projected_bounds(
+    let bounds = spiling_geometry::material_projected_bounds(
         &native,
         rotate_inverse(&pose, [0.0, 0.0, 1.0]),
         spiling_geometry::BoundsPolicy {
@@ -609,7 +609,8 @@ fn tilted_native_cylinder_uses_analytic_extrema_and_native_sections() {
         &mut work,
         &AtomicBool::new(false),
     )
-    .unwrap();
+    .unwrap()
+    .bounds();
     let expected_min = -5.0 * angle.sin();
     let expected_max = 8.0 * angle.cos() + 5.0 * angle.sin();
     assert!(bounds.minimum[0] <= expected_min + 1e-12 && bounds.minimum[1] >= expected_min - 1e-12);

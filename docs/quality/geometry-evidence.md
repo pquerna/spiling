@@ -586,6 +586,14 @@ a tolerance label does not replace a complete measured query bound.
   first-jet bound can exclude costly trim-boundary contact from global extrema;
   a midpoint used for this enclosure remains infeasible until separately
   classified. Retained jets and query scratch coexist under the same byte cap.
+  Native process and bed-placement consumers use material-bound receipts;
+  authoring inspection retains its separate exact chart-closure requirement.
+  On a complete C1 support cover with strict scalar submersion, the native
+  boundary and every complete joint image can exclude interior extrema using
+  independently feasible spatial/vertex witnesses. Boundary enclosures do not
+  create witnesses. Inconclusive bounded boundary work falls back to complete
+  two-parameter refinement without refunding work; resource and cancellation
+  failures remain terminal.
   Actual affine coefficients, pose arithmetic, closed height limits and plane
   drift retain directed error accounting; process-scale padding is not a
   substitute for the placed query's arithmetic bound.
