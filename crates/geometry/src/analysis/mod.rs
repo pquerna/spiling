@@ -528,6 +528,20 @@ impl SlabAnalysis {
                 && proof.has_native_convex_section_topology_proof()
         })
     }
+    pub(super) fn has_native_convex_capture_topology_proof(&self) -> bool {
+        self.critical.as_ref().is_some_and(|proof| {
+            let request = proof.request();
+            let captured = self.capture.request;
+            proof.definition_id() == &self.capture.definition_id
+                && proof.material_realization_identity() == self.capture.material_realization
+                && request.frame == captured.frame
+                && request.height_interval_mm == captured.height_interval_mm
+                && request.sample_height_mm.to_bits() == captured.sample_height_mm.to_bits()
+                && request.native_shape_error_mm.to_bits()
+                    == captured.native_shape_error_mm.to_bits()
+                && proof.has_native_convex_capture_topology_proof()
+        })
+    }
     /// A fixed sampled source M is certified over this entire CLOSED request
     /// by a complete native material cylinder, full world metric and exact
     /// polygon calibration. This does not assert equal source sections, extend

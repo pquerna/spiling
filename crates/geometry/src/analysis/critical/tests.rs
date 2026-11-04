@@ -45,6 +45,378 @@ fn native_curve(knots: Vec<f64>, points: Vec<CPoint>, dimension: u64) -> Curve {
 }
 
 #[test]
+fn tilted_coedge_birth_has_request_scoped_convex_capture() {
+    use crate::PlacedSlabRequest;
+    use crate::analysis::{
+        NativeUnionOccurrence, NativeUnionOccurrenceEvidence, NativeUnionPolicy, SourceLeafRequest,
+        certify_native_source_leaf, certify_native_union,
+    };
+    use spiling_contracts::geometry::{OccurrenceId, RigidPoseMm};
+
+    let cancel = AtomicBool::new(false);
+    let definition = crate::from_step_bytes_with_cancel(
+        include_bytes!("../../../../../fixtures/geometry/cylinder.step"),
+        &cancel,
+    )
+    .unwrap();
+    let mut work = GeometryWorkBudget::new(100_000_000);
+    let prepared = crate::prepare_solid(
+        &definition,
+        crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    let half_angle = 0.5 * 1.0_f64.to_radians();
+    let component = half_angle.sin() / 2.0_f64.sqrt();
+    let request = PlacedSlabRequest {
+        pose: RigidPoseMm {
+            translation_mm: [0.0, 0.0, 0.08726261625534897],
+            rotation_xyzw: [component, component, 0.0, half_angle.cos()],
+        },
+        world_height_interval_mm: [0.0, 9.984000607895137e-5],
+        sample_world_z_mm: 4.9920003039475684e-5,
+        native_shape_error_mm: 0.1,
+    };
+    let mut analysis = crate::analysis::analyze_placed_slab(
+        &prepared,
+        &request,
+        crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes(),
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    let certificate = analysis.critical.as_ref().unwrap();
+    assert!(matches!(
+        certificate.boundary_scope,
+        Some(SourceBoundaryScope::ClosedCapture(_))
+    ));
+    assert!(!certificate.has_native_convex_section_topology_proof());
+    assert!(certificate.has_native_convex_capture_topology_proof());
+    assert!(analysis.has_native_convex_capture_topology_proof());
+    assert!(analysis.collar_complex.is_none());
+    assert!(analysis.endpoint_strata().is_empty());
+    assert!(analysis.closed_shape_error_mm().unwrap() <= request.native_shape_error_mm);
+    assert_eq!(analysis.event_neighborhoods().len(), 2);
+    let functional = HeightFunctional {
+        direction: certificate.capture.direction,
+        offset: certificate.capture.offset,
+    };
+    let source_request = certificate.request();
+    let source = prepared.source_view().unwrap();
+    let tolerance = source.effective_tolerance_mm();
+    let height_uncertainty = functional.dot(
+        [Interval {
+            lo: -tolerance,
+            hi: tolerance,
+        }; 3],
+    );
+    for event in analysis.event_neighborhoods() {
+        assert!(event.stationary_root_proved());
+        assert_eq!(event.source_face_ordinal(), Some(0));
+        assert!(Arc::ptr_eq(&event.capture, &certificate.capture));
+        let band = Interval::new(event.height_bracket_mm[0], event.height_bracket_mm[1])
+            .unwrap()
+            .add(height_uncertainty);
+        assert!(source_request.height_interval_mm[0] < event.height_bracket_mm[0]);
+        assert!(band.contains(source_request.height_interval_mm[0]));
+        assert!(band.hi < analysis.source_sample_height_band_mm()[0]);
+        assert!(band.hi < source_request.height_interval_mm[1]);
+        assert!(
+            event
+                .proved_incoming_endpoint_face(definition.id(), &source_request)
+                .is_none()
+        );
+    }
+    let mut incidence =
+        SourceEdgeIncidence::new(&definition, MAX_EDGE_BYTES, &mut work, &cancel).unwrap();
+    incidence
+        .prepare_vertices(MAX_EDGE_BYTES, &mut work, &cancel)
+        .unwrap();
+    let mut vertex_count = 0;
+    for vertex in incidence.vertices().unwrap() {
+        let point = source
+            .trim_source()
+            .native_vertex_point(vertex, &mut work, &cancel)
+            .unwrap();
+        let support = point.map(|coordinate| {
+            Interval::point(coordinate).add(Interval {
+                lo: -tolerance,
+                hi: tolerance,
+            })
+        });
+        let height = functional.height(support);
+        assert!(!overlaps(height, source_request.height_interval_mm));
+        assert!(
+            incidence
+                .vertex_link_is_cycle(&definition, vertex, &mut work, &cancel)
+                .unwrap()
+        );
+        vertex_count += 1;
+    }
+    assert_eq!(vertex_count, 4);
+    for face in 0..definition.face_ids().len() {
+        assert!(
+            crate::analysis::slab::constant_source_face_height(
+                &definition,
+                face,
+                functional,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+    let loops: Vec<_> = analysis
+        .section()
+        .loops()
+        .iter()
+        .map(|boundary| SectionLoopMm {
+            is_hole: boundary.is_hole,
+            points_mm: boundary
+                .points_mm
+                .iter()
+                .map(|point| [point[0], point[1], request.sample_world_z_mm])
+                .collect(),
+        })
+        .collect();
+    let occurrence_id = OccurrenceId::new(1).unwrap();
+    let policy = NativeUnionPolicy {
+        candidate_coordinate_error_mm: 0.0,
+    };
+    let leaf = certify_native_source_leaf(
+        &SourceLeafRequest {
+            source: &prepared,
+            occurrence_id: &occurrence_id,
+            pose: request.pose,
+            analysis: &analysis,
+            actual_used_source_loops: &loops,
+            policy,
+        },
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(
+        leaf.proof_kind(),
+        crate::analysis::NativeSourceLeafProofKind::ClosedSlab
+    );
+    assert_eq!(
+        leaf.world_height_interval_mm(),
+        request.world_height_interval_mm
+    );
+    let occurrence = || NativeUnionOccurrence {
+        occurrence_id,
+        source: &prepared,
+        pose: request.pose,
+        evidence: NativeUnionOccurrenceEvidence::Slab {
+            analysis: &analysis,
+            leaf: &leaf,
+            endpoint_ownerships: &[],
+        },
+    };
+    let proof = certify_native_union(&[occurrence()], &loops, policy, &mut work, &cancel).unwrap();
+    assert_eq!(proof.material_component_count(), 1);
+    assert_eq!(proof.bounded_void_count(), 0);
+    assert!(proof.closed_shape_error_mm().unwrap() <= request.native_shape_error_mm);
+    let mut changed: Vec<_> = loops
+        .iter()
+        .map(|boundary| SectionLoopMm {
+            is_hole: boundary.is_hole,
+            points_mm: boundary.points_mm.clone(),
+        })
+        .collect();
+    changed[0].points_mm[0][0] += 1e-5;
+    let last = changed[0].points_mm.len() - 1;
+    changed[0].points_mm[last] = changed[0].points_mm[0];
+    let refusal =
+        certify_native_union(&[occurrence()], &changed, policy, &mut work, &cancel).unwrap_err();
+    assert_eq!(refusal.code, GeometryErrorCode::AnalysisIndeterminate);
+    assert!(
+        refusal
+            .message
+            .contains("native critical band requires original coface/root incidence")
+    );
+    let second_id = OccurrenceId::new(2).unwrap();
+    let second_leaf = certify_native_source_leaf(
+        &SourceLeafRequest {
+            source: &prepared,
+            occurrence_id: &second_id,
+            pose: request.pose,
+            analysis: &analysis,
+            actual_used_source_loops: &loops,
+            policy,
+        },
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    let refusal = certify_native_union(
+        &[
+            occurrence(),
+            NativeUnionOccurrence {
+                occurrence_id: second_id,
+                source: &prepared,
+                pose: request.pose,
+                evidence: NativeUnionOccurrenceEvidence::Slab {
+                    analysis: &analysis,
+                    leaf: &second_leaf,
+                    endpoint_ownerships: &[],
+                },
+            },
+        ],
+        &loops,
+        policy,
+        &mut work,
+        &cancel,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.code, GeometryErrorCode::AnalysisIndeterminate);
+    assert!(
+        refusal
+            .message
+            .contains("native critical band requires original coface/root incidence")
+    );
+    assert_eq!(
+        certify_native_union(
+            &[occurrence()],
+            &loops,
+            policy,
+            &mut GeometryWorkBudget::new(0),
+            &cancel,
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::ResourceLimit
+    );
+    assert_eq!(
+        certify_native_union(
+            &[occurrence()],
+            &loops,
+            policy,
+            &mut work,
+            &AtomicBool::new(true),
+        )
+        .unwrap_err()
+        .code,
+        GeometryErrorCode::Cancelled
+    );
+    let original_request = analysis.capture.request;
+    analysis.capture.request.height_interval_mm[0] -= 1e-6;
+    assert!(!analysis.has_native_convex_capture_topology_proof());
+    analysis.capture.request = original_request;
+    assert!(analysis.has_native_convex_capture_topology_proof());
+    let Some(SourceBoundaryScope::ClosedCapture(boundary)) =
+        &mut analysis.critical.as_mut().unwrap().boundary_scope
+    else {
+        unreachable!()
+    };
+    boundary.convex_material = false;
+    assert!(!analysis.has_native_convex_capture_topology_proof());
+    assert!(analysis.closed_shape_error_mm().is_some());
+    let leaf_without_convexity = certify_native_source_leaf(
+        &SourceLeafRequest {
+            source: &prepared,
+            occurrence_id: &occurrence_id,
+            pose: request.pose,
+            analysis: &analysis,
+            actual_used_source_loops: &loops,
+            policy,
+        },
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    let refusal = certify_native_union(
+        &[NativeUnionOccurrence {
+            occurrence_id,
+            source: &prepared,
+            pose: request.pose,
+            evidence: NativeUnionOccurrenceEvidence::Slab {
+                analysis: &analysis,
+                leaf: &leaf_without_convexity,
+                endpoint_ownerships: &[],
+            },
+        }],
+        &loops,
+        policy,
+        &mut work,
+        &cancel,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.code, GeometryErrorCode::AnalysisIndeterminate);
+    assert!(
+        refusal
+            .message
+            .contains("native critical band requires original coface/root incidence")
+    );
+}
+
+#[test]
+fn convex_capture_keeps_concavity_vertex_zones_and_tunnels_distinct() {
+    let notched = crate::analysis::test_source::original_definition(
+        crate::analysis::test_source::polygon_prism(
+            &[
+                [0.0, 0.0],
+                [20.0, 0.0],
+                [20.0, 20.0],
+                [12.0, 20.0],
+                [10.0, 18.0],
+                [8.0, 20.0],
+                [0.0, 20.0],
+            ],
+            4.0,
+        ),
+    );
+    let cancel = AtomicBool::new(false);
+    for (definition, range, sample, expected) in [
+        (notched, [1.99, 2.01], 2.0, false),
+        (
+            source("native-parity-blind-pocket.step"),
+            [1.99, 2.01],
+            2.0,
+            true,
+        ),
+        (
+            source("native-parity-blind-pocket.step"),
+            [0.0, 0.02],
+            0.01,
+            false,
+        ),
+        (
+            source("native-parity-ring-torus.step"),
+            [-0.01, 0.01],
+            0.001,
+            false,
+        ),
+    ] {
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let prepared = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let proof = horizontal_critical(
+            &prepared,
+            horizontal_request(range, sample),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(proof.boundary_motion_bound_mm <= 0.1);
+        assert!(!proof.has_native_convex_section_topology_proof());
+        assert_eq!(
+            proof.has_native_convex_capture_topology_proof(),
+            expected,
+            "{range:?}"
+        );
+    }
+}
+
+#[test]
 fn expanded_curve_root_proves_both_sides_of_an_adaptive_cut() {
     let curve = native_curve(
         bezier_knots(2),

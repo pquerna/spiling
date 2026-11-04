@@ -174,6 +174,7 @@ struct ComponentVoidPairing {
 struct ClosedCaptureBoundary {
     excluded_face_cells: u64,
     excluded_coedge_cells: u64,
+    convex_material: bool,
 }
 
 #[derive(Debug)]
@@ -251,6 +252,14 @@ impl CriticalSlabCertificate {
                 self.boundary_scope.as_ref(),
                 Some(SourceBoundaryScope::WholeSource)
             )
+    }
+    pub(super) fn has_native_convex_capture_topology_proof(&self) -> bool {
+        self.has_native_convex_section_topology_proof()
+            || self.pairing.tunnel_cycles == 0
+                && matches!(
+                    self.boundary_scope.as_ref(),
+                    Some(SourceBoundaryScope::ClosedCapture(proof)) if proof.convex_material
+                )
     }
     /// Euclidean transverse source-plane speed per unit captured height.
     /// World XY enclosures must additionally project the actual height flow
@@ -1994,6 +2003,7 @@ impl SamplePrism {
         Ok(ClosedCaptureBoundary {
             excluded_face_cells: 0,
             excluded_coedge_cells: 0,
+            convex_material: false,
         })
     }
 
@@ -2974,6 +2984,8 @@ pub(super) fn certify_critical_slab(
         Ok(material_links)
     })();
     let mut material_links = vertex_result?;
+    let mut convex_capture =
+        prism.core_radius.is_none() && material_links.all_vertex_supports_outside_closed_slab();
     let mut regular_flow = material_links
         .all_vertex_supports_outside_closed_slab()
         .then_some(0.0);
@@ -3022,6 +3034,7 @@ pub(super) fn certify_critical_slab(
                 surface, domain.uv_domain(), functional, request.height_interval_mm, face_index, work, cancel,
             )?;
             whole_source &= face_glued;
+            convex_capture &= face_glued;
             let mut stack = Vec::<NativeFaceCell>::with_capacity(usize::from(MAX_DEPTH) + 1);
             if stack.capacity().checked_mul(std::mem::size_of::<NativeFaceCell>())
                 .is_none_or(|bytes| bytes > RESERVED_STACK_BYTES)
@@ -3131,7 +3144,7 @@ pub(super) fn certify_critical_slab(
                 // cells need that exclusion before refinement or refusal.
                 // Preserve the optional whole-source convexity theorem by
                 // excluding irrelevant nonconvex carrier cells separately.
-                if (needs_refinement || whole_source && !convex) && !trim_inside {
+                if (needs_refinement || (whole_source || convex_capture) && !convex) && !trim_inside {
                     match domain.classify(uv, work, cancel)? {
                         TrimClassification::Outside => continue,
                         TrimClassification::Inside => trim_inside = true,
@@ -3177,6 +3190,7 @@ pub(super) fn certify_critical_slab(
                     continue;
                 }
                 covered_face_cells += 1;
+                convex_capture &= convex;
                 include_flow_rate(&mut regular_flow,
                     material_face_flow_rate(n, functional.direction, prism.height_dual[2])?);
                 bound = bound.max(metric);
@@ -3390,7 +3404,28 @@ pub(super) fn certify_critical_slab(
                 };
                 let h = functional.height(swept);
                 let active = overlaps(h, request.height_interval_mm);
+                let uncertainty_active = overlaps(
+                    functional.height(swept.map(|coordinate| coordinate.add(Interval {
+                        lo: -native_tolerance,
+                        hi: native_tolerance,
+                    }))),
+                    request.height_interval_mm,
+                );
                 if !active && !whole_source {
+                    if convex_capture && uncertainty_active {
+                        convex_capture = match &material_link {
+                            Some(link) => match link.cell([lo, hi], &jet, &prism, work, cancel) {
+                                Ok(proved) => proved.is_ok_and(|proof| proof.convex_link),
+                                Err(error) if matches!(error.code,
+                                    GeometryErrorCode::AnalysisIndeterminate
+                                        | GeometryErrorCode::ConditioningFailure
+                                        | GeometryErrorCode::ParameterCorrespondenceUnavailable
+                                ) => false,
+                                Err(error) => return Err(error),
+                            },
+                            None => false,
+                        };
+                    }
                     closed_boundary.excluded_coedge_cells += 1;
                     continue;
                 }
@@ -3402,6 +3437,7 @@ pub(super) fn certify_critical_slab(
                     Ok(proved) => proved,
                     Err(stage) => {
                         if !active {
+                            convex_capture &= !uncertainty_active;
                             whole_source = false;
                             closed_boundary.excluded_coedge_cells += 1;
                             continue;
@@ -3420,6 +3456,9 @@ pub(super) fn certify_critical_slab(
                     }
                 };
                 whole_source &= proved.convex_link;
+                if uncertainty_active {
+                    convex_capture &= proved.convex_link;
+                }
                 material_links.record(&proved, work, cancel)?;
                 covered_coedge_cells += 1;
                 if !active { continue; }
@@ -3560,6 +3599,7 @@ pub(super) fn certify_critical_slab(
         upper[axis] = up(upper[axis] + error);
     }
     let occupied = Some(occupied_projection(section, lower, upper, work, cancel)?);
+    closed_boundary.convex_material = convex_capture;
     Ok(Some(CriticalSlabCertificate {
         boundary_motion_bound_mm: up(bound),
         occupied,

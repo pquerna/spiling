@@ -175,6 +175,7 @@ pub struct NativeSourceLeafReceipt {
     regular_boundary_tube_mm: Option<f64>,
     native_world_z_invariant: bool,
     native_convex_section_topology: bool,
+    native_convex_capture_topology: bool,
     radial_product: Option<NativeRadialLeaf>,
     endpoint_radial_products: [Option<NativeEndpointRadialLeaf>; 2],
     sample_loops: Arc<Vec<NativeSourceLoopCapture>>,
@@ -3544,6 +3545,7 @@ fn same_leaf(a: &NativeSourceLeafReceipt, b: &NativeSourceLeafReceipt) -> bool {
         && a.regular_boundary_tube_mm == b.regular_boundary_tube_mm
         && a.native_world_z_invariant == b.native_world_z_invariant
         && a.native_convex_section_topology == b.native_convex_section_topology
+        && a.native_convex_capture_topology == b.native_convex_capture_topology
         && a.rectangle.is_some() == b.rectangle.is_some()
         && a.source_rectangle == b.source_rectangle
         && a.radial_product == b.radial_product
@@ -3599,6 +3601,7 @@ fn hash_leaf(hash: &mut Sha256, leaf: &NativeSourceLeafReceipt) {
     hash.update(leaf.native_endpoint_closure.map(u8::from));
     hash.update([u8::from(leaf.native_world_z_invariant)]);
     hash.update([u8::from(leaf.native_convex_section_topology)]);
+    hash.update([u8::from(leaf.native_convex_capture_topology)]);
     hash.update([u8::from(leaf.rectangle.is_some())]);
     hash.update([u8::from(leaf.source_rectangle.is_some())]);
     if let Some(product) = &leaf.source_rectangle {
@@ -6217,6 +6220,7 @@ fn certify_source_leaf(
         rectangle,
         source_rectangle,
         native_convex_section_topology: analysis.has_native_convex_section_topology_proof(),
+        native_convex_capture_topology: analysis.has_native_convex_capture_topology_proof(),
         radial_product,
         sample_loop_clearance_mm,
         endpoint_radial_products,
@@ -6724,6 +6728,25 @@ pub fn certify_native_union(
                 // cross-height critical glue; the stream still checks that
                 // independently. Whole-source convexity or stationary native
                 // products separately discharge their complete event bands.
+                let preserved_convex_capture = if occurrences.len() == 1
+                    && leaf.native_convex_capture_topology
+                    && leaf.closed_shape_error_mm().is_some()
+                    && leaf.sample_loops.len() == 1
+                    && !leaf.sample_loops[0].hole
+                {
+                    let checkpoint = scratch.bytes;
+                    let preserved = preserves_source_material(
+                        leaf,
+                        CandidateLoops::whole(candidate_union_loops),
+                        &mut scratch,
+                        work,
+                        cancel,
+                    );
+                    scratch.bytes = checkpoint;
+                    preserved?
+                } else {
+                    false
+                };
                 if collar.is_none()
                     && (0..2).any(|side| {
                         leaf.critical_interfaces[side] && !leaf.native_endpoint_closure[side]
@@ -6731,6 +6754,7 @@ pub fn certify_native_union(
                     && !leaf.native_world_z_invariant
                     && !leaf.native_convex_section_topology
                     && !(occurrences.len() == 1 && leaf.radial_product.is_some())
+                    && !preserved_convex_capture
                     && (leaf.is_positive() || analysis.closed_shape_error_mm().is_none())
                 {
                     return Err(native_pair_error(
