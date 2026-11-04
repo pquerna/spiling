@@ -1281,6 +1281,11 @@ pub(super) fn collect_span(
                     refine_candidate(
                         schedule,
                         retry_index,
+                        source
+                            .input
+                            .intent
+                            .effective_deposition_limits()
+                            .min_bead_height_mm,
                         &mut end,
                         &mut state.sizing,
                         partition_end_z_bits,
@@ -1967,6 +1972,10 @@ fn capture_base(
             refine_candidate(
                 schedule,
                 index,
+                input
+                    .intent
+                    .effective_deposition_limits()
+                    .min_bead_height_mm,
                 &mut end,
                 sizing,
                 partition_end_z_bits,
@@ -2259,6 +2268,10 @@ fn capture_base(
             refine_candidate(
                 schedule,
                 index,
+                input
+                    .intent
+                    .effective_deposition_limits()
+                    .min_bead_height_mm,
                 &mut end,
                 sizing,
                 partition_end_z_bits,
@@ -2399,9 +2412,14 @@ fn native_span_reference(
     Ok((interval, sample))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Refinement retains captured process resolution beside schedule sizing and the last native rejection"
+)]
 fn refine_candidate(
     schedule: &mut Vec<LayerElevation>,
     index: u32,
+    minimum_height_mm: f64,
     end: &mut u32,
     sizing: &mut NativeSpanSizing,
     partition_end_z_bits: u64,
@@ -2414,7 +2432,7 @@ fn refine_candidate(
         return Ok(());
     }
     sizing.tighten(partition_end_z_bits, 1);
-    split_layer(schedule, index, context).map_err(|mut failure| {
+    split_resolved_layer(schedule, index, minimum_height_mm, context).map_err(|mut failure| {
         // Keep only this rejected query's cause: accumulating prior retries
         // would grow the diagnostic and could identify a different interval.
         failure.message.push_str("; last rejected capture: ");
@@ -3051,6 +3069,60 @@ pub(super) fn split_layer(
             ),
         ));
     }
+    split_resolved_layer(schedule, index, 0.0, context)
+}
+
+fn split_resolved_layer(
+    schedule: &mut Vec<LayerElevation>,
+    index: u32,
+    minimum_height_mm: f64,
+    context: &str,
+) -> Result<(), ManufacturingError> {
+    let layer = &schedule[index as usize];
+    let midpoint = layer.lower_z + (layer.z - layer.lower_z) * 0.5;
+    let lower_height = midpoint - layer.lower_z;
+    let upper_height = layer.z - midpoint;
+    let lower_sample = layer.lower_z + lower_height * 0.5;
+    let upper_sample = midpoint + upper_height * 0.5;
+    let unresolved = || {
+        error(
+            ManufacturingErrorCode::NativeShapeErrorExceeded,
+            format!(
+                "{context} cannot certify [{:.17e}, {:.17e}] mm at process-resolvable thickness",
+                layer.lower_z, layer.z
+            ),
+        )
+    };
+    if !minimum_height_mm.is_finite()
+        || minimum_height_mm < 0.0
+        || !(layer.lower_z < lower_sample
+            && lower_sample < midpoint
+            && midpoint < upper_sample
+            && upper_sample < layer.z)
+    {
+        return Err(unresolved());
+    }
+    let endpoints = [layer.lower_z, midpoint, layer.z];
+    let commanded = [
+        project_xyz6_bead_height_mm(endpoints[0], 0.0)?,
+        project_xyz6_bead_height_mm(endpoints[1], 0.0)?,
+        project_xyz6_bead_height_mm(endpoints[2], 0.0)?,
+    ];
+    for child in 0..2 {
+        let physical =
+            program_coordinates::enclosed_vertical_gap_mm(endpoints[child + 1], endpoints[child])?;
+        let command = program_coordinates::enclosed_vertical_gap_mm(
+            commanded[child + 1][0],
+            commanded[child][1],
+        )?;
+        if physical <= 0.0
+            || physical < minimum_height_mm
+            || command <= 0.0
+            || command < minimum_height_mm
+        {
+            return Err(unresolved());
+        }
+    }
     if schedule.len() >= MAX_PRINT_LAYERS as usize {
         return Err(error(
             ManufacturingErrorCode::ResourceLimit,
@@ -3060,13 +3132,13 @@ pub(super) fn split_layer(
     let upper = LayerElevation {
         lower_z: midpoint,
         z: layer.z,
-        sample: midpoint + upper_height * 0.5,
+        sample: upper_sample,
         height: upper_height,
     };
     let lower = LayerElevation {
         lower_z: layer.lower_z,
         z: midpoint,
-        sample: layer.lower_z + lower_height * 0.5,
+        sample: lower_sample,
         height: lower_height,
     };
     schedule[index as usize] = lower;
@@ -4364,6 +4436,160 @@ mod refinement_tests {
     }
 
     #[test]
+    fn source_refinement_uses_captured_resolution_below_default_plane_error() {
+        let top = 3.993_600_243_158_054_7e-4;
+        let mut schedule = vec![layer(0.0, top)];
+        let legacy_failure = split_layer(&mut schedule, 0, "legacy regression").unwrap_err();
+        assert_eq!(
+            legacy_failure.code,
+            ManufacturingErrorCode::NativeShapeErrorExceeded
+        );
+        assert_eq!(schedule.len(), 1);
+        assert_eq!(schedule[0].z, top);
+        let mut sizing = NativeSpanSizing::default();
+        let cause = error(
+            ManufacturingErrorCode::NativeShapeErrorExceeded,
+            "original closed source capture exceeds policy",
+        );
+        for _ in 0..2 {
+            refine_candidate(
+                &mut schedule,
+                0,
+                0.000001,
+                &mut 1,
+                &mut sizing,
+                top.to_bits(),
+                "native shape-error refinement",
+                &cause,
+            )
+            .unwrap();
+        }
+        assert_eq!(schedule.len(), 3);
+        assert_eq!(schedule[0].lower_z, 0.0);
+        assert_eq!(schedule[0].z, top * 0.25);
+        assert_eq!(schedule[1].z, top * 0.5);
+        assert_eq!(schedule.last().unwrap().z, top);
+        for child in &schedule {
+            assert!(child.lower_z < child.sample && child.sample < child.z);
+            assert!(child.height >= 0.000001);
+            let lower = project_xyz6_bead_height_mm(child.lower_z, 0.0).unwrap();
+            let upper = project_xyz6_bead_height_mm(child.z, 0.0).unwrap();
+            assert!(
+                program_coordinates::enclosed_vertical_gap_mm(upper[0], lower[1]).unwrap()
+                    >= 0.000001
+            );
+        }
+    }
+
+    #[test]
+    fn source_refinement_respects_effective_material_over_printer_minimum() {
+        let mut intent = decode_intent(include_bytes!(
+            "../../../../fixtures/manufacturing/complete-sparse.intent.json"
+        ))
+        .unwrap();
+        intent.printer.deposition_limits.min_bead_height_mm = 0.000001;
+        let mut selection: MaterialProfileSelection = serde_json::from_slice(include_bytes!(
+            "../../../../fixtures/manufacturing/material-profile-a.json"
+        ))
+        .unwrap();
+        selection.profile.deposition_limits.min_bead_height_mm = 0.00015;
+        let resolved = crate::resolve_material_profile(&intent, selection).unwrap();
+        let minimum = resolved.effective_deposition_limits().min_bead_height_mm;
+        assert_eq!(minimum, 0.00015);
+        assert_eq!(
+            resolved.printer.deposition_limits.min_bead_height_mm,
+            0.000001
+        );
+        let top = 3.993_600_243_158_054_7e-4;
+        let mut schedule = vec![layer(0.0, top)];
+        let mut end = 1;
+        let mut sizing = NativeSpanSizing::default();
+        let cause = error(
+            ManufacturingErrorCode::NativeShapeErrorExceeded,
+            "original closed source capture exceeds policy",
+        );
+        refine_candidate(
+            &mut schedule,
+            0,
+            minimum,
+            &mut end,
+            &mut sizing,
+            top.to_bits(),
+            "native shape-error refinement",
+            &cause,
+        )
+        .unwrap();
+        let failure = refine_candidate(
+            &mut schedule,
+            0,
+            minimum,
+            &mut end,
+            &mut sizing,
+            top.to_bits(),
+            "native shape-error refinement",
+            &cause,
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure.code,
+            ManufacturingErrorCode::NativeShapeErrorExceeded
+        );
+        assert_eq!(schedule.len(), 2);
+        assert!(schedule.iter().all(|child| child.height >= minimum));
+    }
+
+    #[test]
+    fn source_refinement_retains_physical_and_closed_command_minima() {
+        for (bottom, top, minimum) in [
+            (0.0, 0.0002, 0.00015),
+            (0.0000001, 0.0000033, 0.0000015),
+            (0.0, 0.0000008, 0.0),
+            (1.0, 1.0_f64.next_up().next_up(), 0.0),
+        ] {
+            let original = layer(bottom, top);
+            let mut schedule = vec![layer(bottom, top)];
+            let failure =
+                split_resolved_layer(&mut schedule, 0, minimum, "source regression").unwrap_err();
+            assert_eq!(
+                failure.code,
+                ManufacturingErrorCode::NativeShapeErrorExceeded
+            );
+            assert!(failure.message.contains("process-resolvable thickness"));
+            assert_eq!(schedule.len(), 1);
+            assert_eq!(schedule[0].lower_z, original.lower_z);
+            assert_eq!(schedule[0].z, original.z);
+            assert_eq!(schedule[0].sample, original.sample);
+        }
+    }
+
+    #[test]
+    fn source_refinement_preserves_coordinate_conditioning_failure() {
+        let bottom = program_coordinates::MAX_XYZ6_COORDINATE_MM + 1.0;
+        let mut schedule = vec![layer(bottom, bottom + 1.0)];
+        let cause = error(
+            ManufacturingErrorCode::NativeShapeErrorExceeded,
+            "original source rejection",
+        );
+        let failure = refine_candidate(
+            &mut schedule,
+            0,
+            0.000001,
+            &mut 1,
+            &mut NativeSpanSizing::default(),
+            (bottom + 1.0).to_bits(),
+            "native shape-error refinement",
+            &cause,
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure.code,
+            ManufacturingErrorCode::ProgramCoordinateConditioningFailure
+        );
+        assert!(failure.message.ends_with(&cause.to_string()));
+        assert_eq!(schedule.len(), 1);
+    }
+
+    #[test]
     fn terminal_refinement_reports_only_the_last_rejected_query() {
         let mut schedule = vec![layer(0.0, 0.4)];
         let mut sizing = NativeSpanSizing::default();
@@ -4377,6 +4603,7 @@ mod refinement_tests {
             let result = refine_candidate(
                 &mut schedule,
                 0,
+                0.000001,
                 &mut end,
                 &mut sizing,
                 0.4_f64.to_bits(),
@@ -4412,6 +4639,7 @@ mod refinement_tests {
         let failure = refine_candidate(
             &mut schedule,
             0,
+            0.000001,
             &mut 1,
             &mut NativeSpanSizing::default(),
             0.4_f64.to_bits(),
@@ -4441,6 +4669,7 @@ mod refinement_tests {
             refine_candidate(
                 &mut schedule,
                 0,
+                0.000001,
                 &mut end,
                 &mut sizing,
                 2.0_f64.to_bits(),

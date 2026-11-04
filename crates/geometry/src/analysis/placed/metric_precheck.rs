@@ -287,6 +287,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tilted_native_closed_capture_below_default_plane_resolution() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../../fixtures/geometry/cylinder.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let half_angle = 0.5 * 1.0_f64.to_radians();
+        let component = half_angle.sin() / 2.0_f64.sqrt();
+        let request = PlacedSlabRequest {
+            pose: RigidPoseMm {
+                translation_mm: [0.0, 0.0, 0.08726261625534897],
+                rotation_xyzw: [component, component, 0.0, half_angle.cos()],
+            },
+            world_height_interval_mm: [0.0, 0.0001],
+            sample_world_z_mm: 0.00005,
+            native_shape_error_mm: 0.1,
+        };
+        let analysis = analyze_placed_slab(
+            &source,
+            &request,
+            crate::MAX_PREPARED_SECTION_BYTES - source.retained_bytes(),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(analysis.placed_pose(), Some(request.pose));
+        assert_eq!(
+            analysis.world_height_interval_mm(),
+            Some(request.world_height_interval_mm)
+        );
+        assert_eq!(
+            analysis.sample_world_z_mm(),
+            Some(request.sample_world_z_mm)
+        );
+        assert_eq!(
+            analysis.world_shape_error_policy_mm(),
+            Some(request.native_shape_error_mm)
+        );
+        assert!(
+            analysis.section().achieved_plane_error_mm()
+                < spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM
+        );
+        let height_band = analysis.source_sample_height_band_mm();
+        let interval = analysis.capture.request.height_interval_mm;
+        assert!(interval[0] < height_band[0] && height_band[1] < interval[1]);
+        assert!(
+            analysis
+                .closed_shape_error_mm()
+                .is_some_and(|error| error <= request.native_shape_error_mm)
+        );
+    }
+
+    #[test]
     fn tilted_split_cap_candidate_reaches_proved_metric_refinement() {
         let cancel = AtomicBool::new(false);
         let definition = crate::from_step_bytes_with_cancel(
