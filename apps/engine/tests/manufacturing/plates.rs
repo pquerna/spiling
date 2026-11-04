@@ -259,6 +259,14 @@ async fn arrangement_excludes_other_plates_occurrence_process_contributions() {
         },
     )
     .await;
+    let other_source = workspace.0.join("inactive-cylinder.step");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step"),
+        &other_source,
+    )
+    .unwrap();
+    import(&mut client, &other_source).await;
     let s = scene(&mut client).await;
     let GeometryResponse::ScenePage { occurrences, .. } = client
         .geometry(GeometryCommand::GetScenePage {

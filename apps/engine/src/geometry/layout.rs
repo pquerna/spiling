@@ -129,6 +129,25 @@ fn prepare_single(
     budget: u32,
 ) -> Result<LayoutProposal, JobError> {
     r.request.validate()?;
+    // Worker residency includes other plates and history. Every independent trial
+    // must use the same captured source closure as ordinary compilation.
+    let scoped = r
+        .capture
+        .definition_ids
+        .iter()
+        .map(|id| {
+            definitions
+                .get(id)
+                .map(|definition| (id.clone(), definition.clone()))
+                .ok_or_else(|| {
+                    ManufacturingError::new(
+                        ManufacturingErrorCode::StaleRevision,
+                        "layout definition was reclaimed",
+                    )
+                })
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let definitions = &scoped;
     let current = r.draft.snapshot();
     if current.occurrences.is_empty() {
         return Err(fail("Import a part before arranging"));
@@ -533,6 +552,7 @@ pub(super) fn prepare(
             extra_capture
                 .stored_definitions
                 .retain(|d| used.contains(&d.definition_id));
+            extra_capture.definition_ids.retain(|id| used.contains(id));
             extra_capture
                 .surface_images
                 .retain(|hash, _| surface.images.iter().any(|r| &r.image_hash == hash));
