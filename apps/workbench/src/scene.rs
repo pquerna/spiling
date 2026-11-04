@@ -9,6 +9,8 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+mod focus;
+pub use focus::FocusTarget;
 
 #[derive(Debug)]
 pub struct Chunk {

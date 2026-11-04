@@ -52,6 +52,17 @@ navigation retains workspace/task and compatible inspection state. Background
 completion never activates another workspace. Camera controls remain at the canvas;
 gesture instructions use deliberate help.
 
+Focus on selection frames a selected source part or face without editing its pose.
+Faces use checked display extents and an area-weighted normal only when it is
+stable; other targets retain the current viewing direction. Navigation chooses a
+nearby readable angle, fits the entire extent in either projection and eases pan,
+shortest-arc orbit and logarithmic zoom. G operates only in the focused canvas;
+face-tree double-click, Properties, View and command search expose the same task.
+Gestures, view commands and Escape interrupt motion. Animate focus can be disabled;
+Back to previous view restores the pre-focus camera. Source/session/plate changes
+discard transient focus history. Focusing does not prove visibility through other
+material, remove an existing section cut or grant geometric/material authority.
+
 Workspace switching hides and retains drafts. Slice plate uses the existing compile
 operation and refuses unapplied changes; Check setup is offered when preflight is
 required. The active editor owns Apply, and Review promotes Verify program followed

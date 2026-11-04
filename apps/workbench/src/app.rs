@@ -180,6 +180,14 @@ impl Workbench {
         }
     }
     fn disabled(&self, action: Action) -> Option<&'static str> {
+        if action == Action::FocusSelection
+            && (!self.display_current()
+                || self.occurrence.is_none()
+                || self.layout.open
+                || !self.source_display_visible())
+        {
+            return Some("Select a part or face in the current source display first");
+        }
         if action == Action::Compile && (self.project_drafts() || self.subject_drafts()) {
             return Some("Apply or discard unapplied changes before slicing");
         }
@@ -249,6 +257,11 @@ impl Workbench {
             }
         }
         match action {
+            Action::FocusSelection => {
+                self.focus_selection();
+                ctx.request_repaint();
+                return;
+            }
             Action::Arrange => {
                 self.open_layout(ctx);
                 return;
@@ -414,6 +427,8 @@ impl Workbench {
                 self.close_layout(ctx);
             } else if self.plates.overview {
                 self.close_plate_overview(ctx);
+            } else if self.viewport.stop_focus() {
+                ctx.request_repaint();
             } else if self.analysis.open {
                 self.close_analysis(ctx);
             } else if self.show_feedback {
@@ -968,6 +983,7 @@ impl eframe::App for Workbench {
                         }
                     };
                     let plane = self.analysis_plane();
+                    view.source = self.source_display_visible();
                     let mut analysis = self.analysis.view.clone();
                     analysis.enabled &= analysis.valid()
                         && (!analysis.local_frame || self.analysis_pose().is_some())
@@ -975,15 +991,12 @@ impl eframe::App for Workbench {
                     if analysis.enabled {
                         match self.analysis.view.representation {
                             crate::analysis::Representation::Source => {
-                                view.source = true;
                                 view.visible = false;
                             }
                             crate::analysis::Representation::Actual => {
-                                view.source = false;
                                 view.visible = review.is_some();
                             }
                             crate::analysis::Representation::Compare => {
-                                view.source = true;
                                 view.visible = review.is_some();
                             }
                         }

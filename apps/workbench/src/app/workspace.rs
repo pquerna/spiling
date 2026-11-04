@@ -6,6 +6,36 @@ use super::{Phase, Workbench, ui};
 use spiling_contracts::geometry::*;
 
 impl Workbench {
+    pub(super) fn source_display_visible(&self) -> bool {
+        let has_review = !self.layout.open
+            && (self.work_area.workspace == super::Workspace::Review || self.analysis.open)
+            && self.selected_manufacturing_review().is_some();
+        let analysis = &self.analysis.view;
+        if analysis.enabled
+            && analysis.valid()
+            && (!analysis.local_frame || self.analysis_pose().is_some())
+            && (!analysis.selected_only || self.occurrence.is_some())
+        {
+            analysis.representation != crate::analysis::Representation::Actual
+        } else {
+            !has_review || self.manufacturing.replay.source
+        }
+    }
+    pub(super) fn focus_selection(&mut self) {
+        if !self.display_current() || !self.source_display_visible() {
+            return;
+        }
+        if let Some(scene) = &self.state.display {
+            match scene.focus_target(self.selected.as_ref(), self.occurrence) {
+                Ok(target) => {
+                    self.viewport.focus_on(scene, target);
+                }
+                Err(error) => {
+                    self.local_problem = Some(error.into());
+                }
+            }
+        }
+    }
     pub(super) fn clear_selection(&mut self) {
         if self.subject_drafts() {
             self.navigation = Some(super::navigation::Navigation::ClearSelection);
@@ -94,16 +124,24 @@ impl Workbench {
                                             r.occurrence_id == occurrence.occurrence_id
                                                 && r.face_id == face.face_id
                                         });
-                                        if ui
+                                        let response = ui
                                             .selectable_label(
                                                 selected,
                                                 format!("Face {}", ordinal + 1),
                                             )
-                                            .clicked()
+                                            .on_hover_text(
+                                                "Select to inspect; double-click to focus",
+                                            );
+                                        if response.clicked()
                                             && let Some(reference) =
                                                 scene.reference(occurrence, ordinal)
                                         {
-                                            self.select_face(reference);
+                                            self.select_face(reference.clone());
+                                            if response.double_clicked()
+                                                && self.selected.as_ref() == Some(&reference)
+                                            {
+                                                self.focus_selection();
+                                            }
                                         }
                                     }
                                 });
@@ -141,6 +179,7 @@ impl Workbench {
             self.clear_selection();
             return;
         }
+        self.button(ui, super::Action::FocusSelection);
         if self.pose_revision != Some(scene.summary.revision) {
             self.pose[..3].copy_from_slice(&occurrence.pose.translation_mm);
             let (x, y, z) = glam::DQuat::from_array(occurrence.pose.rotation_xyzw)

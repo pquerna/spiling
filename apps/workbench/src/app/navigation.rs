@@ -72,6 +72,7 @@ impl Workbench {
         if self.occurrence != Some(id) && self.subject_drafts() {
             self.navigation = Some(Navigation::Occurrence(id));
         } else {
+            self.selected = None;
             self.occurrence = Some(id);
             self.pose_revision = None;
         }

@@ -222,7 +222,12 @@ impl Workbench {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    for action in [Action::Properties, Action::Analysis, Action::Study] {
+                    for action in [
+                        Action::Properties,
+                        Action::FocusSelection,
+                        Action::Analysis,
+                        Action::Study,
+                    ] {
                         self.button(ui, action);
                     }
                     if ui.button("Activity").clicked() {

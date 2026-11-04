@@ -516,6 +516,17 @@ fn checked_scene_picking_shared_occurrences_sections_and_large_origin() {
     }));
     let reference = crate::viewport::pick(&scene, center + glam::DVec3::Z * 100.0, -glam::DVec3::Z)
         .expect("ray must hit the admitted source");
+    let focus = scene
+        .focus_target(Some(&reference), Some(reference.occurrence_id))
+        .unwrap();
+    assert!(focus.valid());
+    assert!(
+        focus
+            .normal
+            .is_some_and(|normal| normal.dot(glam::DVec3::Z) > 0.9)
+    );
+    assert!((focus.bounds_mm.max[2] - focus.bounds_mm.min[2]).abs() < 0.01);
+    assert!(scene.focus_target(Some(&reference), None).is_err());
     host.geometry(GeometryCommand::InspectFace {
         reference: reference.clone(),
     })
@@ -539,6 +550,22 @@ fn checked_scene_picking_shared_occurrences_sections_and_large_origin() {
         s.scene.as_ref().is_some_and(|s| s.occurrence_count == 2)
     });
     let copied = displayed(&host).display.unwrap();
+    assert!(
+        copied
+            .focus_target(Some(&reference), Some(reference.occurrence_id))
+            .is_err()
+    );
+    let original_part = scene
+        .focus_target(None, Some(reference.occurrence_id))
+        .unwrap();
+    let copy_id = copied
+        .occurrences
+        .iter()
+        .find(|item| item.occurrence_id != reference.occurrence_id)
+        .unwrap()
+        .occurrence_id;
+    let copy_part = copied.focus_target(None, Some(copy_id)).unwrap();
+    assert!((copy_part.center() - original_part.center() - glam::DVec3::X * 40.0).length() < 1e-10);
     assert!(
         Arc::ptr_eq(&scene.definitions[0], &copied.definitions[0]),
         "pose/occurrence edits must reuse checked bytes"

@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 mod beads;
+mod focus;
 pub mod overview;
 pub mod plate;
 mod section;
@@ -119,6 +120,12 @@ pub struct Viewport {
     project_id: Option<spiling_contracts::project::ProjectId>,
     show_height: bool,
     orthographic: bool,
+    motion: Option<focus::Motion>,
+    pending_focus: Option<(SceneSummary, crate::scene::FocusTarget)>,
+    previous_camera: Option<CameraState>,
+    focus_scene: Option<SceneSummary>,
+    smooth_focus: bool,
+    focus_problem: Option<&'static str>,
 }
 impl Default for Viewport {
     fn default() -> Self {
@@ -134,6 +141,12 @@ impl Default for Viewport {
             project_id: None,
             show_height: false,
             orthographic: false,
+            motion: None,
+            pending_focus: None,
+            previous_camera: None,
+            focus_scene: None,
+            smooth_focus: true,
+            focus_problem: None,
         }
     }
 }
@@ -422,6 +435,11 @@ impl Viewport {
         }
     }
     pub fn restore_camera(&mut self, c: &CameraState) {
+        self.interrupt_focus();
+        self.previous_camera = None;
+        self.apply_camera(c);
+    }
+    fn apply_camera(&mut self, c: &CameraState) {
         if c.valid() {
             self.yaw = c.yaw;
             self.pitch = c.pitch;
@@ -433,14 +451,54 @@ impl Viewport {
         }
     }
     pub fn fit(&mut self) {
+        self.interrupt_focus();
         self.camera_restored = false;
         self.fit = true;
     }
     pub fn normal_to(&mut self, normal: DVec3) {
-        let n = normal.normalize();
+        let Some(n) = normal.try_normalize() else {
+            return;
+        };
+        self.interrupt_focus();
         self.yaw = n.y.atan2(n.x);
         self.pitch = n.z.asin();
         self.orthographic = true;
+    }
+    pub fn focus_on(&mut self, scene: &Scene, target: crate::scene::FocusTarget) -> bool {
+        if !target.valid() {
+            return false;
+        }
+        self.pending_focus = Some((scene.summary.clone(), target));
+        self.focus_problem = None;
+        true
+    }
+    fn interrupt_focus(&mut self) {
+        self.motion = None;
+        self.pending_focus = None;
+    }
+    pub fn stop_focus(&mut self) -> bool {
+        let active = self.motion.is_some() || self.pending_focus.is_some();
+        self.interrupt_focus();
+        active
+    }
+    fn animate_to(&mut self, camera: CameraState, now: f64, animations_enabled: bool) {
+        if self.smooth_focus && animations_enabled {
+            self.motion = Some(focus::Motion::new(self.camera(), camera, now));
+        } else {
+            self.motion = None;
+            self.apply_camera(&camera);
+        }
+    }
+    fn advance_focus(&mut self, now: f64) -> bool {
+        let Some(motion) = &self.motion else {
+            return false;
+        };
+        let (camera, done) = motion.sample(now);
+        self.apply_camera(&camera);
+        if done {
+            self.motion = None;
+        }
+        !done
     }
     fn matrix(&self, aspect: f64, radius: f64) -> DMat4 {
         let direction = DVec3::new(
@@ -470,11 +528,7 @@ impl Viewport {
         } else {
             glam::dcamera::rh::proj::directx::perspective(45f64.to_radians(), aspect, near, far)
         };
-        let up = if direction.z.abs() > 0.999 {
-            DVec3::Y
-        } else {
-            DVec3::Z
-        };
+        let up = direction.cross(DVec3::new(-self.yaw.sin(), self.yaw.cos(), 0.0));
         projection * glam::dcamera::rh::view::look_at_mat4(eye, self.pan, up)
     }
     /// Camera and picking use f64; GPU positions are rebased about native scene bounds.
@@ -498,6 +552,23 @@ impl Viewport {
             mut plane,
             scope,
         } = input;
+        let same_focus_scene = match (&self.focus_scene, &scene) {
+            (Some(old), Some(current)) => current.same_revision(old),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_focus_scene || !interactive || layout_preview {
+            self.motion = None;
+            self.previous_camera = None;
+            self.pending_focus = self.pending_focus.take().filter(|(summary, _)| {
+                interactive
+                    && !layout_preview
+                    && scene
+                        .as_ref()
+                        .is_some_and(|scene| scene.same_revision(summary))
+            });
+            self.focus_scene = scene.as_ref().map(|scene| scene.summary.clone());
+        }
         if self.project_id != project_id {
             self.project_id = project_id;
             self.fit = true;
@@ -513,7 +584,7 @@ impl Viewport {
         let mut fit_plate = false;
         ui.horizontal_wrapped(|ui| {
             if ui.button("Fit").clicked() {
-                self.fit = true;
+                self.fit();
             }
             if ui
                 .add_enabled(
@@ -524,37 +595,61 @@ impl Viewport {
                 )
                 .clicked()
             {
-                self.fit = true;
+                self.fit();
                 fit_source = true;
             }
+            let focus_available = interactive && !layout_preview && view.source
+                && scene.as_ref().is_some_and(|scene| scope.is_some_and(|id| scene.occurrences.iter().any(|item| item.occurrence_id == id)));
+            if ui.add_enabled(focus_available, egui::Button::new("Focus on selection")).clicked()
+                && let Some(scene) = &scene
+            {
+                match scene.focus_target(selected, scope) {
+                    Ok(target) => { self.focus_on(scene, target); }
+                    Err(error) => { self.focus_problem = Some(error); }
+                }
+            }
+            if ui.add_enabled(self.previous_camera.is_some(), egui::Button::new("Back to previous view")).clicked()
+                && let Some(previous) = self.previous_camera.take()
+            {
+                self.pending_focus = None;
+                self.animate_to(previous, ui.input(|input| input.time), ui.style().animation_time > 0.0);
+            }
             if ui.button("Isometric").clicked() {
+                self.interrupt_focus();
                 self.orthographic = false;
                 self.yaw = -0.8;
                 self.pitch = 0.7;
             }
             if ui.button("Top").clicked() {
+                self.interrupt_focus();
                 self.pitch = 1.56;
                 self.yaw = -std::f64::consts::FRAC_PI_2;
             }
-            ui.checkbox(&mut self.orthographic, "Orthographic");
+            if ui.checkbox(&mut self.orthographic, "Orthographic").changed() { self.interrupt_focus(); }
+            if ui.checkbox(&mut self.smooth_focus, "Animate focus").changed() && !self.smooth_focus {
+                self.advance_focus(ui.input(|input| input.time) + focus::DURATION_SECONDS);
+            }
             if analysis.enabled && ui.button("Normal to section").clicked() {
                 self.normal_to(
                     DVec3::from_array(plane.normal) * if analysis.flipped { -1.0 } else { 1.0 },
                 );
             }
-            crate::ui::help(ui, "viewport-navigation", "Viewport navigation", "Drag to orbit; right-drag to pan; wheel to zoom. Focus the canvas: arrows orbit, Shift+arrows pan, plus/minus zoom, F fits, 1 selects Top and 0 Isometric.");
+            crate::ui::help(ui, "viewport-navigation", "Viewport navigation", "Drag to orbit; right-drag to pan; wheel to zoom. Focus the canvas: arrows orbit, Shift+arrows pan, plus/minus zoom, F fits, G focuses selection, Escape stops focus, 1 selects Top and 0 Isometric. Focus uses display bounds and a stable face normal when available; it does not prove visibility or change the part pose. Turn off Animate focus for immediate navigation.");
         });
+        if let Some(problem) = self.focus_problem {
+            ui.colored_label(ui.visuals().warn_fg_color, problem);
+        }
         if let Some(plate) = &plate
             && plate.controls(ui, &mut self.show_height)
         {
-            self.fit = true;
+            self.fit();
             fit_plate = true;
         }
         let (rect, response) = ui.allocate_exact_size(
             ui.available_size().max(egui::vec2(1.0, 1.0)),
             egui::Sense::click_and_drag(),
         );
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, "3D viewport. Arrows orbit; Shift arrows pan; plus/minus zoom; F fits; 1 top; 0 isometric. Native faces are also available in the model tree."));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, "3D viewport. Arrows orbit; Shift arrows pan; plus/minus zoom; F fits; G focuses selection; Escape stops focus; 1 top; 0 isometric. Native faces are also available in the model tree."));
         if response.clicked() {
             response.request_focus();
         }
@@ -565,7 +660,7 @@ impl Viewport {
                 ui.visuals().selection.stroke,
                 egui::StrokeKind::Inside,
             );
-            let (delta, shift, zoom, fit, top, iso) = ui.input_mut(|i| {
+            let (delta, shift, zoom, fit, top, iso, focus, stop) = ui.input_mut(|i| {
                 let delta = egui::vec2(
                     f32::from(i.key_pressed(egui::Key::ArrowRight) as u8)
                         - f32::from(i.key_pressed(egui::Key::ArrowLeft) as u8),
@@ -580,8 +675,21 @@ impl Viewport {
                     i.consume_key(egui::Modifiers::NONE, egui::Key::F),
                     i.consume_key(egui::Modifiers::NONE, egui::Key::Num1),
                     i.consume_key(egui::Modifiers::NONE, egui::Key::Num0),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::G),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
                 )
             });
+            if delta != egui::Vec2::ZERO || zoom != 0.0 || fit || top || iso || stop {
+                self.interrupt_focus();
+            }
+            if focus
+                && interactive
+                && view.source
+                && let Some(scene) = &scene
+                && let Ok(target) = scene.focus_target(selected, scope)
+            {
+                self.focus_on(scene, target);
+            }
             if shift {
                 let right = DVec3::new(-self.yaw.sin(), self.yaw.cos(), 0.0);
                 let up = right.cross(DVec3::new(
@@ -695,6 +803,26 @@ impl Viewport {
             self.pan = fit_pan;
             self.fit = false;
         }
+        let now = ui.input(|input| input.time);
+        if let Some((summary, target)) = self.pending_focus.take()
+            && scene
+                .as_ref()
+                .is_some_and(|scene| scene.same_revision(&summary))
+            && let Some(destination) = focus::plan(
+                &self.camera(),
+                target,
+                center,
+                f64::from(rect.width() / rect.height()),
+            )
+        {
+            if self.previous_camera.is_none() {
+                self.previous_camera = Some(self.camera());
+            }
+            self.animate_to(destination, now, ui.style().animation_time > 0.0);
+        }
+        if self.advance_focus(now) {
+            ui.ctx().request_repaint();
+        }
         // A separate handle moves the inspection plane; dragging the surrounding canvas orbits.
         let mut handle = None;
         if analysis.enabled {
@@ -719,6 +847,7 @@ impl Viewport {
                     )
                     .on_hover_text("Drag to move section plane in millimetres");
                 if r.dragged() {
+                    self.interrupt_focus();
                     let axis = screen(point + n * radius * 0.25) - position;
                     let mm_per_pixel = if axis.length_sq() > 4.0 {
                         axis * (radius as f32 * 0.25 / axis.length_sq())
@@ -735,11 +864,13 @@ impl Viewport {
         if response.dragged_by(egui::PointerButton::Primary)
             && !handle.is_some_and(|(_, dragging)| dragging)
         {
+            self.interrupt_focus();
             let d = response.drag_motion();
             self.yaw -= f64::from(d.x) * 0.007;
             self.pitch = (self.pitch + f64::from(d.y) * 0.007).clamp(-1.55, 1.55);
         }
         if response.dragged_by(egui::PointerButton::Secondary) {
+            self.interrupt_focus();
             let d = response.drag_motion();
             let right = DVec3::new(-self.yaw.sin(), self.yaw.cos(), 0.0);
             let up = right.cross(DVec3::new(
@@ -752,10 +883,13 @@ impl Viewport {
         }
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            self.distance = (self.distance * (-f64::from(scroll) * 0.002).exp())
-                .clamp(radius * 0.02, radius * 1000.0);
+            if scroll != 0.0 {
+                self.interrupt_focus();
+            }
+            self.distance =
+                (self.distance * (-f64::from(scroll) * 0.002).exp()).clamp(0.001, radius * 1000.0);
         }
-        self.distance = self.distance.clamp(radius * 0.02, radius * 1000.0);
+        self.distance = self.distance.clamp(0.001, radius * 1000.0);
         let matrix = self.matrix(f64::from(rect.width() / rect.height()), display_radius);
         if interactive
             && view.source
