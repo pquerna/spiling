@@ -22,6 +22,7 @@ use spiling_contracts::geometry::{
 use std::sync::atomic::AtomicBool;
 
 mod material_coordinates;
+mod metric_precheck;
 mod sample_candidate;
 pub(super) use material_coordinates::{ActualMaterialCoordinates, MaterialCoordinatesCapture};
 use sample_candidate::WorldSampleCandidate;
@@ -1790,6 +1791,22 @@ pub(crate) fn analyze_placed_slab(
                 },
             )
         };
+        if source_proof.as_ref().is_some_and(Result::is_err) {
+            metric_precheck::reject_separated_candidate(
+                source.source_view()?,
+                request,
+                &prepared.section,
+                &world_candidate,
+                &placement,
+                super::slab::remaining_scratch(
+                    fixed
+                        .saturating_add(world_candidate.retained_bytes())
+                        .saturating_add(std::mem::size_of_val(&source_proof)),
+                )?,
+                work,
+                cancel,
+            )?;
+        }
         let needs_radial_metric = source_proof.as_ref().is_none_or(|proof| match proof {
             Ok(proof) => proof.has_transition_material(),
             Err(_) => true,
