@@ -542,7 +542,7 @@ impl Viewport {
                     DVec3::from_array(plane.normal) * if analysis.flipped { -1.0 } else { 1.0 },
                 );
             }
-            ui.weak("Drag: orbit · right-drag: pan · wheel: zoom");
+            crate::ui::help(ui, "viewport-navigation", "Viewport navigation", "Drag to orbit; right-drag to pan; wheel to zoom. Focus the canvas: arrows orbit, Shift+arrows pan, plus/minus zoom, F fits, 1 selects Top and 0 Isometric.");
         });
         if let Some(plate) = &plate
             && plate.controls(ui, &mut self.show_height)

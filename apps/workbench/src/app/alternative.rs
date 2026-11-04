@@ -88,7 +88,6 @@ impl super::manufacturing::ManufacturingUi {
         });
         if confirmed {
             self.trial = None;
-            self.panel = 2;
             self.comparison_no_height_match = false;
         }
         confirmed
@@ -99,7 +98,7 @@ impl Workbench {
     pub(super) fn try_alternative_entry(&mut self, ui: &mut egui::Ui) {
         if self.manufacturing.trial.is_some() {
             if ui.button("Return to alternative").clicked() {
-                self.manufacturing.panel = 5;
+                self.show_panel(Panel::Alternative);
             }
             return;
         }
@@ -129,7 +128,7 @@ impl Workbench {
                 && ui.button("Prepare Current for comparison").clicked()
             {
                 if self.state.manufacturing.artifact.is_some() {
-                    self.manufacturing.panel = 2;
+                    self.show_panel(Panel::Review);
                 } else {
                     self.show_prepare(2);
                 }
@@ -137,7 +136,10 @@ impl Workbench {
         }
     }
 
-    fn begin_alternative(&mut self, option: Option<&crate::manufacture::InspectedOption>) {
+    pub(super) fn begin_alternative(
+        &mut self,
+        option: Option<&crate::manufacture::InspectedOption>,
+    ) {
         let (Some(project), Some(hello), Some(intent), Some(context)) = (
             &self.state.project,
             &self.state.hello,
@@ -151,7 +153,7 @@ impl Workbench {
                 "End the open alternative explicitly before replacing it. Its draft is retained."
                     .into(),
             );
-            self.manufacturing.panel = 5;
+            self.show_panel(Panel::Alternative);
             return;
         }
         if !self.manufacturing_current() || self.state.manufacturing.review.is_none() {
@@ -198,7 +200,7 @@ impl Workbench {
             adopting: None,
             height_selection: PhysicalSelection::default(),
         });
-        self.manufacturing.panel = 5;
+        self.show_panel(Panel::Alternative);
         self.manufacturing.comparison_no_height_match = false;
     }
 
@@ -216,6 +218,7 @@ impl Workbench {
                     && !self.state.busy
             });
         if self.manufacturing.adopt_confirmed(receipt) {
+            self.work_area.end_trial();
             self.queued_host = Some(Command::DiscardAlternative);
         } else if self.state.phase == Phase::Running
             && !self.state.busy
@@ -231,7 +234,7 @@ impl Workbench {
     }
 
     pub(super) fn selected_manufacturing_review(&self) -> Option<Arc<crate::manufacture::Review>> {
-        if self.manufacturing.panel == 5
+        if self.work_area.panel == Panel::Alternative
             && let Some(trial) = &self.manufacturing.trial
         {
             if self.manufacturing.comparison_no_height_match {
@@ -276,7 +279,7 @@ impl Workbench {
             },
         );
         let Some(mut trial) = self.manufacturing.trial.take() else {
-            self.manufacturing.panel = 2;
+            self.show_panel(Panel::Review);
             return;
         };
         let (Some(project), Some(hello)) = (self.state.project.clone(), self.state.hello.clone())
@@ -435,7 +438,7 @@ impl Workbench {
         let action = trial_actions(ui, ready, evaluated.map(|_| ready && !project.read_only));
         let reveal_decision = matches!(action, Some(TrialAction::Keep | TrialAction::End));
         match action {
-            Some(TrialAction::Back) => self.manufacturing.panel = 2,
+            Some(TrialAction::Back) => self.work_area.panel = Panel::Review,
             Some(TrialAction::Keep) => trial.keeping = true,
             Some(TrialAction::End) => trial.ending = true,
             None => {}
@@ -491,7 +494,7 @@ impl Workbench {
         if trial.ending {
             ui.label("Discard this trial and its comparison? Current settings and retained options are unchanged.");
             if ui.button("Discard trial and return to Current").clicked() {
-                self.manufacturing.panel = 2;
+                self.show_panel(Panel::Review);
                 self.queued_host = Some(Command::DiscardAlternative);
                 discarded = true;
                 return;
@@ -574,7 +577,7 @@ impl Workbench {
             ui.push_id(option.id.as_str(), |ui| {
                 if ui.button(format!("Inspect {}", option.name)).clicked() {
                     self.manufacturing.inspected_option = Some(option.id.clone());
-                    self.manufacturing.panel = 6;
+                    self.show_panel(Panel::Option);
                     self.queued_project = Some(ProjectCommand::GetManufacturingOption {
                         layout_id: project.layout_id.clone(),
                         session_id: hello.session_id.clone(),
@@ -597,7 +600,7 @@ impl Workbench {
             "Read-only inspection · Current unchanged",
         );
         if ui::close(ui, "Back to Review") {
-            self.manufacturing.panel = 2;
+            self.show_panel(Panel::Review);
         }
         let selected = self
             .state
@@ -646,7 +649,7 @@ impl Workbench {
         }
         if !self.manufacturing_current() && ui.button("Prepare Current for comparison").clicked() {
             if self.state.manufacturing.artifact.is_some() {
-                self.manufacturing.panel = 2;
+                self.show_panel(Panel::Review);
             } else {
                 self.show_prepare(2);
             }
@@ -673,7 +676,7 @@ impl Workbench {
                 base_revision: option.revision,
                 id: option.option.id.clone(),
             });
-            self.manufacturing.panel = 2;
+            self.show_panel(Panel::Review);
         }
         if !writable {
             ui.weak("Remove requires a writable project and current inspection");
@@ -1102,7 +1105,6 @@ mod tests {
         let project = ProjectId::new();
         let session = SessionId::new();
         let mut ui = super::super::manufacturing::ManufacturingUi::default();
-        ui.panel = 5;
         ui.trial = Some(Trial {
             project: project.clone(),
             session: session.clone(),
@@ -1142,7 +1144,6 @@ mod tests {
         receipt.base_revision = ProjectRevision(8);
         assert!(ui.adopt_confirmed(Some(&receipt)));
         assert!(ui.trial.is_none());
-        assert_eq!(ui.panel, 2);
     }
 
     #[test]

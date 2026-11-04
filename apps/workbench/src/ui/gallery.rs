@@ -26,6 +26,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
             "Build area",
             "Arrange",
             "Plates",
+            "Navigation",
         ]
         .iter()
         .enumerate()
@@ -55,6 +56,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
                 7 => build_area(ui),
                 8 => arrange(ui),
                 9 => plates(ui),
+                10 => navigation(ui),
                 _ => colors(ui),
             }
         });
@@ -799,4 +801,38 @@ fn plates(ui: &mut Ui) {
         "Print jobs",
         "Each plate owns its setup, parts and prepared output. Physical sheets remain My Hardware inventory. Switching never moves parts or applies a draft.",
     );
+}
+
+fn navigation(ui: &mut Ui) {
+    use crate::commands::{Action, Workspace};
+    let id = ui.make_persistent_id("gallery-workspace");
+    let mut workspace = ui.data_mut(|d| d.get_temp::<Workspace>(id).unwrap_or_default());
+    let task_id = id.with("task");
+    let mut task = ui.data_mut(|d| d.get_temp::<Action>(task_id));
+    ui.horizontal(|ui| {
+        if let Some(action) = workspace_tabs(ui, workspace) {
+            workspace = if action == Action::PrepareWorkspace {
+                Workspace::Prepare
+            } else {
+                Workspace::Review
+            };
+            task = None;
+        }
+    });
+    if let Some(action) = workspace_commands(ui, workspace, task, |_| None) {
+        task = Some(action);
+    }
+    ui.separator();
+    if let Some(task) = task {
+        ui.label(task.label());
+    }
+    ui.weak("Illustrative navigation · no project changes");
+    ui.data_mut(|d| {
+        d.insert_temp(id, workspace);
+        if let Some(task) = task {
+            d.insert_temp(task_id, task);
+        } else {
+            d.remove::<Action>(task_id);
+        }
+    });
 }

@@ -21,7 +21,7 @@ impl Workbench {
         ui.horizontal(|ui| {
             ui.heading("Color study");
             if ui::close(ui, "Back to workbench") {
-                self.manufacturing.panel = 0;
+                self.close_study(ui.ctx());
             }
         });
         ui.horizontal_wrapped(|ui| {

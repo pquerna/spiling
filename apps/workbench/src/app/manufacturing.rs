@@ -28,7 +28,6 @@ struct BeadStatistics {
 pub(super) struct ManufacturingUi {
     draft: Option<IntentDraft>,
     ignored_nonce: Option<u64>,
-    pub panel: usize,
     pub(super) prepare_section: u8,
     pub(super) replay_record: Option<SourceHash>,
     pub replay: crate::replay::View,
@@ -57,7 +56,7 @@ impl ManufacturingUi {
 }
 impl Workbench {
     pub(super) fn show_prepare(&mut self, section: u8) {
-        self.manufacturing.panel = 1;
+        self.show_panel(Panel::Prepare);
         self.manufacturing.prepare_section = section;
     }
 
@@ -83,18 +82,23 @@ impl Workbench {
                 })
     }
     pub(super) fn manufacturing_pane(&mut self, ui: &mut egui::Ui) {
-        if self.manufacturing.panel == 5 {
+        if self.work_area.panel == Panel::Alternative {
             self.alternative_pane(ui);
             return;
         }
-        if self.manufacturing.panel == 6 {
+        if self.work_area.panel == Panel::Option {
             self.option_pane(ui);
             return;
         }
-        let prepare = self.manufacturing.panel == 1;
+        let prepare = self.work_area.panel == Panel::Prepare;
         ui::pane_header(
             ui,
-            if prepare { "Prepare" } else { "Review layers" },
+            if prepare {
+                ["Printer", "Material", "Settings", "Position", "Infill"]
+                    [usize::from(self.manufacturing.prepare_section.min(4))]
+            } else {
+                "Review layers"
+            },
             &self
                 .state
                 .project
@@ -116,23 +120,10 @@ impl Workbench {
                     },
                 ),
         );
-        if ui::close(ui, "Back to Inspect") {
-            self.manufacturing.panel = 0;
+        if ui::close(ui, "Back to preparation") {
+            self.show_panel(Panel::Parts);
         }
-        if prepare {
-            ui.horizontal_wrapped(|ui| {
-                for (index, label) in ["Setup", "Material", "Settings", "Placement", "Infill"]
-                    .iter()
-                    .enumerate()
-                {
-                    ui.selectable_value(
-                        &mut self.manufacturing.prepare_section,
-                        index as u8,
-                        *label,
-                    );
-                }
-            });
-        } else {
+        if !prepare {
             ui.colored_label(self.prefs.theme.tokens().warning, "NOT MACHINE READY");
             ui::help(
                 ui,
@@ -150,7 +141,7 @@ impl Workbench {
         egui::ScrollArea::vertical()
             .id_salt((
                 "manufacturing-body",
-                self.manufacturing.panel,
+                self.work_area.panel,
                 self.manufacturing.prepare_section,
             ))
             .show(ui, |ui| self.manufacturing_ui(ui));
@@ -161,15 +152,19 @@ impl Workbench {
             return;
         };
         let m = self.state.manufacturing.clone();
-        if self.manufacturing.panel == 1
+        if self.work_area.panel == Panel::Prepare
             && matches!(self.manufacturing.prepare_section, 1 | 2)
             && self.manufacturing.trial.is_some()
         {
             ui.label("Current drafts are retained. Return to the alternative or explicitly end it before editing Current.");
             return;
         }
-        if self.manufacturing.panel == 2 {
-            if self.manufacturing_current() {
+        if self.work_area.panel == Panel::Review {
+            if m.artifact.is_none() {
+                if ui::primary(ui, "Prepare plate", self.disabled(Action::PrepareWorkspace)) {
+                    self.queued = Some(Action::PrepareWorkspace);
+                }
+            } else if self.manufacturing_current() {
                 self.button(ui, Action::Verify);
                 self.primary_button(ui, Action::Export);
             } else {
@@ -330,7 +325,7 @@ impl Workbench {
             && self.awaiting_serial.is_none();
         let writable = ready && !project.read_only;
         let m = self.state.manufacturing.clone();
-        if self.manufacturing.panel == 1 {
+        if self.work_area.panel == Panel::Prepare {
             if matches!(self.manufacturing.prepare_section, 1 | 2)
                 && self.manufacturing.trial.is_some()
             {
@@ -338,7 +333,7 @@ impl Workbench {
                     "An alternative is open. Current Settings drafts are retained, not consumed.",
                 );
                 if ui.button("Return to alternative").clicked() {
-                    self.manufacturing.panel = 5;
+                    self.show_panel(Panel::Alternative);
                 }
                 return;
             }
@@ -472,7 +467,7 @@ impl Workbench {
                     }
                 });
             }
-        } else if self.manufacturing.panel == 2 {
+        } else if self.work_area.panel == Panel::Review {
             if m.loading {
                 ui.spinner();
                 ui.label("Retrieving checked actual output…");
@@ -628,7 +623,11 @@ impl Workbench {
                     );
                 });
             } else {
-                ui.weak("Freshly verify the active compiled output to enable replay and export.");
+                ui.weak(if m.artifact.is_some() {
+                    "Verify the current output to review layers and export."
+                } else {
+                    "Slice this plate in Prepare to review its actual layers."
+                });
             }
         }
     }

@@ -37,6 +37,28 @@ Longer explanations use a deliberately opened help or
 named details surface. Essential scope, errors, save uncertainty, incompleteness,
 current verification and consequential qualification remain visible.
 
+## Workspace navigation
+
+Prepare and Review are the persistent workspaces. The application bar contains
+Project/Edit/View/Help, project save state and command search. Grouped commands
+below the workspace tabs change with the task: Parts/Setup/Construction in Prepare,
+Output/Inspect in Review. Narrow surfaces collapse whole groups into menus in the
+same order; workflow tabs do not wrap together with arbitrary commands.
+
+Properties and Section analysis remain available in both workspaces. Selecting a
+face does not switch workspace. Surface finish is an authoring task within Prepare;
+Color study is a focused page with an explicit return to its invoking task. Plate
+navigation retains workspace/task and compatible inspection state. Background
+completion never activates another workspace. Camera controls remain at the canvas;
+gesture instructions use deliberate help.
+
+Workspace switching hides and retains drafts. Slice plate uses the existing compile
+operation and refuses unapplied changes; Check setup is offered when preflight is
+required. The active editor owns Apply, and Review promotes Verify program followed
+by Export plate only after a fresh passing inspection. Prepare displays source
+geometry; Review exposes checked actual output. Section analysis can deliberately
+inspect either representation. None of these navigation controls writes a project.
+
 ## Actions and exits
 
 Close ends a view; Discard draft abandons an edit; Cancel operation requests native
@@ -63,7 +85,7 @@ physical qualification; **NOT MACHINE READY** belongs in Review/export context.
 
 Prepare separates setup, material, settings, placement and infill into named tasks.
 Applying a settings draft still commits the complete intent. Infill edits display
-percentages while retaining the engine fraction contract. Check/Compile describe
+percentages while retaining the engine fraction contract. Check setup/Slice plate describe
 committed inputs; unapplied drafts stay labelled. Review promotes Verify program,
 then Export after current passing inspection. Qualification and stale state remain
 visible beside the action.
@@ -104,7 +126,7 @@ complete surrounding deposition, including later layers. It is display context,
 not evidence that those commands have executed.
 
 Inspectors keep task navigation and their action strip outside the body scroll.
-Back to Inspect hides an ordinary draft; replacing its source face/part or infill
+Back to preparation hides an ordinary draft; replacing its source face/part or infill
 scope asks whether to keep editing or discard. Project replacement still uses the
 engine's independent dirty-state confirmation after resolving local drafts.
 
@@ -191,7 +213,7 @@ are bounded per plate; a changed program resets playback selection.
 
 ## Exercising a change
 
-Use the production gallery's Panels, Fields, Color, Acquisition, Try / Compare, Build area, Arrange and Plates categories in each theme.
+Use the production gallery's Panels, Fields, Color, Acquisition, Try / Compare, Build area, Arrange, Plates and Navigation categories in each theme.
 The complete panel specimen includes ready, changed, blocked, pending, uncertain,
 invalid, read-only and stale states; its close/reopen path is interactive. Inspect narrow/normal panes,
 long names and scaled text. Test keyboard help, primary-action reasons, Escape,

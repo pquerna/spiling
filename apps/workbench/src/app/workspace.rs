@@ -40,10 +40,6 @@ impl Workbench {
     pub(super) fn tree_ui(&mut self, ui: &mut egui::Ui) {
         self.plates_ui(ui);
         ui::pane_header(ui, "Model", "Selected plate · parts and faces");
-        ui.horizontal_wrapped(|ui| {
-            self.button(ui, crate::commands::Action::Analysis);
-            self.button(ui, crate::commands::Action::Arrange);
-        });
         if self.analysis.view.enabled {
             ui.weak(format!(
                 "Section {:?} · {:.3} mm",

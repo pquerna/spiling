@@ -13,6 +13,9 @@ use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use spiling_contracts::geometry::*;
 
+mod chrome;
+use crate::commands::Workspace;
+use chrome::{Panel, WorkArea};
 mod alternative;
 pub(crate) use alternative::gallery as alternative_gallery;
 
@@ -53,7 +56,7 @@ pub struct Workbench {
     show_feedback: bool,
     command_selection: Option<usize>,
     command_return_focus: Option<egui::Id>,
-    surface_focus: [Option<egui::Id>; 4],
+    surface_focus: [Option<egui::Id>; 5],
     command_query: String,
     command_focus: bool,
     compact_tree: bool,
@@ -77,6 +80,7 @@ pub struct Workbench {
     queued_picker: Option<Picker>,
     queued_manufacturing: Option<spiling_contracts::manufacturing::ManufacturingCommand>,
     queued_project: Option<spiling_contracts::project::ProjectCommand>,
+    work_area: WorkArea,
     manufacturing: manufacturing::ManufacturingUi,
     material: material::MaterialUi,
     process: process::ProcessUi,
@@ -127,7 +131,7 @@ impl Workbench {
             show_feedback: false,
             command_selection: None,
             command_return_focus: None,
-            surface_focus: [None; 4],
+            surface_focus: [None; 5],
             command_query: String::new(),
             command_focus: false,
             compact_tree: false,
@@ -150,6 +154,7 @@ impl Workbench {
             queued_picker: None,
             queued_manufacturing: None,
             queued_project: None,
+            work_area: WorkArea::default(),
             manufacturing: manufacturing::ManufacturingUi::default(),
             material: material::MaterialUi::default(),
             process: process::ProcessUi::default(),
@@ -175,6 +180,12 @@ impl Workbench {
         }
     }
     fn disabled(&self, action: Action) -> Option<&'static str> {
+        if action == Action::Compile && (self.project_drafts() || self.subject_drafts()) {
+            return Some("Apply or discard unapplied changes before slicing");
+        }
+        if action == Action::Compare && !self.manufacturing_current() {
+            return Some("Freshly verify the current plate before comparing settings");
+        }
         if let Some(project) = &self.state.project {
             if action == Action::LoadMaterial
                 && self.material.has_changes(
@@ -196,6 +207,7 @@ impl Workbench {
             }
         }
         if self.awaiting_serial.is_some()
+            && !action.navigation()
             && !matches!(action, Action::Gallery | Action::License | Action::Analysis)
         {
             Some("Waiting for native admission")
@@ -216,6 +228,9 @@ impl Workbench {
     }
     fn dispatch(&mut self, action: Action, frame: &eframe::Frame, ctx: &egui::Context) {
         if self.disabled(action).is_some() {
+            return;
+        }
+        if self.task_action(action, ctx) {
             return;
         }
         if self.guard_action(action) {
@@ -403,8 +418,10 @@ impl Workbench {
                 self.close_analysis(ctx);
             } else if self.show_feedback {
                 self.show_feedback = false;
-            } else if self.manufacturing.panel != 0 {
-                self.manufacturing.panel = 0;
+            } else if self.work_area.panel == Panel::Study {
+                self.close_study(ctx);
+            } else if self.work_area.panel != self.work_area.home_panel() {
+                self.work_area.close_task();
             } else if self.selected.is_some() || self.occurrence.is_some() {
                 self.clear_selection();
             }
@@ -778,97 +795,7 @@ impl eframe::App for Workbench {
         }
         self.library_sync();
         let compact = ui.available_width() < 900.0;
-        egui::Panel::top("commands").show(ui, |ui| {
-            let wide = ui.available_width() >= 900.0;
-            ui.horizontal_wrapped(|ui| {
-                ui.heading("Spiling");
-                if compact {
-                    ui.toggle_value(&mut self.compact_tree, "Models");
-                }
-                if wide {
-                    ui.weak("Development");
-                }
-                ui.menu_button("Project", |ui| {
-                    for action in [
-                        Action::Library,
-                        Action::New,
-                        Action::Open,
-                        Action::OpenReadOnly,
-                        Action::Recover,
-                        Action::Save,
-                        Action::SaveAs,
-                        Action::Import,
-                        Action::Close,
-                    ] {
-                        self.button(ui, action);
-                    }
-                });
-                self.button(ui, Action::Analysis);
-                ui.menu_button("Edit", |ui| {
-                    for action in [Action::Undo, Action::Redo, Action::Arrange] {
-                        self.button(ui, action);
-                    }
-                });
-                ui.menu_button("Manufacturing", |ui| {
-                    for action in [
-                        Action::LoadIntent,
-                        Action::LoadMaterial,
-                        Action::LoadMaterialCatalog,
-                        Action::Preflight,
-                        Action::Compile,
-                        Action::Verify,
-                        Action::Export,
-                    ] {
-                        self.button(ui, action);
-                    }
-                });
-                if ui.button("Commands…").on_hover_text("Ctrl/Cmd+K").clicked() {
-                    self.show_commands = true;
-                    self.command_focus = true;
-                    self.command_query.clear();
-                }
-                ui.menu_button("Engine", |ui| {
-                    self.button(ui, Action::Restart);
-                    self.button(ui, Action::Cancel);
-                    self.button(ui, Action::Resume);
-                    if ui
-                        .add_enabled(
-                            self.state.phase == Phase::Running && !self.state.busy,
-                            egui::Button::new("Run unitless triangle diagnostic"),
-                        )
-                        .clicked()
-                    {
-                        self.queued_host = Some(Command::Diagnostic);
-                    }
-                });
-                ui.menu_button("Help", |ui| {
-                    ui.label("Appearance");
-                    ui::theme_choice(ui, &mut self.prefs.theme);
-                    ui.separator();
-                    self.button(ui, Action::License);
-                    self.button(ui, Action::Gallery);
-                });
-            });
-            ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                for (index, label) in ["Inspect", "Prepare", "Review", "Finish", "Study"]
-                    .into_iter()
-                    .enumerate()
-                {
-                    if ui
-                        .selectable_value(&mut self.manufacturing.panel, index, label)
-                        .clicked()
-                        && self.library.open
-                    {
-                        self.close_library(&ctx);
-                    }
-                }
-                ui.separator();
-                self.button(ui, Action::Open);
-                self.button(ui, Action::Save);
-                self.button(ui, Action::Import);
-            });
-        });
+        self.chrome_ui(ui, compact);
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(format!("{:?}", self.state.phase));
@@ -928,7 +855,7 @@ impl eframe::App for Workbench {
             });
         } else if self.library.open {
             egui::CentralPanel::default_margins().show(ui, |ui| self.library_page(ui));
-        } else if self.manufacturing.panel == 4 {
+        } else if self.work_area.panel == Panel::Study {
             egui::CentralPanel::default_margins().show(ui, |ui| self.study_page(ui));
         } else {
             if self.layout.open || self.analysis.open || !compact || !self.compact_tree {
@@ -947,26 +874,18 @@ impl eframe::App for Workbench {
                             self.analysis_ui(ui);
                             return;
                         }
-                        if self.manufacturing.panel == 3 {
+                        if self.work_area.panel == Panel::Surface {
                             self.finish_pane(ui);
                             return;
                         }
-                        if matches!(self.manufacturing.panel, 1 | 2 | 5 | 6) {
+                        if matches!(
+                            self.work_area.panel,
+                            Panel::Prepare | Panel::Review | Panel::Alternative | Panel::Option
+                        ) {
                             self.manufacturing_pane(ui);
                             return;
                         }
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            if self.manufacturing.panel == 0 {
-                                self.selection_ui(ui);
-                                self.project(ui);
-                            } else if self.manufacturing.panel == 3 {
-                                self.surface_ui(ui);
-                            } else if self.manufacturing.panel == 4 {
-                                self.study_ui(ui);
-                            } else {
-                                self.manufacturing_ui(ui);
-                            }
-                        });
+                        self.properties_pane(ui);
                     });
             }
             if !compact || (self.compact_tree && !self.analysis.open) {
@@ -1000,7 +919,7 @@ impl eframe::App for Workbench {
                             self.queued_host = Some(Command::ResumeDisplay);
                         }
                     }
-                    if !self.layout.open {
+                    if !self.layout.open && self.work_area.workspace == Workspace::Review {
                         ui::replay_control_area(ui, |ui| self.replay_controls(ui));
                     }
                     let current = self.display_current();
@@ -1032,7 +951,9 @@ impl eframe::App for Workbench {
                         self.primary_button(ui, Action::Import);
                     }
                     let layout_preview = self.layout_preview();
-                    let review = if self.layout.open {
+                    let review = if self.layout.open
+                        || (self.work_area.workspace != Workspace::Review && !self.analysis.open)
+                    {
                         None
                     } else {
                         self.selected_manufacturing_review()

@@ -21,6 +21,9 @@ pub use color::{ColorDensity, ColorInspector, ColorMeaning, ColorPresentation};
 pub use stock::{stock_results, stock_target};
 pub use surfaces::{close, group, help, pane_header, primary, problem};
 
+mod navigation;
+pub use navigation::{workspace_commands, workspace_tabs};
+
 use egui::{Color32, RichText, Ui};
 use serde::{Deserialize, Serialize};
 use spiling_contracts::manufacturing::{LayerHeightPolicy, LayerHeightReason, ManufacturingIntent};

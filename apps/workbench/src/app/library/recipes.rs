@@ -311,7 +311,7 @@ impl Workbench {
                     if let Err(error) = context.request(&transfer.recipe.definition) { ui.colored_label(ui.visuals().error_fg_color, error); }
                     let validation = context.request(&transfer.recipe.definition).err();
                     if ui::primary(ui, "Load study", if !writable { Some("Open a writable project and wait for pending operations") } else { validation.as_deref() }) && let Some(h) = &self.state.hello {
-                        self.library.hardware.clear_secret(); self.library.open = false; self.manufacturing.panel = 4;
+                        self.library.hardware.clear_secret(); self.library.open = false; self.surface_focus[4] = ui.ctx().memory(|m| m.focused()); self.work_area.open(Panel::Study);
                         self.queued_project = Some(ProjectCommand::LoadRecipeStudy { session_id: h.session_id.clone(), base_revision: current.as_ref().expect("current").1, reference: reference.clone(), context: context.clone() });
                     }
                 });

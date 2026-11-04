@@ -7,13 +7,49 @@ use crate::host::{Phase, Snapshot};
 #[cfg(test)]
 mod tests {
     #[test]
+    fn local_navigation_survives_startup_and_busy_engine_but_respects_native_picker() {
+        let mut state = crate::host::Snapshot::default();
+        for action in [
+            super::Action::PrepareWorkspace,
+            super::Action::ReviewWorkspace,
+            super::Action::Surface,
+        ] {
+            assert!(action.disabled(&state).is_none());
+            state.busy = true;
+            assert!(action.disabled(&state).is_none());
+            state.picker_open = true;
+            assert!(action.disabled(&state).is_some());
+            state.picker_open = false;
+        }
+        assert!(super::Action::Compile.disabled(&state).is_some());
+    }
+    #[test]
     fn save_as_names_the_project_file_not_a_directory() {
         assert_eq!(super::Action::SaveAs.label(), "Save As .spil…");
     }
 }
 
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Workspace {
+    #[default]
+    Prepare,
+    Review,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
+    PrepareWorkspace,
+    ReviewWorkspace,
+    Properties,
+    Printer,
+    Material,
+    Settings,
+    Placement,
+    Infill,
+    Surface,
+    Study,
+    ReviewLayers,
+    Compare,
     Analysis,
     Arrange,
     Library,
@@ -42,6 +78,18 @@ pub enum Action {
 }
 impl Action {
     pub const ALL: &[Self] = &[
+        Self::PrepareWorkspace,
+        Self::ReviewWorkspace,
+        Self::Properties,
+        Self::Printer,
+        Self::Material,
+        Self::Settings,
+        Self::Placement,
+        Self::Infill,
+        Self::Surface,
+        Self::Study,
+        Self::ReviewLayers,
+        Self::Compare,
         Self::Analysis,
         Self::Arrange,
         Self::Library,
@@ -70,6 +118,18 @@ impl Action {
     ];
     pub fn label(self) -> &'static str {
         match self {
+            Self::PrepareWorkspace => "Prepare",
+            Self::ReviewWorkspace => "Review",
+            Self::Properties => "Properties",
+            Self::Printer => "Printer",
+            Self::Material => "Material",
+            Self::Settings => "Settings",
+            Self::Placement => "Position",
+            Self::Infill => "Infill",
+            Self::Surface => "Surface finish",
+            Self::Study => "Color study",
+            Self::ReviewLayers => "Layers",
+            Self::Compare => "Compare settings",
             Self::Analysis => "Section analysis",
             Self::Arrange => "Arrange…",
             Self::Library => "Library",
@@ -84,7 +144,7 @@ impl Action {
             Self::LoadMaterial => "Load material profile…",
             Self::LoadMaterialCatalog => "Browse material catalog…",
             Self::Preflight => "Check setup",
-            Self::Compile => "Compile program",
+            Self::Compile => "Slice plate",
             Self::Verify => "Verify program",
             Self::Export => "Export plate…",
             Self::Undo => "Undo",
@@ -97,12 +157,33 @@ impl Action {
             Self::Gallery => "Component gallery",
         }
     }
+    pub fn navigation(self) -> bool {
+        matches!(
+            self,
+            Self::PrepareWorkspace
+                | Self::ReviewWorkspace
+                | Self::Properties
+                | Self::Printer
+                | Self::Material
+                | Self::Settings
+                | Self::Placement
+                | Self::Infill
+                | Self::Surface
+                | Self::Study
+                | Self::ReviewLayers
+        )
+    }
     pub fn disabled(self, state: &Snapshot) -> Option<&'static str> {
         if matches!(self, Self::License | Self::Gallery | Self::Analysis) {
             return None;
         }
         if state.confirmation.is_some() {
             return Some("Resolve the discard confirmation first");
+        }
+        if self.navigation() {
+            return state
+                .picker_open
+                .then_some("Finish or cancel the native file dialog first");
         }
         if matches!(self, Self::Close) {
             return None;
@@ -140,6 +221,9 @@ impl Action {
         }
         let m = &state.manufacturing;
         match self {
+            Self::Compare if m.artifact.is_none() => {
+                Some("Slice and freshly verify the current plate first")
+            }
             Self::Arrange if state.scene.as_ref().is_none_or(|s| s.occurrence_count == 0) => {
                 Some("Import a part first")
             }

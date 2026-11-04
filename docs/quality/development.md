@@ -563,6 +563,11 @@ draft navigation, read-only focus, different setup captures, atomic Undo/Redo an
 source-independent save/reopen. Prepare and freshly inspect/export each plate;
 change B and confirm A's unchanged semantic result survives, while shared-definition
 contribution edits invalidate all affected jobs. Navigation itself must not dirty.
+Exercise Prepare/Review transitions with an unapplied Settings or surface draft;
+return to the same task and confirm slicing refuses the draft. Check narrow command
+group menus, palette routes, cross-workspace properties/section inspection and Color
+study return. Complete Check setup, Slice plate, fresh verification and export;
+background completion must not steal the active workspace.
 In Overview, exercise distinct curved and perforated parts, rotated occurrences,
 a configured empty plate and an inactive-only source definition. Check three-quarter
 shape/depth, common physical scale, dimmed inactive context, both themes and narrow

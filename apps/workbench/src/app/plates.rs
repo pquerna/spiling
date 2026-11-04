@@ -21,7 +21,7 @@ struct PlateView {
     section: crate::analysis::SectionView,
     replay: crate::replay::View,
     mode: crate::layers::Mode,
-    panel: usize,
+    work_area: WorkArea,
     prepare_section: u8,
     record: Option<SourceHash>,
     occurrence: Option<OccurrenceId>,
@@ -122,11 +122,7 @@ impl Workbench {
                     section: self.analysis.view.clone(),
                     replay: self.manufacturing.replay,
                     mode: self.manufacturing.layers.mode,
-                    panel: if self.manufacturing.panel == 5 {
-                        2
-                    } else {
-                        self.manufacturing.panel
-                    },
+                    work_area: self.work_area.retained(),
                     prepare_section: self.manufacturing.prepare_section,
                     record: self.manufacturing.replay_record.clone(),
                     occurrence: self.occurrence,
@@ -143,6 +139,7 @@ impl Workbench {
         self.process.discard();
         self.layout = Default::default();
         self.manufacturing = Default::default();
+        self.work_area = Default::default();
         self.material = Default::default();
         self.analysis = Default::default();
         self.analysis.project = Some(p.project_id.clone());
@@ -156,7 +153,7 @@ impl Workbench {
             self.analysis.view = view.section.clone();
             self.manufacturing.replay = view.replay;
             self.manufacturing.layers.mode = view.mode;
-            self.manufacturing.panel = view.panel;
+            self.work_area = view.work_area.clone();
             self.manufacturing.prepare_section = view.prepare_section;
             self.manufacturing.replay_record = view.record.clone();
             self.occurrence = view.occurrence.filter(|id| {
