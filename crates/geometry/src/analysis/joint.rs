@@ -35,6 +35,7 @@ pub(super) use radial_metric::{
 };
 mod inner_prism;
 pub use inner_prism::NativeInnerMaterialPrism;
+mod regular_side;
 
 const MAX_SCRATCH: usize = 64 * 1024 * 1024;
 
@@ -176,6 +177,7 @@ pub struct NativeSourceLeafReceipt {
     native_world_z_invariant: bool,
     native_convex_section_topology: bool,
     native_convex_capture_topology: bool,
+    native_regular_closed_sides: [bool; 2],
     radial_product: Option<NativeRadialLeaf>,
     endpoint_radial_products: [Option<NativeEndpointRadialLeaf>; 2],
     sample_loops: Arc<Vec<NativeSourceLoopCapture>>,
@@ -785,18 +787,24 @@ fn common_kernel(
     // subsequently checked with outward arithmetic; no sampled authority.
     for ring in [a, b] {
         let mut bounds = [[f64::INFINITY, f64::NEG_INFINITY]; 2];
+        let mut vertex_average = [0.0; 2];
+        let weight = 1.0 / ring.points.len() as f64;
         for p in &ring.points {
             work.charge(1, cancel)?;
             for axis in 0..2 {
                 bounds[axis][0] = bounds[axis][0].min(p[axis]);
                 bounds[axis][1] = bounds[axis][1].max(p[axis]);
+                vertex_average[axis] += p[axis] * weight;
             }
         }
         let center = std::array::from_fn(|axis| 0.5 * bounds[axis][0] + 0.5 * bounds[axis][1]);
-        if loop_kernel_contains(a, center, radius, work, cancel)?
-            && loop_kernel_contains(b, center, radius, work, cancel)?
-        {
-            return Ok(true);
+        for proposal in [center, vertex_average] {
+            if proposal.into_iter().all(f64::is_finite)
+                && loop_kernel_contains(a, proposal, radius, work, cancel)?
+                && loop_kernel_contains(b, proposal, radius, work, cancel)?
+            {
+                return Ok(true);
+            }
         }
         for i in 0..ring.points.len() {
             let p = ring.points[i];
@@ -3323,16 +3331,37 @@ impl PendingNativeUnionProof {
                 return Ok(true);
             }
         }
-        let Ok(geometry) = planar::actual_pair_collar(
-            lower.actual_material,
-            upper.actual_material,
-            &matching,
-            &mut scratch,
-            work,
-            cancel,
-        )?
-        else {
-            return Ok(false);
+        let common_convex_kernel = if convex_capture_regular_pair(before, after) {
+            let saved = scratch.bytes;
+            let proof = (|| {
+                let lower_ring = ring(&lower.actual_material[0], &mut scratch, work, cancel)?;
+                let upper_ring = ring(&upper.actual_material[0], &mut scratch, work, cancel)?;
+                common_kernel(&lower_ring, &upper_ring, 0.0, work, cancel)
+            })();
+            scratch.bytes = saved;
+            proof?
+        } else {
+            false
+        };
+        let geometry = if common_convex_kernel {
+            let mut digest = Sha256::new();
+            digest.update(b"spiling-convex-captures-closed-regular-sides-actual-kernel-1\0");
+            digest.update(lower_hash);
+            digest.update(upper_hash);
+            digest.finalize().into()
+        } else {
+            let Ok(geometry) = planar::actual_pair_collar(
+                lower.actual_material,
+                upper.actual_material,
+                &matching,
+                &mut scratch,
+                work,
+                cancel,
+            )?
+            else {
+                return Ok(false);
+            };
+            geometry
         };
         let receipt = NativeRegularInterfacePairReceipt {
             lower: lower_hash,
@@ -3546,6 +3575,7 @@ fn same_leaf(a: &NativeSourceLeafReceipt, b: &NativeSourceLeafReceipt) -> bool {
         && a.native_world_z_invariant == b.native_world_z_invariant
         && a.native_convex_section_topology == b.native_convex_section_topology
         && a.native_convex_capture_topology == b.native_convex_capture_topology
+        && a.native_regular_closed_sides == b.native_regular_closed_sides
         && a.rectangle.is_some() == b.rectangle.is_some()
         && a.source_rectangle == b.source_rectangle
         && a.radial_product == b.radial_product
@@ -3602,6 +3632,7 @@ fn hash_leaf(hash: &mut Sha256, leaf: &NativeSourceLeafReceipt) {
     hash.update([u8::from(leaf.native_world_z_invariant)]);
     hash.update([u8::from(leaf.native_convex_section_topology)]);
     hash.update([u8::from(leaf.native_convex_capture_topology)]);
+    hash.update(leaf.native_regular_closed_sides.map(u8::from));
     hash.update([u8::from(leaf.rectangle.is_some())]);
     hash.update([u8::from(leaf.source_rectangle.is_some())]);
     if let Some(product) = &leaf.source_rectangle {
@@ -4169,6 +4200,22 @@ fn match_loop_captures(
     result
 }
 
+fn convex_capture_regular_pair(
+    before: &NativeSourceLeafReceipt,
+    after: &NativeSourceLeafReceipt,
+) -> bool {
+    [before, after].into_iter().all(|leaf| {
+        leaf.positive
+            && leaf.proof_kind == NativeSourceLeafProofKind::ClosedSlab
+            && leaf.native_convex_capture_topology
+            && leaf.sample_loops.len() == 1
+            && !leaf.sample_loops[0].hole
+    }) && !before.critical_interfaces[1]
+        && !after.critical_interfaces[0]
+        && before.native_regular_closed_sides[1]
+        && after.native_regular_closed_sides[0]
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Retain both independently admitted leaf receipts and boundary tubes together with the actual interface pair witnesses"
@@ -4212,6 +4259,15 @@ fn certify_regular_material_interface(
     }
     boundary_loop_confinement(before, before_tube, 1, interface, scratch, work, cancel)?;
     boundary_loop_confinement(after, after_tube, 0, interface, scratch, work, cancel)?;
+    if convex_capture_regular_pair(before, after)
+        && shape_kernels_overlap(
+            &before.sample_loops[0].shape,
+            &after.sample_loops[0].shape,
+            0.0,
+        )?
+    {
+        return Ok(());
+    }
     // Exact actual geometry identity proves the printed interface, not native
     // incidence: the latter came from original branch flow and confinement.
     if identical {
@@ -6190,6 +6246,26 @@ fn certify_source_leaf(
             .add(Interval::point(policy.candidate_coordinate_error_mm))
             .hi
     });
+    let mut native_regular_closed_sides = [false; 2];
+    if proof_kind == NativeSourceLeafProofKind::ClosedSlab
+        && analysis.has_native_convex_capture_topology_proof()
+        && !analysis.has_native_convex_section_topology_proof()
+        && sample_loops.len() == 1
+        && !sample_loops[0].hole
+    {
+        scratch.owned(regular_side::SCRATCH_BYTES, work, cancel)?;
+        let proof = regular_side::certify(
+            source.source_view()?,
+            pose,
+            interval,
+            [sample_band.lo, sample_band.hi],
+            critical_interfaces,
+            scratch.remaining(),
+            work,
+            cancel,
+        );
+        native_regular_closed_sides = proof?;
+    }
     Ok(NativeSourceLeafReceipt {
         source: NativeUnionSourceCapture {
             identity: Arc::new(NativeUnionSourceIdentity {
@@ -6221,6 +6297,7 @@ fn certify_source_leaf(
         source_rectangle,
         native_convex_section_topology: analysis.has_native_convex_section_topology_proof(),
         native_convex_capture_topology: analysis.has_native_convex_capture_topology_proof(),
+        native_regular_closed_sides,
         radial_product,
         sample_loop_clearance_mm,
         endpoint_radial_products,
@@ -10544,6 +10621,317 @@ type NativePortBranches = (Vec<[usize; 3]>, Vec<[usize; 3]>);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn convex_capture_regular_interface_keeps_later_actual_crescents_connected() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/geometry/cylinder.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(200_000_000);
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let half_angle = 0.5 * 1.0_f64.to_radians();
+        let component = half_angle.sin() / 2.0_f64.sqrt();
+        let pose = RigidPoseMm {
+            translation_mm: [0.0, 0.0, 0.08726261625534897],
+            rotation_xyzw: [component, component, 0.0, half_angle.cos()],
+        };
+        let unit = 9.984000607895137e-5;
+        let before = ranged_slab(
+            &source,
+            pose,
+            [unit * 2.0, unit * 4.0],
+            unit * 3.0,
+            0,
+            &mut work,
+        );
+        let after = ranged_slab(
+            &source,
+            pose,
+            [unit * 4.0, unit * 8.0],
+            unit * 6.0,
+            before.retained_bytes(),
+            &mut work,
+        );
+        let before_m = xy_candidate(&before, unit * 3.0);
+        let after_m = xy_candidate(&after, unit * 6.0);
+        let before_leaf = source_leaf(&source, 1, pose, &before, &mut work);
+        let after_leaf = source_leaf(&source, 1, pose, &after, &mut work);
+        assert!(
+            convex_capture_regular_pair(&before_leaf, &after_leaf),
+            "capture {:?}/{:?}, sides {:?}/{:?}, critical {:?}/{:?}",
+            before_leaf.native_convex_capture_topology,
+            after_leaf.native_convex_capture_topology,
+            before_leaf.native_regular_closed_sides,
+            after_leaf.native_regular_closed_sides,
+            before_leaf.critical_interfaces,
+            after_leaf.critical_interfaces
+        );
+        let mut pending = certify_native_union(
+            &[sampled_occurrence(&source, &after, &after_leaf, None)],
+            &after_m,
+            policy(0.0),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget {
+                        leaf: &before_leaf,
+                        actual_material: &before_m
+                    },
+                    NativeCriticalCollarTarget {
+                        leaf: &after_leaf,
+                        actual_material: &after_m
+                    },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn convex_capture_regular_interface_requires_complete_closed_sides_and_actual_kernel() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/geometry/cylinder.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(200_000_000);
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let half_angle = 0.5 * 1.0_f64.to_radians();
+        let component = half_angle.sin() / 2.0_f64.sqrt();
+        let pose = RigidPoseMm {
+            translation_mm: [0.0, 0.0, 0.08726261625534897],
+            rotation_xyzw: [component, component, 0.0, half_angle.cos()],
+        };
+        let cut = 9.984000607895137e-5;
+        let before = ranged_slab(&source, pose, [0.0, cut], cut * 0.5, 0, &mut work);
+        let after = ranged_slab(
+            &source,
+            pose,
+            [cut, cut * 2.0],
+            cut * 1.5,
+            before.retained_bytes(),
+            &mut work,
+        );
+        let before_m = xy_candidate(&before, cut * 0.5);
+        let after_m = xy_candidate(&after, cut * 1.5);
+        let before_leaf = source_leaf(&source, 1, pose, &before, &mut work);
+        let after_leaf = source_leaf(&source, 1, pose, &after, &mut work);
+        assert!(
+            before_leaf.native_convex_capture_topology && after_leaf.native_convex_capture_topology
+        );
+        assert!(
+            !before_leaf.native_convex_section_topology
+                && !after_leaf.native_convex_section_topology
+        );
+        assert_eq!(before_leaf.critical_interfaces, [true, false]);
+        assert_eq!(before_leaf.native_regular_closed_sides, [false, true]);
+        assert_eq!(after_leaf.native_regular_closed_sides, [true, true]);
+        let before_tube = source_boundary_tube(&before_leaf, &[], &mut work, &cancel).unwrap();
+        let after_tube = source_boundary_tube(&after_leaf, &[], &mut work, &cancel).unwrap();
+        assert!(
+            !shape_kernels_overlap(
+                &before_leaf.sample_loops[0].shape,
+                &after_leaf.sample_loops[0].shape,
+                Interval::point(before_leaf.sample_region_error_mm)
+                    .add(Interval::point(after_leaf.sample_region_error_mm))
+                    .hi
+            )
+            .unwrap()
+        );
+        let first = certify_native_union(
+            &[sampled_occurrence(&source, &before, &before_leaf, None)],
+            &before_m,
+            policy(0.0),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let mut second = certify_native_union(
+            &[sampled_occurrence(&source, &after, &after_leaf, None)],
+            &after_m,
+            policy(0.0),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            second
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget {
+                        leaf: &before_leaf,
+                        actual_material: &before_m
+                    },
+                    NativeCriticalCollarTarget {
+                        leaf: &after_leaf,
+                        actual_material: &after_m
+                    },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+        );
+        certify_regular_material_interface(
+            &before_leaf,
+            &after_leaf,
+            cut,
+            &before_tube,
+            &after_tube,
+            &second.regular_interfaces,
+            &mut Scratch { bytes: 0 },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        for changed in 0..4 {
+            let mut rejected = after_leaf.clone();
+            match changed {
+                0 => rejected.native_regular_closed_sides[0] = false,
+                1 => rejected.native_convex_capture_topology = false,
+                2 => rejected.critical_interfaces[0] = true,
+                _ => {
+                    rejected.candidate_geometry_sha256[0] ^= 1;
+                    rejected.sample_loops =
+                        Arc::new(vec![circle_capture(0, false, [1000.0, 1000.0], 1.0)]);
+                }
+            }
+            assert!(
+                certify_regular_material_interface(
+                    &before_leaf,
+                    &rejected,
+                    cut,
+                    &before_tube,
+                    &after_tube,
+                    &second.regular_interfaces,
+                    &mut Scratch { bytes: 0 },
+                    &mut work,
+                    &cancel
+                )
+                .is_err(),
+                "changed premise {changed}"
+            );
+            assert!(!same_leaf(&after_leaf, &rejected));
+            assert_ne!(leaf_fingerprint(&after_leaf), leaf_fingerprint(&rejected));
+        }
+        assert_eq!(
+            regular_side::certify(
+                source.source_view().unwrap(),
+                pose,
+                [0.0, cut],
+                [cut * 0.5; 2],
+                [false, false],
+                MAX_SCRATCH,
+                &mut work,
+                &cancel
+            )
+            .unwrap(),
+            [false, true]
+        );
+        let bounds = definition.bounds_mm();
+        let row = super::super::placed::rotation(pose).unwrap()[2];
+        let birth = source_event_world_height(
+            &before,
+            std::array::from_fn(|axis| [bounds.min[axis], bounds.max[axis]]),
+            row,
+            pose.translation_mm[2],
+            before.event_neighborhoods()[0].height_bracket_mm(),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let tolerance = source.source_view().unwrap().effective_tolerance_mm();
+        let uncertainty = super::super::slab::HeightFunctional {
+            direction: row,
+            offset: Interval::point(0.0),
+        }
+        .dot(
+            [Interval {
+                lo: -tolerance,
+                hi: tolerance,
+            }; 3],
+        )
+        .abs_upper();
+        let outside_root_cut = up(birth.hi + uncertainty * 0.25);
+        assert!(birth.hi < outside_root_cut && outside_root_cut < cut * 0.5);
+        assert!(
+            !regular_side::certify(
+                source.source_view().unwrap(),
+                pose,
+                [outside_root_cut, cut],
+                [cut * 0.5; 2],
+                [false, true],
+                MAX_SCRATCH,
+                &mut work,
+                &cancel
+            )
+            .unwrap()[0]
+        );
+        for (mut budget, cancellation, remaining, expected) in [
+            (
+                GeometryWorkBudget::new(0),
+                AtomicBool::new(false),
+                MAX_SCRATCH,
+                GeometryErrorCode::ResourceLimit,
+            ),
+            (
+                GeometryWorkBudget::query(),
+                AtomicBool::new(true),
+                MAX_SCRATCH,
+                GeometryErrorCode::Cancelled,
+            ),
+            (
+                GeometryWorkBudget::query(),
+                AtomicBool::new(false),
+                0,
+                GeometryErrorCode::ResourceLimit,
+            ),
+        ] {
+            assert_eq!(
+                regular_side::certify(
+                    source.source_view().unwrap(),
+                    pose,
+                    [cut, cut * 2.0],
+                    [cut * 1.5; 2],
+                    [false, false],
+                    remaining,
+                    &mut budget,
+                    &cancellation
+                )
+                .unwrap_err()
+                .code,
+                expected
+            );
+        }
+        let mut ledger = NativeUnionBindingLedger::new([0.0, cut * 2.0], MAX_SCRATCH).unwrap();
+        ledger
+            .record(first, &before_m, &[&before_leaf], &mut work, &cancel)
+            .unwrap();
+        ledger
+            .record(second, &after_m, &[&after_leaf], &mut work, &cancel)
+            .unwrap();
+    }
 
     #[test]
     fn nonlinear_sphere_belt_native_port_continuation_is_source_and_span_bound() {
