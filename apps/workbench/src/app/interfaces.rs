@@ -43,6 +43,7 @@ mod tests {
 enum Kind {
     Separator(usize),
     Plate(usize),
+    Functional(usize),
 }
 struct Selection {
     review: Weak<crate::manufacture::Review>,
@@ -79,7 +80,13 @@ impl Workbench {
         if self.display_current()
             && selected_layer(self.manufacturing.replay) == Some(selected.layer)
             && scene.zip(review).is_some_and(|(scene, review)| {
-                selected.matches(scene, review) && review.capture.report.verified
+                selected.matches(scene, review)
+                    && review.capture.report.verified
+                    && (!matches!(selected.kind, Kind::Functional(_))
+                        || self.state.project.as_ref().is_some_and(|project| {
+                            review.capture.provenance.project_id == project.project_id
+                                && review.capture.observed_revision == project.revision
+                        }))
             })
         {
             Some(selected.area.clone())
@@ -94,6 +101,7 @@ impl Workbench {
         ui: &mut egui::Ui,
         review: &Arc<crate::manufacture::Review>,
     ) {
+        self.functional_join_review_ui(ui, review);
         ui.collapsing("Construction interfaces",|ui| {
             ui.weak("Compiled density-region construction · not mixed-material interlocks");
             if !review.capture.report.verified || !self.display_current() {
@@ -143,6 +151,7 @@ impl Workbench {
                             let value=&coverage.process_diaphragms[index];
                             (value.occurrence_id,&value.definition_id,crate::inspection::Area::plate(value,origin))
                         }
+                        Kind::Functional(_)=>return Err("Select a density construction record".into()),
                     };
                     if !scene.occurrences.iter().any(|item|item.occurrence_id==occurrence && &item.definition_id==definition) {return Err("Construction owner is absent from the current source".into());}
                     let area=Arc::new(area?);
@@ -161,8 +170,9 @@ impl Workbench {
             let mut clear=false;
             if let Some(selected)=&self.interfaces.selected
                 && selected.matches(&scene,review) && selected.layer==layer_index
+                && !matches!(selected.kind,Kind::Functional(_))
             {
-                ui.label(match selected.kind {Kind::Separator(_)=>"Highlighted: separator centerlines over their physical layer interval",Kind::Plate(_)=>"Highlighted: permanent plate extent, including hole boundaries"});
+                ui.label(match selected.kind {Kind::Separator(_)=>"Highlighted: separator centerlines over their physical layer interval",Kind::Plate(_)=>"Highlighted: permanent plate extent, including hole boundaries",Kind::Functional(_)=>return});
                 match selected.kind {
                     Kind::Separator(index)=>{
                         let value=&coverage.process_interfaces[index];
@@ -174,6 +184,7 @@ impl Workbench {
                         ui.label(format!("Requested thickness {:.3} mm · physical interval {:.6}…{:.6} mm",value.requested_thickness_mm,value.physical_z_mm[0],value.physical_z_mm[1]));
                         ui.label(format!("Neighbor sparse fractions {:.1}% ↔ {:.1}%",value.neighbors[0].fraction*100.0,value.neighbors[1].fraction*100.0));
                     }
+                    Kind::Functional(_)=>return,
                 }
                 ui.weak("Construction outlines are not deposited bead surfaces or measured bond strength. Layer/tool filters still control the actual program.");
                 ui.horizontal_wrapped(|ui| {
@@ -188,6 +199,111 @@ impl Workbench {
                 self.interfaces.selected=None;
             }
             if let Some(problem)=&self.interfaces.problem {ui.colored_label(ui.visuals().warn_fg_color,problem);}
+        });
+    }
+}
+
+impl Workbench {
+    fn functional_join_review_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        review: &Arc<crate::manufacture::Review>,
+    ) {
+        use spiling_contracts::manufacturing::*;
+        let JobWorkflow::FixedDualMarlin { job } =
+            &review.bundle.provenance.intent.printer.workflow
+        else {
+            return;
+        };
+        let Some(request) = &job.functional_construction else {
+            return;
+        };
+        ui.collapsing("Joins · functional material", |ui| {
+            ui.label(format!("Captured request · {} ↔ {} · face {}", request.material_id, request.base_material_id, request.face_id.as_str()));
+            if !self.state.project.as_ref().is_some_and(|project| {
+                review.capture.provenance.project_id == project.project_id
+                    && review.capture.observed_revision == project.revision
+            }) {
+                ui.label("Earlier capture · verify this construction against the current project revision before inspecting realized joins");
+                return;
+            }
+            let Some(frame) = &review.bundle.plan.functional_material_frame else {
+                ui.label("No realized functional construction frame in this capture");
+                return;
+            };
+            let Some(scene) = self.state.display.clone().filter(|scene| {
+                self.display_current() && scene.summary.session_id == review.capture.session
+                    && scene.summary.layout_id == review.capture.layout_id
+                    && scene.occurrences.iter().any(|o| o.occurrence_id == frame.occurrence_id && o.definition_id == frame.definition_id)
+                    && scene.definition(&frame.definition_id).is_some_and(|d| d.record.provenance.source_hash == frame.source_hash)
+            }) else {
+                ui.label("Current source matching this capture is required for realized join inspection");
+                return;
+            };
+            if !review.capture.report.verified || frame.validate(request, job).is_err() {
+                ui.label("Fresh passing replay and a matching functional frame are required for realized join inspection");
+                return;
+            }
+            ui.label(format!("Pure-material ownership ≥ {:.3} mm · join reach {:.3} mm into region / {:.3} mm into base", request.minimum_pure_depth_mm, request.join.reach_into_region_mm, request.join.reach_into_base_mm));
+            ui.label(match request.interface_policy {
+                FunctionalInterfacePolicy::DeclaredSameFamily => "Policy: declared same family · not an adhesion measurement",
+                FunctionalInterfacePolicy::MechanicalCapture => "Policy: nominal mechanical capture · no adhesion credit",
+            });
+            ui.label(format!("Fresh verified construction · {} keys · middle-head world Z {:.3}…{:.3} mm", frame.key_centers_u_mm.len(), frame.key_middle_z_mm[0], frame.key_middle_z_mm[1]));
+            ui.weak("Verified nominal construction, not measured adhesion or physical strength.");
+            let Some(layer_index) = selected_layer(self.manufacturing.replay) else {
+                ui.label("Select a physical layer to inspect its realized region boundary and join phase");
+                return;
+            };
+            let Some(layer) = review.bundle.plan.layers.get(layer_index) else { return; };
+            let Some((index, domain)) = review.bundle.plan.material_domains.iter().enumerate().find(|(_, domain)| {
+                domain.reference.role == MaterialConstructionRole::FunctionalRegion
+                    && domain.physical_z_mm[0] <= layer.lower_z_mm && layer.z_mm <= domain.physical_z_mm[1]
+            }) else { ui.label("No complete functional region domain for this physical layer"); return; };
+            ui.label(format!("Realized {} phase · world Z {:.3}…{:.3} mm", if domain.physical_z_mm[0] >= frame.key_middle_z_mm[0] && domain.physical_z_mm[1] <= frame.key_middle_z_mm[1] { "middle-head" } else { "end-collar" }, domain.physical_z_mm[0], domain.physical_z_mm[1]));
+            if ui.button("Show realized join").clicked() {
+                let result = scene.summary.bounds_mm.ok_or_else(|| "No source display origin".to_owned()).and_then(|bounds| {
+                    let origin = DVec3::from_array(bounds.min) * 0.5 + DVec3::from_array(bounds.max) * 0.5;
+                    let base = review.bundle.plan.material_domains.iter().find(|base| {
+                        base.reference.role == MaterialConstructionRole::FunctionalBase
+                            && base.reference.construction_index == domain.reference.construction_index
+                            && base.physical_z_mm == domain.physical_z_mm
+                    }).ok_or_else(|| "No matching realized base owner for this join".to_owned())?;
+                    crate::inspection::Area::functional_join(domain, base, frame.stock_bounds_mm, origin).map(Arc::new)
+                });
+                match result {
+                    Ok(area) => {
+                        self.viewport.focus_area(&scene, area.target, &[frame.occurrence_id]);
+                        self.interfaces.selected = Some(Selection {
+                            review: Arc::downgrade(review), scene: Arc::downgrade(&scene), layer: layer_index,
+                            kind: Kind::Functional(index), occurrence: frame.occurrence_id, area,
+                        });
+                        self.interfaces.problem = None;
+                    }
+                    Err(error) => {
+                        self.viewport.cancel_area();
+                        self.interfaces.selected = None;
+                        self.interfaces.problem = Some(error);
+                    }
+                }
+            }
+            if let Some(selected) = self.interfaces.selected.as_ref().filter(|selected| {
+                selected.matches(&scene, review) && selected.layer == layer_index && selected.kind == Kind::Functional(index)
+            }) {
+                ui.weak("Shared interface outline; exterior edges excluded. Not deposited bead surfaces.");
+                let mut clear = false;
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Focus join").clicked() { self.viewport.focus_area(&scene, selected.area.target, &[selected.occurrence]); }
+                    if ui.button("Reveal join").clicked() { self.viewport.reveal_area(&scene, selected.area.target, &[selected.occurrence]); }
+                    clear = ui.button("Clear join highlight").clicked();
+                });
+                if clear {
+                    self.viewport.close_reveal(ui.input(|input| input.time), ui.style().animation_time > 0.0);
+                    self.viewport.clear_attention();
+                    self.interfaces.selected = None;
+                }
+            }
+            if let Some(problem) = &self.interfaces.problem { ui.colored_label(ui.visuals().warn_fg_color, problem); }
         });
     }
 }

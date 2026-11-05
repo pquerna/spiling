@@ -630,6 +630,7 @@ impl Workbench {
     }
 }
 mod analysis;
+mod functional_material;
 mod layout;
 mod library;
 mod manufacturing;

@@ -179,6 +179,20 @@ impl Workbench {
             m.loaded_material.as_deref(),
             captured,
         );
+        if !self
+            .material
+            .has_changes(&project.project_id, m.intent.as_deref())
+            && self.manufacturing.draft.as_ref().is_some_and(|d| {
+                d.project == project.project_id
+                    && matches!(
+                        d.value.printer.workflow,
+                        JobWorkflow::FixedDualMarlin { .. }
+                    )
+            })
+        {
+            ui.weak("Loaded material declarations come from the complete fixed-dual intent. Region edits use Apply settings.");
+            return;
+        }
         ui::group(ui, "Material and setup");
         if ui.button("Choose filament").clicked() {
             self.choose_filament();

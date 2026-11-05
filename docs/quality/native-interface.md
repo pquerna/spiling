@@ -86,6 +86,17 @@ Oversized or imprecise outlines refuse without publishing partial geometry;
 ordinary actual-program review remains available. These density-region interfaces
 are not material-contact discovery, TPU placement or mixed-polymer interlocking.
 
+Prepare's Material region form stages a source face, loaded region/base materials,
+minimum pure depth and separately allocated join reaches in the ordinary settings
+draft. The interface policy is explicit and never inferred from material names.
+Apply captures the complete request; the engine owns eligibility and construction.
+For this bounded functional construction, fresh Review's Joins group shows the
+selected physical phase and highlights the exact shared region/base boundary,
+excluding source exterior edges. Show realized join focuses it; Reveal join exposes
+the buried boundary using the reversible cut. Stale, missing or oversized output
+does not produce an invented contact. This is not general adjacency discovery or
+physical bond qualification.
+
 Workspace switching hides and retains drafts. Slice plate uses the existing compile
 operation and refuses unapplied changes; Check setup is offered when preflight is
 required. The active editor owns Apply, and Review promotes Verify program followed

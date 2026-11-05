@@ -12,11 +12,31 @@ use std::sync::Arc;
 const BEAD_MODEL: &str = "Nominal width and physical height over decoded straight strokes. Stadium sections; bridges use elliptical envelopes without sag prediction. Flat ends preserve breaks; intersecting strokes overlap. Displayed surface and overlap are not deposited mass or measured physical shape. Numerical projection ≤ 0.001 mm; section chord error ≤ 0.001 mm. Large reviews retain centerlines when the bead view reaches display limits.";
 
 pub(super) struct IntentDraft {
-    project: ProjectId,
-    revision: ProjectRevision,
+    pub(super) project: ProjectId,
+    pub(super) revision: ProjectRevision,
     nonce: u64,
     original: Arc<ManufacturingIntent>,
-    value: ManufacturingIntent,
+    pub(super) value: ManufacturingIntent,
+}
+impl IntentDraft {
+    pub(super) fn apply_command(
+        &mut self,
+        layout_id: spiling_contracts::project::PrintLayoutId,
+        session_id: SessionId,
+        revision: ProjectRevision,
+    ) -> Result<ManufacturingCommand, String> {
+        if self.revision != revision {
+            return Err("Project changed. Discard this draft and reload current settings.".into());
+        }
+        let value = super::policies::prepared(&self.value)?;
+        self.value = value.clone();
+        Ok(ManufacturingCommand::SetIntent {
+            layout_id,
+            session_id,
+            base_revision: self.revision,
+            intent: Arc::new(value),
+        })
+    }
 }
 struct BeadStatistics {
     display: std::sync::Weak<crate::replay::Replay>,
@@ -26,7 +46,7 @@ struct BeadStatistics {
 }
 #[derive(Default)]
 pub(super) struct ManufacturingUi {
-    draft: Option<IntentDraft>,
+    pub(super) draft: Option<IntentDraft>,
     ignored_nonce: Option<u64>,
     pub(super) prepare_section: u8,
     pub(super) replay_record: Option<SourceHash>,
@@ -40,6 +60,39 @@ pub(super) struct ManufacturingUi {
     pub(super) comparison_no_height_match: bool,
 }
 impl ManufacturingUi {
+    pub(super) fn sync_intent(
+        &mut self,
+        project: &ProjectId,
+        revision: ProjectRevision,
+        current: Option<Arc<ManufacturingIntent>>,
+        loaded: Option<&crate::manufacture::LoadedIntent>,
+    ) {
+        let (source, nonce) = loaded
+            .filter(|l| self.ignored_nonce != Some(l.nonce))
+            .map_or((current, 0), |l| (Some(l.intent.clone()), l.nonce));
+        let Some(source) = source else {
+            if self.draft.as_ref().is_some_and(|d| &d.project != project) {
+                self.draft = None;
+            }
+            return;
+        };
+        let reset = self.draft.as_ref().is_none_or(|d| {
+            &d.project != project
+                || d.nonce != nonce
+                || (d.revision != revision
+                    && (d.value == *d.original
+                        || super::policies::prepared(&d.value).is_ok_and(|v| v == *source)))
+        });
+        if reset {
+            self.draft = Some(IntentDraft {
+                project: project.clone(),
+                revision,
+                nonce,
+                original: source.clone(),
+                value: (*source).clone(),
+            });
+        }
+    }
     pub(super) fn pending_loaded(&self, loaded: Option<&crate::manufacture::LoadedIntent>) -> bool {
         loaded.is_some_and(|l| self.ignored_nonce != Some(l.nonce))
     }
@@ -196,7 +249,7 @@ impl Workbench {
                 self.material_actions(ui);
                 return;
             }
-            2 => {
+            1 | 2 => {
                 if let Some(d) = &mut self.manufacturing.draft {
                     if d.project != project.project_id {
                         return;
@@ -213,14 +266,13 @@ impl Workbench {
                         prepared.as_ref().err().map(String::as_str)
                     };
                     if changed && ui::primary(ui, "Apply settings", reason) {
-                        let value = prepared.expect("validated intent");
-                        d.value = value.clone();
-                        self.queued_manufacturing = Some(ManufacturingCommand::SetIntent {
-                            layout_id: project.layout_id.clone(),
-                            session_id: hello.session_id.clone(),
-                            base_revision: d.revision,
-                            intent: Arc::new(value),
-                        });
+                        self.queued_manufacturing = d
+                            .apply_command(
+                                project.layout_id.clone(),
+                                hello.session_id.clone(),
+                                project.revision,
+                            )
+                            .ok();
                     }
                     if changed {
                         if ui.button("Discard settings draft").clicked() {
@@ -341,6 +393,15 @@ impl Workbench {
                 ui.label("Read-only project");
             }
             let section = self.manufacturing.prepare_section;
+            if matches!(section, 1 | 2) {
+                self.manufacturing.sync_intent(
+                    &project.project_id,
+                    project.revision,
+                    m.intent.clone(),
+                    m.loaded.as_deref(),
+                );
+                self.functional_material_ui(ui, writable);
+            }
             if section == 0 {
                 ui::group(ui, "Machine and plate");
                 self.hardware_summary(ui);
@@ -356,33 +417,12 @@ impl Workbench {
             }
             if section == 2 {
                 ui::group(ui, "Construction");
-                let (source, nonce) = if let Some(loaded) = m
-                    .loaded
+                if let Some(source) = self
+                    .manufacturing
+                    .draft
                     .as_ref()
-                    .filter(|l| self.manufacturing.ignored_nonce != Some(l.nonce))
+                    .map(|d| d.original.clone())
                 {
-                    (Some(loaded.intent.clone()), loaded.nonce)
-                } else {
-                    (m.intent.clone(), 0)
-                };
-                if let Some(source) = source {
-                    let reset = self.manufacturing.draft.as_ref().is_none_or(|d| {
-                        d.project != project.project_id
-                            || d.nonce != nonce
-                            || (d.revision != project.revision
-                                && (d.value == *d.original
-                                    || super::policies::prepared(&d.value)
-                                        .is_ok_and(|v| v == *source)))
-                    });
-                    if reset {
-                        self.manufacturing.draft = Some(IntentDraft {
-                            project: project.project_id.clone(),
-                            revision: project.revision,
-                            nonce,
-                            original: source.clone(),
-                            value: (*source).clone(),
-                        });
-                    }
                     let d = self
                         .manufacturing
                         .draft

@@ -15,6 +15,78 @@ pub struct Area {
     pub(crate) target: FocusTarget,
 }
 impl Area {
+    pub fn functional_join(
+        value: &ResolvedMaterialDomain,
+        base: &ResolvedMaterialDomain,
+        stock: AabbMm,
+        origin: DVec3,
+    ) -> Result<Self, String> {
+        value.validate().map_err(|error| error.to_string())?;
+        base.validate().map_err(|error| error.to_string())?;
+        stock.validate().map_err(|error| error.to_string())?;
+        if value.reference.role != MaterialConstructionRole::FunctionalRegion
+            || base.reference.role != MaterialConstructionRole::FunctionalBase
+            || value.reference.construction_index != base.reference.construction_index
+            || value.physical_z_mm != base.physical_z_mm
+        {
+            return Err("Join inspection requires both matching realized material owners".into());
+        }
+        let rings = |domain: &ResolvedMaterialDomain| {
+            domain
+                .polygons
+                .iter()
+                .flat_map(|polygon| std::iter::once(&polygon.exterior_mm).chain(&polygon.holes_mm))
+                .map(|ring| ring.len().saturating_sub(1))
+                .sum::<usize>()
+        };
+        if rings(value)
+            .checked_mul(rings(base))
+            .is_none_or(|work| work > 262_144)
+        {
+            return Err("Shared join outline exceeds the bounded inspection work budget".into());
+        }
+        let mut builder = Builder::new(origin, DVec3::Z);
+        for polygon in &value.polygons {
+            for ring in std::iter::once(&polygon.exterior_mm).chain(&polygon.holes_mm) {
+                for edge in ring.windows(2) {
+                    if (0..2).any(|axis| {
+                        [stock.min[axis], stock.max[axis]]
+                            .into_iter()
+                            .any(|boundary| edge[0][axis] == boundary && edge[1][axis] == boundary)
+                    }) {
+                        continue;
+                    }
+                    let shared = base.polygons.iter().any(|polygon| {
+                        std::iter::once(&polygon.exterior_mm)
+                            .chain(&polygon.holes_mm)
+                            .any(|ring| {
+                                ring.windows(2).any(|other| {
+                                    (edge[0] == other[0] && edge[1] == other[1])
+                                        || (edge[0] == other[1] && edge[1] == other[0])
+                                })
+                            })
+                    });
+                    if !shared {
+                        return Err(
+                            "Realized owners do not expose an exact complete shared join outline"
+                                .into(),
+                        );
+                    }
+                    let point = |index: usize, upper: bool| {
+                        DVec3::new(
+                            edge[index][0],
+                            edge[index][1],
+                            value.physical_z_mm[usize::from(upper)],
+                        )
+                    };
+                    builder.segment(point(0, false), point(1, false))?;
+                    builder.segment(point(0, true), point(1, true))?;
+                    builder.segment(point(0, false), point(0, true))?;
+                }
+            }
+        }
+        builder.finish()
+    }
     pub fn separator(
         value: &ProcessInterfaceCoverage,
         physical_z_mm: [f64; 2],
@@ -145,6 +217,86 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn functional_outline_keeps_shared_concave_join_and_excludes_source_exterior() {
+        let origin = DVec3::new(1e9, 2e9, 30.0);
+        let boundary = [
+            [0.0, 0.0],
+            [12.0, 0.0],
+            [12.0, 5.0],
+            [7.0, 5.0],
+            [7.0, 8.0],
+            [9.0, 8.0],
+            [9.0, 9.0],
+            [3.0, 9.0],
+            [3.0, 8.0],
+            [5.0, 8.0],
+            [5.0, 5.0],
+            [0.0, 5.0],
+            [0.0, 0.0],
+        ];
+        let mut domain = ResolvedMaterialDomain {
+            reference: MaterialDomainRef {
+                construction_index: 0,
+                role: MaterialConstructionRole::FunctionalRegion,
+            },
+            physical_z_mm: [31.0, 35.0],
+            polygons: vec![MaterialDomainPolygon {
+                exterior_mm: boundary
+                    .map(|p| [origin.x + p[0], origin.y + p[1]])
+                    .to_vec(),
+                holes_mm: vec![],
+            }],
+        };
+        let mut base = ResolvedMaterialDomain {
+            reference: MaterialDomainRef {
+                construction_index: 0,
+                role: MaterialConstructionRole::FunctionalBase,
+            },
+            physical_z_mm: domain.physical_z_mm,
+            polygons: vec![MaterialDomainPolygon {
+                exterior_mm: [
+                    [0.0, 5.0],
+                    [5.0, 5.0],
+                    [5.0, 8.0],
+                    [3.0, 8.0],
+                    [3.0, 9.0],
+                    [9.0, 9.0],
+                    [9.0, 8.0],
+                    [7.0, 8.0],
+                    [7.0, 5.0],
+                    [12.0, 5.0],
+                    [12.0, 12.0],
+                    [0.0, 12.0],
+                    [0.0, 5.0],
+                ]
+                .map(|point| [origin.x + point[0], origin.y + point[1]])
+                .to_vec(),
+                holes_mm: vec![],
+            }],
+        };
+        let stock = AabbMm::new(
+            [origin.x, origin.y, 30.0],
+            [origin.x + 12.0, origin.y + 12.0, 40.0],
+        )
+        .unwrap();
+        let area = Area::functional_join(&domain, &base, stock, origin).unwrap();
+        assert_eq!(area.target.bounds_mm.min, [origin.x, origin.y + 5.0, 31.0]);
+        assert_eq!(
+            area.target.bounds_mm.max,
+            [origin.x + 12.0, origin.y + 9.0, 35.0]
+        );
+        assert!(area.vertices.iter().any(|v| v.position == [5.0, 8.0, 1.0]));
+        assert!(area.vertices.iter().any(|v| v.position == [5.0, 8.0, 5.0]));
+        assert_eq!(area.vertices.len(), (boundary.len() - 4) * 6);
+        base.physical_z_mm[1] = 34.0;
+        assert!(Area::functional_join(&domain, &base, stock, origin).is_err());
+        base.physical_z_mm = domain.physical_z_mm;
+        base.polygons[0].exterior_mm[1][0] += 0.01;
+        assert!(Area::functional_join(&domain, &base, stock, origin).is_err());
+        domain.reference.role = MaterialConstructionRole::FunctionalBase;
+        assert!(Area::functional_join(&domain, &base, stock, origin).is_err());
+    }
     #[test]
     fn rebases_before_rounding_and_never_publishes_a_partial_outline() {
         let origin = DVec3::splat(1e9);
