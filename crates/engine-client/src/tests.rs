@@ -9,6 +9,31 @@ use super::{
 };
 use spiling_contracts::{geometry::*, manufacturing::*, rpc};
 
+#[tokio::test]
+async fn control_dispatch_futures_keep_large_rpc_frames_out_of_callers() {
+    let rpc = super::EngineRpc {
+        channel: tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+        capability: "0".repeat(64),
+    };
+    let session_id = SessionId::new();
+    let project = rpc.project(spiling_contracts::project::ProjectCommand::Get {
+        session_id: session_id.clone(),
+    });
+    let manufacturing = rpc.manufacturing(ManufacturingCommand::Get {
+        session_id,
+        layout_id: spiling_contracts::project::PrintLayoutId::default(),
+    });
+    for bytes in [
+        std::mem::size_of_val(&project),
+        std::mem::size_of_val(&manufacturing),
+    ] {
+        assert!(
+            bytes < 16 * 1024,
+            "inline dispatch future grew to {bytes} bytes"
+        );
+    }
+}
+
 fn manufacturing_record(bytes: &[u8]) -> ManufacturingArtifactRecord {
     ManufacturingArtifactRecord {
         hash: spiling_contracts::geometry::SourceHash::from_bytes(bytes),

@@ -213,8 +213,7 @@ impl EngineRpc {
         }
     }
     pub async fn project(&self, command: ProjectCommand) -> Result<ProjectResponse, ClientError> {
-        self.project_with_request_id(command, &Uuid::new_v4().to_string())
-            .await
+        Box::pin(self.project_with_request_id(command, &Uuid::new_v4().to_string())).await
     }
     pub async fn project_with_request_id(
         &self,
@@ -448,8 +447,7 @@ impl EngineRpc {
         &self,
         command: ManufacturingCommand,
     ) -> Result<ManufacturingResponse, ClientError> {
-        self.manufacturing_with_request_id(command, &Uuid::new_v4().to_string())
-            .await
+        Box::pin(self.manufacturing_with_request_id(command, &Uuid::new_v4().to_string())).await
     }
     pub async fn manufacturing_with_request_id(
         &self,
