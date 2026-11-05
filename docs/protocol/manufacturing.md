@@ -283,7 +283,7 @@ printing recommendations.
 
 [`FixedDualJob`](../../crates/contracts/src/manufacturing/routing.rs) selects the reviewed `marlin2125_native_fixed_hotends` contract at exact Marlin2.1.2.5 source revision `e5a167aaa0a671ea6d9b9d98dc0518c88d5caed7`. This is an explicit **software reference**, not a supported physical printer, firmware build/flash attestation or measured configuration. The adjacent `software-fixed-dual.configuration.json` and calibration/material declarations identify exact inert reference bytes and source-branch assumptions; no deployable firmware or physical calibration is supplied.
 
-The job owns two distinct tools, feeders and loaded material identities/revisions/declaration hashes; coplanar XY nozzle offsets; per-tool filament diameter, process/feed/flow/thermal limits, external retraction and minimum reprime volume; native home; addressed standby/print targets; conservative carriage travel/body bounds; inactive-nozzle radius; transition lift and final park. Shared planning limits must fit both tools. The first route requires a declared common polymer family, not inferred bond qualification. No arbitrary command/macro strings, hidden toolchange motion, MMU/IDEX, shared melt mixing, firmware retract, extrusion compensation, saved offsets or automatic execution is admitted.
+The job owns two distinct tools, feeders and loaded material identities/revisions/declaration hashes; coplanar XY nozzle offsets; per-tool filament diameter, process/feed/flow/thermal limits, external retraction and minimum reprime volume; native home; addressed standby/print targets; conservative carriage travel/body bounds; inactive-nozzle radius; transition lift and final park. Shared planning limits must fit both tools. Ordinary routes require a declared common polymer family, not inferred bond qualification; the explicit functional mechanical-capture exception below is separate. No arbitrary command/macro strings, hidden toolchange motion, MMU/IDEX, shared melt mixing, firmware retract, extrusion compensation, saved offsets or automatic execution is admitted.
 
 One or two `OccurrenceMaterialAssignment {occurrence_id,material,work_envelope_mm}` records bind complete native occurrences to explicit work reservations; two reservations must be strictly separated in XY. Material is a required tagged uniform binding or physical layer cycle, never an implicit tool/palette index. Preflight checks the exact source-ID bijection, upright frame and entire conservative native bound within its reservation. Reservation minimum Z may include conservative native enclosure below the bed; emitted endpoints and occupied bead intervals still obey the command/bed envelope. Every full projected nominal bead capsule must fit exactly one reservation, including per-edge width and coordinate error. This association consumes the already qualified global native union, never a path center, polygon order or inferred regional identity.
 
@@ -298,6 +298,75 @@ All routed travel uses the explicit all-layer clearance plane `last actual layer
 Fresh independent replay checks actual selection/offset/reset/wait/debt/waste/shutdown bytes without calling producer realization. Required-nullable `VerificationReport.routing` and `ManufacturingSummary.routing` retain per-tool model/waste segments, filament, volume, epoch count and final unpaid retraction. Single-tool reports use `null`; missing fields are not compatibility defaults. Both feeders finish retracted, both heaters explicitly shut down, and restart never submits the program. [SPLR6](replay.md) separately exposes actual tool epochs and waste without fictional frame-jump lines.
 
 The existing full `--intent`/typed SetIntent transaction captures material bindings, cycle/phase/origin and route in the functional fingerprint, invalidates manufacturing on change, and retains normal undo/redo/checkpoint/source-absent read-only replay/export. `fixtures/manufacturing/fixed-dual.intent.ts` is the static two-box reference; `fixed-dual-cycle.intent.ts` derives opposite physical phases through the same route. [Development](../quality/development.md#fixed-dual-software-job) owns commands. Arbitrary paint, optical study acceptance and measured color are not routing authority.
+
+#### Functional material region and captive keys
+
+`FixedDualJob.functional_construction` is required nullable captured intent. A
+non-null `FunctionalMaterialConstruction` binds one occurrence, exact definition,
+source hash and native face, two loaded material IDs, `minimum_pure_depth_mm` and
+one `PlanarTKeyJoin`. It cannot coexist with optical construction. The base is
+the occurrence's uniform material; the region uses the other loaded declaration.
+The required `interface_policy` is explicit: `declared_same_family` retains the
+common-polymer-family restriction; `mechanical_capture` permits different declared
+families only for this complete headed-key/end-collar construction. Missing or
+unknown policies refuse. Selecting materials never selects the exception. Native
+construction and independent actual replay must still pass; the policy alone is
+not construction evidence or compatibility between arbitrary grades. It grants
+no adhesion credit. Shared flow/bead envelopes must fit both loaded tools, with
+each tool's captured filament diameter and addressed temperatures. The explicit
+shared bed/fan recipe does not establish physical suitability for both materials.
+
+Pure depth is a nominal solid-material ownership requirement, not a measured
+polymer thickness. In inward face depth `d`, pure region material occupies
+`0…p`; the nominal interface is `p + reach_into_region_mm`, and the separately
+authorized transition ends at
+`p + reach_into_region_mm + reach_into_base_mm`. Foreign teeth never count toward
+`p`. `pitch_mm`, `stem_width_mm`, `head_width_mm`, `head_depth_mm`,
+`edge_margin_mm`, `end_collar_height_mm` and `collar_head_width_mm` describe a
+bounded centered key inventory, not a strength recipe. The head is wider than
+the stem; both end collars have narrower heads than the middle, providing
+nominal opposing end retainers. Chains, movable hooks and automatic pair recipes
+are not exposed as supported strategies.
+
+The first producer requires one translated, axis-aligned native rectangular
+stock with six planar boundary faces, four completely certified full-height
+walls and the two endpoint caps. Complete native closed-slab admission remains
+mandatory even when an endpoint capture does not carry a regular-invariance
+flag. A plausible bounding box or a planar-face label is insufficient. Holes,
+insufficient remaining parent material, incompatible overlays, sparse base
+recipes and unresolved native or actual-stroke proofs refuse. Original source
+material is partitioned, never expanded or filled. One exact shared internal
+boundary supplies both material owners; literal admitted exterior coordinates
+are retained. Rounded cuts that cannot establish the requested minimum pure
+depth refuse rather than silently thin it.
+
+Collar events and captured ownership use the same certified face endpoints and
+actual translation arithmetic. Native refinement preserves those physical
+stops. `NormalizedPrintPlan.functional_material_frame` is required nullable
+inspection data binding source identity, source/world origins, exact Cartesian
+frame, literal `stock_bounds_mm`, source height, world `key_middle_z_mm` and at
+most sixteen centers. `FunctionalRegion` and `FunctionalBase` use material-domain
+index zero, independent of geometric deposition roles or optical shell/backing.
+Existing bounded domain inventories, complete physical intervals and full-bead
+foreign-material clearance apply unchanged.
+
+After actual-byte/path correspondence, independent replay checks both the
+requested region and complete base complement over the finite orthogonal cut
+arrangement. It checks same-material positive nominal-core paths from key and
+retainer deposition to their own parents, actual shoulder witnesses and positive
+projected head/retainer overlap at each physical phase transition. Existing
+printing-time lower-anchor, bridge, source, void, command and routing obligations
+remain separate. These are nominal program/construction checks, not measured
+fusion, flexible-material extraction resistance or physical strength.
+
+The native Material form stages the face assignment, pure depth and per-side
+join reaches in the existing full-intent draft; one Apply is one Core transaction.
+History and persistence capture the complete request. Review's **Joins** group
+uses fresh verified functional domains for boundary highlight and Focus/Reveal;
+an authored request is not realized geometry. General contact discovery, multiple
+competing regions and optical-recipe neighbors remain
+separate extensions. The one-perimeter solid reference exercises the positive;
+other wall policies retain their ordinary geometric refusals without substitution.
 
 #### Source-bound planar surface color
 
@@ -345,16 +414,16 @@ process-height, waste/reprime, native/void/contact and command gates still apply
 
 The normalized plan, captured route and actual SPLR6 tool/XYZ/E events expose the
 realized construction for inspection/reassessment. Routing does not promote a
-stored optical estimate. A separately applied captured origin permits explicit reassessment of the realized finite patch from actual intervals/material mapping and original conditions/evidence. Backing optics, arbitrary regional paint, Local-Z/sublayer parity, measured bond and physical color accuracy remain outside support. Planner30 binds mandatory physical material events and waste-only groups; emitter11/verifier20
+stored optical estimate. A separately applied captured origin permits explicit reassessment of the realized finite patch from actual intervals/material mapping and original conditions/evidence. Backing optics, arbitrary regional paint, Local-Z/sublayer parity, measured bond and physical color accuracy remain outside support. Planner30 binds mandatory physical material events and waste-only groups; emitter11/verifier21
 bind preselection waste-lane staging. SPLR6 retains its command/binary interpretation.
 
 ## Normalized plan
 
-`NormalizedPrintPlan` uses schema11/planner60. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
+`NormalizedPrintPlan` uses schema11/planner61. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
 
 Native sampling and offset construction bounds are each 0.005 mm; finish XY construction has a separate 0.001 mm bound. The explicit recipe `native_shape_error_mm` bounds source-target approximation independently of those construction tolerances. Each mapped image additionally declares its own vertical displacement-error bound.
 
-Surface documents remain schema3. Emitter11/verifier20 consume constant/per-edge widths, immutable Wall ownership, permanent plate ownership, mixed regional/mandatory-skin Bridge portions and fresh interval-aware anchors/interface proofs. SPLR6 keeps those nominal associations separate from actual XYZ/E/feed, and retains distinct tool epochs/transition waste. Preselection staging changes the command lifecycle, not the packed layout; document counters and existing kind meanings do not change.
+Surface documents remain schema3. Emitter11/verifier21 consume constant/per-edge widths, immutable Wall ownership, permanent plate ownership, mixed regional/mandatory-skin Bridge portions and fresh interval-aware anchors/interface proofs. SPLR6 keeps those nominal associations separate from actual XYZ/E/feed, and retains distinct tool epochs/transition waste. Preselection staging changes the command lifecycle, not the packed layout; document counters and existing kind meanings do not change.
 
 Required `native_geometry.source_feature_coverage` is a bounded count summary, not a global invariance enum: `disjoint_source_layer_count + invariant_source_union_layer_count + native_interface_complex_layer_count == certified_layer_count`, using checked arithmetic. It partitions actual accepted scheduled layers into disjoint source, closed-slab invariant-union and native interface-complex evidence. The interface-complex category requires the actual continuing-core/critical-contribution proof and complete leaf ledger; its name never establishes that capability. Mixed jobs cannot claim global source-union invariance. `slab_count` counts accepted original-occurrence/slab evidence captures, including inactive sources and owned critical contributions. An invariant accepted slab may cover several scheduled layers without creating additional captures, so `height_analysis_count <= slab_count <= height_analysis_count * certified_layer_count`; there is no per-layer lower bound on captures. `owned_critical_slab_count` counts unique original-occurrence/slab captures with any owned endpoint stratum or nonzero transition collar, not faces, and cannot exceed `slab_count`. Missing source contributions cannot be disguised as empty height domains. Reused native evidence remains bound to each accepted capture; failed/refined candidates affect only cumulative `geometry_work`. All count fields are explicitly required on checked JSON/native admission and bounded by existing layer/occurrence caps. Summary admission neither reconstructs private native receipts nor certifies the emitted physical union boundary.
 
@@ -569,7 +638,7 @@ An independent verifier decodes command state from emitted bytes, not emitter he
 
 Current Cartesian XYZ admission binds independently parsed coordinates to the checked XYZ6 projection of each captured expected point. Raw-plan half-step tolerance cannot authorize an alternate neighboring lattice point. The explicit `contracts::manufacturing::program_coordinates` module owns this fixed output precision, coordinate-conditioning range and outward decimal/height enclosures; backend serialization and verifier command parsing remain independent. Projection multiplies the binary64 input by `1_000_000`, rounds ties away from zero, divides by `1_000_000` and normalizes signed zero; it is not exact-real decimal rounding of the original input. Accepted absolute coordinates are at most `2^52 / 1_000_000` mm, preserving distinct adjacent parsed micrometre lattice points. Compensated gap subtraction checks every intermediate and its outward result for finiteness. Unrepresentable arithmetic refuses with `program_coordinate_conditioning_failure`, not a widened clearance tolerance.
 
-Current inspection/reopen requires planner60, binding native-first material authority, wall/finish/hatch construction, mandatory physical per-occurrence material events and query-local vertical products for terraced sources. Local reuse excludes every cap in the closed queried interval; whole-source and touching-cap ownership remain separate. Input fingerprints bind complete ordered authoring documents, source/pose and printer/recipe/routing policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, ownership, permanent plate extent/attachment and lower anchors; fixed-dual replay additionally reconstructs source/material and staged tool/frame/thermal/debt/waste state. It does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3 remain stable. Emitter11/verifier20 invalidate superseded transition programs; SPLR6 keeps its existing binary interpretation. Older development assignment shapes refuse without aliases or missing-policy defaults.
+Current inspection/reopen requires planner61, binding native-first material authority, wall/finish/hatch construction, mandatory physical per-occurrence material events and query-local vertical products for terraced sources. Local reuse excludes every cap in the closed queried interval; whole-source and touching-cap ownership remain separate. Input fingerprints bind complete ordered authoring documents, source/pose and printer/recipe/routing policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, ownership, permanent plate extent/attachment and lower anchors; fixed-dual replay additionally reconstructs source/material and staged tool/frame/thermal/debt/waste state. It does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3 remain stable. Emitter11/verifier21 invalidate superseded transition programs; SPLR6 keeps its existing binary interpretation. Older development assignment shapes refuse without aliases or missing-policy defaults.
 
 Final normalized-plan admission checks ordinary projected axes during its existing coordinate pass. Independent fresh verification separately checks closed-wall seam scores, same-tool history and distance/coordinate ordering before matching actual emitted commands. A mutually matching program and plan that ignore either consumed policy do not earn semantic success; stored `verified` metadata remains descriptive.
 

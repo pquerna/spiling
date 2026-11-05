@@ -574,7 +574,7 @@ prime_start_mm: [number, number, number], prime_end_mm: [number, number, number]
  */
 park_position_mm: [number, number, number], };
 
-export type FixedDualJob = { machine_id: string, configuration: FixedDualConfiguration, firmware_revision: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], bed_temperature_c: number, maximum_bed_temperature_c: number, tools: [FixedDualTool, FixedDualTool], assignments: Array<OccurrenceMaterialAssignment>, surface_constructions: Array<SurfaceColorConstruction>, transition_lift_mm: number,
+export type FixedDualJob = { machine_id: string, configuration: FixedDualConfiguration, firmware_revision: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], bed_temperature_c: number, maximum_bed_temperature_c: number, tools: [FixedDualTool, FixedDualTool], assignments: Array<OccurrenceMaterialAssignment>, surface_constructions: Array<SurfaceColorConstruction>, functional_construction: FunctionalMaterialConstruction | null, transition_lift_mm: number,
 /**
  * Allowed tool-zero reference positions, including negative carriage X/Y.
  */
@@ -583,6 +583,18 @@ carriage_travel_bounds_mm: AabbMm,
  * Occupied body relative to the tool-zero tip, excluding the two tips.
  */
 carriage_body_bounds_mm: AabbMm, inactive_nozzle_radius_mm: number, park_position_mm: [number, number, number], };
+
+export type FunctionalInterfacePolicy = "declared_same_family" | "mechanical_capture";
+
+export type FunctionalMaterialConstruction = { interface_policy: FunctionalInterfacePolicy, occurrence_id: OccurrenceId, definition_id: DefinitionId, source_hash: SourceHash, face_id: FaceId, material_id: string, base_material_id: string, minimum_pure_depth_mm: number, join: PlanarTKeyJoin, };
+
+export type PlanarTKeyJoin = { reach_into_region_mm: number, reach_into_base_mm: number, pitch_mm: number, stem_width_mm: number, head_width_mm: number, head_depth_mm: number, edge_margin_mm: number, end_collar_height_mm: number, collar_head_width_mm: number, };
+
+export type FunctionalMaterialFrame = { occurrence_id: OccurrenceId, definition_id: DefinitionId, source_hash: SourceHash, face_id: FaceId, origin_mm: [number, number, number], world_origin_mm: [number, number, number], stock_bounds_mm: AabbMm, horizontal_direction: [number, number, number], outward_normal: [number, number, number], width_mm: number, source_z_mm: [number, number],
+/**
+ * Closed world interval where the wider middle heads apply.
+ */
+key_middle_z_mm: [number, number], key_centers_u_mm: Array<number>, };
 
 export type SurfaceColorConstruction = { occurrence_id: OccurrenceId, definition_id: DefinitionId, source_hash: SourceHash, faces: Array<SurfaceColorFace>, shell: OccurrenceMaterial, white_material_id: string, optical_origin: OpticalConstructionOrigin | null, };
 
@@ -600,12 +612,13 @@ export type SurfaceColorMask = { min_u_mm: number, max_u_mm: number, };
 
 export type SurfaceColorFrame = { construction_index: number, face_id: FaceId, origin_mm: [number, number, number], horizontal_direction: [number, number, number], outward_normal: [number, number, number], width_mm: number, source_z_mm: [number, number], selected_u_mm: [number, number], };
 
-export type MaterialConstructionRole = "shell" | "backing" | "core";
+export type MaterialConstructionRole = "shell" | "backing" | "core" | "functional_region" | "functional_base";
 
 export type MaterialDomainRef = {
 /**
  * Shell selects its regional request. Shared white backing/core use index0
  * and cover the union of all admitted constructions on the same native part.
+ * Functional roles belong exclusively to functional construction index0.
  */
 construction_index: number, role: MaterialConstructionRole, };
 
@@ -790,7 +803,7 @@ export type NativeGeometryCoverageSummary = { requested_shape_error_mm: number, 
  */
 slab_count: number, certified_layer_count: number, event_count: number, geometry_work: bigint, evidence: PreflightEvidence, source_feature_coverage: NativeFeatureCoverageSummary, skin_coverage: SkinCoverageScope, support_clearance: SupportClearanceScope, };
 
-export type NormalizedPrintPlan = { material_frames: Array<SurfaceColorFrame>, material_domains: Array<ResolvedMaterialDomain>, schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, };
+export type NormalizedPrintPlan = { functional_material_frame: FunctionalMaterialFrame | null, material_frames: Array<SurfaceColorFrame>, material_domains: Array<ResolvedMaterialDomain>, schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, };
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
@@ -833,6 +846,7 @@ export type ManufacturingCommand = { "op": "get", layout_id: PrintLayoutId, sess
 export type ManufacturingResponse = { "type": "material_review", report: MaterialReviewReport, } | { "type": "status", info: ProjectInfo, context_hash: SourceHash, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, } | { "type": "preflight", report: PreflightReport, } | { "type": "error", error: ManufacturingError, };
 
 export const MAX_MATERIAL_DOMAINS = 24 as const;
+export const MAX_FUNCTIONAL_KEYS = 16 as const;
 export const MAX_MATERIAL_DOMAIN_POLYGONS = 2 as const;
 export const MAX_MATERIAL_DOMAIN_HOLES = 4 as const;
 export const MAX_MATERIAL_DOMAIN_RING_POINTS = 256 as const;

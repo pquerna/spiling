@@ -181,6 +181,7 @@
             ]
           }
         ],
+        "functional_construction": null,
         "surface_constructions": [
           {
             "occurrence_id": 1,

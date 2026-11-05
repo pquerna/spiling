@@ -52,7 +52,7 @@ pub use spiling::engine as rpc;
 
 pub const ENGINE_BUILD_ID: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    ";project10;manufacturing11;surface3;planner60;emitter11;verifier20;splr6;fixed-dual2;optical-prusa-v7-007bb922-cycle2;color-names1-xkcd450cca88;libraries3;hardware1;catalog2;stock1;alternatives1;layouts5"
+    ";project10;manufacturing11;surface3;planner61;emitter11;verifier21;splr6;fixed-dual2;optical-prusa-v7-007bb922-cycle2;color-names1-xkcd450cca88;libraries3;hardware1;catalog2;stock1;alternatives1;layouts5"
 );
 pub const PROJECT_FORMAT_CAPABILITY: &str = "ptac_projects_v1";
 pub const MANUFACTURING_SCHEMA_CAPABILITY: &str = "manufacturing_schema11";

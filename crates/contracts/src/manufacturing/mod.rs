@@ -37,7 +37,9 @@ pub use diaphragm::*;
 mod skin_fit_decode;
 
 mod construction;
+mod functional;
 pub use construction::*;
+pub use functional::*;
 mod routing;
 pub use routing::*;
 
@@ -2340,6 +2342,8 @@ fn sparse_bands<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedPrintPlan {
+    #[serde(deserialize_with = "required_option")]
+    pub functional_material_frame: Option<FunctionalMaterialFrame>,
     #[serde(deserialize_with = "construction::frames")]
     pub material_frames: Vec<SurfaceColorFrame>,
     #[serde(deserialize_with = "construction::material_domains")]
@@ -3800,6 +3804,32 @@ impl ManufacturingBundle {
                             "surface construction immutable source binding mismatch",
                         ));
                     }
+                }
+                if let Some(construction) = &job.functional_construction {
+                    let occurrence = self
+                        .provenance
+                        .occurrences
+                        .iter()
+                        .find(|o| {
+                            o.occurrence_id == construction.occurrence_id
+                                && o.definition_id == construction.definition_id
+                        })
+                        .ok_or_else(|| {
+                            invalid("functional construction has no captured source occurrence")
+                        })?;
+                    if !self.provenance.definitions.iter().any(|d| {
+                        d.definition_id == construction.definition_id
+                            && d.provenance.source_hash == construction.source_hash
+                    }) {
+                        return Err(invalid(
+                            "functional construction immutable source binding mismatch",
+                        ));
+                    }
+                    self.plan
+                        .functional_material_frame
+                        .as_ref()
+                        .ok_or_else(|| invalid("functional construction has no captured frame"))?
+                        .validate_source_pose(construction, &occurrence.pose)?;
                 }
                 let mut routed_segments = [0u32; 2];
                 for path in self.plan.layers.iter().flat_map(|layer| &layer.paths) {

@@ -138,6 +138,8 @@ pub enum MaterialConstructionRole {
     Shell,
     Backing,
     Core,
+    FunctionalRegion,
+    FunctionalBase,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -145,6 +147,7 @@ pub enum MaterialConstructionRole {
 pub struct MaterialDomainRef {
     /// Shell selects its regional request. Shared white backing/core use index0
     /// and cover the union of all admitted constructions on the same native part.
+    /// Functional roles belong exclusively to functional construction index0.
     pub construction_index: u16,
     pub role: MaterialConstructionRole,
 }
@@ -220,6 +223,14 @@ pub(super) fn validate_material_domains(
         JobWorkflow::FixedDualMarlin { job } => Some(job),
         _ => None,
     };
+    if let Some(job) = job
+        && let Some(construction) = &job.functional_construction
+    {
+        return functional::validate_material_domains(plan, construction, job);
+    }
+    if plan.functional_material_frame.is_some() {
+        return Err(invalid("functional frame has no functional construction"));
+    }
     if plan.material_frames.len() > MAX_SURFACE_COLOR_FACES
         || plan.material_frames.len()
             != job.map_or(0, |j| {
@@ -283,6 +294,14 @@ pub(super) fn validate_material_domains(
         points += domain.validate()?;
         if points > 65_536 {
             return Err(resource("material-domain point budget exceeded"));
+        }
+        if matches!(
+            domain.reference.role,
+            MaterialConstructionRole::FunctionalRegion | MaterialConstructionRole::FunctionalBase
+        ) {
+            return Err(invalid(
+                "functional domains cannot reinterpret an optical construction",
+            ));
         }
         if job.is_none_or(|j| {
             usize::from(domain.reference.construction_index) >= j.surface_constructions.len()

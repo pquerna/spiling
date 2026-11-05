@@ -98,7 +98,7 @@ fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan)
         layer.region_coverage.support_nominal_deposition_volume_mm3 = support;
     }
 }
-fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
+pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     let intent = ManufacturingIntent {
         hardware: None,
         material_profile: None,
@@ -166,6 +166,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         },
     };
     let mut plan = NormalizedPrintPlan {
+        functional_material_frame: None,
         material_frames: Vec::new(),
         material_domains: Vec::new(),
         schema_version: MANUFACTURING_SCHEMA_VERSION,

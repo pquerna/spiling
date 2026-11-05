@@ -68,6 +68,7 @@ const intent = {
         maximum_bed_temperature_c: 100,
         tools: [tool(0), tool(1)],
         surface_constructions: [],
+        functional_construction: null,
         assignments: [
           {
             occurrence_id: 1,

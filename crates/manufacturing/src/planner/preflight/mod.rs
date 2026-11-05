@@ -323,6 +323,25 @@ pub(super) fn admit<'a>(
         add("invalid_intent", e.to_string(), None, None);
     }
     if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
+        if let Some(construction) = &job.functional_construction {
+            let source = input
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.occurrence_id == construction.occurrence_id
+                        && occurrence.definition_id == construction.definition_id
+                })
+                .and_then(|occurrence| input.definitions.get(&occurrence.definition_id));
+            if source.is_none_or(|native| {
+                native.provenance().source_hash != construction.source_hash
+                    || !native
+                        .faces()
+                        .iter()
+                        .any(|face| face.face_id == construction.face_id)
+            }) {
+                add("invalid_functional_target", "Functional material construction does not bind the immutable native source and face".into(), Some(construction.occurrence_id), Some(construction.face_id.clone()));
+            }
+        }
         for construction in &job.surface_constructions {
             let source = input
                 .occurrences

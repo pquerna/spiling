@@ -3761,7 +3761,7 @@ fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
         &cancel,
     )
     .unwrap();
-    let mut schedule = scheduled_layers(&input, &admission, &captures, &cancel).unwrap();
+    let mut schedule = scheduled_layers(&input, &mut admission, &captures, &cancel).unwrap();
     let endpoints = schedule
         .iter()
         .map(|layer| layer.z.to_bits())
@@ -3919,7 +3919,7 @@ fn housing_c0_occupied_projection_preserves_other_poses_and_semantic_finish_addi
     .unwrap();
     // Keep the genuine full schedule available for C0's required upper-source
     // dependencies, but collect only its first span, not the whole operator.
-    let mut schedule = scheduled_layers(&input, &admission, &captures, &cancel).unwrap();
+    let mut schedule = scheduled_layers(&input, &mut admission, &captures, &cancel).unwrap();
     let occurrences = input.occurrences.iter().collect::<Vec<_>>();
     let retained = schedule.capacity() * std::mem::size_of::<LayerElevation>()
         + occurrences.capacity() * std::mem::size_of::<&OccurrenceRecord>();
@@ -4145,7 +4145,7 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
     // making the captured terminal request. A state starting only at that
     // terminal height lacks the production lower-leaf precondition.
     let interval = [9.983_333_334_748_949, 10.000_000_092_453_4];
-    let mut schedule = scheduled_layers(&input, &admission, &captures, &cancel).unwrap();
+    let mut schedule = scheduled_layers(&input, &mut admission, &captures, &cancel).unwrap();
     while schedule.last().unwrap().lower_z >= interval[0] {
         schedule.pop();
     }

@@ -269,6 +269,139 @@ fn surface_color_intent(scene: &Scene) -> ManufacturingIntent {
     intent
 }
 
+fn functional_material_intent(scene: &Scene) -> ManufacturingIntent {
+    let mut intent = surface_color_intent(scene);
+    intent.recipe.infill_fraction = 1.0;
+    intent.recipe.perimeter_count = 1;
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    let color = job.surface_constructions.remove(0);
+    job.functional_construction = Some(FunctionalMaterialConstruction {
+        occurrence_id: color.occurrence_id,
+        definition_id: color.definition_id,
+        source_hash: color.source_hash,
+        face_id: color.faces[0].face_id.clone(),
+        material_id: job.tools[0].material.id.clone(),
+        base_material_id: job.tools[1].material.id.clone(),
+        interface_policy: FunctionalInterfacePolicy::DeclaredSameFamily,
+        minimum_pure_depth_mm: 5.0,
+        join: PlanarTKeyJoin {
+            reach_into_region_mm: 1.6,
+            reach_into_base_mm: 1.6,
+            pitch_mm: 6.4,
+            stem_width_mm: 1.6,
+            head_width_mm: 4.8,
+            head_depth_mm: 1.2,
+            edge_margin_mm: 1.2,
+            end_collar_height_mm: 1.2,
+            collar_head_width_mm: 3.2,
+        },
+    });
+    intent
+}
+
+#[test]
+fn functional_region_preserves_five_mm_pure_depth_and_constructs_captive_keys() {
+    let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+    let intent = functional_material_intent(&scene);
+    let bundle = scene.compile(&intent).unwrap();
+    let frame = bundle.plan.functional_material_frame.as_ref().unwrap();
+    assert!(bundle.plan.material_frames.is_empty());
+    assert!(frame.key_centers_u_mm.contains(&(frame.width_mm * 0.5)));
+    assert!(
+        bundle.plan.material_domains.len() >= 6
+            && bundle.plan.material_domains.len() <= MAX_MATERIAL_DOMAINS
+    );
+    assert!(bundle.plan.material_domains.iter().all(|domain| matches!(
+        domain.reference.role,
+        MaterialConstructionRole::FunctionalRegion | MaterialConstructionRole::FunctionalBase
+    )));
+    let hash = SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap());
+    let fresh = inspect_bundle(
+        &bundle,
+        &hash,
+        VerificationOutput::ReportOnly,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(fresh.report.routing.is_some());
+    let wrong_tool = bundle.program.replacen("T0 S1", "T1 S1", 1);
+    assert_ne!(wrong_tool, bundle.program);
+    assert!(verifier::verify(&wrong_tool, &bundle.plan, &intent, &AtomicBool::new(false)).is_err());
+}
+
+#[test]
+fn functional_region_refuses_missing_depth_holes_subresolution_keys_and_changed_source() {
+    let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+    for change in 0..5 {
+        let mut intent = functional_material_intent(&scene);
+        let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+            unreachable!()
+        };
+        let request = job.functional_construction.as_mut().unwrap();
+        match change {
+            0 => request.minimum_pure_depth_mm = 9.0,
+            1 => request.minimum_pure_depth_mm = 5.0 + 2.0_f64.powi(-50),
+            2 => request.join.stem_width_mm = 0.1,
+            3 => request.source_hash = SourceHash::from_bytes(b"another source"),
+            _ => job.tools[0].material.polymer_family = "TPU".into(),
+        }
+        let failure = scene.compile(&intent).unwrap_err();
+        if change == 1 {
+            assert_eq!(
+                failure.code,
+                ManufacturingErrorCode::ProgramCoordinateConditioningFailure
+            );
+        }
+    }
+    let hole = Scene::new(HOLE, &[pose(20.0, 20.0, 0.0)]);
+    assert!(hole.compile(&functional_material_intent(&hole)).is_err());
+}
+
+#[test]
+fn mechanical_capture_replays_distinct_polymers_temperatures_and_filament_diameters() {
+    let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+    let mut intent = functional_material_intent(&scene);
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    job.functional_construction
+        .as_mut()
+        .unwrap()
+        .interface_policy = FunctionalInterfacePolicy::MechanicalCapture;
+    job.tools[0].material.polymer_family = "TPU".into();
+    job.tools[0].material.id = "software-tpu".into();
+    job.tools[0].material.declaration_hash = SourceHash::from_bytes(b"software TPU declaration");
+    job.functional_construction.as_mut().unwrap().material_id = job.tools[0].material.id.clone();
+    job.tools[0].filament_diameter_mm = 2.85;
+    job.tools[0].nozzle_temperature_c = 220.0;
+    let bundle = scene.compile(&intent).unwrap();
+    assert_eq!(bundle.provenance.intent, intent);
+    let bytes = serde_json::to_vec(&bundle).unwrap();
+    let decoded = decode_bundle(&bytes).unwrap();
+    let fresh = inspect_bundle(
+        &decoded,
+        &SourceHash::from_bytes(&bytes),
+        VerificationOutput::ReportOnly,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(fresh.report.routing.is_some());
+    for (from, to) in [("M109 T0 R220", "M109 T0 R200"), ("T0 S1", "T1 S1")] {
+        let mutated = decoded.program.replacen(from, to, 1);
+        assert_ne!(mutated, decoded.program);
+        assert!(
+            verifier::verify(&mutated, &decoded.plan, &intent, &AtomicBool::new(false)).is_err()
+        );
+    }
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    job.tools[0].max_volumetric_flow_mm3_s = 2.0;
+    assert!(intent.validate().is_err());
+}
+
 #[test]
 fn native_face_color_constructs_owned_skin_backing_core_and_replays_protected_hole() {
     for bytes in [BOX, HOLE] {

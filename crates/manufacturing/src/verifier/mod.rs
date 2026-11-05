@@ -12,6 +12,7 @@ use spiling_contracts::manufacturing::*;
 
 mod construction;
 mod expected;
+mod joins;
 mod replay;
 pub(crate) use replay::ReplaySink;
 
@@ -1163,6 +1164,7 @@ pub(crate) fn verify_actual(
     skin_bridges::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     skin_commands::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     construction::verify(plan, &mut geometry_work, cancel)?;
+    joins::verify(plan, intent, &mut geometry_work, cancel)?;
     let routing = if let Some(routed) = &mut route {
         travel_segments += routed.travel_segments;
         retraction_count += routed.retraction_count;

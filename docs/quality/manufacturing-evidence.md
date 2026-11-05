@@ -71,6 +71,37 @@ analytic cube matrix against a versioned mature slicer. It retains explicit
 refusals and unresolved process/material differences; reference agreement is
 separate from the native verifier and physical qualification.
 
+## Functional region and join inspection
+
+The [functional construction contract](../protocol/manufacturing.md#functional-material-region-and-captive-keys)
+owns the bounded one-part, one-face, solid rectangular-stock lane. It retains
+pure-material depth separately from either transition reach and uses wider
+middle heads with narrower end collars. Explicit `mechanical_capture` permits
+different declared families only through this complete native construction and
+fresh replay; ordinary routes retain the common-family gate. This does not
+qualify a general material-pair matrix, adhesion or physical retention.
+
+Native Prepare → Material stages the selected face and its join in the same
+revision-bound settings draft. Apply, Undo/Redo and save/reopen use the ordinary
+captured intent. Fresh Review → Joins highlights a realized material boundary at
+the selected physical layer; Focus/Reveal is transient inspection, not contact
+authority. The separate density-interface inspector retains its own meaning.
+
+Focused checks are `cargo test -p spiling-manufacturing --lib functional_`,
+`cargo test -p spiling-manufacturing --lib mechanical_capture_` and
+`cargo test -p spiling-contracts functional_`. They cover the one-perimeter solid
+reference, fresh actual-byte verification, strict source/material/role/frame
+binding, pure-depth conditioning and native hole/depth refusals. They do not
+qualify other wall policies; the two-perimeter proposal can still refuse at the
+unchanged source-joint corner gate. No butt-joint or lower-depth fallback is used.
+
+With freshly built CLI/engine binaries, `node tools/smoke-functional-joins.mjs`
+exercises a declared TPU/PLA software construction with distinct filament
+diameters and addressed temperatures, undo/redo, source-absent fresh replay and
+four-file export. Run it sequentially under the external resource limits in
+[development](development.md). Shared-bed/cooling suitability, flexible-material
+extraction and physical printing remain unqualified.
+
 ## Entry points and immutable capture
 
 - [`CompilerInput`, `compile`, `inspect_bundle`](../../crates/manufacturing/src/lib.rs)
@@ -452,8 +483,8 @@ Source-bound planar surface color is exercised through the real CLI on the commi
 
 Retained optical studies apply through typed Core/engine/client/CLI transactions with complete accepted report/selection and explicit two-material evidence/declaration bindings. Queued cancellation and stale revisions preserve the committed project; ACK commits one revision without changing SceneRevision or publishing scene artifacts. Both native source workflows exercise application, physical depth/history edits, changed-pose reassessment and source/palette/study-deleted fresh verification/export. Inspection distinguishes the small requested patch from complete realized side exposure and reuses the existing model with captured evidence; it does not reuse the requested prediction as a printed outcome. Unknown evidence/conditions remain unassessed and backing optics remain unmodelled. The native Review panel supports source-hidden actual replay and catalog metadata tint by decoded tool, plus requested/realized inspection and fresh four-file export. The native window can consume a CLI-produced recovered project; local hardware evidence does not qualify other GPUs/platforms or physical color.
 
-Current identities are project10/manufacturing11/process3/surface3, source21/planner60,
-emitter11/verifier20 and SPLR6; executable constants and exact native pins remain authoritative.
+Current identities are project10/manufacturing11/process3/surface3, source21/planner61,
+emitter11/verifier21 and SPLR6; executable constants and exact native pins remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
 Raw inspection, an older producer's successful job or historical hardware

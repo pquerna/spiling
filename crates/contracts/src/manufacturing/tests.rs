@@ -4,6 +4,555 @@
 
 use super::*;
 
+fn functional_job() -> FixedDualJob {
+    let captured: ManufacturingIntent = serde_json::from_str(include_str!(
+        "../../../../fixtures/manufacturing/fixed-dual.intent.json"
+    ))
+    .unwrap();
+    let JobWorkflow::FixedDualMarlin { mut job } = captured.printer.workflow else {
+        panic!()
+    };
+    job.assignments.truncate(1);
+    job.assignments[0].work_envelope_mm = AabbMm::new([0.0; 3], [100.0, 100.0, 20.0]).unwrap();
+    let (_, definitions, occurrences) = inputs();
+    job.functional_construction = Some(FunctionalMaterialConstruction {
+        interface_policy: FunctionalInterfacePolicy::DeclaredSameFamily,
+        occurrence_id: occurrences[0].occurrence_id,
+        definition_id: definitions[0].definition_id.clone(),
+        source_hash: definitions[0].provenance.source_hash.clone(),
+        face_id: FaceId::parse("step:1").unwrap(),
+        material_id: job.tools[1].material.id.clone(),
+        base_material_id: job.tools[0].material.id.clone(),
+        minimum_pure_depth_mm: 2.0,
+        join: PlanarTKeyJoin {
+            reach_into_region_mm: 2.0,
+            reach_into_base_mm: 3.0,
+            pitch_mm: 10.0,
+            stem_width_mm: 2.0,
+            head_width_mm: 6.0,
+            head_depth_mm: 1.0,
+            edge_margin_mm: 1.0,
+            end_collar_height_mm: 1.0,
+            collar_head_width_mm: 4.0,
+        },
+    });
+    job
+}
+
+fn functional_plan(job: &FixedDualJob) -> NormalizedPrintPlan {
+    let c = job.functional_construction.as_ref().unwrap();
+    let mut plan = plan();
+    plan.functional_material_frame = Some(FunctionalMaterialFrame {
+        stock_bounds_mm: AabbMm::new([0.0, 0.0, 0.0], [20.0, 20.0, 20.0]).unwrap(),
+        occurrence_id: c.occurrence_id,
+        definition_id: c.definition_id.clone(),
+        source_hash: c.source_hash.clone(),
+        face_id: c.face_id.clone(),
+        origin_mm: [0.0; 3],
+        world_origin_mm: [0.0; 3],
+        horizontal_direction: [1.0, 0.0, 0.0],
+        outward_normal: [0.0, -1.0, 0.0],
+        width_mm: 20.0,
+        source_z_mm: [0.0, 20.0],
+        key_middle_z_mm: [1.0, 19.0],
+        key_centers_u_mm: vec![10.0],
+    });
+    plan.material_domains = [
+        MaterialConstructionRole::FunctionalRegion,
+        MaterialConstructionRole::FunctionalBase,
+    ]
+    .map(|role| ResolvedMaterialDomain {
+        reference: MaterialDomainRef {
+            construction_index: 0,
+            role,
+        },
+        physical_z_mm: [5.0, 5.2],
+        polygons: vec![MaterialDomainPolygon {
+            exterior_mm: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]],
+            holes_mm: vec![],
+        }],
+    })
+    .into();
+    plan.layers[0].paths[0].material_domain = Some(plan.material_domains[0].reference);
+    plan
+}
+
+#[test]
+fn functional_dimensions_collars_and_common_polymer_remain_strict() {
+    let job = functional_job();
+    job.validate_declaration().unwrap();
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+        for field in 0..10 {
+            let mut bad = job.clone();
+            let c = bad.functional_construction.as_mut().unwrap();
+            let values = [
+                &mut c.minimum_pure_depth_mm,
+                &mut c.join.reach_into_region_mm,
+                &mut c.join.reach_into_base_mm,
+                &mut c.join.pitch_mm,
+                &mut c.join.stem_width_mm,
+                &mut c.join.head_width_mm,
+                &mut c.join.head_depth_mm,
+                &mut c.join.edge_margin_mm,
+                &mut c.join.end_collar_height_mm,
+                &mut c.join.collar_head_width_mm,
+            ];
+            *values.into_iter().nth(field).unwrap() = value;
+            assert!(
+                bad.validate_declaration().is_err(),
+                "field {field}, value {value}"
+            );
+        }
+    }
+    for collar in [1.0, 2.0, 6.0, 7.0] {
+        let mut bad = job.clone();
+        bad.functional_construction
+            .as_mut()
+            .unwrap()
+            .join
+            .collar_head_width_mm = collar;
+        assert!(bad.validate_declaration().is_err());
+    }
+    let mut bad = job.clone();
+    bad.tools[1].material.polymer_family = "another-polymer".into();
+    assert!(bad.validate_declaration().is_err());
+    let mut bad = job;
+    bad.functional_construction.as_mut().unwrap().occurrence_id = OccurrenceId::new(2).unwrap();
+    assert!(bad.validate_declaration().is_err());
+}
+
+#[test]
+fn mixed_families_require_explicit_complete_mechanical_capture() {
+    let mut job = functional_job();
+    job.tools[0].material.polymer_family = "TPU".into();
+    job.tools[1].material.polymer_family = "PLA".into();
+    assert!(job.validate_declaration().is_err());
+    job.functional_construction
+        .as_mut()
+        .unwrap()
+        .interface_policy = FunctionalInterfacePolicy::MechanicalCapture;
+    job.validate_declaration().unwrap();
+    // The policy does not authorize other mixed jobs, optical constructions,
+    // cycles, incomplete keys, or unmatched loaded/base identities.
+    for change in 0..8 {
+        let mut bad = job.clone();
+        match change {
+            0 => bad.functional_construction = None,
+            1 => {
+                let mut second = bad.assignments[0].clone();
+                second.occurrence_id = OccurrenceId::new(2).unwrap();
+                second.work_envelope_mm =
+                    AabbMm::new([110.0, 0.0, 0.0], [210.0, 100.0, 20.0]).unwrap();
+                bad.assignments.push(second);
+            }
+            2 => {
+                bad.assignments[0].material = OccurrenceMaterial::LayerCycle {
+                    recipe: crate::optical::LayerCycle {
+                        slots: vec![
+                            crate::optical::OpticalSlot {
+                                material: 0,
+                                height_mm: 0.2,
+                            },
+                            crate::optical::OpticalSlot {
+                                material: 1,
+                                height_mm: 0.2,
+                            },
+                        ],
+                        phase_slot: 0,
+                        origin_z_mm: 0.0,
+                    },
+                    material_ids: [
+                        bad.tools[0].material.id.clone(),
+                        bad.tools[1].material.id.clone(),
+                    ],
+                };
+            }
+            3 => bad.functional_construction.as_mut().unwrap().material_id = "unloaded".into(),
+            4 => {
+                bad.functional_construction
+                    .as_mut()
+                    .unwrap()
+                    .base_material_id = "unloaded".into()
+            }
+            5 => {
+                bad.assignments[0].material = OccurrenceMaterial::Uniform {
+                    material_id: bad.tools[1].material.id.clone(),
+                }
+            }
+            6 => {
+                bad.functional_construction
+                    .as_mut()
+                    .unwrap()
+                    .join
+                    .end_collar_height_mm = 0.0
+            }
+            _ => {
+                let optical: ManufacturingIntent = serde_json::from_str(include_str!(
+                    "../../../../fixtures/manufacturing/surface-color-box.intent.json"
+                ))
+                .unwrap();
+                let JobWorkflow::FixedDualMarlin { job: optical } = optical.printer.workflow else {
+                    panic!("fixed-dual optical fixture")
+                };
+                bad.surface_constructions = optical.surface_constructions;
+            }
+        }
+        assert!(bad.validate_declaration().is_err(), "change {change}");
+    }
+}
+
+#[test]
+fn mechanical_capture_preserves_loaded_tool_flow_and_process_envelopes() {
+    let mut value: ManufacturingIntent = serde_json::from_str(include_str!(
+        "../../../../fixtures/manufacturing/fixed-dual.intent.json"
+    ))
+    .unwrap();
+    let mut job = functional_job();
+    job.tools[0].material.polymer_family = "TPU".into();
+    job.tools[1].material.polymer_family = "PLA".into();
+    job.functional_construction
+        .as_mut()
+        .unwrap()
+        .interface_policy = FunctionalInterfacePolicy::MechanicalCapture;
+    value.printer.workflow = JobWorkflow::FixedDualMarlin { job };
+    value.validate().unwrap();
+    for change in 0..7 {
+        let mut bad = value.clone();
+        match change {
+            0 | 1 | 2 | 3 => {
+                let JobWorkflow::FixedDualMarlin { job } = &mut bad.printer.workflow else {
+                    unreachable!()
+                };
+                match change {
+                    0 => job.tools[0].max_volumetric_flow_mm3_s = 0.01,
+                    1 => job.tools[1].max_volumetric_flow_mm3_s = 0.01,
+                    2 => {
+                        job.tools[1].deposition_limits.max_bead_width_mm =
+                            bad.recipe.bead_width_mm - 0.01
+                    }
+                    _ => {
+                        job.tools[0].deposition_limits.max_bead_height_mm =
+                            bad.recipe.layer_height_mm - 0.01
+                    }
+                }
+            }
+            4 => {
+                bad.printer.capabilities.generated_supports = true;
+                bad.recipe.supports = SupportPolicy::Breakaway {
+                    density: 0.25,
+                    xy_clearance_mm: 0.5,
+                    z_gap_mm: 0.2,
+                    interface_thickness_mm: 0.4,
+                };
+            }
+            5 => {
+                bad.recipe.sparse_infill =
+                    SparseInfillPolicy::CombineEligible { max_height_mm: 0.4 }
+            }
+            _ => {
+                bad.recipe.process.retraction = RetractionPolicy::Enabled {
+                    distance_mm: 1.0,
+                    speed_mm_s: 10.0,
+                    minimum_travel_mm: 1.0,
+                    z_hop_mm: 0.2,
+                }
+            }
+        }
+        assert!(bad.validate().is_err(), "change {change}");
+    }
+}
+
+#[test]
+fn functional_interface_policy_json_is_required_known_and_round_trips() {
+    for policy in [
+        FunctionalInterfacePolicy::DeclaredSameFamily,
+        FunctionalInterfacePolicy::MechanicalCapture,
+    ] {
+        let mut construction = functional_job().functional_construction.unwrap();
+        construction.interface_policy = policy;
+        let json = serde_json::to_value(&construction).unwrap();
+        assert_eq!(
+            serde_json::from_value::<FunctionalMaterialConstruction>(json.clone()).unwrap(),
+            construction
+        );
+        let mut missing = json.clone();
+        missing.as_object_mut().unwrap().remove("interface_policy");
+        assert!(serde_json::from_value::<FunctionalMaterialConstruction>(missing).is_err());
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!("unknown"),
+            serde_json::json!(0),
+            serde_json::json!(true),
+        ] {
+            let mut bad = json.clone();
+            bad["interface_policy"] = invalid;
+            assert!(serde_json::from_value::<FunctionalMaterialConstruction>(bad).is_err());
+        }
+    }
+}
+
+#[test]
+fn functional_world_frame_binds_translation_and_exact_collar_arithmetic() {
+    let job = functional_job();
+    let c = job.functional_construction.as_ref().unwrap();
+    let mut frame = functional_plan(&job).functional_material_frame.unwrap();
+    let pose = RigidPoseMm {
+        translation_mm: [0.125, 3.5, 0.25],
+        ..RigidPoseMm::IDENTITY
+    };
+    frame.world_origin_mm = pose.translation_mm;
+    frame.stock_bounds_mm = AabbMm::new(
+        pose.translation_mm,
+        pose.translation_mm.map(|value| value + 20.0),
+    )
+    .unwrap();
+    frame.key_middle_z_mm = [1.25, 19.25];
+    frame.validate_source_pose(c, &pose).unwrap();
+    for change in 0..4 {
+        let mut bad = frame.clone();
+        match change {
+            0 => bad.world_origin_mm[0] = bad.world_origin_mm[0].next_up(),
+            1 => bad.key_middle_z_mm[0] = bad.key_middle_z_mm[0].next_up(),
+            2 => bad.key_middle_z_mm[1] = bad.key_middle_z_mm[1].next_down(),
+            _ => bad.world_origin_mm[2] = f64::INFINITY,
+        }
+        assert!(
+            bad.validate_source_pose(c, &pose).is_err(),
+            "change {change}"
+        );
+    }
+    let mut rotated = pose;
+    rotated.rotation_xyzw = [0.0, 0.0, 1.0, 0.0];
+    assert!(frame.validate_source_pose(c, &rotated).is_err());
+    assert!(
+        frame
+            .validate_source_pose(c, &RigidPoseMm::IDENTITY)
+            .is_err()
+    );
+}
+
+#[test]
+fn functional_frame_native_round_trip_rejects_missing_nonfinite_and_oversized_fields() {
+    use prost::Message;
+    let frame = functional_plan(&functional_job())
+        .functional_material_frame
+        .unwrap();
+    let wire = crate::rpc::FunctionalMaterialFrame::try_from(frame.clone()).unwrap();
+    let decoded =
+        crate::rpc::FunctionalMaterialFrame::decode(wire.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(FunctionalMaterialFrame::try_from(decoded).unwrap(), frame);
+    let mut diagonal = frame.clone();
+    diagonal.horizontal_direction = [
+        std::f64::consts::FRAC_1_SQRT_2,
+        std::f64::consts::FRAC_1_SQRT_2,
+        0.0,
+    ];
+    diagonal.outward_normal = [
+        std::f64::consts::FRAC_1_SQRT_2,
+        -std::f64::consts::FRAC_1_SQRT_2,
+        0.0,
+    ];
+    assert!(diagonal.validate_values().is_err());
+    for change in 0..6 {
+        let mut bad = wire.clone();
+        match change {
+            0 => bad.world_origin_mm = None,
+            1 => bad.world_origin_mm.as_mut().unwrap().x = f64::NAN,
+            2 => bad.source_z_mm = vec![0.0],
+            3 => bad.key_middle_z_mm.push(20.0),
+            4 => bad.key_centers_u_mm = vec![10.0; 17],
+            _ => bad.width_mm = f64::INFINITY,
+        }
+        assert!(
+            FunctionalMaterialFrame::try_from(bad).is_err(),
+            "change {change}"
+        );
+    }
+    let mut bad = frame;
+    bad.world_origin_mm[0] = f64::INFINITY;
+    assert!(crate::rpc::FunctionalMaterialFrame::try_from(bad).is_err());
+}
+
+#[test]
+fn functional_nullable_fields_and_bounded_frame_json_are_strict() {
+    let job = functional_job();
+    let mut json = serde_json::to_value(&job).unwrap();
+    json.as_object_mut()
+        .unwrap()
+        .remove("functional_construction");
+    assert!(serde_json::from_value::<FixedDualJob>(json).is_err());
+    let plan = functional_plan(&job);
+    let mut json = serde_json::to_value(&plan).unwrap();
+    json.as_object_mut()
+        .unwrap()
+        .remove("functional_material_frame");
+    assert!(serde_json::from_value::<NormalizedPrintPlan>(json).is_err());
+    assert_eq!(
+        serde_json::from_value::<NormalizedPrintPlan>(serde_json::to_value(&plan).unwrap())
+            .unwrap(),
+        plan
+    );
+    let mut json = serde_json::to_value(&plan).unwrap();
+    json["functional_material_frame"]["key_centers_u_mm"] = serde_json::json!(vec![10.0; 17]);
+    assert!(serde_json::from_value::<NormalizedPrintPlan>(json).is_err());
+    for field in ["end_collar_height_mm", "collar_head_width_mm"] {
+        let mut json = serde_json::to_value(&job).unwrap();
+        json["functional_construction"]["join"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(serde_json::from_value::<FixedDualJob>(json).is_err());
+    }
+}
+
+#[test]
+fn functional_domains_bind_source_roles_and_complete_intervals() {
+    let job = functional_job();
+    let plan = functional_plan(&job);
+    let c = job.functional_construction.as_ref().unwrap();
+    functional::validate_material_domains(&plan, c, &job).unwrap();
+    assert_eq!(job.tool_for_path(&plan.layers[0].paths[0]).unwrap(), 1);
+    let mut base = plan.layers[0].paths[0].clone();
+    base.material_domain = Some(plan.material_domains[1].reference);
+    assert_eq!(job.tool_for_path(&base).unwrap(), 0);
+    for role in [
+        MaterialConstructionRole::Shell,
+        MaterialConstructionRole::Backing,
+        MaterialConstructionRole::Core,
+    ] {
+        let mut bad = plan.clone();
+        bad.material_domains[0].reference.role = role;
+        bad.layers[0].paths[0].material_domain = Some(bad.material_domains[0].reference);
+        assert!(functional::validate_material_domains(&bad, c, &job).is_err());
+        assert!(job.tool_for_path(&bad.layers[0].paths[0]).is_err());
+    }
+    for change in 0..14 {
+        let mut bad = plan.clone();
+        match change {
+            0 => bad.functional_material_frame = None,
+            1 => {
+                bad.functional_material_frame.as_mut().unwrap().source_hash =
+                    SourceHash::from_bytes(b"other")
+            }
+            2 => {
+                bad.functional_material_frame.as_mut().unwrap().face_id =
+                    FaceId::parse("step:2").unwrap()
+            }
+            3 => bad.functional_material_frame.as_mut().unwrap().width_mm = f64::NAN,
+            4 => bad
+                .functional_material_frame
+                .as_mut()
+                .unwrap()
+                .key_centers_u_mm
+                .clear(),
+            5 => {
+                bad.functional_material_frame
+                    .as_mut()
+                    .unwrap()
+                    .key_centers_u_mm = vec![9.0]
+            }
+            6 => {
+                bad.material_domains.pop();
+            }
+            7 => bad.material_domains[1].physical_z_mm[1] = 5.1,
+            8 => bad.material_domains.push(bad.material_domains[0].clone()),
+            9 => bad.material_domains[0].reference.construction_index = 1,
+            10 => bad.layers[0].paths[0].material_domain = None,
+            11 => bad.material_domains[0].physical_z_mm = [0.0, 20.0],
+            12 => {
+                bad.functional_material_frame
+                    .as_mut()
+                    .unwrap()
+                    .horizontal_direction = [0.0; 3]
+            }
+            _ => {
+                bad.functional_material_frame
+                    .as_mut()
+                    .unwrap()
+                    .key_centers_u_mm = vec![10.0; 17]
+            }
+        }
+        assert!(
+            functional::validate_material_domains(&bad, c, &job).is_err(),
+            "change {change}"
+        );
+    }
+    let mut optical = intent();
+    assert!(construction::validate_material_domains(&plan, &optical).is_err());
+    optical.printer.workflow = JobWorkflow::FixedDualMarlin { job };
+    construction::validate_material_domains(&plan, &optical).unwrap();
+}
+
+#[test]
+fn functional_regional_owners_and_existing_domain_budget_are_enforced() {
+    let job = functional_job();
+    let c = job.functional_construction.as_ref().unwrap();
+    let mut plan = functional_plan(&job);
+    plan.layers[0]
+        .region_coverage
+        .process_regions
+        .push(ProcessRegionCoverage {
+            material_domain: Some(plan.material_domains[0].reference),
+            area_mm2: 1.0,
+            fraction: 1.0,
+            contributions: vec![ProcessRegionContribution {
+                occurrence_id: c.occurrence_id,
+                definition_id: c.definition_id.clone(),
+                provenance: None,
+            }],
+        });
+    plan.layers[0].paths[0].owner = Some(DepositionOwner::Regional { region_index: 0 });
+    functional::validate_material_domains(&plan, c, &job).unwrap();
+    for change in 0..4 {
+        let mut bad = plan.clone();
+        let region = &mut bad.layers[0].region_coverage.process_regions[0];
+        match change {
+            0 => region.material_domain = None,
+            1 => region.material_domain = Some(bad.material_domains[1].reference),
+            2 => region.contributions[0].occurrence_id = OccurrenceId::new(2).unwrap(),
+            _ => region.fraction = 0.5,
+        }
+        assert!(functional::validate_material_domains(&bad, c, &job).is_err());
+    }
+    let template = functional_plan(&job);
+    let cuts = [
+        0.0, 0.25, 0.5, 0.75, 1.0, 1.1, 1.2, 1.3, 1.4, 1.65, 1.9, 2.15, 2.4,
+    ];
+    let frame = plan.functional_material_frame.as_mut().unwrap();
+    frame.source_z_mm = [0.0, 2.4];
+    frame.key_middle_z_mm = [1.0, 1.4];
+    plan.layers.clear();
+    plan.material_domains.clear();
+    for (index, interval) in cuts.windows(2).enumerate() {
+        let physical_z_mm = [interval[0], interval[1]];
+        let mut layer = template.layers[0].clone();
+        layer.index = index as u32;
+        layer.lower_z_mm = interval[0];
+        layer.z_mm = interval[1];
+        for path in &mut layer.paths {
+            path.physical_z_mm = physical_z_mm;
+            for point in &mut path.points_mm {
+                point[2] = interval[1];
+            }
+        }
+        plan.layers.push(layer);
+        for domain in &template.material_domains {
+            let mut domain = domain.clone();
+            domain.physical_z_mm = physical_z_mm;
+            plan.material_domains.push(domain);
+        }
+    }
+    assert_eq!(plan.material_domains.len(), MAX_MATERIAL_DOMAINS);
+    functional::validate_material_domains(&plan, c, &job).unwrap();
+    plan.material_domains.push(plan.material_domains[0].clone());
+    assert_eq!(
+        functional::validate_material_domains(&plan, c, &job)
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::ResourceLimit
+    );
+}
+
 #[test]
 fn layer_preferences_resolve_without_changing_limits_and_protections_do_not() {
     let mut value = intent();
@@ -734,6 +1283,7 @@ fn accepted_coverage_binds_recipe_occurrences_schedule_and_visible_summary() {
 
 fn plan() -> NormalizedPrintPlan {
     NormalizedPrintPlan {
+        functional_material_frame: None,
         material_frames: Vec::new(),
         material_domains: Vec::new(),
         schema_version: MANUFACTURING_SCHEMA_VERSION,

@@ -8,13 +8,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest = std::path::PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").ok_or("missing Cargo manifest directory")?,
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest.join("build.rs").display()
+    );
     let mut prost = tonic_prost_build::Config::new();
     prost.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);
-    // Captured provenance and optional installed setups are cold owned payloads.
+    // Captured provenance, optional setups and functional construction are cold owned payloads.
     // Keep them out of every surrounding control enum's inline size.
     prost.boxed(".spiling.engine.LibraryFilamentDefinition.catalog_origin");
     prost.boxed(".spiling.engine.PrinterIdentity.catalog_origin");
     prost.boxed(".spiling.engine.OwnedMachine.configuration.setup");
+    prost.boxed(".spiling.engine.FixedDualJob.functional_construction.functional_material");
     // Keep bounded protobuf control oneofs inline rather than adding per-call boxes.
     for oneof in [
         ".spiling.engine.ArtifactSummary.kind",

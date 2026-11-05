@@ -2539,6 +2539,157 @@ impl TryFrom<OccurrenceMaterialAssignment> for rpc::OccurrenceMaterialAssignment
     }
 }
 
+impl TryFrom<rpc::PlanarTKeyJoin> for PlanarTKeyJoin {
+    type Error = String;
+    fn try_from(v: rpc::PlanarTKeyJoin) -> Result<Self, String> {
+        let result = Self {
+            reach_into_region_mm: v.reach_into_region_mm,
+            reach_into_base_mm: v.reach_into_base_mm,
+            pitch_mm: v.pitch_mm,
+            stem_width_mm: v.stem_width_mm,
+            head_width_mm: v.head_width_mm,
+            head_depth_mm: v.head_depth_mm,
+            edge_margin_mm: v.edge_margin_mm,
+            end_collar_height_mm: v.end_collar_height_mm,
+            collar_head_width_mm: v.collar_head_width_mm,
+        };
+        result.validate().map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+}
+impl TryFrom<PlanarTKeyJoin> for rpc::PlanarTKeyJoin {
+    type Error = String;
+    fn try_from(v: PlanarTKeyJoin) -> Result<Self, String> {
+        v.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            reach_into_region_mm: v.reach_into_region_mm,
+            reach_into_base_mm: v.reach_into_base_mm,
+            pitch_mm: v.pitch_mm,
+            stem_width_mm: v.stem_width_mm,
+            head_width_mm: v.head_width_mm,
+            head_depth_mm: v.head_depth_mm,
+            edge_margin_mm: v.edge_margin_mm,
+            end_collar_height_mm: v.end_collar_height_mm,
+            collar_head_width_mm: v.collar_head_width_mm,
+        })
+    }
+}
+impl TryFrom<rpc::FunctionalInterfacePolicy> for FunctionalInterfacePolicy {
+    type Error = String;
+    fn try_from(value: rpc::FunctionalInterfacePolicy) -> Result<Self, String> {
+        match value {
+            rpc::FunctionalInterfacePolicy::DeclaredSameFamily => Ok(Self::DeclaredSameFamily),
+            rpc::FunctionalInterfacePolicy::MechanicalCapture => Ok(Self::MechanicalCapture),
+            rpc::FunctionalInterfacePolicy::Unspecified => {
+                Err("unspecified functional interface policy".into())
+            }
+        }
+    }
+}
+impl TryFrom<FunctionalInterfacePolicy> for rpc::FunctionalInterfacePolicy {
+    type Error = String;
+    fn try_from(value: FunctionalInterfacePolicy) -> Result<Self, String> {
+        Ok(match value {
+            FunctionalInterfacePolicy::DeclaredSameFamily => Self::DeclaredSameFamily,
+            FunctionalInterfacePolicy::MechanicalCapture => Self::MechanicalCapture,
+        })
+    }
+}
+impl TryFrom<rpc::FunctionalMaterialConstruction> for FunctionalMaterialConstruction {
+    type Error = String;
+    fn try_from(v: rpc::FunctionalMaterialConstruction) -> Result<Self, String> {
+        let result = Self {
+            interface_policy: rpc::FunctionalInterfacePolicy::try_from(v.interface_policy)
+                .map_err(|_| "unknown functional interface policy")?
+                .try_into()?,
+            occurrence_id: OccurrenceId::new(v.occurrence_id).map_err(|e| e.to_string())?,
+            definition_id: DefinitionId::parse(v.definition_id).map_err(|e| e.to_string())?,
+            source_hash: SourceHash::parse(v.source_hash).map_err(|e| e.to_string())?,
+            face_id: crate::geometry::FaceId::parse(v.face_id).map_err(|e| e.to_string())?,
+            material_id: v.material_id,
+            base_material_id: v.base_material_id,
+            minimum_pure_depth_mm: v.minimum_pure_depth_mm,
+            join: required(v.join, "functional T-key join")?.try_into()?,
+        };
+        result.validate_dimensions().map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+}
+impl TryFrom<FunctionalMaterialConstruction> for rpc::FunctionalMaterialConstruction {
+    type Error = String;
+    fn try_from(v: FunctionalMaterialConstruction) -> Result<Self, String> {
+        v.validate_dimensions().map_err(|e| e.to_string())?;
+        Ok(Self {
+            interface_policy: rpc::FunctionalInterfacePolicy::try_from(v.interface_policy)? as i32,
+            occurrence_id: v.occurrence_id.get(),
+            definition_id: v.definition_id.into(),
+            source_hash: v.source_hash.into(),
+            face_id: v.face_id.into(),
+            material_id: v.material_id,
+            base_material_id: v.base_material_id,
+            minimum_pure_depth_mm: v.minimum_pure_depth_mm,
+            join: Some(v.join.try_into()?),
+        })
+    }
+}
+
+impl TryFrom<rpc::FunctionalMaterialFrame> for FunctionalMaterialFrame {
+    type Error = String;
+    fn try_from(v: rpc::FunctionalMaterialFrame) -> Result<Self, String> {
+        if v.key_centers_u_mm.len() > MAX_FUNCTIONAL_KEYS {
+            return Err("functional key count exceeds sixteen".into());
+        }
+        let result = Self {
+            occurrence_id: OccurrenceId::new(v.occurrence_id).map_err(|e| e.to_string())?,
+            definition_id: DefinitionId::parse(v.definition_id).map_err(|e| e.to_string())?,
+            source_hash: SourceHash::parse(v.source_hash).map_err(|e| e.to_string())?,
+            face_id: crate::geometry::FaceId::parse(v.face_id).map_err(|e| e.to_string())?,
+            origin_mm: required(v.origin_mm, "functional source origin")?.try_into()?,
+            world_origin_mm: required(v.world_origin_mm, "functional world origin")?.try_into()?,
+            stock_bounds_mm: required(v.stock_bounds_mm, "functional stock bounds")?.try_into()?,
+            horizontal_direction: required(
+                v.horizontal_direction,
+                "functional horizontal direction",
+            )?
+            .try_into()?,
+            outward_normal: required(v.outward_normal, "functional outward normal")?.try_into()?,
+            width_mm: v.width_mm,
+            source_z_mm: v
+                .source_z_mm
+                .try_into()
+                .map_err(|_| "functional source interval requires two endpoints")?,
+            key_middle_z_mm: v
+                .key_middle_z_mm
+                .try_into()
+                .map_err(|_| "functional middle interval requires two endpoints")?,
+            key_centers_u_mm: v.key_centers_u_mm,
+        };
+        result.validate_values().map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+}
+impl TryFrom<FunctionalMaterialFrame> for rpc::FunctionalMaterialFrame {
+    type Error = String;
+    fn try_from(v: FunctionalMaterialFrame) -> Result<Self, String> {
+        v.validate_values().map_err(|e| e.to_string())?;
+        Ok(Self {
+            occurrence_id: v.occurrence_id.get(),
+            definition_id: v.definition_id.into(),
+            source_hash: v.source_hash.into(),
+            face_id: v.face_id.into(),
+            origin_mm: Some(v.origin_mm.try_into()?),
+            world_origin_mm: Some(v.world_origin_mm.try_into()?),
+            stock_bounds_mm: Some(v.stock_bounds_mm.try_into()?),
+            horizontal_direction: Some(v.horizontal_direction.try_into()?),
+            outward_normal: Some(v.outward_normal.try_into()?),
+            width_mm: v.width_mm,
+            source_z_mm: v.source_z_mm.into(),
+            key_middle_z_mm: v.key_middle_z_mm.into(),
+            key_centers_u_mm: v.key_centers_u_mm,
+        })
+    }
+}
+
 impl TryFrom<rpc::FixedDualJob> for FixedDualJob {
     type Error = String;
     fn try_from(value: rpc::FixedDualJob) -> Result<Self, String> {
@@ -2584,6 +2735,16 @@ impl TryFrom<rpc::FixedDualJob> for FixedDualJob {
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<_, _>>()?,
+            functional_construction: match required(
+                value.functional_construction,
+                "functional construction or explicit null",
+            )? {
+                rpc::fixed_dual_job::FunctionalConstruction::FunctionalMaterial(v) => {
+                    Some((*v).try_into()?)
+                }
+                rpc::fixed_dual_job::FunctionalConstruction::NoFunctionalConstruction(true) => None,
+                _ => return Err("functional construction null sentinel must be true".into()),
+            },
             transition_lift_mm: value.transition_lift_mm,
             carriage_travel_bounds_mm: required(
                 value.carriage_travel_bounds_mm,
@@ -2630,6 +2791,12 @@ impl TryFrom<FixedDualJob> for rpc::FixedDualJob {
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<_, _>>()?,
+            functional_construction: Some(match value.functional_construction {
+                Some(v) => rpc::fixed_dual_job::FunctionalConstruction::FunctionalMaterial(
+                    Box::new(v.try_into()?),
+                ),
+                None => rpc::fixed_dual_job::FunctionalConstruction::NoFunctionalConstruction(true),
+            }),
             assignments: value
                 .assignments
                 .into_iter()
@@ -2758,6 +2925,109 @@ fn validate_assignment_bounds(value: &OccurrenceMaterialAssignment) -> Result<()
 #[cfg(test)]
 mod fixed_dual_wire_tests {
     use super::*;
+
+    #[test]
+    fn functional_native_round_trip_and_strict_presence_dimensions_and_source() {
+        use prost::Message;
+        let mut domain = job();
+        domain.assignments.truncate(1);
+        domain.functional_construction = Some(FunctionalMaterialConstruction {
+            interface_policy: FunctionalInterfacePolicy::DeclaredSameFamily,
+            occurrence_id: domain.assignments[0].occurrence_id,
+            definition_id: DefinitionId::from_source_sha256(&[7; 32]),
+            source_hash: SourceHash::from_bytes(b"functional-source"),
+            face_id: crate::geometry::FaceId::parse("step:1").unwrap(),
+            material_id: domain.tools[1].material.id.clone(),
+            base_material_id: domain.tools[0].material.id.clone(),
+            minimum_pure_depth_mm: 2.0,
+            join: PlanarTKeyJoin {
+                reach_into_region_mm: 2.0,
+                reach_into_base_mm: 3.0,
+                pitch_mm: 10.0,
+                stem_width_mm: 2.0,
+                head_width_mm: 6.0,
+                head_depth_mm: 1.0,
+                edge_margin_mm: 1.0,
+                end_collar_height_mm: 1.0,
+                collar_head_width_mm: 4.0,
+            },
+        });
+        let wire = rpc::FixedDualJob::try_from(domain.clone()).unwrap();
+        let decoded = rpc::FixedDualJob::decode(wire.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(FixedDualJob::try_from(decoded).unwrap(), domain);
+        let mut omitted = wire.clone();
+        omitted.functional_construction = None;
+        assert!(FixedDualJob::try_from(omitted).is_err());
+        let mut invalid_null = wire.clone();
+        invalid_null.functional_construction =
+            Some(rpc::fixed_dual_job::FunctionalConstruction::NoFunctionalConstruction(false));
+        assert!(FixedDualJob::try_from(invalid_null).is_err());
+        let mut mixed = domain.clone();
+        mixed.tools[1].material.polymer_family = "TPU".into();
+        assert!(rpc::FixedDualJob::try_from(mixed.clone()).is_err());
+        mixed
+            .functional_construction
+            .as_mut()
+            .unwrap()
+            .interface_policy = FunctionalInterfacePolicy::MechanicalCapture;
+        let wire_mixed = rpc::FixedDualJob::try_from(mixed.clone()).unwrap();
+        let decoded = rpc::FixedDualJob::decode(wire_mixed.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(FixedDualJob::try_from(decoded).unwrap(), mixed);
+        let original = domain.functional_construction.as_ref().unwrap();
+        let wire_construction =
+            rpc::FunctionalMaterialConstruction::try_from(original.clone()).unwrap();
+        for policy in [
+            FunctionalInterfacePolicy::DeclaredSameFamily,
+            FunctionalInterfacePolicy::MechanicalCapture,
+        ] {
+            let mut construction = original.clone();
+            construction.interface_policy = policy;
+            let wire = rpc::FunctionalMaterialConstruction::try_from(construction.clone()).unwrap();
+            let decoded =
+                rpc::FunctionalMaterialConstruction::decode(wire.encode_to_vec().as_slice())
+                    .unwrap();
+            assert_eq!(
+                FunctionalMaterialConstruction::try_from(decoded).unwrap(),
+                construction
+            );
+        }
+        // Encoding zero omits the field in proto3, so this also exercises absence.
+        for policy in [0, -1, i32::MAX] {
+            let mut bad = wire_construction.clone();
+            bad.interface_policy = policy;
+            let decoded =
+                rpc::FunctionalMaterialConstruction::decode(bad.encode_to_vec().as_slice())
+                    .unwrap();
+            assert!(FunctionalMaterialConstruction::try_from(decoded).is_err());
+        }
+        for change in 0..8 {
+            let mut bad = wire_construction.clone();
+            match change {
+                0 => bad.join = None,
+                1 => bad.join.as_mut().unwrap().head_width_mm = f64::NAN,
+                2 => bad.join.as_mut().unwrap().collar_head_width_mm = f64::INFINITY,
+                3 => bad.join.as_mut().unwrap().collar_head_width_mm = original.join.stem_width_mm,
+                4 => bad.occurrence_id = 0,
+                5 => bad.face_id = "not-a-face".into(),
+                6 => bad.source_hash = "not-a-hash".into(),
+                _ => bad.definition_id = "not-a-definition".into(),
+            }
+            assert!(
+                FunctionalMaterialConstruction::try_from(bad).is_err(),
+                "change {change}"
+            );
+        }
+        let mut bad = domain.clone();
+        bad.functional_construction
+            .as_mut()
+            .unwrap()
+            .join
+            .head_width_mm = f64::NAN;
+        assert!(rpc::FixedDualJob::try_from(bad).is_err());
+        let mut bad = domain;
+        bad.functional_construction.as_mut().unwrap().occurrence_id = OccurrenceId::new(2).unwrap();
+        assert!(rpc::FixedDualJob::try_from(bad).is_err());
+    }
     use crate::geometry::AabbMm;
 
     fn job() -> FixedDualJob {
@@ -2804,6 +3074,7 @@ mod fixed_dual_wire_tests {
             maximum_bed_temperature_c: 100.0,
             tools: [tool(0), tool(1)],
             surface_constructions: Vec::new(),
+            functional_construction: None,
             assignments: (0..2)
                 .map(|index| OccurrenceMaterialAssignment {
                     occurrence_id: OccurrenceId::new(index as u32 + 1).unwrap(),

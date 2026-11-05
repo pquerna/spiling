@@ -243,6 +243,58 @@ message FixedDualJob {
   double inactive_nozzle_radius_mm = 15;
   Vec3 park_position_mm = 16;
   repeated SurfaceColorConstruction surface_constructions = 17;
+  // Required presence: explicit null is true; omitted/false refuses.
+  oneof functional_construction {
+    FunctionalMaterialConstruction functional_material = 18;
+    bool no_functional_construction = 19;
+  }
+}
+message PlanarTKeyJoin {
+  double reach_into_region_mm = 1;
+  double reach_into_base_mm = 2;
+  double pitch_mm = 3;
+  double stem_width_mm = 4;
+  double head_width_mm = 5;
+  double head_depth_mm = 6;
+  double edge_margin_mm = 7;
+  double end_collar_height_mm = 8;
+  double collar_head_width_mm = 9;
+}
+enum FunctionalInterfacePolicy {
+  FUNCTIONAL_INTERFACE_POLICY_UNSPECIFIED = 0;
+  FUNCTIONAL_INTERFACE_POLICY_DECLARED_SAME_FAMILY = 1;
+  // Nominal geometry only; no adhesion or physical-retention credit.
+  FUNCTIONAL_INTERFACE_POLICY_MECHANICAL_CAPTURE = 2;
+}
+message FunctionalMaterialConstruction {
+  uint32 occurrence_id = 1;
+  string definition_id = 2;
+  string source_hash = 3;
+  string face_id = 4;
+  string material_id = 5;
+  string base_material_id = 6;
+  double minimum_pure_depth_mm = 7;
+  PlanarTKeyJoin join = 8;
+  // Required: missing, unspecified and unknown values refuse admission.
+  FunctionalInterfacePolicy interface_policy = 9;
+}
+// Inspectable frame only; source/native/replay proof remains independent.
+message FunctionalMaterialFrame {
+  uint32 occurrence_id = 1;
+  string definition_id = 2;
+  string source_hash = 3;
+  string face_id = 4;
+  Vec3 origin_mm = 5;
+  Vec3 world_origin_mm = 6;
+  Vec3 horizontal_direction = 7;
+  Vec3 outward_normal = 8;
+  double width_mm = 9;
+  // Exactly two finite, strictly ordered endpoints each.
+  repeated double source_z_mm = 10;
+  repeated double key_middle_z_mm = 11;
+  // One to sixteen sorted centers, including the face center.
+  repeated double key_centers_u_mm = 12;
+  AabbMm stock_bounds_mm = 13;
 }
 message SurfaceColorFace {
   string face_id = 1;

@@ -22,9 +22,10 @@ pub(super) struct Construction {
     pub domains: Vec<Domain>,
     pub stored: Vec<ResolvedMaterialDomain>,
     pub frames: Vec<SurfaceColorFrame>,
+    pub functional_frame: Option<FunctionalMaterialFrame>,
     pub bytes: usize,
     pub points: usize,
-    arrange_corners: bool,
+    pub(super) arrange_corners: bool,
 }
 
 fn unsupported(message: &str) -> ManufacturingError {

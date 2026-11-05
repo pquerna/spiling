@@ -272,6 +272,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         JobWorkflow::decl(&config),
         SingleExtruderJob::decl(&config),
         FixedDualJob::decl(&config),
+        FunctionalInterfacePolicy::decl(&config),
+        FunctionalMaterialConstruction::decl(&config),
+        PlanarTKeyJoin::decl(&config),
+        FunctionalMaterialFrame::decl(&config),
         SurfaceColorConstruction::decl(&config),
         OpticalMaterialBinding::decl(&config),
         ApplyOpticalConstruction::decl(&config),
@@ -381,6 +385,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for (name, value) in [
         ("MAX_MATERIAL_DOMAINS", MAX_MATERIAL_DOMAINS as u64),
+        ("MAX_FUNCTIONAL_KEYS", MAX_FUNCTIONAL_KEYS as u64),
         (
             "MAX_MATERIAL_DOMAIN_POLYGONS",
             MAX_MATERIAL_DOMAIN_POLYGONS as u64,

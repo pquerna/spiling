@@ -385,6 +385,18 @@ fn endpoint_distance_enclosed(
     Ok((distance, enclosure))
 }
 
+pub(crate) fn strict_capsule_point(
+    point: [f64; 3],
+    segment: [[f64; 3]; 2],
+    radius_mm: f64,
+) -> Result<bool, ManufacturingError> {
+    if !radius_mm.is_finite() || radius_mm <= 0.0 {
+        return Ok(false);
+    }
+    let (distance, enclosure) = endpoint_distance_enclosed(point, segment)?;
+    Ok((distance + enclosure).next_up() < radius_mm)
+}
+
 /// Canonical decimal dimensions admit exact rational capsule comparison.
 /// Doubled micrometres represent both XYZ6 points and a half-bead radius.
 /// Checked overflow/noncanonical dimensions use the outward floating proof.

@@ -6,6 +6,7 @@ mod boolean;
 use boolean::budget as boolean_budget;
 mod classification;
 mod color;
+mod joins;
 mod neighborhood;
 use neighborhood::SkinNeighborhoods;
 mod bonds;
@@ -71,7 +72,7 @@ fn remaining_geometry_units(
 }
 // Compile-local immutable D span, required-C/exemption owner and exact XY width
 // envelope. Actual physical Z remains on each materialized layer and skin key.
-type WallCacheKey = (usize, Option<usize>, [u64; 3]);
+type WallCacheKey = (usize, Option<usize>, [u64; 3], Option<usize>);
 
 pub(crate) fn plan(
     input: &CompilerInput<'_>,
@@ -165,7 +166,7 @@ pub(crate) fn plan(
     // This is a proposal, not authorization. The streamed source stage below
     // commits each actual interval only after native metric/incidence and joint
     // source-union certificates, refining this same field/support schedule.
-    let mut schedule = scheduled_layers(input, &admission, &process_captures, cancel)?;
+    let mut schedule = scheduled_layers(input, &mut admission, &process_captures, cancel)?;
     let mut support_work = support::SupportWork::default();
     let mut span_sizing = native::NativeSpanSizing::default();
     let mut slab_pool = native::NativeSlabPool::default();
@@ -320,10 +321,6 @@ fn native_retry_outside_bytes(
     })
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "One admission result transfers owned prefix or final buffers without a separate allocation"
-)]
 enum ScheduleAdmission {
     PrefixAdmitted(NativeScheduleCapture),
     RefineUnreachableLayer {
@@ -919,7 +916,7 @@ fn admit_schedule<'model>(
         native_coverage.retained_bytes(),
         schedule.capacity() * std::mem::size_of::<LayerElevation>(),
     ])?;
-    let mut construction = color::capture(
+    let mut construction = joins::capture_or_color(
         input,
         &sections,
         schedule,
@@ -1047,6 +1044,11 @@ fn admit_schedule<'model>(
             let required_owner = native_span
                 .filter(|span| !span.image_islands.is_empty())
                 .map(|_| native_index);
+            let construction_phase = construction.domains.iter().position(|domain| {
+                domain.reference.role == MaterialConstructionRole::FunctionalRegion
+                    && domain.physical_z_mm[0] <= elevation.lower_z
+                    && z <= domain.physical_z_mm[1]
+            });
             let next_key = (
                 current,
                 below,
@@ -1054,6 +1056,7 @@ fn admit_schedule<'model>(
                 (z - elevation.lower_z).to_bits(),
                 top_axis,
                 required_owner,
+                construction_phase,
             );
             if key != Some(next_key) {
                 // Drop the prior classification before allocating its replacement.
@@ -1070,7 +1073,7 @@ fn admit_schedule<'model>(
                     envelope[1].to_bits(),
                     limits.min_bead_width_mm.max(actual_height).to_bits(),
                 ];
-                let layout_key = (current, required_owner, envelope_key);
+                let layout_key = (current, required_owner, envelope_key, construction_phase);
                 if layout_span != Some(layout_key) {
                     drop(wall_layout.take());
                     if let Some(cached) = wall_cache.get(&layout_key) {
@@ -2212,6 +2215,7 @@ fn admit_schedule<'model>(
             ));
         }
         let mut result = NormalizedPrintPlan {
+            functional_material_frame: construction.functional_frame.take(),
             material_frames: std::mem::take(&mut construction.frames),
             material_domains: std::mem::take(&mut construction.stored),
             schema_version: MANUFACTURING_SCHEMA_VERSION,
@@ -2797,7 +2801,7 @@ fn image_support_contact_floor(
 
 fn scheduled_layers(
     input: &CompilerInput<'_>,
-    admission: &preflight::Admission,
+    admission: &mut preflight::Admission,
     process: &[zones::Capture],
     cancel: &AtomicBool,
 ) -> Result<Vec<LayerElevation>, ManufacturingError> {
@@ -2813,6 +2817,7 @@ fn scheduled_layers(
     })?;
     let recipe = &input.intent.recipe;
     let mut events = admission.horizontal_events.clone();
+    joins::append_z_events(input, admission, &mut events, cancel)?;
     events.sort_by(f64::total_cmp);
     events.dedup_by(|a, b| *a == *b);
     let mut row_events = Vec::new();

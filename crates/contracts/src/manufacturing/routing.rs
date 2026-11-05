@@ -277,6 +277,8 @@ pub struct FixedDualJob {
     pub assignments: Vec<OccurrenceMaterialAssignment>,
     #[serde(deserialize_with = "construction::constructions")]
     pub surface_constructions: Vec<SurfaceColorConstruction>,
+    #[serde(deserialize_with = "required_option")]
+    pub functional_construction: Option<FunctionalMaterialConstruction>,
     pub transition_lift_mm: f64,
     /// Allowed tool-zero reference positions, including negative carriage X/Y.
     pub carriage_travel_bounds_mm: AabbMm,
@@ -332,13 +334,6 @@ impl FixedDualJob {
         {
             return Err(invalid(
                 "fixed-dual routing requires distinct tools, feeders and materials, with tool zero as the offset origin",
-            ));
-        }
-        // The first whole-occurrence route has no independently admitted bond
-        // policy for different polymers. This is a declaration, not adhesion proof.
-        if self.tools[0].material.polymer_family != self.tools[1].material.polymer_family {
-            return Err(invalid(
-                "the reference route requires a declared common polymer family",
             ));
         }
         for tool in &self.tools {
@@ -431,6 +426,24 @@ impl FixedDualJob {
         if self.surface_constructions.len() > 16 {
             return Err(invalid("too many surface constructions"));
         }
+        if let Some(construction) = &self.functional_construction {
+            construction.validate(self)?;
+        }
+        // Only a complete, checked functional request can authorize nominal
+        // mixed-family capture geometry. Other mixed jobs retain the family gate.
+        if self.tools[0].material.polymer_family != self.tools[1].material.polymer_family
+            && !matches!(
+                &self.functional_construction,
+                Some(FunctionalMaterialConstruction {
+                    interface_policy: FunctionalInterfacePolicy::MechanicalCapture,
+                    ..
+                })
+            )
+        {
+            return Err(invalid(
+                "the reference route requires a declared common polymer family unless a complete functional construction explicitly requests mechanical capture",
+            ));
+        }
         if self.assignments.len() == 2 {
             let a = &self.assignments[0].work_envelope_mm;
             let b = &self.assignments[1].work_envelope_mm;
@@ -490,6 +503,29 @@ impl FixedDualJob {
     }
 
     pub fn tool_for_path(&self, path: &DepositionPath) -> Result<u8, ManufacturingError> {
+        if let Some(construction) = &self.functional_construction {
+            construction.validate(self)?;
+            let reference = path
+                .material_domain
+                .ok_or_else(|| invalid("functional bead has no material-domain owner"))?;
+            if reference.construction_index != 0
+                || self.assignments[self.assignment_for_path(path)?].occurrence_id
+                    != construction.occurrence_id
+            {
+                return Err(invalid(
+                    "functional bead has a different construction or occurrence owner",
+                ));
+            }
+            return self.tool_for_material(match reference.role {
+                MaterialConstructionRole::FunctionalRegion => &construction.material_id,
+                MaterialConstructionRole::FunctionalBase => &construction.base_material_id,
+                _ => {
+                    return Err(invalid(
+                        "optical material role cannot own a functional bead",
+                    ));
+                }
+            });
+        }
         if let Some(reference) = path.material_domain {
             let construction = self
                 .surface_constructions
@@ -507,6 +543,12 @@ impl FixedDualJob {
                     .material_id_for_interval(path.physical_z_mm)?,
                 MaterialConstructionRole::Backing | MaterialConstructionRole::Core => {
                     &construction.white_material_id
+                }
+                MaterialConstructionRole::FunctionalRegion
+                | MaterialConstructionRole::FunctionalBase => {
+                    return Err(invalid(
+                        "functional material role has no functional construction",
+                    ));
                 }
             });
         }
