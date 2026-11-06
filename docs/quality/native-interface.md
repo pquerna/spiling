@@ -104,6 +104,31 @@ by Export plate only after a fresh passing inspection. Prepare displays source
 geometry; Review exposes checked actual output. Section analysis can deliberately
 inspect either representation. None of these navigation controls writes a project.
 
+## Defaults and scoped modifiers
+
+Plate settings are the baseline; explicit part/definition process instructions are
+modifiers. Prepare → Settings links to the selected part's Infill modifiers.
+Resolved base shows the engine's whole-volume density and owning source; Defaults
+and inheritance separates the captured recipe and definition baseline. Regional
+boxes are separate instructions, not a uniform-density claim.
+
+Use `ui::modifier_row` for property, technical value, scope and contextual actions.
+Values are read-only until Change opens their owning draft. Add modifier… offers
+only supported whole-part/source-box density; an existing local base opens Change
+instead of adding a duplicate. Add modifier commits a new request;
+Apply changes updates its exact operation ID, including its selector and interface
+permission. An equal-to-default pin remains explicit. Remove modifier removes only
+that instruction (or its single-instruction layer); earlier or inherited content
+can become visible. Enabled acts on the owning layer; multi-instruction layers
+explicitly say Enable group. There is no universal reorder or second resolver.
+
+Unapplied drafts, Disabled, Needs slicing and Needs verification are visible. Details owns source-frame
+coordinates, interface data and IDs. Closing the pane retains a draft; Discard draft
+abandons it. Matching session/project/base-revision/edit receipts alone confirm
+application. Stale/rejected requests retain the draft. Other preparation drafts are
+never committed by a modifier action. These controls do not provide mixed-nozzle
+selection, automatic suggestions or detached process-document preview.
+
 ## Actions and exits
 
 Close ends a view; Discard draft abandons an edit; Cancel operation requests native

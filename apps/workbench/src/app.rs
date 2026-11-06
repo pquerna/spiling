@@ -662,6 +662,7 @@ impl eframe::App for Workbench {
         }
         self.reconcile_plate(ctx);
         self.reconcile_alternative_receipt();
+        self.reconcile_process_receipt();
         if self.state.phase == Phase::Running
             && !self.state.busy
             && self.awaiting_serial.is_none()

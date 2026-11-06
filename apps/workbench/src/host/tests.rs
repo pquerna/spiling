@@ -3665,3 +3665,147 @@ fn named_plate_refresh_empty_scope_and_edit_receipts_are_authoritative() {
     wait(&host, |s| s.phase == Phase::Closed);
     assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
 }
+
+#[test]
+#[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
+fn scoped_modifiers_preserve_neighbors_and_receipts_across_history_and_saved_return() {
+    use spiling_contracts::{process::*, surface::SurfaceScope};
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&host, |s| s.phase == Phase::Running);
+    imported(&host);
+    let s = displayed(&host);
+    let o = &s.display.as_ref().unwrap().occurrences[0];
+    let scope = SurfaceScope::Occurrence {
+        occurrence_id: o.occurrence_id,
+        expected_definition_id: o.definition_id.clone(),
+    };
+    let apply = |edit: ProcessEdit| {
+        project_edit(&host, |session_id, base_revision| {
+            ProjectCommand::EditProcess {
+                session_id,
+                base_revision,
+                edit,
+            }
+        })
+    };
+    let add = |selector, fraction| ProcessEdit::AddLayer {
+        scope: scope.clone(),
+        selector,
+        action: ProcessAction::Replace {
+            value: ProcessValue::SparseFraction { fraction },
+        },
+        interface: None,
+    };
+    let first = apply(add(ProcessSelector::WholeOwnedVolume, 0.25));
+    let whole = first.project.as_ref().unwrap().process_document.layers[0].clone();
+    let box_selector = ProcessSelector::SourceBoxMm {
+        min: [1.0; 3],
+        max: [2.0; 3],
+    };
+    let boxed = apply(add(box_selector, 0.6));
+    let neighbor = boxed.project.as_ref().unwrap().process_document.layers[1].clone();
+    let edit = ProcessEdit::UpdateOperation {
+        operation_id: whole.operations[0].operation_id,
+        selector: ProcessSelector::WholeOwnedVolume,
+        action: ProcessAction::Replace {
+            value: ProcessValue::SparseFraction { fraction: 0.4 },
+        },
+        interface: None,
+    };
+    let changed = apply(edit.clone());
+    let receipt = changed.process_edit.as_ref().unwrap();
+    assert_eq!(receipt.edit, edit);
+    assert_eq!(receipt.revision, changed.project.as_ref().unwrap().revision);
+    let doc = &changed.project.as_ref().unwrap().process_document;
+    assert_eq!(
+        doc.layers.len(),
+        2,
+        "change must not append another modifier"
+    );
+    assert_eq!(
+        doc.layers[1], neighbor,
+        "neighbor must retain exact content and identity"
+    );
+    let stale_revision = boxed.project.as_ref().unwrap().revision;
+    let serial = changed.serial;
+    host.project(ProjectCommand::EditProcess {
+        session_id: changed.hello.as_ref().unwrap().session_id.clone(),
+        base_revision: stale_revision,
+        edit,
+    })
+    .unwrap();
+    let failed = idle_after(&host, serial);
+    assert_eq!(
+        failed.process_edit.as_ref().unwrap().nonce,
+        receipt.nonce,
+        "failed mutation must not publish a new receipt"
+    );
+    let disabled = apply(ProcessEdit::SetLayerEnabled {
+        layer_id: whole.layer_id,
+        enabled: false,
+    });
+    assert!(!disabled.project.as_ref().unwrap().process_document.layers[0].enabled);
+    let enabled = apply(ProcessEdit::SetLayerEnabled {
+        layer_id: whole.layer_id,
+        enabled: true,
+    });
+    assert!(enabled.project.as_ref().unwrap().process_document.layers[0].enabled);
+    let removed = apply(ProcessEdit::RemoveLayer {
+        layer_id: whole.layer_id,
+    });
+    assert_eq!(
+        removed.project.as_ref().unwrap().process_document.layers,
+        vec![neighbor.clone()]
+    );
+    let undone = send(&host, Action::Undo);
+    assert_eq!(
+        undone
+            .project
+            .as_ref()
+            .unwrap()
+            .process_document
+            .layers
+            .len(),
+        2
+    );
+    let redone = send(&host, Action::Redo);
+    assert_eq!(
+        redone.project.as_ref().unwrap().process_document.layers,
+        vec![neighbor.clone()]
+    );
+    let path = root.path().join("Modifiers.spil");
+    send(
+        &host,
+        Action::Save {
+            target: Some(native(&path)),
+        },
+    );
+    let opened = send(
+        &host,
+        Action::Open {
+            path: native(&path),
+            read_only: false,
+            recover_previous: false,
+        },
+    );
+    assert_eq!(
+        opened.project.as_ref().unwrap().process_document.layers,
+        vec![neighbor]
+    );
+    let pid = opened.hello.as_ref().unwrap().pid;
+    let closed = send(&host, Action::Close);
+    assert_eq!(closed.phase, Phase::Closed);
+    #[cfg(target_os = "linux")]
+    assert!(
+        !PathBuf::from(format!("/proc/{pid}")).exists(),
+        "child must be reaped"
+    );
+}

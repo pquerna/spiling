@@ -282,6 +282,14 @@ impl Actor {
         }
     }
     pub(super) async fn project_edit(&mut self, command: ProjectCommand) -> Option<ProjectInfo> {
+        let process_edit = match &command {
+            ProjectCommand::EditProcess {
+                session_id,
+                base_revision,
+                edit,
+            } => Some((session_id.clone(), *base_revision, edit.clone())),
+            _ => None,
+        };
         let plate_edit = match &command {
             ProjectCommand::EditPrintLayout {
                 session_id,
@@ -364,6 +372,18 @@ impl Actor {
         if let (Some((session, base_revision, edit)), Some(info)) = (plate_edit, receipt.as_ref()) {
             self.nonce += 1;
             self.state.plate_edit = Some(Arc::new(PlateEditReceipt {
+                nonce: self.nonce,
+                session,
+                project: info.project_id.clone(),
+                base_revision,
+                revision: info.revision,
+                edit,
+            }));
+        }
+        if let (Some((session, base_revision, edit)), Some(info)) = (process_edit, receipt.as_ref())
+        {
+            self.nonce += 1;
+            self.state.process_edit = Some(Arc::new(ProcessEditReceipt {
                 nonce: self.nonce,
                 session,
                 project: info.project_id.clone(),

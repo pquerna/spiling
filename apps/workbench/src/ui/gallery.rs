@@ -27,6 +27,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
             "Arrange",
             "Plates",
             "Navigation",
+            "Modifiers",
         ]
         .iter()
         .enumerate()
@@ -57,6 +58,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
                 8 => arrange(ui),
                 9 => plates(ui),
                 10 => navigation(ui),
+                11 => modifiers(ui),
                 _ => colors(ui),
             }
         });
@@ -835,4 +837,41 @@ fn navigation(ui: &mut Ui) {
             d.remove::<Action>(task_id);
         }
     });
+}
+
+fn modifiers(ui: &mut Ui) {
+    pane_header(
+        ui,
+        "Infill modifiers",
+        "Illustrative part · no project changes",
+    );
+    group(ui, "Resolved base");
+    resolved_value(ui, "Infill density", "25%", "Plate defaults");
+    group(ui, "Modifiers");
+    ui.weak("Needs slicing");
+    let enabled_id = ui.make_persistent_id("gallery-modifier-enabled");
+    let mut enabled = ui.data_mut(|data| data.get_temp::<bool>(enabled_id).unwrap_or(true));
+    ui.checkbox(&mut enabled, "Enabled");
+    ui.data_mut(|data| data.insert_temp(enabled_id, enabled));
+    if !enabled {
+        ui.weak("Disabled");
+    }
+    modifier_row(ui, "Infill density", "40%", "Source box", false);
+    ui.collapsing("Details", |ui| {
+        resolved_value(ui, "Z", "2–8 mm", "Source frame");
+        ui.label("Permanent separator wall");
+    });
+    ui.add_enabled(false, egui::Button::new("Add modifier…"));
+    ui.separator();
+    group(ui, "New modifier");
+    ui.weak("Unapplied");
+    let fraction_id = ui.make_persistent_id("gallery-modifier-density");
+    let mut fraction = ui.data_mut(|data| data.get_temp::<f64>(fraction_id).unwrap_or(0.4));
+    percent(ui, "Infill density (%)", &mut fraction);
+    ui.data_mut(|data| data.insert_temp(fraction_id, fraction));
+    primary(
+        ui,
+        "Add modifier",
+        Some("Illustrative draft · no project is open"),
+    );
 }

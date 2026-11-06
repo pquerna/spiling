@@ -147,8 +147,13 @@ impl Workbench {
         ui::pane_header(
             ui,
             if prepare {
-                ["Printer", "Material", "Settings", "Position", "Infill"]
-                    [usize::from(self.manufacturing.prepare_section.min(4))]
+                [
+                    "Printer",
+                    "Material",
+                    "Settings",
+                    "Position",
+                    "Infill modifiers",
+                ][usize::from(self.manufacturing.prepare_section.min(4))]
             } else {
                 "Review layers"
             },
@@ -238,7 +243,7 @@ impl Workbench {
                 .material
                 .has_changes(&project.project_id, m.intent.as_deref())
             || self.process.has_changes();
-        if draft {
+        if draft && self.manufacturing.prepare_section != 4 {
             ui.label("Unapplied changes · compile uses committed settings");
         }
         match self.manufacturing.prepare_section {
@@ -416,7 +421,17 @@ impl Workbench {
                 self.material_ui(ui, writable);
             }
             if section == 2 {
-                ui::group(ui, "Construction");
+                ui::group(ui, "Part modifiers");
+                if ui
+                    .add_enabled(
+                        self.occurrence.is_some(),
+                        egui::Button::new("View infill modifiers"),
+                    )
+                    .clicked()
+                {
+                    self.show_prepare(4);
+                }
+                ui::group(ui, "Plate defaults");
                 if let Some(source) = self
                     .manufacturing
                     .draft

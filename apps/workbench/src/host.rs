@@ -72,6 +72,16 @@ pub struct PlateEditReceipt {
     pub revision: spiling_contracts::project::ProjectRevision,
     pub edit: spiling_contracts::project::PrintLayoutEdit,
 }
+/// Observed synchronous Core process transaction, never a request acknowledgement.
+#[derive(Debug, Clone)]
+pub struct ProcessEditReceipt {
+    pub nonce: u64,
+    pub session: spiling_contracts::geometry::SessionId,
+    pub project: ProjectId,
+    pub base_revision: ProjectRevision,
+    pub revision: ProjectRevision,
+    pub edit: spiling_contracts::process::ProcessEdit,
+}
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub library: Arc<library::State>,
@@ -97,6 +107,7 @@ pub struct Snapshot {
     pub optical_loading: bool,
     pub stock: stock::State,
     pub plate_edit: Option<Arc<PlateEditReceipt>>,
+    pub process_edit: Option<Arc<ProcessEditReceipt>>,
     pub layout_proposal: Option<Arc<spiling_contracts::geometry::LayoutProposal>>,
     pub bed_proposal: Option<Arc<spiling_contracts::geometry::BedPosePreparation>>,
     pub busy: bool,
@@ -134,6 +145,7 @@ impl Default for Snapshot {
             stock: stock::State::default(),
             bed_proposal: None,
             plate_edit: None,
+            process_edit: None,
             layout_proposal: None,
             busy: true,
             active_operation: false,
