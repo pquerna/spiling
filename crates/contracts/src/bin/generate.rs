@@ -274,6 +274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         FixedDualJob::decl(&config),
         FunctionalInterfacePolicy::decl(&config),
         FunctionalMaterialConstruction::decl(&config),
+        FunctionalFacePatch::decl(&config),
         PlanarTKeyJoin::decl(&config),
         FunctionalMaterialFrame::decl(&config),
         SurfaceColorConstruction::decl(&config),

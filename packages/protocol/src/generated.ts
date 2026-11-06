@@ -586,11 +586,37 @@ carriage_body_bounds_mm: AabbMm, inactive_nozzle_radius_mm: number, park_positio
 
 export type FunctionalInterfacePolicy = "declared_same_family" | "mechanical_capture";
 
-export type FunctionalMaterialConstruction = { interface_policy: FunctionalInterfacePolicy, occurrence_id: OccurrenceId, definition_id: DefinitionId, source_hash: SourceHash, face_id: FaceId, material_id: string, base_material_id: string, minimum_pure_depth_mm: number, join: PlanarTKeyJoin, };
+export type FunctionalMaterialConstruction = { interface_policy: FunctionalInterfacePolicy, occurrence_id: OccurrenceId, definition_id: DefinitionId, source_hash: SourceHash, face_id: FaceId,
+/**
+ * Required nullable selection in the full native face frame.
+ */
+face_patch: FunctionalFacePatch | null, material_id: string, base_material_id: string, minimum_pure_depth_mm: number, join: PlanarTKeyJoin, };
+
+export type FunctionalFacePatch = { horizontal_mm: [number, number], source_z_mm: [number, number], };
 
 export type PlanarTKeyJoin = { reach_into_region_mm: number, reach_into_base_mm: number, pitch_mm: number, stem_width_mm: number, head_width_mm: number, head_depth_mm: number, edge_margin_mm: number, end_collar_height_mm: number, collar_head_width_mm: number, };
 
-export type FunctionalMaterialFrame = { occurrence_id: OccurrenceId, definition_id: DefinitionId, source_hash: SourceHash, face_id: FaceId, origin_mm: [number, number, number], world_origin_mm: [number, number, number], stock_bounds_mm: AabbMm, horizontal_direction: [number, number, number], outward_normal: [number, number, number], width_mm: number, source_z_mm: [number, number],
+export type FunctionalMaterialFrame = { occurrence_id: OccurrenceId, definition_id: DefinitionId, source_hash: SourceHash, face_id: FaceId,
+/**
+ * Full native face origin, independent of patch selection.
+ */
+origin_mm: [number, number, number],
+/**
+ * Full native face origin under the literal captured pose.
+ */
+world_origin_mm: [number, number, number], stock_bounds_mm: AabbMm, horizontal_direction: [number, number, number], outward_normal: [number, number, number], width_mm: number,
+/**
+ * Whole native height, independent of the selected patch.
+ */
+source_z_mm: [number, number],
+/**
+ * Selected interval in full-face U coordinates.
+ */
+selected_u_mm: [number, number],
+/**
+ * Active material interval in world Z.
+ */
+region_z_mm: [number, number],
 /**
  * Closed world interval where the wider middle heads apply.
  */

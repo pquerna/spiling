@@ -37,6 +37,35 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn localized_join_scope_uses_world_intervals_and_excludes_touching_layers() {
+        let active = [12.0, 18.0];
+        assert_eq!(
+            functional_layer_scope(active, [11.8, 12.0]),
+            FunctionalLayerScope::Inactive
+        );
+        assert_eq!(
+            functional_layer_scope(active, [18.0, 18.2]),
+            FunctionalLayerScope::Inactive
+        );
+        assert_eq!(
+            functional_layer_scope(active, [12.0, 12.2]),
+            FunctionalLayerScope::Active
+        );
+        assert_eq!(
+            functional_layer_scope(active, [17.8, 18.0]),
+            FunctionalLayerScope::Active
+        );
+        assert_eq!(
+            functional_layer_scope(active, [11.9, 12.1]),
+            FunctionalLayerScope::Crossing
+        );
+        assert_eq!(
+            functional_layer_scope(active, [17.9, 18.1]),
+            FunctionalLayerScope::Crossing
+        );
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -69,6 +98,22 @@ pub(super) struct InterfacesUi {
 }
 fn selected_layer(view: crate::replay::View) -> Option<usize> {
     view.layer_end.or(view.layer).map(usize::from)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FunctionalLayerScope {
+    Inactive,
+    Active,
+    Crossing,
+}
+fn functional_layer_scope(active: [f64; 2], layer: [f64; 2]) -> FunctionalLayerScope {
+    if layer[1] <= active[0] || layer[0] >= active[1] {
+        FunctionalLayerScope::Inactive
+    } else if active[0] <= layer[0] && layer[1] <= active[1] {
+        FunctionalLayerScope::Active
+    } else {
+        FunctionalLayerScope::Crossing
+    }
 }
 impl Workbench {
     pub(super) fn interface_overlay(
@@ -220,6 +265,11 @@ impl Workbench {
         };
         ui.collapsing("Joins · functional material", |ui| {
             ui.label(format!("Captured request · {} ↔ {} · face {}", request.material_id, request.base_material_id, request.face_id.as_str()));
+            if let Some(patch) = &request.face_patch {
+                ui.label(format!("Requested patch · source face U {:.3}…{:.3} mm · source Z {:.3}…{:.3} mm", patch.horizontal_mm[0], patch.horizontal_mm[1], patch.source_z_mm[0], patch.source_z_mm[1]));
+            } else {
+                ui.label("Requested scope · full native face");
+            }
             if !self.state.project.as_ref().is_some_and(|project| {
                 review.capture.provenance.project_id == project.project_id
                     && review.capture.observed_revision == project.revision
@@ -244,6 +294,8 @@ impl Workbench {
                 ui.label("Fresh passing replay and a matching functional frame are required for realized join inspection");
                 return;
             }
+            ui.label(format!("Selected active scope · face U {:.3}…{:.3} mm · world Z {:.3}…{:.3} mm", frame.selected_u_mm[0], frame.selected_u_mm[1], frame.region_z_mm[0], frame.region_z_mm[1]));
+            ui.weak(format!("Whole source face Z {:.3}…{:.3} mm · solid base; sparse base is not enabled", frame.source_z_mm[0], frame.source_z_mm[1]));
             ui.label(format!("Pure-material ownership ≥ {:.3} mm · join reach {:.3} mm into region / {:.3} mm into base", request.minimum_pure_depth_mm, request.join.reach_into_region_mm, request.join.reach_into_base_mm));
             ui.label(match request.interface_policy {
                 FunctionalInterfacePolicy::DeclaredSameFamily => "Policy: declared same family · not an adhesion measurement",
@@ -256,10 +308,22 @@ impl Workbench {
                 return;
             };
             let Some(layer) = review.bundle.plan.layers.get(layer_index) else { return; };
+            ui.label(format!("Selected layer {} · world Z {:.3}…{:.3} mm", layer_index + 1, layer.lower_z_mm, layer.z_mm));
+            match functional_layer_scope(frame.region_z_mm, [layer.lower_z_mm, layer.z_mm]) {
+                FunctionalLayerScope::Inactive => {
+                    ui.label("Inactive layer · outside the selected patch height; base material only, no functional join");
+                    return;
+                }
+                FunctionalLayerScope::Crossing => {
+                    ui.label("This layer crosses the active patch boundary; no complete functional interval is available to inspect");
+                    return;
+                }
+                FunctionalLayerScope::Active => {}
+            }
             let Some((index, domain)) = review.bundle.plan.material_domains.iter().enumerate().find(|(_, domain)| {
                 domain.reference.role == MaterialConstructionRole::FunctionalRegion
                     && domain.physical_z_mm[0] <= layer.lower_z_mm && layer.z_mm <= domain.physical_z_mm[1]
-            }) else { ui.label("No complete functional region domain for this physical layer"); return; };
+            }) else { ui.label("No complete functional region domain for this active physical layer"); return; };
             ui.label(format!("Realized {} phase · world Z {:.3}…{:.3} mm", if domain.physical_z_mm[0] >= frame.key_middle_z_mm[0] && domain.physical_z_mm[1] <= frame.key_middle_z_mm[1] { "middle-head" } else { "end-collar" }, domain.physical_z_mm[0], domain.physical_z_mm[1]));
             if ui.button("Show realized join").clicked() {
                 let result = scene.summary.bounds_mm.ok_or_else(|| "No source display origin".to_owned()).and_then(|bounds| {

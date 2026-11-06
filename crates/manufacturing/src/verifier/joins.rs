@@ -191,6 +191,8 @@ pub(super) fn verify(
     .to_polygon();
     for domain in &plan.material_domains {
         cancelled(cancel)?;
+        let active = frame.region_z_mm[0] <= domain.physical_z_mm[0]
+            && domain.physical_z_mm[1] <= frame.region_z_mm[1];
         let middle = domain.physical_z_mm[0] >= frame.key_middle_z_mm[0]
             && domain.physical_z_mm[1] <= frame.key_middle_z_mm[1];
         let head_width = if middle {
@@ -198,12 +200,15 @@ pub(super) fn verify(
         } else {
             join.collar_head_width_mm
         };
-        let mut expected = vec![rectangle(
-            frame,
-            [0.0, frame.width_mm],
-            [0.0, request.minimum_pure_depth_mm],
-        )];
-        for &center in &frame.key_centers_u_mm {
+        let mut expected = Vec::new();
+        if active {
+            expected.push(rectangle(
+                frame,
+                frame.selected_u_mm,
+                [0.0, request.minimum_pure_depth_mm],
+            ));
+        }
+        for &center in frame.key_centers_u_mm.iter().filter(|_| active) {
             for (width, depth) in [
                 (
                     join.stem_width_mm,
@@ -312,6 +317,9 @@ pub(super) fn verify(
         }
         let middle =
             layer.lower_z_mm >= frame.key_middle_z_mm[0] && layer.z_mm <= frame.key_middle_z_mm[1];
+        if layer.z_mm <= frame.region_z_mm[0] || layer.lower_z_mm >= frame.region_z_mm[1] {
+            continue;
+        }
         let role = if middle {
             MaterialConstructionRole::FunctionalRegion
         } else {

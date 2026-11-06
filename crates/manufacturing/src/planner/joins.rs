@@ -48,17 +48,24 @@ pub(super) fn append_z_events(
     let face = definition
         .vertical_wall_face_with_work(&request.face_id, &mut admission.geometry_work, cancel)
         .map_err(|failure| super::native_error(failure, "functional collar face certificate"))?;
+    let selected_z = request
+        .face_patch
+        .as_ref()
+        .map_or([face.min_z_mm, face.max_z_mm], |patch| patch.source_z_mm);
+    if selected_z[0] < face.min_z_mm || selected_z[1] > face.max_z_mm {
+        return Err(unsupported(
+            "selected height interval exceeds the native face",
+        ));
+    }
     let collar = request.join.end_collar_height_mm;
-    let middle = [
-        face.min_z_mm + occurrence.pose.translation_mm[2] + collar,
-        face.max_z_mm + occurrence.pose.translation_mm[2] - collar,
-    ];
+    let region_z = selected_z.map(|height| height + occurrence.pose.translation_mm[2]);
+    let middle = [region_z[0] + collar, region_z[1] - collar];
     if !middle.iter().all(|height| height.is_finite()) || middle[0] >= middle[1] {
         return Err(unsupported(
             "end collars consume the complete native height",
         ));
     }
-    for height in middle {
+    for height in [region_z[0], middle[0], middle[1], region_z[1]] {
         check_cancel(cancel)?;
         if let Err(position) = events.binary_search_by(|old| old.total_cmp(&height)) {
             if events.len() >= 3 * MAX_PRINT_LAYERS as usize {
@@ -147,6 +154,24 @@ pub(super) fn capture_or_color(
         return Err(unsupported("native face frame is not exactly axis aligned"));
     }
     let origin = super::forward(&occurrence.pose, face.origin_mm);
+    let selected_u = request
+        .face_patch
+        .as_ref()
+        .map_or([0.0, face.width_mm], |patch| patch.horizontal_mm);
+    let selected_z = request
+        .face_patch
+        .as_ref()
+        .map_or([face.min_z_mm, face.max_z_mm], |patch| patch.source_z_mm);
+    if selected_u[0] < 0.0
+        || selected_u[1] > face.width_mm
+        || selected_z[0] < face.min_z_mm
+        || selected_z[1] > face.max_z_mm
+    {
+        return Err(unsupported(
+            "selected patch exceeds the certified native face",
+        ));
+    }
+    let region_z = selected_z.map(|height| height + occurrence.pose.translation_mm[2]);
     let depth_sign = -face.outward_normal[depth_axis];
     let horizontal_sign = face.horizontal_direction[horizontal_axis];
     let width = input.intent.recipe.bead_width_mm;
@@ -168,7 +193,7 @@ pub(super) fn capture_or_color(
     }
     let total_depth =
         request.minimum_pure_depth_mm + join.reach_into_region_mm + join.reach_into_base_mm;
-    let usable = face.width_mm - 2.0 * join.edge_margin_mm;
+    let usable = selected_u[1] - selected_u[0] - 2.0 * join.edge_margin_mm;
     let count = ((usable - join.head_width_mm) / join.pitch_mm).floor() + 1.0;
     if !count.is_finite() || !(1.0..=16.0).contains(&count) {
         return Err(unsupported(
@@ -180,11 +205,11 @@ pub(super) fn capture_or_color(
         count -= 1;
     }
     while count > 1 {
-        let left = face.width_mm * 0.5
+        let left = (selected_u[0] + selected_u[1]) * 0.5
             - (count - 1) as f64 * 0.5 * join.pitch_mm
             - join.head_width_mm * 0.5;
-        if left >= join.edge_margin_mm
-            && face.width_mm - (face.width_mm - left) >= join.edge_margin_mm
+        if left - selected_u[0] >= join.edge_margin_mm
+            && selected_u[1] - (selected_u[0] + selected_u[1] - left) >= join.edge_margin_mm
         {
             break;
         }
@@ -192,12 +217,13 @@ pub(super) fn capture_or_color(
     }
     let centers: Vec<_> = (0..count)
         .map(|index| {
-            face.width_mm * 0.5 + (index as f64 - (count - 1) as f64 * 0.5) * join.pitch_mm
+            (selected_u[0] + selected_u[1]) * 0.5
+                + (index as f64 - (count - 1) as f64 * 0.5) * join.pitch_mm
         })
         .collect();
     let middle = [
-        origin[2] + join.end_collar_height_mm,
-        face.max_z_mm + occurrence.pose.translation_mm[2] - join.end_collar_height_mm,
+        region_z[0] + join.end_collar_height_mm,
+        region_z[1] - join.end_collar_height_mm,
     ];
     let mut construction = color::Construction::default();
     let mut stock_bounds = None;
@@ -318,8 +344,10 @@ pub(super) fn capture_or_color(
         let upper = schedule[section.end as usize - 1].z;
         let boundaries = [
             lower,
+            region_z[0].clamp(lower, upper),
             middle[0].clamp(lower, upper),
             middle[1].clamp(lower, upper),
+            region_z[1].clamp(lower, upper),
             upper,
         ];
         for interval in boundaries.windows(2) {
@@ -327,6 +355,19 @@ pub(super) fn capture_or_color(
                 continue;
             }
             let physical_z_mm = [interval[0], interval[1]];
+            if interval[1] <= region_z[0] || interval[0] >= region_z[1] {
+                retain(
+                    &mut construction,
+                    section.material.as_ref().clone(),
+                    MaterialConstructionRole::FunctionalBase,
+                    physical_z_mm,
+                )?;
+                super::remaining_geometry_units(
+                    retained_points + staging_points + construction.points,
+                    owned_bytes + staging_bytes + construction.bytes,
+                )?;
+                continue;
+            }
             let head_width = if interval[0] >= middle[0] && interval[1] <= middle[1] {
                 join.head_width_mm
             } else {
@@ -340,6 +381,7 @@ pub(super) fn capture_or_color(
                 depth_sign,
                 horizontal_sign,
                 face.width_mm,
+                selected_u,
                 extents,
                 &centers,
                 head_width,
@@ -369,6 +411,8 @@ pub(super) fn capture_or_color(
         outward_normal: face.outward_normal,
         width_mm: face.width_mm,
         source_z_mm: [face.min_z_mm, face.max_z_mm],
+        selected_u_mm: selected_u,
+        region_z_mm: region_z,
         key_middle_z_mm: middle,
         key_centers_u_mm: centers,
     });
@@ -395,6 +439,7 @@ fn paired_domains(
     depth_sign: f64,
     horizontal_sign: f64,
     width: f64,
+    selected_u: [f64; 2],
     stock: [[f64; 2]; 2],
     centers: &[f64],
     head_width: f64,
@@ -440,7 +485,7 @@ fn paired_domains(
         Coord::from(xy)
     };
     let mut boundary = Vec::with_capacity(centers.len() * 8 + 2);
-    boundary.push(point(0.0, pure));
+    boundary.push(point(selected_u[0], pure));
     for &center in centers {
         let neck = [
             center - join.stem_width_mm * 0.5,
@@ -460,17 +505,20 @@ fn paired_domains(
             boundary.push(point(u, depth));
         }
     }
-    boundary.push(point(width, pure));
+    boundary.push(point(selected_u[1], pure));
     if boundary.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(unsupported(
             "key boundary collapsed at the source coordinate precision",
         ));
     }
     let mut region_ring = Vec::with_capacity(boundary.len() + 3);
-    region_ring.extend([point(0.0, 0.0), point(width, 0.0)]);
+    region_ring.extend([point(selected_u[0], 0.0), point(selected_u[1], 0.0)]);
     region_ring.extend(boundary.iter().rev().copied());
     region_ring.push(region_ring[0]);
     let mut base_ring = boundary;
+    if selected_u[1] < width {
+        base_ring.extend([point(selected_u[1], 0.0), point(width, 0.0)]);
+    }
     let mut right = point(width, 0.0);
     let mut left = point(0.0, 0.0);
     if axis == 0 {
@@ -480,7 +528,11 @@ fn paired_domains(
         right.y = depth_end;
         left.y = depth_end;
     }
-    base_ring.extend([right, left, base_ring[0]]);
+    base_ring.extend([right, left]);
+    if selected_u[0] > 0.0 {
+        base_ring.extend([point(0.0, 0.0), point(selected_u[0], 0.0)]);
+    }
+    base_ring.push(base_ring[0]);
     Ok((
         MultiPolygon(vec![Polygon::new(LineString(region_ring), Vec::new())]),
         MultiPolygon(vec![Polygon::new(LineString(base_ring), Vec::new())]),

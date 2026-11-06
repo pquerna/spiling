@@ -266,6 +266,11 @@ enum FunctionalInterfacePolicy {
   // Nominal geometry only; no adhesion or physical-retention credit.
   FUNCTIONAL_INTERFACE_POLICY_MECHANICAL_CAPTURE = 2;
 }
+message FunctionalFacePatch {
+  // Exactly two finite, strictly ordered endpoints; horizontal minimum >= 0.
+  repeated double horizontal_mm = 1;
+  repeated double source_z_mm = 2;
+}
 message FunctionalMaterialConstruction {
   uint32 occurrence_id = 1;
   string definition_id = 2;
@@ -277,6 +282,11 @@ message FunctionalMaterialConstruction {
   PlanarTKeyJoin join = 8;
   // Required: missing, unspecified and unknown values refuse admission.
   FunctionalInterfacePolicy interface_policy = 9;
+  // Required presence: explicit null is true; omitted/false refuses.
+  oneof face_patch {
+    FunctionalFacePatch patch = 10;
+    bool no_face_patch = 11;
+  }
 }
 // Inspectable frame only; source/native/replay proof remains independent.
 message FunctionalMaterialFrame {
@@ -289,12 +299,16 @@ message FunctionalMaterialFrame {
   Vec3 horizontal_direction = 7;
   Vec3 outward_normal = 8;
   double width_mm = 9;
+  // Whole native source height and world middle-head interval, respectively.
   // Exactly two finite, strictly ordered endpoints each.
   repeated double source_z_mm = 10;
   repeated double key_middle_z_mm = 11;
-  // One to sixteen sorted centers, including the face center.
+  // One to sixteen sorted centers, including the selected U midpoint.
   repeated double key_centers_u_mm = 12;
   AabbMm stock_bounds_mm = 13;
+  // Required pairs: selected U in the full native face and active world Z.
+  repeated double selected_u_mm = 14;
+  repeated double region_z_mm = 15;
 }
 message SurfaceColorFace {
   string face_id = 1;

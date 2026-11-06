@@ -24,6 +24,7 @@ fn functional_job() -> FixedDualJob {
         material_id: job.tools[1].material.id.clone(),
         base_material_id: job.tools[0].material.id.clone(),
         minimum_pure_depth_mm: 2.0,
+        face_patch: None,
         join: PlanarTKeyJoin {
             reach_into_region_mm: 2.0,
             reach_into_base_mm: 3.0,
@@ -54,26 +55,50 @@ fn functional_plan(job: &FixedDualJob) -> NormalizedPrintPlan {
         outward_normal: [0.0, -1.0, 0.0],
         width_mm: 20.0,
         source_z_mm: [0.0, 20.0],
+        selected_u_mm: [0.0, 20.0],
+        region_z_mm: [0.0, 20.0],
         key_middle_z_mm: [1.0, 19.0],
         key_centers_u_mm: vec![10.0],
     });
-    plan.material_domains = [
-        MaterialConstructionRole::FunctionalRegion,
-        MaterialConstructionRole::FunctionalBase,
-    ]
-    .map(|role| ResolvedMaterialDomain {
-        reference: MaterialDomainRef {
-            construction_index: 0,
-            role,
-        },
-        physical_z_mm: [5.0, 5.2],
-        polygons: vec![MaterialDomainPolygon {
-            exterior_mm: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]],
-            holes_mm: vec![],
-        }],
-    })
-    .into();
-    plan.layers[0].paths[0].material_domain = Some(plan.material_domains[0].reference);
+    plan.material_domains = [0.0, 1.0, 19.0, 20.0]
+        .windows(2)
+        .flat_map(|interval| {
+            [
+                MaterialConstructionRole::FunctionalRegion,
+                MaterialConstructionRole::FunctionalBase,
+            ]
+            .map(|role| ResolvedMaterialDomain {
+                reference: MaterialDomainRef {
+                    construction_index: 0,
+                    role,
+                },
+                physical_z_mm: [interval[0], interval[1]],
+                polygons: vec![MaterialDomainPolygon {
+                    exterior_mm: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]],
+                    holes_mm: vec![],
+                }],
+            })
+        })
+        .collect();
+    let template = plan.layers[0].clone();
+    plan.layers = (0..100)
+        .map(|index| {
+            let mut layer = template.clone();
+            layer.index = index;
+            layer.lower_z_mm = f64::from(index) * 0.2;
+            layer.z_mm = f64::from(index + 1) * 0.2;
+            layer.height_mm = layer.z_mm - layer.lower_z_mm;
+            layer.section_z_mm = layer.lower_z_mm * 0.5 + layer.z_mm * 0.5;
+            for path in &mut layer.paths {
+                path.physical_z_mm = [layer.lower_z_mm, layer.z_mm];
+                path.material_domain = Some(plan.material_domains[0].reference);
+                for point in &mut path.points_mm {
+                    point[2] = layer.z_mm;
+                }
+            }
+            layer
+        })
+        .collect();
     plan
 }
 
@@ -122,7 +147,7 @@ fn functional_dimensions_collars_and_common_polymer_remain_strict() {
 }
 
 #[test]
-fn mixed_families_require_explicit_complete_mechanical_capture() {
+fn mixed_contacts_require_explicit_complete_mechanical_capture() {
     let mut job = functional_job();
     job.tools[0].material.polymer_family = "TPU".into();
     job.tools[1].material.polymer_family = "PLA".into();
@@ -134,10 +159,12 @@ fn mixed_families_require_explicit_complete_mechanical_capture() {
     job.validate_declaration().unwrap();
     // The policy does not authorize other mixed jobs, optical constructions,
     // cycles, incomplete keys, or unmatched loaded/base identities.
-    for change in 0..8 {
+    let mut uniform = job.clone();
+    uniform.functional_construction = None;
+    uniform.validate_declaration().unwrap();
+    for change in 1..8 {
         let mut bad = job.clone();
         match change {
-            0 => bad.functional_construction = None,
             1 => {
                 let mut second = bad.assignments[0].clone();
                 second.occurrence_id = OccurrenceId::new(2).unwrap();
@@ -306,6 +333,7 @@ fn functional_world_frame_binds_translation_and_exact_collar_arithmetic() {
         pose.translation_mm.map(|value| value + 20.0),
     )
     .unwrap();
+    frame.region_z_mm = [0.25, 20.25];
     frame.key_middle_z_mm = [1.25, 19.25];
     frame.validate_source_pose(c, &pose).unwrap();
     for change in 0..4 {
@@ -353,7 +381,7 @@ fn functional_frame_native_round_trip_rejects_missing_nonfinite_and_oversized_fi
         0.0,
     ];
     assert!(diagonal.validate_values().is_err());
-    for change in 0..6 {
+    for change in 0..16 {
         let mut bad = wire.clone();
         match change {
             0 => bad.world_origin_mm = None,
@@ -361,7 +389,17 @@ fn functional_frame_native_round_trip_rejects_missing_nonfinite_and_oversized_fi
             2 => bad.source_z_mm = vec![0.0],
             3 => bad.key_middle_z_mm.push(20.0),
             4 => bad.key_centers_u_mm = vec![10.0; 17],
-            _ => bad.width_mm = f64::INFINITY,
+            5 => bad.width_mm = f64::INFINITY,
+            6 => bad.selected_u_mm.clear(),
+            7 => bad.selected_u_mm.push(20.0),
+            8 => bad.region_z_mm.clear(),
+            9 => bad.region_z_mm = vec![0.0],
+            10 => bad.selected_u_mm = vec![-1.0, 20.0],
+            11 => bad.selected_u_mm = vec![0.0, 21.0],
+            12 => bad.region_z_mm = vec![-1.0, 20.0],
+            13 => bad.region_z_mm = vec![0.0, 21.0],
+            14 => bad.region_z_mm = vec![0.0, 18.0],
+            _ => bad.selected_u_mm = vec![0.0, f64::NAN],
         }
         assert!(
             FunctionalMaterialFrame::try_from(bad).is_err(),
@@ -371,6 +409,164 @@ fn functional_frame_native_round_trip_rejects_missing_nonfinite_and_oversized_fi
     let mut bad = frame;
     bad.world_origin_mm[0] = f64::INFINITY;
     assert!(crate::rpc::FunctionalMaterialFrame::try_from(bad).is_err());
+}
+
+#[test]
+fn functional_patch_json_is_required_nullable_closed_and_dimension_checked() {
+    let mut c = functional_job().functional_construction.unwrap();
+    for patch in [
+        None,
+        Some(FunctionalFacePatch {
+            horizontal_mm: [2.0, 14.0],
+            source_z_mm: [-1.0, 9.0],
+        }),
+    ] {
+        c.face_patch = patch;
+        c.validate_dimensions().unwrap();
+        let json = serde_json::to_value(&c).unwrap();
+        assert_eq!(
+            serde_json::from_value::<FunctionalMaterialConstruction>(json.clone()).unwrap(),
+            c
+        );
+        let mut missing = json.clone();
+        missing.as_object_mut().unwrap().remove("face_patch");
+        assert!(serde_json::from_value::<FunctionalMaterialConstruction>(missing).is_err());
+        for patch in [
+            serde_json::json!({}),
+            serde_json::json!(true),
+            serde_json::json!({"horizontal_mm": [2.0, 14.0], "source_z_mm": [-1.0, 9.0], "unknown": 1}),
+            serde_json::json!({"horizontal_mm": [2.0], "source_z_mm": [-1.0, 9.0]}),
+            serde_json::json!({"horizontal_mm": [2.0, 14.0], "source_z_mm": [-1.0, 9.0, 10.0]}),
+            serde_json::json!({"horizontal_mm": [2.0, 14.0]}),
+        ] {
+            let mut bad = json.clone();
+            bad["face_patch"] = patch;
+            assert!(serde_json::from_value::<FunctionalMaterialConstruction>(bad).is_err());
+        }
+    }
+    for (horizontal_mm, source_z_mm) in [
+        ([-1.0, 14.0], [-1.0, 9.0]),
+        ([14.0, 2.0], [-1.0, 9.0]),
+        ([2.0, 2.0], [-1.0, 9.0]),
+        ([2.0, 14.0], [9.0, -1.0]),
+        ([2.0, 14.0], [9.0, 9.0]),
+    ] {
+        let mut json = serde_json::to_value(&c).unwrap();
+        json["face_patch"] =
+            serde_json::json!({"horizontal_mm": horizontal_mm, "source_z_mm": source_z_mm});
+        let bad = serde_json::from_value::<FunctionalMaterialConstruction>(json).unwrap();
+        assert!(bad.validate_dimensions().is_err());
+    }
+    let frame = functional_plan(&functional_job())
+        .functional_material_frame
+        .unwrap();
+    for field in ["selected_u_mm", "region_z_mm"] {
+        let json = serde_json::to_value(&frame).unwrap();
+        let mut missing = json.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<FunctionalMaterialFrame>(missing).is_err());
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!([0.0]),
+            serde_json::json!([0.0, 1.0, 2.0]),
+        ] {
+            let mut bad = json.clone();
+            bad[field] = value;
+            assert!(serde_json::from_value::<FunctionalMaterialFrame>(bad).is_err());
+        }
+    }
+}
+
+#[test]
+fn functional_partial_frame_preserves_full_source_and_exact_translated_selection() {
+    use prost::Message;
+    let mut job = functional_job();
+    let mut frame = functional_plan(&job).functional_material_frame.unwrap();
+    let c = job.functional_construction.as_mut().unwrap();
+    c.face_patch = Some(FunctionalFacePatch {
+        horizontal_mm: [2.0, 14.0],
+        source_z_mm: [-1.0, 9.0],
+    });
+    let c = c.clone();
+    let pose = RigidPoseMm {
+        translation_mm: [0.125, 3.5, 4.25],
+        ..RigidPoseMm::IDENTITY
+    };
+    frame.origin_mm = [0.0, 0.0, -4.0];
+    frame.world_origin_mm = [0.125, 3.5, 0.25];
+    frame.stock_bounds_mm = AabbMm::new([0.125, 3.5, 0.25], [20.125, 23.5, 20.25]).unwrap();
+    frame.source_z_mm = [-4.0, 16.0];
+    frame.selected_u_mm = [2.0, 14.0];
+    frame.region_z_mm = [3.25, 13.25];
+    frame.key_middle_z_mm = [4.25, 12.25];
+    frame.key_centers_u_mm = vec![8.0];
+    frame.validate(&c, &job).unwrap();
+    frame.validate_source_pose(&c, &pose).unwrap();
+    let wire = crate::rpc::FunctionalMaterialFrame::try_from(frame.clone()).unwrap();
+    let decoded =
+        crate::rpc::FunctionalMaterialFrame::decode(wire.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(FunctionalMaterialFrame::try_from(decoded).unwrap(), frame);
+    for change in 0..11 {
+        let mut bad = frame.clone();
+        match change {
+            0 => bad.selected_u_mm = [0.0, 20.0],
+            1 => bad.region_z_mm[0] = bad.region_z_mm[0].next_up(),
+            2 => bad.region_z_mm[1] = bad.region_z_mm[1].next_down(),
+            3 => bad.key_middle_z_mm[0] = bad.key_middle_z_mm[0].next_up(),
+            4 => bad.key_middle_z_mm[1] = bad.key_middle_z_mm[1].next_down(),
+            5 => bad.origin_mm[2] = -1.0,
+            6 => bad.world_origin_mm[2] = 3.25,
+            7 => bad.source_z_mm = [-1.0, 9.0],
+            8 => bad.key_centers_u_mm = vec![10.0],
+            9 => bad.source_hash = SourceHash::from_bytes(b"other"),
+            _ => bad.key_centers_u_mm = vec![3.0, 8.0],
+        }
+        assert!(
+            bad.validate(&c, &job).is_err() || bad.validate_source_pose(&c, &pose).is_err(),
+            "change {change}"
+        );
+    }
+    for patch in [
+        FunctionalFacePatch {
+            horizontal_mm: [2.0, 21.0],
+            source_z_mm: [-1.0, 9.0],
+        },
+        FunctionalFacePatch {
+            horizontal_mm: [2.0, 14.0],
+            source_z_mm: [-5.0, 9.0],
+        },
+        FunctionalFacePatch {
+            horizontal_mm: [2.0, 14.0],
+            source_z_mm: [-1.0, 17.0],
+        },
+    ] {
+        let mut bad = c.clone();
+        bad.face_patch = Some(patch);
+        assert!(frame.validate(&bad, &job).is_err());
+        assert!(frame.validate_source_pose(&bad, &pose).is_err());
+    }
+    let mut full = c.clone();
+    full.face_patch = None;
+    assert!(frame.validate_source_pose(&full, &pose).is_err());
+    let pose = RigidPoseMm {
+        translation_mm: [0.0, 0.0, 0.2],
+        ..RigidPoseMm::IDENTITY
+    };
+    frame.origin_mm = [0.0, 0.0, -1e16];
+    frame.world_origin_mm = [0.0, 0.0, -1e16 + 0.2];
+    frame.source_z_mm = [-1e16, 16.0];
+    frame.stock_bounds_mm = AabbMm::new(frame.world_origin_mm, [20.0, 20.0, 16.0 + 0.2]).unwrap();
+    frame.region_z_mm = [-1.0 + 0.2, 9.0 + 0.2];
+    frame.key_middle_z_mm = [
+        -1.0 + 0.2 + c.join.end_collar_height_mm,
+        9.0 + 0.2 - c.join.end_collar_height_mm,
+    ];
+    frame.validate_source_pose(&c, &pose).unwrap();
+    let mut aliased = frame.clone();
+    let recovered_tz = frame.world_origin_mm[2] - frame.origin_mm[2];
+    assert_ne!(recovered_tz, pose.translation_mm[2]);
+    aliased.region_z_mm = [-1.0 + recovered_tz, 9.0 + recovered_tz];
+    assert!(aliased.validate_source_pose(&c, &pose).is_err());
 }
 
 #[test]
@@ -484,6 +680,89 @@ fn functional_domains_bind_source_roles_and_complete_intervals() {
 }
 
 #[test]
+fn functional_partial_domains_require_base_everywhere_and_exact_active_pairs() {
+    let mut job = functional_job();
+    job.functional_construction.as_mut().unwrap().face_patch = Some(FunctionalFacePatch {
+        horizontal_mm: [2.0, 14.0],
+        source_z_mm: [2.0, 8.0],
+    });
+    let c = job.functional_construction.as_ref().unwrap();
+    let template = functional_plan(&job);
+    let mut plan = template.clone();
+    let frame = plan.functional_material_frame.as_mut().unwrap();
+    frame.selected_u_mm = [2.0, 14.0];
+    frame.region_z_mm = [2.0, 8.0];
+    frame.key_middle_z_mm = [3.0, 7.0];
+    frame.key_centers_u_mm = vec![8.0];
+    frame
+        .validate_source_pose(c, &RigidPoseMm::IDENTITY)
+        .unwrap();
+    plan.material_domains.clear();
+    let region_ref = template.material_domains[0].reference;
+    let base_ref = template.material_domains[1].reference;
+    for layer in &mut plan.layers {
+        let active = layer.lower_z_mm >= 2.0 && layer.z_mm <= 8.0;
+        for path in &mut layer.paths {
+            path.material_domain = Some(if active { region_ref } else { base_ref });
+        }
+        layer.region_coverage.process_regions.clear();
+    }
+    for interval in [0.0, 2.0, 3.0, 7.0, 8.0, 20.0].windows(2) {
+        let physical_z_mm = [interval[0], interval[1]];
+        let active = interval[0] >= 2.0 && interval[1] <= 8.0;
+        let mut base = template.material_domains[1].clone();
+        base.physical_z_mm = physical_z_mm;
+        plan.material_domains.push(base);
+        if active {
+            let mut region = template.material_domains[0].clone();
+            region.physical_z_mm = physical_z_mm;
+            plan.material_domains.push(region);
+        }
+    }
+    functional::validate_material_domains(&plan, c, &job).unwrap();
+    for change in 0..15 {
+        let mut bad = plan.clone();
+        match change {
+            0 => {
+                bad.material_domains.remove(0);
+            }
+            1 => {
+                bad.material_domains
+                    .retain(|d| !(d.reference == region_ref && d.physical_z_mm == [3.0, 7.0]));
+            }
+            2 | 3 => {
+                let mut extra = template.material_domains[0].clone();
+                extra.physical_z_mm = if change == 2 { [0.0, 2.0] } else { [8.0, 20.0] };
+                bad.material_domains.push(extra);
+            }
+            4 => bad.material_domains[2].physical_z_mm = [2.0, 7.0],
+            5 => bad.material_domains[0].physical_z_mm = [0.0, 3.0],
+            6 => bad.layers[0].z_mm = 2.5,
+            7 => bad.layers[1].z_mm = 3.5,
+            8 => bad.layers[3].z_mm = 8.5,
+            9 => bad.layers[0].paths[0].material_domain = Some(region_ref),
+            10 => {
+                bad.material_domains[1].physical_z_mm = [2.0, 2.5];
+            }
+            11 => {
+                let mut extra = template.material_domains[0].clone();
+                extra.physical_z_mm = [0.5, 1.0];
+                bad.material_domains.push(extra);
+            }
+            12 => bad.layers.retain(|layer| layer.z_mm <= 2.0),
+            13 => bad.layers.retain(|layer| layer.z_mm <= 7.0),
+            _ => {
+                bad.layers.remove(20);
+            }
+        }
+        assert!(
+            functional::validate_material_domains(&bad, c, &job).is_err(),
+            "change {change}"
+        );
+    }
+}
+
+#[test]
 fn functional_regional_owners_and_existing_domain_budget_are_enforced() {
     let job = functional_job();
     let c = job.functional_construction.as_ref().unwrap();
@@ -520,6 +799,8 @@ fn functional_regional_owners_and_existing_domain_budget_are_enforced() {
     ];
     let frame = plan.functional_material_frame.as_mut().unwrap();
     frame.source_z_mm = [0.0, 2.4];
+    frame.stock_bounds_mm.max[2] = 2.4;
+    frame.region_z_mm = [0.0, 2.4];
     frame.key_middle_z_mm = [1.0, 1.4];
     plan.layers.clear();
     plan.material_domains.clear();
@@ -536,7 +817,7 @@ fn functional_regional_owners_and_existing_domain_budget_are_enforced() {
             }
         }
         plan.layers.push(layer);
-        for domain in &template.material_domains {
+        for domain in template.material_domains.iter().take(2) {
             let mut domain = domain.clone();
             domain.physical_z_mm = physical_z_mm;
             plan.material_domains.push(domain);

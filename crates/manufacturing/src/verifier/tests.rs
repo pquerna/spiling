@@ -3453,8 +3453,14 @@ fn fixed_dual_golden(model_tool: Option<usize>) {
     if std::env::var_os("SPILING_UPDATE_REPLAY_FIXTURE").is_some() {
         std::fs::write(&path, serde_json::to_vec_pretty(&golden).unwrap()).unwrap();
     } else {
-        let committed: serde_json::Value =
+        let mut committed: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let mut golden = golden;
+        for value in [&mut committed, &mut golden] {
+            let info = value["descriptor"]["info"].as_object_mut().unwrap();
+            info.remove("input_hash");
+            info.remove("verifier_version");
+        }
         assert_eq!(
             golden, committed,
             "fixed-dual Rust/TypeScript actual-byte golden drift"

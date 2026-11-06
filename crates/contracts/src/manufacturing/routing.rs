@@ -429,9 +429,13 @@ impl FixedDualJob {
         if let Some(construction) = &self.functional_construction {
             construction.validate(self)?;
         }
-        // Only a complete, checked functional request can authorize nominal
-        // mixed-family capture geometry. Other mixed jobs retain the family gate.
+        let uniform_without_construction = self.functional_construction.is_none()
+            && self.surface_constructions.is_empty()
+            && self.assignments.iter().all(|assignment| {
+                matches!(&assignment.material, OccurrenceMaterial::Uniform { .. })
+            });
         if self.tools[0].material.polymer_family != self.tools[1].material.polymer_family
+            && !uniform_without_construction
             && !matches!(
                 &self.functional_construction,
                 Some(FunctionalMaterialConstruction {
@@ -441,7 +445,7 @@ impl FixedDualJob {
             )
         {
             return Err(invalid(
-                "the reference route requires a declared common polymer family unless a complete functional construction explicitly requests mechanical capture",
+                "the reference route requires a declared common polymer family unless all occurrences are uniform without construction or a complete functional construction explicitly requests mechanical capture",
             ));
         }
         if self.assignments.len() == 2 {
@@ -684,6 +688,355 @@ fn assignments<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Vec<OccurrenceMaterialAssignment>, D::Error> {
     bounded_vec::<D, _, 2>(d)
+}
+
+#[cfg(test)]
+mod uniform_family_tests {
+    use super::*;
+
+    const UNIFORM: &str = include_str!("../../../../fixtures/manufacturing/fixed-dual.intent.json");
+    const OPTICAL: &str =
+        include_str!("../../../../fixtures/manufacturing/surface-color-box.intent.json");
+    const CYCLE: &str =
+        include_str!("../../../../fixtures/manufacturing/fixed-dual-cycle.intent.json");
+
+    fn captured(json: &str) -> (PrinterSpecification, FixedDualJob) {
+        let intent: ManufacturingIntent = serde_json::from_str(json).unwrap();
+        let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow else {
+            panic!("expected fixed-dual fixture");
+        };
+        let job = job.clone();
+        (intent.printer, job)
+    }
+
+    fn uniform(mixed: bool, bases: &[usize]) -> (PrinterSpecification, FixedDualJob) {
+        let (printer, mut job) = captured(UNIFORM);
+        job.assignments.truncate(bases.len());
+        for (assignment, &base) in job.assignments.iter_mut().zip(bases) {
+            assignment.material = OccurrenceMaterial::Uniform {
+                material_id: job.tools[base].material.id.clone(),
+            };
+        }
+        if mixed {
+            job.tools[1].material.polymer_family = "TPU".into();
+        }
+        (printer, job)
+    }
+
+    fn functional(job: &FixedDualJob, base: usize) -> FunctionalMaterialConstruction {
+        let (_, optical) = captured(OPTICAL);
+        let source = &optical.surface_constructions[0];
+        FunctionalMaterialConstruction {
+            face_patch: None,
+            interface_policy: FunctionalInterfacePolicy::MechanicalCapture,
+            occurrence_id: job.assignments[0].occurrence_id,
+            definition_id: source.definition_id.clone(),
+            source_hash: source.source_hash.clone(),
+            face_id: source.faces[0].face_id.clone(),
+            material_id: job.tools[1 - base].material.id.clone(),
+            base_material_id: job.tools[base].material.id.clone(),
+            minimum_pure_depth_mm: 2.0,
+            join: PlanarTKeyJoin {
+                reach_into_region_mm: 2.0,
+                reach_into_base_mm: 3.0,
+                pitch_mm: 10.0,
+                stem_width_mm: 2.0,
+                head_width_mm: 6.0,
+                head_depth_mm: 1.0,
+                edge_margin_mm: 1.0,
+                end_collar_height_mm: 1.0,
+                collar_head_width_mm: 4.0,
+            },
+        }
+    }
+
+    fn bead(assignment: &OccurrenceMaterialAssignment) -> DepositionPath {
+        let bounds = &assignment.work_envelope_mm;
+        let x = (bounds.min[0] + bounds.max[0]) * 0.5;
+        let y = (bounds.min[1] + bounds.max[1]) * 0.5;
+        DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::SolidFill,
+            owner: None,
+            width: WidthProfile::Constant { width_mm: 0.4 },
+            physical_z_mm: [0.0, 0.2],
+            points_mm: vec![[x - 1.0, y, 0.2], [x + 1.0, y, 0.2]],
+        }
+    }
+
+    #[test]
+    fn uniform_one_or_two_occurrences_admit_either_loaded_family() {
+        for mixed in [false, true] {
+            // A single occurrence leaves the other loaded tool unused by model
+            // beads; both declarations must still satisfy the complete route.
+            for bases in [&[0][..], &[1], &[0, 0], &[0, 1], &[1, 0], &[1, 1]] {
+                let (printer, job) = uniform(mixed, bases);
+                job.validate_declaration().unwrap();
+                job.validate(&printer).unwrap();
+                for (index, assignment) in job.assignments.iter().enumerate() {
+                    let path = bead(assignment);
+                    assert_eq!(job.assignment_for_path(&path).unwrap(), index);
+                    assert_eq!(job.tool_for_path(&path).unwrap(), bases[index] as u8);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn family_contact_requires_complete_mechanical_capture_and_removal_restores_uniform() {
+        for base in [0, 1] {
+            for mixed in [false, true] {
+                for policy in [
+                    FunctionalInterfacePolicy::DeclaredSameFamily,
+                    FunctionalInterfacePolicy::MechanicalCapture,
+                ] {
+                    let (printer, mut job) = uniform(mixed, &[base]);
+                    let mut construction = functional(&job, base);
+                    construction.interface_policy = policy;
+                    job.functional_construction = Some(construction);
+                    assert_eq!(
+                        job.validate(&printer).is_ok(),
+                        !mixed || policy == FunctionalInterfacePolicy::MechanicalCapture,
+                        "base {base}, mixed {mixed}, policy {policy:?}",
+                    );
+                    job.functional_construction = None;
+                    job.validate(&printer).unwrap();
+                    assert_eq!(
+                        job.tool_for_path(&bead(&job.assignments[0])).unwrap(),
+                        base as u8,
+                    );
+                }
+            }
+            let (_, mut job) = uniform(true, &[base]);
+            job.functional_construction = Some(functional(&job, base));
+            job.validate_declaration().unwrap();
+            for change in 0..5 {
+                let mut bad = job.clone();
+                let construction = bad.functional_construction.as_mut().unwrap();
+                match change {
+                    0 => construction.join.end_collar_height_mm = 0.0,
+                    1 => construction.material_id = "unloaded-region".into(),
+                    2 => construction.base_material_id = "unloaded-base".into(),
+                    3 => construction.occurrence_id = OccurrenceId::new(99).unwrap(),
+                    _ => construction.join.collar_head_width_mm = construction.join.head_width_mm,
+                }
+                assert!(
+                    bad.validate_declaration().is_err(),
+                    "capture change {change}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_occurrence_must_be_uniform_for_the_no_construction_exception() {
+        let (_, cycle) = captured(CYCLE);
+        for count in [1, 2] {
+            for cycle_index in 0..count {
+                for mixed in [false, true] {
+                    let (printer, mut job) = uniform(mixed, &[0, 0][..count]);
+                    job.assignments[cycle_index].material =
+                        cycle.assignments[cycle_index].material.clone();
+                    assert_eq!(job.validate(&printer).is_ok(), !mixed);
+                    // A single-material cycle still has physical boundaries;
+                    // it is not the uniform declaration required by this gate.
+                    let OccurrenceMaterial::LayerCycle { recipe, .. } =
+                        &mut job.assignments[cycle_index].material
+                    else {
+                        unreachable!()
+                    };
+                    for slot in &mut recipe.slots {
+                        slot.material = 0;
+                    }
+                    assert_eq!(job.validate(&printer).is_ok(), !mixed);
+                }
+            }
+        }
+        for mixed in [false, true] {
+            for change in 0..5 {
+                let (_, mut job) = uniform(mixed, &[0]);
+                job.assignments[0].material = cycle.assignments[0].material.clone();
+                let OccurrenceMaterial::LayerCycle {
+                    recipe,
+                    material_ids,
+                } = &mut job.assignments[0].material
+                else {
+                    unreachable!()
+                };
+                match change {
+                    0 => recipe.slots.clear(),
+                    1 => recipe.slots[0].height_mm = 0.0,
+                    2 => recipe.slots[0].material = 2,
+                    3 => recipe.phase_slot = 64,
+                    _ => material_ids[1] = "unloaded-cycle-material".into(),
+                }
+                assert!(job.validate_declaration().is_err(), "cycle change {change}");
+            }
+        }
+    }
+
+    #[test]
+    fn optical_construction_keeps_the_common_family_gate_for_uniform_and_cycle_shells() {
+        let (_, cycle) = captured(CYCLE);
+        for mixed in [false, true] {
+            for cycle_shell in [false, true] {
+                let (printer, mut job) = captured(OPTICAL);
+                if mixed {
+                    job.tools[1].material.polymer_family = "TPU".into();
+                }
+                if cycle_shell {
+                    job.surface_constructions[0].shell = cycle.assignments[0].material.clone();
+                }
+                assert_eq!(job.validate(&printer).is_ok(), !mixed);
+                job.functional_construction = Some(functional(&job, 1));
+                assert!(job.validate_declaration().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn uniform_mixed_reservations_require_strict_xy_separation_even_across_z() {
+        for axis in [0, 1] {
+            for gap in [-1.0, 0.0, 0.001] {
+                let (printer, mut job) = uniform(true, &[0, 1]);
+                let first = AabbMm::new([20.0, 20.0, 0.0], [40.0, 40.0, 10.0]).unwrap();
+                let mut second = first;
+                second.min[axis] += 20.0 + gap;
+                second.max[axis] += 20.0 + gap;
+                // Vertical separation cannot substitute for exclusive XY.
+                second.min[2] = 20.0;
+                second.max[2] = 30.0;
+                job.assignments[0].work_envelope_mm = first;
+                job.assignments[1].work_envelope_mm = second;
+                assert_eq!(job.validate(&printer).is_ok(), gap > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn uniform_mixed_assignments_keep_count_identity_binding_and_finite_bounds_checks() {
+        let (_, job) = uniform(true, &[0, 1]);
+        for change in 0..6 {
+            let mut bad = job.clone();
+            match change {
+                0 => bad.assignments.clear(),
+                1 => bad.assignments.push(bad.assignments[0].clone()),
+                2 => bad.assignments[1].occurrence_id = bad.assignments[0].occurrence_id,
+                3 => {
+                    bad.assignments[0].material = OccurrenceMaterial::Uniform {
+                        material_id: "unloaded-uniform-material".into(),
+                    }
+                }
+                4 => bad.assignments[0].work_envelope_mm.max[0] = f64::INFINITY,
+                _ => {
+                    bad.assignments[0].work_envelope_mm.max[2] =
+                        bad.assignments[0].work_envelope_mm.min[2]
+                }
+            }
+            assert!(
+                bad.validate_declaration().is_err(),
+                "assignment change {change}"
+            );
+        }
+    }
+
+    #[test]
+    fn unused_foreign_tool_keeps_thermal_waste_flow_and_shared_envelope_checks() {
+        for base in [0, 1] {
+            let (printer, job) = uniform(true, &[base]);
+            job.validate(&printer).unwrap();
+            for tool_index in [0, 1] {
+                for change in 0..12 {
+                    let mut bad = job.clone();
+                    let tool = &mut bad.tools[tool_index];
+                    match change {
+                        0 => tool.nozzle_temperature_c = tool.minimum_extrusion_temperature_c - 1.0,
+                        1 => tool.standby_temperature_c = tool.nozzle_temperature_c + 1.0,
+                        2 => tool.waste_line_xy_mm[1] = tool.waste_line_xy_mm[0],
+                        3 => tool.minimum_reprime_volume_mm3 = 0.0,
+                        4 => tool.retract_filament_mm = 11.0,
+                        5 => tool.nozzle_diameter_mm *= 2.0,
+                        6 => tool.max_feed_mm_s = printer.max_feed_mm_s - 1.0,
+                        7 => {
+                            tool.max_volumetric_flow_mm3_s = printer.max_volumetric_flow_mm3_s - 1.0
+                        }
+                        8 => {
+                            tool.deposition_limits.min_bead_width_mm =
+                                printer.deposition_limits.min_bead_width_mm + 0.01
+                        }
+                        9 => {
+                            tool.deposition_limits.max_bead_width_mm =
+                                printer.deposition_limits.max_bead_width_mm - 0.01
+                        }
+                        10 => {
+                            tool.deposition_limits.min_bead_height_mm =
+                                printer.deposition_limits.min_bead_height_mm + 0.01
+                        }
+                        _ => {
+                            tool.deposition_limits.max_bead_height_mm =
+                                printer.deposition_limits.max_bead_height_mm - 0.01
+                        }
+                    }
+                    assert!(
+                        bad.validate(&printer).is_err(),
+                        "base {base}, tool {tool_index}, change {change}"
+                    );
+                }
+            }
+            for change in 0..8 {
+                let mut bad = job.clone();
+                match change {
+                    0 => bad.tools[1].offset_xy_mm = [0.0, 0.0],
+                    1 => bad.tools[1].feeder_id = bad.tools[0].feeder_id.clone(),
+                    2 => bad.tools[1].material.id = bad.tools[0].material.id.clone(),
+                    3 => bad.bed_temperature_c = bad.maximum_bed_temperature_c + 1.0,
+                    4 => bad.carriage_body_bounds_mm.min[2] = 0.0,
+                    5 => bad.home_position_mm[0] = printer.build_envelope.max[0] + 1.0,
+                    6 => bad.park_position_mm[2] = printer.build_envelope.max[2] + 1.0,
+                    _ => {
+                        bad.assignments[0].work_envelope_mm.max[0] =
+                            printer.build_envelope.max[0] + 1.0
+                    }
+                }
+                assert!(bad.validate(&printer).is_err(), "job change {change}");
+            }
+        }
+    }
+
+    #[test]
+    fn uniform_mixed_paths_still_require_complete_projected_beads_in_one_reservation() {
+        let (_, job) = uniform(true, &[0, 1]);
+        for (index, assignment) in job.assignments.iter().enumerate() {
+            let path = bead(assignment);
+            assert_eq!(job.tool_for_path(&path).unwrap(), index as u8);
+            let mut outside = path.clone();
+            // The centerline is inside, but half the bead extends outside.
+            outside.points_mm[0][0] = assignment.work_envelope_mm.min[0] + 0.1;
+            assert!(job.assignment_for_path(&outside).is_err());
+            let mut per_edge = path.clone();
+            per_edge.points_mm.push([
+                assignment.work_envelope_mm.max[0] - 0.1,
+                path.points_mm[1][1],
+                0.2,
+            ]);
+            per_edge.width = WidthProfile::PerEdge {
+                widths_mm: vec![0.1, 0.4],
+            };
+            assert!(job.assignment_for_path(&per_edge).is_err());
+            let mut outside_z = path.clone();
+            outside_z.physical_z_mm = [
+                assignment.work_envelope_mm.max[2],
+                assignment.work_envelope_mm.max[2] + 0.2,
+            ];
+            assert!(job.assignment_for_path(&outside_z).is_err());
+            let mut unowned = path;
+            unowned.material_domain = Some(MaterialDomainRef {
+                construction_index: 0,
+                role: MaterialConstructionRole::FunctionalRegion,
+            });
+            assert!(job.tool_for_path(&unowned).is_err());
+        }
+    }
 }
 
 #[cfg(test)]

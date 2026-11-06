@@ -24,10 +24,41 @@ pub struct FunctionalMaterialConstruction {
     pub definition_id: DefinitionId,
     pub source_hash: SourceHash,
     pub face_id: FaceId,
+    /// Required nullable selection in the full native face frame.
+    #[serde(deserialize_with = "required_option")]
+    pub face_patch: Option<FunctionalFacePatch>,
     pub material_id: String,
     pub base_material_id: String,
     pub minimum_pure_depth_mm: f64,
     pub join: PlanarTKeyJoin,
+}
+
+/// Source-local intervals only; selecting a patch grants no geometry authority.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FunctionalFacePatch {
+    pub horizontal_mm: [f64; 2],
+    pub source_z_mm: [f64; 2],
+}
+
+impl FunctionalFacePatch {
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        if !ordered_interval(self.horizontal_mm)
+            || self.horizontal_mm[0] < 0.0
+            || !ordered_interval(self.source_z_mm)
+        {
+            return Err(invalid(
+                "functional patch requires finite ordered U/Z intervals and nonnegative U",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn ordered_interval(interval: [f64; 2]) -> bool {
+    interval.iter().all(|v| v.is_finite())
+        && interval[0] < interval[1]
+        && (interval[1] - interval[0]).is_finite()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
@@ -52,6 +83,9 @@ impl FunctionalMaterialConstruction {
             return Err(invalid(
                 "functional region and base require distinct materials",
             ));
+        }
+        if let Some(patch) = &self.face_patch {
+            patch.validate()?;
         }
         self.join.validate()?;
         positive(&[self.minimum_pure_depth_mm])?;
@@ -121,13 +155,20 @@ pub struct FunctionalMaterialFrame {
     pub definition_id: DefinitionId,
     pub source_hash: SourceHash,
     pub face_id: FaceId,
+    /// Full native face origin, independent of patch selection.
     pub origin_mm: [f64; 3],
+    /// Full native face origin under the literal captured pose.
     pub world_origin_mm: [f64; 3],
     pub stock_bounds_mm: AabbMm,
     pub horizontal_direction: [f64; 3],
     pub outward_normal: [f64; 3],
     pub width_mm: f64,
+    /// Whole native height, independent of the selected patch.
     pub source_z_mm: [f64; 2],
+    /// Selected interval in full-face U coordinates.
+    pub selected_u_mm: [f64; 2],
+    /// Active material interval in world Z.
+    pub region_z_mm: [f64; 2],
     /// Closed world interval where the wider middle heads apply.
     pub key_middle_z_mm: [f64; 2],
     #[serde(deserialize_with = "key_centers")]
@@ -157,15 +198,24 @@ impl FunctionalMaterialFrame {
             .chain(&self.horizontal_direction)
             .chain(&self.outward_normal)
             .chain(&self.source_z_mm)
+            .chain(&self.selected_u_mm)
+            .chain(&self.region_z_mm)
             .chain(&self.key_middle_z_mm)
             .chain(&self.key_centers_u_mm)
             .any(|v| !v.is_finite())
             || !self.width_mm.is_finite()
             || self.width_mm <= 0.0
-            || !(self.source_z_mm[1] - self.source_z_mm[0]).is_finite()
-            || self.source_z_mm[0] >= self.source_z_mm[1]
-            || !(self.key_middle_z_mm[1] - self.key_middle_z_mm[0]).is_finite()
-            || self.key_middle_z_mm[0] >= self.key_middle_z_mm[1]
+            || !ordered_interval(self.source_z_mm)
+            || !ordered_interval(self.selected_u_mm)
+            || !ordered_interval(self.region_z_mm)
+            || !ordered_interval(self.key_middle_z_mm)
+            || self.origin_mm[2] != self.source_z_mm[0]
+            || self.selected_u_mm[0] < 0.0
+            || self.selected_u_mm[1] > self.width_mm
+            || self.region_z_mm[0] < self.stock_bounds_mm.min[2]
+            || self.region_z_mm[1] > self.stock_bounds_mm.max[2]
+            || self.key_middle_z_mm[0] < self.region_z_mm[0]
+            || self.key_middle_z_mm[1] > self.region_z_mm[1]
             || self.horizontal_direction[2] != 0.0
             || self.outward_normal[2] != 0.0
             || norm(self.horizontal_direction) != 1.0
@@ -180,11 +230,13 @@ impl FunctionalMaterialFrame {
             || (0..3).any(|axis| self.stock_bounds_mm.min[axis] >= self.stock_bounds_mm.max[axis])
             || self.key_centers_u_mm.is_empty()
             || self.key_centers_u_mm.len() > MAX_FUNCTIONAL_KEYS
-            || !self.key_centers_u_mm.contains(&(self.width_mm * 0.5))
+            || !self
+                .key_centers_u_mm
+                .contains(&((self.selected_u_mm[0] + self.selected_u_mm[1]) * 0.5))
             || self
                 .key_centers_u_mm
                 .iter()
-                .any(|u| *u <= 0.0 || *u >= self.width_mm)
+                .any(|u| *u <= self.selected_u_mm[0] || *u >= self.selected_u_mm[1])
             || self.key_centers_u_mm.windows(2).any(|u| u[0] >= u[1])
         {
             return Err(invalid(
@@ -227,16 +279,20 @@ impl FunctionalMaterialFrame {
         construction.validate(job)?;
         let join = &construction.join;
         let bounds = &job.assignments[0].work_envelope_mm;
-        if self.occurrence_id != construction.occurrence_id
+        let (selected_u, selected_z) = self.selected_source_intervals(construction)?;
+        if self.selected_u_mm != selected_u
+            || self.occurrence_id != construction.occurrence_id
             || self.definition_id != construction.definition_id
             || self.source_hash != construction.source_hash
             || self.face_id != construction.face_id
-            || self.source_z_mm[1] - self.source_z_mm[0] <= 2.0 * join.end_collar_height_mm
+            || selected_z[1] - selected_z[0] <= 2.0 * join.end_collar_height_mm
+            || self.key_middle_z_mm[0] < self.region_z_mm[0] + join.end_collar_height_mm
+            || self.key_middle_z_mm[1] > self.region_z_mm[1] - join.end_collar_height_mm
             || self.key_middle_z_mm[0] < bounds.min[2] + join.end_collar_height_mm
             || self.key_middle_z_mm[1] > bounds.max[2] - join.end_collar_height_mm
             || self.key_centers_u_mm.iter().any(|u| {
-                *u - join.head_width_mm * 0.5 < join.edge_margin_mm
-                    || self.width_mm - *u - join.head_width_mm * 0.5 < join.edge_margin_mm
+                *u - join.head_width_mm * 0.5 - self.selected_u_mm[0] < join.edge_margin_mm
+                    || self.selected_u_mm[1] - *u - join.head_width_mm * 0.5 < join.edge_margin_mm
             })
             || self
                 .key_centers_u_mm
@@ -250,6 +306,25 @@ impl FunctionalMaterialFrame {
         Ok(())
     }
 
+    fn selected_source_intervals(
+        &self,
+        construction: &FunctionalMaterialConstruction,
+    ) -> Result<([f64; 2], [f64; 2]), ManufacturingError> {
+        match &construction.face_patch {
+            Some(patch) => {
+                patch.validate()?;
+                if patch.horizontal_mm[1] > self.width_mm
+                    || patch.source_z_mm[0] < self.source_z_mm[0]
+                    || patch.source_z_mm[1] > self.source_z_mm[1]
+                {
+                    return Err(invalid("functional patch exceeds the full native face"));
+                }
+                Ok((patch.horizontal_mm, patch.source_z_mm))
+            }
+            None => Ok(([0.0, self.width_mm], self.source_z_mm)),
+        }
+    }
+
     pub fn validate_source_pose(
         &self,
         construction: &FunctionalMaterialConstruction,
@@ -260,12 +335,20 @@ impl FunctionalMaterialFrame {
         pose.validate().map_err(|e| invalid(&e.message))?;
         let world_origin: [f64; 3] =
             std::array::from_fn(|axis| self.origin_mm[axis] + pose.translation_mm[axis]);
+        let (selected_u, selected_z) = self.selected_source_intervals(construction)?;
+        let region_z = selected_z.map(|z| z + pose.translation_mm[2]);
         let middle = [
-            self.source_z_mm[0] + pose.translation_mm[2] + construction.join.end_collar_height_mm,
-            self.source_z_mm[1] + pose.translation_mm[2] - construction.join.end_collar_height_mm,
+            selected_z[0] + pose.translation_mm[2] + construction.join.end_collar_height_mm,
+            selected_z[1] + pose.translation_mm[2] - construction.join.end_collar_height_mm,
         ];
         if pose.rotation_xyzw != [0.0, 0.0, 0.0, 1.0]
             || world_origin.iter().chain(&middle).any(|v| !v.is_finite())
+            || self.occurrence_id != construction.occurrence_id
+            || self.definition_id != construction.definition_id
+            || self.source_hash != construction.source_hash
+            || self.face_id != construction.face_id
+            || self.selected_u_mm != selected_u
+            || self.region_z_mm != region_z
             || self.world_origin_mm != world_origin
             || self.key_middle_z_mm != middle
             || self.stock_bounds_mm.min[2] != self.source_z_mm[0] + pose.translation_mm[2]
@@ -289,6 +372,21 @@ pub(super) fn validate_material_domains(
         .as_ref()
         .ok_or_else(|| invalid("functional construction has no source frame"))?;
     frame.validate(construction, job)?;
+    if plan.layers.first().map(|layer| layer.lower_z_mm) != Some(frame.stock_bounds_mm.min[2])
+        || plan.layers.last().map(|layer| layer.z_mm) != Some(frame.stock_bounds_mm.max[2])
+        || plan
+            .layers
+            .iter()
+            .any(|layer| layer.lower_z_mm >= layer.z_mm)
+        || plan
+            .layers
+            .windows(2)
+            .any(|pair| pair[0].z_mm != pair[1].lower_z_mm)
+    {
+        return Err(invalid(
+            "functional schedule must cover the complete captured stock height without gaps",
+        ));
+    }
     if !plan.material_frames.is_empty() || !job.surface_constructions.is_empty() {
         return Err(invalid(
             "functional construction cannot carry optical frames or requests",
@@ -303,6 +401,12 @@ pub(super) fn validate_material_domains(
         MaterialConstructionRole::FunctionalRegion,
         MaterialConstructionRole::FunctionalBase,
     ];
+    let events = [
+        frame.region_z_mm[0],
+        frame.key_middle_z_mm[0],
+        frame.key_middle_z_mm[1],
+        frame.region_z_mm[1],
+    ];
     let mut points = 0usize;
     for (index, domain) in plan.material_domains.iter().enumerate() {
         points = points
@@ -313,14 +417,18 @@ pub(super) fn validate_material_domains(
         }
         if domain.reference.construction_index != 0
             || !roles.contains(&domain.reference.role)
-            || !plan.material_domains.iter().any(|other| {
-                other.reference.construction_index == 0
-                    && other.reference.role != domain.reference.role
-                    && roles.contains(&other.reference.role)
-                    && other.physical_z_mm == domain.physical_z_mm
-            })
-            || frame
-                .key_middle_z_mm
+            || (domain.reference.role == MaterialConstructionRole::FunctionalRegion
+                && (domain.physical_z_mm[0] < frame.region_z_mm[0]
+                    || domain.physical_z_mm[1] > frame.region_z_mm[1]))
+            || (domain.physical_z_mm[0] < frame.region_z_mm[1]
+                && frame.region_z_mm[0] < domain.physical_z_mm[1]
+                && !plan.material_domains.iter().any(|other| {
+                    other.reference.construction_index == 0
+                        && other.reference.role != domain.reference.role
+                        && roles.contains(&other.reference.role)
+                        && other.physical_z_mm == domain.physical_z_mm
+                }))
+            || events
                 .iter()
                 .any(|z| domain.physical_z_mm[0] < *z && *z < domain.physical_z_mm[1])
             || plan.material_domains[..index].iter().any(|other| {
@@ -338,7 +446,17 @@ pub(super) fn validate_material_domains(
         }
     }
     for layer in &plan.layers {
+        if events
+            .iter()
+            .any(|z| layer.lower_z_mm < *z && *z < layer.z_mm)
+        {
+            return Err(invalid(
+                "functional layer straddles an active-region or collar endpoint",
+            ));
+        }
+        let active = frame.region_z_mm[0] <= layer.lower_z_mm && layer.z_mm <= frame.region_z_mm[1];
         for role in roles {
+            let expected = usize::from(role == MaterialConstructionRole::FunctionalBase || active);
             if plan
                 .material_domains
                 .iter()
@@ -352,10 +470,10 @@ pub(super) fn validate_material_domains(
                         && layer.z_mm <= d.physical_z_mm[1]
                 })
                 .count()
-                != 1
+                != expected
             {
                 return Err(invalid(
-                    "functional layer lacks complete region/base material intervals",
+                    "functional layer disagrees with active region/base material intervals",
                 ));
             }
         }
@@ -367,8 +485,7 @@ pub(super) fn validate_material_domains(
                 d.reference == reference
                     && d.physical_z_mm[0] <= layer.lower_z_mm
                     && layer.z_mm <= d.physical_z_mm[1]
-            }) || (reference.role == MaterialConstructionRole::FunctionalRegion
-                && region.fraction != 1.0)
+            }) || region.fraction != 1.0
                 || region.contributions.iter().any(|source| {
                     source.occurrence_id != construction.occurrence_id
                         || source.definition_id != construction.definition_id

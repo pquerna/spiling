@@ -285,6 +285,7 @@ fn functional_material_intent(scene: &Scene) -> ManufacturingIntent {
         material_id: job.tools[0].material.id.clone(),
         base_material_id: job.tools[1].material.id.clone(),
         interface_policy: FunctionalInterfacePolicy::DeclaredSameFamily,
+        face_patch: None,
         minimum_pure_depth_mm: 5.0,
         join: PlanarTKeyJoin {
             reach_into_region_mm: 1.6,
@@ -329,6 +330,143 @@ fn functional_region_preserves_five_mm_pure_depth_and_constructs_captive_keys() 
     let wrong_tool = bundle.program.replacen("T0 S1", "T1 S1", 1);
     assert_ne!(wrong_tool, bundle.program);
     assert!(verifier::verify(&wrong_tool, &bundle.plan, &intent, &AtomicBool::new(false)).is_err());
+}
+
+#[test]
+fn functional_localized_patches_preserve_complete_stock_and_replay() {
+    for (axis, sign, horizontal, heights) in [
+        (1, -1.0, [2.0, 18.0], [1.2, 6.8]),
+        (1, -1.0, [2.0, 18.0], [2.0, 6.0]),
+        (1, -1.0, [4.0, 20.0], [1.13, 6.87]),
+        (1, 1.0, [0.0, 16.0], [0.0, 8.0]),
+        (0, -1.0, [0.0, 10.0], [1.2, 6.8]),
+        (0, 1.0, [1.0, 9.0], [0.0, 8.0]),
+    ] {
+        let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+        let mut requested = functional_material_intent(&scene);
+        let native = scene.definitions.values().next().unwrap();
+        let face = native
+            .faces()
+            .iter()
+            .find(|info| {
+                native
+                    .vertical_wall_face(&info.face_id)
+                    .is_ok_and(|face| face.outward_normal[axis] == sign)
+            })
+            .unwrap();
+        let JobWorkflow::FixedDualMarlin { job } = &mut requested.printer.workflow else {
+            unreachable!()
+        };
+        let request = job.functional_construction.as_mut().unwrap();
+        request.face_id = face.face_id.clone();
+        request.face_patch = Some(FunctionalFacePatch {
+            horizontal_mm: horizontal,
+            source_z_mm: heights,
+        });
+        let bundle = scene.compile(&requested).unwrap_or_else(|error| {
+            panic!("face {axis}/{sign}, U {horizontal:?}, Z {heights:?}: {error:?}")
+        });
+        let frame = bundle.plan.functional_material_frame.as_ref().unwrap();
+        assert_eq!(frame.selected_u_mm, horizontal);
+        assert_eq!(frame.region_z_mm, heights);
+        for layer in &bundle.plan.layers {
+            let active = heights[0] <= layer.lower_z_mm && layer.z_mm <= heights[1];
+            assert_eq!(
+                layer.paths.iter().any(|path| path
+                    .material_domain
+                    .is_some_and(|owner| owner.role == MaterialConstructionRole::FunctionalRegion)),
+                active
+            );
+            for stop in [heights[0], heights[0] + 1.2, heights[1] - 1.2, heights[1]] {
+                assert!(!(layer.lower_z_mm < stop && stop < layer.z_mm));
+            }
+        }
+        let bytes = serde_json::to_vec(&bundle).unwrap();
+        inspect_bundle(
+            &decode_bundle(&bytes).unwrap(),
+            &SourceHash::from_bytes(&bytes),
+            VerificationOutput::ReportOnly,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn functional_patch_refuses_outside_face_small_keys_and_collapsed_collars() {
+    let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+    for patch in [
+        FunctionalFacePatch {
+            horizontal_mm: [0.0, 21.0],
+            source_z_mm: [0.0, 8.0],
+        },
+        FunctionalFacePatch {
+            horizontal_mm: [0.0, 20.0],
+            source_z_mm: [-1.0, 8.0],
+        },
+        FunctionalFacePatch {
+            horizontal_mm: [0.0, 20.0],
+            source_z_mm: [0.0, 9.0],
+        },
+        FunctionalFacePatch {
+            horizontal_mm: [8.0, 12.0],
+            source_z_mm: [0.0, 8.0],
+        },
+        FunctionalFacePatch {
+            horizontal_mm: [2.0, 18.0],
+            source_z_mm: [2.0, 4.0],
+        },
+    ] {
+        let mut requested = functional_material_intent(&scene);
+        let JobWorkflow::FixedDualMarlin { job } = &mut requested.printer.workflow else {
+            unreachable!()
+        };
+        job.functional_construction.as_mut().unwrap().face_patch = Some(patch);
+        assert!(scene.compile(&requested).is_err());
+    }
+}
+
+#[test]
+fn uniform_mixed_material_parts_and_unused_tools_replay_without_contact_policy() {
+    for tools in [vec![0], vec![1], vec![0, 1]] {
+        let poses = [pose(20.0, 20.0, 0.0), pose(120.0, 20.0, 0.0)];
+        let scene = Scene::new(BOX, &poses[..tools.len()]);
+        let mut requested: ManufacturingIntent = serde_json::from_str(include_str!(
+            "../../../fixtures/manufacturing/fixed-dual.intent.json"
+        ))
+        .unwrap();
+        let JobWorkflow::FixedDualMarlin { job } = &mut requested.printer.workflow else {
+            unreachable!()
+        };
+        job.tools[0].material.polymer_family = "TPU".into();
+        job.tools[0].filament_diameter_mm = 2.85;
+        job.tools[0].nozzle_temperature_c = 220.0;
+        job.assignments.truncate(tools.len());
+        for (assignment, &tool) in job.assignments.iter_mut().zip(&tools) {
+            assignment.material = OccurrenceMaterial::Uniform {
+                material_id: job.tools[tool].material.id.clone(),
+            };
+        }
+        let bundle = scene.compile(&requested).unwrap();
+        assert!(bundle.plan.functional_material_frame.is_none());
+        assert!(bundle.plan.material_domains.is_empty());
+        let bytes = serde_json::to_vec(&bundle).unwrap();
+        let fresh = inspect_bundle(
+            &decode_bundle(&bytes).unwrap(),
+            &SourceHash::from_bytes(&bytes),
+            VerificationOutput::ReportOnly,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let routing = fresh.report.routing.unwrap();
+        for (index, tool) in routing.tools.iter().enumerate() {
+            assert_eq!(tool.model_deposition_segments > 0, tools.contains(&index));
+            assert_eq!(
+                tool.waste_deposition_segments as usize,
+                bundle.plan.layers.len()
+            );
+        }
+    }
 }
 
 #[test]

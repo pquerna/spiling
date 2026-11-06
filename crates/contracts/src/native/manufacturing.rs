@@ -2595,6 +2595,34 @@ impl TryFrom<FunctionalInterfacePolicy> for rpc::FunctionalInterfacePolicy {
         })
     }
 }
+impl TryFrom<rpc::FunctionalFacePatch> for FunctionalFacePatch {
+    type Error = String;
+    fn try_from(v: rpc::FunctionalFacePatch) -> Result<Self, String> {
+        let result = Self {
+            horizontal_mm: v
+                .horizontal_mm
+                .try_into()
+                .map_err(|_| "functional patch horizontal interval requires two endpoints")?,
+            source_z_mm: v
+                .source_z_mm
+                .try_into()
+                .map_err(|_| "functional patch source interval requires two endpoints")?,
+        };
+        result.validate().map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+}
+impl TryFrom<FunctionalFacePatch> for rpc::FunctionalFacePatch {
+    type Error = String;
+    fn try_from(v: FunctionalFacePatch) -> Result<Self, String> {
+        v.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            horizontal_mm: v.horizontal_mm.into(),
+            source_z_mm: v.source_z_mm.into(),
+        })
+    }
+}
+
 impl TryFrom<rpc::FunctionalMaterialConstruction> for FunctionalMaterialConstruction {
     type Error = String;
     fn try_from(v: rpc::FunctionalMaterialConstruction) -> Result<Self, String> {
@@ -2606,6 +2634,13 @@ impl TryFrom<rpc::FunctionalMaterialConstruction> for FunctionalMaterialConstruc
             definition_id: DefinitionId::parse(v.definition_id).map_err(|e| e.to_string())?,
             source_hash: SourceHash::parse(v.source_hash).map_err(|e| e.to_string())?,
             face_id: crate::geometry::FaceId::parse(v.face_id).map_err(|e| e.to_string())?,
+            face_patch: match required(v.face_patch, "functional face patch or explicit null")? {
+                rpc::functional_material_construction::FacePatch::Patch(patch) => {
+                    Some(patch.try_into()?)
+                }
+                rpc::functional_material_construction::FacePatch::NoFacePatch(true) => None,
+                _ => return Err("functional face patch null sentinel must be true".into()),
+            },
             material_id: v.material_id,
             base_material_id: v.base_material_id,
             minimum_pure_depth_mm: v.minimum_pure_depth_mm,
@@ -2625,6 +2660,12 @@ impl TryFrom<FunctionalMaterialConstruction> for rpc::FunctionalMaterialConstruc
             definition_id: v.definition_id.into(),
             source_hash: v.source_hash.into(),
             face_id: v.face_id.into(),
+            face_patch: Some(match v.face_patch {
+                Some(patch) => {
+                    rpc::functional_material_construction::FacePatch::Patch(patch.try_into()?)
+                }
+                None => rpc::functional_material_construction::FacePatch::NoFacePatch(true),
+            }),
             material_id: v.material_id,
             base_material_id: v.base_material_id,
             minimum_pure_depth_mm: v.minimum_pure_depth_mm,
@@ -2658,6 +2699,14 @@ impl TryFrom<rpc::FunctionalMaterialFrame> for FunctionalMaterialFrame {
                 .source_z_mm
                 .try_into()
                 .map_err(|_| "functional source interval requires two endpoints")?,
+            selected_u_mm: v
+                .selected_u_mm
+                .try_into()
+                .map_err(|_| "functional selected U interval requires two endpoints")?,
+            region_z_mm: v
+                .region_z_mm
+                .try_into()
+                .map_err(|_| "functional active world interval requires two endpoints")?,
             key_middle_z_mm: v
                 .key_middle_z_mm
                 .try_into()
@@ -2684,6 +2733,8 @@ impl TryFrom<FunctionalMaterialFrame> for rpc::FunctionalMaterialFrame {
             outward_normal: Some(v.outward_normal.try_into()?),
             width_mm: v.width_mm,
             source_z_mm: v.source_z_mm.into(),
+            selected_u_mm: v.selected_u_mm.into(),
+            region_z_mm: v.region_z_mm.into(),
             key_middle_z_mm: v.key_middle_z_mm.into(),
             key_centers_u_mm: v.key_centers_u_mm,
         })
@@ -2940,6 +2991,7 @@ mod fixed_dual_wire_tests {
             material_id: domain.tools[1].material.id.clone(),
             base_material_id: domain.tools[0].material.id.clone(),
             minimum_pure_depth_mm: 2.0,
+            face_patch: None,
             join: PlanarTKeyJoin {
                 reach_into_region_mm: 2.0,
                 reach_into_base_mm: 3.0,
@@ -2990,6 +3042,73 @@ mod fixed_dual_wire_tests {
                 FunctionalMaterialConstruction::try_from(decoded).unwrap(),
                 construction
             );
+        }
+        let patch = FunctionalFacePatch {
+            horizontal_mm: [2.0, 14.0],
+            source_z_mm: [-1.0, 9.0],
+        };
+        let mut partial = original.clone();
+        partial.face_patch = Some(patch.clone());
+        let wire_partial = rpc::FunctionalMaterialConstruction::try_from(partial.clone()).unwrap();
+        let decoded =
+            rpc::FunctionalMaterialConstruction::decode(wire_partial.encode_to_vec().as_slice())
+                .unwrap();
+        assert_eq!(
+            FunctionalMaterialConstruction::try_from(decoded).unwrap(),
+            partial
+        );
+        for face_patch in [
+            None,
+            Some(rpc::functional_material_construction::FacePatch::NoFacePatch(false)),
+        ] {
+            let mut bad = wire_construction.clone();
+            bad.face_patch = face_patch;
+            let decoded =
+                rpc::FunctionalMaterialConstruction::decode(bad.encode_to_vec().as_slice())
+                    .unwrap();
+            assert!(FunctionalMaterialConstruction::try_from(decoded).is_err());
+        }
+        // An unknown selection tag cannot substitute for explicit patch/null presence.
+        let mut unknown = wire_construction.clone();
+        unknown.face_patch = None;
+        let mut bytes = unknown.encode_to_vec();
+        bytes.extend_from_slice(&[0x62, 0]); // field12, length-delimited empty value
+        let decoded = rpc::FunctionalMaterialConstruction::decode(bytes.as_slice()).unwrap();
+        assert!(FunctionalMaterialConstruction::try_from(decoded).is_err());
+        for change in 0..10 {
+            let mut bad_patch = rpc::FunctionalFacePatch::try_from(patch.clone()).unwrap();
+            match change {
+                0 => bad_patch.horizontal_mm.clear(),
+                1 => bad_patch.source_z_mm.clear(),
+                2 => bad_patch.horizontal_mm.push(20.0),
+                3 => bad_patch.source_z_mm = vec![0.0],
+                4 => bad_patch.horizontal_mm = vec![-1.0, 14.0],
+                5 => bad_patch.horizontal_mm = vec![2.0, 2.0],
+                6 => bad_patch.source_z_mm = vec![9.0, -1.0],
+                7 => bad_patch.horizontal_mm[1] = f64::INFINITY,
+                8 => bad_patch.source_z_mm[0] = f64::NAN,
+                _ => bad_patch.source_z_mm = vec![-f64::MAX, f64::MAX],
+            }
+            let mut bad = wire_construction.clone();
+            bad.face_patch = Some(rpc::functional_material_construction::FacePatch::Patch(
+                bad_patch,
+            ));
+            assert!(
+                FunctionalMaterialConstruction::try_from(bad).is_err(),
+                "patch change {change}"
+            );
+        }
+        for (horizontal_mm, source_z_mm) in [
+            ([2.0, f64::NAN], [-1.0, 9.0]),
+            ([2.0, 14.0], [-1.0, f64::INFINITY]),
+            ([14.0, 2.0], [-1.0, 9.0]),
+        ] {
+            let mut bad = original.clone();
+            bad.face_patch = Some(FunctionalFacePatch {
+                horizontal_mm,
+                source_z_mm,
+            });
+            assert!(rpc::FunctionalMaterialConstruction::try_from(bad).is_err());
         }
         // Encoding zero omits the field in proto3, so this also exercises absence.
         for policy in [0, -1, i32::MAX] {

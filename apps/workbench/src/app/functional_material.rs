@@ -19,7 +19,9 @@ fn request_for_face(
             Some(AnalyticSurfaceDescription::Plane { .. })
         )
     {
-        return Err("Select a native planar face; the engine must also admit its full-height trim");
+        return Err(
+            "Select a native planar face; the engine must also admit the complete source wall",
+        );
     }
     let assignment = &job.assignments[0];
     let OccurrenceMaterial::Uniform { material_id: base } = &assignment.material else {
@@ -38,6 +40,7 @@ fn request_for_face(
     let region = job.tools.iter().find(|t| &t.material.id != base).unwrap();
     Ok(FunctionalMaterialConstruction {
         interface_policy: FunctionalInterfacePolicy::DeclaredSameFamily,
+        face_patch: None,
         occurrence_id: face.reference.occurrence_id,
         definition_id: face.reference.definition_id.clone(),
         source_hash: face.provenance.source_hash.clone(),
@@ -57,6 +60,115 @@ fn request_for_face(
             collar_head_width_mm: 3.2,
         },
     })
+}
+
+fn estimated_face_extent(face: &FaceInspection, bounds: AabbMm) -> Option<FunctionalFacePatch> {
+    let Some(AnalyticSurfaceDescription::Plane { normal, .. }) = &face.face.geometry.analytic
+    else {
+        return None;
+    };
+    let depth_axis = (0..2)
+        .find(|&axis| normal[axis].abs() == 1.0 && normal[1 - axis] == 0.0 && normal[2] == 0.0)?;
+    let horizontal_axis = 1 - depth_axis;
+    bounds.validate().ok()?;
+    let extent = FunctionalFacePatch {
+        horizontal_mm: [
+            0.0,
+            bounds.max[horizontal_axis] - bounds.min[horizontal_axis],
+        ],
+        source_z_mm: [bounds.min[2], bounds.max[2]],
+    };
+    extent.validate().ok()?;
+    Some(extent)
+}
+
+fn centered_patch(extent: &FunctionalFacePatch) -> FunctionalFacePatch {
+    let middle_half = |[lower, upper]: [f64; 2]| {
+        let middle = lower * 0.5 + upper * 0.5;
+        [lower * 0.5 + middle * 0.5, middle * 0.5 + upper * 0.5]
+    };
+    FunctionalFacePatch {
+        horizontal_mm: {
+            let [lower, upper] = extent.horizontal_mm;
+            let margin = (upper - lower) * 0.1;
+            [lower + margin, upper - margin]
+        },
+        source_z_mm: middle_half(extent.source_z_mm),
+    }
+}
+
+fn same_source_face(request: &FunctionalMaterialConstruction, face: &FaceInspection) -> bool {
+    request.occurrence_id == face.reference.occurrence_id
+        && request.definition_id == face.reference.definition_id
+        && request.source_hash == face.provenance.source_hash
+        && request.face_id == face.reference.face_id
+}
+
+fn patch_scope_ui(
+    ui: &mut egui::Ui,
+    request: &mut FunctionalMaterialConstruction,
+    extent: Option<&FunctionalFacePatch>,
+) {
+    ui::group(ui, "Face scope");
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .selectable_label(request.face_patch.is_none(), "Full face")
+            .clicked()
+        {
+            request.face_patch = None;
+        }
+        if ui
+            .add_enabled(
+                extent.is_some() || request.face_patch.is_some(),
+                egui::Button::selectable(request.face_patch.is_some(), "Localized pad / band"),
+            )
+            .clicked()
+            && request.face_patch.is_none()
+        {
+            request.face_patch = extent.map(centered_patch);
+        }
+    });
+    if let Some(extent) = extent {
+        ui.weak(format!(
+            "Source bounds estimate · U {:.3}…{:.3} mm · source Z {:.3}…{:.3} mm",
+            extent.horizontal_mm[0],
+            extent.horizontal_mm[1],
+            extent.source_z_mm[0],
+            extent.source_z_mm[1],
+        ));
+    } else {
+        ui.weak("Select this request's face in the current source to obtain patch starting values. Existing ranges are retained.");
+    }
+    if let Some(patch) = &mut request.face_patch {
+        ui.weak("U is measured from the face's low horizontal source coordinate, toward +X or +Y. Source Z excludes part placement.");
+        ui::number(
+            ui,
+            "Source face U start (mm)",
+            &mut patch.horizontal_mm[0],
+            0.1,
+        );
+        ui::number(
+            ui,
+            "Source face U end (mm)",
+            &mut patch.horizontal_mm[1],
+            0.1,
+        );
+        ui::number(ui, "Source Z start (mm)", &mut patch.source_z_mm[0], 0.1);
+        ui::number(ui, "Source Z end (mm)", &mut patch.source_z_mm[1], 0.1);
+        ui.add_enabled_ui(extent.is_some(), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Center pad").clicked()
+                    && let Some(extent) = extent
+                {
+                    *patch = centered_patch(extent);
+                }
+            });
+        });
+        ui.weak("Starting pads use the middle half of the source height. For a full-width height band, enter the actual face's U endpoints; display bounds are only estimates. No range or key dimension is clamped; the engine may refuse insufficient space or out-of-face values.");
+    } else {
+        ui.label("Full native face requested · complete source width and height");
+    }
+    ui.weak("Stage changes here, then Apply settings to commit the complete intent. Sparse base recipes remain unsupported.");
 }
 
 fn bind_region(job: &mut FixedDualJob, region_tool: usize) {
@@ -126,15 +238,23 @@ impl Workbench {
     pub(super) fn functional_material_ui(&mut self, ui: &mut egui::Ui, writable: bool) {
         ui::group(ui, "Material region");
         ui.weak(
-            "One planar face on solid rectangular stock. Physical retention remains unqualified.",
+            "One full face or localized pad/band on solid rectangular stock. Physical retention remains unqualified.",
         );
         ui::help(
             ui,
             "functional-region-scope",
             "Scope and qualification",
-            "Requires one upright rectangular native part, a full-height axis-aligned face and no optical construction. The engine independently admits the geometry and complete keys. Software replay does not establish adhesion, physical strength or printability.",
+            "Requires one upright rectangular native part, a full-height axis-aligned source wall and no optical construction. A localized patch selects source face U and source Z intervals within that wall; full face remains the default. The engine independently admits the geometry, complete keys and end collars. Sparse base recipes are not enabled. Software replay does not establish adhesion, physical strength or printability.",
         );
         let face = self.functional_face();
+        let extent = face.as_ref().ok().and_then(|face| {
+            let definition = self
+                .state
+                .display
+                .as_ref()?
+                .definition(&face.reference.definition_id)?;
+            estimated_face_extent(face, definition.record.bounds_mm)
+        });
         let Some(project) = self.state.project.as_ref() else {
             return;
         };
@@ -197,6 +317,8 @@ impl Workbench {
             ui.add_enabled_ui(disabled.is_none(), |ui| {
                 let request = job.functional_construction.as_mut().unwrap();
                 ui.label(format!("Authored request · part {} · face {}", request.occurrence_id.get(), request.face_id.as_str()));
+                let extent = extent.as_ref().filter(|_| face.as_ref().is_ok_and(|face| same_source_face(request, face)));
+                patch_scope_ui(ui, request, extent);
                 ui::number(ui, "Minimum pure region depth (mm)", &mut request.minimum_pure_depth_mm, 0.1);
                 ui.weak("Pure material excludes the join band; never reduced automatically.");
                 let mut region_tool = job.tools.iter().position(|t| t.material.id == request.material_id);
@@ -350,6 +472,7 @@ mod tests {
         assert_eq!(request.definition_id, inspected.reference.definition_id);
         assert_eq!(request.face_id, inspected.reference.face_id);
         assert_eq!(request.minimum_pure_depth_mm, 5.0);
+        assert_eq!(request.face_patch, None);
         assert_eq!(
             request.interface_policy,
             FunctionalInterfacePolicy::DeclaredSameFamily
@@ -357,6 +480,10 @@ mod tests {
         job.functional_construction = Some(request);
         bind_region(job, 0);
         let request = job.functional_construction.as_mut().unwrap();
+        request.face_patch = Some(FunctionalFacePatch {
+            horizontal_mm: [4.0, 20.0],
+            source_z_mm: [2.0, 10.0],
+        });
         request.interface_policy = FunctionalInterfacePolicy::MechanicalCapture;
         request.minimum_pure_depth_mm = 6.0;
         request.join.reach_into_region_mm = 3.0;
@@ -399,6 +526,67 @@ mod tests {
         assert!(!ui.has_intent_draft(&project, Some(&submitted)));
         ui.sync_intent(&project, ProjectRevision(9), Some(submitted), None);
         assert_eq!(ui.draft.as_ref().unwrap().revision, ProjectRevision(9));
+    }
+    #[test]
+    fn localized_starting_values_use_source_bounds_without_placement_or_clamping() {
+        let mut value = intent();
+        let job = job(&mut value);
+        let mut inspected = face(job);
+        inspected.pose.translation_mm = [100.0, 200.0, 300.0];
+        let extent = estimated_face_extent(
+            &inspected,
+            AabbMm {
+                min: [-4.0, -12.0, -8.0],
+                max: [6.0, 28.0, 16.0],
+            },
+        )
+        .unwrap();
+        assert_eq!(extent.horizontal_mm, [0.0, 40.0]);
+        assert_eq!(extent.source_z_mm, [-8.0, 16.0]);
+        let pad = centered_patch(&extent);
+        assert_eq!(pad.horizontal_mm, [4.0, 36.0]);
+        assert_eq!(pad.source_z_mm, [-2.0, 10.0]);
+        let request = request_for_face(job, &inspected).unwrap();
+        assert!(same_source_face(&request, &inspected));
+        inspected.provenance.source_hash = SourceHash::from_bytes(b"replacement source");
+        assert!(!same_source_face(&request, &inspected));
+        inspected.face.geometry.analytic = Some(AnalyticSurfaceDescription::Plane {
+            origin_mm: [0.0; 3],
+            normal: [0.0, 0.0, 1.0],
+        });
+        assert!(
+            estimated_face_extent(
+                &inspected,
+                AabbMm {
+                    min: [0.0; 3],
+                    max: [10.0; 3],
+                }
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn invalid_localized_intervals_remain_in_the_full_intent_draft() {
+        let current = Arc::new(intent());
+        let project = ProjectId::new();
+        let mut ui = ManufacturingUi::default();
+        ui.sync_intent(&project, ProjectRevision(8), Some(current), None);
+        let draft = ui.draft.as_mut().unwrap();
+        let job = job(&mut draft.value);
+        let mut request = request_for_face(job, &face(job)).unwrap();
+        request.face_patch = Some(FunctionalFacePatch {
+            horizontal_mm: [20.0, 4.0],
+            source_z_mm: [2.0, 10.0],
+        });
+        job.functional_construction = Some(request);
+        let expected = draft.value.clone();
+        assert!(
+            draft
+                .apply_command(PrintLayoutId::new(), SessionId::new(), ProjectRevision(8))
+                .is_err()
+        );
+        assert_eq!(draft.value, expected);
     }
     #[test]
     fn removal_restores_explicit_base_without_rewriting_loaded_declarations() {
