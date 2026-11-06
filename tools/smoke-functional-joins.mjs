@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: OSL-3.0
  */
 import assert from "node:assert/strict";
+import { decodeReplayDisplay } from "../packages/protocol/src/replay.ts";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -218,19 +219,32 @@ function checkPlan(plan, request, stockBounds) {
   near(frame.width_mm, stockBounds.max[0] - stockBounds.min[0], "full face width");
   const bottom = stockBounds.min[2] + pose.translation_mm[2];
   const top = stockBounds.max[2] + pose.translation_mm[2];
+  const selectedU = request.face_patch?.horizontal_mm ?? [0, frame.width_mm];
+  const sourceZ = request.face_patch?.source_z_mm ?? [stockBounds.min[2], stockBounds.max[2]];
+  const regionZ = sourceZ.map((z) => z + pose.translation_mm[2]);
+  assert.deepEqual(frame.selected_u_mm, selectedU);
+  assert.deepEqual(frame.region_z_mm, regionZ);
+  assert.deepEqual(frame.source_z_mm, [stockBounds.min[2], stockBounds.max[2]]);
   const middle = [
-    bottom + request.join.end_collar_height_mm,
-    top - request.join.end_collar_height_mm,
+    regionZ[0] + request.join.end_collar_height_mm,
+    regionZ[1] - request.join.end_collar_height_mm,
   ];
+  const events = [...regionZ, ...middle];
   frame.key_middle_z_mm.forEach((v, i) => near(v, middle[i], "collar transition"));
-  assert.ok(frame.key_centers_u_mm.includes(frame.width_mm / 2), "missing centered key");
+  assert.ok(
+    frame.key_centers_u_mm.includes((selectedU[0] + selectedU[1]) / 2),
+    "missing centered key",
+  );
   assert.ok(frame.key_centers_u_mm.length >= 1 && frame.key_centers_u_mm.length <= 16);
   for (let i = 0; i < frame.key_centers_u_mm.length; i++) {
     const center = frame.key_centers_u_mm[i];
-    assert.ok(center - request.join.head_width_mm / 2 >= request.join.edge_margin_mm - epsilon);
+    assert.ok(
+      center - request.join.head_width_mm / 2 >=
+        selectedU[0] + request.join.edge_margin_mm - epsilon,
+    );
     assert.ok(
       center + request.join.head_width_mm / 2 <=
-        frame.width_mm - request.join.edge_margin_mm + epsilon,
+        selectedU[1] - request.join.edge_margin_mm + epsilon,
     );
     if (i) near(center - frame.key_centers_u_mm[i - 1], request.join.pitch_mm, "key pitch");
   }
@@ -259,19 +273,55 @@ function checkPlan(plan, request, stockBounds) {
   near(ordered[0][0][0], bottom, "domain start");
   near(ordered.at(-1)[0][1], top, "domain end");
   const phases = new Set();
+  let volume = 0;
   for (const [[lower, upper], pair] of ordered) {
-    assert.deepEqual(Object.keys(pair).sort(), [...roles].sort());
+    const active = lower >= regionZ[0] - epsilon && upper <= regionZ[1] + epsilon;
+    assert.deepEqual(Object.keys(pair).sort(), active ? [...roles].sort() : ["functional_base"]);
+    near(
+      Object.values(pair).reduce((sum, domain) => sum + area(domain), 0),
+      frame.width_mm * stockDepth,
+      "complete stock partition",
+    );
+    volume += Object.values(pair).reduce((sum, domain) => sum + area(domain), 0) * (upper - lower);
+    const vertices = Object.values(pair).flatMap((domain) =>
+      domain.polygons.flatMap((polygon) => [polygon.exterior_mm, ...polygon.holes_mm].flat()),
+    );
+    const cuts = [
+      [0, frame.width_mm, ...selectedU, ...vertices.map((p) => p[0] - frame.world_origin_mm[0])],
+      [0, stockDepth, pure, ...vertices.map(depth)],
+    ].map((values) => [...new Set(values)].sort((a, b) => a - b));
+    for (let x = 1; x < cuts[0].length; x++) {
+      const u = (cuts[0][x - 1] + cuts[0][x]) / 2;
+      for (let y = 1; y < cuts[1].length; y++) {
+        const d = (cuts[1][y - 1] + cuts[1][y]) / 2;
+        const owners = Object.values(pair).filter((domain) => contains(domain, world(u, d)));
+        assert.equal(owners.length, 1, "stock cell has a gap or overlapping material owners");
+        if (d < pure) {
+          const selected = active && u > selectedU[0] && u < selectedU[1];
+          assert.equal(
+            owners[0].reference.role,
+            selected ? "functional_region" : "functional_base",
+            "pure depth must apply only inside selected U and active Z",
+          );
+        }
+      }
+    }
     assert.ok(
-      !middle.some((z) => lower < z - epsilon && upper > z + epsilon),
+      !events.some((z) => lower < z - epsilon && upper > z + epsilon),
       "domain crosses a physical phase boundary",
     );
+    if (!active) {
+      near(area(pair.functional_base), frame.width_mm * stockDepth, "outside active Z is all Base");
+      phases.add(upper <= regionZ[0] + epsilon ? "below" : "above");
+      continue;
+    }
     const phase =
       upper <= middle[0] + epsilon ? "bottom" : lower >= middle[1] - epsilon ? "top" : "middle";
     phases.add(phase);
     const head =
       phase === "middle" ? request.join.head_width_mm : request.join.collar_head_width_mm;
     const regionArea =
-      frame.width_mm * pure +
+      (selectedU[1] - selectedU[0]) * pure +
       frame.key_centers_u_mm.length *
         (request.join.stem_width_mm * (neckEnd - pure) + head * request.join.head_depth_mm);
     near(area(pair.functional_region), regionArea, "pure slab and key footprint");
@@ -280,28 +330,6 @@ function checkPlan(plan, request, stockBounds) {
       frame.width_mm * stockDepth,
       "complete stock partition",
     );
-    // Every vertex-defined horizontal strip in the protected pure slab belongs
-    // to region only. This is an assertion over captured geometry, not a planner.
-    const cuts = [
-      0,
-      frame.width_mm,
-      ...Object.values(pair).flatMap((d) =>
-        d.polygons.flatMap((p) =>
-          [p.exterior_mm, ...p.holes_mm].flatMap((ring) =>
-            ring.map((point) => point[0] - frame.world_origin_mm[0]),
-          ),
-        ),
-      ),
-    ];
-    const sorted = [...new Set(cuts)].sort((a, b) => a - b);
-    for (let i = 1; i < sorted.length; i++) {
-      const u = (sorted[i - 1] + sorted[i]) / 2;
-      if (u <= 0 || u >= frame.width_mm) continue;
-      for (const d of [pure * 0.01, pure / 2, pure * 0.99]) {
-        assert.ok(contains(pair.functional_region, world(u, d)), "pure-depth region gap");
-        assert.equal(contains(pair.functional_base, world(u, d)), false, "base enters pure depth");
-      }
-    }
     for (const center of frame.key_centers_u_mm) {
       for (const sign of [-1, 1]) {
         const shoulder = world(
@@ -322,21 +350,32 @@ function checkPlan(plan, request, stockBounds) {
     }
     for (const p of pair.functional_base.polygons)
       for (const point of p.exterior_mm)
-        assert.ok(depth(point) >= pure - epsilon, "base boundary enters pure depth");
+        if (
+          point[0] - frame.world_origin_mm[0] > selectedU[0] + epsilon &&
+          point[0] - frame.world_origin_mm[0] < selectedU[1] - epsilon
+        )
+          assert.ok(depth(point) >= pure - epsilon, "base boundary enters selected pure depth");
   }
-  assert.deepEqual([...phases].sort(), ["bottom", "middle", "top"]);
+  assert.deepEqual(
+    [...phases].sort(),
+    request.face_patch
+      ? ["above", "below", "bottom", "middle", "top"]
+      : ["bottom", "middle", "top"],
+  );
+  near(volume, frame.width_mm * stockDepth * (top - bottom), "complete stock volume");
   for (let i = 1; i < ordered.length; i++)
     near(ordered[i][0][0], ordered[i - 1][0][1], "continuous domains");
   assert.ok(plan.layers.length > 0);
   for (const layer of plan.layers) {
     assert.ok(layer.paths.length > 0);
     assert.ok(
-      !middle.some((z) => layer.lower_z_mm < z - epsilon && layer.z_mm > z + epsilon),
+      !events.some((z) => layer.lower_z_mm < z - epsilon && layer.z_mm > z + epsilon),
       "bead crosses collar event",
     );
+    const active = layer.lower_z_mm >= regionZ[0] - epsilon && layer.z_mm <= regionZ[1] + epsilon;
     assert.deepEqual(
       [...new Set(layer.paths.map((p) => p.material_domain?.role))].sort(),
-      [...roles].sort(),
+      active ? [...roles].sort() : ["functional_base"],
     );
     for (const path of layer.paths) {
       assert.equal(path.material_domain.construction_index, 0);
@@ -349,16 +388,19 @@ function checkPlan(plan, request, stockBounds) {
       assert.ok(domain, "path has no phase-specific role domain");
       near(path.physical_z_mm[0], layer.lower_z_mm, "fine bead lower interval");
       near(path.physical_z_mm[1], layer.z_mm, "fine bead upper interval");
-      if (path.material_domain.role === "functional_base") {
+      if (active && path.material_domain.role === "functional_base") {
         for (let i = 1; i < path.points_mm.length; i++) {
           const width =
             path.width.kind === "constant" ? path.width.width_mm : path.width.widths_mm[i - 1];
           assert.ok(width > 0);
-          for (const point of [path.points_mm[i - 1], path.points_mm[i]])
+          for (const point of [path.points_mm[i - 1], path.points_mm[i]]) {
+            const u = point[0] - frame.world_origin_mm[0];
+            if (u <= selectedU[0] + epsilon || u >= selectedU[1] - epsilon) continue;
             assert.ok(
               depth(point) - width / 2 >= pure - epsilon,
-              "base bead footprint enters protected pure depth",
+              "base bead footprint enters selected protected pure depth",
             );
+          }
         }
       }
     }
@@ -368,10 +410,13 @@ function checkPlan(plan, request, stockBounds) {
     domains: plan.material_domains.length,
     phases: [...phases],
     keys: frame.key_centers_u_mm.length,
+    selected_u_mm: frame.selected_u_mm,
+    region_z_mm: frame.region_z_mm,
+    stock_volume_mm3: volume,
   };
 }
 
-function checkVerified(report, intent) {
+function checkVerified(report, intent, modelTools = [0, 1]) {
   assert.equal(report.manufacturing.verification.verified, true);
   assert.equal(report.manufacturing.software_only, true);
   assert.equal(report.manufacturing.not_machine_ready, true);
@@ -379,11 +424,153 @@ function checkVerified(report, intent) {
   assert.equal(report.manufacturing.verified_artifact_hash, report.manufacturing.artifact.hash);
   const routing = report.manufacturing.verification.routing;
   assert.ok(routing?.selection_count > 0);
+  assert.equal(routing.tools.length, 2);
   routing.tools.forEach((tool, i) => {
     assert.equal(tool.tool, i);
     assert.equal(tool.material_id, intent.printer.workflow.job.tools[i].material.id);
-    assert.ok(tool.model_deposition_segments > 0 && tool.waste_deposition_segments > 0);
+    assert.ok(tool.waste_deposition_segments > 0);
+    assert.ok(tool.waste_volume_mm3 > 0 && tool.waste_filament_length_mm > 0);
+    if (modelTools.includes(i)) {
+      assert.ok(tool.model_deposition_segments > 0);
+      assert.ok(tool.model_volume_mm3 > 0 && tool.model_filament_length_mm > 0);
+    } else {
+      assert.equal(
+        tool.model_deposition_segments,
+        0,
+        "unused loaded tool deposited model material",
+      );
+      assert.equal(tool.model_volume_mm3, 0);
+      assert.equal(tool.model_filament_length_mm, 0);
+    }
   });
+}
+
+async function checkExport(directory, report, intent) {
+  assert.deepEqual((await readdir(directory)).sort(), ["manifest.json", ...artifacts]);
+  assert.deepEqual(report.manufacturing_export.artifact, report.manufacturing.artifact);
+  assert.deepEqual(report.manufacturing_export.verification, report.manufacturing.verification);
+  assert.deepEqual(
+    await json(join(directory, "verification.json")),
+    report.manufacturing.verification,
+  );
+  const provenance = await json(join(directory, "provenance.json"));
+  assert.deepEqual(provenance.intent, intent);
+  assert.deepEqual(provenance.inspection.workflow, intent.printer.workflow);
+  assert.deepEqual(provenance.inspection.surface_color, []);
+  for (const [key, value] of Object.entries(producers)) {
+    assert.equal(provenance[key], value);
+    assert.equal(provenance.inspection[key], value);
+  }
+  return json(join(directory, "plan.json"));
+}
+
+async function checkReplay(file, directory, report, intent, plan) {
+  const replay = report.manufacturing_replay;
+  assert.deepEqual(replay.artifact, report.manufacturing.artifact);
+  assert.equal(replay.verification.verified, true);
+  assert.equal(replay.replay_display.info.bundle_hash, report.manufacturing.artifact.hash);
+  assert.equal(
+    replay.replay_display.info.program_hash,
+    hash(await readFile(join(directory, "program.gcode"))),
+  );
+  const bytes = await readFile(file);
+  const decoded = await decodeReplayDisplay(Uint8Array.from(bytes).buffer, replay.replay_display);
+  assert.equal(decoded.layerCount, plan.layers.length);
+  const job = intent.printer.workflow.job;
+  const frame = plan.functional_material_frame;
+  const layers = plan.layers.map(() => [0, 1].map(() => ({ epochs: 0, waste: 0, model: 0 })));
+  const totals = [0, 0];
+  for (let event = 0; event < decoded.eventCount; event++) {
+    const kind = decoded.kind(event);
+    if (![1, 2, 3, 4, 5, 8, 14, 15].includes(kind)) continue;
+    const tool = decoded.activeTool(event);
+    const layer = decoded.layer(event);
+    assert.ok(tool === 0 || tool === 1);
+    assert.ok(layer < layers.length);
+    if (kind === 14) layers[layer][tool].epochs++;
+    else if (kind === 15) layers[layer][tool].waste++;
+    else {
+      layers[layer][tool].model++;
+      totals[tool]++;
+      const association = decoded.association(event);
+      assert.ok(association, "actual model stroke lost its captured physical interval");
+      near(association.physicalZMm[0], plan.layers[layer].lower_z_mm, "actual bead lower interval");
+      near(association.physicalZMm[1], plan.layers[layer].z_mm, "actual bead upper interval");
+      if (frame && job.tools[tool].material.id === job.functional_construction.material_id) {
+        assert.ok(association.physicalZMm[0] >= frame.region_z_mm[0] - epsilon);
+        assert.ok(association.physicalZMm[1] <= frame.region_z_mm[1] + epsilon);
+        for (const point of [decoded.position(event - 1), decoded.position(event)]) {
+          const u = point[0] - frame.world_origin_mm[0];
+          assert.ok(
+            u >= frame.selected_u_mm[0] - epsilon && u <= frame.selected_u_mm[1] + epsilon,
+            "actual functional material escaped selected U",
+          );
+        }
+      } else if (!frame) {
+        const assignments = job.assignments.filter(
+          (row) => row.material.material_id === job.tools[tool].material.id,
+        );
+        assert.ok(
+          assignments.some((row) =>
+            [decoded.position(event - 1), decoded.position(event)].every((point) =>
+              point.every(
+                (value, axis) =>
+                  value >= row.work_envelope_mm.min[axis] - epsilon &&
+                  value <= row.work_envelope_mm.max[axis] + epsilon,
+              ),
+            ),
+          ),
+          "actual uniform model tool disagrees with occurrence reservation",
+        );
+      }
+    }
+  }
+  for (let layer = 0; layer < layers.length; layer++) {
+    for (const tool of [0, 1]) {
+      assert.equal(layers[layer][tool].epochs, 1, "each loaded tool requires one epoch per layer");
+      assert.equal(
+        layers[layer][tool].waste,
+        1,
+        "each loaded tool requires waste even without model work",
+      );
+      const isBase =
+        frame && job.tools[tool].material.id === job.functional_construction.base_material_id;
+      const active =
+        frame &&
+        plan.layers[layer].lower_z_mm >= frame.region_z_mm[0] - epsilon &&
+        plan.layers[layer].z_mm <= frame.region_z_mm[1] + epsilon;
+      const expectedModel = frame
+        ? isBase || active
+        : job.assignments.some((row) => row.material.material_id === job.tools[tool].material.id);
+      assert.equal(
+        layers[layer][tool].model > 0,
+        Boolean(expectedModel),
+        "actual per-layer model tool disagrees with active functional Z or uniform assignment",
+      );
+    }
+  }
+  for (const tool of [0, 1])
+    assert.equal(
+      totals[tool],
+      report.manufacturing.verification.routing.tools[tool].model_deposition_segments,
+    );
+  return bytes;
+}
+
+function checkUniformPlan(plan, count) {
+  assert.equal(plan.functional_material_frame, null, "uniform job retained functional geometry");
+  assert.deepEqual(plan.material_frames, [], "uniform job acquired optical geometry");
+  assert.deepEqual(plan.material_domains, [], "uniform job retained construction domains");
+  assert.ok(plan.layers.length > 0);
+  near(plan.layers[0].lower_z_mm, 0, "uniform stock bottom");
+  near(plan.layers.at(-1).z_mm, 8, "uniform stock top");
+  for (const layer of plan.layers) {
+    near(layer.region_coverage.source_section_area_mm2, count * 200, "uniform source stock area");
+    near(layer.region_coverage.section_area_mm2, count * 200, "uniform retained stock area");
+    near(layer.region_coverage.surface_added_area_mm2, 0, "uniform added material");
+    assert.ok(layer.paths.length > 0);
+    for (const path of layer.paths) assert.equal(path.material_domain, null);
+  }
 }
 
 function checkStaleHistory(report, labels, baselineHash) {
@@ -447,6 +634,8 @@ try {
   assert.ok(selected, "native CLI inspection has no -Y planar face");
   assert.equal(selected.provenance.source_hash, sourceHash);
   evidence.selected_face = selected;
+  const unconfiguredProject = join(output, "before-face.spil");
+  await copyFile(project, unconfiguredProject);
   const intent = await json(join(root, "fixtures/manufacturing/fixed-dual.intent.json"));
   const job = intent.printer.workflow.job;
   job.assignments = job.assignments.slice(0, 1);
@@ -462,6 +651,7 @@ try {
   job.tools[0].material.declaration_hash = hash(Buffer.from("software TPU declaration"));
   job.tools[0].filament_diameter_mm = 2.85;
   job.tools[0].nozzle_temperature_c = 220;
+  assert.equal(job.tools[1].material.polymer_family, "PLA", "mixed-family smoke requires TPU/PLA");
   job.functional_construction = {
     occurrence_id: 1,
     definition_id: selected.reference.definition_id,
@@ -470,6 +660,7 @@ try {
     material_id: job.tools[0].material.id,
     base_material_id: job.tools[1].material.id,
     interface_policy: "mechanical_capture",
+    face_patch: null,
     minimum_pure_depth_mm: 5,
     join: {
       reach_into_region_mm: 1.6,
@@ -485,6 +676,78 @@ try {
   };
   intent.recipe.infill_fraction = 1;
   intent.recipe.perimeter_count = 1;
+  const recoveryCases = [];
+  async function compileCase(name, seed, capturedIntent, modelTools, extraArgs = []) {
+    const caseProject = join(output, `${name}.spil`);
+    const caseIntentFile = join(output, `${name}.intent.json`);
+    const caseExport = join(output, `${name}-export`);
+    const replayFile = join(output, `${name}.splr`);
+    await copyFile(seed, caseProject);
+    await save(`${name}.intent.json`, capturedIntent);
+    const report = await invoke(name, [
+      "edit",
+      caseProject,
+      ...extraArgs,
+      "--intent",
+      caseIntentFile,
+      "--preflight",
+      "--compile",
+      "--verify",
+      "--save",
+      "--manufacturing-out",
+      caseExport,
+    ]);
+    checkVerified(report, capturedIntent, modelTools);
+    const applied = report.operations.find((op) => op.operation === "intent");
+    assert.ok(applied, "missing full-intent transaction");
+    assert.equal(applied.manufacturing.artifact, null, "intent edit retained an active artifact");
+    assert.equal(report.manufacturing.preflight.disposition, "admitted");
+    assert.equal(
+      report.operations.find((op) => op.operation === "preflight").preflight_freshness,
+      "current",
+    );
+    const casePlan = await checkExport(caseExport, report, capturedIntent);
+    const replayReport = await invoke(`${name}-current-replay`, [
+      "inspect",
+      caseProject,
+      "--verify",
+      "--replay-out",
+      replayFile,
+    ]);
+    checkVerified(replayReport, capturedIntent, modelTools);
+    await checkReplay(replayFile, caseExport, replayReport, capturedIntent, casePlan);
+    if (capturedIntent.printer.workflow.job.functional_construction) {
+      evidence[name] = checkPlan(
+        casePlan,
+        capturedIntent.printer.workflow.job.functional_construction,
+        fixtureStock,
+      );
+    } else {
+      checkUniformPlan(casePlan, capturedIntent.printer.workflow.job.assignments.length);
+      evidence[name] = { routing: report.manufacturing.verification.routing };
+    }
+    recoveryCases.push({
+      name,
+      project: caseProject,
+      intentFile: caseIntentFile,
+      intent: capturedIntent,
+      modelTools,
+      exported: caseExport,
+      replayFile,
+      report,
+    });
+    return report;
+  }
+  const fixtureStock = { min: [0, 0, 0], max: [20, 10, 8] };
+  for (const base of [0, 1]) {
+    const uniform = structuredClone(intent);
+    uniform.printer.workflow.job.functional_construction = null;
+    uniform.printer.workflow.job.assignments[0].material = {
+      kind: "uniform",
+      material_id: job.tools[base].material.id,
+    };
+    await compileCase(`setup-before-face-base-${base}`, unconfiguredProject, uniform, [base]);
+  }
   const intentFile = join(output, "functional.intent.json");
   await save("functional.intent.json", intent);
   const exported = join(output, "baseline");
@@ -511,7 +774,6 @@ try {
   assert.equal(compiled.manufacturing.preflight_freshness, "stale");
   assert.deepEqual((await readdir(exported)).sort(), ["manifest.json", ...artifacts]);
   const plan = await json(join(exported, "plan.json"));
-  const fixtureStock = { min: [0, 0, 0], max: [20, 10, 8] };
   for (let axis = 0; axis < 3; axis++) {
     assert.ok(bounds.min[axis] <= fixtureStock.min[axis]);
     assert.ok(bounds.max[axis] >= fixtureStock.max[axis]);
@@ -570,6 +832,59 @@ try {
     stale_preflight_labelled: true,
   };
 
+  const patchIntent = structuredClone(intent);
+  patchIntent.printer.workflow.job.functional_construction.face_patch = {
+    horizontal_mm: [2, 18],
+    source_z_mm: [1.2, 6.8],
+  };
+  const patched = await compileCase("bounded-face-patch", project, patchIntent, [0, 1]);
+  assert.notEqual(
+    patched.manufacturing.artifact.hash,
+    baselineHash,
+    "patch edit retained the full-face artifact identity",
+  );
+
+  for (const base of [0, 1]) {
+    const uniform = structuredClone(intent);
+    uniform.printer.workflow.job.functional_construction = null;
+    uniform.printer.workflow.job.assignments[0].material = {
+      kind: "uniform",
+      material_id: job.tools[base].material.id,
+    };
+    const removed = await compileCase(`remove-to-uniform-base-${base}`, project, uniform, [base]);
+    assert.notEqual(
+      removed.manufacturing.artifact.hash,
+      baselineHash,
+      "Remove retained a functional manufacturing artifact",
+    );
+  }
+
+  const separate = structuredClone(intent);
+  const separateJob = separate.printer.workflow.job;
+  separateJob.functional_construction = null;
+  separateJob.assignments[0].material = { kind: "uniform", material_id: job.tools[0].material.id };
+  const second = structuredClone(separateJob.assignments[0]);
+  second.occurrence_id = 2;
+  second.material.material_id = job.tools[1].material.id;
+  second.work_envelope_mm.min[0] += 100;
+  second.work_envelope_mm.max[0] += 100;
+  separateJob.assignments.push(second);
+  const secondPose = { ...pose, translation_mm: [120, 20, 0] };
+  const disjoint = await compileCase(
+    "two-disjoint-uniform-families",
+    unconfiguredProject,
+    separate,
+    [0, 1],
+    ["--add", selected.reference.definition_id, JSON.stringify(secondPose)],
+  );
+  assert.equal(disjoint.scene.occurrence_count, 2);
+  assert.deepEqual(disjoint.occurrences.map((row) => row.occurrence_id).sort(), [1, 2]);
+  assert.ok(
+    disjoint.occurrences.every((row) => row.definition_id === selected.reference.definition_id),
+  );
+  assert.deepEqual(disjoint.occurrences.find((row) => row.occurrence_id === 1).pose, pose);
+  assert.deepEqual(disjoint.occurrences.find((row) => row.occurrence_id === 2).pose, secondPose);
+
   // Only these disposable copies are removed. Repository fixtures and Core-owned
   // immutable storage are never modified. Neither input path exists on reopen.
   await unlink(source);
@@ -596,6 +911,57 @@ try {
     const after = await readFile(join(recoveredExport, name));
     assert.deepEqual(after, before, `fresh source-free export changed immutable ${name}`);
     evidence.artifacts[name] = { bytes: before.length, sha256: hash(before) };
+  }
+
+  for (const entry of recoveryCases) {
+    await unlink(entry.intentFile);
+    const recoveredExport = join(output, `${entry.name}-source-free-export`);
+    const replayFile = join(output, `${entry.name}-source-free.splr`);
+    const recovered = await invoke(`${entry.name}-source-free-replay`, [
+      "inspect",
+      entry.project,
+      "--preflight",
+      "--verify",
+      "--manufacturing-out",
+      recoveredExport,
+      "--replay-out",
+      replayFile,
+    ]);
+    assert.notEqual(recovered.hello.session_id, entry.report.hello.session_id);
+    checkVerified(recovered, entry.intent, entry.modelTools);
+    assert.equal(recovered.manufacturing.preflight.disposition, "admitted");
+    assert.equal(recovered.manufacturing.preflight_freshness, "current");
+    assert.equal(recovered.manufacturing.artifact.hash, entry.report.manufacturing.artifact.hash);
+    const recoveredPlan = await checkExport(recoveredExport, recovered, entry.intent);
+    const replayBytes = await checkReplay(
+      replayFile,
+      recoveredExport,
+      recovered,
+      entry.intent,
+      recoveredPlan,
+    );
+    assert.deepEqual(
+      replayBytes,
+      await readFile(entry.replayFile),
+      `${entry.name}: fresh source-free replay display changed`,
+    );
+    if (entry.intent.printer.workflow.job.functional_construction) {
+      checkPlan(
+        recoveredPlan,
+        entry.intent.printer.workflow.job.functional_construction,
+        fixtureStock,
+      );
+    } else {
+      checkUniformPlan(recoveredPlan, entry.intent.printer.workflow.job.assignments.length);
+    }
+    for (const artifact of artifacts) {
+      assert.deepEqual(
+        await readFile(join(recoveredExport, artifact)),
+        await readFile(join(entry.exported, artifact)),
+        `${entry.name}: source-free recovery changed immutable ${artifact}`,
+      );
+    }
+    evidence[entry.name].source_free_fresh_replay = true;
   }
 
   for (const [name, alter, refusal] of [
