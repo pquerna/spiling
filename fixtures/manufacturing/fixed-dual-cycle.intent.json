@@ -138,7 +138,8 @@
                 160
               ]
             ],
-            "material_profile": null
+            "material_profile": null,
+            "waste_bead_width_mm": 0.45
           },
           {
             "id": "fixed-hotend-1",
@@ -180,7 +181,8 @@
                 160
               ]
             ],
-            "material_profile": null
+            "material_profile": null,
+            "waste_bead_width_mm": 0.45
           }
         ],
         "assignments": [
@@ -219,7 +221,8 @@
                 9
               ]
             },
-            "tool_id": null
+            "tool_id": null,
+            "interior": null
           },
           {
             "occurrence_id": 2,
@@ -256,7 +259,8 @@
                 9
               ]
             },
-            "tool_id": null
+            "tool_id": null,
+            "interior": null
           }
         ],
         "transition_lift_mm": 0.5,

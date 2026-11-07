@@ -57,9 +57,17 @@ async function invoke(name, args, expectedFailure = false) {
   assert.equal(report.hello.engine_build, evidence.engine_build);
   return report;
 }
+const intentName = process.env.SPILING_MIXED_INTENT ?? "fixed-dual-shared-material";
+const intent = JSON.parse(
+  await readFile(join(root, `fixtures/manufacturing/${intentName}.intent.json`), "utf8"),
+);
 const source = join(output, "owned-box.step"),
   project = join(output, "Shared material.spil");
-await copyFile(join(root, "fixtures/geometry/box-mm.step"), source);
+const singlePart = intent.printer.workflow.job.assignments.length === 1;
+await copyFile(
+  join(root, singlePart ? "fixtures/geometry/through-hole.step" : "fixtures/geometry/box-mm.step"),
+  source,
+);
 const created = await invoke("create", [
   "create",
   project,
@@ -69,19 +77,19 @@ const created = await invoke("create", [
   "1",
   JSON.stringify({ translation_mm: [20, 20, 0], rotation_xyzw: [0, 0, 0, 1] }),
 ]);
-const intentName = process.env.SPILING_MIXED_INTENT ?? "fixed-dual-shared-material";
-const intent = JSON.parse(
-  await readFile(join(root, `fixtures/manufacturing/${intentName}.intent.json`), "utf8"),
-);
 const intentFile = join(output, "intent.json");
 await writeFile(intentFile, JSON.stringify(intent));
 const originalExport = join(output, "original-export");
 await invoke("compile", [
   "edit",
   project,
-  "--add",
-  created.definitions[0].record.definition_id,
-  JSON.stringify({ translation_mm: [120, 20, 0], rotation_xyzw: [0, 0, 0, 1] }),
+  ...(singlePart
+    ? []
+    : [
+        "--add",
+        created.definitions[0].record.definition_id,
+        JSON.stringify({ translation_mm: [120, 20, 0], rotation_xyzw: [0, 0, 0, 1] }),
+      ]),
   "--intent",
   intentFile,
   "--preflight",
@@ -146,7 +154,7 @@ const job = returned.manufacturing.intent.printer.workflow.job;
 assert.deepEqual(job.tools[0].material, job.tools[1].material);
 assert.deepEqual(
   job.assignments.map((a) => a.tool_id),
-  job.tools.map((t) => t.id),
+  job.tools.slice(0, job.assignments.length).map((t) => t.id),
 );
 const decoded = await decodeReplayDisplay(
   Uint8Array.from(await readFile(replay)).buffer,
@@ -158,7 +166,33 @@ for (let i = 0; i < decoded.eventCount; i++) {
   const tool = decoded.activeTool(i),
     point = decoded.position(i);
   assert.ok(tool === 0 || tool === 1);
-  const expected = point[0] < 80 ? 0 : 1;
+  const association = decoded.association(i);
+  const interior = singlePart && typeof association?.regionalOwner === "number";
+  const expected = singlePart ? (interior ? 1 : 0) : point[0] < 80 ? 0 : 1;
+  if (singlePart) {
+    assert.ok(association);
+    if (interior) assert.equal(association.beadWidthMm, job.assignments[0].interior.bead_width_mm);
+    // Independent analytic fixture observer: actual XYZ6 full beads retain the
+    // original20x20 source and radius3 bore, under the existing0.005 mm policy.
+    const from = decoded.position(i - 1),
+      radius = association.beadWidthMm * 0.5;
+    const dx = point[0] - from[0],
+      dy = point[1] - from[1];
+    const t = Math.max(
+      0,
+      Math.min(1, ((30 - from[0]) * dx + (30 - from[1]) * dy) / (dx * dx + dy * dy)),
+    );
+    assert.ok(
+      Math.hypot(from[0] + t * dx - 30, from[1] + t * dy - 30) >= 3 + radius - 0.005001,
+      "actual full bead intrudes into protected bore",
+    );
+    for (const p of [from, point])
+      for (const v of p.slice(0, 2))
+        assert.ok(
+          v - radius >= 20 - 0.005001 && v + radius <= 40 + 0.005001,
+          "actual full bead exceeds exterior",
+        );
+  }
   assert.equal(
     tool,
     expected,
@@ -198,7 +232,7 @@ assert.equal(
   true,
 );
 const invalid = structuredClone(intent);
-invalid.printer.workflow.job.assignments[1].tool_id = null;
+invalid.printer.workflow.job.assignments.at(-1).tool_id = null;
 const invalidFile = join(output, "ambiguous.intent.json");
 await writeFile(invalidFile, JSON.stringify(invalid));
 const error = await invoke("ambiguous-binding", ["edit", project, "--intent", invalidFile], true);

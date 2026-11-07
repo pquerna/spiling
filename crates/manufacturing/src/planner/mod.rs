@@ -1232,6 +1232,26 @@ fn admit_schedule<'model>(
                     neighborhoods.work_mut(),
                     cancel,
                 )?;
+                classified
+                    .as_mut()
+                    .expect("classified material")
+                    .with_tool_widths(
+                        input.intent,
+                        classification::fixed_owned_budget(
+                            skin_retained_points(
+                                retained_points,
+                                &neighborhoods,
+                                &[&lower, &upper],
+                            )?,
+                            skin_retained_bytes(
+                                skin_owned_bytes,
+                                &neighborhoods,
+                                &[&lower, &upper],
+                            )?,
+                        ),
+                        neighborhoods.work_mut(),
+                        cancel,
+                    )?;
                 classified_owned_bytes = classified
                     .as_mut()
                     .expect("classified process regions")
@@ -1388,6 +1408,7 @@ fn admit_schedule<'model>(
                 &templates,
             )?;
             let hatch_layer = region::HatchLayer {
+                width_mm: recipe.bead_width_mm,
                 z,
                 lower_z: elevation.lower_z,
                 height: z - elevation.lower_z,
@@ -1805,8 +1826,26 @@ fn admit_schedule<'model>(
                         neighborhoods.work_mut(),
                         cancel,
                     )?;
+                    classified.with_tool_widths(
+                        input.intent,
+                        classification::fixed_owned_budget(
+                            skin_retained_points(
+                                live_retained_points,
+                                &neighborhoods,
+                                &[&lower, &upper],
+                            )?,
+                            skin_retained_bytes(
+                                live_owned_bytes,
+                                &neighborhoods,
+                                &[&lower, &upper],
+                            )?,
+                        ),
+                        neighborhoods.work_mut(),
+                        cancel,
+                    )?;
                     let classified_bytes = classified.retained_bytes();
                     let hatch_layer = region::HatchLayer {
+                        width_mm: recipe.bead_width_mm,
                         z: elevation.z,
                         lower_z: elevation.lower_z,
                         height: elevation.z - elevation.lower_z,

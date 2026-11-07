@@ -1,6 +1,8 @@
-// SPDX-FileCopyrightText: 2026 Spiling contributors
-// SPDX-License-Identifier: OSL-3.0
-// Licensed under the Open Software License version 3.0
+/*!
+ * SPDX-FileCopyrightText: 2026 Spiling contributors
+ * SPDX-License-Identifier: OSL-3.0
+ * Licensed under the Open Software License version 3.0
+ */
 
 import type { ManufacturingIntent } from "../../packages/protocol/src/generated.ts";
 import fixed from "./fixed-dual.intent.ts";

@@ -500,6 +500,7 @@ impl Construction {
                     1.0
                 };
                 result.push(classification::InteriorRegion {
+                    bead_width_mm: None,
                     domain: material,
                     coverage: ProcessRegionCoverage {
                         material_domain: Some(domain.reference),

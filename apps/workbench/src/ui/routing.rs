@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use spiling_contracts::manufacturing::{FixedDualJob, FixedDualTool, OccurrenceMaterial};
+use spiling_contracts::manufacturing::{
+    FixedDualJob, FixedDualTool, InteriorToolBinding, OccurrenceMaterial,
+};
 
 pub fn tool_reference(index: usize, tool: &FixedDualTool) -> String {
     format!("T{index} · {:.2} mm nozzle", tool.nozzle_diameter_mm)
@@ -61,6 +63,7 @@ pub fn routed_material_fields(ui: &mut egui::Ui, job: &mut FixedDualJob, writabl
             _ => None,
         })
         .collect();
+    let one_part = job.assignments.len() == 1;
     for (assignment, resolved) in job.assignments.iter_mut().zip(resolved) {
         ui.push_id(("part-tool", assignment.occurrence_id), |ui| {
             ui.label(format!("Part {}", assignment.occurrence_id.get()));
@@ -98,6 +101,63 @@ pub fn routed_material_fields(ui: &mut egui::Ui, job: &mut FixedDualJob, writabl
                             }
                         }
                     });
+                if one_part {
+                    ui.label("Interior fill");
+                    egui::ComboBox::from_id_salt("interior-tool")
+                        .selected_text(assignment.interior.as_ref().map_or_else(
+                            || "Primary tool".into(),
+                            |binding| {
+                                job.tools
+                                    .iter()
+                                    .position(|tool| tool.id == binding.tool_id)
+                                    .map_or_else(
+                                        || "Choose loaded tool".into(),
+                                        |index| {
+                                            format!("T{index} · {:.2} mm", binding.bead_width_mm)
+                                        },
+                                    )
+                            },
+                        ))
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(assignment.interior.is_none(), "Primary tool")
+                                .clicked()
+                            {
+                                assignment.interior = None;
+                            }
+                            for (index, tool) in job.tools.iter().enumerate() {
+                                if resolved == Some(index as u8) {
+                                    continue;
+                                }
+                                let OccurrenceMaterial::Uniform { material_id } =
+                                    &assignment.material
+                                else {
+                                    continue;
+                                };
+                                if tool.material.id != *material_id {
+                                    continue;
+                                }
+                                if ui
+                                    .selectable_label(
+                                        assignment
+                                            .interior
+                                            .as_ref()
+                                            .is_some_and(|b| b.tool_id == tool.id),
+                                        tool_reference(index, tool),
+                                    )
+                                    .clicked()
+                                {
+                                    assignment.interior = Some(InteriorToolBinding {
+                                        tool_id: tool.id.clone(),
+                                        bead_width_mm: tool.nozzle_diameter_mm,
+                                    });
+                                }
+                            }
+                        });
+                    if let Some(binding) = &mut assignment.interior {
+                        super::number(ui, "Interior width (mm)", &mut binding.bead_width_mm, 0.01);
+                    }
+                }
             });
         });
     }

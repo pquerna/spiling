@@ -656,7 +656,7 @@ export type FixedDualTool = { id: string, feeder_id: string, material: LoadedMat
 /**
  * Physical nozzle displacement from tool zero; Z is identically zero.
  */
-offset_xy_mm: [number, number], nozzle_diameter_mm: number, filament_diameter_mm: number, deposition_limits: DepositionLimits, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, nozzle_temperature_c: number, standby_temperature_c: number, minimum_extrusion_temperature_c: number, maximum_nozzle_temperature_c: number, retract_filament_mm: number, retract_speed_mm_s: number,
+offset_xy_mm: [number, number], nozzle_diameter_mm: number, filament_diameter_mm: number, waste_bead_width_mm: number, deposition_limits: DepositionLimits, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, nozzle_temperature_c: number, standby_temperature_c: number, minimum_extrusion_temperature_c: number, maximum_nozzle_temperature_c: number, retract_filament_mm: number, retract_speed_mm_s: number,
 /**
  * Declared pressure-establishment minimum; actual waste is stroke-derived.
  */
@@ -674,12 +674,14 @@ declaration_hash: SourceHash, polymer_family: string, };
 
 export type OccurrenceMaterial = { "kind": "uniform", material_id: string, } | { "kind": "layer_cycle", recipe: LayerCycle, material_ids: [string, string], };
 
+export type InteriorToolBinding = { tool_id: string, bead_width_mm: number, };
+
 export type OccurrenceMaterialAssignment = { occurrence_id: OccurrenceId,
 /**
  * Explicit loaded tool for a uniform assignment. Null requires unambiguous
  * loaded material identity; material-domain/cycle routing owns its selection.
  */
-tool_id: string | null, material: OccurrenceMaterial, work_envelope_mm: AabbMm, };
+tool_id: string | null, interior: InteriorToolBinding | null, material: OccurrenceMaterial, work_envelope_mm: AabbMm, };
 
 export type FixedDualConfiguration = "marlin2125_native_fixed_hotends";
 

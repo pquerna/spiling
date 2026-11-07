@@ -310,7 +310,7 @@ pub(crate) fn stream(
                         1.0
                     };
                 let length = distance(start, end);
-                let area = ((recipe.bead_width_mm - height) * height
+                let area = ((loaded.waste_bead_width_mm - height) * height
                     + std::f64::consts::PI * (height * 0.5).powi(2))
                     * flow;
                 let loaded_area =

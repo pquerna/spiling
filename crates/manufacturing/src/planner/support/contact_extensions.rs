@@ -68,6 +68,7 @@ fn scene(skin: ProcessSkinKind, axis: region::HatchAxis, hole: bool) -> Scene {
     }
     let recipe = crate::planner::tests::recipe(1.0);
     let layer = region::HatchLayer {
+        width_mm: recipe.bead_width_mm,
         z: 1.2,
         lower_z: 0.8,
         height: 0.4,

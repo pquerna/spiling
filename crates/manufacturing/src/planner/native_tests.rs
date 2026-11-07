@@ -4421,3 +4421,92 @@ fn rounded_housing_disabled_supports_refines_startup_and_replays() {
     );
     visit_fresh_replayed_object_segments(&bundle, |_, _| {});
 }
+
+#[test]
+fn mixed_width_native_bore_keeps_fine_walls_and_rejects_missing_or_doubled_actual_work() {
+    let scene = NativeScene::new(
+        include_bytes!("../../../../fixtures/geometry/through-hole.step"),
+        &[RigidPoseMm {
+            translation_mm: [20.0, 20.0, 0.0],
+            ..RigidPoseMm::IDENTITY
+        }],
+    );
+    let intent = decode_intent(include_bytes!(
+        "../../../../fixtures/manufacturing/mixed-width-interior.intent.json"
+    ))
+    .unwrap();
+    let cancel = AtomicBool::new(false);
+    let mixed = compile(scene.input(&intent), &cancel).unwrap();
+    let mut primary = intent.clone();
+    let JobWorkflow::FixedDualMarlin { job } = &mut primary.printer.workflow else {
+        unreachable!()
+    };
+    job.assignments[0].interior = None;
+    let reference = compile(scene.input(&primary), &cancel).unwrap();
+    assert_eq!(mixed.plan.layers.len(), reference.plan.layers.len());
+    let mut counts = [0usize; 2];
+    for (actual, fine) in mixed.plan.layers.iter().zip(&reference.plan.layers) {
+        assert_eq!(
+            actual.region_coverage.protected_hole_area_mm2,
+            fine.region_coverage.protected_hole_area_mm2
+        );
+        let walls = |layer: &PrintLayer| {
+            layer
+                .paths
+                .iter()
+                .filter(|p| p.owner == Some(DepositionOwner::Wall))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            walls(actual),
+            walls(fine),
+            "interior routing must retain fine exterior and bore construction"
+        );
+        for (index, layer) in [actual, fine].into_iter().enumerate() {
+            counts[index] += layer
+                .paths
+                .iter()
+                .filter(|p| matches!(p.owner, Some(DepositionOwner::Regional { .. })))
+                .map(|p| p.points_mm.len() - 1)
+                .sum::<usize>();
+        }
+    }
+    assert!(
+        counts[0] > 0 && counts[0] < counts[1],
+        "wider generated interior must use its own pitch"
+    );
+    let line = mixed
+        .program
+        .lines()
+        .find(|line| {
+            (line.starts_with("G1 X2") || line.starts_with("G1 X3"))
+                && line.contains(" E")
+                && line.ends_with("F2280.000000")
+        })
+        .expect("bulk-tool model move");
+    let missing = mixed.program.replacen(&format!("{line}\n"), "", 1);
+    let duplicate = mixed.program.replacen(line, &format!("{line}\n{line}"), 1);
+    for program in [&missing, &duplicate] {
+        assert!(crate::verifier::verify(program, &mixed.plan, &intent, &cancel).is_err());
+    }
+    let wrong_tool = mixed.program.replacen("T1 S1", "T0 S1", 1);
+    assert!(crate::verifier::verify(&wrong_tool, &mixed.plan, &intent, &cancel).is_err());
+    let mut wrong = mixed.plan.clone();
+    let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow else {
+        unreachable!()
+    };
+    let path = wrong
+        .layers
+        .iter_mut()
+        .flat_map(|l| &mut l.paths)
+        .find(|p| job.tool_for_path(p).unwrap() == 1)
+        .unwrap();
+    path.width = WidthProfile::Constant {
+        width_mm: intent.recipe.bead_width_mm,
+    };
+    assert!(
+        crate::backend::emit(&wrong, &intent, &cancel).is_err(),
+        "fine paths cannot be relabeled as bulk work"
+    );
+}

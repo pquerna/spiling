@@ -187,6 +187,7 @@ message LoadedMaterial {
   string polymer_family = 4;
 }
 message FixedDualTool {
+  double waste_bead_width_mm = 19;
   ResolvedMaterialProfile material_profile = 18;
   string id = 1;
   string feeder_id = 2;
@@ -215,7 +216,12 @@ message LayerCycleOccurrenceMaterial {
   // Exactly two ordered, distinct immutable loaded material identities.
   repeated string material_ids = 2;
 }
+message InteriorToolBinding {
+  string tool_id = 1;
+  double bead_width_mm = 2;
+}
 message OccurrenceMaterialAssignment {
+  InteriorToolBinding interior = 7;
   uint32 occurrence_id = 1;
   // Required for ambiguous uniform loading; cycles/constructions retain their own bindings.
   optional string tool_id = 6;

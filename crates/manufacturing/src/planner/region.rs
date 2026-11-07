@@ -745,6 +745,8 @@ impl HatchAxis {
 }
 
 pub(super) struct HatchLayer<'a> {
+    /// Actual proposed hatch width, independent of wall/skin recipe defaults.
+    pub width_mm: f64,
     pub z: f64,
     pub lower_z: f64,
     pub height: f64,
@@ -854,7 +856,7 @@ impl HatchRows {
         fraction: f64,
         layer: &HatchLayer<'_>,
     ) -> Result<(Self, [f64; 2], f64), ManufacturingError> {
-        let width = layer.recipe.bead_width_mm;
+        let width = layer.width_mm;
         let h = layer.height;
         let solid_spacing = ((width - h) * h + std::f64::consts::PI * (h * 0.5).powi(2)) / h;
         let rect = polygon
@@ -1290,7 +1292,7 @@ pub(super) fn append_hatch_row(
             paths,
             kind,
             vec![a, b],
-            layer.recipe.bead_width_mm,
+            layer.width_mm,
             [layer.lower_z, layer.z],
         )?;
     }
@@ -1407,6 +1409,7 @@ fn optional_support_rows_omit_uncommandable_proposals_but_preserve_required_skin
     let recipe = super::tests::recipe(1.0);
     for axis in [HatchAxis::X, HatchAxis::Y] {
         let layer = HatchLayer {
+            width_mm: recipe.bead_width_mm,
             z: recipe.layer_height_mm,
             lower_z: 0.0,
             height: recipe.layer_height_mm,
@@ -1466,6 +1469,7 @@ fn ordinary_quarter_hatch_preserves_each_polygon_cadence_and_authored_origins() 
     let recipe = super::tests::recipe(0.5);
     let cancel = AtomicBool::new(false);
     let layer = HatchLayer {
+        width_mm: recipe.bead_width_mm,
         z: recipe.layer_height_mm,
         lower_z: 0.0,
         height: recipe.layer_height_mm,
@@ -1633,6 +1637,7 @@ fn zero_fraction_has_no_rows_for_centered_alternate_or_transported_phases() {
     );
     for axis in [HatchAxis::X, HatchAxis::Y] {
         let layer = HatchLayer {
+            width_mm: recipe.bead_width_mm,
             z: 0.2,
             lower_z: 0.0,
             height: 0.2,

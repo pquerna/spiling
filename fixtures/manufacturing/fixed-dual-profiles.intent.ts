@@ -1,5 +1,8 @@
-// SPDX-FileCopyrightText: 2026 Spiling contributors
-// SPDX-License-Identifier: OSL-3.0
+/*!
+ * SPDX-FileCopyrightText: 2026 Spiling contributors
+ * SPDX-License-Identifier: OSL-3.0
+ * Licensed under the Open Software License version 3.0
+ */
 
 import type {
   FixedDualTool,
@@ -42,9 +45,9 @@ const selection = (tool: FixedDualTool, index: number): MaterialProfileSelection
     },
     source: {
       kind: "synthetic_test",
-      source_id: "fixed-dual-profiles.intent.ts",
+      source_id: "material-profile-test-source.txt",
       source_revision: "1",
-      source_hash: tool.material.declaration_hash,
+      source_hash: "95c80eb53239470982522fdb2bcf56168a6fa279790d057fe2d62fdf1978d865",
     },
   },
   setup: {

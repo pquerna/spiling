@@ -1531,6 +1531,7 @@ pub(super) fn realize(
                     interface,
                     density,
                     &region::HatchLayer {
+                        width_mm: recipe.bead_width_mm,
                         z: layer.z_mm,
                         lower_z: layer.lower_z_mm,
                         height: layer.z_mm - layer.lower_z_mm,
@@ -3721,6 +3722,7 @@ mod tests {
             let mut recipe = crate::planner::tests::recipe(0.1);
             recipe.process.max_bridge_span_mm = limit;
             let layer = region::HatchLayer {
+                width_mm: recipe.bead_width_mm,
                 z: 0.8,
                 lower_z: 0.4,
                 height: 0.4,
@@ -3801,6 +3803,7 @@ mod tests {
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
         });
         let layer = region::HatchLayer {
+            width_mm: recipe.bead_width_mm,
             z: 0.8,
             lower_z: 0.4,
             height: 0.4,
@@ -4045,6 +4048,7 @@ mod tests {
                 &[],
                 &required,
                 &region::HatchLayer {
+                    width_mm: recipe.bead_width_mm,
                     z: 0.8,
                     lower_z: 0.4,
                     height: 0.4,
@@ -4105,6 +4109,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let recipe = crate::planner::tests::recipe(0.1);
         let layer = region::HatchLayer {
+            width_mm: recipe.bead_width_mm,
             z: 0.8,
             lower_z: 0.4,
             height: 0.4,

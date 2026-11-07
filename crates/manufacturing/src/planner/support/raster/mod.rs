@@ -206,7 +206,7 @@ impl Domains {
                 wall_centers,
                 layer.z,
                 layer.lower_z,
-                layer.recipe.bead_width_mm,
+                layer.width_mm,
                 kind,
                 &mut paths,
                 &mut segments,
@@ -294,7 +294,7 @@ fn charge_hatch(
     foreign_work: usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    let width = layer.recipe.bead_width_mm;
+    let width = layer.width_mm;
     let h = layer.height;
     let spacing = ((width - h) * h + std::f64::consts::PI * (h * 0.5).powi(2)) / h;
     for polygon in &domain.0 {
@@ -437,7 +437,7 @@ fn walls(
             let wall_ring = WallRing {
                 z,
                 lower_z: layer.lower_z,
-                bead_width_mm: layer.recipe.bead_width_mm,
+                bead_width_mm: layer.width_mm,
                 first_path: paths.len(),
             };
             for edge in ring.0.windows(2) {
@@ -722,6 +722,7 @@ mod tests {
                 &lower_interface,
                 1.0,
                 &region::HatchLayer {
+                    width_mm: recipe.bead_width_mm,
                     z: 0.575,
                     lower_z: 0.0,
                     height: 0.575,
@@ -740,6 +741,7 @@ mod tests {
                 &upper_interface,
                 1.0,
                 &region::HatchLayer {
+                    width_mm: recipe.bead_width_mm,
                     z: 1.15,
                     lower_z: 0.575,
                     height: 0.575,
@@ -809,6 +811,7 @@ mod tests {
                 interface: &interface,
             },
             &region::HatchLayer {
+                width_mm: recipe.bead_width_mm,
                 z: 0.6,
                 lower_z: 0.0,
                 height: 0.6,
@@ -862,6 +865,7 @@ mod tests {
         .unwrap();
         let recipe = crate::planner::tests::recipe(1.0);
         let layer = region::HatchLayer {
+            width_mm: recipe.bead_width_mm,
             z: 0.4,
             lower_z: 0.0,
             height: 0.4,

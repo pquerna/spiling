@@ -3264,6 +3264,7 @@ fn fixed_dual_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         tool.nozzle_diameter_mm = intent.printer.nozzle_diameter_mm;
         tool.deposition_limits = intent.printer.deposition_limits;
         tool.filament_diameter_mm = intent.recipe.filament_diameter_mm;
+        tool.waste_bead_width_mm = intent.recipe.bead_width_mm;
     }
     for layer in &mut plan.layers {
         for path in &mut layer.paths {

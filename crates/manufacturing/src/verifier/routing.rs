@@ -303,8 +303,8 @@ impl<'a> RouteState<'a> {
                 ));
             }
         }
-        let radius = self.recipe.bead_width_mm * 0.5;
         for tool in &self.job.tools {
+            let radius = tool.waste_bead_width_mm * 0.5;
             let [a, b] = tool.waste_line_xy_mm;
             let occupied = [
                 [
@@ -536,7 +536,7 @@ impl<'a> RouteState<'a> {
                 self.check_motion(from, actual, intent)?;
                 for point in [from, actual] {
                     for (axis, coordinate) in point[..2].iter().copied().enumerate() {
-                        let radius = (self.recipe.bead_width_mm * 0.5
+                        let radius = (self.job.tools[tool].waste_bead_width_mm * 0.5
                             + program_coordinates::xyz6_coordinate_error_mm(coordinate)?)
                         .next_up();
                         if (coordinate - radius).next_down()
@@ -565,7 +565,7 @@ impl<'a> RouteState<'a> {
                     } else {
                         1.0
                     };
-                let area = ((self.recipe.bead_width_mm - height) * height
+                let area = ((self.job.tools[tool].waste_bead_width_mm - height) * height
                     + std::f64::consts::PI * (height * 0.5).powi(2))
                     * flow;
                 let volume = length * area;
@@ -601,7 +601,7 @@ impl<'a> RouteState<'a> {
                         self.layer,
                         15,
                         Some(expected::Association {
-                            width: self.recipe.bead_width_mm,
+                            width: self.job.tools[tool].waste_bead_width_mm,
                             physical_z: [layer.lower_z_mm, layer.z_mm],
                             owner: None,
                         }),

@@ -36,6 +36,7 @@ pub struct FixedDualTool {
     pub offset_xy_mm: [f64; 2],
     pub nozzle_diameter_mm: f64,
     pub filament_diameter_mm: f64,
+    pub waste_bead_width_mm: f64,
     pub deposition_limits: DepositionLimits,
     pub max_feed_mm_s: f64,
     pub max_volumetric_flow_mm3_s: f64,
@@ -286,6 +287,14 @@ impl OccurrenceMaterial {
     }
 }
 
+/// Eligible interior routing is separate from product identity and external skins.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct InteriorToolBinding {
+    pub tool_id: String,
+    pub bead_width_mm: f64,
+}
+
 /// Explicit exclusive build-space reservation, not an inferred source mask.
 /// Compile must bind the complete native occurrence to this reservation.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
@@ -296,6 +305,8 @@ pub struct OccurrenceMaterialAssignment {
     /// loaded material identity; material-domain/cycle routing owns its selection.
     #[serde(deserialize_with = "required_option")]
     pub tool_id: Option<String>,
+    #[serde(deserialize_with = "required_option")]
+    pub interior: Option<InteriorToolBinding>,
     pub material: OccurrenceMaterial,
     pub work_envelope_mm: AabbMm,
 }
@@ -395,6 +406,7 @@ impl FixedDualJob {
             positive(&[
                 tool.nozzle_diameter_mm,
                 tool.filament_diameter_mm,
+                tool.waste_bead_width_mm,
                 tool.max_feed_mm_s,
                 tool.max_volumetric_flow_mm3_s,
                 tool.retract_filament_mm,
@@ -459,6 +471,31 @@ impl FixedDualJob {
                     for material_id in material_ids {
                         self.tool_for_material(material_id)?;
                     }
+                }
+            }
+        }
+        for assignment in &self.assignments {
+            if let Some(interior) = &assignment.interior {
+                if self.assignments.len() != 1
+                    || !self.surface_constructions.is_empty()
+                    || self.functional_construction.is_some()
+                {
+                    return Err(invalid(
+                        "mixed-width interior currently requires one uniform native source without material construction",
+                    ));
+                }
+                let OccurrenceMaterial::Uniform { material_id } = &assignment.material else {
+                    return Err(invalid(
+                        "mixed-width interior requires a uniform formulation",
+                    ));
+                };
+                let primary = self.resolve_tool(material_id, assignment.tool_id.as_deref())?;
+                let bulk = self.resolve_tool(material_id, Some(&interior.tool_id))?;
+                positive(&[interior.bead_width_mm])?;
+                if primary == bulk {
+                    return Err(invalid(
+                        "interior tool must be distinct from the captured primary tool",
+                    ));
                 }
             }
         }
@@ -654,6 +691,21 @@ impl FixedDualJob {
                 "constructed model bead has no material-domain owner",
             ));
         }
+        if let Some(interior) = &assignment.interior
+            && matches!(path.owner, Some(DepositionOwner::Regional { .. }))
+        {
+            if path.width.constant_width_mm() != Some(interior.bead_width_mm) {
+                return Err(invalid(
+                    "interior paths must be generated at their captured tool width",
+                ));
+            }
+            return self.resolve_tool(
+                assignment
+                    .material
+                    .material_id_for_interval(path.physical_z_mm)?,
+                Some(&interior.tool_id),
+            );
+        }
         self.resolve_tool(
             assignment
                 .material
@@ -701,21 +753,15 @@ impl FixedDualJob {
                 cooling = Some(&profile.cooling_configuration_id);
             }
         }
+        if printer.nozzle_diameter_mm != self.tools[0].nozzle_diameter_mm {
+            return Err(invalid(
+                "shared wall planning nozzle must match captured tool zero",
+            ));
+        }
         for tool in &self.tools {
-            if printer.nozzle_diameter_mm != tool.nozzle_diameter_mm
-                || printer.max_feed_mm_s > tool.max_feed_mm_s
-                || printer.max_volumetric_flow_mm3_s > tool.max_volumetric_flow_mm3_s
-                || printer.deposition_limits.min_bead_width_mm
-                    < tool.deposition_limits.min_bead_width_mm
-                || printer.deposition_limits.max_bead_width_mm
-                    > tool.deposition_limits.max_bead_width_mm
-                || printer.deposition_limits.min_bead_height_mm
-                    < tool.deposition_limits.min_bead_height_mm
-                || printer.deposition_limits.max_bead_height_mm
-                    > tool.deposition_limits.max_bead_height_mm
-            {
+            if printer.max_feed_mm_s > tool.max_feed_mm_s {
                 return Err(invalid(
-                    "shared planning envelope exceeds a declared loaded tool envelope",
+                    "shared travel envelope exceeds a captured tool feed limit",
                 ));
             }
         }
@@ -1102,12 +1148,53 @@ mod uniform_family_tests {
     }
 
     #[test]
-    fn unused_foreign_tool_keeps_thermal_waste_flow_and_shared_envelope_checks() {
+    fn every_loaded_tool_must_admit_its_actual_waste_even_without_model_work() {
+        for base in [0, 1] {
+            let (mut printer, job) = uniform(true, &[base]);
+            printer.workflow = JobWorkflow::FixedDualMarlin { job };
+            let mut intent = decode_intent(include_bytes!(
+                "../../../../fixtures/manufacturing/fixed-dual.intent.json"
+            ))
+            .unwrap();
+            intent.printer = printer;
+            intent.validate().unwrap();
+            for index in 0..2 {
+                for case in 0..5 {
+                    let mut bad = intent.clone();
+                    let height = bad.select_layer_height().unwrap().height_mm;
+                    let JobWorkflow::FixedDualMarlin { job } = &mut bad.printer.workflow else {
+                        unreachable!()
+                    };
+                    let tool = &mut job.tools[index];
+                    match case {
+                        0 => {
+                            tool.deposition_limits.min_bead_width_mm =
+                                tool.waste_bead_width_mm + 0.01
+                        }
+                        1 => {
+                            tool.deposition_limits.max_bead_width_mm =
+                                tool.waste_bead_width_mm - 0.01
+                        }
+                        2 => tool.deposition_limits.min_bead_height_mm = height + 0.01,
+                        3 => tool.deposition_limits.max_bead_height_mm = height - 0.01,
+                        _ => tool.max_volumetric_flow_mm3_s = 0.001,
+                    }
+                    assert!(
+                        bad.validate().is_err(),
+                        "base{base}, tool{index}, actual process{case}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unused_foreign_tool_keeps_thermal_waste_and_shared_travel_checks() {
         for base in [0, 1] {
             let (printer, job) = uniform(true, &[base]);
             job.validate(&printer).unwrap();
             for tool_index in [0, 1] {
-                for change in 0..12 {
+                for change in 0..8 {
                     let mut bad = job.clone();
                     let tool = &mut bad.tools[tool_index];
                     match change {
@@ -1116,27 +1203,9 @@ mod uniform_family_tests {
                         2 => tool.waste_line_xy_mm[1] = tool.waste_line_xy_mm[0],
                         3 => tool.minimum_reprime_volume_mm3 = 0.0,
                         4 => tool.retract_filament_mm = 11.0,
-                        5 => tool.nozzle_diameter_mm *= 2.0,
+                        5 => tool.nozzle_diameter_mm = f64::NAN,
                         6 => tool.max_feed_mm_s = printer.max_feed_mm_s - 1.0,
-                        7 => {
-                            tool.max_volumetric_flow_mm3_s = printer.max_volumetric_flow_mm3_s - 1.0
-                        }
-                        8 => {
-                            tool.deposition_limits.min_bead_width_mm =
-                                printer.deposition_limits.min_bead_width_mm + 0.01
-                        }
-                        9 => {
-                            tool.deposition_limits.max_bead_width_mm =
-                                printer.deposition_limits.max_bead_width_mm - 0.01
-                        }
-                        10 => {
-                            tool.deposition_limits.min_bead_height_mm =
-                                printer.deposition_limits.min_bead_height_mm + 0.01
-                        }
-                        _ => {
-                            tool.deposition_limits.max_bead_height_mm =
-                                printer.deposition_limits.max_bead_height_mm - 0.01
-                        }
+                        _ => tool.max_volumetric_flow_mm3_s = 0.0,
                     }
                     assert!(
                         bad.validate(&printer).is_err(),
@@ -1439,5 +1508,54 @@ impl ManufacturingIntent {
             JobWorkflow::FixedDualMarlin { job } => Some(job.tool_for_path(path)?),
             _ => None,
         })
+    }
+}
+
+#[cfg(test)]
+mod mixed_width_tests {
+    use super::*;
+
+    #[test]
+    fn interior_binding_is_consumed_by_role_and_exact_generated_width() {
+        let intent = decode_intent(include_bytes!(
+            "../../../../fixtures/manufacturing/mixed-width-interior.intent.json"
+        ))
+        .unwrap();
+        let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow else {
+            unreachable!()
+        };
+        let mut path = DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::SolidFill,
+            owner: Some(DepositionOwner::Regional { region_index: 0 }),
+            width: WidthProfile::Constant { width_mm: 0.6 },
+            physical_z_mm: [0.0, 0.2],
+            points_mm: vec![[21.0, 21.0, 0.2], [22.0, 21.0, 0.2]],
+        };
+        assert_eq!(job.tool_for_path(&path).unwrap(), 1);
+        path.width = WidthProfile::Constant { width_mm: 0.45 };
+        assert!(
+            job.tool_for_path(&path).is_err(),
+            "relabeling fine paths cannot implement mixed width"
+        );
+        path.owner = Some(DepositionOwner::Wall);
+        path.kind = DepositionKind::Perimeter;
+        assert_eq!(job.tool_for_path(&path).unwrap(), 0);
+        for case in 0..5 {
+            let mut bad = intent.clone();
+            let JobWorkflow::FixedDualMarlin { job } = &mut bad.printer.workflow else {
+                unreachable!()
+            };
+            match case {
+                0 => {
+                    job.assignments[0].interior.as_mut().unwrap().tool_id = job.tools[0].id.clone()
+                }
+                1 => job.assignments[0].interior.as_mut().unwrap().bead_width_mm = 0.4,
+                2 => job.tools[1].waste_bead_width_mm = 0.3,
+                3 => job.assignments[0].interior.as_mut().unwrap().bead_width_mm = 1.0,
+                _ => job.assignments[0].tool_id = None,
+            }
+            assert!(bad.validate().is_err(), "case{case}");
+        }
     }
 }

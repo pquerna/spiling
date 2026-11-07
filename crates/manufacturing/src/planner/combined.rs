@@ -297,6 +297,7 @@ pub(super) fn combine(
                 .map(|p| p.points_mm.len() - 1)
                 .sum();
             let hatch = region::HatchLayer {
+                width_mm: recipe.bead_width_mm,
                 z,
                 lower_z,
                 height,

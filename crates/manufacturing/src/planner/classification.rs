@@ -31,6 +31,7 @@ pub(super) struct ClassifiedRegions {
 }
 
 pub(super) struct InteriorRegion {
+    pub(super) bead_width_mm: Option<f64>,
     pub(super) domain: MultiPolygon<f64>,
     pub(super) coverage: ProcessRegionCoverage,
     pub(super) frame_origin_mm: Option<[f64; 2]>,
@@ -329,6 +330,7 @@ impl ClassifiedRegions {
             top,
             interiors: if interior_area > 0.0 {
                 vec![InteriorRegion {
+                    bead_width_mm: None,
                     domain: interior,
                     coverage: coverage.process_regions[0].clone(),
                     frame_origin_mm: None,
@@ -608,6 +610,7 @@ impl ClassifiedRegions {
                 )?;
                 completed.reserve_exact(target - completed.len());
                 completed.push(InteriorRegion {
+                    bead_width_mm: None,
                     domain: owned,
                     frame_origin_mm: None,
                     coverage: ProcessRegionCoverage {
@@ -803,6 +806,89 @@ impl ClassifiedRegions {
         super::zones::partition(self, domains, recipe, admit, work, cancel)
     }
 
+    pub(super) fn with_tool_widths(
+        &mut self,
+        intent: &ManufacturingIntent,
+        mut admit: impl FnMut(usize, usize) -> Result<(), ManufacturingError>,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow else {
+            return Ok(());
+        };
+        let Some(binding) = job.assignments.first().and_then(|a| a.interior.as_ref()) else {
+            return Ok(());
+        };
+        let additional_radius = (binding.bead_width_mm - intent.recipe.bead_width_mm) * 0.5;
+        if additional_radius <= 0.0 {
+            return Err(error(
+                ManufacturingErrorCode::InvalidSpecification,
+                "mixed interior requires a larger declared bead width",
+            ));
+        }
+        for index in 0..self.interiors.len() {
+            check_cancel(cancel)?;
+            let base_points = self.retained_points();
+            let base_bytes = self.retained_bytes();
+            let domain = &self.interiors[index].domain;
+            let proposal = region::offset_admitted(
+                domain,
+                -additional_radius,
+                |points, bytes, overlay| {
+                    admit(
+                        point_sum(base_points, points)?,
+                        byte_sum(base_bytes, bytes)?,
+                    )?;
+                    if let Some((a, b)) = overlay {
+                        super::boolean::budget_accumulated(a, b, work, cancel)?;
+                    }
+                    Ok(())
+                },
+                cancel,
+            )?;
+            if !domain.0.is_empty() && proposal.0.is_empty() {
+                return Err(error(
+                    ManufacturingErrorCode::UnsupportedGeometry,
+                    "larger interior tool leaves no qualified hatch domain",
+                ));
+            }
+            for original in &domain.0 {
+                let mut retained = false;
+                for candidate in &proposal.0 {
+                    check_cancel(cancel)?;
+                    super::boolean::charge(
+                        work,
+                        original.exterior().0.len().saturating_add(
+                            original
+                                .interiors()
+                                .iter()
+                                .map(|r| r.0.len())
+                                .sum::<usize>(),
+                        ),
+                    )?;
+                    if candidate
+                        .exterior()
+                        .0
+                        .first()
+                        .is_some_and(|p| original.contains(&Point(*p)))
+                    {
+                        retained = true;
+                        break;
+                    }
+                }
+                if !retained {
+                    return Err(error(
+                        ManufacturingErrorCode::UnsupportedGeometry,
+                        "larger interior tool would discard a classified material component",
+                    ));
+                }
+            }
+            self.interiors[index].domain = proposal;
+            self.interiors[index].bead_width_mm = Some(binding.bead_width_mm);
+        }
+        Ok(())
+    }
+
     /// Propose one shared ordinary phase without granting final stroke support
     /// or changing any source-framed or mandatory-skin construction.
     #[expect(
@@ -858,6 +944,10 @@ impl ClassifiedRegions {
             let mut segments = 0;
             let mut candidate_points = 0;
             for (index, interior) in self.interiors.iter().enumerate() {
+                let layer = &region::HatchLayer {
+                    width_mm: interior.bead_width_mm.unwrap_or(layer.width_mm),
+                    ..*layer
+                };
                 if interior.frame_origin_mm.is_some() {
                     continue;
                 }
@@ -1044,6 +1134,7 @@ impl ClassifiedRegions {
         self.layout
             .append_paths(lower_z, z, &mut paths, segments, cancel)?;
         let layer = region::HatchLayer {
+            width_mm: recipe.bead_width_mm,
             z,
             lower_z,
             height: z - lower_z,
@@ -1073,6 +1164,10 @@ impl ClassifiedRegions {
             cancel,
         )?;
         for (region_index, interior) in self.interiors.iter().enumerate() {
+            let interior_layer = region::HatchLayer {
+                width_mm: interior.bead_width_mm.unwrap_or(layer.width_mm),
+                ..layer
+            };
             let fraction = interior.coverage.fraction;
             let begin = paths.len();
             region::hatch_with_phase(
@@ -1083,7 +1178,7 @@ impl ClassifiedRegions {
                     DepositionKind::SparseFill
                 },
                 fraction,
-                &layer,
+                &interior_layer,
                 interior.frame_origin_mm,
                 phase,
                 &mut paths,
@@ -1328,6 +1423,9 @@ impl ClassifiedRegions {
             )
         })) {
             let role_layer = region::HatchLayer {
+                width_mm: owner
+                    .and_then(|(_, region)| region.bead_width_mm)
+                    .unwrap_or(layer.width_mm),
                 axis: if kind == DepositionKind::TopSkin {
                     layer.top_axis
                 } else {
@@ -1541,9 +1639,7 @@ impl ClassifiedRegions {
                             // each owner. Quarter-bead physical overlap leaves
                             // representation margin within half-bead permission.
                             origin[fixed] = interface.coordinate_mm
-                                + side
-                                    * (layer.recipe.bead_width_mm
-                                        - interface.bonding_overlap_mm * 0.5);
+                                + side * (layer.width_mm - interface.bonding_overlap_mm * 0.5);
                         }
                         region::HatchRows::common(polygon, fraction, &alternate_layer, origin)?
                     } else {
@@ -3937,6 +4033,7 @@ mod ownership_tests {
             ClassifiedRegions::new(layout, &fill, &fill, |_, _| Ok(()), &recipe, &cancel).unwrap();
         let owned_bytes = classified.retained_bytes();
         let layer = region::HatchLayer {
+            width_mm: recipe.bead_width_mm,
             z: 2.0 * h,
             lower_z: h,
             height: h,
@@ -4068,6 +4165,7 @@ mod skin_bridge_tests {
             vec![top.0[0].exterior().clone()],
         );
         let interior = InteriorRegion {
+            bead_width_mm: None,
             domain: MultiPolygon(vec![regional.clone()]),
             coverage: ProcessRegionCoverage {
                 material_domain: None,
@@ -4157,6 +4255,7 @@ mod skin_bridge_tests {
         let original = check(&mut probe, region::HatchAxis::Y, 0, 0).unwrap();
         assert!(!original.supported);
         let layer = region::HatchLayer {
+            width_mm: recipe.bead_width_mm,
             z: transition[2],
             lower_z: floor,
             height: transition[2] - floor,
@@ -4321,6 +4420,7 @@ mod split_skin_tests {
                     region::HatchAxis::X
                 };
                 let layer = region::HatchLayer {
+                    width_mm: recipe.bead_width_mm,
                     z: 0.4,
                     lower_z: 0.2,
                     height: 0.2,

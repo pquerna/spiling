@@ -1089,15 +1089,32 @@ impl ManufacturingIntent {
             ));
         }
         if let JobWorkflow::FixedDualMarlin { job } = &p.workflow {
+            for assignment in &job.assignments {
+                if let Some(interior) = &assignment.interior {
+                    let OccurrenceMaterial::Uniform { material_id } = &assignment.material else {
+                        unreachable!("validated uniform binding")
+                    };
+                    let tool = &job.tools
+                        [usize::from(job.resolve_tool(material_id, Some(&interior.tool_id))?)];
+                    if interior.bead_width_mm <= r.bead_width_mm
+                        || !tool.admits_deposition(interior.bead_width_mm, selected_height)
+                        || !self.admits_deposition(interior.bead_width_mm, selected_height)
+                    {
+                        return Err(invalid(
+                            "mixed interior width exceeds the captured common-height planning/tool envelope",
+                        ));
+                    }
+                }
+            }
             for (index, tool) in job.tools.iter().enumerate() {
                 let process = self.process_for_tool(Some(index as u8))?;
                 process.policy.validate_printer(p)?;
-                if !tool.admits_deposition(r.bead_width_mm, selected_height) {
+                if !tool.admits_deposition(tool.waste_bead_width_mm, selected_height) {
                     return Err(invalid(
                         "nominal routed waste bead exceeds captured tool/profile envelope",
                     ));
                 }
-                let area = ((r.bead_width_mm - selected_height) * selected_height
+                let area = ((tool.waste_bead_width_mm - selected_height) * selected_height
                     + std::f64::consts::PI * (selected_height * 0.5).powi(2))
                     * process.flow_multiplier;
                 for (speed_factor, flow_factor) in [

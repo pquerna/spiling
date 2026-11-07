@@ -101,8 +101,8 @@ pub(crate) fn validate_plan(
     let bed = intent.printer.build_envelope.min[2];
     let top = plan.layers.last().unwrap().z_mm;
     let waste = [
-        waste_bounds(job, 0, intent.recipe.bead_width_mm, top, bed)?,
-        waste_bounds(job, 1, intent.recipe.bead_width_mm, top, bed)?,
+        waste_bounds(job, 0, job.tools[0].waste_bead_width_mm, top, bed)?,
+        waste_bounds(job, 1, job.tools[1].waste_bead_width_mm, top, bed)?,
     ];
     if waste.iter().any(|bounds| {
         (0..2).any(|axis| {
@@ -136,7 +136,6 @@ pub(crate) fn validate_plan(
         }
         previous = layer.z_mm;
         let height = layer.z_mm - layer.lower_z_mm;
-        let width = intent.recipe.bead_width_mm;
         let mut present = [false; 2];
         for path in &layer.paths {
             check_cancel(cancel)?;
@@ -163,6 +162,7 @@ pub(crate) fn validate_plan(
             ));
         }
         for (index, tool) in job.tools.iter().enumerate() {
+            let width = tool.waste_bead_width_mm;
             let limits = &tool.deposition_limits;
             if !tool.admits_deposition(width, height)
                 || width < height
@@ -275,8 +275,8 @@ pub(crate) fn check_motion(
     );
     let bed = intent.printer.build_envelope.min[2];
     for mut obstacle in job.assignments.iter().map(|a| a.work_envelope_mm).chain([
-        waste_bounds(job, 0, intent.recipe.bead_width_mm, built_top, bed)?,
-        waste_bounds(job, 1, intent.recipe.bead_width_mm, built_top, bed)?,
+        waste_bounds(job, 0, job.tools[0].waste_bead_width_mm, built_top, bed)?,
+        waste_bounds(job, 1, job.tools[1].waste_bead_width_mm, built_top, bed)?,
     ]) {
         obstacle.max[2] = obstacle.max[2].min(built_top.next_up());
         if obstacle.min[2] <= obstacle.max[2]

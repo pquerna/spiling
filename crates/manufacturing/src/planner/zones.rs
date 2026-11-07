@@ -654,6 +654,7 @@ pub(super) fn partition(
             next.reserve_exact(target - next.len());
             if !outside.0.is_empty() {
                 next.push(InteriorRegion {
+                    bead_width_mm: None,
                     coverage: ProcessRegionCoverage {
                         material_domain: None,
                         area_mm2: outside.unsigned_area(),
@@ -733,6 +734,7 @@ pub(super) fn partition(
                     contribution.provenance = value.provenance;
                 }
                 next.push(InteriorRegion {
+                    bead_width_mm: None,
                     coverage: ProcessRegionCoverage {
                         material_domain: None,
                         area_mm2: eligible.unsigned_area(),
@@ -960,6 +962,7 @@ pub(super) fn partition(
                     contribution.provenance = zone.values[side].provenance;
                 }
                 next.push(InteriorRegion {
+                    bead_width_mm: None,
                     coverage: ProcessRegionCoverage {
                         material_domain: None,
                         area_mm2: piece.unsigned_area(),

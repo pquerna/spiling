@@ -686,6 +686,7 @@ mod tests {
         for axis in [region::HatchAxis::X, region::HatchAxis::Y] {
             for all_interface in [false, true] {
                 let layer = region::HatchLayer {
+                    width_mm: recipe.bead_width_mm,
                     z: recipe.layer_height_mm,
                     lower_z: 0.0,
                     height: recipe.layer_height_mm,
@@ -776,6 +777,7 @@ mod tests {
                     &interface,
                     1.0,
                     &region::HatchLayer {
+                        width_mm: recipe.bead_width_mm,
                         z: recipe.layer_height_mm,
                         lower_z: 0.0,
                         height: recipe.layer_height_mm,

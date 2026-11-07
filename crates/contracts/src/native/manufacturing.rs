@@ -2397,6 +2397,7 @@ fn validate_routed_tool(value: &FixedDualTool) -> Result<(), String> {
     if [
         value.nozzle_diameter_mm,
         value.filament_diameter_mm,
+        value.waste_bead_width_mm,
         value.max_feed_mm_s,
         value.max_volumetric_flow_mm3_s,
         value.retract_filament_mm,
@@ -2453,6 +2454,7 @@ impl TryFrom<rpc::FixedDualTool> for FixedDualTool {
             offset_xy_mm,
             nozzle_diameter_mm: value.nozzle_diameter_mm,
             filament_diameter_mm: value.filament_diameter_mm,
+            waste_bead_width_mm: value.waste_bead_width_mm,
             deposition_limits: required(value.deposition_limits, "tool deposition limits")?
                 .try_into()?,
             max_feed_mm_s: value.max_feed_mm_s,
@@ -2482,6 +2484,7 @@ impl TryFrom<FixedDualTool> for rpc::FixedDualTool {
             offset_xy_mm: value.offset_xy_mm.to_vec(),
             nozzle_diameter_mm: value.nozzle_diameter_mm,
             filament_diameter_mm: value.filament_diameter_mm,
+            waste_bead_width_mm: value.waste_bead_width_mm,
             deposition_limits: Some(value.deposition_limits.try_into()?),
             max_feed_mm_s: value.max_feed_mm_s,
             max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
@@ -2503,6 +2506,10 @@ impl TryFrom<rpc::OccurrenceMaterialAssignment> for OccurrenceMaterialAssignment
         let result = Self {
             occurrence_id: OccurrenceId::new(value.occurrence_id).map_err(|e| e.to_string())?,
             tool_id: value.tool_id,
+            interior: value.interior.map(|binding| InteriorToolBinding {
+                tool_id: binding.tool_id,
+                bead_width_mm: binding.bead_width_mm,
+            }),
             material: match required(value.material, "occurrence material")? {
                 rpc::occurrence_material_assignment::Material::Uniform(uniform) => {
                     routing_label(&uniform.material_id)?;
@@ -2539,6 +2546,10 @@ impl TryFrom<OccurrenceMaterialAssignment> for rpc::OccurrenceMaterialAssignment
         Ok(Self {
             occurrence_id: value.occurrence_id.get(),
             tool_id: value.tool_id,
+            interior: value.interior.map(|binding| rpc::InteriorToolBinding {
+                tool_id: binding.tool_id,
+                bead_width_mm: binding.bead_width_mm,
+            }),
             material: Some(match value.material {
                 OccurrenceMaterial::Uniform { material_id } => {
                     rpc::occurrence_material_assignment::Material::Uniform(
@@ -2977,6 +2988,12 @@ impl TryFrom<FixedDualVerification> for rpc::FixedDualVerification {
 }
 
 fn validate_assignment_bounds(value: &OccurrenceMaterialAssignment) -> Result<(), String> {
+    if let Some(binding) = &value.interior {
+        routing_label(&binding.tool_id)?;
+        if !binding.bead_width_mm.is_finite() || binding.bead_width_mm <= 0.0 {
+            return Err("invalid interior bead width".into());
+        }
+    }
     if let Some(id) = &value.tool_id {
         routing_label(id)?;
     }
@@ -3194,6 +3211,7 @@ mod fixed_dual_wire_tests {
         ))
         .unwrap();
         let tool = |index: usize| FixedDualTool {
+            waste_bead_width_mm: 0.45,
             material_profile: None,
             id: format!("tool-{index}"),
             feeder_id: format!("feeder-{index}"),
@@ -3236,6 +3254,7 @@ mod fixed_dual_wire_tests {
             functional_construction: None,
             assignments: (0..2)
                 .map(|index| OccurrenceMaterialAssignment {
+                    interior: None,
                     tool_id: None,
                     occurrence_id: OccurrenceId::new(index as u32 + 1).unwrap(),
                     material: OccurrenceMaterial::Uniform {

@@ -22,6 +22,7 @@ const tool = (index: 0 | 1): FixedDualTool => ({
   offset_xy_mm: index === 0 ? [0, 0] : [25, 0],
   nozzle_diameter_mm: 0.4,
   filament_diameter_mm: 1.75,
+  waste_bead_width_mm: single.recipe.bead_width_mm,
   deposition_limits: single.printer.deposition_limits,
   max_feed_mm_s: 150,
   max_volumetric_flow_mm3_s: 12,
@@ -76,12 +77,14 @@ const intent = {
           {
             occurrence_id: 1,
             tool_id: null,
+            interior: null,
             material: { kind: "uniform", material_id: "software-pla-a" },
             work_envelope_mm: { min: [19, 19, -1], max: [41, 31, 9] },
           },
           {
             occurrence_id: 2,
             tool_id: null,
+            interior: null,
             material: { kind: "uniform", material_id: "software-pla-b" },
             work_envelope_mm: { min: [119, 19, -1], max: [141, 31, 9] },
           },

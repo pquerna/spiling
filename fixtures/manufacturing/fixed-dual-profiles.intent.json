@@ -148,9 +148,9 @@
                   },
                   "source": {
                     "kind": "synthetic_test",
-                    "source_id": "fixed-dual-profiles.intent.ts",
+                    "source_id": "material-profile-test-source.txt",
                     "source_revision": "1",
-                    "source_hash": "883b1eaa92941d652997e2092ad5f5cf9aabeba3991c8654782a281dbfbf0111"
+                    "source_hash": "95c80eb53239470982522fdb2bcf56168a6fa279790d057fe2d62fdf1978d865"
                   }
                 },
                 "setup": {
@@ -181,6 +181,7 @@
             ],
             "nozzle_diameter_mm": 0.4,
             "filament_diameter_mm": 1.75,
+            "waste_bead_width_mm": 0.45,
             "deposition_limits": {
               "min_bead_width_mm": 0.3,
               "max_bead_width_mm": 0.75,
@@ -257,9 +258,9 @@
                   },
                   "source": {
                     "kind": "synthetic_test",
-                    "source_id": "fixed-dual-profiles.intent.ts",
+                    "source_id": "material-profile-test-source.txt",
                     "source_revision": "1",
-                    "source_hash": "883b1eaa92941d652997e2092ad5f5cf9aabeba3991c8654782a281dbfbf0111"
+                    "source_hash": "95c80eb53239470982522fdb2bcf56168a6fa279790d057fe2d62fdf1978d865"
                   }
                 },
                 "setup": {
@@ -290,6 +291,7 @@
             ],
             "nozzle_diameter_mm": 0.4,
             "filament_diameter_mm": 1.75,
+            "waste_bead_width_mm": 0.45,
             "deposition_limits": {
               "min_bead_width_mm": 0.3,
               "max_bead_width_mm": 0.75,
@@ -323,6 +325,7 @@
           {
             "occurrence_id": 1,
             "tool_id": "fixed-hotend-0",
+            "interior": null,
             "material": {
               "kind": "uniform",
               "material_id": "software-pla-a"
@@ -343,6 +346,7 @@
           {
             "occurrence_id": 2,
             "tool_id": "fixed-hotend-1",
+            "interior": null,
             "material": {
               "kind": "uniform",
               "material_id": "software-pla-a"
