@@ -1,0 +1,76 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
+
+use spiling_contracts::manufacturing::{FixedDualJob, FixedDualTool, OccurrenceMaterial};
+
+pub fn tool_reference(index: usize, tool: &FixedDualTool) -> String {
+    format!("T{index} · {:.2} mm nozzle", tool.nozzle_diameter_mm)
+}
+
+/// Only edits the caller's captured intent draft. Core/engine owns adoption and validation.
+pub fn routed_material_fields(ui: &mut egui::Ui, job: &mut FixedDualJob, writable: bool) {
+    super::group(ui, "Loaded tools");
+    for (index, tool) in job.tools.iter().enumerate() {
+        ui.push_id(("loaded-tool", &tool.id), |ui| {
+            ui.label(egui::RichText::new(tool_reference(index, tool)).strong())
+                .on_hover_text(&tool.id);
+            ui.label(&tool.material.id);
+            ui.weak(format!(
+                "{} · {}",
+                tool.material.revision, tool.material.polymer_family
+            ));
+        });
+    }
+    super::group(ui, "Part bindings");
+    let resolved: Vec<_> = job
+        .assignments
+        .iter()
+        .map(|a| match &a.material {
+            OccurrenceMaterial::Uniform { material_id } => {
+                job.resolve_tool(material_id, a.tool_id.as_deref()).ok()
+            }
+            _ => None,
+        })
+        .collect();
+    for (assignment, resolved) in job.assignments.iter_mut().zip(resolved) {
+        ui.push_id(("part-tool", assignment.occurrence_id), |ui| {
+            ui.label(format!("Part {}", assignment.occurrence_id.get()));
+            let constructed = job
+                .surface_constructions
+                .iter()
+                .any(|c| c.occurrence_id == assignment.occurrence_id)
+                || job
+                    .functional_construction
+                    .as_ref()
+                    .is_some_and(|c| c.occurrence_id == assignment.occurrence_id);
+            if constructed || !matches!(assignment.material, OccurrenceMaterial::Uniform { .. }) {
+                ui.weak("Source construction");
+                return;
+            }
+            ui.add_enabled_ui(writable, |ui| {
+                egui::ComboBox::from_id_salt("loaded-tool")
+                    .selected_text(resolved.map_or_else(
+                        || "Choose loaded tool".into(),
+                        |i| tool_reference(i as usize, &job.tools[i as usize]),
+                    ))
+                    .show_ui(ui, |ui| {
+                        for (index, tool) in job.tools.iter().enumerate() {
+                            if ui
+                                .selectable_label(
+                                    resolved == Some(index as u8),
+                                    tool_reference(index, tool),
+                                )
+                                .clicked()
+                            {
+                                assignment.tool_id = Some(tool.id.clone());
+                                assignment.material = OccurrenceMaterial::Uniform {
+                                    material_id: tool.material.id.clone(),
+                                };
+                            }
+                        }
+                    });
+            });
+        });
+    }
+}

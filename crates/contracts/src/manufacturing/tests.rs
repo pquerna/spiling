@@ -246,7 +246,7 @@ fn mechanical_capture_preserves_loaded_tool_flow_and_process_envelopes() {
     for change in 0..7 {
         let mut bad = value.clone();
         match change {
-            0 | 1 | 2 | 3 => {
+            0..=3 => {
                 let JobWorkflow::FixedDualMarlin { job } = &mut bad.printer.workflow else {
                     unreachable!()
                 };

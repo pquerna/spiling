@@ -21,6 +21,9 @@ pub use color::{ColorDensity, ColorInspector, ColorMeaning, ColorPresentation};
 pub use stock::{stock_results, stock_target};
 pub use surfaces::{close, group, help, pane_header, primary, problem};
 
+mod routing;
+pub use routing::{routed_material_fields, tool_reference};
+
 mod modifiers;
 pub use modifiers::{ModifierAction, modifier_row, resolved_value};
 

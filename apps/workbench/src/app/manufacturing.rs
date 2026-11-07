@@ -405,7 +405,6 @@ impl Workbench {
                     m.intent.clone(),
                     m.loaded.as_deref(),
                 );
-                self.functional_material_ui(ui, writable);
             }
             if section == 0 {
                 ui::group(ui, "Machine and plate");
@@ -419,8 +418,12 @@ impl Workbench {
             }
             if section == 1 {
                 self.material_ui(ui, writable);
+                ui.collapsing("Material region", |ui| {
+                    self.functional_material_ui(ui, writable)
+                });
             }
             if section == 2 {
+                self.functional_material_ui(ui, writable);
                 ui::group(ui, "Part modifiers");
                 if ui
                     .add_enabled(

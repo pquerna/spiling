@@ -44,6 +44,8 @@ const tool = (index: 0 | 1): FixedDualTool => ({
 });
 
 const intent = {
+  hardware: null,
+  material_profile: null,
   printer: {
     ...single.printer,
     id: "software-fixed-dual-marlin-reference",
@@ -72,11 +74,13 @@ const intent = {
         assignments: [
           {
             occurrence_id: 1,
+            tool_id: null,
             material: { kind: "uniform", material_id: "software-pla-a" },
             work_envelope_mm: { min: [19, 19, -1], max: [41, 31, 9] },
           },
           {
             occurrence_id: 2,
+            tool_id: null,
             material: { kind: "uniform", material_id: "software-pla-b" },
             work_envelope_mm: { min: [119, 19, -1], max: [141, 31, 9] },
           },

@@ -1970,6 +1970,7 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
     for (name, cylinder) in [
         ("cylinder-ribs", true),
         ("fixed-dual", false),
+        ("fixed-dual-shared-material", false),
         ("fixed-dual-cycle", false),
     ] {
         let host = Host::new(
@@ -1993,6 +1994,8 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
             decode_intent(
                 &std::fs::read(repo.join(if cylinder {
                     "fixtures/manufacturing/solid-fill.intent.json"
+                } else if name == "fixed-dual-shared-material" {
+                    "fixtures/manufacturing/fixed-dual-shared-material.intent.json"
                 } else if name == "fixed-dual-cycle" {
                     "fixtures/manufacturing/fixed-dual-cycle.intent.json"
                 } else {
@@ -2051,7 +2054,12 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
                 }
             });
         } else {
-            let s = wait(&host, |s| s.display.is_some());
+            let s = wait(&host, |s| {
+                s.display.as_ref().is_some_and(|d| {
+                    d.occurrences.len() == 1
+                        && s.scene.as_ref().is_some_and(|scene| d.same_revision(scene))
+                })
+            });
             let scene = s.scene.as_ref().unwrap();
             let o = &s.display.as_ref().unwrap().occurrences[0];
             let serial = s.serial;

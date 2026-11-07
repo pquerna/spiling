@@ -190,7 +190,18 @@ impl Workbench {
                     )
             })
         {
-            ui.weak("Loaded material declarations come from the complete fixed-dual intent. Region edits use Apply settings.");
+            let d = self
+                .manufacturing
+                .draft
+                .as_mut()
+                .expect("checked intent draft");
+            let conflict = d.revision != project.revision;
+            if conflict {
+                ui.weak("Project changed · draft retained");
+            }
+            if let JobWorkflow::FixedDualMarlin { job } = &mut d.value.printer.workflow {
+                ui::routed_material_fields(ui, job, writable && !conflict);
+            }
             return;
         }
         ui::group(ui, "Material and setup");

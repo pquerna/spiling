@@ -3291,6 +3291,35 @@ fn fixed_dual_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
 }
 
 #[test]
+fn same_formulation_keeps_independent_explicit_tool_ownership_in_actual_replay() {
+    let (mut intent, mut plan) = fixed_dual_fixture();
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    job.tools[1].material = job.tools[0].material.clone();
+    for (index, assignment) in job.assignments.iter_mut().enumerate() {
+        assignment.material = OccurrenceMaterial::Uniform {
+            material_id: job.tools[0].material.id.clone(),
+        };
+        assignment.tool_id = Some(job.tools[index].id.clone());
+    }
+    let cancel = AtomicBool::new(false);
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let report = verify(&program, &plan, &intent, &cancel).unwrap();
+    let routing = report.routing.unwrap();
+    assert!(
+        routing
+            .tools
+            .iter()
+            .all(|t| t.model_deposition_segments > 0)
+    );
+    let changed = program.replacen("T1 S1", "T0 S1", 1);
+    assert_ne!(program, changed);
+    assert!(verify(&changed, &plan, &intent, &cancel).is_err());
+}
+
+#[test]
 fn fixed_dual_actual_epochs_repay_feeders_and_separate_waste_from_model() {
     fixed_dual_golden(None);
 }

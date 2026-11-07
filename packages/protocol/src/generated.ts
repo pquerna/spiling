@@ -674,7 +674,12 @@ declaration_hash: SourceHash, polymer_family: string, };
 
 export type OccurrenceMaterial = { "kind": "uniform", material_id: string, } | { "kind": "layer_cycle", recipe: LayerCycle, material_ids: [string, string], };
 
-export type OccurrenceMaterialAssignment = { occurrence_id: OccurrenceId, material: OccurrenceMaterial, work_envelope_mm: AabbMm, };
+export type OccurrenceMaterialAssignment = { occurrence_id: OccurrenceId,
+/**
+ * Explicit loaded tool for a uniform assignment. Null requires unambiguous
+ * loaded material identity; material-domain/cycle routing owns its selection.
+ */
+tool_id: string | null, material: OccurrenceMaterial, work_envelope_mm: AabbMm, };
 
 export type FixedDualConfiguration = "marlin2125_native_fixed_hotends";
 

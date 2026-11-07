@@ -2483,6 +2483,7 @@ impl TryFrom<rpc::OccurrenceMaterialAssignment> for OccurrenceMaterialAssignment
     fn try_from(value: rpc::OccurrenceMaterialAssignment) -> Result<Self, String> {
         let result = Self {
             occurrence_id: OccurrenceId::new(value.occurrence_id).map_err(|e| e.to_string())?,
+            tool_id: value.tool_id,
             material: match required(value.material, "occurrence material")? {
                 rpc::occurrence_material_assignment::Material::Uniform(uniform) => {
                     routing_label(&uniform.material_id)?;
@@ -2518,6 +2519,7 @@ impl TryFrom<OccurrenceMaterialAssignment> for rpc::OccurrenceMaterialAssignment
         validate_assignment_bounds(&value)?;
         Ok(Self {
             occurrence_id: value.occurrence_id.get(),
+            tool_id: value.tool_id,
             material: Some(match value.material {
                 OccurrenceMaterial::Uniform { material_id } => {
                     rpc::occurrence_material_assignment::Material::Uniform(
@@ -2956,6 +2958,9 @@ impl TryFrom<FixedDualVerification> for rpc::FixedDualVerification {
 }
 
 fn validate_assignment_bounds(value: &OccurrenceMaterialAssignment) -> Result<(), String> {
+    if let Some(id) = &value.tool_id {
+        routing_label(id)?;
+    }
     value
         .work_envelope_mm
         .validate()
@@ -2976,6 +2981,21 @@ fn validate_assignment_bounds(value: &OccurrenceMaterialAssignment) -> Result<()
 #[cfg(test)]
 mod fixed_dual_wire_tests {
     use super::*;
+
+    #[test]
+    fn explicit_same_material_tool_bindings_round_trip() {
+        let mut domain = job();
+        domain.tools[1].material = domain.tools[0].material.clone();
+        for (index, assignment) in domain.assignments.iter_mut().enumerate() {
+            assignment.material = OccurrenceMaterial::Uniform {
+                material_id: domain.tools[0].material.id.clone(),
+            };
+            assignment.tool_id = Some(domain.tools[index].id.clone());
+        }
+        domain.validate_declaration().unwrap();
+        let wire: rpc::FixedDualJob = domain.clone().try_into().unwrap();
+        assert_eq!(FixedDualJob::try_from(wire).unwrap(), domain);
+    }
 
     #[test]
     fn functional_native_round_trip_and_strict_presence_dimensions_and_source() {
@@ -3196,6 +3216,7 @@ mod fixed_dual_wire_tests {
             functional_construction: None,
             assignments: (0..2)
                 .map(|index| OccurrenceMaterialAssignment {
+                    tool_id: None,
                     occurrence_id: OccurrenceId::new(index as u32 + 1).unwrap(),
                     material: OccurrenceMaterial::Uniform {
                         material_id: format!("material-{index}"),

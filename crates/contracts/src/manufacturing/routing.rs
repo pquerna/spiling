@@ -256,6 +256,10 @@ impl OccurrenceMaterial {
 #[serde(deny_unknown_fields)]
 pub struct OccurrenceMaterialAssignment {
     pub occurrence_id: OccurrenceId,
+    /// Explicit loaded tool for a uniform assignment. Null requires unambiguous
+    /// loaded material identity; material-domain/cycle routing owns its selection.
+    #[serde(deserialize_with = "required_option")]
+    pub tool_id: Option<String>,
     pub material: OccurrenceMaterial,
     pub work_envelope_mm: AabbMm,
 }
@@ -330,10 +334,16 @@ impl FixedDualJob {
             || self.tools[1].offset_xy_mm == [0.0, 0.0]
             || self.tools[0].id == self.tools[1].id
             || self.tools[0].feeder_id == self.tools[1].feeder_id
-            || self.tools[0].material.id == self.tools[1].material.id
         {
             return Err(invalid(
-                "fixed-dual routing requires distinct tools, feeders and materials, with tool zero as the offset origin",
+                "fixed-dual routing requires distinct tools and feeders, with tool zero as the offset origin",
+            ));
+        }
+        if self.tools[0].material.id == self.tools[1].material.id
+            && self.tools[0].material != self.tools[1].material
+        {
+            return Err(invalid(
+                "the same material identity has conflicting loaded declarations",
             ));
         }
         for tool in &self.tools {
@@ -401,13 +411,32 @@ impl FixedDualJob {
             finite_box(&assignment.work_envelope_mm)?;
             match &assignment.material {
                 OccurrenceMaterial::Uniform { material_id } => {
-                    self.tool_for_material(material_id)?;
+                    self.resolve_tool(material_id, assignment.tool_id.as_deref())?;
                 }
                 OccurrenceMaterial::LayerCycle { material_ids, .. } => {
+                    if assignment.tool_id.is_some() {
+                        return Err(invalid("a material cycle cannot pin one uniform tool"));
+                    }
                     for material_id in material_ids {
                         self.tool_for_material(material_id)?;
                     }
                 }
+            }
+        }
+        for assignment in &self.assignments {
+            if assignment.tool_id.is_some()
+                && (self
+                    .surface_constructions
+                    .iter()
+                    .any(|c| c.occurrence_id == assignment.occurrence_id)
+                    || self
+                        .functional_construction
+                        .as_ref()
+                        .is_some_and(|c| c.occurrence_id == assignment.occurrence_id))
+            {
+                return Err(invalid(
+                    "material constructions retain their own tool bindings",
+                ));
             }
         }
         for (index, construction) in self.surface_constructions.iter().enumerate() {
@@ -461,11 +490,31 @@ impl FixedDualJob {
     }
 
     pub fn tool_for_material(&self, material_id: &str) -> Result<u8, ManufacturingError> {
-        self.tools
-            .iter()
-            .position(|tool| tool.material.id == material_id)
-            .map(|index| index as u8)
-            .ok_or_else(|| invalid("routed material is not loaded in either declared feeder"))
+        self.resolve_tool(material_id, None)
+    }
+
+    /// Resolve a captured explicit tool, or require exactly one material owner.
+    /// Never choose the first loaded copy of a formulation.
+    pub fn resolve_tool(
+        &self,
+        material_id: &str,
+        tool_id: Option<&str>,
+    ) -> Result<u8, ManufacturingError> {
+        if let Some(id) = tool_id {
+            label(id)?;
+        }
+        let mut found = None;
+        for (index, tool) in self.tools.iter().enumerate() {
+            if tool.material.id == material_id
+                && tool_id.is_none_or(|id| tool.id == id)
+                && found.replace(index as u8).is_some()
+            {
+                return Err(invalid(
+                    "material is loaded in multiple tools; an explicit tool binding is required",
+                ));
+            }
+        }
+        found.ok_or_else(|| invalid("the selected tool does not contain the captured material"))
     }
 
     /// Bind the complete projected bead to one authored exclusive reservation.
@@ -566,10 +615,11 @@ impl FixedDualJob {
                 "constructed model bead has no material-domain owner",
             ));
         }
-        self.tool_for_material(
+        self.resolve_tool(
             assignment
                 .material
                 .material_id_for_interval(path.physical_z_mm)?,
+            assignment.tool_id.as_deref(),
         )
     }
 
@@ -707,6 +757,46 @@ mod uniform_family_tests {
         };
         let job = job.clone();
         (intent.printer, job)
+    }
+
+    #[test]
+    fn identical_formulation_on_two_tools_requires_exact_uniform_bindings() {
+        let (printer, mut job) = captured(UNIFORM);
+        job.tools[1].material = job.tools[0].material.clone();
+        for (index, assignment) in job.assignments.iter_mut().enumerate() {
+            assignment.material = OccurrenceMaterial::Uniform {
+                material_id: job.tools[0].material.id.clone(),
+            };
+            assignment.tool_id = Some(job.tools[index].id.clone());
+        }
+        job.validate(&printer).unwrap();
+        assert_eq!(job.tool_for_path(&bead(&job.assignments[0])).unwrap(), 0);
+        assert_eq!(job.tool_for_path(&bead(&job.assignments[1])).unwrap(), 1);
+        assert!(job.tool_for_material(&job.tools[0].material.id).is_err());
+        let mut invalid = job.clone();
+        invalid.assignments[1].tool_id = None;
+        assert!(invalid.validate(&printer).is_err());
+        let mut invalid = job.clone();
+        invalid.assignments[1].tool_id = Some("missing".into());
+        assert!(invalid.validate(&printer).is_err());
+        let mut invalid = job.clone();
+        invalid.tools[1].material.revision = "different".into();
+        assert!(invalid.validate(&printer).is_err());
+        let mut invalid = job;
+        invalid.assignments[1].material = OccurrenceMaterial::Uniform {
+            material_id: "foreign".into(),
+        };
+        assert!(invalid.validate(&printer).is_err());
+    }
+
+    #[test]
+    fn uniform_tool_binding_is_strict_persisted_content() {
+        let mut json: serde_json::Value = serde_json::from_str(UNIFORM).unwrap();
+        json["printer"]["workflow"]["job"]["assignments"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("tool_id");
+        assert!(serde_json::from_value::<ManufacturingIntent>(json).is_err());
     }
 
     fn uniform(mixed: bool, bases: &[usize]) -> (PrinterSpecification, FixedDualJob) {

@@ -216,6 +216,8 @@ message LayerCycleOccurrenceMaterial {
 }
 message OccurrenceMaterialAssignment {
   uint32 occurrence_id = 1;
+  // Required for ambiguous uniform loading; cycles/constructions retain their own bindings.
+  optional string tool_id = 6;
   reserved 2;
   AabbMm work_envelope_mm = 3;
   // Required: omission and unknown alternatives are rejected by adapters.
