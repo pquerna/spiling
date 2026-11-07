@@ -325,7 +325,7 @@ In the component gallery compare all densities, declared-name precedence, white/
 ## Material authority and qualification
 
 [ADR005](../adr/ADR005-native-first-development-geometry.md) adopts the implemented
-source21/planner63 DEVELOPMENT route: one imported SolidCore BREP, exact
+source21/planner64 DEVELOPMENT route: one imported SolidCore BREP, exact
 kernel/tolerance binding, original STEP identity/provenance and original finish
 inputs. Qualify preserved operators with the actual coherent producer; do not
 relabel source5/planner24 reports or transfer older runtime evidence.
@@ -611,6 +611,8 @@ Read-only inspection permits selection, never structural edits. Recreate old
 single-job development roots; missing layout records are not migrated.
 
 ### Fixed-dual software job
+
+`tools/smoke-mixed-tools.mjs` consumes adjacent coherent debug engine/CLI binaries without building. Run it sequentially under the native resource bounds. Its default case exercises same-formulation explicit tool bindings; `SPILING_MIXED_INTENT=fixed-dual-profiles` additionally exercises addressed per-tool process resolution and saved return. Evidence stays under `.cache/mixed-tools-*`. Native Material exposes loaded tools, part bindings and the existing per-tool profile editor; actual-window evidence remains separate from headless replay.
 
 Use two upright occurrences of the same committed box, not a global layer-color
 instruction. The first receipt supplies the immutable definition ID for `--add`:

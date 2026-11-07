@@ -2728,7 +2728,7 @@ fn admission_error(
 
 pub(in crate::planner) fn object_volumes(
     layers: &mut [PrintLayer],
-    recipe: &PlanarPrintRecipe,
+    intent: &ManufacturingIntent,
 ) -> Result<(), ManufacturingError> {
     for layer in layers {
         layer.region_coverage.nominal_deposition_volume_mm3 = layer
@@ -2736,8 +2736,14 @@ pub(in crate::planner) fn object_volumes(
             .iter()
             .filter(|path| !support_role(path.kind))
             .try_fold(0.0, |sum, path| {
+                let process = intent.process_for_path(path)?;
                 Ok::<_, ManufacturingError>(
-                    sum + region::nominal_volume(path, layer.index, recipe)?,
+                    sum + region::nominal_volume_with_process(
+                        path,
+                        layer.index,
+                        process.flow_multiplier,
+                        process.policy,
+                    )?,
                 )
             })?;
     }

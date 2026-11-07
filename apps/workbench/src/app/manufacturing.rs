@@ -247,9 +247,10 @@ impl Workbench {
             ui.label("Unapplied changes · compile uses committed settings");
         }
         match self.manufacturing.prepare_section {
-            1 if self
-                .material
-                .has_changes(&project.project_id, m.intent.as_deref()) =>
+            1 if self.material.tool_id.is_some()
+                || self
+                    .material
+                    .has_changes(&project.project_id, m.intent.as_deref()) =>
             {
                 self.material_actions(ui);
                 return;

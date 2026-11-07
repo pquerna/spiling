@@ -554,7 +554,7 @@ pub(super) fn combine(
         }
         first = last + 1;
     }
-    support::object_volumes(&mut plan.layers, recipe)?;
+    support::object_volumes(&mut plan.layers, intent)?;
     Ok(())
 }
 

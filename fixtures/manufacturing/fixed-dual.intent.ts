@@ -8,6 +8,7 @@ import single from "./solid-fill.intent.ts";
 // [20,20,0] and [120,20,0]. No actual printer, measured color or adhesion claim.
 const tool = (index: 0 | 1): FixedDualTool => ({
   id: `fixed-hotend-${index}`,
+  material_profile: null,
   feeder_id: `direct-feeder-${index}`,
   material: {
     id: index === 0 ? "software-pla-a" : "software-pla-b",

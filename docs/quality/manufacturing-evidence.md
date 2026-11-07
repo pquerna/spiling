@@ -66,6 +66,11 @@ Enabled finishes/process constructions, supports, coarse bands and fixtures refu
 first route. Original single-tool operator evidence retains its producer/input identity;
 the routing increment does not requalify every historical geometry journey.
 
+The same-formulation fixed-dual reference keeps equal nozzle diameters and the existing separated-source envelope. `tools/smoke-mixed-tools.mjs` exercises explicit per-occurrence tool bindings through actual CLI/engine compilation, source/declaration-deleted saved return, fresh replay/export and ambiguous-binding refusal. The native Material surface edits those captured bindings in the existing settings draft. This does not qualify mixed diameters or same-part mixed-width construction.
+
+The equal-diameter `fixed-dual-profiles` reference captures independent tool feeds, first-layer speed factors, queued fans and hotend targets. Run `SPILING_MIXED_INTENT=fixed-dual-profiles node --experimental-strip-types tools/smoke-mixed-tools.mjs` with coherent binaries and external process bounds. It also exercises addressed profile resolution/history before source/profile-deleted fresh replay/export. The independent numeric replay test varies flow factors and rejects a swapped model feed and excessive active-tool flow. Shared bed/cooling disagreement, changed material/nozzle and unsupported regional bridge spans remain explicit refusals.
+
+
 The [engine G-code comparison](gcode-parity.md) independently audits a bounded
 analytic cube matrix against a versioned mature slicer. It retains explicit
 refusals and unresolved process/material differences; reference agreement is
@@ -496,8 +501,8 @@ Source-bound planar surface color is exercised through the real CLI on the commi
 
 Retained optical studies apply through typed Core/engine/client/CLI transactions with complete accepted report/selection and explicit two-material evidence/declaration bindings. Queued cancellation and stale revisions preserve the committed project; ACK commits one revision without changing SceneRevision or publishing scene artifacts. Both native source workflows exercise application, physical depth/history edits, changed-pose reassessment and source/palette/study-deleted fresh verification/export. Inspection distinguishes the small requested patch from complete realized side exposure and reuses the existing model with captured evidence; it does not reuse the requested prediction as a printed outcome. Unknown evidence/conditions remain unassessed and backing optics remain unmodelled. The native Review panel supports source-hidden actual replay and catalog metadata tint by decoded tool, plus requested/realized inspection and fresh four-file export. The native window can consume a CLI-produced recovered project; local hardware evidence does not qualify other GPUs/platforms or physical color.
 
-Current identities are project10/manufacturing11/process3/surface3, source21/planner63,
-emitter11/verifier23 and SPLR6; executable constants and exact native pins remain authoritative.
+Current identities are project10/manufacturing11/process3/surface3, source21/planner64,
+emitter12/verifier24 and SPLR6; executable constants and exact native pins remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
 Raw inspection, an older producer's successful job or historical hardware
@@ -701,5 +706,3 @@ and protected-hole coupons, roofs/bridges and support removal against fixed tole
 retain failures and raw measurements. Check prime/travel/hop/park clearance and shutdown
 on actual firmware. Replay proves no sensor truth, airflow, swept-tool collision freedom
 or bead physics. No execution connector or software report grants permission to print.
-
-The same-formulation fixed-dual reference keeps equal nozzle diameters and the existing separated-source envelope. `tools/smoke-mixed-tools.mjs` exercises explicit per-occurrence tool bindings through actual CLI/engine compilation, source/declaration-deleted saved return, fresh replay/export and ambiguous-binding refusal. The native Material surface edits those captured bindings in the existing settings draft. This does not qualify mixed diameters or same-part mixed-width construction.

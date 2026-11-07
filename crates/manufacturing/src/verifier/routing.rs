@@ -552,15 +552,16 @@ impl<'a> RouteState<'a> {
                 }
                 let length = distance(from, actual);
                 let height = layer.z_mm - layer.lower_z_mm;
-                let speed = self.recipe.print_speed_mm_s
+                let process = intent.process_for_tool(Some(self.active))?;
+                let speed = process.speed_mm_s
                     * if self.layer == 0 {
-                        self.recipe.process.first_layer_speed_factor
+                        process.policy.first_layer_speed_factor
                     } else {
                         1.0
                     };
-                let flow = self.recipe.flow_multiplier
+                let flow = process.flow_multiplier
                     * if self.layer == 0 {
-                        self.recipe.process.first_layer_flow_factor
+                        process.policy.first_layer_flow_factor
                     } else {
                         1.0
                     };
@@ -580,7 +581,7 @@ impl<'a> RouteState<'a> {
                         > E_HALF_STEP + arithmetic_slack(self.expected_e)
                     || (feed - speed * 60.0).abs() > F_HALF_STEP + arithmetic_slack(feed)
                     || feed / 60.0 > intent.printer.max_feed_mm_s
-                    || area * speed > intent.effective_max_volumetric_flow_mm3_s()
+                    || area * speed > process.max_volumetric_flow_mm3_s
                 {
                     return Err(failed(
                         "waste quantity, E8 volume, flow or speed differs from declared supported strip",

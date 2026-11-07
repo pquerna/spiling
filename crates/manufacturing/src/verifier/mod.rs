@@ -775,12 +775,13 @@ pub(crate) fn verify_actual(
             layer_nominal_volume = 0.0;
             layer_support_volume = 0.0;
         }
+        let process = intent.process_for_tool(source_tool)?;
         let wanted_fan = if deposition_kind == DepositionKind::Bridge {
-            recipe.process.bridge_fan_pwm
+            process.policy.bridge_fan_pwm
         } else if layer_index == 0 {
-            recipe.process.fan_first_layers
+            process.policy.fan_first_layers
         } else {
-            recipe.process.fan_after_first_layers
+            process.policy.fan_after_first_layers
         };
         if fan_state != Some(wanted_fan) {
             return Err(failed(
@@ -858,15 +859,15 @@ pub(crate) fn verify_actual(
         }
         max_position_error_mm = max_position_error_mm.max(distance(position, target));
         let feed = decoded.fields[4].ok_or_else(|| failed("missing feed"))?;
-        let mut process_speed = recipe.print_speed_mm_s;
-        let mut process_flow = recipe.flow_multiplier;
+        let mut process_speed = process.speed_mm_s;
+        let mut process_flow = process.flow_multiplier;
         if layer_index == 0 {
-            process_speed *= recipe.process.first_layer_speed_factor;
-            process_flow *= recipe.process.first_layer_flow_factor;
+            process_speed *= process.policy.first_layer_speed_factor;
+            process_flow *= process.policy.first_layer_flow_factor;
         }
         if deposition_kind == DepositionKind::Bridge {
-            process_speed *= recipe.process.bridge_speed_factor;
-            process_flow *= recipe.process.bridge_flow_factor;
+            process_speed *= process.policy.bridge_speed_factor;
+            process_flow *= process.policy.bridge_flow_factor;
         }
         let volume_per_mm = association.map_or(0.0, |association| {
             let height = association.physical_z[1] - association.physical_z[0];
@@ -1054,15 +1055,14 @@ pub(crate) fn verify_actual(
             // differs from its ideal by at most two XYZ rounding-vector norms.
             let position_delta_bound =
                 2.0 * 3.0_f64.sqrt() * XYZ_HALF_STEP + arithmetic_slack(nominal_length);
-            let rounding_flow_slack = (intent.effective_max_volumetric_flow_mm3_s()
-                * position_delta_bound
+            let rounding_flow_slack = (process.max_volumetric_flow_mm3_s * position_delta_bound
                 + 2.0 * E_HALF_STEP * filament_area * speed)
                 / length
                 + volume_per_mm * F_HALF_STEP / 60.0;
             if !flow.is_finite()
                 || !rounding_flow_slack.is_finite()
                 || flow
-                    > intent.effective_max_volumetric_flow_mm3_s()
+                    > process.max_volumetric_flow_mm3_s
                         + rounding_flow_slack
                         + arithmetic_slack(flow)
             {

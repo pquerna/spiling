@@ -14,12 +14,32 @@ pub(super) struct MaterialUi {
     ignored_nonce: Option<u64>,
     draft: Option<MaterialDraft>,
     catalog: catalog::CatalogUi,
+    pub(super) tool_id: Option<String>,
 }
 struct MaterialDraft {
     revision: ProjectRevision,
     nonce: u64,
     original: MaterialProfileSelection,
     value: MaterialProfileSelection,
+}
+fn captured_selection<'a>(
+    intent: Option<&'a ManufacturingIntent>,
+    tool_id: Option<&str>,
+) -> Option<&'a MaterialProfileSelection> {
+    let intent = intent?;
+    if let Some(id) = tool_id {
+        let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow else {
+            return None;
+        };
+        job.tools
+            .iter()
+            .find(|tool| tool.id == id)?
+            .material_profile
+            .as_ref()
+            .map(|p| &p.selection)
+    } else {
+        intent.material_profile.as_ref().map(|p| &p.selection)
+    }
 }
 impl MaterialUi {
     fn stage_reviewed(
@@ -43,6 +63,7 @@ impl MaterialUi {
     pub(super) fn discard(&mut self, nonce: Option<u64>) {
         self.ignored_nonce = nonce;
         self.draft = None;
+        self.tool_id = None;
     }
 
     pub(super) fn has_changes(
@@ -52,10 +73,7 @@ impl MaterialUi {
     ) -> bool {
         self.identity.as_ref().is_some_and(|(id, _)| id == project)
             && self.draft.as_ref().is_some_and(|d| {
-                intent
-                    .and_then(|i| i.material_profile.as_ref())
-                    .map(|p| &p.selection)
-                    != Some(&d.value)
+                captured_selection(intent, self.tool_id.as_deref()) != Some(&d.value)
             })
     }
     pub(super) fn pending_loaded(
@@ -114,12 +132,16 @@ impl Workbench {
         else {
             return;
         };
-        let m = self.state.manufacturing.clone();
-        let captured = m
-            .intent
+        if !self
+            .material
+            .identity
             .as_ref()
-            .and_then(|i| i.material_profile.as_ref())
-            .map(|p| &p.selection);
+            .is_some_and(|(id, session)| id == &project.project_id && session == &hello.session_id)
+        {
+            return;
+        }
+        let m = self.state.manufacturing.clone();
+        let captured = captured_selection(m.intent.as_deref(), self.material.tool_id.as_deref());
         let pending_intent = self.manufacturing.pending_loaded(m.loaded.as_deref())
             || self
                 .manufacturing
@@ -150,15 +172,24 @@ impl Workbench {
         };
         if changed && ui::primary(ui, "Apply profile", disabled) {
             self.queued_manufacturing = Some(ManufacturingCommand::ApplyMaterialProfile {
+                tool_id: self.material.tool_id.clone(),
                 layout_id: project.layout_id.clone(),
                 session_id: hello.session_id.clone(),
                 base_revision: d.revision,
                 selection: d.value.clone(),
             });
         }
-        if ui.button("Discard profile draft").clicked() {
+        if ui
+            .button(if changed {
+                "Discard profile draft"
+            } else {
+                "Close profile"
+            })
+            .clicked()
+        {
             self.material.ignored_nonce = m.loaded_material.as_ref().map(|l| l.nonce);
             self.material.draft = None;
+            self.material.tool_id = None;
         }
     }
     pub(super) fn material_ui(&mut self, ui: &mut egui::Ui, writable: bool) {
@@ -167,11 +198,7 @@ impl Workbench {
             return;
         };
         let m = self.state.manufacturing.clone();
-        let captured = m
-            .intent
-            .as_ref()
-            .and_then(|i| i.material_profile.as_ref())
-            .map(|p| &p.selection);
+        let captured = captured_selection(m.intent.as_deref(), self.material.tool_id.as_deref());
         self.material.sync(
             &project.project_id,
             &hello.session_id,
@@ -179,9 +206,15 @@ impl Workbench {
             m.loaded_material.as_deref(),
             captured,
         );
-        if !self
-            .material
-            .has_changes(&project.project_id, m.intent.as_deref())
+        if self.material.tool_id.is_none()
+            && !self.material.pending_loaded(
+                &project.project_id,
+                &hello.session_id,
+                m.loaded_material.as_deref(),
+            )
+            && !self
+                .material
+                .has_changes(&project.project_id, m.intent.as_deref())
             && self.manufacturing.draft.as_ref().is_some_and(|d| {
                 d.project == project.project_id
                     && matches!(
@@ -202,13 +235,49 @@ impl Workbench {
             if let JobWorkflow::FixedDualMarlin { job } = &mut d.value.printer.workflow {
                 ui::routed_material_fields(ui, job, writable && !conflict);
             }
+            let settings_changed = m.intent.as_deref() != Some(&d.value);
+            if let JobWorkflow::FixedDualMarlin { job } = &d.value.printer.workflow {
+                ui::group(ui, "Tool profiles");
+                ui.add_enabled_ui(writable && !conflict && !settings_changed, |ui| {
+                    for (index, tool) in job.tools.iter().enumerate() {
+                        ui.push_id(("tool-profile", &tool.id), |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(format!("T{index}"));
+                                if tool.material_profile.is_some()
+                                    && ui.button("Edit profile").clicked()
+                                {
+                                    self.material.tool_id = Some(tool.id.clone());
+                                    self.material.draft = None;
+                                }
+                                if ui.button("Load profile…").clicked() {
+                                    self.material.tool_id = Some(tool.id.clone());
+                                    self.material.draft = None;
+                                    self.queued = Some(Action::LoadMaterial);
+                                }
+                            });
+                        });
+                    }
+                });
+                if settings_changed {
+                    ui.weak("Apply or discard settings before editing a tool profile");
+                }
+            }
             return;
         }
+        if let Some(tool) = &self.material.tool_id {
+            ui.label(egui::RichText::new(format!("Tool profile · {tool}")).strong());
+            if self.material.draft.is_none() && ui.button("Back to loaded tools").clicked() {
+                self.material.tool_id = None;
+                return;
+            }
+        }
         ui::group(ui, "Material and setup");
-        if ui.button("Choose filament").clicked() {
+        if self.material.tool_id.is_none() && ui.button("Choose filament").clicked() {
             self.choose_filament();
         }
-        self.button(ui, Action::LoadMaterialCatalog);
+        if self.material.tool_id.is_none() {
+            self.button(ui, Action::LoadMaterialCatalog);
+        }
         ui.collapsing("Load a single profile", |ui| {
             self.button(ui, Action::LoadMaterial);
         });

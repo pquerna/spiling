@@ -4281,6 +4281,7 @@ fn material_capture_is_required_nullable_and_typed_profile_adapters_reject_unkno
     bad.setup.as_mut().unwrap().abrasion_resistant_nozzle = None;
     assert!(MaterialProfileSelection::try_from(bad).is_err());
     let command = ManufacturingCommand::ApplyMaterialProfile {
+        tool_id: None,
         layout_id: crate::project::PrintLayoutId::new(),
         session_id: SessionId::new(),
         base_revision: crate::project::ProjectRevision(5),

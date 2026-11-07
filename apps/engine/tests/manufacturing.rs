@@ -2895,6 +2895,7 @@ async fn material_review_is_nonmutating_and_stale_selection_cannot_commit() {
     assert_ne!(edited_state.0.revision, report.input_revision);
     let error = client
         .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+            tool_id: None,
             layout_id: current_layout(&client).await,
             session_id,
             base_revision: report.input_revision,

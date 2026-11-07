@@ -69,11 +69,9 @@ const created = await invoke("create", [
   "1",
   JSON.stringify({ translation_mm: [20, 20, 0], rotation_xyzw: [0, 0, 0, 1] }),
 ]);
+const intentName = process.env.SPILING_MIXED_INTENT ?? "fixed-dual-shared-material";
 const intent = JSON.parse(
-  await readFile(
-    join(root, "fixtures/manufacturing/fixed-dual-shared-material.intent.json"),
-    "utf8",
-  ),
+  await readFile(join(root, `fixtures/manufacturing/${intentName}.intent.json`), "utf8"),
 );
 const intentFile = join(output, "intent.json");
 await writeFile(intentFile, JSON.stringify(intent));
@@ -93,6 +91,44 @@ await invoke("compile", [
   originalExport,
   "--save",
 ]);
+if (intent.printer.workflow.job.tools[0].material_profile) {
+  const selected = structuredClone(intent.printer.workflow.job.tools[0].material_profile.selection);
+  selected.overrides.print_speed_mm_s = 27;
+  const profileFile = join(output, "tool-profile.json");
+  await writeFile(profileFile, JSON.stringify(selected));
+  // Exercise engine resolution and ordinary persistent history, not just full-intent ingest.
+  await invoke("profile-history", [
+    "edit",
+    project,
+    "--tool-profile",
+    intent.printer.workflow.job.tools[0].id,
+    profileFile,
+    "--undo",
+    "--redo",
+    "--compile",
+    "--verify",
+    "--save",
+  ]);
+  await unlink(profileFile);
+  const changed = await invoke("profile-capture", ["inspect", project]);
+  assert.equal(
+    changed.manufacturing.intent.printer.workflow.job.tools[0].material_profile.selection.overrides
+      .print_speed_mm_s,
+    27,
+  );
+  assert.deepEqual(
+    changed.manufacturing.intent.printer.workflow.job.tools[1],
+    intent.printer.workflow.job.tools[1],
+  );
+  // Original export above predates the intentional process edit; compare the captured revision.
+  await invoke("profile-export", [
+    "inspect",
+    project,
+    "--verify",
+    "--manufacturing-out",
+    join(output, "profile-export"),
+  ]);
+}
 await unlink(source);
 await unlink(intentFile);
 const replay = join(output, "actual.splr"),
@@ -128,11 +164,33 @@ for (let i = 0; i < decoded.eventCount; i++) {
     expected,
     `actual model endpoint assigned to wrong same-material tool: ${point}`,
   );
+  const selected = job.tools[tool].material_profile?.selection;
+  if (selected) {
+    const profile = selected.profile,
+      policy = selected.overrides.process ?? profile.process;
+    const base = selected.overrides.print_speed_mm_s ?? profile.print_speed_mm_s;
+    const layer = decoded.layer(i);
+    const speed =
+      base *
+      (layer === 0 ? policy.first_layer_speed_factor : 1) *
+      (decoded.kind(i) === 8 ? policy.bridge_speed_factor : 1);
+    assert.ok(
+      Math.abs(decoded.feed(i) - speed * 60) < 0.000002,
+      `tool${tool} actual model feed must consume its capture`,
+    );
+  }
   counts[tool]++;
 }
 assert.ok(counts.every((n) => n > 0));
 assert.deepEqual(
-  await readFile(join(originalExport, "program.gcode")),
+  await readFile(
+    join(
+      intent.printer.workflow.job.tools[0].material_profile
+        ? join(output, "profile-export")
+        : originalExport,
+      "program.gcode",
+    ),
+  ),
   await readFile(join(recoveredExport, "program.gcode")),
 );
 assert.equal(

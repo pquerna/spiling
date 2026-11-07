@@ -57,15 +57,15 @@ fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan)
     plan.native_geometry
         .source_feature_coverage
         .disjoint_source_layer_count = plan.layers.len() as u32;
-    let r = &intent.recipe;
     for layer in &mut plan.layers {
         let mut object = 0.0;
         let mut support = 0.0;
         for path in &layer.paths {
+            let process = intent.process_for_path(path).unwrap();
             let height = path.height_mm();
-            let flow = r.flow_multiplier
+            let flow = process.flow_multiplier
                 * if layer.index == 0 {
-                    r.process.first_layer_flow_factor
+                    process.policy.first_layer_flow_factor
                 } else {
                     1.0
                 };
@@ -79,7 +79,7 @@ fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan)
                     distance(edge.points_mm[0], edge.points_mm[1])
                         * area
                         * if path.kind == DepositionKind::Bridge {
-                            r.process.bridge_flow_factor
+                            process.policy.bridge_flow_factor
                         } else {
                             1.0
                         }
@@ -3703,4 +3703,60 @@ fn actual_deposition_beads_recheck_captured_plate_and_fixture_bounds() {
     intent.hardware = Some(std::sync::Arc::new(capture));
     let error = verify(GOLDEN, &plan, &intent, &cancel).unwrap_err();
     assert!(error.message.contains("fixture"), "{error:?}");
+}
+
+#[test]
+fn per_tool_profiles_drive_actual_feed_flow_cooling_and_reject_swapped_feed() {
+    let (mut intent, mut plan) = fixed_dual_fixture();
+    let selected: ManufacturingIntent = decode_intent(include_bytes!(
+        "../../../../fixtures/manufacturing/fixed-dual-profiles.intent.json"
+    ))
+    .unwrap();
+    let JobWorkflow::FixedDualMarlin { job: profiles } = selected.printer.workflow else {
+        unreachable!()
+    };
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    for (index, tool) in job.tools.iter_mut().enumerate() {
+        let mut capture = profiles.tools[index].material_profile.clone().unwrap();
+        let selection = &mut capture.selection;
+        let p = &mut selection.profile;
+        p.material.id = tool.material.id.clone();
+        p.material.revision = tool.material.revision.clone();
+        p.material.filament_diameter_mm = tool.filament_diameter_mm;
+        p.nozzle_diameter_mm = tool.nozzle_diameter_mm;
+        p.deposition_limits = tool.deposition_limits;
+        p.process = intent.recipe.process.clone();
+        p.process.fan_after_first_layers = if index == 0 { 128 } else { 160 };
+        p.print_speed_mm_s = if index == 0 { 6.0 } else { 4.0 };
+        p.flow_multiplier = if index == 0 { 1.03 } else { 0.97 };
+        tool.nozzle_temperature_c = selection.nozzle_temperature_c();
+        tool.material_profile = Some(capture);
+    }
+    refresh_volumes(&intent, &mut plan);
+    let cancel = AtomicBool::new(false);
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let report = verify(&program, &plan, &intent, &cancel).unwrap();
+    assert!(report.verified);
+    let line = program
+        .lines()
+        .find(|line| {
+            line.starts_with("G1 X12") && line.contains(" E") && line.ends_with("F240.000000")
+        })
+        .expect("tool one model move at4 mm/s");
+    let swapped = program.replacen(line, &line.replace("F240.000000", "F360.000000"), 1);
+    assert!(verify(&swapped, &plan, &intent, &cancel).is_err());
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    job.tools[1]
+        .material_profile
+        .as_mut()
+        .unwrap()
+        .selection
+        .profile
+        .max_volumetric_flow_mm3_s = 0.0001;
+    assert!(verify(&program, &plan, &intent, &cancel).is_err());
 }

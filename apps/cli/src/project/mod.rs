@@ -137,7 +137,7 @@ enum Operation {
     ApplyOption(SourceHash),
     Hardware(Option<Arc<spiling_contracts::hardware::ProjectHardwareCapture>>),
     LocalHardware(String, String, String),
-    MaterialProfile(Box<MaterialProfileSelection>),
+    MaterialProfile(Option<String>, Box<MaterialProfileSelection>),
     LibraryLocation(NativePath),
     UseLibraryFilament(String),
     ProjectMaterials,
@@ -666,7 +666,12 @@ pub fn parse(
                 text(&mut args, "--material-select profile ID")?,
                 text(&mut args, "--material-select profile revision")?,
             )),
-            Some("--material-profile") => {
+            Some(flag @ ("--material-profile" | "--tool-profile")) => {
+                let tool_id = if flag == "--tool-profile" {
+                    Some(text(&mut args, "--tool-profile tool ID")?)
+                } else {
+                    None
+                };
                 let file = args
                     .next()
                     .ok_or("--material-profile requires a native JSON path")?;
@@ -680,7 +685,7 @@ pub fn parse(
                 }
                 let selection: MaterialProfileSelection = serde_json::from_slice(&bytes)?;
                 selection.validate()?;
-                operations.push(Operation::MaterialProfile(Box::new(selection)));
+                operations.push(Operation::MaterialProfile(tool_id, Box::new(selection)));
             }
             Some("--preflight") => operations.push(Operation::Preflight),
             Some("--layout") => {
@@ -1809,6 +1814,7 @@ async fn execute(
                 };
                 match client
                     .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+                        tool_id: None,
                         layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision,
@@ -2507,6 +2513,7 @@ async fn execute(
                 }
                 match client
                     .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+                        tool_id: None,
                         layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision: review.input_revision,
@@ -2518,11 +2525,12 @@ async fn execute(
                     _ => return Err("unexpected material selection response".into()),
                 }
             }
-            Operation::MaterialProfile(selection) => {
+            Operation::MaterialProfile(tool_id, selection) => {
                 label = "material_profile";
                 let base_revision = info(client).await?.revision;
                 match client
                     .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+                        tool_id,
                         layout_id: current_layout.clone(),
                         session_id: session.clone(),
                         base_revision,

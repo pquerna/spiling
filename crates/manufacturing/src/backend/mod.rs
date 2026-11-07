@@ -257,14 +257,13 @@ pub fn emit(
                                 "actual E8 waste volume is below declared reprime minimum",
                             ));
                         }
+                        let flow_limit = intent
+                            .process_for_tool(routed.map(|_| active_tool))?
+                            .max_volumetric_flow_mm3_s;
                         let flow = delta * filament_area * feed / 60.0 / length;
-                        let rounding_slack = (intent.effective_max_volumetric_flow_mm3_s()
-                            * 0.000002
-                            + 0.00000001 * filament_area * speed)
-                            / length;
-                        if !flow.is_finite()
-                            || flow > intent.effective_max_volumetric_flow_mm3_s() + rounding_slack
-                        {
+                        let rounding_slack =
+                            (flow_limit * 0.000002 + 0.00000001 * filament_area * speed) / length;
+                        if !flow.is_finite() || flow > flow_limit + rounding_slack {
                             return Err(error(
                                 ManufacturingErrorCode::InvalidSpecification,
                                 "actual decoded deposition flow exceeds printer limit",

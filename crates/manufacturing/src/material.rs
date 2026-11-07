@@ -39,6 +39,42 @@ pub fn resolve_material_profile(
     Ok(resolved)
 }
 
+/// Resolve one explicitly addressed loaded tool; preserve all other tool captures.
+pub fn resolve_tool_material_profile(
+    current: &ManufacturingIntent,
+    tool_id: &str,
+    selection: MaterialProfileSelection,
+) -> Result<ManufacturingIntent, ManufacturingError> {
+    current.validate()?;
+    selection.validate()?;
+    let mut resolved = current.clone();
+    let JobWorkflow::FixedDualMarlin { job } = &mut resolved.printer.workflow else {
+        return Err(ManufacturingError::new(
+            ManufacturingErrorCode::InvalidSpecification,
+            "an addressed tool profile requires a fixed-dual job",
+        ));
+    };
+    let tool = job
+        .tools
+        .iter_mut()
+        .find(|tool| tool.id == tool_id)
+        .ok_or_else(|| {
+            ManufacturingError::new(
+                ManufacturingErrorCode::InvalidSpecification,
+                "unknown loaded tool profile target",
+            )
+        })?;
+    // A process profile is not permission to silently replace a loaded formulation
+    // or installed nozzle. Contract validation binds both to the existing capture.
+    tool.nozzle_temperature_c = selection.nozzle_temperature_c();
+    tool.material_profile = Some(ResolvedMaterialProfile {
+        resolver_version: MATERIAL_RESOLVER_VERSION,
+        selection,
+    });
+    resolved.validate()?;
+    Ok(resolved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +136,50 @@ mod tests {
             resolved
         );
         assert_eq!(original.material_profile, None);
+    }
+    #[test]
+    fn per_tool_resolution_keeps_other_capture_and_rejects_shared_conflicts() {
+        let current = decode_intent(include_bytes!(
+            "../../../fixtures/manufacturing/fixed-dual-profiles.intent.json"
+        ))
+        .unwrap();
+        let JobWorkflow::FixedDualMarlin { job } = &current.printer.workflow else {
+            unreachable!()
+        };
+        let mut selected = job.tools[0]
+            .material_profile
+            .as_ref()
+            .unwrap()
+            .selection
+            .clone();
+        selected.overrides.print_speed_mm_s = Some(27.0);
+        let result =
+            resolve_tool_material_profile(&current, &job.tools[0].id, selected.clone()).unwrap();
+        let JobWorkflow::FixedDualMarlin { job: changed } = &result.printer.workflow else {
+            unreachable!()
+        };
+        assert_eq!(job.tools[1], changed.tools[1]);
+        assert_eq!(changed.tools[0].print_speed_mm_s(&result.recipe), 27.0);
+        for case in 0..6 {
+            let mut invalid = selected.clone();
+            match case {
+                0 => invalid.overrides.bed_temperature_c = Some(70.0),
+                1 => invalid.profile.material.id = "different-product".into(),
+                2 => invalid.profile.nozzle_diameter_mm = 0.6,
+                3 => {
+                    invalid.profile.cooling_configuration_id = "other-fan".into();
+                    invalid.setup.cooling_configuration_id = "other-fan".into();
+                }
+                4 => invalid.overrides.nozzle_temperature_c = Some(300.0),
+                _ => invalid.profile.process.max_bridge_span_mm += 1.0,
+            }
+            assert!(
+                resolve_tool_material_profile(&current, &job.tools[0].id, invalid).is_err(),
+                "case{case}"
+            );
+        }
+        assert!(resolve_tool_material_profile(&current, "missing-tool", selected).is_err());
+        assert!(current.validate().is_ok());
     }
     #[test]
     fn incompatible_profiles_and_unallowed_limits_refuse_without_clamping() {

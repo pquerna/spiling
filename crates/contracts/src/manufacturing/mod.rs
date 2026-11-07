@@ -1073,11 +1073,63 @@ impl ManufacturingIntent {
         let p = &self.printer;
         let r = &self.recipe;
         r.process.validate_printer(p)?;
+        if let JobWorkflow::FixedDualMarlin { job } = &p.workflow {
+            for tool in &job.tools {
+                if tool.process(r).max_bridge_span_mm != r.process.max_bridge_span_mm {
+                    return Err(invalid(
+                        "tool-specific bridge span requires a qualified regional anchor consumer",
+                    ));
+                }
+            }
+        }
         let selected_height = self.select_layer_height()?.height_mm;
         if !self.admits_deposition(r.bead_width_mm, selected_height) {
             return Err(invalid(
                 "nominal recipe deposition exceeds printer envelope",
             ));
+        }
+        if let JobWorkflow::FixedDualMarlin { job } = &p.workflow {
+            for (index, tool) in job.tools.iter().enumerate() {
+                let process = self.process_for_tool(Some(index as u8))?;
+                process.policy.validate_printer(p)?;
+                if !tool.admits_deposition(r.bead_width_mm, selected_height) {
+                    return Err(invalid(
+                        "nominal routed waste bead exceeds captured tool/profile envelope",
+                    ));
+                }
+                let area = ((r.bead_width_mm - selected_height) * selected_height
+                    + std::f64::consts::PI * (selected_height * 0.5).powi(2))
+                    * process.flow_multiplier;
+                for (speed_factor, flow_factor) in [
+                    (1.0, 1.0),
+                    (
+                        process.policy.first_layer_speed_factor,
+                        process.policy.first_layer_flow_factor,
+                    ),
+                    (
+                        process.policy.bridge_speed_factor,
+                        process.policy.bridge_flow_factor,
+                    ),
+                    (
+                        process.policy.first_layer_speed_factor
+                            * process.policy.bridge_speed_factor,
+                        process.policy.first_layer_flow_factor * process.policy.bridge_flow_factor,
+                    ),
+                ] {
+                    let feed =
+                        (process.speed_mm_s * speed_factor * 60_000_000.0).round() / 1_000_000.0;
+                    let flow = area * flow_factor * feed / 60.0;
+                    if !feed.is_finite()
+                        || feed < 0.000001
+                        || feed / 60.0 > tool.max_feed_mm_s.min(p.max_feed_mm_s)
+                        || !flow.is_finite()
+                        || flow <= 0.0
+                        || flow > process.max_volumetric_flow_mm3_s
+                    {
+                        return Err(invalid("tool process exceeds captured feed/flow limits"));
+                    }
+                }
+            }
         }
         if !matches!(r.supports, SupportPolicy::Disabled) && !p.capabilities.generated_supports {
             return Err(invalid(
@@ -2945,30 +2997,36 @@ impl NormalizedPrintPlan {
                         layer.z_mm
                     )));
                 }
-                let recipe = &intent.recipe;
+                let process = intent.process_for_path(path)?;
                 let first_speed = if layer.index == 0 {
-                    recipe.process.first_layer_speed_factor
+                    process.policy.first_layer_speed_factor
                 } else {
                     1.0
                 };
                 let first_flow = if layer.index == 0 {
-                    recipe.process.first_layer_flow_factor
+                    process.policy.first_layer_flow_factor
                 } else {
                     1.0
                 };
                 let (bridge_speed, bridge_flow) = if path.kind == DepositionKind::Bridge {
                     (
-                        recipe.process.bridge_speed_factor,
-                        recipe.process.bridge_flow_factor,
+                        process.policy.bridge_speed_factor,
+                        process.policy.bridge_flow_factor,
                     )
                 } else {
                     (1.0, 1.0)
                 };
-                let speed = recipe.print_speed_mm_s * first_speed * bridge_speed;
+                let speed = process.speed_mm_s * first_speed * bridge_speed;
                 let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
                 for edge in path.checked_edges()? {
                     let width = edge.width_mm;
-                    if !intent.admits_deposition(width, path_height) {
+                    let tool_admits = match &intent.printer.workflow {
+                        JobWorkflow::FixedDualMarlin { job } => job.tools
+                            [usize::from(job.tool_for_path(path)?)]
+                        .admits_deposition(width, path_height),
+                        _ => true,
+                    };
+                    if !intent.admits_deposition(width, path_height) || !tool_admits {
                         return Err(invalid(&format!(
                             "path dimensions exceed local deposition limits or owning layer: width={width}, physical_z={physical:?}, height={path_height}, layer_z={}, limits={:?}",
                             layer.z_mm, intent.printer.deposition_limits
@@ -2976,14 +3034,14 @@ impl NormalizedPrintPlan {
                     }
                     let area = ((width - path_height) * path_height
                         + std::f64::consts::PI * (path_height * 0.5).powi(2))
-                        * recipe.flow_multiplier
+                        * process.flow_multiplier
                         * first_flow
                         * bridge_flow;
                     if !area.is_finite()
                         || area <= 0.0
                         || !feed.is_finite()
                         || feed < 0.000001
-                        || area * feed / 60.0 > intent.effective_max_volumetric_flow_mm3_s()
+                        || area * feed / 60.0 > process.max_volumetric_flow_mm3_s
                     {
                         return Err(invalid(
                             "path dimensions exceed emitted-feed volumetric flow limit",
@@ -4104,6 +4162,7 @@ pub enum ManufacturingCommand {
         request: MaterialReviewRequest,
     },
     ApplyMaterialProfile {
+        tool_id: Option<String>,
         layout_id: crate::project::PrintLayoutId,
         session_id: SessionId,
         base_revision: ProjectRevision,

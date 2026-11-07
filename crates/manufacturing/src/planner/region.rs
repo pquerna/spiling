@@ -1358,13 +1358,21 @@ pub(crate) fn nominal_volume(
     index: u32,
     recipe: &PlanarPrintRecipe,
 ) -> Result<f64, ManufacturingError> {
+    nominal_volume_with_process(path, index, recipe.flow_multiplier, &recipe.process)
+}
+pub(crate) fn nominal_volume_with_process(
+    path: &DepositionPath,
+    index: u32,
+    flow_multiplier: f64,
+    process: &ProcessPolicy,
+) -> Result<f64, ManufacturingError> {
     let height = path.height_mm();
-    let mut factor = recipe.flow_multiplier;
+    let mut factor = flow_multiplier;
     if index == 0 {
-        factor *= recipe.process.first_layer_flow_factor;
+        factor *= process.first_layer_flow_factor;
     }
     if path.kind == DepositionKind::Bridge {
-        factor *= recipe.process.bridge_flow_factor;
+        factor *= process.bridge_flow_factor;
     }
     let mut volume = 0.0;
     for edge in path.checked_edges()? {

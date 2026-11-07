@@ -30,6 +30,8 @@ pub struct FixedDualTool {
     pub id: String,
     pub feeder_id: String,
     pub material: LoadedMaterial,
+    #[serde(deserialize_with = "required_option")]
+    pub material_profile: Option<ResolvedMaterialProfile>,
     /// Physical nozzle displacement from tool zero; Z is identically zero.
     pub offset_xy_mm: [f64; 2],
     pub nozzle_diameter_mm: f64,
@@ -47,6 +49,40 @@ pub struct FixedDualTool {
     pub minimum_reprime_volume_mm3: f64,
     /// One bed-rooted, repeated line, deposited once on every actual layer.
     pub waste_line_xy_mm: [[f64; 2]; 2],
+}
+
+impl FixedDualTool {
+    pub fn process<'a>(&'a self, recipe: &'a PlanarPrintRecipe) -> &'a ProcessPolicy {
+        self.material_profile
+            .as_ref()
+            .map_or(&recipe.process, |p| p.selection.process())
+    }
+    pub fn print_speed_mm_s(&self, recipe: &PlanarPrintRecipe) -> f64 {
+        self.material_profile
+            .as_ref()
+            .map_or(recipe.print_speed_mm_s, |p| p.selection.print_speed_mm_s())
+    }
+    pub fn flow_multiplier(&self, recipe: &PlanarPrintRecipe) -> f64 {
+        self.material_profile
+            .as_ref()
+            .map_or(recipe.flow_multiplier, |p| p.selection.flow_multiplier())
+    }
+    pub fn effective_max_volumetric_flow_mm3_s(&self, printer: &PrinterSpecification) -> f64 {
+        self.material_profile
+            .as_ref()
+            .map_or(self.max_volumetric_flow_mm3_s, |p| {
+                self.max_volumetric_flow_mm3_s
+                    .min(p.selection.profile.max_volumetric_flow_mm3_s)
+            })
+            .min(printer.max_volumetric_flow_mm3_s)
+    }
+    pub fn admits_deposition(&self, width: f64, height: f64) -> bool {
+        self.deposition_limits.admits(width, height)
+            && self
+                .material_profile
+                .as_ref()
+                .is_none_or(|p| p.selection.profile.deposition_limits.admits(width, height))
+    }
 }
 
 /// Whole-occurrence material authority, independent of mutable layer indices.
@@ -366,6 +402,9 @@ impl FixedDualJob {
                 tool.minimum_reprime_volume_mm3,
             ])?;
             tool.deposition_limits.validate()?;
+            if let Some(profile) = &tool.material_profile {
+                profile.validate()?;
+            }
             if tool
                 .offset_xy_mm
                 .iter()
@@ -630,6 +669,38 @@ impl FixedDualJob {
 
     pub fn validate(&self, printer: &PrinterSpecification) -> Result<(), ManufacturingError> {
         self.validate_declaration()?;
+        let mut cooling = None;
+        for tool in &self.tools {
+            if let Some(capture) = &tool.material_profile {
+                let selected = &capture.selection;
+                let profile = &selected.profile;
+                if profile.printer_id != printer.id
+                    || profile.printer_revision != printer.revision
+                    || profile.nozzle_diameter_mm != tool.nozzle_diameter_mm
+                    || profile.material.id != tool.material.id
+                    || profile.material.revision != tool.material.revision
+                    || profile.material.polymer_family != tool.material.polymer_family
+                    || profile.material.filament_diameter_mm != tool.filament_diameter_mm
+                    || selected.nozzle_temperature_c() != tool.nozzle_temperature_c
+                    || selected.bed_temperature_c() != self.bed_temperature_c
+                {
+                    return Err(invalid(
+                        "tool profile disagrees with captured material, printer, nozzle or thermal targets",
+                    ));
+                }
+                if !matches!(selected.process().retraction, RetractionPolicy::Disabled) {
+                    return Err(invalid(
+                        "tool profile body retraction is unsupported; captured tool selections own feeder recovery",
+                    ));
+                }
+                if cooling.is_some_and(|id| id != &profile.cooling_configuration_id) {
+                    return Err(invalid(
+                        "fixed-dual tool profiles require one declared shared cooling configuration",
+                    ));
+                }
+                cooling = Some(&profile.cooling_configuration_id);
+            }
+        }
         for tool in &self.tools {
             if printer.nozzle_diameter_mm != tool.nozzle_diameter_mm
                 || printer.max_feed_mm_s > tool.max_feed_mm_s
@@ -1322,5 +1393,51 @@ mod cycle_tests {
                 upper.to_bits(),
             );
         }
+    }
+}
+
+/// Borrowed captured process values. This selects data; it does not emit or verify commands.
+pub struct CapturedDepositionProcess<'a> {
+    pub policy: &'a ProcessPolicy,
+    pub speed_mm_s: f64,
+    pub flow_multiplier: f64,
+    pub max_volumetric_flow_mm3_s: f64,
+}
+impl ManufacturingIntent {
+    pub fn process_for_tool(
+        &self,
+        tool: Option<u8>,
+    ) -> Result<CapturedDepositionProcess<'_>, ManufacturingError> {
+        if let Some(index) = tool {
+            let JobWorkflow::FixedDualMarlin { job } = &self.printer.workflow else {
+                return Err(invalid("explicit tool process requires a routed job"));
+            };
+            let tool = job
+                .tools
+                .get(usize::from(index))
+                .ok_or_else(|| invalid("missing captured tool"))?;
+            Ok(CapturedDepositionProcess {
+                policy: tool.process(&self.recipe),
+                speed_mm_s: tool.print_speed_mm_s(&self.recipe),
+                flow_multiplier: tool.flow_multiplier(&self.recipe),
+                max_volumetric_flow_mm3_s: tool.effective_max_volumetric_flow_mm3_s(&self.printer),
+            })
+        } else {
+            Ok(CapturedDepositionProcess {
+                policy: &self.recipe.process,
+                speed_mm_s: self.recipe.print_speed_mm_s,
+                flow_multiplier: self.recipe.flow_multiplier,
+                max_volumetric_flow_mm3_s: self.effective_max_volumetric_flow_mm3_s(),
+            })
+        }
+    }
+    pub fn process_for_path(
+        &self,
+        path: &DepositionPath,
+    ) -> Result<CapturedDepositionProcess<'_>, ManufacturingError> {
+        self.process_for_tool(match &self.printer.workflow {
+            JobWorkflow::FixedDualMarlin { job } => Some(job.tool_for_path(path)?),
+            _ => None,
+        })
     }
 }

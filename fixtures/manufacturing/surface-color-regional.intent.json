@@ -137,7 +137,8 @@
                 80,
                 160
               ]
-            ]
+            ],
+            "material_profile": null
           },
           {
             "id": "fixed-hotend-1",
@@ -178,7 +179,8 @@
                 180,
                 160
               ]
-            ]
+            ],
+            "material_profile": null
           }
         ],
         "functional_construction": null,

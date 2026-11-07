@@ -20,6 +20,34 @@ pub fn routed_material_fields(ui: &mut egui::Ui, job: &mut FixedDualJob, writabl
                 "{} · {}",
                 tool.material.revision, tool.material.polymer_family
             ));
+            if let Some(capture) = &tool.material_profile {
+                let selected = &capture.selection;
+                ui.label(format!(
+                    "{:.1} mm/s · ×{:.3} · {:.0} °C",
+                    selected.print_speed_mm_s(),
+                    selected.flow_multiplier(),
+                    selected.nozzle_temperature_c()
+                ));
+                ui.collapsing("Profile details", |ui| {
+                    ui.label(format!(
+                        "{} · {}",
+                        selected.profile.id, selected.profile.revision
+                    ));
+                    ui.label(format!(
+                        "Flow limit · {:.2} mm³/s",
+                        selected
+                            .profile
+                            .max_volumetric_flow_mm3_s
+                            .min(tool.max_volumetric_flow_mm3_s)
+                    ));
+                    ui.label(format!("Hotend · {}", selected.setup.hotend_id));
+                    ui.label(format!(
+                        "Cooling · {}",
+                        selected.setup.cooling_configuration_id
+                    ));
+                    ui.weak("Declared process · not physical calibration");
+                });
+            }
         });
     }
     super::group(ui, "Part bindings");

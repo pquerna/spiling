@@ -232,7 +232,7 @@ pub(crate) fn stream(
     let mut debt = [0.0f64; 2];
     let mut fan = None;
     let mut travels = 0u32;
-    let mut process = 0u32;
+    let mut process_events = 0u32;
     for layer in &plan.layers {
         check_cancel(cancel)?;
         for group in 0..if routed.is_some() { 2 } else { 1 } {
@@ -295,16 +295,17 @@ pub(crate) fn stream(
                     ))?;
                 }
                 emit(Event::Travel(start, recipe.travel_speed_mm_s))?;
+                let process = intent.process_for_tool(Some(tool))?;
                 let height = layer.z_mm - layer.lower_z_mm;
-                let flow = recipe.flow_multiplier
+                let flow = process.flow_multiplier
                     * if layer.index == 0 {
-                        recipe.process.first_layer_flow_factor
+                        process.policy.first_layer_flow_factor
                     } else {
                         1.0
                     };
-                let speed = recipe.print_speed_mm_s
+                let speed = process.speed_mm_s
                     * if layer.index == 0 {
-                        recipe.process.first_layer_speed_factor
+                        process.policy.first_layer_speed_factor
                     } else {
                         1.0
                     };
@@ -326,13 +327,14 @@ pub(crate) fn stream(
                 {
                     continue;
                 }
+                let process = intent.process_for_path(path)?;
                 let target = path.points_mm[0];
                 let pwm = if path.kind == DepositionKind::Bridge {
-                    recipe.process.bridge_fan_pwm
+                    process.policy.bridge_fan_pwm
                 } else if layer.index == 0 {
-                    recipe.process.fan_first_layers
+                    process.policy.fan_first_layers
                 } else {
-                    recipe.process.fan_after_first_layers
+                    process.policy.fan_after_first_layers
                 };
                 if fan != Some(pwm) {
                     emit(Event::Fan(pwm))?;
@@ -391,13 +393,13 @@ pub(crate) fn stream(
                     else {
                         unreachable!()
                     };
-                    if process > 100_000 - 2 {
+                    if process_events > 100_000 - 2 {
                         return Err(error(
                             ManufacturingErrorCode::ResourceLimit,
                             "process event budget exceeded",
                         ));
                     }
-                    process += 2;
+                    process_events += 2;
                     emit(Event::Extrusion(extrusion - distance_mm, speed_mm_s))?;
                     let from = position.unwrap();
                     let base_z = from[2].max(target[2]);
@@ -433,15 +435,15 @@ pub(crate) fn stream(
                     }
                     emit(Event::Extrusion(extrusion, speed_mm_s))?;
                 }
-                let mut speed = recipe.print_speed_mm_s;
-                let mut flow = recipe.flow_multiplier;
+                let mut speed = process.speed_mm_s;
+                let mut flow = process.flow_multiplier;
                 if layer.index == 0 {
-                    speed *= recipe.process.first_layer_speed_factor;
-                    flow *= recipe.process.first_layer_flow_factor;
+                    speed *= process.policy.first_layer_speed_factor;
+                    flow *= process.policy.first_layer_flow_factor;
                 }
                 if path.kind == DepositionKind::Bridge {
-                    speed *= recipe.process.bridge_speed_factor;
-                    flow *= recipe.process.bridge_flow_factor;
+                    speed *= process.policy.bridge_speed_factor;
+                    flow *= process.policy.bridge_flow_factor;
                 }
                 let height = path.height_mm();
                 for edge in path.checked_edges()? {

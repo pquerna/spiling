@@ -95,17 +95,24 @@ impl TryFrom<ManufacturingCommand> for rpc::ManufacturingRequest {
                 }),
             ),
             ManufacturingCommand::ApplyMaterialProfile {
+                tool_id,
                 layout_id: _,
                 session_id,
                 base_revision,
                 selection,
-            } => (
-                session_id,
-                Command::ApplyMaterialProfile(rpc::ApplyMaterialProfileRequest {
-                    base_revision: base_revision.get(),
-                    selection: Some(selection.try_into()?),
-                }),
-            ),
+            } => {
+                if let Some(id) = &tool_id {
+                    routing_label(id)?;
+                }
+                (
+                    session_id,
+                    Command::ApplyMaterialProfile(rpc::ApplyMaterialProfileRequest {
+                        tool_id,
+                        base_revision: base_revision.get(),
+                        selection: Some(selection.try_into()?),
+                    }),
+                )
+            }
             _ => return Err("long manufacturing command requires its dedicated RPC".into()),
         };
         let parent = format!("sessions/{}", session_id.as_str());
@@ -134,12 +141,19 @@ impl TryFrom<rpc::ManufacturingRequest> for ManufacturingCommand {
                 base_revision: ProjectRevision(request.base_revision),
                 request: required(request.request, "material review request")?.try_into()?,
             }),
-            Command::ApplyMaterialProfile(request) => Ok(Self::ApplyMaterialProfile {
-                layout_id,
-                session_id,
-                base_revision: ProjectRevision(request.base_revision),
-                selection: required(request.selection, "material profile selection")?.try_into()?,
-            }),
+            Command::ApplyMaterialProfile(request) => {
+                if let Some(id) = &request.tool_id {
+                    routing_label(id)?;
+                }
+                Ok(Self::ApplyMaterialProfile {
+                    tool_id: request.tool_id,
+                    layout_id,
+                    session_id,
+                    base_revision: ProjectRevision(request.base_revision),
+                    selection: required(request.selection, "material profile selection")?
+                        .try_into()?,
+                })
+            }
             Command::SetIntent(request) => Ok(Self::SetIntent {
                 layout_id,
                 session_id,
@@ -2371,6 +2385,9 @@ fn validate_routed_tool(value: &FixedDualTool) -> Result<(), String> {
     routing_label(&value.id)?;
     routing_label(&value.feeder_id)?;
     validate_loaded_material(&value.material)?;
+    if let Some(profile) = &value.material_profile {
+        profile.validate().map_err(|e| e.to_string())?;
+    }
     value
         .deposition_limits
         .validate()
@@ -2432,6 +2449,7 @@ impl TryFrom<rpc::FixedDualTool> for FixedDualTool {
             id: value.id,
             feeder_id: value.feeder_id,
             material: required(value.material, "loaded material")?.try_into()?,
+            material_profile: value.material_profile.map(TryInto::try_into).transpose()?,
             offset_xy_mm,
             nozzle_diameter_mm: value.nozzle_diameter_mm,
             filament_diameter_mm: value.filament_diameter_mm,
@@ -2460,6 +2478,7 @@ impl TryFrom<FixedDualTool> for rpc::FixedDualTool {
             id: value.id,
             feeder_id: value.feeder_id,
             material: Some(value.material.try_into()?),
+            material_profile: value.material_profile.map(TryInto::try_into).transpose()?,
             offset_xy_mm: value.offset_xy_mm.to_vec(),
             nozzle_diameter_mm: value.nozzle_diameter_mm,
             filament_diameter_mm: value.filament_diameter_mm,
@@ -3175,6 +3194,7 @@ mod fixed_dual_wire_tests {
         ))
         .unwrap();
         let tool = |index: usize| FixedDualTool {
+            material_profile: None,
             id: format!("tool-{index}"),
             feeder_id: format!("feeder-{index}"),
             material: LoadedMaterial {

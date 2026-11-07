@@ -2196,7 +2196,7 @@ fn admit_schedule<'model>(
             neighborhoods.work_mut(),
             cancel,
         )?;
-        support::object_volumes(&mut layers, recipe)?;
+        support::object_volumes(&mut layers, input.intent)?;
         for layer in &mut layers {
             bonds::refresh_witness_kinds(layer)?;
         }

@@ -195,12 +195,18 @@ impl<'a> Expected<'a> {
         self.prefix_index = 0;
         self.edge = 1;
         self.edges = Some(p.checked_edges()?);
+        let policy = self
+            .routing
+            .zip(path_tool)
+            .map_or(&self.recipe.process, |(job, tool)| {
+                job.tools[usize::from(tool)].process(self.recipe)
+            });
         let pwm = if role == DepositionKind::Bridge {
-            self.recipe.process.bridge_fan_pwm
+            policy.bridge_fan_pwm
         } else if self.layer == 0 {
-            self.recipe.process.fan_first_layers
+            policy.fan_first_layers
         } else {
-            self.recipe.process.fan_after_first_layers
+            policy.fan_after_first_layers
         };
         let mut n = 0;
         if let Some(job) = self.routing {

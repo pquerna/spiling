@@ -208,6 +208,7 @@ impl Runtime {
                 ))
             }
             ManufacturingCommand::ApplyMaterialProfile {
+                tool_id,
                 layout_id: _,
                 session_id,
                 base_revision,
@@ -216,9 +217,13 @@ impl Runtime {
                 self.manufacturing_base(&session_id, base_revision)?;
                 let current = self.project.snapshot().manufacturing_intent.clone().ok_or_else(||
                     ManufacturingError::new(ManufacturingErrorCode::NoIntent,"an explicit printer/recipe intent is required before material selection"))?;
-                let intent = Arc::new(spiling_manufacturing::resolve_material_profile(
-                    &current, selection,
-                )?);
+                let intent = Arc::new(if let Some(tool_id) = tool_id {
+                    spiling_manufacturing::resolve_tool_material_profile(
+                        &current, &tool_id, selection,
+                    )?
+                } else {
+                    spiling_manufacturing::resolve_material_profile(&current, selection)?
+                });
                 let edit = self
                     .project
                     .prepare(Edit::SetManufacturingIntent { intent })

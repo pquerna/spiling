@@ -87,6 +87,7 @@ message ReviewMaterialsRequest {
   MaterialReviewRequest request = 2;
 }
 message ApplyMaterialProfileRequest {
+  optional string tool_id = 3;
   uint32 base_revision = 1;
   MaterialProfileSelection selection = 2;
 }

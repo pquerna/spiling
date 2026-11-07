@@ -1971,6 +1971,7 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
         ("cylinder-ribs", true),
         ("fixed-dual", false),
         ("fixed-dual-shared-material", false),
+        ("fixed-dual-profiles", false),
         ("fixed-dual-cycle", false),
     ] {
         let host = Host::new(
@@ -1994,6 +1995,8 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
             decode_intent(
                 &std::fs::read(repo.join(if cylinder {
                     "fixtures/manufacturing/solid-fill.intent.json"
+                } else if name == "fixed-dual-profiles" {
+                    "fixtures/manufacturing/fixed-dual-profiles.intent.json"
                 } else if name == "fixed-dual-shared-material" {
                     "fixtures/manufacturing/fixed-dual-shared-material.intent.json"
                 } else if name == "fixed-dual-cycle" {
@@ -2192,6 +2195,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     oversized.profile.material.product = "oversized".repeat(8192);
     assert!(
         host.manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+            tool_id: None,
             layout_id: layout_id(&host),
             session_id: before.hello.as_ref().unwrap().session_id.clone(),
             base_revision: before.project.as_ref().unwrap().revision,
@@ -2202,6 +2206,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     assert_eq!(host.snapshot().serial, before.serial);
     let s = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::ApplyMaterialProfile {
+            tool_id: None,
             layout_id: layout_id(&host),
             session_id,
             base_revision,
@@ -2263,6 +2268,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     incompatible.profile.printer_revision = "different-printer".into();
     let rejected = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::ApplyMaterialProfile {
+            tool_id: None,
             layout_id: layout_id(&host),
             session_id,
             base_revision,
@@ -2277,6 +2283,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     assert!(!rejected.problems.is_empty());
     let stale_serial = rejected.serial;
     host.manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+        tool_id: None,
         layout_id: layout_id(&host),
         session_id: rejected.hello.as_ref().unwrap().session_id.clone(),
         base_revision: accepted_revision,
@@ -2462,6 +2469,7 @@ fn catalog_review_is_nonmutating_bound_and_available_read_only() {
     assert!(report.candidates[1].settings.is_empty());
     let applied = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::ApplyMaterialProfile {
+            tool_id: None,
             layout_id: layout_id(&host),
             session_id,
             base_revision,

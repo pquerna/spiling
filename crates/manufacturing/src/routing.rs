@@ -164,7 +164,8 @@ pub(crate) fn validate_plan(
         }
         for (index, tool) in job.tools.iter().enumerate() {
             let limits = &tool.deposition_limits;
-            if width < height
+            if !tool.admits_deposition(width, height)
+                || width < height
                 || width < limits.min_bead_width_mm
                 || width > limits.max_bead_width_mm
                 || height < limits.min_bead_height_mm
@@ -176,9 +177,10 @@ pub(crate) fn validate_plan(
             }
             let points = waste_points(job, index as u8, layer.z_mm)?;
             let length = (points[1][0] - points[0][0]).hypot(points[1][1] - points[0][1]);
-            let flow = intent.recipe.flow_multiplier
+            let process = intent.process_for_tool(Some(index as u8))?;
+            let flow = process.flow_multiplier
                 * if layer.index == 0 {
-                    intent.recipe.process.first_layer_flow_factor
+                    process.policy.first_layer_flow_factor
                 } else {
                     1.0
                 };
