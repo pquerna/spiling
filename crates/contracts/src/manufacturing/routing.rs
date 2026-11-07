@@ -664,27 +664,41 @@ impl FixedDualJob {
     /// Bind the complete projected bead to one authored exclusive reservation.
     /// The planner separately proves each reservation's native source binding.
     pub fn assignment_for_path(&self, path: &DepositionPath) -> Result<usize, ManufacturingError> {
-        let mut found = None;
-        for (index, assignment) in self.assignments.iter().enumerate() {
-            let bounds = &assignment.work_envelope_mm;
-            if path.physical_z_mm[0] < bounds.min[2] || path.physical_z_mm[1] > bounds.max[2] {
-                continue;
-            }
-            let mut contains = true;
-            for edge in path.checked_edges()? {
-                for point in edge.points_mm {
-                    for (axis, &value) in point.iter().take(2).enumerate() {
-                        let coordinate = program_coordinates::project_xyz6_coordinate_mm(value)?;
-                        let error = program_coordinates::xyz6_coordinate_error_mm(value)?;
-                        let radius = (edge.width_mm * 0.5 + error).next_up();
-                        if (coordinate - radius).next_down() < bounds.min[axis]
-                            || (coordinate + radius).next_up() > bounds.max[axis]
-                        {
-                            contains = false;
-                        }
-                    }
+        let outside =
+            || invalid("a complete routed bead is outside every assigned source reservation");
+        let mut candidates = self
+            .assignments
+            .iter()
+            .enumerate()
+            .filter(|(_, assignment)| {
+                let b = assignment.work_envelope_mm;
+                !(path.physical_z_mm[0] < b.min[2] || path.physical_z_mm[1] > b.max[2])
+            });
+        // Preserve the original Z-admission/diagnostic ordering before XY work.
+        let first = candidates.next().ok_or_else(outside)?;
+        // Every reservation tests the same complete projected bead. Enclose it
+        // once using the original per-edge width and outward XYZ6 arithmetic;
+        // containment in an axis-aligned reservation is exactly the conjunction
+        // of these endpoint extrema. Do not repeat projection for every part,
+        // or replace the varying widths with a representative scalar width.
+        let mut lower = [f64::INFINITY; 2];
+        let mut upper = [f64::NEG_INFINITY; 2];
+        for edge in path.checked_edges()? {
+            for point in edge.points_mm {
+                for (axis, &value) in point.iter().take(2).enumerate() {
+                    let coordinate = program_coordinates::project_xyz6_coordinate_mm(value)?;
+                    let error = program_coordinates::xyz6_coordinate_error_mm(value)?;
+                    let radius = (edge.width_mm * 0.5 + error).next_up();
+                    lower[axis] = lower[axis].min((coordinate - radius).next_down());
+                    upper[axis] = upper[axis].max((coordinate + radius).next_up());
                 }
             }
+        }
+        let mut found = None;
+        for (index, assignment) in std::iter::once(first).chain(candidates) {
+            let bounds = &assignment.work_envelope_mm;
+            let contains = (0..2)
+                .all(|axis| lower[axis] >= bounds.min[axis] && upper[axis] <= bounds.max[axis]);
             if contains {
                 if found.is_some() {
                     return Err(invalid(
@@ -694,9 +708,7 @@ impl FixedDualJob {
                 found = Some(index);
             }
         }
-        found.ok_or_else(|| {
-            invalid("a complete routed bead is outside every assigned source reservation")
-        })
+        found.ok_or_else(outside)
     }
 
     pub fn tool_for_path(&self, path: &DepositionPath) -> Result<u8, ManufacturingError> {
@@ -1670,5 +1682,116 @@ mod plate_count_tests {
             .unwrap();
         rows.push(rows[0].clone());
         assert!(decode_intent(&serde_json::to_vec(&json).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod reservation_projection_tests {
+    use super::*;
+
+    // Retain the former pairwise definition as an independent equivalence oracle.
+    fn pairwise(job: &FixedDualJob, path: &DepositionPath) -> Result<usize, ManufacturingError> {
+        let mut owners = Vec::new();
+        for (index, assignment) in job.assignments.iter().enumerate() {
+            let b = assignment.work_envelope_mm;
+            if path.physical_z_mm[0] < b.min[2] || path.physical_z_mm[1] > b.max[2] {
+                continue;
+            }
+            let mut contained = true;
+            for edge in path.checked_edges()? {
+                for p in edge.points_mm {
+                    for (axis, &v) in p.iter().take(2).enumerate() {
+                        let projected = program_coordinates::project_xyz6_coordinate_mm(v)?;
+                        let radius = (edge.width_mm * 0.5
+                            + program_coordinates::xyz6_coordinate_error_mm(v)?)
+                        .next_up();
+                        contained &= (projected - radius).next_down() >= b.min[axis]
+                            && (projected + radius).next_up() <= b.max[axis];
+                    }
+                }
+            }
+            if contained {
+                owners.push(index);
+            }
+        }
+        if owners.len() == 1 {
+            Ok(owners[0])
+        } else {
+            Err(invalid("not exactly one owner"))
+        }
+    }
+    #[test]
+    fn projected_enclosure_matches_pairwise_beads_across_reservations_and_boundaries() {
+        let intent = decode_intent(include_bytes!(
+            "../../../../fixtures/manufacturing/mixed-width-combined.intent.json"
+        ))
+        .unwrap();
+        let JobWorkflow::FixedDualMarlin { mut job } = intent.printer.workflow else {
+            unreachable!()
+        };
+        let template = job.assignments[0].clone();
+        job.assignments = (0..32)
+            .map(|i| OccurrenceMaterialAssignment {
+                occurrence_id: OccurrenceId::new(i + 1).unwrap(),
+                work_envelope_mm: AabbMm::new(
+                    [i as f64 * 3.0 - 20.0, -1.0, 0.0],
+                    [i as f64 * 3.0 - 18.0, 2.0, 1.0],
+                )
+                .unwrap(),
+                ..template.clone()
+            })
+            .collect();
+        for owner in [0, 7, 31] {
+            let b = job.assignments[owner].work_envelope_mm;
+            for delta in [-0.000001, -0.0000005, -0.0, 0.0, 0.0000005, 0.000001] {
+                for width in [0.2, 0.4, 0.8] {
+                    let x = b.min[0] + width * 0.5 + delta;
+                    let mut path = DepositionPath {
+                        material_domain: None,
+                        kind: DepositionKind::SparseFill,
+                        owner: None,
+                        physical_z_mm: [0.0, 0.2],
+                        width: WidthProfile::PerEdge {
+                            widths_mm: vec![width, 0.2],
+                        },
+                        points_mm: vec![
+                            [x, 0.0, 0.2],
+                            [b.min[0] + 1.0, 0.5, 0.2],
+                            [b.max[0] - 0.3, 1.0, 0.2],
+                        ],
+                    };
+                    for variant in 0..7 {
+                        let expected = pairwise(&job, &path).map_err(|e| e.code);
+                        assert_eq!(
+                            job.assignment_for_path(&path).map_err(|e| e.code),
+                            expected,
+                            "owner {owner}, delta {delta}, width {width}, variant {variant}"
+                        );
+                        match variant {
+                            0 => path.reverse(),
+                            1 => path.width = WidthProfile::Constant { width_mm: width },
+                            2 => path.points_mm[1][0] = b.max[0] + 1.0, // Leaves and returns; endpoints alone do not suffice.
+                            3 => path.physical_z_mm = [0.8, 1.1],
+                            4 => path.points_mm[0][0] = f64::NAN,
+                            _ => path.physical_z_mm = [0.0, 0.2],
+                        }
+                    }
+                }
+            }
+        }
+        let a = job.assignments[0].clone();
+        let path = DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::SparseFill,
+            owner: None,
+            physical_z_mm: [0.0, 0.2],
+            width: WidthProfile::Constant { width_mm: 0.4 },
+            points_mm: vec![[-19.5, 0.0, 0.2], [-19.0, 1.0, 0.2]],
+        };
+        job.assignments[1].work_envelope_mm = a.work_envelope_mm;
+        assert!(
+            job.assignment_for_path(&path).is_err(),
+            "overlapping owners must still refuse"
+        );
     }
 }

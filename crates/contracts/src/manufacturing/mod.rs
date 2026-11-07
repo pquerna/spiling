@@ -3091,14 +3091,20 @@ impl NormalizedPrintPlan {
                 };
                 let speed = process.speed_mm_s * first_speed * bridge_speed;
                 let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
-                for edge in path.checked_edges()? {
+                let edges = path.checked_edges()?;
+                // Ownership binds the complete path, not the current edge.
+                // Resolve once; each actual edge still checks its own width
+                // against that tool and the complete captured process envelope.
+                let owning_tool = match &intent.printer.workflow {
+                    JobWorkflow::FixedDualMarlin { job } => {
+                        Some(&job.tools[usize::from(job.tool_for_path(path)?)])
+                    }
+                    _ => None,
+                };
+                for edge in edges {
                     let width = edge.width_mm;
-                    let tool_admits = match &intent.printer.workflow {
-                        JobWorkflow::FixedDualMarlin { job } => job.tools
-                            [usize::from(job.tool_for_path(path)?)]
-                        .admits_deposition(width, path_height),
-                        _ => true,
-                    };
+                    let tool_admits =
+                        owning_tool.is_none_or(|tool| tool.admits_deposition(width, path_height));
                     if !intent.admits_deposition(width, path_height) || !tool_admits {
                         return Err(invalid(&format!(
                             "path dimensions exceed local deposition limits or owning layer: width={width}, physical_z={physical:?}, height={path_height}, layer_z={}, limits={:?}",

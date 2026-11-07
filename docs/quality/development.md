@@ -322,6 +322,11 @@ Optical estimates and candidate summaries, selected-candidate inspection, declar
 
 In the component gallery compare all densities, declared-name precedence, white/black/unknown samples and source labels in Graphite/Paper, including narrow/scaled text and keyboard disclosure. In Study compare all reference naming modes, enter an invalid/alpha sample and verify it remains editable, then inspect a retained candidate through its full details. Reference-mode selection never changes ordinary product labels. Generated names and presentation disclosure do not change saved project state, declared supplier identity, optical ranking or manufacturing authority.
 
+Repeatable production slicing, bundle validation and replay measurements use
+`pnpm bench:slice`. [Performance measurements](performance.md) owns the frozen
+workload, profiling profile, phase isolation and comparison procedure; the
+synthetic `bench:smoke` command does not measure slicing.
+
 ## Material authority and qualification
 
 [ADR005](../adr/ADR005-native-first-development-geometry.md) adopts the implemented

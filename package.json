@@ -13,6 +13,7 @@
     "check": "node tools/run.mjs check",
     "test": "node tools/run.mjs test",
     "bench:smoke": "node tools/run.mjs bench:smoke",
+    "bench:slice": "node tools/run.mjs bench:slice",
     "package": "node tools/run.mjs package",
     "contracts": "node tools/run.mjs contracts",
     "build": "node tools/run.mjs build",

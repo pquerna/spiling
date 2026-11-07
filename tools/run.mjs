@@ -515,6 +515,33 @@ async function cliSmoke() {
   await run("node", ["--import", "tsx", "tools/smoke-cli.mjs"]);
 }
 
+async function sliceBenchmark() {
+  // Cargo runs a bench in its package directory; root commands own root-relative paths.
+  const args = process.argv.slice(3);
+  for (let i = 0; i < args.length - 1; i++) {
+    if (["--bundle", "--write-bundle"].includes(args[i])) {
+      args[i + 1] = resolve(root, args[i + 1]);
+      i++;
+    }
+  }
+  await run("cargo", [
+    "bench",
+    "--locked",
+    "--profile",
+    "profiling",
+    "-p",
+    "spiling-manufacturing",
+    "-p",
+    "spiling-engine",
+    "-p",
+    "spiling-cli",
+    "--bench",
+    "pipeline",
+    "--",
+    ...args,
+  ]);
+}
+
 async function benchmark() {
   const engine = await stageEngine();
   const cli = join(cargoTarget, "debug", `spiling-cli${binSuffix}`);
@@ -650,6 +677,9 @@ async function main() {
       break;
     case "bench:smoke":
       await benchmark();
+      break;
+    case "bench:slice":
+      await sliceBenchmark();
       break;
     default:
       throw new Error(`Unknown command ${command ?? "(missing)"}`);

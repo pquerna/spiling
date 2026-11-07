@@ -70,3 +70,9 @@ opt-level = 2
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+# Release-equivalent code generation with symbols for repeatable CPU profiles.
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = "none"
