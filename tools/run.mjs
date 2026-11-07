@@ -535,6 +535,8 @@ async function sliceBenchmark() {
     "spiling-engine",
     "-p",
     "spiling-cli",
+    "-p",
+    "spiling-workbench",
     "--bench",
     "pipeline",
     "--",

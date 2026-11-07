@@ -3,13 +3,16 @@
 
 # Native opening and manufacturing performance
 
-`crates/manufacturing/benches/pipeline.rs` exercises the production compiler and
-inspection facades. `pnpm bench:slice` builds the `profiling` Cargo profile:
-release-derived optimization/LTO with symbols retained. It selects the engine/CLI
-packages too, keeping their unified dependency feature set. Build time is outside
-reported samples. Record the exact revision, dirty diff, executable hash,
-toolchain, profile overrides, CPU/affinity/quota and resource envelope with runs.
-Do not compare different profiles as an algorithm improvement.
+`crates/manufacturing/benches/pipeline.rs` exercises the production compiler
+and inspection facades. `pnpm bench:slice` builds the `profiling` Cargo
+profile: release-derived optimization/LTO with symbols retained. It selects the
+engine/CLI/workbench packages too, keeping the native application's unified
+dependency feature set. Build time is outside reported samples. Keep that
+package selection for focused library tests too; omitting a package can change
+transitive features and rebuild the kernel even with the same profile and
+kernel revision. Record the exact revision, dirty diff, executable hash,
+toolchain, profile overrides, CPU/affinity/quota and resource envelope with
+runs. Do not compare different profiles as an algorithm improvement.
 
 The `native-manufacturing-v1` workload imports the unchanged through-hole source
 and shared box definitions, places 1/2/8/32 separated uniform occurrences and
@@ -75,9 +78,16 @@ acceptance or establish correctness of a legitimately changed program.
 ## CPU profiles and real workflow costs
 
 Build first. Resolve the benchmark executable from Cargo's `compiler-artifact`
-JSON (`cargo build --locked --profile profiling -p spiling-manufacturing --bench
-pipeline -p spiling-engine -p spiling-cli --message-format=json`), rather than remembering a hash. Run `perf record
--e cycles:u -F 99 --call-graph dwarf,16384 -- EXECUTABLE ...` where permitted.
+JSON, using the same package set rather than remembering an executable hash:
+
+```sh
+cargo build --locked --profile profiling \
+  -p spiling-manufacturing -p spiling-engine -p spiling-cli -p spiling-workbench \
+  --bench pipeline --message-format=json
+```
+
+Run `perf record -e cycles:u -F 99 --call-graph dwarf,16384 -- EXECUTABLE ...`
+where permitted.
 Retain self and inclusive views, lost-sample counts and unwind quality; an
 unresolved stack does not support an inclusive attribution. Compare timings
 without the profiler separately. Do not change system profiling policy to make a

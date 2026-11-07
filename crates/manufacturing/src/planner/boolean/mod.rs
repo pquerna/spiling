@@ -23,17 +23,26 @@ struct EdgeBounds {
 fn resource(message: &str) -> ManufacturingError {
     error(ManufacturingErrorCode::ResourceLimit, message)
 }
+#[inline]
 pub(super) fn charge(work: &mut usize, amount: usize) -> Result<(), ManufacturingError> {
     let before = *work;
-    *work = before
-        .checked_add(amount)
-        .filter(|n| *n <= MAX_BOOLEAN_PAIRS)
-        .ok_or_else(|| {
-            resource(&format!(
-                "planar Boolean work budget exceeded; consumed {before}, requested {amount}, limit {MAX_BOOLEAN_PAIRS}"
-            ))
-        })?;
-    Ok(())
+    if let Some(total) = before.checked_add(amount)
+        && total <= MAX_BOOLEAN_PAIRS
+    {
+        *work = total;
+        Ok(())
+    } else {
+        Err(charge_exceeded(before, amount))
+    }
+}
+
+// Keep formatting and allocation out of the per-edge success path.
+#[cold]
+#[inline(never)]
+fn charge_exceeded(before: usize, amount: usize) -> ManufacturingError {
+    resource(&format!(
+        "planar Boolean work budget exceeded; consumed {before}, requested {amount}, limit {MAX_BOOLEAN_PAIRS}"
+    ))
 }
 
 // Pinned geo0.32/i_overlay4/i_float1.15 uses bbox midpoint and
@@ -323,6 +332,47 @@ fn polygon_budget<'a>(
 mod tests {
     use super::*;
     use geo::{Coord, LineString, Polygon};
+
+    #[test]
+    fn cumulative_charge_preserves_exact_ceiling_overflow_and_failed_state() {
+        // Widen the oracle so host-size overflow cannot become an admitted sum.
+        for before in [
+            0,
+            1,
+            MAX_BOOLEAN_PAIRS - 1,
+            MAX_BOOLEAN_PAIRS,
+            MAX_BOOLEAN_PAIRS + 1,
+            usize::MAX - 1,
+            usize::MAX,
+        ] {
+            for amount in [0, 1, 2, MAX_BOOLEAN_PAIRS, usize::MAX] {
+                let expected = before as u128 + amount as u128;
+                let mut work = before;
+                let result = charge(&mut work, amount);
+                if expected <= MAX_BOOLEAN_PAIRS as u128 {
+                    assert!(result.is_ok());
+                    assert_eq!(work as u128, expected);
+                } else {
+                    let failure = result.unwrap_err();
+                    assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
+                    assert_eq!(
+                        failure.message,
+                        format!(
+                            "planar Boolean work budget exceeded; consumed {before}, requested {amount}, limit {MAX_BOOLEAN_PAIRS}"
+                        )
+                    );
+                    assert_eq!(work, before, "a refused charge cannot consume work");
+                }
+            }
+        }
+        let mut work = MAX_BOOLEAN_PAIRS - 2;
+        charge(&mut work, 1).unwrap();
+        charge(&mut work, 1).unwrap();
+        assert_eq!(work, MAX_BOOLEAN_PAIRS);
+        assert!(charge(&mut work, 1).is_err());
+        charge(&mut work, 0).unwrap();
+        assert_eq!(work, MAX_BOOLEAN_PAIRS);
+    }
 
     #[test]
     fn boolean_broad_phase_refuses_dense_intra_operand_and_quantized_candidate_work() {
