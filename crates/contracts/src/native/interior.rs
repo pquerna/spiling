@@ -96,9 +96,185 @@ impl TryFrom<InteriorToolPolicyEdit> for rpc::InteriorToolPolicyEdit {
     }
 }
 
+impl TryFrom<rpc::InteriorPolicyOpportunity> for InteriorPolicyOpportunity {
+    type Error = String;
+    fn try_from(v: rpc::InteriorPolicyOpportunity) -> Result<Self, String> {
+        Ok(Self {
+            edit: v
+                .edit
+                .ok_or("missing interior policy opportunity edit")?
+                .try_into()?,
+            context_hash: crate::geometry::SourceHash::parse(v.context_hash)
+                .map_err(|e| e.to_string())?,
+            input_hash: crate::geometry::SourceHash::parse(v.input_hash)
+                .map_err(|e| e.to_string())?,
+        })
+    }
+}
+impl TryFrom<InteriorPolicyOpportunity> for rpc::InteriorPolicyOpportunity {
+    type Error = String;
+    fn try_from(v: InteriorPolicyOpportunity) -> Result<Self, String> {
+        Ok(Self {
+            edit: Some(v.edit.try_into()?),
+            context_hash: v.context_hash.as_str().into(),
+            input_hash: v.input_hash.as_str().into(),
+        })
+    }
+}
+impl TryFrom<rpc::InteriorPolicyAssessment> for InteriorPolicyAssessment {
+    type Error = String;
+    fn try_from(v: rpc::InteriorPolicyAssessment) -> Result<Self, String> {
+        Ok(Self {
+            opportunity: v
+                .opportunity
+                .ok_or("missing policy assessment opportunity")?
+                .try_into()?,
+            primary: v
+                .primary
+                .ok_or("missing policy primary reference")?
+                .try_into()?,
+            automatic: v
+                .automatic
+                .ok_or("missing policy automatic result")?
+                .try_into()?,
+            strategy: v.strategy.try_into()?,
+            reason: v.reason.try_into()?,
+        })
+    }
+}
+impl TryFrom<InteriorPolicyAssessment> for rpc::InteriorPolicyAssessment {
+    type Error = String;
+    fn try_from(v: InteriorPolicyAssessment) -> Result<Self, String> {
+        Ok(Self {
+            opportunity: Some(v.opportunity.try_into()?),
+            primary: Some(v.primary.try_into()?),
+            automatic: Some(v.automatic.try_into()?),
+            strategy: v.strategy.into(),
+            reason: v.reason.into(),
+        })
+    }
+}
+impl TryFrom<rpc::QualifiedInteriorWork> for QualifiedInteriorWork {
+    type Error = String;
+    fn try_from(v: rpc::QualifiedInteriorWork) -> Result<Self, String> {
+        Ok(Self {
+            interior_segments_per_tool: v
+                .interior_segments_per_tool
+                .try_into()
+                .map_err(|_| "policy work needs two tool counts")?,
+            program_hash: crate::geometry::SourceHash::parse(v.program_hash)
+                .map_err(|e| e.to_string())?,
+            model_volume_mm3: v.model_volume_mm3,
+            waste_volume_mm3: v.waste_volume_mm3,
+            time: v.time.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+impl TryFrom<QualifiedInteriorWork> for rpc::QualifiedInteriorWork {
+    type Error = String;
+    fn try_from(v: QualifiedInteriorWork) -> Result<Self, String> {
+        Ok(Self {
+            interior_segments_per_tool: v.interior_segments_per_tool.to_vec(),
+            program_hash: v.program_hash.as_str().into(),
+            model_volume_mm3: v.model_volume_mm3,
+            waste_volume_mm3: v.waste_volume_mm3,
+            time: v.time.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+impl TryFrom<i32> for InteriorStrategy {
+    type Error = String;
+    fn try_from(value: i32) -> Result<Self, String> {
+        match value {
+            1 => Ok(Self::Primary),
+            2 => Ok(Self::Synchronized),
+            3 => Ok(Self::Grouped),
+            _ => Err("unknown InteriorStrategy".into()),
+        }
+    }
+}
+impl From<InteriorStrategy> for i32 {
+    fn from(value: InteriorStrategy) -> Self {
+        match value {
+            InteriorStrategy::Primary => 1,
+            InteriorStrategy::Synchronized => 2,
+            InteriorStrategy::Grouped => 3,
+        }
+    }
+}
+impl TryFrom<i32> for InteriorSelectionReason {
+    type Error = String;
+    fn try_from(value: i32) -> Result<Self, String> {
+        match value {
+            1 => Ok(Self::ExplicitPrimary),
+            2 => Ok(Self::NoTimingModel),
+            3 => Ok(Self::NoObjective),
+            4 => Ok(Self::GroupingDisabled),
+            5 => Ok(Self::NoQualifiedAlternative),
+            6 => Ok(Self::IncomparableTiming),
+            7 => Ok(Self::ObjectiveNotMet),
+            8 => Ok(Self::ImprovedModeledWork),
+            _ => Err("unknown InteriorSelectionReason".into()),
+        }
+    }
+}
+impl From<InteriorSelectionReason> for i32 {
+    fn from(value: InteriorSelectionReason) -> Self {
+        match value {
+            InteriorSelectionReason::ExplicitPrimary => 1,
+            InteriorSelectionReason::NoTimingModel => 2,
+            InteriorSelectionReason::NoObjective => 3,
+            InteriorSelectionReason::GroupingDisabled => 4,
+            InteriorSelectionReason::NoQualifiedAlternative => 5,
+            InteriorSelectionReason::IncomparableTiming => 6,
+            InteriorSelectionReason::ObjectiveNotMet => 7,
+            InteriorSelectionReason::ImprovedModeledWork => 8,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn detached_policy_request_is_typed_and_rejects_competing_context() {
+        use crate::{
+            geometry::{DefinitionId, OccurrenceId, SessionId, SourceHash},
+            project::{PrintLayoutId, ProjectRevision},
+        };
+        let command = ManufacturingCommand::EvaluateInteriorPolicy {
+            layout_id: PrintLayoutId::parse("1ccf1bc1-590b-4fe2-88b5-7e8de3da1fcb").unwrap(),
+            session_id: SessionId::new(),
+            base_revision: ProjectRevision(2),
+            opportunity: InteriorPolicyOpportunity {
+                edit: InteriorToolPolicyEdit {
+                    occurrence_id: OccurrenceId::new(1).unwrap(),
+                    expected_definition_id: DefinitionId::from_source_sha256(&[1; 32]),
+                    expected: Some(InteriorToolOverride {
+                        enabled: true,
+                        value: InteriorToolPolicy::PrimaryOnly,
+                    }),
+                    value: None,
+                },
+                context_hash: SourceHash::from_bytes(b"context"),
+                input_hash: SourceHash::from_bytes(b"input"),
+            },
+        };
+        let wire: rpc::EvaluateManufacturingAlternativeRequest =
+            command.clone().try_into().unwrap();
+        assert_eq!(
+            ManufacturingCommand::try_from(wire.clone()).unwrap(),
+            command
+        );
+        let mut wrong = wire.clone();
+        wrong.expected_context_hash = SourceHash::from_bytes(b"competing").as_str().into();
+        assert!(ManufacturingCommand::try_from(wrong).is_err());
+        let mut missing = wire;
+        missing.construction = None;
+        assert!(ManufacturingCommand::try_from(missing).is_err());
+        assert!(InteriorStrategy::try_from(0).is_err());
+        assert!(InteriorSelectionReason::try_from(999).is_err());
+    }
     #[test]
     fn policy_edit_requires_explicit_expected_state_and_action() {
         use rpc::interior_tool_policy_edit::{Action, ExpectedState};

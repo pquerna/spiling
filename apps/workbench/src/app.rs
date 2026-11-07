@@ -30,6 +30,8 @@ struct Preferences {
     library_location: Option<NativePath>,
     #[serde(default)]
     analysis_pins: Vec<analysis::Pinned>,
+    #[serde(default)]
+    dismissed_policy_contexts: Vec<SourceHash>,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -38,6 +40,7 @@ impl Default for Preferences {
             accepted_osl3: false,
             library_location: None,
             analysis_pins: Vec::new(),
+            dismissed_policy_contexts: Vec::new(),
         }
     }
 }
@@ -104,6 +107,7 @@ impl Workbench {
             .unwrap_or_default();
         prefs.analysis_pins.retain(|p| p.valid());
         prefs.analysis_pins.truncate(32);
+        prefs.dismissed_policy_contexts.truncate(32);
         prefs.theme.apply(&cc.egui_ctx);
         let gpu = cc
             .wgpu_render_state

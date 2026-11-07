@@ -154,6 +154,7 @@ pub enum Work {
     },
     Compile(CompileRequest),
     EvaluateAlternative {
+        interior_opportunity: Option<InteriorPolicyOpportunity>,
         request: CompileRequest,
         context_hash: SourceHash,
         changed_inputs: Vec<ManufacturingInputChange>,
@@ -474,6 +475,7 @@ fn run(
                 compile(request, &definitions, &cancel).map(Product::Compiled)
             }
             Work::EvaluateAlternative {
+                interior_opportunity,
                 request,
                 context_hash,
                 changed_inputs,
@@ -500,7 +502,22 @@ fn run(
                             media_type: media_type.into(),
                         }
                     };
+                    let interior_policy = interior_opportunity
+                        .map(|opportunity| {
+                            let bundle = decode_bundle(asset.bytes.as_slice())?;
+                            let selection =
+                                bundle.plan.interior_selection.as_deref().ok_or_else(|| {
+                                    ManufacturingError::new(
+                                        ManufacturingErrorCode::VerificationFailed,
+                                        "policy evaluation omitted construction assessment",
+                                    )
+                                })?;
+                            InteriorPolicyAssessment::from_selection(opportunity, selection)
+                                .map(Arc::new)
+                        })
+                        .transpose()?;
                     let evaluation = ManufacturingAlternativeEvaluation {
+                        interior_policy,
                         project_id,
                         captured_revision,
                         context_hash,

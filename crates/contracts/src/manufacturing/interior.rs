@@ -334,3 +334,133 @@ impl NormalizedPrintPlan {
         Ok(Cow::Owned(resolved))
     }
 }
+
+/// One engine-selected exact pin to reassess after a meaningful captured change.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InteriorPolicyOpportunity {
+    pub edit: InteriorToolPolicyEdit,
+    pub context_hash: SourceHash,
+    pub input_hash: SourceHash,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct InteriorPolicyAssessment {
+    pub opportunity: InteriorPolicyOpportunity,
+    pub primary: QualifiedInteriorWork,
+    pub automatic: QualifiedInteriorWork,
+    pub strategy: InteriorStrategy,
+    pub reason: InteriorSelectionReason,
+}
+impl InteriorPolicyAssessment {
+    pub fn from_selection(
+        opportunity: InteriorPolicyOpportunity,
+        selection: &InteriorSelection,
+    ) -> Result<Self, ManufacturingError> {
+        let InteriorCandidateOutcome::Qualified { work: primary } =
+            &selection.candidates[0].outcome
+        else {
+            return Err(invalid(
+                "policy assessment has no qualified primary reference",
+            ));
+        };
+        let InteriorCandidateOutcome::Qualified { work: automatic } =
+            &selection.candidates[selection.selected.index()].outcome
+        else {
+            return Err(invalid(
+                "policy assessment has no qualified automatic result",
+            ));
+        };
+        Ok(Self {
+            opportunity,
+            primary: primary.clone(),
+            automatic: automatic.clone(),
+            strategy: selection.selected,
+            reason: selection.reason,
+        })
+    }
+    pub fn qualified(&self) -> bool {
+        self.reason == InteriorSelectionReason::ImprovedModeledWork
+            && self.strategy != InteriorStrategy::Primary
+    }
+    pub fn validate_for(
+        &self,
+        intent: &ManufacturingIntent,
+        report: &VerificationReport,
+    ) -> Result<(), ManufacturingError> {
+        let edit = &self.opportunity.edit;
+        if edit.expected
+            != Some(InteriorToolOverride {
+                enabled: true,
+                value: InteriorToolPolicy::PrimaryOnly,
+            })
+            || edit.value.is_some()
+        {
+            return Err(invalid(
+                "policy assessment must release one exact primary-only pin",
+            ));
+        }
+        let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow else {
+            return Err(invalid("policy assessment lost its captured workflow"));
+        };
+        if !job.assignments.iter().any(|a| {
+            a.occurrence_id == edit.occurrence_id
+                && a.interior
+                    .as_ref()
+                    .is_some_and(|b| b.policy_override.is_none() && b.policy_context.is_none())
+        }) {
+            return Err(invalid(
+                "policy assessment did not release the exact reviewed pin",
+            ));
+        }
+        for work in [&self.primary, &self.automatic] {
+            positive(&[work.model_volume_mm3])?;
+            if work.interior_segments_per_tool[0]
+                .checked_add(work.interior_segments_per_tool[1])
+                .is_none_or(|n| n > MAX_DEPOSITION_SEGMENTS)
+            {
+                return Err(resource("policy work segment count exceeds bound"));
+            }
+            if !work.waste_volume_mm3.is_finite() || work.waste_volume_mm3 < 0.0 {
+                return Err(invalid("invalid policy assessment waste"));
+            }
+            if let Some(time) = &work.time {
+                time.validate()?;
+            }
+        }
+        let work = &self.automatic;
+        if work.time != report.job_time || work.model_volume_mm3 != report.deposited_volume_mm3 {
+            return Err(invalid("policy assessment differs from actual result"));
+        }
+        if self.qualified() {
+            let (Some(goal), Some(before), Some(after)) =
+                (&job.interior_goal, &self.primary.time, &work.time)
+            else {
+                return Err(invalid(
+                    "qualified policy change lacks its objective or timing evidence",
+                ));
+            };
+            let model_bound = self.primary.model_volume_mm3 * (1.0 + goal.max_extra_model_fraction);
+            let waste_bound = self.primary.waste_volume_mm3 + goal.max_extra_waste_mm3;
+            if !model_bound.is_finite()
+                || !waste_bound.is_finite()
+                || before.model != after.model
+                || before.startup_context_hash != after.startup_context_hash
+                || after.modeled_seconds() >= before.modeled_seconds()
+                || before.modeled_seconds() - after.modeled_seconds()
+                    < goal.minimum_modeled_saving_seconds
+                || work.model_volume_mm3 > model_bound
+                || work.waste_volume_mm3 > waste_bound
+            {
+                return Err(invalid(
+                    "policy change does not meet the captured objective",
+                ));
+            }
+        } else if self.strategy != InteriorStrategy::Primary || self.primary != self.automatic {
+            return Err(invalid(
+                "unqualified policy change must retain its primary reference",
+            ));
+        }
+        Ok(())
+    }
+}

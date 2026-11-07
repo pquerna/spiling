@@ -37,7 +37,8 @@ pub fn manufacturing_call(
 ) -> Result<ManufacturingCall, String> {
     super::request_id(request_id)?;
     match command {
-        command @ ManufacturingCommand::EvaluateAlternative { .. } => {
+        command @ (ManufacturingCommand::EvaluateAlternative { .. }
+        | ManufacturingCommand::EvaluateInteriorPolicy { .. }) => {
             let mut request = rpc::EvaluateManufacturingAlternativeRequest::try_from(command)?;
             request.request_id = request_id.to_owned();
             Ok(ManufacturingCall::EvaluateAlternative(request))
@@ -205,38 +206,73 @@ impl TryFrom<ManufacturingCommand> for rpc::CompileManufacturingRequest {
 impl TryFrom<ManufacturingCommand> for rpc::EvaluateManufacturingAlternativeRequest {
     type Error = String;
     fn try_from(value: ManufacturingCommand) -> Result<Self, String> {
-        let ManufacturingCommand::EvaluateAlternative {
-            layout_id,
-            session_id,
-            base_revision,
-            expected_context_hash,
-            intent,
-        } = value
-        else {
-            return Err("expected alternative evaluation command".into());
-        };
+        use rpc::evaluate_manufacturing_alternative_request::Construction;
+        let (layout_id, session_id, base_revision, expected_context_hash, construction) =
+            match value {
+                ManufacturingCommand::EvaluateAlternative {
+                    layout_id,
+                    session_id,
+                    base_revision,
+                    expected_context_hash,
+                    intent,
+                } => (
+                    layout_id,
+                    session_id,
+                    base_revision,
+                    expected_context_hash.as_str().to_owned(),
+                    Construction::Intent(Arc::unwrap_or_clone(intent).try_into()?),
+                ),
+                ManufacturingCommand::EvaluateInteriorPolicy {
+                    layout_id,
+                    session_id,
+                    base_revision,
+                    opportunity,
+                } => (
+                    layout_id,
+                    session_id,
+                    base_revision,
+                    String::new(),
+                    Construction::InteriorPolicy(opportunity.try_into()?),
+                ),
+                _ => return Err("expected alternative evaluation command".into()),
+            };
         Ok(Self {
             parent: format!("sessions/{}", session_id.as_str()),
             layout_id: layout_id.as_str().into(),
             request_id: String::new(),
             base_revision: base_revision.get(),
-            expected_context_hash: expected_context_hash.as_str().into(),
-            intent: Some(Arc::unwrap_or_clone(intent).try_into()?),
+            expected_context_hash,
+            construction: Some(construction),
         })
     }
 }
 impl TryFrom<rpc::EvaluateManufacturingAlternativeRequest> for ManufacturingCommand {
     type Error = String;
     fn try_from(value: rpc::EvaluateManufacturingAlternativeRequest) -> Result<Self, String> {
+        use rpc::evaluate_manufacturing_alternative_request::Construction;
         super::request_id(&value.request_id)?;
-        Ok(Self::EvaluateAlternative {
-            layout_id: PrintLayoutId::parse(value.layout_id).map_err(|e| e.to_string())?,
-            session_id: super::session_parent(&value.parent)?,
-            base_revision: ProjectRevision(value.base_revision),
-            expected_context_hash: SourceHash::parse(value.expected_context_hash)
-                .map_err(|error| error.to_string())?,
-            intent: Arc::new(required(value.intent, "alternative intent")?.try_into()?),
-        })
+        let layout_id = PrintLayoutId::parse(value.layout_id).map_err(|e| e.to_string())?;
+        let session_id = super::session_parent(&value.parent)?;
+        let base_revision = ProjectRevision(value.base_revision);
+        match required(value.construction, "alternative construction")? {
+            Construction::Intent(intent) => Ok(Self::EvaluateAlternative {
+                layout_id,
+                session_id,
+                base_revision,
+                expected_context_hash: SourceHash::parse(value.expected_context_hash)
+                    .map_err(|e| e.to_string())?,
+                intent: Arc::new(intent.try_into()?),
+            }),
+            Construction::InteriorPolicy(opportunity) if value.expected_context_hash.is_empty() => {
+                Ok(Self::EvaluateInteriorPolicy {
+                    layout_id,
+                    session_id,
+                    base_revision,
+                    opportunity: opportunity.try_into()?,
+                })
+            }
+            _ => Err("scoped policy evaluation must not supply a separate intent context".into()),
+        }
     }
 }
 
@@ -247,6 +283,10 @@ impl TryFrom<rpc::ManufacturingAlternativeEvaluation> for ManufacturingAlternati
             return Err("alternative input change count exceeds limit".into());
         }
         let evaluation = Self {
+            interior_policy: value
+                .interior_policy
+                .map(|v| InteriorPolicyAssessment::try_from(v).map(Arc::new))
+                .transpose()?,
             project_id: crate::project::ProjectId::parse(value.project_id)
                 .map_err(|error| error.to_string())?,
             captured_revision: ProjectRevision(value.captured_revision),
@@ -310,6 +350,10 @@ impl TryFrom<ManufacturingAlternativeEvaluation> for rpc::ManufacturingAlternati
             Some(&value.replay_display),
         )?;
         Ok(Self {
+            interior_policy: value
+                .interior_policy
+                .map(|v| Arc::unwrap_or_clone(v).try_into())
+                .transpose()?,
             project_id: value.project_id.as_str().into(),
             captured_revision: value.captured_revision.get(),
             context_hash: value.context_hash.as_str().into(),
@@ -1622,6 +1666,7 @@ impl TryFrom<ManufacturingResponse> for rpc::ManufacturingReply {
             });
         }
         let ManufacturingResponse::Status {
+            interior_opportunity,
             info,
             context_hash,
             intent,
@@ -1649,6 +1694,9 @@ impl TryFrom<ManufacturingResponse> for rpc::ManufacturingReply {
         Ok(Self {
             result: Some(rpc::manufacturing_reply::Result::Status(
                 rpc::ManufacturingStatus {
+                    interior_opportunity: interior_opportunity
+                        .map(TryInto::try_into)
+                        .transpose()?,
                     context_hash: context_hash.as_str().into(),
                     info: Some(info.try_into()?),
                     intent: intent
@@ -1684,6 +1732,10 @@ impl TryFrom<rpc::ManufacturingReply> for ManufacturingResponse {
             }
         }
         Ok(Self::Status {
+            interior_opportunity: status
+                .interior_opportunity
+                .map(TryInto::try_into)
+                .transpose()?,
             info: required(status.info, "project info")?.try_into()?,
             context_hash: SourceHash::parse(status.context_hash)
                 .map_err(|error| error.to_string())?,
@@ -2531,6 +2583,11 @@ impl TryFrom<rpc::OccurrenceMaterialAssignment> for OccurrenceMaterialAssignment
                 .interior
                 .map(|binding| {
                     Ok::<_, String>(InteriorToolBinding {
+                        policy_context: binding
+                            .policy_context
+                            .map(SourceHash::parse)
+                            .transpose()
+                            .map_err(|e| e.to_string())?,
                         tool_id: binding.tool_id,
                         bead_width_mm: binding.bead_width_mm,
                         policy_override: binding
@@ -2580,6 +2637,7 @@ impl TryFrom<OccurrenceMaterialAssignment> for rpc::OccurrenceMaterialAssignment
                 .interior
                 .map(|binding| {
                     Ok::<_, String>(rpc::InteriorToolBinding {
+                        policy_context: binding.policy_context.map(|hash| hash.as_str().to_owned()),
                         tool_id: binding.tool_id,
                         bead_width_mm: binding.bead_width_mm,
                         policy_override: binding

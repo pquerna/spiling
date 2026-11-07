@@ -296,6 +296,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         OccurrenceMaterial::decl(&config),
         InteriorToolPolicy::decl(&config),
         InteriorToolPolicyEdit::decl(&config),
+        InteriorPolicyOpportunity::decl(&config),
+        InteriorPolicyAssessment::decl(&config),
         InteriorToolOverride::decl(&config),
         InteriorSelectionGoal::decl(&config),
         InteriorStrategy::decl(&config),

@@ -24,6 +24,8 @@ pub struct ManufacturingInputChange {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ManufacturingAlternativeEvaluation {
+    #[serde(deserialize_with = "required_option")]
+    pub interior_policy: Option<Arc<InteriorPolicyAssessment>>,
     pub project_id: ProjectId,
     pub captured_revision: ProjectRevision,
     pub context_hash: SourceHash,
@@ -40,6 +42,9 @@ pub struct ManufacturingAlternativeEvaluation {
 impl ManufacturingAlternativeEvaluation {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         self.intent.validate()?;
+        if let Some(policy) = &self.interior_policy {
+            policy.validate_for(&self.intent, &self.report)?;
+        }
         self.report.validate()?;
         self.provenance.validate_for_record(&self.record)?;
         self.replay_display.validate_for_record(&self.record)?;

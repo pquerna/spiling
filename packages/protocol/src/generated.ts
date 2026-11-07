@@ -686,6 +686,10 @@ export type InteriorToolPolicy = "automatic" | "primary_only";
 
 export type InteriorToolPolicyEdit = { occurrence_id: OccurrenceId, expected_definition_id: DefinitionId, expected: InteriorToolOverride | null, value: InteriorToolOverride | null, };
 
+export type InteriorPolicyOpportunity = { edit: InteriorToolPolicyEdit, context_hash: SourceHash, input_hash: SourceHash, };
+
+export type InteriorPolicyAssessment = { opportunity: InteriorPolicyOpportunity, primary: QualifiedInteriorWork, automatic: QualifiedInteriorWork, strategy: InteriorStrategy, reason: InteriorSelectionReason, };
+
 export type InteriorToolOverride = { enabled: boolean, value: InteriorToolPolicy, };
 
 export type InteriorSelectionGoal = { minimum_modeled_saving_seconds: number, max_extra_model_fraction: number, max_extra_waste_mm3: number, };
@@ -702,7 +706,11 @@ export type InteriorCandidateAssessment = { strategy: InteriorStrategy, outcome:
 
 export type InteriorSelection = { selected: InteriorStrategy, reason: InteriorSelectionReason, candidates: [InteriorCandidateAssessment, InteriorCandidateAssessment, InteriorCandidateAssessment], };
 
-export type InteriorToolBinding = { policy_override: InteriorToolOverride | null, tool_id: string, bead_width_mm: number, };
+export type InteriorToolBinding = {
+/**
+ * Core-stamped semantic context of a deliberately created/re-enabled pin.
+ */
+policy_context: SourceHash | null, policy_override: InteriorToolOverride | null, tool_id: string, bead_width_mm: number, };
 
 export type OccurrenceMaterialAssignment = { occurrence_id: OccurrenceId,
 /**
@@ -815,7 +823,7 @@ export type MaterialReviewReport = { input_revision: ProjectRevision, query: str
 
 export type ManufacturingIntent = { hardware: ProjectHardwareCapture | null, material_profile: ResolvedMaterialProfile | null, printer: PrinterSpecification, recipe: PlanarPrintRecipe, };
 
-export type ManufacturingAlternativeEvaluation = { project_id: ProjectId, captured_revision: ProjectRevision, context_hash: SourceHash, intent: ManufacturingIntent, changed_inputs: Array<ManufacturingInputChange>, changed_inputs_complete: boolean, record: ManufacturingArtifactRecord, report: VerificationReport, provenance: ManufacturingInspectionProvenance, resource: ArtifactView, replay_display: ReplayDisplayDescriptor, };
+export type ManufacturingAlternativeEvaluation = { interior_policy: InteriorPolicyAssessment | null, project_id: ProjectId, captured_revision: ProjectRevision, context_hash: SourceHash, intent: ManufacturingIntent, changed_inputs: Array<ManufacturingInputChange>, changed_inputs_complete: boolean, record: ManufacturingArtifactRecord, report: VerificationReport, provenance: ManufacturingInspectionProvenance, resource: ArtifactView, replay_display: ReplayDisplayDescriptor, };
 
 export type ManufacturingInputGroup = "hardware" | "material_profile" | "printer" | "recipe";
 
@@ -906,9 +914,9 @@ export type ManufacturingBundle = { schema_version: number, provenance: Manufact
 
 export type ManufacturingArtifactRecord = { hash: SourceHash, input_hash: SourceHash, byte_count: number, summary: ManufacturingSummary, };
 
-export type ManufacturingCommand = { "op": "get", layout_id: PrintLayoutId, session_id: SessionId, } | { "op": "set_intent", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, intent: ManufacturingIntent, } | { "op": "edit_interior_policy", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, edit: InteriorToolPolicyEdit, } | { "op": "review_materials", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, request: MaterialReviewRequest, } | { "op": "apply_material_profile", tool_id: string | null, layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, selection: MaterialProfileSelection, } | { "op": "compile", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, } | { "op": "evaluate_alternative", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, expected_context_hash: SourceHash, intent: ManufacturingIntent, } | { "op": "preflight", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, } | { "op": "inspect", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, output: VerificationOutput, };
+export type ManufacturingCommand = { "op": "get", layout_id: PrintLayoutId, session_id: SessionId, } | { "op": "set_intent", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, intent: ManufacturingIntent, } | { "op": "edit_interior_policy", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, edit: InteriorToolPolicyEdit, } | { "op": "review_materials", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, request: MaterialReviewRequest, } | { "op": "apply_material_profile", tool_id: string | null, layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, selection: MaterialProfileSelection, } | { "op": "compile", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, } | { "op": "evaluate_interior_policy", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, opportunity: InteriorPolicyOpportunity, } | { "op": "evaluate_alternative", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, expected_context_hash: SourceHash, intent: ManufacturingIntent, } | { "op": "preflight", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, } | { "op": "inspect", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, output: VerificationOutput, };
 
-export type ManufacturingResponse = { "type": "material_review", report: MaterialReviewReport, } | { "type": "status", info: ProjectInfo, context_hash: SourceHash, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, } | { "type": "preflight", report: PreflightReport, } | { "type": "error", error: ManufacturingError, };
+export type ManufacturingResponse = { "type": "material_review", report: MaterialReviewReport, } | { "type": "status", interior_opportunity: InteriorPolicyOpportunity | null, info: ProjectInfo, context_hash: SourceHash, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, } | { "type": "preflight", report: PreflightReport, } | { "type": "error", error: ManufacturingError, };
 
 export const MAX_MATERIAL_DOMAINS = 24 as const;
 export const MAX_FUNCTIONAL_KEYS = 16 as const;

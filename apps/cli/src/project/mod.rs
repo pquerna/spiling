@@ -128,6 +128,7 @@ enum Operation {
     ProcessEdit(ProcessEdit),
     ProcessResolve(OccurrenceId),
     InteriorPolicy(InteriorToolPolicyEdit),
+    CheckInteriorDefault,
     Intent(Arc<ManufacturingIntent>),
     EvaluateAlternative(Arc<ManufacturingIntent>),
     EvaluateOption(SourceHash),
@@ -497,6 +498,7 @@ pub fn parse(
                 let scope = process_scope_kind(&mut args, "--process-reset scope")?;
                 operations.push(Operation::ProcessReset(occurrence, scope));
             }
+            Some("--check-interior-default") => operations.push(Operation::CheckInteriorDefault),
             Some("--interior-policy-edit") => {
                 let json = text(&mut args, "--interior-policy-edit JSON")?;
                 if json.len() > 4096 {
@@ -859,6 +861,7 @@ pub fn parse(
                     Operation::PrepareLayout(_)
                         | Operation::Plate(plates::Action::Select(_))
                         | Operation::LibraryLocation(_)
+                        | Operation::CheckInteriorDefault
                         | Operation::EvaluateAlternative(_)
                         | Operation::EvaluateOption(_)
                         | Operation::ListOptions
@@ -1328,11 +1331,14 @@ async fn execute(
         let mut process_resolution = None;
         let mut storage_maintenance = None;
         match operation {
-            Operation::EvaluateAlternative(_) | Operation::EvaluateOption(_) => {
+            Operation::EvaluateAlternative(_)
+            | Operation::EvaluateOption(_)
+            | Operation::CheckInteriorDefault => {
                 label = "evaluate_alternative";
                 let ManufacturingResponse::Status {
                     info: captured,
                     context_hash,
+                    interior_opportunity,
                     ..
                 } = client
                     .manufacturing(ManufacturingCommand::Get {
@@ -1343,33 +1349,56 @@ async fn execute(
                 else {
                     return Err("expected checked Current context".into());
                 };
-                let (intent, expected_context_hash) = match operation {
-                    Operation::EvaluateAlternative(intent) => (intent, context_hash),
-                    Operation::EvaluateOption(id) => {
-                        let ProjectResponse::ManufacturingOption { option } = client
-                            .project(ProjectCommand::GetManufacturingOption {
+                let (command, expected_intent, expected_context_hash, expected_policy) =
+                    if matches!(operation, Operation::CheckInteriorDefault) {
+                        let opportunity = interior_opportunity.ok_or(
+                            "no retained interior policy needs reassessment in this context",
+                        )?;
+                        (
+                            ManufacturingCommand::EvaluateInteriorPolicy {
                                 layout_id: current_layout.clone(),
                                 session_id: session.clone(),
                                 base_revision: captured.revision,
-                                id,
-                            })
-                            .await?
-                        else {
-                            return Err("expected retained manufacturing option".into());
+                                opportunity: opportunity.clone(),
+                            },
+                            None,
+                            context_hash,
+                            Some(opportunity),
+                        )
+                    } else {
+                        let (intent, expected_context_hash) = match operation {
+                            Operation::EvaluateAlternative(intent) => (intent, context_hash),
+                            Operation::EvaluateOption(id) => {
+                                let ProjectResponse::ManufacturingOption { option } = client
+                                    .project(ProjectCommand::GetManufacturingOption {
+                                        layout_id: current_layout.clone(),
+                                        session_id: session.clone(),
+                                        base_revision: captured.revision,
+                                        id,
+                                    })
+                                    .await?
+                                else {
+                                    return Err("expected retained manufacturing option".into());
+                                };
+                                (option.intent, option.context_hash)
+                            }
+                            _ => unreachable!(),
                         };
-                        (option.intent, option.context_hash)
-                    }
-                    _ => unreachable!(),
-                };
-                let ManufacturingResponse::OperationAccepted { operation } = client
-                    .manufacturing(ManufacturingCommand::EvaluateAlternative {
-                        layout_id: current_layout.clone(),
-                        session_id: session.clone(),
-                        base_revision: captured.revision,
-                        expected_context_hash: expected_context_hash.clone(),
-                        intent: intent.clone(),
-                    })
-                    .await?
+                        (
+                            ManufacturingCommand::EvaluateAlternative {
+                                layout_id: current_layout.clone(),
+                                session_id: session.clone(),
+                                base_revision: captured.revision,
+                                expected_context_hash: expected_context_hash.clone(),
+                                intent: intent.clone(),
+                            },
+                            Some(intent),
+                            expected_context_hash,
+                            None,
+                        )
+                    };
+                let ManufacturingResponse::OperationAccepted { operation } =
+                    client.manufacturing(command).await?
                 else {
                     return Err("expected alternative evaluation operation".into());
                 };
@@ -1381,7 +1410,11 @@ async fn execute(
                 if evaluation.project_id != captured.project_id
                     || evaluation.captured_revision != captured.revision
                     || evaluation.context_hash != expected_context_hash
-                    || evaluation.intent != intent
+                    || expected_intent
+                        .as_ref()
+                        .is_some_and(|intent| evaluation.intent != *intent)
+                    || evaluation.interior_policy.as_ref().map(|a| &a.opportunity)
+                        != expected_policy.as_ref()
                 {
                     return Err("alternative evaluation capture mismatch".into());
                 }
@@ -1393,6 +1426,20 @@ async fn execute(
                     || bundle.provenance.input_revision != evaluation.captured_revision
                 {
                     return Err("alternative bundle input mismatch".into());
+                }
+                if let Some(assessment) = evaluation.interior_policy.as_deref() {
+                    let selection = bundle
+                        .plan
+                        .interior_selection
+                        .as_deref()
+                        .ok_or("policy bundle omitted construction assessment")?;
+                    if InteriorPolicyAssessment::from_selection(
+                        assessment.opportunity.clone(),
+                        selection,
+                    )? != *assessment
+                    {
+                        return Err("policy assessment differs from checked bundle".into());
+                    }
                 }
                 client
                     .fetch_replay_display(&evaluation.record, &evaluation.replay_display)

@@ -3913,3 +3913,234 @@ fn scoped_modifiers_preserve_neighbors_and_receipts_across_history_and_saved_ret
         "child must be reaped"
     );
 }
+
+#[test]
+#[ignore = "actual detached policy comparison; requires SPILING_TEST_ENGINE"]
+fn interior_policy_suggestion_is_detached_cancelable_and_exactly_adopted() {
+    use spiling_contracts::manufacturing::*;
+    let root = tempfile::tempdir().unwrap();
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = root.path().join("source.step");
+    std::fs::copy(repo.join("fixtures/geometry/through-hole.step"), &source).unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("ops"),
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&host, |s| s.phase == Phase::Running);
+    send(&host, Action::Import(native(&source)));
+    let s = wait(&host, |s| s.display.is_some() && !s.display_loading);
+    let occurrence = s.display.as_ref().unwrap().occurrences[0].clone();
+    let scene = s.scene.as_ref().unwrap();
+    host.geometry(GeometryCommand::SetInstancePose {
+        session_id: scene.session_id.clone(),
+        base_revision: scene.revision,
+        project_revision: s.project.as_ref().unwrap().revision,
+        occurrence_id: occurrence.occurrence_id,
+        pose: RigidPoseMm {
+            translation_mm: [20.0, 20.0, 0.0],
+            ..RigidPoseMm::IDENTITY
+        },
+    })
+    .unwrap();
+    idle_after(&host, s.serial);
+    let intent = Arc::new(
+        decode_intent(include_bytes!(
+            "../../../../fixtures/manufacturing/mixed-width-combined.intent.json"
+        ))
+        .unwrap(),
+    );
+    manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::SetIntent {
+            layout_id: layout_id(&host),
+            session_id,
+            base_revision,
+            intent: intent.clone(),
+        }
+    });
+    let pin = InteriorToolOverride {
+        enabled: true,
+        value: InteriorToolPolicy::PrimaryOnly,
+    };
+    let edit = InteriorToolPolicyEdit {
+        occurrence_id: occurrence.occurrence_id,
+        expected_definition_id: occurrence.definition_id,
+        expected: None,
+        value: Some(pin),
+    };
+    let pinned = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::EditInteriorPolicy {
+            layout_id: layout_id(&host),
+            session_id,
+            base_revision,
+            edit: edit.clone(),
+        }
+    });
+    assert!(pinned.manufacturing.interior_opportunity.is_none());
+    let mut changed = pinned
+        .manufacturing
+        .intent
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .clone();
+    if let JobWorkflow::FixedDualMarlin { job } = &mut changed.printer.workflow {
+        job.interior_goal
+            .as_mut()
+            .unwrap()
+            .minimum_modeled_saving_seconds = 2.0;
+    }
+    manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::SetIntent {
+            layout_id: layout_id(&host),
+            session_id,
+            base_revision,
+            intent: Arc::new(changed),
+        }
+    });
+    retain_project(&host, root.path(), "interior-pin-review");
+    let baseline = host.snapshot();
+    let opportunity = baseline.manufacturing.interior_opportunity.clone().unwrap();
+    let info = baseline.project.clone();
+    host.manufacturing(ManufacturingCommand::EvaluateInteriorPolicy {
+        layout_id: layout_id(&host),
+        session_id: baseline.hello.as_ref().unwrap().session_id.clone(),
+        base_revision: info.as_ref().unwrap().revision,
+        opportunity: opportunity.clone(),
+    })
+    .unwrap();
+    wait(&host, |s| s.active_operation);
+    host.command(Command::Cancel).unwrap();
+    wait(&host, |s| !s.busy && !s.active_operation);
+    assert_eq!(host.snapshot().project, info);
+    assert_eq!(
+        host.snapshot().manufacturing.intent,
+        baseline.manufacturing.intent
+    );
+    assert!(host.snapshot().manufacturing.alternative.is_none());
+    let serial = host.snapshot().serial;
+    host.command(Command::DismissProblems).unwrap();
+    idle_after(&host, serial);
+    let evaluated = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::EvaluateInteriorPolicy {
+            layout_id: layout_id(&host),
+            session_id,
+            base_revision,
+            opportunity: opportunity.clone(),
+        }
+    });
+    assert_eq!(evaluated.project, info);
+    assert_eq!(
+        evaluated.manufacturing.intent,
+        baseline.manufacturing.intent
+    );
+    let loaded = wait(&host, |s| !s.busy && !s.manufacturing.alternative_loading);
+    let assessment = loaded
+        .manufacturing
+        .alternative
+        .as_ref()
+        .unwrap()
+        .interior_policy
+        .as_deref()
+        .unwrap();
+    assert!(assessment.qualified());
+    assert_eq!(assessment.opportunity, opportunity);
+    let candidate = loaded
+        .manufacturing
+        .alternative_review
+        .as_ref()
+        .unwrap()
+        .bundle
+        .clone();
+    assert_eq!(
+        InteriorPolicyAssessment::from_selection(
+            opportunity.clone(),
+            candidate.plan.interior_selection.as_ref().unwrap()
+        )
+        .unwrap(),
+        *assessment
+    );
+    let mut stale = opportunity.clone();
+    stale.input_hash = spiling_contracts::geometry::SourceHash::from_bytes(b"wrong input");
+    let rejected = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::EvaluateInteriorPolicy {
+            layout_id: layout_id(&host),
+            session_id,
+            base_revision,
+            opportunity: stale,
+        }
+    });
+    assert_eq!(rejected.project, info);
+    let serial = rejected.serial;
+    host.command(Command::DismissProblems).unwrap();
+    idle_after(&host, serial);
+    let adopted = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::EditInteriorPolicy {
+            layout_id: layout_id(&host),
+            session_id,
+            base_revision,
+            edit: opportunity.edit.clone(),
+        }
+    });
+    assert_eq!(
+        adopted.manufacturing.intent.as_deref(),
+        Some(&candidate.provenance.intent)
+    );
+    assert_eq!(
+        adopted
+            .manufacturing
+            .applied_settings
+            .as_ref()
+            .unwrap()
+            .interior_edit
+            .as_ref(),
+        Some(&opportunity.edit)
+    );
+    let review = checked_review(&host);
+    assert_eq!(
+        review.manufacturing.review.as_ref().unwrap().bundle.program,
+        candidate.program
+    );
+    let output = root.path().join("export");
+    send(&host, Action::Export(native(&output)));
+    assert_eq!(
+        std::fs::read_to_string(output.join("program.gcode")).unwrap(),
+        candidate.program
+    );
+    let saved_path = root.path().join("suggested.spil");
+    let saved = send(
+        &host,
+        Action::Save {
+            target: Some(native(&saved_path)),
+        },
+    );
+    assert!(!saved.project.as_ref().unwrap().dirty);
+    std::fs::remove_file(&source).unwrap();
+    let restarted = send(&host, Action::Restart);
+    assert_eq!(restarted.manufacturing.intent, adopted.manufacturing.intent);
+    let revision = restarted.project.as_ref().unwrap().revision;
+    manufacture_control(&host, |session_id, _| ManufacturingCommand::Inspect {
+        layout_id: layout_id(&host),
+        session_id,
+        base_revision: revision,
+        output: VerificationOutput::ReportAndMotion,
+    });
+    let returned = wait(&host, |s| {
+        s.manufacturing.review.is_some() && !s.manufacturing.loading
+    });
+    assert_eq!(
+        returned
+            .manufacturing
+            .review
+            .as_ref()
+            .unwrap()
+            .bundle
+            .program,
+        candidate.program
+    );
+    retain_project(&host, root.path(), "interior-suggestion");
+    assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
+}

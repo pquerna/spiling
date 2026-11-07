@@ -55,7 +55,10 @@ message EvaluateManufacturingAlternativeRequest {
   string request_id = 2;
   uint32 base_revision = 3;
   string expected_context_hash = 4;
-  ManufacturingIntent intent = 5;
+  oneof construction {
+    ManufacturingIntent intent = 5;
+    InteriorPolicyOpportunity interior_policy = 7;
+  }
 }
 enum ManufacturingInputGroup {
   MANUFACTURING_INPUT_GROUP_UNSPECIFIED = 0;
@@ -71,6 +74,7 @@ message ManufacturingInputChange {
   optional string after = 4;
 }
 message ManufacturingAlternativeEvaluation {
+  InteriorPolicyAssessment interior_policy = 12;
   string project_id = 1;
   uint32 captured_revision = 2;
   string context_hash = 3;
@@ -161,6 +165,7 @@ message ManufacturingReply {
   }
 }
 message ManufacturingStatus {
+  InteriorPolicyOpportunity interior_opportunity = 6;
   string context_hash = 5;
   ProjectInfo info = 1;
   ManufacturingIntent intent = 2;
@@ -503,4 +508,37 @@ message InteriorToolPolicyEdit {
 message EditInteriorPolicyRequest {
   uint32 base_revision = 1;
   InteriorToolPolicyEdit edit = 2;
+}
+
+message InteriorPolicyOpportunity {
+  InteriorToolPolicyEdit edit = 1;
+  string context_hash = 2;
+  string input_hash = 3;
+}
+message InteriorPolicyAssessment {
+  InteriorPolicyOpportunity opportunity = 1;
+  QualifiedInteriorWork primary = 2;
+  QualifiedInteriorWork automatic = 3;
+  InteriorStrategy strategy = 4;
+  InteriorSelectionReason reason = 5;
+}
+
+enum InteriorStrategy { INTERIOR_STRATEGY_UNSPECIFIED = 0; INTERIOR_STRATEGY_PRIMARY = 1; INTERIOR_STRATEGY_SYNCHRONIZED = 2; INTERIOR_STRATEGY_GROUPED = 3; }
+enum InteriorSelectionReason {
+  INTERIOR_SELECTION_REASON_UNSPECIFIED = 0;
+  INTERIOR_SELECTION_REASON_EXPLICIT_PRIMARY = 1;
+  INTERIOR_SELECTION_REASON_NO_TIMING_MODEL = 2;
+  INTERIOR_SELECTION_REASON_NO_OBJECTIVE = 3;
+  INTERIOR_SELECTION_REASON_GROUPING_DISABLED = 4;
+  INTERIOR_SELECTION_REASON_NO_QUALIFIED_ALTERNATIVE = 5;
+  INTERIOR_SELECTION_REASON_INCOMPARABLE_TIMING = 6;
+  INTERIOR_SELECTION_REASON_OBJECTIVE_NOT_MET = 7;
+  INTERIOR_SELECTION_REASON_IMPROVED_MODELED_WORK = 8;
+}
+message QualifiedInteriorWork {
+  repeated uint32 interior_segments_per_tool = 1;
+  string program_hash = 2;
+  double model_volume_mm3 = 3;
+  double waste_volume_mm3 = 4;
+  JobTimeLedger time = 5;
 }

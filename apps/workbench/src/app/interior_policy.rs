@@ -13,6 +13,7 @@ pub(super) struct InteriorPolicyDraft {
     revision: ProjectRevision,
     pub edit: InteriorToolPolicyEdit,
     pub open: bool,
+    assessment: Option<InteriorPolicyAssessment>,
     submitted: Option<(u64, u64)>,
 }
 impl InteriorPolicyDraft {
@@ -38,6 +39,7 @@ impl InteriorPolicyDraft {
                 })),
             },
             open: true,
+            assessment: None,
             submitted: None,
         }
     }
@@ -56,6 +58,11 @@ impl InteriorPolicyDraft {
         ui.separator();
         ui::group(ui, "Interior tool policy");
         ui.weak("Unapplied · this part");
+        if let Some(assessment) = &self.assessment
+            && self.edit == assessment.opportunity.edit
+        {
+            comparison(ui, assessment);
+        }
         ui.add_enabled_ui(editable && self.submitted.is_none(), |ui| {
             let mut defaults = self.edit.value.is_none();
             if ui.checkbox(&mut defaults, "Use defaults").changed() {
@@ -204,6 +211,102 @@ pub(super) fn policy_name(value: InteriorToolPolicy) -> &'static str {
     match value {
         InteriorToolPolicy::Automatic => "Automatic",
         InteriorToolPolicy::PrimaryOnly => "Primary tool only",
+    }
+}
+
+fn comparison(ui: &mut egui::Ui, assessment: &InteriorPolicyAssessment) {
+    ui.collapsing("Comparison", |ui| {
+        for (label, work) in [
+            ("Primary only", &assessment.primary),
+            ("Automatic", &assessment.automatic),
+        ] {
+            ui::group(ui, label);
+            if let Some(time) = &work.time {
+                ui.label(format!("{:.1} min modeled", time.modeled_seconds() / 60.0));
+            }
+            ui.label(format!(
+                "Model {:.1} mm³ · Waste {:.1} mm³",
+                work.model_volume_mm3, work.waste_volume_mm3
+            ));
+        }
+        ui.weak("Declared model · shared unknown startup");
+    });
+}
+impl Workbench {
+    pub(super) fn interior_suggestion_ui(&mut self, ui: &mut egui::Ui, occurrence: OccurrenceId) {
+        let (Some(project), Some(hello), Some(opportunity)) = (
+            self.state.project.clone(),
+            self.state.hello.clone(),
+            self.state.manufacturing.interior_opportunity.clone(),
+        ) else {
+            return;
+        };
+        if opportunity.edit.occurrence_id != occurrence
+            || self
+                .prefs
+                .dismissed_policy_contexts
+                .contains(&opportunity.input_hash)
+            || self.process.has_changes()
+        {
+            return;
+        }
+        let assessment = self
+            .state
+            .manufacturing
+            .alternative
+            .as_ref()
+            .filter(|evaluation| {
+                evaluation.project_id == project.project_id
+                    && evaluation.captured_revision == project.revision
+            })
+            .and_then(|evaluation| evaluation.interior_policy.as_deref())
+            .filter(|a| a.opportunity == opportunity);
+        // A proposal row requires the checked immutable bundle to agree with the
+        // typed receipt, not just a terminal operation flag.
+        let assessment = assessment.filter(|assessment| {
+            self.state
+                .manufacturing
+                .alternative_review
+                .as_ref()
+                .is_some_and(|review| {
+                    review
+                        .bundle
+                        .plan
+                        .interior_selection
+                        .as_deref()
+                        .is_some_and(|selection| {
+                            InteriorPolicyAssessment::from_selection(opportunity.clone(), selection)
+                                .as_ref()
+                                == Ok(*assessment)
+                        })
+                })
+        });
+        ui.separator();
+        if let Some(assessment) = assessment {
+            if assessment.qualified() {
+                ui::group(ui, "Suggested change");
+                ui::modifier_delta(ui, "Interior tool policy", "Primary only", "Automatic");
+                if let (Some(before), Some(after)) = (&assessment.primary.time, &assessment.automatic.time) {
+                    ui.weak(format!("{:.1} min less modeled work", (before.modeled_seconds() - after.modeled_seconds()) / 60.0));
+                }
+                if ui.add_enabled(!self.state.busy, egui::Button::new("Review")).clicked() {
+                    let mut draft = InteriorPolicyDraft::new(project.project_id.clone(), hello.session_id.clone(), project.revision, occurrence, opportunity.edit.expected_definition_id.clone(), opportunity.edit.expected);
+                    draft.edit = opportunity.edit.clone();
+                    draft.assessment = Some(assessment.clone());
+                    self.process.interior = Some(draft);
+                }
+            } else { ui.weak("Current pin retained · objective not met"); }
+        } else if ui.add_enabled(self.state.phase == Phase::Running && self.manufacturing.trial.is_none() && !self.state.busy && !self.state.manufacturing.alternative_loading, egui::Button::new("Check default")).on_hover_text("Compare releasing this pin after the captured setup or goal changed. Current stays unchanged.").clicked() {
+            self.queued_manufacturing = Some(ManufacturingCommand::EvaluateInteriorPolicy { layout_id: project.layout_id.clone(), session_id: hello.session_id.clone(), base_revision: project.revision, opportunity: opportunity.clone() });
+        }
+        if ui.button("Dismiss").clicked() {
+            if self.prefs.dismissed_policy_contexts.len() == 32 {
+                self.prefs.dismissed_policy_contexts.remove(0);
+            }
+            self.prefs
+                .dismissed_policy_contexts
+                .push(opportunity.input_hash);
+        }
     }
 }
 

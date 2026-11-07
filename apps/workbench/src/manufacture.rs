@@ -87,6 +87,7 @@ pub struct AppliedSettings {
 }
 #[derive(Debug, Clone, Default)]
 pub struct State {
+    pub interior_opportunity: Option<spiling_contracts::manufacturing::InteriorPolicyOpportunity>,
     pub layout_id: Option<spiling_contracts::project::PrintLayoutId>,
     pub context_hash: Option<spiling_contracts::geometry::SourceHash>,
     pub alternative: Option<Arc<ManufacturingAlternativeEvaluation>>,

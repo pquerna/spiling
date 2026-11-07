@@ -4288,6 +4288,12 @@ pub enum ManufacturingCommand {
         session_id: SessionId,
         base_revision: ProjectRevision,
     },
+    EvaluateInteriorPolicy {
+        layout_id: crate::project::PrintLayoutId,
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        opportunity: InteriorPolicyOpportunity,
+    },
     EvaluateAlternative {
         layout_id: crate::project::PrintLayoutId,
         session_id: SessionId,
@@ -4317,6 +4323,7 @@ impl ManufacturingCommand {
             | Self::ApplyMaterialProfile { layout_id, .. }
             | Self::Compile { layout_id, .. }
             | Self::EvaluateAlternative { layout_id, .. }
+            | Self::EvaluateInteriorPolicy { layout_id, .. }
             | Self::Preflight { layout_id, .. }
             | Self::Inspect { layout_id, .. } => layout_id,
         }
@@ -4334,6 +4341,7 @@ pub enum ManufacturingResponse {
         report: MaterialReviewReport,
     },
     Status {
+        interior_opportunity: Option<InteriorPolicyOpportunity>,
         info: ProjectInfo,
         context_hash: SourceHash,
         intent: Option<Arc<ManufacturingIntent>>,

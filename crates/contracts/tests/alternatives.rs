@@ -165,7 +165,7 @@ fn evaluation_native_request_requires_original_context_and_complete_intent() {
     malformed.expected_context_hash.make_ascii_uppercase();
     assert!(ManufacturingCommand::try_from(malformed).is_err());
     let mut missing = wire;
-    missing.intent = None;
+    missing.construction = None;
     assert!(ManufacturingCommand::try_from(missing).is_err());
 }
 

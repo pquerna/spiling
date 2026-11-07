@@ -3034,6 +3034,25 @@ fn scoped_interior_policy_is_cas_bound_and_preserves_captured_settings_and_histo
         .as_mut()
         .unwrap()
         .policy_override = Some(pin);
+    let captured_context = if let JobWorkflow::FixedDualMarlin { job } = &project
+        .snapshot()
+        .manufacturing_intent
+        .as_ref()
+        .unwrap()
+        .printer
+        .workflow
+    {
+        job.assignments[0]
+            .interior
+            .as_ref()
+            .unwrap()
+            .policy_context
+            .clone()
+    } else {
+        unreachable!()
+    };
+    assert!(captured_context.is_some());
+    job.assignments[0].interior.as_mut().unwrap().policy_context = captured_context;
     assert_eq!(
         project.snapshot().manufacturing_intent.as_deref(),
         Some(&expected)
@@ -3111,5 +3130,122 @@ fn scoped_interior_policy_is_cas_bound_and_preserves_captured_settings_and_histo
     assert_eq!(
         project.snapshot().manufacturing_intent.as_deref(),
         Some(&intent)
+    );
+}
+
+#[test]
+fn policy_reassessment_requires_changed_semantics_and_never_mutates_current() {
+    use spiling_contracts::manufacturing::*;
+    let mut project = imported();
+    let intent: ManufacturingIntent = serde_json::from_str(include_str!(
+        "../../../fixtures/manufacturing/mixed-width-combined.intent.json"
+    ))
+    .unwrap();
+    edit(
+        &mut project,
+        Edit::SetManufacturingIntent {
+            intent: Arc::new(intent),
+        },
+    );
+    let occurrence = project
+        .snapshot()
+        .occurrences
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let pin = InteriorToolOverride {
+        enabled: true,
+        value: InteriorToolPolicy::PrimaryOnly,
+    };
+    let change = InteriorToolPolicyEdit {
+        occurrence_id: occurrence.occurrence_id,
+        expected_definition_id: occurrence.definition_id,
+        expected: None,
+        value: Some(pin),
+    };
+    edit(
+        &mut project,
+        Edit::SetInteriorToolPolicy {
+            edit: change.clone(),
+        },
+    );
+    assert!(
+        interior_policy_opportunity(&project.snapshot())
+            .unwrap()
+            .is_none(),
+        "a deliberate new pin must not nag"
+    );
+    let mut changed = project
+        .snapshot()
+        .manufacturing_intent
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .clone();
+    if let JobWorkflow::FixedDualMarlin { job } = &mut changed.printer.workflow {
+        job.interior_goal
+            .as_mut()
+            .unwrap()
+            .minimum_modeled_saving_seconds = 2.0;
+    }
+    edit(
+        &mut project,
+        Edit::SetManufacturingIntent {
+            intent: Arc::new(changed),
+        },
+    );
+    let baseline = project.snapshot();
+    let opportunity = interior_policy_opportunity(&baseline).unwrap().unwrap();
+    let trial = interior_policy_trial(&baseline, &opportunity).unwrap();
+    assert!(Arc::ptr_eq(&baseline, &project.snapshot()));
+    assert!(trial.manufacturing_artifact.is_none());
+    let mut released = baseline
+        .manufacturing_intent
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .clone();
+    if let JobWorkflow::FixedDualMarlin { job } = &mut released.printer.workflow {
+        let b = job.assignments[0].interior.as_mut().unwrap();
+        b.policy_override = None;
+        b.policy_context = None;
+    }
+    assert_eq!(trial.manufacturing_intent.as_deref(), Some(&released));
+    for bad in [
+        InteriorPolicyOpportunity {
+            input_hash: SourceHash::from_bytes(b"stale inputs"),
+            ..opportunity.clone()
+        },
+        InteriorPolicyOpportunity {
+            edit: InteriorToolPolicyEdit {
+                expected_definition_id: DefinitionId::from_source_sha256(&[99; 32]),
+                ..opportunity.edit.clone()
+            },
+            ..opportunity.clone()
+        },
+    ] {
+        assert!(interior_policy_trial(&baseline, &bad).is_err());
+    }
+    // Reaffirming the same deliberate pin records the new context and suppresses it.
+    edit(
+        &mut project,
+        Edit::SetInteriorToolPolicy {
+            edit: InteriorToolPolicyEdit {
+                expected: Some(pin),
+                ..change
+            },
+        },
+    );
+    assert!(
+        interior_policy_opportunity(&project.snapshot())
+            .unwrap()
+            .is_none()
+    );
+    assert!(interior_policy_trial(&project.snapshot(), &opportunity).is_err());
+    project.undo().unwrap();
+    assert_eq!(
+        interior_policy_opportunity(&project.snapshot()).unwrap(),
+        Some(opportunity)
     );
 }

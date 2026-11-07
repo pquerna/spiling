@@ -128,7 +128,7 @@ Unapplied drafts, Disabled, Needs slicing and Needs verification are visible. De
 coordinates, interface data and IDs. Closing the pane retains a draft; Discard draft
 abandons it. Matching session/project/base-revision/edit receipts alone confirm
 application. Stale/rejected requests retain the draft. Other preparation drafts are
-never committed by a modifier action. The source-bound Interior tool policy modifier uses the same dense row/editor pattern, an occurrence-only compare-and-set command and matching receipt; Automatic inherits by default, and explicit/disabled pins remain visible. These controls do not provide arbitrary regional tool routing, automatic suggestions or detached process-document preview.
+never committed by a modifier action. The source-bound Interior tool policy modifier uses the same dense row/editor pattern, an occurrence-only compare-and-set command and matching receipt; Automatic inherits by default, and explicit/disabled pins remain visible. These controls do not provide arbitrary regional tool routing or detached process-document preview. A changed-context interior pin can be explicitly checked; only qualified evidence produces one compact policy-delta row. Review opens the same editor, Use defaults commits only that pin, and Dismiss suppresses the semantic proposal across saved return. Required diagnostics remain visible; no evaluation runs on redraw.
 
 ## Actions and exits
 

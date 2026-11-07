@@ -8,7 +8,9 @@ mod print_layouts;
 pub use print_layouts::PrintLayoutSnapshot;
 mod placement;
 pub use placement::PlacementDraft;
+mod interior_policy;
 mod manufacturing_options;
+pub use interior_policy::{interior_policy_opportunity, interior_policy_trial};
 pub use manufacturing_options::{context_hash, trial_snapshot};
 pub mod materials;
 mod optical_construction;
@@ -1134,7 +1136,7 @@ impl Project {
                 manufacturing_options::set_intent(&mut snapshot, intent)?;
             }
             Edit::SetInteriorToolPolicy { edit } => {
-                manufacturing_options::set_interior_policy(&mut snapshot, edit)?;
+                interior_policy::apply(&mut snapshot, edit)?;
             }
             Edit::RetainManufacturingOption { option } => {
                 manufacturing_options::retain_option(&mut snapshot, option)?;

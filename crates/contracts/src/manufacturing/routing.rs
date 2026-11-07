@@ -291,6 +291,9 @@ impl OccurrenceMaterial {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct InteriorToolBinding {
+    /// Core-stamped semantic context of a deliberately created/re-enabled pin.
+    #[serde(deserialize_with = "required_option")]
+    pub policy_context: Option<SourceHash>,
     #[serde(deserialize_with = "required_option")]
     pub policy_override: Option<InteriorToolOverride>,
     pub tool_id: String,

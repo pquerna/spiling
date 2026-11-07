@@ -863,6 +863,9 @@ fn modifiers(ui: &mut Ui) {
     });
     ui.add_enabled(false, egui::Button::new("Add modifier…"));
     ui.separator();
+    group(ui, "Suggested change");
+    modifier_delta(ui, "Interior tool policy", "Primary only", "Automatic");
+    ui.separator();
     group(ui, "New modifier");
     ui.weak("Unapplied");
     let fraction_id = ui.make_persistent_id("gallery-modifier-density");

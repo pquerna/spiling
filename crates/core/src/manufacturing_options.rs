@@ -7,9 +7,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use spiling_contracts::{
     geometry::{DefinitionId, MAX_DEFINITIONS, MAX_OCCURRENCES, OccurrenceRecord, SourceHash},
-    manufacturing::{
-        InteriorToolPolicyEdit, JobWorkflow, ManufacturingErrorCode, ManufacturingIntent,
-    },
+    manufacturing::{ManufacturingErrorCode, ManufacturingIntent},
     project::{
         ManufacturingOption, ProjectError, ProjectErrorCode, StoredDefinition,
         validate_manufacturing_options,
@@ -264,40 +262,3 @@ pub(crate) fn retained_bytes<'a>(
 #[cfg(test)]
 #[path = "manufacturing_options_tests.rs"]
 mod tests;
-
-/// Narrow occurrence edit; unrelated captured settings are never supplied by a UI draft.
-pub(crate) fn set_interior_policy(
-    snapshot: &mut Snapshot,
-    edit: InteriorToolPolicyEdit,
-) -> Result<(), ProjectError> {
-    let occurrence = snapshot
-        .occurrences
-        .get(&edit.occurrence_id)
-        .ok_or_else(|| invalid("interior policy part is not on the addressed plate"))?;
-    if occurrence.definition_id != edit.expected_definition_id {
-        return Err(invalid("interior policy source identity changed"));
-    }
-    let mut intent = snapshot
-        .manufacturing_intent
-        .as_deref()
-        .cloned()
-        .ok_or_else(|| invalid("interior policy requires captured tool bindings"))?;
-    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
-        return Err(invalid(
-            "interior policy requires the captured dual-tool route",
-        ));
-    };
-    let binding = job
-        .assignments
-        .iter_mut()
-        .find(|a| a.occurrence_id == edit.occurrence_id)
-        .and_then(|a| a.interior.as_mut())
-        .ok_or_else(|| invalid("part has no captured interior tool binding"))?;
-    if binding.policy_override != edit.expected {
-        return Err(invalid(
-            "interior policy changed since this edit was captured",
-        ));
-    }
-    binding.policy_override = edit.value;
-    set_intent(snapshot, Arc::new(intent))
-}

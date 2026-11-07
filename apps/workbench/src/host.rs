@@ -1121,6 +1121,7 @@ impl Actor {
             artifact,
             resource,
             context_hash,
+            interior_opportunity,
         } = status
         else {
             return Err(ClientError::Protocol(
@@ -1183,6 +1184,7 @@ impl Actor {
         }
         let m = Arc::make_mut(&mut self.state.manufacturing);
         m.context_hash = Some(context_hash);
+        m.interior_opportunity = interior_opportunity;
         if layout_changed
             || m.revision
                 .as_ref()

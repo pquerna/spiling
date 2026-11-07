@@ -181,6 +181,9 @@ impl Actor {
             ManufacturingCommand::Compile { .. } => "Compile manufacturing",
             ManufacturingCommand::Inspect { .. } => "Fresh actual-program verification",
             ManufacturingCommand::Get { .. } => "Manufacturing status",
+            ManufacturingCommand::EvaluateInteriorPolicy { .. } => {
+                "Evaluate interior policy · Current unchanged"
+            }
             ManufacturingCommand::EvaluateAlternative { .. } => {
                 "Evaluate alternative · Current unchanged"
             }

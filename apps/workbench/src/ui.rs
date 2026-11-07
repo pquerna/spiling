@@ -25,7 +25,7 @@ mod routing;
 pub use routing::{routed_material_fields, tool_reference};
 
 mod modifiers;
-pub use modifiers::{ModifierAction, modifier_row, resolved_value};
+pub use modifiers::{ModifierAction, modifier_delta, modifier_row, resolved_value};
 
 mod navigation;
 pub use navigation::{workspace_commands, workspace_tabs};

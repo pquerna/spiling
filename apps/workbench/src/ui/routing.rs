@@ -148,6 +148,7 @@ pub fn routed_material_fields(ui: &mut egui::Ui, job: &mut FixedDualJob, writabl
                                     .clicked()
                                 {
                                     assignment.interior = Some(InteriorToolBinding {
+                                        policy_context: None,
                                         policy_override: None,
                                         tool_id: tool.id.clone(),
                                         bead_width_mm: tool.nozzle_diameter_mm,

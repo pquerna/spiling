@@ -44,7 +44,7 @@ export default {
           {
             ...job.assignments[0],
             work_envelope_mm: { min: [19, 19, -1], max: [41, 41, 9] },
-            interior: { tool_id: tool.id, bead_width_mm: 0.6, policy_override: null },
+            interior: { tool_id: tool.id, bead_width_mm: 0.6, policy_context: null, policy_override: null },
           },
         ],
       },

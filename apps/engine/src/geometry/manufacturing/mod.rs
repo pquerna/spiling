@@ -126,7 +126,16 @@ impl Runtime {
     }
     fn manufacturing_status(&self) -> Reply {
         let snapshot = self.project.snapshot();
+        let interior_opportunity = match spiling_core::interior_policy_opportunity(&snapshot) {
+            Ok(value) => value,
+            Err(error) => {
+                return Reply::Manufacturing(ManufacturingResponse::Error {
+                    error: project_error(error),
+                });
+            }
+        };
         Reply::Manufacturing(ManufacturingResponse::Status {
+            interior_opportunity,
             info: self.project.info(),
             context_hash: match spiling_core::context_hash(&snapshot) {
                 Ok(hash) => hash,
@@ -316,6 +325,49 @@ impl Runtime {
                         context_hash,
                         changed_inputs,
                         changed_inputs_complete,
+                        interior_opportunity: None,
+                    }
+                })
+                .map_err(geometry_error)
+            }
+            ManufacturingCommand::EvaluateInteriorPolicy {
+                session_id,
+                base_revision,
+                opportunity,
+                ..
+            } => {
+                self.manufacturing_base(&session_id, base_revision)?;
+                if self.active.is_some() {
+                    return Err(ManufacturingError::new(
+                        ManufacturingErrorCode::Busy,
+                        "an engine job is active",
+                    ));
+                }
+                let baseline = self.project.snapshot();
+                let snapshot = spiling_core::interior_policy_trial(&baseline, &opportunity)
+                    .map_err(project_error)?;
+                let context_hash = spiling_core::context_hash(&baseline).map_err(project_error)?;
+                let intent = snapshot.manufacturing_intent.clone().ok_or_else(|| {
+                    ManufacturingError::new(
+                        ManufacturingErrorCode::NoIntent,
+                        "policy evaluation lost captured intent",
+                    )
+                })?;
+                let (changed_inputs, changed_inputs_complete) =
+                    manufacturing_input_changes(baseline.manufacturing_intent.as_deref(), &intent)?;
+                let request = self.capture_compile_input(
+                    &snapshot,
+                    base_revision,
+                    intent,
+                    compilation_byte_budget(self.manufacturing_bytes())?,
+                )?;
+                self.start(Purpose::EvaluateAlternative, 0, move |_, _, _| {
+                    Work::EvaluateAlternative {
+                        request,
+                        context_hash,
+                        changed_inputs,
+                        changed_inputs_complete,
+                        interior_opportunity: Some(opportunity),
                     }
                 })
                 .map_err(geometry_error)

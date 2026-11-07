@@ -228,6 +228,7 @@ message InteriorSelectionGoal {
   double max_extra_waste_mm3 = 3;
 }
 message InteriorToolBinding {
+  optional string policy_context = 4;
   InteriorToolOverride policy_override = 3;
   string tool_id = 1;
   double bead_width_mm = 2;

@@ -21,6 +21,23 @@ pub fn modifier_row(
     row(ui, property, value, scope, writable).0
 }
 
+/// Compact proposed values. The arrow is painted, independent of font coverage.
+pub fn modifier_delta(ui: &mut Ui, property: &str, before: &str, after: &str) {
+    ui.label(property);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(before);
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 16.0), egui::Sense::hover());
+        ui.painter().arrow(
+            rect.left_center() + egui::vec2(1.0, 0.0),
+            egui::vec2(12.0, 0.0),
+            egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
+        );
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, "changes to"));
+        ui.label(egui::RichText::new(after).strong());
+    });
+}
+
 fn row(
     ui: &mut Ui,
     property: &str,

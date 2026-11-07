@@ -626,6 +626,9 @@ impl Workbench {
                 }
             });
         }
+        if !self.process.definition {
+            self.interior_suggestion_ui(ui, o.occurrence_id);
+        }
     }
 }
 fn process_scope(
