@@ -1385,7 +1385,9 @@ fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accoun
     assert_eq!(finished.provenance.surface_overlays, scene.surface_overlays);
     let native = &scene.definitions[&scene.occurrences[0].definition_id];
     let cert = native.vertical_wall_face(&face_id).unwrap();
-    let (admitted, _) = preflight::admit(&scene.input(&intent), &cancel).unwrap();
+    let mut admission_work_1 = spiling_geometry::GeometryWorkBudget::compile();
+    let (admitted, _) =
+        preflight::admit(&scene.input(&intent), &cancel, &mut admission_work_1).unwrap();
     let sample = finished.plan.layers[0].section_z_mm;
     let native_section = spiling_geometry::section_with_byte_limit(
         native,
@@ -1724,7 +1726,9 @@ fn finished_native_cantilever_keeps_ribs_through_actual_anchor_support_realizati
     assert!(bundle.verification.support_deposited_volume_mm3 > 0.0);
     let native = &scene.definitions[&scene.occurrences[0].definition_id];
     let cert = native.vertical_wall_face(&face_id).unwrap();
-    let (admitted, _) = preflight::admit(&scene.input(&enabled), &cancel).unwrap();
+    let mut admission_work_2 = spiling_geometry::GeometryWorkBudget::compile();
+    let (admitted, _) =
+        preflight::admit(&scene.input(&enabled), &cancel, &mut admission_work_2).unwrap();
     let source = region::from_native(
         &spiling_geometry::section_with_byte_limit(
             native,
@@ -1829,7 +1833,9 @@ fn multiple_certified_finishes_preserve_exact_native_hole_rings_across_pose_and_
     );
     let quarter = std::f64::consts::FRAC_1_SQRT_2;
     scene.occurrences[0].pose.rotation_xyzw = [0.0, 0.0, quarter, quarter];
-    let (admitted, _) = preflight::admit(&scene.input(&intent), &cancel).unwrap();
+    let mut admission_work_3 = spiling_geometry::GeometryWorkBudget::compile();
+    let (admitted, _) =
+        preflight::admit(&scene.input(&intent), &cancel, &mut admission_work_3).unwrap();
     assert_eq!(admitted.report.disposition, PreflightDisposition::Admitted);
     for occurrence in &scene.occurrences {
         let source = region::from_native(
@@ -1915,7 +1921,8 @@ fn finish_metadata_shares_native_work_across_faces_and_occurrences() {
             &[RigidPoseMm::IDENTITY, translated(50.0, 0.0, 0.0)],
         );
         let native = &scene.definitions[&scene.occurrences[0].definition_id];
-        let bounds = preflight::admit(&scene.input(&intent), &cancel)
+        let mut admission_work_4 = spiling_geometry::GeometryWorkBudget::compile();
+        let bounds = preflight::admit(&scene.input(&intent), &cancel, &mut admission_work_4)
             .unwrap()
             .0
             .native_bounds[&scene.occurrences[0].occurrence_id];
@@ -2090,7 +2097,9 @@ fn cylindrical_source_phase_pose_and_flipped_z_preserve_native_closed_material()
                 .layers
                 .push(cylinder_layer(&scene, phase));
             let native = &scene.definitions[&scene.occurrences[0].definition_id];
-            let (admitted, _) = preflight::admit(&scene.input(&intent), &cancel).unwrap();
+            let mut admission_work_5 = spiling_geometry::GeometryWorkBudget::compile();
+            let (admitted, _) =
+                preflight::admit(&scene.input(&intent), &cancel, &mut admission_work_5).unwrap();
             assert_eq!(admitted.report.disposition, PreflightDisposition::Admitted);
             let sample = 2.0;
             let local_z = inverse(&pose, [0.0, 0.0, sample])[2];
@@ -2415,7 +2424,9 @@ fn blank_image_interval_returns_exact_native_material_and_no_invented_added_area
         parameters,
     );
     let intent = intent(false);
-    let (admitted, _) = preflight::admit(&scene.input(&intent), &cancel).unwrap();
+    let mut admission_work_6 = spiling_geometry::GeometryWorkBudget::compile();
+    let (admitted, _) =
+        preflight::admit(&scene.input(&intent), &cancel, &mut admission_work_6).unwrap();
     assert_eq!(admitted.report.disposition, PreflightDisposition::Admitted);
     let occurrence = &scene.occurrences[0];
     let native = &scene.definitions[&occurrence.definition_id];
@@ -2717,7 +2728,9 @@ fn steep_image_support_succeeds_from_real_bed_corridor_and_lower_image_rebuild_b
                 .iter()
                 .any(|path| path.kind == DepositionKind::SupportInterface)
         }));
-        let (admitted, _) = preflight::admit(&scene.input(&enabled), &cancel).unwrap();
+        let mut admission_work_7 = spiling_geometry::GeometryWorkBudget::compile();
+        let (admitted, _) =
+            preflight::admit(&scene.input(&enabled), &cancel, &mut admission_work_7).unwrap();
         let occurrence = &scene.occurrences[0];
         let native = &scene.definitions[&occurrence.definition_id];
         let cert = native
@@ -3736,7 +3749,9 @@ fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
     );
     let input = scene.input(&intent);
     let cancel = AtomicBool::new(false);
-    let (mut admission, sources) = preflight::admit(&input, &cancel).unwrap();
+    let mut admission_work_8 = spiling_geometry::GeometryWorkBudget::compile();
+    let (mut admission, sources) =
+        preflight::admit(&input, &cancel, &mut admission_work_8).unwrap();
     let mut planar_work = 0;
     preflight::resolve_native_events(&input, &mut admission, &sources, &mut planar_work, &cancel)
         .unwrap();
@@ -3757,7 +3772,7 @@ fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
     admit_source_captures(
         &sources,
         admission.native_capture_proposal_bytes(),
-        &mut admission.geometry_work,
+        admission.geometry_work,
         &cancel,
     )
     .unwrap();
@@ -3811,7 +3826,7 @@ fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
                 )
                 .unwrap();
                 slab_pool
-                    .recycle(recycled, outside, &mut admission.geometry_work, &cancel)
+                    .recycle(recycled, outside, admission.geometry_work, &cancel)
                     .unwrap();
                 refine_deposition_pair(&mut schedule, index, &input, failure).unwrap();
             }
@@ -3836,7 +3851,7 @@ fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
                 .unwrap();
                 capture
                     .stage
-                    .materialize_pending_voids(&input, live, &mut admission.geometry_work, &cancel)
+                    .materialize_pending_voids(&input, live, admission.geometry_work, &cancel)
                     .unwrap();
                 capture.stage.protected_voids_mut().unwrap();
                 assert!(!capture.sections.is_empty());
@@ -3891,7 +3906,9 @@ fn housing_c0_occupied_projection_preserves_other_poses_and_semantic_finish_addi
         ],
     );
     let input = scene.input(&intent);
-    let (mut admission, sources) = preflight::admit(&input, &cancel).unwrap();
+    let mut admission_work_9 = spiling_geometry::GeometryWorkBudget::compile();
+    let (mut admission, sources) =
+        preflight::admit(&input, &cancel, &mut admission_work_9).unwrap();
     assert_eq!(admission.report.disposition, PreflightDisposition::Admitted);
     let mut planar_work = 0;
     preflight::resolve_native_events(&input, &mut admission, &sources, &mut planar_work, &cancel)
@@ -3913,7 +3930,7 @@ fn housing_c0_occupied_projection_preserves_other_poses_and_semantic_finish_addi
     admit_source_captures(
         &sources,
         admission.native_capture_proposal_bytes(),
-        &mut admission.geometry_work,
+        admission.geometry_work,
         &cancel,
     )
     .unwrap();
@@ -4110,7 +4127,9 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
     .unwrap();
     let input = scene.input(&intent);
     let cancel = AtomicBool::new(false);
-    let (mut admission, geometry) = preflight::admit(&input, &cancel).unwrap();
+    let mut admission_work_10 = spiling_geometry::GeometryWorkBudget::compile();
+    let (mut admission, geometry) =
+        preflight::admit(&input, &cancel, &mut admission_work_10).unwrap();
     let mut proposal_work = 0;
     preflight::resolve_native_events(
         &input,
@@ -4136,7 +4155,7 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
     admit_source_captures(
         &geometry,
         admission.native_capture_proposal_bytes(),
-        &mut admission.geometry_work,
+        admission.geometry_work,
         &cancel,
     )
     .unwrap();
@@ -4203,9 +4222,7 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
         index = span.end;
     }
     assert_eq!(covered_upper, interval[1]);
-    state
-        .finalize(&mut admission.geometry_work, &cancel)
-        .unwrap();
+    state.finalize(admission.geometry_work, &cancel).unwrap();
 }
 
 #[test]
@@ -4670,4 +4687,57 @@ fn mixed_tool_coarse_work_consumes_non_grid_fine_intervals_without_erasing_top()
         assert!((sum - actual).abs() < 1e-14);
     }
     visit_fresh_replayed_object_segments(&bundle, |_, _| {});
+}
+
+#[test]
+fn automatic_interior_retains_primary_for_slow_bulk_and_unknown_timing() {
+    let scene = NativeScene::new(
+        include_bytes!("../../../../fixtures/geometry/through-hole.step"),
+        &[RigidPoseMm {
+            translation_mm: [20.0, 20.0, 0.0],
+            ..RigidPoseMm::IDENTITY
+        }],
+    );
+    let base = decode_intent(include_bytes!(
+        "../../../../fixtures/manufacturing/mixed-width-combined.intent.json"
+    ))
+    .unwrap();
+    for unknown in [false, true] {
+        let mut intent = base.clone();
+        let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+            unreachable!()
+        };
+        if unknown {
+            job.timing_model = None;
+        } else {
+            job.tools[1]
+                .material_profile
+                .as_mut()
+                .unwrap()
+                .selection
+                .overrides
+                .print_speed_mm_s = Some(1.0);
+        }
+        let bundle = compile(scene.input(&intent), &AtomicBool::new(false)).unwrap();
+        let selection = bundle.plan.interior_selection.as_ref().unwrap();
+        assert_eq!(selection.selected, InteriorStrategy::Primary);
+        assert_eq!(
+            selection.reason,
+            if unknown {
+                InteriorSelectionReason::NoTimingModel
+            } else {
+                InteriorSelectionReason::ObjectiveNotMet
+            }
+        );
+        let route = bundle.verification.routing.as_ref().unwrap();
+        assert_eq!(route.tools[1].model_deposition_segments, 0);
+        assert!(
+            route
+                .tools
+                .iter()
+                .all(|tool| tool.waste_deposition_segments == bundle.plan.layers.len() as u32)
+        );
+        assert_eq!(route.selection_count, bundle.plan.layers.len() as u32 * 2);
+        visit_fresh_replayed_object_segments(&bundle, |_, _| {});
+    }
 }

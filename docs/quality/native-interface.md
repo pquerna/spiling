@@ -116,7 +116,7 @@ boxes are separate instructions, not a uniform-density claim.
 
 Use `ui::modifier_row` for property, technical value, scope and contextual actions.
 Values are read-only until Change opens their owning draft. Add modifier… offers
-only supported whole-part/source-box density; an existing local base opens Change
+supported density and occurrence-bound interior-tool policies; an existing local base opens Change
 instead of adding a duplicate. Add modifier commits a new request;
 Apply changes updates its exact operation ID, including its selector and interface
 permission. An equal-to-default pin remains explicit. Remove modifier removes only
@@ -128,8 +128,7 @@ Unapplied drafts, Disabled, Needs slicing and Needs verification are visible. De
 coordinates, interface data and IDs. Closing the pane retains a draft; Discard draft
 abandons it. Matching session/project/base-revision/edit receipts alone confirm
 application. Stale/rejected requests retain the draft. Other preparation drafts are
-never committed by a modifier action. These controls do not provide mixed-nozzle
-selection, automatic suggestions or detached process-document preview.
+never committed by a modifier action. The source-bound Interior tool policy modifier uses the same dense row/editor pattern, an occurrence-only compare-and-set command and matching receipt; Automatic inherits by default, and explicit/disabled pins remain visible. These controls do not provide arbitrary regional tool routing, automatic suggestions or detached process-document preview.
 
 ## Actions and exits
 

@@ -9,6 +9,77 @@ use spiling_contracts::{
 pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
     let report = &review.capture.report;
     let summary = &review.capture.record.summary;
+    if let Some(selection) = &review.bundle.plan.interior_selection
+        && let (JobWorkflow::FixedDualMarlin { job }, InteriorCandidateOutcome::Qualified { work }) = (
+            &review.bundle.provenance.intent.printer.workflow,
+            &selection.candidates[selection.selected.index()].outcome,
+        )
+    {
+        let tools = work
+            .interior_segments_per_tool
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| **n > 0)
+            .map(|(i, _)| format!("Tool {i} · Ø{:.2} mm", job.tools[i].nozzle_diameter_mm))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        crate::ui::resolved_value(
+            ui,
+            "Interior fill",
+            if tools.is_empty() {
+                "No interior paths"
+            } else {
+                &tools
+            },
+            if job
+                .assignments
+                .iter()
+                .filter_map(|a| a.interior.as_ref())
+                .any(|b| b.policy_override.is_some_and(|o| o.enabled))
+            {
+                "Modifier"
+            } else {
+                "Automatic"
+            },
+        );
+        if selection.reason != InteriorSelectionReason::ImprovedModeledWork {
+            ui.weak(interior_reason(selection.reason));
+        }
+        ui.collapsing("Construction choices", |ui| {
+            for candidate in &selection.candidates {
+                ui.push_id(candidate.strategy.index(), |ui| {
+                    let name = match candidate.strategy {
+                        InteriorStrategy::Primary => "Primary tool",
+                        InteriorStrategy::Synchronized => "Mixed widths",
+                        InteriorStrategy::Grouped => "Grouped interior",
+                    };
+                    ui.label(if candidate.strategy == selection.selected {
+                        format!("{name} · Selected")
+                    } else {
+                        name.into()
+                    });
+                    match &candidate.outcome {
+                        InteriorCandidateOutcome::Qualified { work } => {
+                            ui.weak(work.time.as_ref().map_or_else(
+                                || "Timing unknown".into(),
+                                |time| format!("{:.1} min modeled", time.modeled_seconds() / 60.0),
+                            ));
+                            ui.weak(format!(
+                                "Model {:.1} mm³ · Waste {:.1} mm³",
+                                work.model_volume_mm3, work.waste_volume_mm3
+                            ));
+                        }
+                        InteriorCandidateOutcome::Refused { error } => {
+                            ui.weak(&error.message);
+                        }
+                        InteriorCandidateOutcome::NotEvaluated { reason } => {
+                            ui.weak(interior_reason(*reason));
+                        }
+                    }
+                });
+            }
+        });
+    }
     if let Some(time) = &report.job_time {
         ui.collapsing("Job estimate", |ui| {
             crate::ui::resolved_value(ui, "Modeled work", &format!("{:.1} min", time.modeled_seconds() / 60.0), "Declared model");
@@ -204,5 +275,18 @@ pub(super) fn assessment_label(value: &OpticalAssessment) -> String {
                 "Outside target"
             }
         ),
+    }
+}
+
+fn interior_reason(reason: InteriorSelectionReason) -> &'static str {
+    match reason {
+        InteriorSelectionReason::ExplicitPrimary => "Primary tool only",
+        InteriorSelectionReason::NoTimingModel => "No timing model",
+        InteriorSelectionReason::NoObjective => "No selection objective",
+        InteriorSelectionReason::GroupingDisabled => "Grouping off",
+        InteriorSelectionReason::NoQualifiedAlternative => "No qualified alternative",
+        InteriorSelectionReason::IncomparableTiming => "Timing differs",
+        InteriorSelectionReason::ObjectiveNotMet => "Objective not met",
+        InteriorSelectionReason::ImprovedModeledWork => "Lower modeled work",
     }
 }

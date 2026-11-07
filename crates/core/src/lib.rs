@@ -309,6 +309,9 @@ pub enum Edit {
     SetManufacturingIntent {
         intent: Arc<ManufacturingIntent>,
     },
+    SetInteriorToolPolicy {
+        edit: InteriorToolPolicyEdit,
+    },
     RetainManufacturingOption {
         option: ManufacturingOption,
     },
@@ -1129,6 +1132,9 @@ impl Project {
             }
             Edit::SetManufacturingIntent { intent } => {
                 manufacturing_options::set_intent(&mut snapshot, intent)?;
+            }
+            Edit::SetInteriorToolPolicy { edit } => {
+                manufacturing_options::set_interior_policy(&mut snapshot, edit)?;
             }
             Edit::RetainManufacturingOption { option } => {
                 manufacturing_options::retain_option(&mut snapshot, option)?;

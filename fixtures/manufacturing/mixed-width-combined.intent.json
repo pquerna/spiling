@@ -84,6 +84,11 @@
     "workflow": {
       "kind": "fixed_dual_marlin",
       "job": {
+        "interior_goal": {
+          "minimum_modeled_saving_seconds": 1,
+          "max_extra_model_fraction": 0.05,
+          "max_extra_waste_mm3": 0
+        },
         "timing_model": {
           "id": "software-rest-to-rest",
           "revision": "1",
@@ -337,6 +342,7 @@
             "occurrence_id": 1,
             "tool_id": "fixed-hotend-0",
             "interior": {
+              "policy_override": null,
               "tool_id": "fixed-hotend-1",
               "bead_width_mm": 0.6
             },

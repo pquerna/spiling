@@ -46,7 +46,7 @@ pub(super) fn append_z_events(
         ));
     }
     let face = definition
-        .vertical_wall_face_with_work(&request.face_id, &mut admission.geometry_work, cancel)
+        .vertical_wall_face_with_work(&request.face_id, admission.geometry_work, cancel)
         .map_err(|failure| super::native_error(failure, "functional collar face certificate"))?;
     let selected_z = request
         .face_patch

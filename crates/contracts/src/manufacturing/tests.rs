@@ -1564,6 +1564,7 @@ fn accepted_coverage_binds_recipe_occurrences_schedule_and_visible_summary() {
 
 fn plan() -> NormalizedPrintPlan {
     NormalizedPrintPlan {
+        interior_selection: None,
         functional_material_frame: None,
         material_frames: Vec::new(),
         material_domains: Vec::new(),

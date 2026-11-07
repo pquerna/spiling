@@ -2102,6 +2102,84 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
                 idle_after(&host, serial);
             }
         }
+        if name == "mixed-width-combined" {
+            let s = host.snapshot();
+            let occurrence = &s.display.as_ref().unwrap().occurrences[0];
+            let pin = InteriorToolOverride {
+                enabled: true,
+                value: InteriorToolPolicy::PrimaryOnly,
+            };
+            let edit = InteriorToolPolicyEdit {
+                occurrence_id: occurrence.occurrence_id,
+                expected_definition_id: occurrence.definition_id.clone(),
+                expected: None,
+                value: Some(pin),
+            };
+            let applied = manufacture_control(&host, |session_id, base_revision| {
+                ManufacturingCommand::EditInteriorPolicy {
+                    layout_id: layout_id(&host),
+                    session_id,
+                    base_revision,
+                    edit: edit.clone(),
+                }
+            });
+            assert_eq!(
+                applied
+                    .manufacturing
+                    .applied_settings
+                    .as_ref()
+                    .unwrap()
+                    .interior_edit
+                    .as_ref(),
+                Some(&edit)
+            );
+            let pinned = applied.manufacturing.intent.clone();
+            let rejected = manufacture_control(&host, |session_id, base_revision| {
+                ManufacturingCommand::EditInteriorPolicy {
+                    layout_id: layout_id(&host),
+                    session_id,
+                    base_revision,
+                    edit: edit.clone(),
+                }
+            });
+            assert_eq!(rejected.manufacturing.intent, pinned);
+            assert_eq!(
+                rejected.project.as_ref().unwrap().revision,
+                applied.project.as_ref().unwrap().revision
+            );
+            host.command(Command::DismissProblems).unwrap();
+            idle_after(&host, rejected.serial);
+            let undo = send(&host, Action::Undo);
+            assert_eq!(undo.manufacturing.intent, Some(intent.clone()));
+            assert_eq!(send(&host, Action::Redo).manufacturing.intent, pinned);
+            let pinned_review = checked_review(&host);
+            assert_eq!(
+                pinned_review
+                    .manufacturing
+                    .review
+                    .as_ref()
+                    .unwrap()
+                    .bundle
+                    .plan
+                    .interior_selection
+                    .as_ref()
+                    .unwrap()
+                    .reason,
+                InteriorSelectionReason::ExplicitPrimary
+            );
+            manufacture_control(&host, |session_id, base_revision| {
+                ManufacturingCommand::EditInteriorPolicy {
+                    layout_id: layout_id(&host),
+                    session_id,
+                    base_revision,
+                    edit: InteriorToolPolicyEdit {
+                        expected: Some(pin),
+                        value: None,
+                        ..edit.clone()
+                    },
+                }
+            });
+        }
         let s = checked_review(&host);
         let review = s.manufacturing.review.as_ref().unwrap();
         assert!(review.capture.report.verified);

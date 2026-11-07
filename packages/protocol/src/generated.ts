@@ -578,11 +578,11 @@ export type DeclaredJobTimeModel = { id: string, revision: string, linear_accele
 
 export type JobTimeLedger = { model: DeclaredJobTimeModel, model_deposition_seconds: number, auxiliary_deposition_seconds: number, travel_seconds: number, feeder_seconds: number, activation_seconds: number, command_overhead_seconds: number, model_moves: number, auxiliary_moves: number, travel_moves: number, feeder_moves: number, selections_per_tool: [number, number], command_count: number,
 /**
- * Ordered nonmotion commands and complete declared startup context.
+ * Unmodeled startup commands and complete declared startup context.
  */
-nonmotion_context_hash: SourceHash, };
+startup_context_hash: SourceHash, };
 
-export type FixedDualJob = { timing_model: DeclaredJobTimeModel | null, machine_id: string, configuration: FixedDualConfiguration, firmware_revision: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], bed_temperature_c: number, maximum_bed_temperature_c: number, tools: [FixedDualTool, FixedDualTool], assignments: Array<OccurrenceMaterialAssignment>, surface_constructions: Array<SurfaceColorConstruction>, functional_construction: FunctionalMaterialConstruction | null, transition_lift_mm: number,
+export type FixedDualJob = { interior_goal: InteriorSelectionGoal | null, timing_model: DeclaredJobTimeModel | null, machine_id: string, configuration: FixedDualConfiguration, firmware_revision: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], bed_temperature_c: number, maximum_bed_temperature_c: number, tools: [FixedDualTool, FixedDualTool], assignments: Array<OccurrenceMaterialAssignment>, surface_constructions: Array<SurfaceColorConstruction>, functional_construction: FunctionalMaterialConstruction | null, transition_lift_mm: number,
 /**
  * Allowed tool-zero reference positions, including negative carriage X/Y.
  */
@@ -682,7 +682,27 @@ declaration_hash: SourceHash, polymer_family: string, };
 
 export type OccurrenceMaterial = { "kind": "uniform", material_id: string, } | { "kind": "layer_cycle", recipe: LayerCycle, material_ids: [string, string], };
 
-export type InteriorToolBinding = { tool_id: string, bead_width_mm: number, };
+export type InteriorToolPolicy = "automatic" | "primary_only";
+
+export type InteriorToolPolicyEdit = { occurrence_id: OccurrenceId, expected_definition_id: DefinitionId, expected: InteriorToolOverride | null, value: InteriorToolOverride | null, };
+
+export type InteriorToolOverride = { enabled: boolean, value: InteriorToolPolicy, };
+
+export type InteriorSelectionGoal = { minimum_modeled_saving_seconds: number, max_extra_model_fraction: number, max_extra_waste_mm3: number, };
+
+export type InteriorStrategy = "primary" | "synchronized" | "grouped";
+
+export type InteriorSelectionReason = "explicit_primary" | "no_timing_model" | "no_objective" | "grouping_disabled" | "no_qualified_alternative" | "incomparable_timing" | "objective_not_met" | "improved_modeled_work";
+
+export type QualifiedInteriorWork = { interior_segments_per_tool: [number, number], program_hash: SourceHash, model_volume_mm3: number, waste_volume_mm3: number, time: JobTimeLedger | null, };
+
+export type InteriorCandidateOutcome = { "kind": "qualified", work: QualifiedInteriorWork, } | { "kind": "refused", error: ManufacturingError, } | { "kind": "not_evaluated", reason: InteriorSelectionReason, };
+
+export type InteriorCandidateAssessment = { strategy: InteriorStrategy, outcome: InteriorCandidateOutcome, };
+
+export type InteriorSelection = { selected: InteriorStrategy, reason: InteriorSelectionReason, candidates: [InteriorCandidateAssessment, InteriorCandidateAssessment, InteriorCandidateAssessment], };
+
+export type InteriorToolBinding = { policy_override: InteriorToolOverride | null, tool_id: string, bead_width_mm: number, };
 
 export type OccurrenceMaterialAssignment = { occurrence_id: OccurrenceId,
 /**
@@ -848,7 +868,7 @@ export type NativeGeometryCoverageSummary = { requested_shape_error_mm: number, 
  */
 slab_count: number, certified_layer_count: number, event_count: number, geometry_work: bigint, evidence: PreflightEvidence, source_feature_coverage: NativeFeatureCoverageSummary, skin_coverage: SkinCoverageScope, support_clearance: SupportClearanceScope, };
 
-export type NormalizedPrintPlan = { functional_material_frame: FunctionalMaterialFrame | null, material_frames: Array<SurfaceColorFrame>, material_domains: Array<ResolvedMaterialDomain>, schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, };
+export type NormalizedPrintPlan = { interior_selection: InteriorSelection | null, functional_material_frame: FunctionalMaterialFrame | null, material_frames: Array<SurfaceColorFrame>, material_domains: Array<ResolvedMaterialDomain>, schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, };
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
@@ -886,7 +906,7 @@ export type ManufacturingBundle = { schema_version: number, provenance: Manufact
 
 export type ManufacturingArtifactRecord = { hash: SourceHash, input_hash: SourceHash, byte_count: number, summary: ManufacturingSummary, };
 
-export type ManufacturingCommand = { "op": "get", layout_id: PrintLayoutId, session_id: SessionId, } | { "op": "set_intent", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, intent: ManufacturingIntent, } | { "op": "review_materials", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, request: MaterialReviewRequest, } | { "op": "apply_material_profile", tool_id: string | null, layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, selection: MaterialProfileSelection, } | { "op": "compile", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, } | { "op": "evaluate_alternative", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, expected_context_hash: SourceHash, intent: ManufacturingIntent, } | { "op": "preflight", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, } | { "op": "inspect", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, output: VerificationOutput, };
+export type ManufacturingCommand = { "op": "get", layout_id: PrintLayoutId, session_id: SessionId, } | { "op": "set_intent", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, intent: ManufacturingIntent, } | { "op": "edit_interior_policy", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, edit: InteriorToolPolicyEdit, } | { "op": "review_materials", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, request: MaterialReviewRequest, } | { "op": "apply_material_profile", tool_id: string | null, layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, selection: MaterialProfileSelection, } | { "op": "compile", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, } | { "op": "evaluate_alternative", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, expected_context_hash: SourceHash, intent: ManufacturingIntent, } | { "op": "preflight", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, } | { "op": "inspect", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, output: VerificationOutput, };
 
 export type ManufacturingResponse = { "type": "material_review", report: MaterialReviewReport, } | { "type": "status", info: ProjectInfo, context_hash: SourceHash, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, } | { "type": "preflight", report: PreflightReport, } | { "type": "error", error: ManufacturingError, };
 

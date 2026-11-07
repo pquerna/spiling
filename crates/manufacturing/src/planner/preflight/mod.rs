@@ -10,7 +10,7 @@ use spiling_contracts::manufacturing::*;
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 
-pub(super) struct Admission {
+pub(super) struct Admission<'work> {
     pub bounds: Option<AabbMm>,
     pub horizontal_events: Vec<f64>,
     pub native_bounds: BTreeMap<OccurrenceId, AabbMm>,
@@ -20,10 +20,10 @@ pub(super) struct Admission {
     pub material_domains: BTreeMap<OccurrenceId, [[f64; 2]; 2]>,
     pub surface_fields: BTreeMap<OccurrenceId, Vec<surface::PreparedFinish>>,
     pub report: PreflightReport,
-    pub geometry_work: spiling_geometry::GeometryWorkBudget,
+    pub geometry_work: &'work mut spiling_geometry::GeometryWorkBudget,
 }
 
-impl Admission {
+impl Admission<'_> {
     pub(super) fn native_capture_proposal_bytes(&self) -> usize {
         self.native_capture_proposal_bands
             .capacity()
@@ -198,7 +198,8 @@ pub fn preflight(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<PreflightReport, ManufacturingError> {
-    Ok(admit(input, cancel)?.0.report)
+    let mut work = spiling_geometry::GeometryWorkBudget::compile();
+    Ok(admit(input, cancel, &mut work)?.0.report)
 }
 
 /// Native/finish bounds for packing heuristics. Complete candidate compilation and
@@ -216,7 +217,8 @@ pub fn layout_footprints(
             "Automatic arrangement is not yet qualified for fixed-dual reservations",
         ));
     }
-    let (admission, _) = admit(input, cancel)?;
+    let mut work = spiling_geometry::GeometryWorkBudget::compile();
+    let (admission, _) = admit(input, cancel, &mut work)?;
     for check in &admission.report.checks {
         if check.required
             && matches!(
@@ -264,10 +266,11 @@ pub fn layout_footprints(
         .collect()
 }
 
-pub(super) fn admit<'a>(
+pub(super) fn admit<'a, 'work>(
     input: &'a CompilerInput<'_>,
     cancel: &AtomicBool,
-) -> Result<(Admission, super::PreparedSources<'a>), ManufacturingError> {
+    geometry_work: &'work mut spiling_geometry::GeometryWorkBudget,
+) -> Result<(Admission<'work>, super::PreparedSources<'a>), ManufacturingError> {
     check_cancel(cancel)?;
     let mut result = Admission {
         bounds: None,
@@ -277,7 +280,7 @@ pub(super) fn admit<'a>(
         native_capture_proposal_bands: Vec::new(),
         material_domains: BTreeMap::new(),
         surface_fields: BTreeMap::new(),
-        geometry_work: spiling_geometry::GeometryWorkBudget::compile(),
+        geometry_work,
         report: PreflightReport {
             input_revision: input.revision,
             disposition: PreflightDisposition::Admitted,
@@ -524,7 +527,7 @@ pub(super) fn admit<'a>(
             let source = match spiling_geometry::prepare_solid(
                 definition,
                 remaining_prepared,
-                &mut result.geometry_work,
+                result.geometry_work,
                 cancel,
             ) {
                 Ok(source) => source,
@@ -573,7 +576,7 @@ pub(super) fn admit<'a>(
                     maximum_endpoint_uncertainty_mm: LAYER_QUANTIZATION_MM,
                 },
                 query_bytes,
-                &mut result.geometry_work,
+                result.geometry_work,
                 cancel,
             ) {
                 Ok(extent) => {
@@ -640,7 +643,7 @@ pub(super) fn admit<'a>(
                 occurrence,
                 placed,
                 (MAX_DEPOSITION_SEGMENTS as usize / 4).saturating_sub(surface_samples),
-                &mut result.geometry_work,
+                result.geometry_work,
                 cancel,
             ) {
                 Ok(fields) => {
@@ -878,7 +881,7 @@ pub(super) fn resolve_native_events(
                 [bounds.min[2], bounds.max[2]],
                 policy,
                 query_bytes,
-                &mut admission.geometry_work,
+                admission.geometry_work,
                 cancel,
             )
             .map_err(|e| super::native_error(e, "complete native height analysis"))?;
@@ -1018,7 +1021,7 @@ pub(super) fn resolve_native_events(
             )?;
             let requires_plane = match lower_terminal.as_ref() {
                 Some(routing) => {
-                    routing.requires_plane(bracket, role, &mut admission.geometry_work, cancel)?
+                    routing.requires_plane(bracket, role, admission.geometry_work, cancel)?
                 }
                 None => true,
             };

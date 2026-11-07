@@ -127,6 +127,7 @@ enum Operation {
     ProcessReset(OccurrenceId, SurfaceScopeKind),
     ProcessEdit(ProcessEdit),
     ProcessResolve(OccurrenceId),
+    InteriorPolicy(InteriorToolPolicyEdit),
     Intent(Arc<ManufacturingIntent>),
     EvaluateAlternative(Arc<ManufacturingIntent>),
     EvaluateOption(SourceHash),
@@ -495,6 +496,13 @@ pub fn parse(
                     OccurrenceId::new(text(&mut args, "--process-reset occurrence")?.parse()?)?;
                 let scope = process_scope_kind(&mut args, "--process-reset scope")?;
                 operations.push(Operation::ProcessReset(occurrence, scope));
+            }
+            Some("--interior-policy-edit") => {
+                let json = text(&mut args, "--interior-policy-edit JSON")?;
+                if json.len() > 4096 {
+                    return Err("interior policy edit exceeds control bound".into());
+                }
+                operations.push(Operation::InteriorPolicy(serde_json::from_str(&json)?));
             }
             Some("--process-edit") => {
                 let json = text(&mut args, "--process-edit JSON")?;
@@ -2429,6 +2437,25 @@ async fn execute(
                     })
                     .await?;
                 hardware_selection = Some(binding);
+            }
+            Operation::InteriorPolicy(edit) => {
+                label = "interior_policy";
+                let base_revision = info(client).await?.revision;
+                match client
+                    .manufacturing(ManufacturingCommand::EditInteriorPolicy {
+                        layout_id: current_layout.clone(),
+                        session_id: session.clone(),
+                        base_revision,
+                        edit,
+                    })
+                    .await?
+                {
+                    ManufacturingResponse::Status { .. } => {}
+                    ManufacturingResponse::Error { error } => {
+                        return Err(spiling_engine_client::ClientError::Manufacturing(error).into());
+                    }
+                    _ => return Err("unexpected interior policy response".into()),
+                }
             }
             Operation::Intent(intent) => {
                 label = "intent";

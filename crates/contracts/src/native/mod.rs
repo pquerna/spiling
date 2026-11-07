@@ -10,6 +10,7 @@ mod cost;
 mod error;
 pub mod geometry;
 mod hardware;
+mod interior;
 mod layout;
 mod library;
 pub mod manufacturing;

@@ -77,8 +77,9 @@ type WallCacheKey = (usize, Option<usize>, [u64; 3], Option<usize>);
 pub(crate) fn plan(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
+    geometry_work: &mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
-    let (mut admission, geometry_sources) = preflight::admit(input, cancel)?;
+    let (mut admission, geometry_sources) = preflight::admit(input, cancel, geometry_work)?;
 
     match admission.report.disposition {
         PreflightDisposition::Admitted => {}
@@ -158,7 +159,7 @@ pub(crate) fn plan(
     admit_source_captures(
         &geometry_sources,
         admission.native_capture_proposal_bytes(),
-        &mut admission.geometry_work,
+        admission.geometry_work,
         cancel,
     )?;
     let prepared_sources = geometry_sources;
@@ -234,7 +235,7 @@ pub(crate) fn plan(
             slab_pool.recycle(
                 std::mem::take(recycled),
                 outside,
-                &mut admission.geometry_work,
+                admission.geometry_work,
                 cancel,
             )?;
         }
@@ -259,7 +260,7 @@ pub(crate) fn plan(
             capture.stage.materialize_pending_voids(
                 input,
                 live,
-                &mut admission.geometry_work,
+                admission.geometry_work,
                 cancel,
             )?;
         }
@@ -864,9 +865,7 @@ fn admit_schedule<'model>(
             stage: native_stage,
         }
     } else {
-        ScheduleNativeAuthority::Complete(
-            native_stage.finalize(&mut admission.geometry_work, cancel)?,
-        )
+        ScheduleNativeAuthority::Complete(native_stage.finalize(admission.geometry_work, cancel)?)
     };
     let authority_bytes_before_support = native_coverage.retained_bytes();
 
@@ -924,7 +923,7 @@ fn admit_schedule<'model>(
         retained_points,
         construction_owned_bytes,
         surface_work,
-        &mut admission.geometry_work,
+        admission.geometry_work,
         cancel,
     )?;
     retained_points += construction.points;
@@ -1281,7 +1280,7 @@ fn admit_schedule<'model>(
                             &Vec::new(),
                             retained_section_bytes,
                         )),
-                        &mut admission.geometry_work,
+                        admission.geometry_work,
                         cancel,
                     )? {
                         return Err(error(
@@ -1712,7 +1711,7 @@ fn admit_schedule<'model>(
             },
             &mut segments,
             cancel,
-            &mut admission.geometry_work,
+            admission.geometry_work,
             probe.is_some(),
             support_work,
             |index,
@@ -2255,6 +2254,7 @@ fn admit_schedule<'model>(
             ));
         }
         let mut result = NormalizedPrintPlan {
+            interior_selection: None,
             functional_material_frame: construction.functional_frame.take(),
             material_frames: std::mem::take(&mut construction.frames),
             material_domains: std::mem::take(&mut construction.stored),
@@ -2341,7 +2341,7 @@ fn admit_schedule<'model>(
             &mut neighborhoods,
             retained_points,
             support_outside_bytes,
-            &mut admission.geometry_work,
+            admission.geometry_work,
             retained_support_native_bytes.saturating_add(native::output_bytes(
                 &sections,
                 &Vec::new(),

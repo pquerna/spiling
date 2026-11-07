@@ -11,6 +11,7 @@ impl Actor {
         session: spiling_contracts::geometry::SessionId,
         base_revision: ProjectRevision,
         info: &ProjectInfo,
+        interior_edit: Option<InteriorToolPolicyEdit>,
     ) {
         if self.state.project.as_ref().is_none_or(|project| {
             project.project_id != info.project_id || project.revision != info.revision
@@ -26,6 +27,7 @@ impl Actor {
             self.nonce += 1;
             Arc::make_mut(&mut self.state.manufacturing).applied_settings =
                 Some(Arc::new(manufacture::AppliedSettings {
+                    interior_edit,
                     nonce: self.nonce,
                     project: info.project_id.clone(),
                     session,
@@ -173,6 +175,7 @@ impl Actor {
         let label = match &command {
             ManufacturingCommand::ReviewMaterials { .. } => "Review material profiles",
             ManufacturingCommand::SetIntent { .. } => "Apply full manufacturing intent",
+            ManufacturingCommand::EditInteriorPolicy { .. } => "Apply interior tool policy",
             ManufacturingCommand::ApplyMaterialProfile { .. } => "Apply captured material profile",
             ManufacturingCommand::Preflight { .. } => "Manufacturing preflight",
             ManufacturingCommand::Compile { .. } => "Compile manufacturing",
@@ -185,6 +188,7 @@ impl Actor {
         let applying = matches!(
             &command,
             ManufacturingCommand::SetIntent { .. }
+                | ManufacturingCommand::EditInteriorPolicy { .. }
                 | ManufacturingCommand::ApplyMaterialProfile { .. }
         );
         let material = matches!(&command, ManufacturingCommand::ApplyMaterialProfile { .. });
@@ -193,7 +197,13 @@ impl Actor {
                 session_id,
                 base_revision,
                 ..
-            } => Some((session_id.clone(), *base_revision)),
+            } => Some((session_id.clone(), *base_revision, None)),
+            ManufacturingCommand::EditInteriorPolicy {
+                session_id,
+                base_revision,
+                edit,
+                ..
+            } => Some((session_id.clone(), *base_revision, Some(edit.clone()))),
             _ => None,
         };
         let mut settings_receipt = None;
@@ -274,10 +284,10 @@ impl Actor {
         }
         if self.pending.is_none() {
             self.refresh_after_failure().await;
-            if let Some((session, base_revision)) = settings_apply
+            if let Some((session, base_revision, interior_edit)) = settings_apply
                 && let Some(info) = settings_receipt
             {
-                self.settings_applied(session, base_revision, &info);
+                self.settings_applied(session, base_revision, &info, interior_edit);
             }
         }
     }
@@ -399,7 +409,7 @@ impl Actor {
             if let Some((session, base_revision)) = settings_apply
                 && let Some(info) = &receipt
             {
-                self.settings_applied(session, base_revision, info);
+                self.settings_applied(session, base_revision, info, None);
             }
         }
         receipt

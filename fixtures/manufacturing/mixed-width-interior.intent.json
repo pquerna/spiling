@@ -84,7 +84,22 @@
     "workflow": {
       "kind": "fixed_dual_marlin",
       "job": {
-        "timing_model": null,
+        "interior_goal": {
+          "minimum_modeled_saving_seconds": 1,
+          "max_extra_model_fraction": 0.05,
+          "max_extra_waste_mm3": 0
+        },
+        "timing_model": {
+          "id": "software-rest-to-rest",
+          "revision": "1",
+          "linear_acceleration_mm_s2": 1000,
+          "filament_acceleration_mm_s2": 500,
+          "tool_activation_seconds": [
+            0.5,
+            0.5
+          ],
+          "command_overhead_seconds": 0.0002
+        },
         "machine_id": "software-fixed-dual-marlin-reference",
         "configuration": "marlin2125_native_fixed_hotends",
         "firmware_revision": "e5a167aaa0a671ea6d9b9d98dc0518c88d5caed7",
@@ -327,6 +342,7 @@
             "occurrence_id": 1,
             "tool_id": "fixed-hotend-0",
             "interior": {
+              "policy_override": null,
               "tool_id": "fixed-hotend-1",
               "bead_width_mm": 0.6
             },

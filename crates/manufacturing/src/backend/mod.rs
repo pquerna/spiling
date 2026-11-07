@@ -19,6 +19,8 @@ pub fn emit(
     check_cancel(cancel)?;
     intent.validate()?;
     plan.validate(intent)?;
+    let execution = plan.execution_intent(intent)?;
+    let intent = execution.as_ref();
     let routed = match &intent.printer.workflow {
         JobWorkflow::FixedDualMarlin { job } => {
             crate::routing::validate_plan(plan, intent, job, cancel)?;

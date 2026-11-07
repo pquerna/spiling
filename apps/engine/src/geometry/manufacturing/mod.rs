@@ -183,6 +183,21 @@ impl Runtime {
                 // compiler sees its captured ProjectRevision become stale at staging.
                 Ok(self.manufacturing_status())
             }
+            ManufacturingCommand::EditInteriorPolicy {
+                session_id,
+                base_revision,
+                edit,
+                ..
+            } => {
+                self.manufacturing_base(&session_id, base_revision)?;
+                let edit = self
+                    .project
+                    .prepare(Edit::SetInteriorToolPolicy { edit })
+                    .map_err(project_error)?;
+                self.project.commit(edit).map_err(project_error)?;
+                self.synchronize_native_pins();
+                Ok(self.manufacturing_status())
+            }
             ManufacturingCommand::ReviewMaterials {
                 layout_id: _,
                 session_id,

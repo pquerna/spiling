@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, sync::Arc};
 use ts_rs::TS;
 
+mod interior;
+pub use interior::*;
 mod cost;
 pub use cost::*;
 mod goals;
@@ -2423,6 +2425,8 @@ fn sparse_bands<'de, D: serde::Deserializer<'de>>(
 #[serde(deny_unknown_fields)]
 pub struct NormalizedPrintPlan {
     #[serde(deserialize_with = "required_option")]
+    pub interior_selection: Option<Arc<InteriorSelection>>,
+    #[serde(deserialize_with = "required_option")]
     pub functional_material_frame: Option<FunctionalMaterialFrame>,
     #[serde(deserialize_with = "construction::frames")]
     pub material_frames: Vec<SurfaceColorFrame>,
@@ -2499,6 +2503,11 @@ impl NormalizedPrintPlan {
         intent: &ManufacturingIntent,
     ) -> Result<Option<PrimeExclusionBoundsMm>, ManufacturingError> {
         intent.validate()?;
+        if let Some(selection) = &self.interior_selection {
+            selection.validate_for(intent)?;
+        }
+        let execution = self.execution_intent(intent)?;
+        let intent = execution.as_ref();
         if self.schema_version != MANUFACTURING_SCHEMA_VERSION {
             return Err(invalid("unsupported plan schema"));
         }
@@ -2768,6 +2777,7 @@ impl NormalizedPrintPlan {
                     "routed coarse bands require an explicit same-formulation interior tool",
                 ));
             }
+            let mut interior_counts = [0u32; 2];
             let mut routed_segments = self
                 .layers
                 .len()
@@ -2803,6 +2813,9 @@ impl NormalizedPrintPlan {
                     }
                     previous_tool = tool;
                     seen[usize::from(tool)] = true;
+                    if matches!(path.owner, Some(DepositionOwner::Regional { .. })) {
+                        interior_counts[usize::from(tool)] += (path.points_mm.len() - 1) as u32;
+                    }
                 }
                 if seen == [false; 2] {
                     return Err(invalid(
@@ -2812,6 +2825,20 @@ impl NormalizedPrintPlan {
                 if job.park_position_mm[2] <= layer.z_mm {
                     return Err(invalid(
                         "fixed-dual final park must clear every deposition layer",
+                    ));
+                }
+            }
+            if let Some(selection) = &self.interior_selection {
+                let InteriorCandidateOutcome::Qualified { work } =
+                    &selection.candidates[selection.selected.index()].outcome
+                else {
+                    return Err(invalid(
+                        "selected interior construction lacks qualified ownership",
+                    ));
+                };
+                if work.interior_segments_per_tool != interior_counts {
+                    return Err(invalid(
+                        "selected interior tool summary disagrees with complete regional ownership",
                     ));
                 }
             }
@@ -3882,11 +3909,12 @@ impl ManufacturingBundle {
         self.verification.validate()?;
         self.verification
             .validate_time_model(&self.provenance.intent.printer.workflow)?;
+        if let Some(selection) = &self.plan.interior_selection {
+            selection.validate_current(&self.program, &self.verification)?;
+        }
 
-        match (
-            &self.provenance.intent.printer.workflow,
-            &self.verification.routing,
-        ) {
+        let execution = self.plan.execution_intent(&self.provenance.intent)?;
+        match (&execution.printer.workflow, &self.verification.routing) {
             (JobWorkflow::DiagnosticBodyOnly, None)
                 if self.verification.lifecycle_motion_count == 0 => {}
             (JobWorkflow::CompleteMarlin { .. }, None)
@@ -4236,6 +4264,12 @@ pub enum ManufacturingCommand {
         base_revision: ProjectRevision,
         intent: Arc<ManufacturingIntent>,
     },
+    EditInteriorPolicy {
+        layout_id: crate::project::PrintLayoutId,
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        edit: InteriorToolPolicyEdit,
+    },
     ReviewMaterials {
         layout_id: crate::project::PrintLayoutId,
         session_id: SessionId,
@@ -4278,6 +4312,7 @@ impl ManufacturingCommand {
         match self {
             Self::Get { layout_id, .. }
             | Self::SetIntent { layout_id, .. }
+            | Self::EditInteriorPolicy { layout_id, .. }
             | Self::ReviewMaterials { layout_id, .. }
             | Self::ApplyMaterialProfile { layout_id, .. }
             | Self::Compile { layout_id, .. }

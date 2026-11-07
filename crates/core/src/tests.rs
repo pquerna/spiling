@@ -550,6 +550,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             verifier_version: "5".into(),
         },
         plan: NormalizedPrintPlan {
+            interior_selection: None,
             functional_material_frame: None,
             material_frames: Vec::new(),
             material_domains: Vec::new(),
@@ -2980,5 +2981,135 @@ fn manifest_capacity_guard_reserves_counter_growth_not_a_nested_recovery_documen
     assert_eq!(
         validate_manifest_size(&manifest).unwrap_err().code,
         ProjectErrorCode::ResourceLimit
+    );
+}
+
+#[test]
+fn scoped_interior_policy_is_cas_bound_and_preserves_captured_settings_and_history() {
+    use spiling_contracts::manufacturing::*;
+    let mut project = imported();
+    let mut intent: ManufacturingIntent = serde_json::from_str(include_str!(
+        "../../../fixtures/manufacturing/mixed-width-combined.intent.json"
+    ))
+    .unwrap();
+    let occurrence = project
+        .snapshot()
+        .occurrences
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    job.assignments[0].occurrence_id = occurrence.occurrence_id;
+    edit(
+        &mut project,
+        Edit::SetManufacturingIntent {
+            intent: Arc::new(intent.clone()),
+        },
+    );
+    let pin = InteriorToolOverride {
+        enabled: true,
+        value: InteriorToolPolicy::PrimaryOnly,
+    };
+    let change = InteriorToolPolicyEdit {
+        occurrence_id: occurrence.occurrence_id,
+        expected_definition_id: occurrence.definition_id.clone(),
+        expected: None,
+        value: Some(pin),
+    };
+    edit(
+        &mut project,
+        Edit::SetInteriorToolPolicy {
+            edit: change.clone(),
+        },
+    );
+    let mut expected = intent.clone();
+    let JobWorkflow::FixedDualMarlin { job } = &mut expected.printer.workflow else {
+        unreachable!()
+    };
+    job.assignments[0]
+        .interior
+        .as_mut()
+        .unwrap()
+        .policy_override = Some(pin);
+    assert_eq!(
+        project.snapshot().manufacturing_intent.as_deref(),
+        Some(&expected)
+    );
+    let snapshot = project.snapshot();
+    for bad in [
+        change.clone(),
+        InteriorToolPolicyEdit {
+            expected_definition_id: DefinitionId::from_source_sha256(&[42; 32]),
+            expected: Some(pin),
+            ..change.clone()
+        },
+        InteriorToolPolicyEdit {
+            occurrence_id: OccurrenceId::new(99).unwrap(),
+            expected: Some(pin),
+            ..change.clone()
+        },
+    ] {
+        assert!(
+            project
+                .prepare(Edit::SetInteriorToolPolicy { edit: bad })
+                .is_err()
+        );
+        assert!(Arc::ptr_eq(&snapshot, &project.snapshot()));
+    }
+    project.undo().unwrap();
+    assert_eq!(
+        project.snapshot().manufacturing_intent.as_deref(),
+        Some(&intent)
+    );
+    project.redo().unwrap();
+    assert_eq!(
+        project.snapshot().manufacturing_intent.as_deref(),
+        Some(&expected)
+    );
+    // Disabled and equal-default pins remain authored data; defaults remove only this pin.
+    for value in [
+        Some(InteriorToolOverride {
+            enabled: false,
+            ..pin
+        }),
+        Some(InteriorToolOverride {
+            enabled: true,
+            value: InteriorToolPolicy::Automatic,
+        }),
+        None,
+    ] {
+        let current = if let JobWorkflow::FixedDualMarlin { job } = &project
+            .snapshot()
+            .manufacturing_intent
+            .as_ref()
+            .unwrap()
+            .printer
+            .workflow
+        {
+            job.assignments[0]
+                .interior
+                .as_ref()
+                .unwrap()
+                .policy_override
+        } else {
+            unreachable!()
+        };
+        edit(
+            &mut project,
+            Edit::SetInteriorToolPolicy {
+                edit: InteriorToolPolicyEdit {
+                    expected: current,
+                    value,
+                    ..change.clone()
+                },
+            },
+        );
+    }
+    assert_eq!(
+        project.snapshot().manufacturing_intent.as_deref(),
+        Some(&intent)
     );
 }

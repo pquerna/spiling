@@ -11,6 +11,7 @@ use spiling_contracts::{
 
 #[derive(Default)]
 pub(super) struct ProcessUi {
+    pub(super) interior: Option<super::interior_policy::InteriorPolicyDraft>,
     identity: Option<(ProjectId, OccurrenceId, bool)>,
     revision: Option<ProjectRevision>,
     definition: bool,
@@ -45,6 +46,7 @@ impl PendingEdit {
 }
 impl ProcessUi {
     pub(super) fn discard(&mut self) {
+        self.interior = None;
         self.dirty = false;
         self.target = None;
         self.submitted = None;
@@ -56,7 +58,7 @@ impl ProcessUi {
         self.boxed = boxed;
     }
     pub(super) fn has_changes(&self) -> bool {
-        self.dirty
+        self.dirty || self.interior.is_some()
     }
     fn edit(&self, scope: SurfaceScope) -> ProcessEdit {
         let selector = if self.boxed {
@@ -130,6 +132,7 @@ impl ProcessUi {
 }
 impl Workbench {
     pub(super) fn reconcile_process_receipt(&mut self) {
+        self.reconcile_interior_receipt();
         let Some(pending) = &self.process.submitted else {
             return;
         };
@@ -154,6 +157,10 @@ impl Workbench {
         }
     }
     pub(super) fn process_actions(&mut self, ui: &mut egui::Ui) {
+        if self.process.interior.is_some() {
+            self.interior_policy_actions(ui);
+            return;
+        }
         let (Some(project), Some(hello), Some(scene)) = (
             self.state.project.clone(),
             self.state.hello.clone(),
@@ -252,7 +259,7 @@ impl Workbench {
             ui.selectable_value(&mut p.definition, false, "This part");
             ui.selectable_value(&mut p.definition, true, "Shared definition");
         });
-        if before != p.definition && p.dirty {
+        if before != p.definition && p.has_changes() {
             self.navigation = Some(super::navigation::Navigation::InfillScope(
                 p.definition,
                 p.boxed,
@@ -299,7 +306,36 @@ impl Workbench {
                             .find(|op| op.operation_id == owner.operation_id)
                     })
             });
-        let can_edit = writable && !p.dirty && p.submitted.is_none();
+        let can_edit = writable && !p.has_changes() && p.submitted.is_none();
+        let interior_binding = self.state.manufacturing.intent.as_ref().and_then(|intent| {
+            let spiling_contracts::manufacturing::JobWorkflow::FixedDualMarlin { job } =
+                &intent.printer.workflow
+            else {
+                return None;
+            };
+            job.assignments
+                .iter()
+                .find(|a| a.occurrence_id == o.occurrence_id)
+                .and_then(|a| a.interior.as_ref())
+        });
+        if !p.definition
+            && let Some(binding) = interior_binding
+        {
+            let policy = binding.policy_override.filter(|p| p.enabled).map_or(
+                spiling_contracts::manufacturing::InteriorToolPolicy::Automatic,
+                |p| p.value,
+            );
+            ui::resolved_value(
+                ui,
+                "Interior tool policy",
+                super::interior_policy::policy_name(policy),
+                if binding.policy_override.is_some_and(|p| p.enabled) {
+                    "Modifier"
+                } else {
+                    "Plate defaults"
+                },
+            );
+        }
         ui::group(ui, "Resolved base");
         if let Some(r) = resolved {
             let value = if p.definition { r.inherited } else { r.value };
@@ -345,7 +381,7 @@ impl Workbench {
         } else {
             ui.weak("No resolved process values");
         }
-        if !p.dirty {
+        if !p.dirty && p.interior.is_none() {
             ui::group(ui, "Modifiers");
             if let Some(status) = status {
                 ui.weak(status);
@@ -358,6 +394,56 @@ impl Workbench {
                 .collect();
             if layers.is_empty() {
                 ui.weak("Using inherited density");
+            }
+            if !p.definition
+                && let Some(binding) = interior_binding
+                && let Some(value) = binding.policy_override
+            {
+                let mut enabled = value.enabled;
+                if ui
+                    .add_enabled(can_edit, egui::Checkbox::new(&mut enabled, "Enabled"))
+                    .changed()
+                {
+                    let mut draft = super::interior_policy::InteriorPolicyDraft::new(
+                        project.project_id.clone(),
+                        hello.session_id.clone(),
+                        project.revision,
+                        o.occurrence_id,
+                        o.definition_id.clone(),
+                        Some(value),
+                    );
+                    draft
+                        .edit
+                        .value
+                        .as_mut()
+                        .expect("captured override")
+                        .enabled = enabled;
+                    p.interior = Some(draft);
+                }
+                if let Some(action) = ui::modifier_row(
+                    ui,
+                    "Interior tool policy",
+                    super::interior_policy::policy_name(value.value),
+                    if value.enabled {
+                        "This part"
+                    } else {
+                        "Disabled"
+                    },
+                    can_edit,
+                ) {
+                    let mut draft = super::interior_policy::InteriorPolicyDraft::new(
+                        project.project_id.clone(),
+                        hello.session_id.clone(),
+                        project.revision,
+                        o.occurrence_id,
+                        o.definition_id.clone(),
+                        Some(value),
+                    );
+                    if matches!(action, ui::ModifierAction::Remove) {
+                        draft.edit.value = None;
+                    }
+                    p.interior = Some(draft);
+                }
             }
             let queue = &mut self.queued_project;
             for layer in layers {
@@ -451,9 +537,23 @@ impl Workbench {
                     ui.separator();
                 });
             }
-            if !p.dirty {
+            if !p.has_changes() {
                 ui.add_enabled_ui(writable, |ui| {
                     ui.menu_button("Add modifier…", |ui| {
+                        if !p.definition
+                            && let Some(binding) = interior_binding
+                            && ui.button("Interior tool policy").clicked()
+                        {
+                            p.interior = Some(super::interior_policy::InteriorPolicyDraft::new(
+                                project.project_id.clone(),
+                                hello.session_id.clone(),
+                                project.revision,
+                                o.occurrence_id,
+                                o.definition_id.clone(),
+                                binding.policy_override,
+                            ));
+                            ui.close();
+                        }
                         for (boxed, name) in [
                             (false, "Infill density · whole part"),
                             (true, "Infill density · source box"),
@@ -477,6 +577,9 @@ impl Workbench {
                     });
                 });
             }
+        }
+        if let Some(draft) = &mut p.interior {
+            draft.body(ui, writable);
         }
         if p.dirty {
             ui.separator();

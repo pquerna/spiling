@@ -61,6 +61,7 @@ const intent = {
     workflow: {
       kind: "fixed_dual_marlin",
       job: {
+        interior_goal: null,
         timing_model: null,
         machine_id: "software-fixed-dual-marlin-reference",
         configuration: "marlin2125_native_fixed_hotends",

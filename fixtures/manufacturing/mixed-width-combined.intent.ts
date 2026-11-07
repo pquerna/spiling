@@ -30,7 +30,7 @@ export default {
   printer: {
     ...mixed.printer,
     deposition_limits: { ...mixed.printer.deposition_limits, max_bead_height_mm: 0.5 },
-    workflow: { kind: "fixed_dual_marlin", job: { ...job, timing_model: { id: "software-rest-to-rest", revision: "1", linear_acceleration_mm_s2: 1000, filament_acceleration_mm_s2: 500, tool_activation_seconds: [0.5, 0.5], command_overhead_seconds: 0.0002 }, tools: [job.tools[0], tool] } },
+    workflow: { kind: "fixed_dual_marlin", job: { ...job, tools: [job.tools[0], tool] } },
   },
   recipe: {
     ...mixed.recipe,

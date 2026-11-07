@@ -55,8 +55,8 @@ pub struct JobTimeLedger {
     pub feeder_moves: u32,
     pub selections_per_tool: [u32; 2],
     pub command_count: u32,
-    /// Ordered nonmotion commands and complete declared startup context.
-    pub nonmotion_context_hash: SourceHash,
+    /// Unmodeled startup commands and complete declared startup context.
+    pub startup_context_hash: SourceHash,
 }
 impl JobTimeLedger {
     pub fn modeled_seconds(&self) -> f64 {

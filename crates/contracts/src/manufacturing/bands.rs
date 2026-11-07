@@ -74,10 +74,9 @@ pub(super) fn validate_landing_alignment(
     let landing_owner = Some(DepositionOwner::Regional {
         region_index: landing_index as u16,
     });
-    let binding = job.assignments[0]
-        .interior
-        .as_ref()
-        .expect("checked interior binding");
+    let width = job.assignments[0]
+        .active_interior()
+        .map_or(intent.recipe.bead_width_mm, |binding| binding.bead_width_mm);
     let mut coarse_rows = BTreeSet::new();
     let mut landing_rows = BTreeSet::new();
     let mut volume = 0.0;
@@ -85,7 +84,7 @@ pub(super) fn validate_landing_alignment(
         if !matches!(
             path.kind,
             DepositionKind::SparseFill | DepositionKind::Bridge
-        ) || path.width.constant_width_mm() != Some(binding.bead_width_mm)
+        ) || path.width.constant_width_mm() != Some(width)
             || !coarse_rows.insert(row_key(path)?)
         {
             return Err(invalid(
@@ -94,8 +93,7 @@ pub(super) fn validate_landing_alignment(
         }
         let process = intent.process_for_tool(Some(job.tool_for_path(path)?))?;
         let height = path.height_mm();
-        let area = (binding.bead_width_mm - height) * height
-            + std::f64::consts::PI * (height * 0.5).powi(2);
+        let area = (width - height) * height + std::f64::consts::PI * (height * 0.5).powi(2);
         volume += (path.points_mm[1][0] - path.points_mm[0][0])
             .hypot(path.points_mm[1][1] - path.points_mm[0][1])
             * area
@@ -111,7 +109,7 @@ pub(super) fn validate_landing_alignment(
             path.kind,
             DepositionKind::SparseFill | DepositionKind::Bridge
         ) || path.physical_z_mm != [landing.lower_z_mm, landing.z_mm]
-            || path.width.constant_width_mm() != Some(binding.bead_width_mm)
+            || path.width.constant_width_mm() != Some(width)
             || !landing_rows.insert(row_key(path)?)
         {
             return Err(invalid(

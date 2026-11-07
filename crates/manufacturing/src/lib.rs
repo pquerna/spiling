@@ -5,6 +5,7 @@
 //! Software-only native-section manufacturing, with mandatory independent replay.
 pub mod backend;
 mod material;
+mod selection;
 pub use material::{resolve_material_profile, resolve_tool_material_profile, review_materials};
 pub mod planner;
 mod realization;
@@ -24,9 +25,9 @@ use std::sync::{
 };
 
 /// Binds native material authority and physical per-occurrence material events.
-pub const PLANNER_VERSION: &str = "66";
-pub const EMITTER_VERSION: &str = "13";
-pub const VERIFIER_VERSION: &str = "27";
+pub const PLANNER_VERSION: &str = "67";
+pub const EMITTER_VERSION: &str = "14";
+pub const VERIFIER_VERSION: &str = "28";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,
@@ -47,11 +48,24 @@ pub fn compile(
     input: CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<ManufacturingBundle, ManufacturingError> {
+    if matches!(&input.intent.printer.workflow, JobWorkflow::FixedDualMarlin { job } if job.has_bound_interior())
+    {
+        return selection::compile(input, cancel);
+    }
+    let mut work = spiling_geometry::GeometryWorkBudget::compile();
+    compile_exact(input, cancel, &mut work)
+}
+
+fn compile_exact(
+    input: CompilerInput<'_>,
+    cancel: &AtomicBool,
+    geometry_work: &mut spiling_geometry::GeometryWorkBudget,
+) -> Result<ManufacturingBundle, ManufacturingError> {
     check_cancel(cancel)?;
     // Shared admission validates intent, native identity and the complete image
     // table before planning or provenance allocation. Do not hash/copy assets or
     // prepare the same native/field schedule through a second compile-only lane.
-    let mut plan = planner::plan(&input, cancel)?;
+    let mut plan = planner::plan(&input, cancel, geometry_work)?;
     let mut definitions = input.stored_definitions.to_vec();
     definitions.sort_by(|a, b| a.definition_id.cmp(&b.definition_id));
     let occurrences = input.occurrences.to_vec();

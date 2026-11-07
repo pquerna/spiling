@@ -816,7 +816,7 @@ impl ClassifiedRegions {
         let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow else {
             return Ok(());
         };
-        let Some(binding) = job.assignments.first().and_then(|a| a.interior.as_ref()) else {
+        let Some(binding) = job.assignments.first().and_then(|a| a.active_interior()) else {
             return Ok(());
         };
         let additional_radius = (binding.bead_width_mm - intent.recipe.bead_width_mm) * 0.5;

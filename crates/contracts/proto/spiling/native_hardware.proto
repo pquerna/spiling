@@ -216,7 +216,19 @@ message LayerCycleOccurrenceMaterial {
   // Exactly two ordered, distinct immutable loaded material identities.
   repeated string material_ids = 2;
 }
+enum InteriorToolPolicy {
+  INTERIOR_TOOL_POLICY_UNSPECIFIED = 0;
+  INTERIOR_TOOL_POLICY_AUTOMATIC = 1;
+  INTERIOR_TOOL_POLICY_PRIMARY_ONLY = 2;
+}
+message InteriorToolOverride { bool enabled = 1; InteriorToolPolicy value = 2; }
+message InteriorSelectionGoal {
+  double minimum_modeled_saving_seconds = 1;
+  double max_extra_model_fraction = 2;
+  double max_extra_waste_mm3 = 3;
+}
 message InteriorToolBinding {
+  InteriorToolOverride policy_override = 3;
   string tool_id = 1;
   double bead_width_mm = 2;
 }
@@ -242,6 +254,7 @@ message DeclaredJobTimeModel {
   double command_overhead_seconds = 6;
 }
 message FixedDualJob {
+  InteriorSelectionGoal interior_goal = 21;
   DeclaredJobTimeModel timing_model = 20;
   string machine_id = 1;
   FixedDualConfiguration configuration = 2;

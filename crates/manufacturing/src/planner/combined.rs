@@ -317,15 +317,16 @@ pub(super) fn combine(
             let area = (width - height) * height + std::f64::consts::PI * (height * 0.5).powi(2);
             let tool = match &intent.printer.workflow {
                 JobWorkflow::FixedDualMarlin { job } => {
-                    let binding = job.assignments[0]
-                        .interior
-                        .as_ref()
-                        .expect("preflight bound combined interior");
+                    let assignment = &job.assignments[0];
+                    let material = assignment.material.material_id_for_interval([lower_z, z])?;
                     Some(
-                        job.tools
-                            .iter()
-                            .position(|t| t.id == binding.tool_id)
-                            .expect("validated loaded binding") as u8,
+                        job.resolve_tool(
+                            material,
+                            assignment
+                                .active_interior()
+                                .map(|binding| binding.tool_id.as_str())
+                                .or(assignment.tool_id.as_deref()),
+                        )?,
                     )
                 }
                 _ => None,

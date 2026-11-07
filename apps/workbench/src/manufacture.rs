@@ -77,6 +77,7 @@ pub struct InspectedOption {
 }
 #[derive(Debug, Clone)]
 pub struct AppliedSettings {
+    pub interior_edit: Option<spiling_contracts::manufacturing::InteriorToolPolicyEdit>,
     pub nonce: u64,
     pub project: spiling_contracts::project::ProjectId,
     pub session: SessionId,

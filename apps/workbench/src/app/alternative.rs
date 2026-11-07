@@ -79,7 +79,8 @@ impl super::manufacturing::ManufacturingUi {
                 .as_ref()
                 .zip(receipt)
                 .is_some_and(|(adoption, receipt)| {
-                    receipt.nonce > adoption.after_nonce
+                    receipt.interior_edit.is_none()
+                        && receipt.nonce > adoption.after_nonce
                         && receipt.project == trial.project
                         && receipt.session == trial.session
                         && receipt.base_revision == adoption.base_revision
@@ -1130,6 +1131,7 @@ mod tests {
         });
         assert!(!ui.adopt_confirmed(None));
         let mut receipt = crate::manufacture::AppliedSettings {
+            interior_edit: None,
             nonce: 4,
             project,
             session,

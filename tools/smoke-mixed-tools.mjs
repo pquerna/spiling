@@ -61,6 +61,10 @@ const intentName = process.env.SPILING_MIXED_INTENT ?? "fixed-dual-shared-materi
 const intent = JSON.parse(
   await readFile(join(root, `fixtures/manufacturing/${intentName}.intent.json`), "utf8"),
 );
+const selectionCase = process.env.SPILING_INTERIOR_CASE ?? "automatic";
+assert.ok(["automatic", "slow-bulk", "no-timing"].includes(selectionCase));
+if (selectionCase === "slow-bulk") intent.printer.workflow.job.tools[1].material_profile.selection.overrides.print_speed_mm_s = 1;
+if (selectionCase === "no-timing") intent.printer.workflow.job.timing_model = null;
 const source = join(output, "owned-box.step"),
   project = join(output, "Shared material.spil");
 const singlePart = intent.printer.workflow.job.assignments.length === 1;
@@ -160,6 +164,16 @@ const decoded = await decodeReplayDisplay(
   Uint8Array.from(await readFile(replay)).buffer,
   returned.manufacturing.replay_display,
 );
+const plan = JSON.parse(await readFile(join(recoveredExport, "plan.json"), "utf8"));
+const selection = plan.interior_selection;
+const primaryOnly = selectionCase !== "automatic";
+if (singlePart) {
+  assert.ok(selection);
+  assert.equal(selection.selected, primaryOnly ? "primary" : intentName === "mixed-width-combined" ? "grouped" : "synchronized");
+  assert.equal(selection.reason, primaryOnly ? selectionCase === "no-timing" ? "no_timing_model" : "objective_not_met" : "improved_modeled_work");
+  assert.equal(selection.candidates.length, 3);
+  evidence.interior_selection = selection;
+}
 const counts = [0, 0];
 let coarseEvents = 0;
 for (let i = 0; i < decoded.eventCount; i++) {
@@ -177,11 +191,11 @@ for (let i = 0; i < decoded.eventCount; i++) {
   assert.ok(tool === 0 || tool === 1);
   const association = decoded.association(i);
   const interior = singlePart && typeof association?.regionalOwner === "number";
-  const expected = singlePart ? (interior ? 1 : 0) : point[0] < 80 ? 0 : 1;
+  const expected = singlePart ? (interior && !primaryOnly ? 1 : 0) : point[0] < 80 ? 0 : 1;
   if (singlePart) {
     assert.ok(association);
     if (interior) {
-      assert.equal(association.beadWidthMm, job.assignments[0].interior.bead_width_mm);
+      assert.equal(association.beadWidthMm, primaryOnly ? intent.recipe.bead_width_mm : job.assignments[0].interior.bead_width_mm);
       if (association.physicalZMm[1]-association.physicalZMm[0] > 0.21) coarseEvents++;
     }
     // Independent analytic fixture observer: actual XYZ6 full beads retain the
@@ -227,8 +241,8 @@ for (let i = 0; i < decoded.eventCount; i++) {
   }
   counts[tool]++;
 }
-assert.ok(counts.every((n) => n > 0));
-if (intentName === "mixed-width-combined")
+assert.ok(primaryOnly ? counts[0] > 0 && counts[1] === 0 : counts.every((n) => n > 0));
+if (intentName === "mixed-width-combined" && !primaryOnly)
   assert.ok(coarseEvents > 0, "the selected bulk tool must occupy real thicker intervals");
 assert.deepEqual(
   await readFile(

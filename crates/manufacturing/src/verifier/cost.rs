@@ -10,6 +10,7 @@ use spiling_contracts::{geometry::SourceHash, manufacturing::*};
 pub(super) struct JobTimeBuilder {
     ledger: JobTimeLedger,
     context: Sha256,
+    in_work: bool,
 }
 impl JobTimeBuilder {
     pub(super) fn new(
@@ -55,9 +56,10 @@ impl JobTimeBuilder {
                 feeder_moves: 0,
                 selections_per_tool: [0; 2],
                 command_count: 0,
-                nonmotion_context_hash: SourceHash::from_bytes(&[]),
+                startup_context_hash: SourceHash::from_bytes(&[]),
             },
             context,
+            in_work: false,
         }))
     }
     pub(super) fn observe(
@@ -122,11 +124,14 @@ impl JobTimeBuilder {
             }
             command => {
                 if let Command::SelectTool(tool) = command {
+                    self.in_work = true;
                     self.ledger.selections_per_tool[usize::from(tool)] += 1;
                 }
-                let code = line.split_once(';').map_or(line, |(code, _)| code).trim();
-                self.context.update((code.len() as u64).to_le_bytes());
-                self.context.update(code.as_bytes());
+                if !self.in_work {
+                    let code = line.split_once(';').map_or(line, |(code, _)| code).trim();
+                    self.context.update((code.len() as u64).to_le_bytes());
+                    self.context.update(code.as_bytes());
+                }
             }
         }
         Ok(())
@@ -141,7 +146,7 @@ impl JobTimeBuilder {
             .sum();
         self.ledger.command_overhead_seconds =
             f64::from(self.ledger.command_count) * self.ledger.model.command_overhead_seconds;
-        self.ledger.nonmotion_context_hash = SourceHash::from_bytes(&self.context.finalize());
+        self.ledger.startup_context_hash = SourceHash::from_bytes(&self.context.finalize());
         self.ledger.validate()?;
         Ok(self.ledger)
     }

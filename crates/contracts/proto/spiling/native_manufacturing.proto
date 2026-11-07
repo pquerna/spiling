@@ -41,6 +41,7 @@ message ManufacturingRequest {
   string layout_id = 6;
   string parent = 1; // sessions/{session_uuid}
   oneof command {
+    EditInteriorPolicyRequest edit_interior_policy = 7;
     GetManufacturingRequest get = 2;
     SetManufacturingIntentRequest set_intent = 3;
     ApplyMaterialProfileRequest apply_material_profile = 4;
@@ -331,7 +332,7 @@ message JobTimeLedger {
   uint32 feeder_moves = 11;
   repeated uint32 selections_per_tool = 12;
   uint32 command_count = 13;
-  string nonmotion_context_hash = 14;
+  string startup_context_hash = 14;
 }
 message VerificationReport {
   JobTimeLedger job_time = 19;
@@ -485,4 +486,21 @@ message MaterialReviewReport {
   uint32 catalog_profiles = 4;
   uint32 matching_profiles = 5;
   repeated MaterialCandidateReview candidates = 6;
+}
+
+message InteriorToolPolicyEdit {
+  uint32 occurrence_id = 1;
+  string expected_definition_id = 2;
+  oneof expected_state {
+    bool expected_default = 3; // must be true
+    InteriorToolOverride expected_override = 4;
+  }
+  oneof action {
+    bool use_defaults = 5; // must be true
+    InteriorToolOverride set_override = 6;
+  }
+}
+message EditInteriorPolicyRequest {
+  uint32 base_revision = 1;
+  InteriorToolPolicyEdit edit = 2;
 }

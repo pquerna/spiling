@@ -1047,7 +1047,7 @@ pub(super) fn collect_span(
     );
     for prepared in sources.values() {
         let remaining = prepared
-            .prepare_native_position_maps(map_allowance, &mut admission.geometry_work, cancel)
+            .prepare_native_position_maps(map_allowance, admission.geometry_work, cancel)
             .map_err(|failure| {
                 super::native_error(failure, "native positional query-map preparation")
             })?;
@@ -1242,7 +1242,7 @@ pub(super) fn collect_span(
                         upper,
                     },
                     coexisting,
-                    &mut admission.geometry_work,
+                    admission.geometry_work,
                     cancel,
                 )
             } else {
@@ -1255,7 +1255,7 @@ pub(super) fn collect_span(
                         upper,
                     },
                     coexisting,
-                    &mut admission.geometry_work,
+                    admission.geometry_work,
                     cancel,
                 )
             };
@@ -1406,14 +1406,14 @@ pub(super) fn collect_span(
                             collar.capture_projected_voids(
                                 evidence.analysis,
                                 available as u32,
-                                &mut admission.geometry_work,
+                                admission.geometry_work,
                                 cancel,
                             )
                         } else {
                             spiling_geometry::capture_projected_voids(
                                 evidence.analysis,
                                 available as u32,
-                                &mut admission.geometry_work,
+                                admission.geometry_work,
                                 cancel,
                             )
                         }
@@ -1704,7 +1704,7 @@ pub(super) fn collect_span(
             ready.pending,
             &ready.candidate,
             &positive,
-            &mut admission.geometry_work,
+            admission.geometry_work,
             cancel,
         )
         .map_err(|failure| {
@@ -1875,7 +1875,7 @@ fn capture_base(
                     interval,
                     sample,
                     input.intent.recipe.native_shape_error_mm,
-                    &mut admission.geometry_work,
+                    admission.geometry_work,
                     cancel,
                 )?;
                 let evidence = if let Some(evidence) = cached {
@@ -1900,7 +1900,7 @@ fn capture_base(
                             native_shape_error_mm: input.intent.recipe.native_shape_error_mm,
                         },
                         query_byte_limit,
-                        &mut admission.geometry_work,
+                        admission.geometry_work,
                         cancel,
                     );
                     let analysis = match analysis {
@@ -2068,7 +2068,7 @@ fn capture_base(
                         candidate_coordinate_error_mm: 0.0,
                     },
                 },
-                &mut admission.geometry_work,
+                admission.geometry_work,
                 cancel,
             ) {
                 Ok(leaf) => leaf,
@@ -4694,7 +4694,10 @@ mod refinement_tests {
 mod capture_proposal_tests {
     use super::*;
 
-    fn admission(band: [f64; 2]) -> preflight::Admission {
+    fn admission(
+        band: [f64; 2],
+        work: &mut spiling_geometry::GeometryWorkBudget,
+    ) -> preflight::Admission<'_> {
         preflight::Admission {
             bounds: None,
             horizontal_events: Vec::new(),
@@ -4709,7 +4712,7 @@ mod capture_proposal_tests {
                 software_only: true,
                 checks: Vec::new(),
             },
-            geometry_work: spiling_geometry::GeometryWorkBudget::compile(),
+            geometry_work: work,
         }
     }
 
@@ -4729,7 +4732,8 @@ mod capture_proposal_tests {
 
     #[test]
     fn capture_proposal_search_preserves_cumulative_work_limits_and_cancellation() {
-        let admission = admission([1.0, 1.0]);
+        let mut work = spiling_geometry::GeometryWorkBudget::compile();
+        let admission = admission([1.0, 1.0], &mut work);
         let schedule = schedule();
         let intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
             "../../../../fixtures/manufacturing/complete-sparse.intent.json"

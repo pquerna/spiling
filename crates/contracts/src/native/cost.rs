@@ -56,7 +56,7 @@ impl TryFrom<rpc::JobTimeLedger> for JobTimeLedger {
                 .try_into()
                 .map_err(|_| "job time requires exactly two selection counts")?,
             command_count: v.command_count,
-            nonmotion_context_hash: SourceHash::parse(v.nonmotion_context_hash)
+            startup_context_hash: SourceHash::parse(v.startup_context_hash)
                 .map_err(|e| e.to_string())?,
         };
         result.validate().map_err(|e| e.to_string())?;
@@ -81,7 +81,7 @@ impl TryFrom<JobTimeLedger> for rpc::JobTimeLedger {
             feeder_moves: v.feeder_moves,
             selections_per_tool: v.selections_per_tool.to_vec(),
             command_count: v.command_count,
-            nonmotion_context_hash: v.nonmotion_context_hash.into(),
+            startup_context_hash: v.startup_context_hash.into(),
         })
     }
 }

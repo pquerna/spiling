@@ -82,6 +82,18 @@ impl TryFrom<ManufacturingCommand> for rpc::ManufacturingRequest {
                     intent: Some(Arc::unwrap_or_clone(intent).try_into()?),
                 }),
             ),
+            ManufacturingCommand::EditInteriorPolicy {
+                session_id,
+                base_revision,
+                edit,
+                ..
+            } => (
+                session_id,
+                Command::EditInteriorPolicy(rpc::EditInteriorPolicyRequest {
+                    base_revision: base_revision.get(),
+                    edit: Some(edit.try_into()?),
+                }),
+            ),
             ManufacturingCommand::ReviewMaterials {
                 layout_id: _,
                 session_id,
@@ -134,6 +146,12 @@ impl TryFrom<rpc::ManufacturingRequest> for ManufacturingCommand {
             Command::Get(_) => Ok(Self::Get {
                 session_id,
                 layout_id,
+            }),
+            Command::EditInteriorPolicy(request) => Ok(Self::EditInteriorPolicy {
+                layout_id,
+                session_id,
+                base_revision: ProjectRevision(request.base_revision),
+                edit: required(request.edit, "interior policy edit")?.try_into()?,
             }),
             Command::ReviewMaterials(request) => Ok(Self::ReviewMaterials {
                 layout_id,
@@ -2509,10 +2527,19 @@ impl TryFrom<rpc::OccurrenceMaterialAssignment> for OccurrenceMaterialAssignment
         let result = Self {
             occurrence_id: OccurrenceId::new(value.occurrence_id).map_err(|e| e.to_string())?,
             tool_id: value.tool_id,
-            interior: value.interior.map(|binding| InteriorToolBinding {
-                tool_id: binding.tool_id,
-                bead_width_mm: binding.bead_width_mm,
-            }),
+            interior: value
+                .interior
+                .map(|binding| {
+                    Ok::<_, String>(InteriorToolBinding {
+                        tool_id: binding.tool_id,
+                        bead_width_mm: binding.bead_width_mm,
+                        policy_override: binding
+                            .policy_override
+                            .map(TryInto::try_into)
+                            .transpose()?,
+                    })
+                })
+                .transpose()?,
             material: match required(value.material, "occurrence material")? {
                 rpc::occurrence_material_assignment::Material::Uniform(uniform) => {
                     routing_label(&uniform.material_id)?;
@@ -2549,10 +2576,19 @@ impl TryFrom<OccurrenceMaterialAssignment> for rpc::OccurrenceMaterialAssignment
         Ok(Self {
             occurrence_id: value.occurrence_id.get(),
             tool_id: value.tool_id,
-            interior: value.interior.map(|binding| rpc::InteriorToolBinding {
-                tool_id: binding.tool_id,
-                bead_width_mm: binding.bead_width_mm,
-            }),
+            interior: value
+                .interior
+                .map(|binding| {
+                    Ok::<_, String>(rpc::InteriorToolBinding {
+                        tool_id: binding.tool_id,
+                        bead_width_mm: binding.bead_width_mm,
+                        policy_override: binding
+                            .policy_override
+                            .map(TryInto::try_into)
+                            .transpose()?,
+                    })
+                })
+                .transpose()?,
             material: Some(match value.material {
                 OccurrenceMaterial::Uniform { material_id } => {
                     rpc::occurrence_material_assignment::Material::Uniform(
@@ -2797,6 +2833,7 @@ impl TryFrom<rpc::FixedDualJob> for FixedDualJob {
         }
         let [tool0, tool1] = tools;
         let result = Self {
+            interior_goal: value.interior_goal.map(TryInto::try_into).transpose()?,
             timing_model: value.timing_model.map(TryInto::try_into).transpose()?,
             machine_id: value.machine_id,
             configuration: rpc::FixedDualConfiguration::try_from(value.configuration)
@@ -2855,6 +2892,7 @@ impl TryFrom<FixedDualJob> for rpc::FixedDualJob {
     fn try_from(value: FixedDualJob) -> Result<Self, String> {
         value.validate_declaration().map_err(|e| e.to_string())?;
         Ok(Self {
+            interior_goal: value.interior_goal.map(TryInto::try_into).transpose()?,
             timing_model: value.timing_model.map(TryInto::try_into).transpose()?,
             machine_id: value.machine_id,
             configuration: rpc::FixedDualConfiguration::try_from(value.configuration)? as i32,
@@ -3245,6 +3283,7 @@ mod fixed_dual_wire_tests {
             ],
         };
         FixedDualJob {
+            interior_goal: None,
             timing_model: None,
             machine_id: "software-wire-test".into(),
             configuration: FixedDualConfiguration::Marlin2125NativeFixedHotends,

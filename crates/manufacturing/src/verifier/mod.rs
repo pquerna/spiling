@@ -464,6 +464,8 @@ pub(crate) fn verify_actual(
         ));
     }
     let prime_exclusion = plan.validate_and_prime_exclusion(intent)?;
+    let execution = plan.execution_intent(intent)?;
+    let intent = execution.as_ref();
 
     let recipe = &intent.recipe;
     let printer = &intent.printer;
@@ -1207,7 +1209,7 @@ pub(crate) fn verify_actual(
     if !deposited_volume_mm3.is_finite() {
         return Err(failed("decoded deposited volume is nonfinite"));
     }
-    Ok(VerificationReport {
+    let report = VerificationReport {
         job_time: time.map(cost::JobTimeBuilder::finish).transpose()?,
         layer_height: LayerHeightAssessment::from_plan(intent, &plan.layers)?,
         verified: true,
@@ -1258,7 +1260,12 @@ pub(crate) fn verify_actual(
         retraction_count,
         retracted_filament_mm,
         routing,
-    })
+    };
+    report.validate()?;
+    if let Some(selection) = &plan.interior_selection {
+        selection.validate_current(program, &report)?;
+    }
+    Ok(report)
 }
 
 mod diaphragms;

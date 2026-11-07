@@ -291,6 +291,8 @@ impl OccurrenceMaterial {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct InteriorToolBinding {
+    #[serde(deserialize_with = "required_option")]
+    pub policy_override: Option<InteriorToolOverride>,
     pub tool_id: String,
     pub bead_width_mm: f64,
 }
@@ -314,6 +316,8 @@ pub struct OccurrenceMaterialAssignment {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FixedDualJob {
+    #[serde(deserialize_with = "required_option")]
+    pub interior_goal: Option<InteriorSelectionGoal>,
     #[serde(deserialize_with = "required_option")]
     pub timing_model: Option<DeclaredJobTimeModel>,
     pub machine_id: String,
@@ -362,6 +366,9 @@ impl FixedDualJob {
             && self.functional_construction.is_none()
     }
     pub fn validate_declaration(&self) -> Result<(), ManufacturingError> {
+        if let Some(goal) = &self.interior_goal {
+            goal.validate()?;
+        }
         if let Some(model) = &self.timing_model {
             model.validate()?;
         }
@@ -702,7 +709,7 @@ impl FixedDualJob {
                 "constructed model bead has no material-domain owner",
             ));
         }
-        if let Some(interior) = &assignment.interior
+        if let Some(interior) = assignment.active_interior()
             && matches!(path.owner, Some(DepositionOwner::Regional { .. }))
         {
             if path.width.constant_width_mm() != Some(interior.bead_width_mm) {
