@@ -6,6 +6,7 @@
 pub mod export;
 mod library;
 mod native;
+pub use native::NativeOperationWatch;
 #[cfg(test)]
 mod tests;
 

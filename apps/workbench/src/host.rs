@@ -19,7 +19,7 @@ use spiling_contracts::{
     },
     project::{ProjectCommand, ProjectId, ProjectInfo, ProjectResponse, ProjectRevision},
 };
-use spiling_engine_client::{ClientError, EngineClient};
+use spiling_engine_client::{ClientError, EngineClient, NativeOperationWatch};
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -605,6 +605,8 @@ enum Receipt {
     Manufacturing,
     Project,
 }
+type NativeObservation = (NativeOperationWatch, NativeOperationView);
+
 struct Pending {
     name: String,
     label: &'static str,
@@ -692,7 +694,9 @@ impl Actor {
         self.publish();
         let mut timer = tokio::time::interval(Duration::from_millis(200));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut observation: Option<JoinHandle<Result<NativeOperationView, ClientError>>> = None;
+        let mut observation_generation = self.state.generation;
+        let mut watch: Option<NativeOperationWatch> = None;
+        let mut observation: Option<JoinHandle<Result<NativeObservation, ClientError>>> = None;
         loop {
             tokio::select! {
                 biased;
@@ -703,10 +707,17 @@ impl Actor {
                 },
                 result = async { match &mut observation { Some(task) => task.await, None => std::future::pending().await } } => {
                     observation = None;
-                    match result {
-                        Ok(Ok(job)) => self.observe(job).await,
-                        Ok(Err(error)) => { if let Some(pending) = &mut self.pending { pending.paused = true; } self.failure(error).await; }
-                        Err(error) => self.problem(format!("Operation observer failed: {error}")),
+                    if observation_generation != self.state.generation {
+                        watch = None;
+                    } else {
+                        match result {
+                            Ok(Ok((next_watch, job))) => {
+                                watch = Some(next_watch);
+                                self.observe(job).await;
+                            },
+                            Ok(Err(error)) => { if let Some(pending) = &mut self.pending { pending.paused = true; } self.failure(error).await; }
+                            Err(error) => { if let Some(pending) = &mut self.pending { pending.paused = true; } self.problem(format!("Operation observer failed: {error}")); },
+                        }
                     }
                 },
                 result = async {
@@ -795,10 +806,6 @@ impl Actor {
                 _ = timer.tick() => {
                     self.check_exit().await;
                     if self.diagnostic_task.is_none() && !self.diagnostic_paused && let (Some(operation),Some(client))=(&self.state.diagnostic,&self.client) && !operation.done{self.diagnostic_task=Some(tokio::spawn(crate::diagnostics::observe(client.rpc(),operation.name.clone())));}
-                    if observation.is_none() && let (Some(pending), Some(client)) = (&self.pending, &self.client) && !pending.paused {
-                        let rpc = client.rpc(); let name = pending.name.clone();
-                        observation = Some(tokio::spawn(async move { rpc.native_operation(name).await }));
-                    }
                     // Idle liveness checks do not repaint or re-download project/scene state.
                     continue;
                 }
@@ -807,10 +814,41 @@ impl Actor {
             if self.state.phase == Phase::Closed {
                 break;
             }
+            if observation_generation != self.state.generation {
+                if let Some(task) = observation.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
+                watch = None;
+            }
+            if observation.is_none() {
+                if let (Some(pending), Some(client)) = (&self.pending, &self.client)
+                    && !pending.paused
+                {
+                    observation_generation = self.state.generation;
+                    let rpc = client.rpc();
+                    let name = pending.name.clone();
+                    let previous = watch.take().filter(|w| w.name() == name);
+                    // Observe immediately and keep the same bounded stream across progress.
+                    // The timer is only a liveness fallback, never completion latency.
+                    observation = Some(tokio::spawn(async move {
+                        let mut watch = match previous {
+                            Some(watch) => watch,
+                            None => rpc.watch_native_operation(name).await?,
+                        };
+                        let job = watch.next().await?;
+                        Ok((watch, job))
+                    }));
+                } else {
+                    watch = None;
+                }
+            }
         }
         if let Some(task) = observation {
             task.abort();
+            let _ = task.await;
         }
+        drop(watch);
         self.section_cancel.store(true, Ordering::Relaxed);
         self.cancel_display();
         self.cleanup().await;
@@ -903,6 +941,7 @@ impl Actor {
                     client.hello().engine_build,
                     client.hello().session_id
                 );
+                crate::performance::mark("engine_connected");
                 self.state.hello = Some(Arc::new(client.hello().clone()));
                 self.client = Some(client);
                 self.state.phase = Phase::Running;
@@ -1036,6 +1075,7 @@ impl Actor {
         }
     }
     async fn refresh(&mut self) -> Result<(), ClientError> {
+        let _opening = crate::performance::span("host_refresh");
         let client = self
             .client
             .as_ref()
@@ -1574,6 +1614,7 @@ impl Actor {
                 read_only,
                 recover_previous,
             } => {
+                crate::performance::mark("open_requested");
                 receipt = Some(Receipt::Open(Route {
                     path: path.clone(),
                     read_only,
@@ -1765,6 +1806,7 @@ impl Actor {
         let completed = operation.status == JobStatus::Completed;
         match (&pending.receipt, &operation.result) {
             (Receipt::Open(route), Some(JobResult::Scene { summary })) if completed => {
+                crate::performance::mark("open_published");
                 self.route = Some(route.clone());
                 Arc::make_mut(&mut self.state.library)
                     .hardware

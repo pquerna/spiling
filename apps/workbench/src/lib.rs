@@ -12,10 +12,16 @@ pub mod inspection;
 pub mod launch;
 pub mod layers;
 pub mod manufacture;
+mod performance;
 pub mod replay;
 pub mod scene;
 pub mod ui;
 pub mod viewport;
+
+/// Initialize the opt-in process clock before native graphics/window creation.
+pub fn start_open_trace() {
+    performance::mark("launch");
+}
 
 pub fn native_options() -> eframe::NativeOptions {
     eframe::NativeOptions {

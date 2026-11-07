@@ -42,6 +42,7 @@ build is required. A suitable Vulkan driver must be installed separately.
 | `pnpm check`                      | Formatting, Clippy, TypeScript and contract checks                                       |
 | `pnpm test`                       | Workspace behavior, real CLI and packed interoperability                                 |
 | `pnpm smoke:cli`                  | Actual child startup, operations, transfer and reap                                      |
+| `pnpm bench:open ...`             | Optimized actual native project-opening measurements; Linux X11 automation               |
 | `pnpm bench:smoke`                | Diagnostic process/transfer benchmark, not geometry performance                          |
 | `pnpm compare:slicers`            | Independent commanded G-code comparison; see [contract](gcode-parity.md)                 |
 | `pnpm test:parity`                | Independent observer fault/accounting tests                                              |

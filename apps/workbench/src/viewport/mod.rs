@@ -166,6 +166,7 @@ impl Default for Viewport {
 }
 impl Viewport {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let _opening = crate::performance::span("viewport_initialize");
         let state = cc.wgpu_render_state.as_ref().expect("native wgpu renderer");
         let device = &state.device;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1268,6 +1269,7 @@ impl egui_wgpu::CallbackTrait for Callback {
             _ => true,
         };
         if changed {
+            let _opening = crate::performance::span("source_gpu_stage");
             match r.stage(device, self.scene.clone()) {
                 Ok(draws) => {
                     r.draws = draws;

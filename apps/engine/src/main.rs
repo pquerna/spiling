@@ -7,6 +7,7 @@ mod geometry;
 mod jobs;
 mod library;
 mod native;
+mod performance;
 mod session;
 use geometry::{Control, Reply};
 use jobs::Jobs;

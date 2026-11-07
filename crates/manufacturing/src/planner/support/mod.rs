@@ -13,7 +13,9 @@ use std::{
 mod anchors;
 pub(super) use anchors::inward_bond_endpoint;
 pub(crate) use anchors::strict_capsule_point;
-pub(crate) use anchors::{AnchorCandidate, AnchorWorkspace, endpoint_bond, projected_edges};
+pub(crate) use anchors::{
+    AnchorCandidate, AnchorWorkspace, PreparedAnchorPaths, endpoint_bond, projected_edges,
+};
 pub(in crate::planner) mod strokes;
 pub(crate) use strokes::StrokeRuns;
 pub(crate) use strokes::{GapKind, gap_kind};

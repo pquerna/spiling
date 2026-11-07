@@ -1,7 +1,7 @@
 <!-- SPDX-FileCopyrightText: 2026 Spiling contributors -->
 <!-- SPDX-License-Identifier: OSL-3.0 -->
 
-# Manufacturing performance measurements
+# Native opening and manufacturing performance
 
 `crates/manufacturing/benches/pipeline.rs` exercises the production compiler and
 inspection facades. `pnpm bench:slice` builds the `profiling` Cargo profile:
@@ -95,5 +95,63 @@ verification flags never authorize skipping fresh independent replay.
 CPU utilization and phase work identify serial computation versus waits. Count
 all native/control/render/library workers and coexisting scratch before choosing
 parallelism. Tokio handles asynchronous control/I/O; native CPU work remains off
-its executor. BREP definitions are not `Sync`; parallel source work needs a real
-ownership boundary, not a thread-count setting or an unsafe assertion.
+its executor. Native definitions remain confined to the engine worker. A synchronized kernel
+cache alone does not qualify concurrent queries; parallel source work needs an
+exercised ownership boundary, not a thread-count setting or an unsafe assertion.
+
+## Actual native opening
+
+`pnpm bench:open` builds matching optimized engine/CLI/workbench binaries and
+measures fresh-process, read-only opening of a saved `.spil` with at least one
+renderable source. The automation
+adapter currently requires Linux X11, Python 3 and an accessible `DISPLAY`.
+Use isolated XDG data where the native application license has already been
+accepted interactively. Each sample gets a copy of those preferences in its own
+XDG data directory; the supplied preferences remain untouched. The tool never
+accepts the license on the operator’s behalf.
+Run inside the same external memory/task/CPU envelope for both revisions.
+
+```sh
+pnpm --silent bench:open --project SAVED.spil --user-data ISOLATED_XDG_DATA \
+  --output .cache/open-before --samples 3 --warmups 1 > .cache/open-before.ndjson
+# Repeat after the change, using a new output directory/file.
+node tools/compare-open-bench.mjs .cache/open-before.ndjson .cache/open-after.ndjson
+```
+
+The opt-in `SPILING_OPEN_TRACE=1` records bounded static milestones on stderr:
+initial UI, first GPU readback, engine/storage/native admission/tessellation,
+saved fresh replay, operation publication, display transfer/staging and source
+readback. The workbench requests two extra GPU readbacks when tracing; completion
+bounds rendered pixels, not compositor presentation. These clocks are
+process-local; compare stage durations within one process, not absolute engine
+and workbench timestamps. Complete open still validates all saved content and
+freshly replays saved manufacturing. No partial-open or stored-verification shortcut
+is part of this measurement.
+
+Each sample retains the real window screenshot, trace, binary/project/preferences hashes,
+adapter, effective CPU affinity/parallelism, cgroup resource limits and peak process
+RSS. It closes through the window manager, requires successful shutdown and child
+reaping, and confirms that the read-only input is unchanged. Warmups are excluded;
+each sample starts a new process. Filesystem cache state is uncontrolled, so this
+is not a cold-disk benchmark. Compare the same optimized profile and environment;
+the comparator refuses incomplete samples and changed inputs, producer, graphics
+or recorded resource configuration. Timing remains separate from correctness and
+hardware/platform qualification.
+
+`node tools/prepare-open-bench.mjs NEW_DIRECTORY profiling` captures a reusable
+cohort through the matching CLI/engine: shared occurrences, distinct definitions,
+curved sources, multiple plates with saved programs and a 32-part mixed-width job
+with protected bore. Build the matching
+binaries first. Preparation is outside sample timing; external source copies are
+removed before fresh return. `cohort.json` retains source hashes and explicit
+geometry/display refusals. A project with some unavailable definitions is not
+complete display qualification for those sources. Use additional real saved jobs
+for manufacturing-heavy return; do not substitute the small cohort for them.
+
+Fresh fine-path replay prepares a bounded borrowed-path inventory per prior
+layer. Conservative projected bounds and maximum local bead radius reject only
+paths that cannot contribute centerline or endpoint support. Surviving edges use
+the original exact capsule calculation and order; skipped edges still charge the
+same cumulative work ceiling. No copied motion plan or new verification authority
+is retained. Native operation observation uses the existing checked operation
+stream immediately; the host timer remains for liveness, not completion polling.

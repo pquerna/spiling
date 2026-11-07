@@ -655,7 +655,10 @@ async function main() {
     case "test":
       await stageEngine();
       await runTestSuites([
-        ["tooling", () => run("node", ["--test", "tools/run.test.mjs"])],
+        [
+          "tooling",
+          () => run("node", ["--test", "tools/run.test.mjs", "tools/compare-open-bench.test.mjs"]),
+        ],
         ["material catalogs", () => run("node", ["--test", "tools/material-catalogs.test.mjs"])],
         [
           "Rust workspace",
@@ -677,6 +680,27 @@ async function main() {
       break;
     case "bench:smoke":
       await benchmark();
+      break;
+    case "bench:open":
+      await run("cargo", [
+        "build",
+        "--locked",
+        "--profile",
+        "profiling",
+        "-p",
+        "spiling-engine",
+        "-p",
+        "spiling-cli",
+        "-p",
+        "spiling-workbench",
+        "--bin",
+        "spiling-engine",
+        "--bin",
+        "spiling-cli",
+        "--bin",
+        "spiling-workbench",
+      ]);
+      await run("node", ["tools/bench-open.mjs", ...process.argv.slice(3)]);
       break;
     case "bench:slice":
       await sliceBenchmark();

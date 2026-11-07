@@ -168,6 +168,32 @@ fn project_receipts_discard_read_only_restart_and_reap() {
 #[test]
 #[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
 #[cfg(target_os = "linux")]
+fn drop_reaps_child_with_native_observation_in_flight() {
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    let ready = wait(&host, |s| s.phase == Phase::Running);
+    let pid = ready.hello.as_ref().unwrap().pid;
+    let curved = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step");
+    host.send(Request::Action(Action::Import(native(&curved))))
+        .unwrap();
+    wait(&host, |s| s.active_operation || !s.jobs.is_empty());
+    let started = Instant::now();
+    drop(host);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
+}
+
+#[test]
+#[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
+#[cfg(target_os = "linux")]
 fn engine_death_is_bounded_and_restart_does_not_claim_unsaved_recovery() {
     let root = tempfile::tempdir().unwrap();
     let host = Host::new(
@@ -196,7 +222,18 @@ fn engine_death_is_bounded_and_restart_does_not_claim_unsaved_recovery() {
     let restarted = send(&host, Action::Restart);
     assert_eq!(restarted.scene.as_ref().unwrap().occurrence_count, 0);
     assert!(!restarted.project.as_ref().unwrap().dirty);
-    assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
+    assert_ne!(
+        restarted.hello.as_ref().unwrap().session_id,
+        state.hello.as_ref().unwrap().session_id
+    );
+    // A late old observation must never interrupt work in the replacement session.
+    let current = imported(&host);
+    assert_eq!(current.phase, Phase::Running);
+    assert_eq!(current.scene.as_ref().unwrap().occurrence_count, 1);
+    let closing = send(&host, Action::Close);
+    host.confirm(closing.confirmation.unwrap().id, true)
+        .unwrap();
+    wait(&host, |s| s.phase == Phase::Closed);
 }
 
 #[test]

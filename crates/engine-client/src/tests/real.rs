@@ -103,6 +103,54 @@ async fn face_rows(client: &mut EngineClient, definition: &DefinitionRecord) -> 
 }
 
 #[tokio::test]
+#[ignore = "actual checked native operation stream; requires SPILING_TEST_ENGINE"]
+async fn native_watch_drop_reconnect_and_terminal_receipts_preserve_work() {
+    let mut client = EngineClient::spawn(engine()).await.unwrap();
+    let before = scene(&mut client).await;
+    let GeometryResponse::OperationAccepted { operation } = client
+        .geometry(GeometryCommand::ImportPart {
+            session_id: before.session_id,
+            base_revision: before.revision,
+            source: NativePath::from_os_str(fixture("box-mm.step").as_os_str()).unwrap(),
+            initial_pose: RigidPoseMm::IDENTITY,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected accepted native import")
+    };
+    let name = operation.name;
+    let rpc = client.rpc();
+    let mut first = rpc.watch_native_operation(name.clone()).await.unwrap();
+    assert_eq!(first.next().await.unwrap().name, name);
+    drop(first); // Observation lifetime never cancels the accepted mutation.
+    let mut resumed = rpc.watch_native_operation(name.clone()).await.unwrap();
+    let terminal = timeout(Duration::from_secs(75), async {
+        loop {
+            let view = resumed.next().await.unwrap();
+            assert_eq!(view.name, name);
+            if view.done {
+                break view;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(terminal.status, JobStatus::Completed);
+    assert!(matches!(
+        resumed.next().await,
+        Err(ClientError::InvalidRequest(_))
+    ));
+    let mut historical = rpc.watch_native_operation(name.clone()).await.unwrap();
+    let observed = historical.next().await.unwrap();
+    assert!(observed.done);
+    assert_eq!(observed.name, name);
+    assert_eq!(observed.status, JobStatus::Completed);
+    assert_eq!(scene(&mut client).await.occurrence_count, 1);
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 #[ignore = "native deep check; requires SPILING_TEST_ENGINE"]
 async fn failed_import_and_stale_handles_preserve_scene_session_and_pid() {
     let mut client = EngineClient::spawn(engine()).await.unwrap();

@@ -47,6 +47,7 @@ impl Default for Preferences {
 
 pub struct Workbench {
     startup_open: Option<crate::launch::Open>,
+    opening_frames: crate::performance::Frames,
     prefs: Preferences,
     host: Option<Host>,
     state: Snapshot,
@@ -101,6 +102,7 @@ impl Workbench {
         Self::with_open(cc, None)
     }
     pub fn with_open(cc: &eframe::CreationContext<'_>, open: Option<crate::launch::Open>) -> Self {
+        let _opening = crate::performance::span("app_initialize");
         let mut prefs: Preferences = cc
             .storage
             .and_then(|s| eframe::get_value(s, PREFS))
@@ -123,6 +125,7 @@ impl Workbench {
         eprintln!("Spiling native graphics: {gpu}");
         Self {
             startup_open: open,
+            opening_frames: Default::default(),
             start_requested: prefs.accepted_osl3,
             prefs,
             host: None,
@@ -810,6 +813,8 @@ impl eframe::App for Workbench {
     }
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.opening_frames
+            .observe(&ctx, self.state.display.as_ref());
         let previous_theme = self.prefs.theme;
         if !self.prefs.accepted_osl3 {
             ui.heading("Welcome to Spiling");

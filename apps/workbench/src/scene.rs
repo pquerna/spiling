@@ -86,6 +86,7 @@ pub async fn load(
     cancel: Arc<AtomicBool>,
     reserved: usize,
 ) -> Result<Arc<Scene>, ClientError> {
+    let _opening = crate::performance::span("source_transfer");
     let mut definitions = Vec::new();
     let mut occurrences = Vec::new();
     for kind in [ScenePageKind::Definitions, ScenePageKind::Occurrences] {

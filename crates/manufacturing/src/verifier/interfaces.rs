@@ -7,7 +7,8 @@
 use super::constant_width;
 use super::{cancelled, failed, project_xyz6_point_mm};
 use crate::planner::support::{
-    AnchorCandidate, AnchorWorkspace, GapKind, endpoint_bond, gap_kind, projected_edges,
+    AnchorCandidate, AnchorWorkspace, GapKind, PreparedAnchorPaths, endpoint_bond, gap_kind,
+    projected_edges,
 };
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
@@ -585,6 +586,7 @@ pub(super) fn verify_earlier_fine_paths(
 ) -> Result<(), ManufacturingError> {
     let layer = &plan.layers[index];
     let previous = &plan.layers[index - 1];
+    let mut prepared = None;
     for path in layer.paths.iter().filter(|path| {
         matches!(
             path.kind,
@@ -642,21 +644,23 @@ pub(super) fn verify_earlier_fine_paths(
                 project_xyz6_point_mm(edge[1])?,
             ];
             let length = (actual[1][0] - actual[0][0]).hypot(actual[1][1] - actual[0][1]);
-            let earlier = projected_edges(
-                previous.paths.iter().filter(|path| {
-                    !matches!(
-                        path.kind,
-                        DepositionKind::Support | DepositionKind::SupportInterface
-                    ) && path.physical_z_mm[1] == layer.lower_z_mm
-                }),
-                true,
-            );
-            for gap in anchors.gaps_edges(
+            if prepared.is_none() {
+                prepared = Some(PreparedAnchorPaths::new(
+                    previous.paths.iter().filter(|path| {
+                        !matches!(
+                            path.kind,
+                            DepositionKind::Support | DepositionKind::SupportInterface
+                        ) && path.physical_z_mm[1] == layer.lower_z_mm
+                    }),
+                    cancel,
+                )?);
+            }
+            for gap in anchors.gaps_prepared(
                 AnchorCandidate {
                     endpoints_mm: actual,
                     bead_width_mm: local.width_mm,
                 },
-                earlier,
+                prepared.as_ref().expect("earlier paths prepared"),
                 work,
                 cancel,
             )? {

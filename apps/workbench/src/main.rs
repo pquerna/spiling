@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() -> eframe::Result {
+    spiling_workbench::start_open_trace();
     let open = match spiling_workbench::launch::parse(std::env::args_os().skip(1)) {
         Ok(open) => open,
         Err(error) => {

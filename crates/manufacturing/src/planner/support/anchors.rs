@@ -115,6 +115,127 @@ pub(super) fn emitted_coordinate_separation_lower_mm(
     Ok(lower)
 }
 
+/// Per-query-layer broad phase over borrowed paths, not another motion plan.
+/// Bounds use the same projected endpoints and the largest local bead radius.
+/// Rejection grants no support; remaining edges use the unchanged capsule proof.
+pub(crate) struct PreparedAnchorPaths<'a> {
+    paths: Vec<PreparedAnchorPath<'a>>,
+}
+struct PreparedAnchorPath<'a> {
+    path: &'a DepositionPath,
+    bounds: [[f64; 2]; 2],
+    max_radius: f64,
+    edges: usize,
+}
+impl<'a> PreparedAnchorPaths<'a> {
+    pub(crate) fn new(
+        paths: impl Iterator<Item = &'a DepositionPath>,
+        cancel: &AtomicBool,
+    ) -> Result<Self, ManufacturingError> {
+        let mut prepared = Vec::new();
+        for path in paths {
+            check_cancel(cancel)?;
+            let edges = path.checked_edges()?;
+            let edge_count = edges.len();
+            if prepared.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                return Err(error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "prepared anchor path inventory exceeds segment budget",
+                ));
+            }
+            let mut bounds = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
+            for &point in &path.points_mm {
+                check_cancel(cancel)?;
+                let point =
+                    spiling_contracts::manufacturing::program_coordinates::project_xyz6_point_mm(
+                        point,
+                    )?;
+                for axis in 0..2 {
+                    bounds[0][axis] = bounds[0][axis].min(point[axis]);
+                    bounds[1][axis] = bounds[1][axis].max(point[axis]);
+                }
+            }
+            let mut max_radius = 0.0_f64;
+            for edge in edges {
+                check_cancel(cancel)?;
+                max_radius = max_radius.max(edge.width_mm * 0.5);
+            }
+            // Grow geometrically within the row ceiling; coordinates remain borrowed.
+            if prepared.len() == prepared.capacity() {
+                let growth = prepared
+                    .capacity()
+                    .max(16)
+                    .min(MAX_DEPOSITION_SEGMENTS as usize - prepared.len());
+                prepared.try_reserve_exact(growth).map_err(|_| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "prepared anchor path allocation failed",
+                    )
+                })?;
+            }
+            prepared.push(PreparedAnchorPath {
+                path,
+                bounds,
+                max_radius,
+                edges: edge_count,
+            });
+        }
+        Ok(Self { paths: prepared })
+    }
+    fn inputs(&self, candidate: AnchorCandidate) -> impl Iterator<Item = AnchorInput> + '_ {
+        let [a, b] = candidate.endpoints_mm;
+        let radius = candidate.bead_width_mm * 0.5;
+        let mut paths = self.paths.iter();
+        let mut current: Option<spiling_contracts::manufacturing::DepositionEdges<'_>> = None;
+        std::iter::from_fn(move || {
+            loop {
+                if let Some(edge) = current.as_mut().and_then(Iterator::next) {
+                    let project = spiling_contracts::manufacturing::program_coordinates::project_xyz6_point_mm;
+                    return Some(AnchorInput::Edge((
+                        (|| Ok([project(edge.points_mm[0])?, project(edge.points_mm[1])?]))(),
+                        true,
+                        edge.width_mm,
+                    )));
+                }
+                let next = paths.next()?;
+                let reach = radius + next.max_radius;
+                if (0..2).any(|axis| {
+                    a[axis].min(b[axis]) > next.bounds[1][axis] + reach
+                        || a[axis].max(b[axis]) < next.bounds[0][axis] - reach
+                }) {
+                    return Some(AnchorInput::Skipped(next.edges));
+                }
+                // The immutable borrowed path was checked at preparation. Keep typed failures.
+                match next.path.checked_edges() {
+                    Ok(edges) => current = Some(edges),
+                    Err(error) => return Some(AnchorInput::Edge((Err(error), true, 0.0))),
+                }
+            }
+        })
+    }
+}
+enum AnchorInput {
+    Edge((Result<[[f64; 3]; 2], ManufacturingError>, bool, f64)),
+    Skipped(usize),
+}
+fn charge_pairs(work: &mut usize, count: usize) -> Result<(), ManufacturingError> {
+    if let Some(next) = work
+        .checked_add(count)
+        .filter(|n| *n <= MAX_ANCHOR_PAIR_WORK)
+    {
+        *work = next;
+        return Ok(());
+    }
+    // Match the per-edge counter at its first refusal, including partial batches.
+    if *work <= MAX_ANCHOR_PAIR_WORK {
+        *work = MAX_ANCHOR_PAIR_WORK;
+    }
+    Err(error(
+        ManufacturingErrorCode::ResourceLimit,
+        "cumulative deposited-stroke anchor work budget exceeded",
+    ))
+}
+
 pub(crate) struct AnchorWorkspace {
     intervals: Vec<(f64, f64, bool)>,
     uncovered: Vec<AnchorGap>,
@@ -214,6 +335,24 @@ impl AnchorWorkspace {
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<&[AnchorGap], ManufacturingError> {
+        self.gaps_inputs(candidate, edges.map(AnchorInput::Edge), work, cancel)
+    }
+    pub(crate) fn gaps_prepared(
+        &mut self,
+        candidate: AnchorCandidate,
+        paths: &PreparedAnchorPaths<'_>,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<&[AnchorGap], ManufacturingError> {
+        self.gaps_inputs(candidate, paths.inputs(candidate), work, cancel)
+    }
+    fn gaps_inputs(
+        &mut self,
+        candidate: AnchorCandidate,
+        edges: impl Iterator<Item = AnchorInput>,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<&[AnchorGap], ManufacturingError> {
         let [a, b] = candidate.endpoints_mm;
         check_cancel(cancel)?;
         let delta = [b[0] - a[0], b[1] - a[1]];
@@ -234,7 +373,15 @@ impl AnchorWorkspace {
         self.intervals.clear();
         self.uncovered.clear();
         let mut endpoints = [EndpointAnchor::default(), EndpointAnchor::default()];
-        for (edge, direct, previous_width) in edges {
+        for input in edges {
+            let (edge, direct, previous_width) = match input {
+                AnchorInput::Edge(edge) => edge,
+                AnchorInput::Skipped(count) => {
+                    check_cancel(cancel)?;
+                    charge_pairs(work, count)?;
+                    continue;
+                }
+            };
             let edge = edge?;
             let previous_radius = previous_width * 0.5;
             if !previous_radius.is_finite() || previous_radius <= 0.0 {
@@ -244,15 +391,7 @@ impl AnchorWorkspace {
                 ));
             }
             check_cancel(cancel)?;
-            *work = work
-                .checked_add(1)
-                .filter(|n| *n <= MAX_ANCHOR_PAIR_WORK)
-                .ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "cumulative deposited-stroke anchor work budget exceeded",
-                    )
-                })?;
+            charge_pairs(work, 1)?;
             let c = [edge[0][0], edge[0][1]];
             let d = [edge[1][0], edge[1][1]];
             if c.iter().chain(&d).any(|x| !x.is_finite()) {
@@ -623,6 +762,125 @@ fn cross(a: [f64; 2], b: [f64; 2]) -> f64 {
 #[cfg(test)]
 mod dimension_tests {
     use super::*;
+
+    #[test]
+    fn prepared_paths_match_all_edge_gaps_and_cumulative_work() {
+        use spiling_contracts::manufacturing::{DepositionKind, WidthProfile};
+        let mut paths = (0..32)
+            .map(|i| {
+                let x = f64::from(i) * 12.0 - 48.0;
+                DepositionPath {
+                    material_domain: None,
+                    kind: DepositionKind::SolidFill,
+                    owner: None,
+                    width: WidthProfile::PerEdge {
+                        widths_mm: vec![0.4, 1.2],
+                    },
+                    physical_z_mm: [0.0, 0.2],
+                    points_mm: vec![
+                        [x, -2.0, 0.2],
+                        [x + 0.0000005, 2.0, 0.2],
+                        [x + 3.0, -2.0, 0.2],
+                    ],
+                }
+            })
+            .collect::<Vec<_>>();
+        // Internal vertices, rather than just path endpoints, may supply support.
+        paths[31].points_mm[1] = [-0.0, 0.0, 0.2];
+        let cancel = AtomicBool::new(false);
+        let prepared = PreparedAnchorPaths::new(paths.iter(), &cancel).unwrap();
+        let gaps = |rows: &[AnchorGap]| {
+            rows.iter()
+                .map(|g| (g.start, g.end, g.left, g.right, g.direct_ends))
+                .collect::<Vec<_>>()
+        };
+        for x in [
+            -60.0, -48.0, -0.0000005, -0.0, 0.0000005, 12.0, 200.0, 400.0,
+        ] {
+            for width in [0.2, 0.4, 1.2, 4.0] {
+                let candidate = AnchorCandidate {
+                    endpoints_mm: [[x, -3.0, 0.4], [x + 1.0, 3.0, 0.4]],
+                    bead_width_mm: width,
+                };
+                assert!(
+                    prepared
+                        .inputs(candidate)
+                        .any(|entry| matches!(entry, AnchorInput::Skipped(_)))
+                );
+                for initial in [
+                    0,
+                    MAX_ANCHOR_PAIR_WORK - 64,
+                    MAX_ANCHOR_PAIR_WORK - 63,
+                    MAX_ANCHOR_PAIR_WORK,
+                ] {
+                    let (mut original, mut indexed) =
+                        (AnchorWorkspace::default(), AnchorWorkspace::default());
+                    let (mut old_work, mut new_work) = (initial, initial);
+                    let expected = original
+                        .gaps_edges(
+                            candidate,
+                            projected_edges(paths.iter(), true),
+                            &mut old_work,
+                            &cancel,
+                        )
+                        .map(gaps)
+                        .map_err(|e| (e.code, e.message));
+                    let actual = indexed
+                        .gaps_prepared(candidate, &prepared, &mut new_work, &cancel)
+                        .map(gaps)
+                        .map_err(|e| (e.code, e.message));
+                    assert_eq!(actual, expected, "x={x}, width={width}, initial={initial}");
+                    assert_eq!(new_work, old_work);
+                }
+            }
+        }
+    }
+    #[test]
+    fn prepared_paths_preserve_invalid_candidate_and_cancellation_refusals() {
+        let cancel = AtomicBool::new(false);
+        let prepared = PreparedAnchorPaths::new(std::iter::empty(), &cancel).unwrap();
+        let candidate = AnchorCandidate {
+            endpoints_mm: [[0.0; 3], [1.0, 0.0, 0.0]],
+            bead_width_mm: 0.0,
+        };
+        let mut workspace = AnchorWorkspace::default();
+        assert!(
+            workspace
+                .gaps_prepared(candidate, &prepared, &mut 0, &cancel)
+                .is_err()
+        );
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(
+            workspace.gaps_prepared(candidate, &prepared, &mut 0, &cancel),
+            Err(ManufacturingError {
+                code: ManufacturingErrorCode::Cancelled,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn preparation_rejects_malformed_paths_even_far_outside_the_query() {
+        use spiling_contracts::manufacturing::{DepositionKind, WidthProfile};
+        let path = DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::SolidFill,
+            owner: None,
+            width: WidthProfile::Constant { width_mm: 0.4 },
+            physical_z_mm: [0.0, 0.2],
+            points_mm: vec![[1000.0, 1000.0, 0.2], [1001.0, 1000.0, 0.2]],
+        };
+        let cancel = AtomicBool::new(false);
+        for invalid in 0..3 {
+            let mut path = path.clone();
+            match invalid {
+                0 => path.points_mm[1][0] = f64::NAN,
+                1 => path.width = WidthProfile::Constant { width_mm: f64::NAN },
+                _ => path.width = WidthProfile::PerEdge { widths_mm: vec![] },
+            }
+            assert!(PreparedAnchorPaths::new(std::iter::once(&path), &cancel).is_err());
+        }
+    }
 
     #[test]
     fn previous_capsule_radius_is_independent_of_candidate_endpoint_radius() {

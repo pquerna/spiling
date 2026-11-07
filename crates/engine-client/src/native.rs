@@ -63,7 +63,63 @@ fn bounded<T: Message>(message: T) -> Result<T, ClientError> {
 fn corrupt_manufacturing(message: &str) -> ClientError {
     ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, message).into()
 }
+/// One checked, long-lived operation observation. Dropping it does not cancel work.
+/// The gRPC stream is flow-controlled; no application progress queue is retained.
+pub struct NativeOperationWatch {
+    name: String,
+    stream: tonic::Streaming<spiling_contracts::google::longrunning::Operation>,
+    terminal: bool,
+}
+impl NativeOperationWatch {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub async fn next(&mut self) -> Result<NativeOperationView, ClientError> {
+        if self.terminal {
+            return Err(ClientError::InvalidRequest(
+                "native operation watch already completed".into(),
+            ));
+        }
+        let operation = self
+            .stream
+            .message()
+            .await
+            .map_err(rpc_error)?
+            .ok_or_else(|| {
+                ClientError::Protocol(
+                    "native operation watch ended before a terminal result".into(),
+                )
+            })?;
+        if operation.name != self.name {
+            return Err(ClientError::Protocol(
+                "native operation watch name mismatch".into(),
+            ));
+        }
+        let view = native::native_operation_view(&operation).map_err(ClientError::Protocol)?;
+        self.terminal = view.done;
+        Ok(view)
+    }
+}
+
 impl EngineRpc {
+    /// Subscribe immediately to the durable current state and subsequent updates.
+    /// Establishment is bounded; observation remains live until terminal/error/drop.
+    pub async fn watch_native_operation(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<NativeOperationWatch, ClientError> {
+        let name = name.into();
+        let stream =
+            tokio::time::timeout(super::REQUEST_TIMEOUT, self.watch_operation(name.clone()))
+                .await
+                .map_err(|_| ClientError::Timeout)??;
+        Ok(NativeOperationWatch {
+            name,
+            stream,
+            terminal: false,
+        })
+    }
+
     /// Retrieve a bounded immutable engine report; never evaluate colors locally.
     pub async fn fetch_appearance_report(
         &self,

@@ -34,7 +34,7 @@ use std::{
 pub use spiling_contracts::display::MeshBudget;
 struct Resident {
     // Created and retained only inside run(). The compiler borrows cheap shared
-    // handles on this same worker; Definition's native caches are not Sync.
+    // handles on this same worker; concurrent native queries are not qualified.
     definition: Arc<Definition>,
     record: StoredDefinition,
     vertices: u32,
@@ -933,6 +933,8 @@ fn open(
     work: &mut GeometryWorkBudget,
     progress: &dyn Fn(String),
 ) -> Result<Opened, JobError> {
+    let _opening = crate::performance::span("open_prepare");
+    crate::performance::mark("open_started");
     let OpenRequest {
         path,
         read_only,
@@ -961,6 +963,7 @@ fn open(
                 "retained captured source and native query-proof budget exceeded",
             )
         })?;
+    let loading = crate::performance::span("open_storage");
     let loaded = storage::open_reusing(
         &path,
         read_only,
@@ -997,6 +1000,7 @@ fn open(
                 })?,
         },
     )?;
+    drop(loading);
     let mut capacity = Capacity::new(definitions, budget);
     let incoming_source_bytes = loaded.sources.values().fold(0usize, |bytes, source| {
         bytes.saturating_add(source.bytes.len())
@@ -1025,10 +1029,14 @@ fn open(
             ));
         } else {
             progress("preparing_native_geometry".into());
+            let native = crate::performance::span("open_native");
             let definition = capacity.admit(source.bytes.as_slice(), cancel)?;
             validate_provenance(&definition, source)?;
             validate_surface_targets(&definition, &loaded.manifest.surface_overlays)?;
+            drop(native);
+            let tessellation = crate::performance::span("open_tessellate");
             let display = capacity.display(&definition, cancel, work, progress)?;
+            drop(tessellation);
             let resident = resident(definition, source, &display);
             imports.push(imported(&resident.definition, source.clone(), display));
             pending.insert(id.clone(), resident);
@@ -1040,10 +1048,12 @@ fn open(
         .iter()
         .filter_map(|l| l.manufacturing_artifact.as_ref())
     {
+        let _replay = crate::performance::span("open_replay");
         inspect_asset(asset, VerificationOutput::ReportOnly, cancel)?;
     }
     let project = Project::from_loaded(loaded)?;
     check_cancel(cancel)?;
+    crate::performance::mark("open_prepared");
     Ok(Opened {
         project,
         imports,
