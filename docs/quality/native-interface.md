@@ -37,6 +37,8 @@ Longer explanations use a deliberately opened help or
 named details surface. Essential scope, errors, save uncertainty, incompleteness,
 current verification and consequential qualification remain visible.
 
+When several read-only rows share one evidence source, disclose that source once at the group level. Do not repeat identical provenance beneath every value. Timing uses **Modeled work** and a separate **Startup · Unknown** row; detailed terms and model assumptions belong in Job estimate. A declared estimate is not a measured total duration.
+
 ## Workspace navigation
 
 Prepare and Review are the persistent workspaces. The application bar contains

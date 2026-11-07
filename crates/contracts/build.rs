@@ -28,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ".spiling.engine.NativeOperationResult.result",
         ".spiling.engine.ManufacturingRequest.command",
         ".spiling.engine.ManufacturingReply.result",
+        ".spiling.engine.JobWorkflow.workflow",
         ".spiling.engine.AppearancePaletteRow.evidence",
     ] {
         prost.type_attribute(

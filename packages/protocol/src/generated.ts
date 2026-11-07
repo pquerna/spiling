@@ -574,7 +574,15 @@ prime_start_mm: [number, number, number], prime_end_mm: [number, number, number]
  */
 park_position_mm: [number, number, number], };
 
-export type FixedDualJob = { machine_id: string, configuration: FixedDualConfiguration, firmware_revision: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], bed_temperature_c: number, maximum_bed_temperature_c: number, tools: [FixedDualTool, FixedDualTool], assignments: Array<OccurrenceMaterialAssignment>, surface_constructions: Array<SurfaceColorConstruction>, functional_construction: FunctionalMaterialConstruction | null, transition_lift_mm: number,
+export type DeclaredJobTimeModel = { id: string, revision: string, linear_acceleration_mm_s2: number, filament_acceleration_mm_s2: number, tool_activation_seconds: [number, number], command_overhead_seconds: number, };
+
+export type JobTimeLedger = { model: DeclaredJobTimeModel, model_deposition_seconds: number, auxiliary_deposition_seconds: number, travel_seconds: number, feeder_seconds: number, activation_seconds: number, command_overhead_seconds: number, model_moves: number, auxiliary_moves: number, travel_moves: number, feeder_moves: number, selections_per_tool: [number, number], command_count: number,
+/**
+ * Ordered nonmotion commands and complete declared startup context.
+ */
+nonmotion_context_hash: SourceHash, };
+
+export type FixedDualJob = { timing_model: DeclaredJobTimeModel | null, machine_id: string, configuration: FixedDualConfiguration, firmware_revision: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], bed_temperature_c: number, maximum_bed_temperature_c: number, tools: [FixedDualTool, FixedDualTool], assignments: Array<OccurrenceMaterialAssignment>, surface_constructions: Array<SurfaceColorConstruction>, functional_construction: FunctionalMaterialConstruction | null, transition_lift_mm: number,
 /**
  * Allowed tool-zero reference positions, including negative carriage X/Y.
  */
@@ -844,7 +852,7 @@ export type NormalizedPrintPlan = { functional_material_frame: FunctionalMateria
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
-export type VerificationReport = { layer_height: LayerHeightAssessment, verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, lifecycle_motion_count: number, priming_filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, retraction_count: number, retracted_filament_mm: number, routing: FixedDualVerification | null, };
+export type VerificationReport = { job_time: JobTimeLedger | null, layer_height: LayerHeightAssessment, verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, lifecycle_motion_count: number, priming_filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, retraction_count: number, retracted_filament_mm: number, routing: FixedDualVerification | null, };
 
 export type VerificationOutput = "report_only" | "report_and_motion";
 

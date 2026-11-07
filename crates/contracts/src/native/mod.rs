@@ -6,6 +6,7 @@ use crate::{ArtifactView, geometry::*, rpc};
 mod appearance;
 mod bed_pose;
 mod color_naming;
+mod cost;
 mod error;
 pub mod geometry;
 mod hardware;

@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, sync::Arc};
 use ts_rs::TS;
 
+mod cost;
+pub use cost::*;
 mod goals;
 pub use goals::*;
 mod alternative;
@@ -3400,6 +3402,8 @@ fn validate_routing_totals(
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct VerificationReport {
+    #[serde(deserialize_with = "required_option")]
+    pub job_time: Option<JobTimeLedger>,
     pub layer_height: LayerHeightAssessment,
     pub verified: bool,
     #[serde(deserialize_with = "descriptions")]
@@ -3424,6 +3428,38 @@ pub struct VerificationReport {
 }
 impl VerificationReport {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
+        if let Some(time) = &self.job_time {
+            time.validate()?;
+            let route = self
+                .routing
+                .as_ref()
+                .ok_or_else(|| invalid("job time requires complete routed commands"))?;
+            if time.model_moves != self.deposition_segments
+                || Some(time.auxiliary_moves)
+                    != route.tools[0]
+                        .waste_deposition_segments
+                        .checked_add(route.tools[1].waste_deposition_segments)
+                || Some(time.travel_moves)
+                    != self
+                        .travel_segments
+                        .checked_add(self.lifecycle_motion_count)
+                || Some(time.feeder_moves)
+                    != self
+                        .retraction_count
+                        .checked_mul(2)
+                        .and_then(|n| n.checked_sub(2))
+                || time.selections_per_tool.iter().sum::<u32>() != route.selection_count
+                || time
+                    .selections_per_tool
+                    .iter()
+                    .zip(&route.tools)
+                    .any(|(count, tool)| *count != tool.waste_deposition_segments)
+            {
+                return Err(invalid(
+                    "job time ledger does not cover the complete verified command inventory",
+                ));
+            }
+        }
         self.layer_height.validate()?;
         let waste_segments = validate_routing_totals(
             self.routing.as_ref(),
@@ -3844,6 +3880,9 @@ impl ManufacturingBundle {
             &self.provenance.occurrences,
         )?;
         self.verification.validate()?;
+        self.verification
+            .validate_time_model(&self.provenance.intent.printer.workflow)?;
+
         match (
             &self.provenance.intent.printer.workflow,
             &self.verification.routing,

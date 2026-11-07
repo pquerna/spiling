@@ -314,6 +314,8 @@ pub struct OccurrenceMaterialAssignment {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FixedDualJob {
+    #[serde(deserialize_with = "required_option")]
+    pub timing_model: Option<DeclaredJobTimeModel>,
     pub machine_id: String,
     pub configuration: FixedDualConfiguration,
     pub firmware_revision: String,
@@ -360,6 +362,9 @@ impl FixedDualJob {
             && self.functional_construction.is_none()
     }
     pub fn validate_declaration(&self) -> Result<(), ManufacturingError> {
+        if let Some(model) = &self.timing_model {
+            model.validate()?;
+        }
         label(&self.machine_id)?;
         if self.firmware_revision != FIXED_DUAL_FIRMWARE_REVISION {
             return Err(invalid(

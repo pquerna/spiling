@@ -1524,6 +1524,7 @@ impl TryFrom<rpc::VerificationReport> for VerificationReport {
     fn try_from(value: rpc::VerificationReport) -> Result<Self, String> {
         valid(
             Self {
+                job_time: value.job_time.map(TryInto::try_into).transpose()?,
                 layer_height: required(value.layer_height, "layer-height assessment")?
                     .try_into()?,
                 verified: value.verified,
@@ -1553,6 +1554,7 @@ impl TryFrom<VerificationReport> for rpc::VerificationReport {
     fn try_from(value: VerificationReport) -> Result<Self, String> {
         value.validate().map_err(|e| e.to_string())?;
         Ok(Self {
+            job_time: value.job_time.map(TryInto::try_into).transpose()?,
             layer_height: Some(value.layer_height.try_into()?),
             verified: value.verified,
             routing: value.routing.map(TryInto::try_into).transpose()?,
@@ -2171,6 +2173,7 @@ mod tests {
     #[test]
     fn reports_reject_unbounded_descriptions_and_nonfinite_measurements() {
         let report = VerificationReport {
+            job_time: None,
             layer_height: crate::manufacturing::LayerHeightAssessment {
                 policy: crate::manufacturing::LayerHeightPolicy::ProtectedMaximum,
                 requested_mm: 0.2,
@@ -2794,6 +2797,7 @@ impl TryFrom<rpc::FixedDualJob> for FixedDualJob {
         }
         let [tool0, tool1] = tools;
         let result = Self {
+            timing_model: value.timing_model.map(TryInto::try_into).transpose()?,
             machine_id: value.machine_id,
             configuration: rpc::FixedDualConfiguration::try_from(value.configuration)
                 .map_err(|e| e.to_string())?
@@ -2851,6 +2855,7 @@ impl TryFrom<FixedDualJob> for rpc::FixedDualJob {
     fn try_from(value: FixedDualJob) -> Result<Self, String> {
         value.validate_declaration().map_err(|e| e.to_string())?;
         Ok(Self {
+            timing_model: value.timing_model.map(TryInto::try_into).transpose()?,
             machine_id: value.machine_id,
             configuration: rpc::FixedDualConfiguration::try_from(value.configuration)? as i32,
             firmware_revision: value.firmware_revision,
@@ -3240,6 +3245,7 @@ mod fixed_dual_wire_tests {
             ],
         };
         FixedDualJob {
+            timing_model: None,
             machine_id: "software-wire-test".into(),
             configuration: FixedDualConfiguration::Marlin2125NativeFixedHotends,
             firmware_revision: FIXED_DUAL_FIRMWARE_REVISION.into(),
@@ -3511,6 +3517,7 @@ mod routed_report_wire_tests {
             }),
         };
         let report = VerificationReport {
+            job_time: None,
             layer_height: crate::manufacturing::LayerHeightAssessment {
                 policy: crate::manufacturing::LayerHeightPolicy::ProtectedMaximum,
                 requested_mm: 0.2,

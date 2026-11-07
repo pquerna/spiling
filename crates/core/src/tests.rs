@@ -609,6 +609,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
         ),
         // Storage tests exercise schema/integrity, not an independent replay service.
         verification: VerificationReport {
+            job_time: None,
             layer_height: spiling_contracts::manufacturing::LayerHeightAssessment {
                 policy: spiling_contracts::manufacturing::LayerHeightPolicy::ProtectedMaximum,
                 requested_mm: 0.2,

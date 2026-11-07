@@ -233,7 +233,16 @@ message OccurrenceMaterialAssignment {
     LayerCycleOccurrenceMaterial layer_cycle = 5;
   }
 }
+message DeclaredJobTimeModel {
+  string id = 1;
+  string revision = 2;
+  double linear_acceleration_mm_s2 = 3;
+  double filament_acceleration_mm_s2 = 4;
+  repeated double tool_activation_seconds = 5;
+  double command_overhead_seconds = 6;
+}
 message FixedDualJob {
+  DeclaredJobTimeModel timing_model = 20;
   string machine_id = 1;
   FixedDualConfiguration configuration = 2;
   string firmware_revision = 3;

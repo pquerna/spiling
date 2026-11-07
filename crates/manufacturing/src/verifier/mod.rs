@@ -11,6 +11,7 @@ use spiling_contracts::manufacturing::program_coordinates::{
 use spiling_contracts::manufacturing::*;
 
 mod construction;
+mod cost;
 mod expected;
 mod joins;
 mod replay;
@@ -475,6 +476,10 @@ pub(crate) fn verify_actual(
         _ => None,
     };
     let mut route = route_job.map(|job| routing::RouteState::new(job, plan, recipe));
+    let mut time = route_job
+        .map(|job| cost::JobTimeBuilder::new(job, recipe))
+        .transpose()?
+        .flatten();
 
     let initial_position = match &printer.workflow {
         JobWorkflow::CompleteMarlin { job } => Some(project_xyz6_point_mm(job.prime_end_mm)?),
@@ -533,6 +538,14 @@ pub(crate) fn verify_actual(
         let decoded = decode(line, route.is_some())
             .map_err(|reason| failed(format!("program line {}: {reason}", line_index + 1)))?;
         let Some(decoded) = decoded else { continue };
+        if let Some(time) = &mut time {
+            time.observe(
+                &decoded,
+                line,
+                &state,
+                route.as_ref().is_some_and(|r| r.pending()),
+            )?;
+        }
         if setup_index < setup_len {
             if decoded.command != setup[setup_index] {
                 return Err(failed(
@@ -1195,6 +1208,7 @@ pub(crate) fn verify_actual(
         return Err(failed("decoded deposited volume is nonfinite"));
     }
     Ok(VerificationReport {
+        job_time: time.map(cost::JobTimeBuilder::finish).transpose()?,
         layer_height: LayerHeightAssessment::from_plan(intent, &plan.layers)?,
         verified: true,
         coverage: vec![

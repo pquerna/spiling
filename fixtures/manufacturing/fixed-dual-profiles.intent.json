@@ -84,6 +84,7 @@
     "workflow": {
       "kind": "fixed_dual_marlin",
       "job": {
+        "timing_model": null,
         "machine_id": "software-fixed-dual-marlin-reference",
         "configuration": "marlin2125_native_fixed_hotends",
         "firmware_revision": "e5a167aaa0a671ea6d9b9d98dc0518c88d5caed7",

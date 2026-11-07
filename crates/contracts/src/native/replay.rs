@@ -324,6 +324,7 @@ mod tests {
             provenance: provenance.clone(),
             replay_display: Some(descriptor.clone()),
             report: VerificationReport {
+                job_time: None,
                 layer_height: crate::manufacturing::LayerHeightAssessment {
                     policy: crate::manufacturing::LayerHeightPolicy::ProtectedMaximum,
                     requested_mm: 0.2,

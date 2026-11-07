@@ -4526,6 +4526,32 @@ fn mixed_tool_coarse_intervals_retain_fine_landing_and_exact_bore() {
     .unwrap();
     let cancel = AtomicBool::new(false);
     let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    let time = bundle
+        .verification
+        .job_time
+        .as_ref()
+        .expect("captured time model");
+    assert!(time.model_deposition_seconds > 0.0 && time.auxiliary_deposition_seconds > 0.0);
+    assert!(time.travel_seconds > 0.0 && time.feeder_seconds > 0.0);
+    assert_eq!(time.model_moves, bundle.verification.deposition_segments);
+    for mutation in 0..5 {
+        let mut corrupt = bundle.clone();
+        let time = corrupt.verification.job_time.as_mut().unwrap();
+        match mutation {
+            0 => time.auxiliary_moves = 0,
+            1 => time.model.revision = "foreign".into(),
+            2 => time.travel_seconds = f64::NAN,
+            3 => time.command_count = 1,
+            _ => {
+                time.selections_per_tool[0] += time.selections_per_tool[1];
+                time.selections_per_tool[1] = 0;
+            }
+        }
+        assert!(
+            corrupt.validate().is_err(),
+            "incomplete/foreign/nonfinite time evidence must reject"
+        );
+    }
     let bands: Vec<_> = bundle
         .plan
         .sparse_bands

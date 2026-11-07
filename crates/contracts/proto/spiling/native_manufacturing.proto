@@ -317,7 +317,24 @@ message ManufacturingSummary {
 }
 // Sampled nominal-bead advisory counts, not an emitted-verification certificate.
 message SurfaceResolutionTotals { uint64 evaluated_witnesses = 1; uint64 resolved = 2; uint64 ambiguous = 3; uint64 below_nominal_resolution = 4; uint64 unavailable = 5; bool coverage_complete = 6; }
+message JobTimeLedger {
+  DeclaredJobTimeModel model = 1;
+  double model_deposition_seconds = 2;
+  double auxiliary_deposition_seconds = 3;
+  double travel_seconds = 4;
+  double feeder_seconds = 5;
+  double activation_seconds = 6;
+  double command_overhead_seconds = 7;
+  uint32 model_moves = 8;
+  uint32 auxiliary_moves = 9;
+  uint32 travel_moves = 10;
+  uint32 feeder_moves = 11;
+  repeated uint32 selections_per_tool = 12;
+  uint32 command_count = 13;
+  string nonmotion_context_hash = 14;
+}
 message VerificationReport {
+  JobTimeLedger job_time = 19;
   LayerHeightAssessment layer_height = 18;
   bool verified = 1;
   repeated string coverage = 2;

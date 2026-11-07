@@ -245,6 +245,20 @@ assert.equal(
   JSON.parse(await readFile(join(recoveredExport, "verification.json"), "utf8")).verified,
   true,
 );
+const verification = JSON.parse(await readFile(join(recoveredExport, "verification.json"), "utf8"));
+if (job.timing_model) {
+  const time = verification.job_time;
+  assert.ok(time, "fresh replay must consume the captured timing model");
+  assert.deepEqual(time.model, job.timing_model);
+  assert.equal(time.model_moves, verification.deposition_segments);
+  assert.equal(time.auxiliary_moves, verification.routing.tools.reduce((sum, t) => sum + t.waste_deposition_segments, 0));
+  assert.equal(time.travel_moves, verification.travel_segments + verification.lifecycle_motion_count);
+  assert.equal(time.feeder_moves, 2 * verification.retraction_count - 2);
+  assert.deepEqual(time.selections_per_tool, [verification.routing.selection_count / 2, verification.routing.selection_count / 2]);
+  for (const key of ["model_deposition_seconds", "auxiliary_deposition_seconds", "travel_seconds", "feeder_seconds", "activation_seconds", "command_overhead_seconds"])
+    assert.ok(Number.isFinite(time[key]) && time[key] > 0, `complete modeled work term ${key}`);
+  evidence.job_time = time;
+}
 const invalid = structuredClone(intent);
 invalid.printer.workflow.job.assignments.at(-1).tool_id = null;
 const invalidFile = join(output, "ambiguous.intent.json");

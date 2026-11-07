@@ -271,6 +271,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         OutputDialect::decl(&config),
         JobWorkflow::decl(&config),
         SingleExtruderJob::decl(&config),
+        DeclaredJobTimeModel::decl(&config),
+        JobTimeLedger::decl(&config),
         FixedDualJob::decl(&config),
         FunctionalInterfacePolicy::decl(&config),
         FunctionalMaterialConstruction::decl(&config),

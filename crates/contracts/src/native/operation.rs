@@ -111,6 +111,9 @@ pub(super) fn validate_verified(
     replay_display: Option<&ReplayDisplayDescriptor>,
 ) -> Result<(), String> {
     report.validate().map_err(|e| e.to_string())?;
+    report
+        .validate_time_model(&provenance.workflow)
+        .map_err(|e| e.to_string())?;
     provenance
         .validate_for_record(record)
         .map_err(|e| e.to_string())?;

@@ -1638,6 +1638,7 @@ fn bundle() -> ManufacturingBundle {
         plan,
         program: "; arbitrary bytes do not imply replay success\n".into(),
         verification: VerificationReport {
+            job_time: None,
             layer_height,
             verified: false,
             coverage: vec!["schema".into()],

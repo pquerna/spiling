@@ -9,6 +9,27 @@ use spiling_contracts::{
 pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
     let report = &review.capture.report;
     let summary = &review.capture.record.summary;
+    if let Some(time) = &report.job_time {
+        ui.collapsing("Job estimate", |ui| {
+            crate::ui::resolved_value(ui, "Modeled work", &format!("{:.1} min", time.modeled_seconds() / 60.0), "Declared model");
+            crate::ui::resolved_value(ui, "Startup", "Unknown", "Homing and heating");
+            ui.collapsing("Timing details", |ui| {
+                for (label, seconds) in [
+                    ("Model deposition", time.model_deposition_seconds),
+                    ("Auxiliary deposition", time.auxiliary_deposition_seconds),
+                    ("Travel", time.travel_seconds), ("Feeder", time.feeder_seconds),
+                    ("Tool activation", time.activation_seconds),
+                    ("Command overhead", time.command_overhead_seconds),
+                ] { crate::ui::resolved_value(ui, label, &format!("{seconds:.1} s"), ""); }
+                ui.label(format!("Model {} · {}", time.model.id, time.model.revision));
+                ui.weak("Rest at each command · declared acceleration and activation delays · physical timing unqualified");
+            });
+        });
+    } else if report.routing.is_some() {
+        ui.collapsing("Job estimate", |ui| {
+            ui.weak("No declared timing model");
+        });
+    }
     ui.collapsing("Actual accounting",|ui|{
         ui.label(format!("Object: {} strokes · {:.4} mm³ · {:.4} mm filament",report.deposition_segments,report.deposited_volume_mm3,report.filament_length_mm));
         ui.label(format!("Support: {} strokes · {:.4} mm³ · {:.4} mm filament",report.support_deposition_segments,report.support_deposited_volume_mm3,report.support_filament_length_mm));
