@@ -163,7 +163,7 @@ fn intersect_native_section(
 /// Native adapter dependency version captured in persisted provenance.
 pub const KERNEL_VERSION: &str = "1.0.1";
 /// Exact published native dependency revision; changed with the workspace pin.
-pub const KERNEL_REVISION: &str = "fdfc5a1e7c3a41994962ad6dc7961478be15eabf";
+pub const KERNEL_REVISION: &str = "a1ce2e536d0e405f2f2338c621fe136590202450";
 
 /// Immutable native certificate for one full-height rectangular vertical wall.
 /// Coordinates and phase direction are source-local millimetres; the outward

@@ -529,10 +529,32 @@ pub fn make_kernel_context() -> solidcore::Kernel {
 }
 
 pub(crate) fn surface_owned_bytes(surface: &solidcore::surface::surface::Surface) -> usize {
-    use solidcore::surface::surface::p2::SurfaceKind;
+    use solidcore::surface::{
+        ball_patch::BallPatch, procedural_blend::ProceduralBlend, surface::p2::SurfaceKind,
+    };
     let base = std::mem::size_of::<solidcore::surface::surface::Surface>();
     let kind_bytes = match surface.kind() {
         SurfaceKind::BSpline(bspline) => bspline_surface_bytes(bspline),
+        SurfaceKind::ProceduralBlend(blend) => {
+            let mut bytes = std::mem::size_of::<ProceduralBlend>()
+                + bspline_surface_bytes(blend.net())
+                + bspline_curve_bytes(blend.leader());
+            for index in 0..2 {
+                if let Some(support) = blend.support(index) {
+                    bytes = bytes.saturating_add(surface_owned_bytes(support));
+                }
+                if let Some(seed) = blend.seed(index) {
+                    bytes = bytes.saturating_add(bspline_curve_bytes(seed));
+                }
+            }
+            if let Some(law) = blend.law() {
+                bytes = bytes.saturating_add(bspline_curve_bytes(law));
+            }
+            bytes
+        }
+        SurfaceKind::BallPatch(patch) => {
+            std::mem::size_of::<BallPatch>() + bspline_surface_bytes(patch.net())
+        }
         SurfaceKind::Cone(_) => std::mem::size_of::<solidcore::surface::cone::Cone>(),
         SurfaceKind::Plane(_) => std::mem::size_of::<solidcore::surface::plane::Plane>(),
         SurfaceKind::Sphere(_) => std::mem::size_of::<solidcore::surface::sphere::Sphere>(),
@@ -612,6 +634,84 @@ impl std::fmt::Debug for Definition {
             .field("face_count", &self.faces.len())
             .field("bounds_mm", &self.bounds)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::{bspline_curve_bytes, bspline_surface_bytes, surface_owned_bytes};
+    use solidcore::{
+        math::Point3,
+        nurbs::{b_spline_curve::BSplineCurve, b_spline_surface::BSplineSurface},
+        surface::{
+            ball_patch::BallPatch,
+            procedural_blend::{BlendDefinitionInput, ProceduralBlend},
+            surface::Surface,
+        },
+    };
+
+    #[test]
+    fn upstream_procedural_surface_storage_counts_owned_nets_and_definitions() {
+        let kernel = super::make_kernel_context();
+        let net = BSplineSurface::create_bilinear_surface(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+        )
+        .unwrap();
+        let support = Surface::from(net.clone());
+        let curve = BSplineCurve::create_line_segment(
+            3,
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let mut input = BlendDefinitionInput {
+            supports: [&support, &support],
+            sides: [1.0, -1.0],
+            offsets: [2.0, 2.0],
+            law: None,
+            order: 1,
+            thumbweight: 0.0,
+            leader: &curve,
+            seeds: [&curve, &curve],
+            bound: 1.0e-6,
+            chamfer: None,
+        };
+        let blend = ProceduralBlend::create(&kernel, &net, &input, |_, _| true).unwrap();
+        let surface = Surface::from(blend);
+        let expected = std::mem::size_of::<Surface>()
+            + std::mem::size_of::<ProceduralBlend>()
+            + bspline_surface_bytes(&net)
+            + 2 * surface_owned_bytes(&support)
+            + 3 * bspline_curve_bytes(&curve);
+        assert_eq!(surface_owned_bytes(&surface), expected);
+        input.law = Some(&curve);
+        let with_law = ProceduralBlend::create(&kernel, &net, &input, |_, _| true).unwrap();
+        assert_eq!(
+            surface_owned_bytes(&Surface::from(with_law)),
+            expected + bspline_curve_bytes(&curve)
+        );
+    }
+
+    #[test]
+    fn upstream_ball_patch_storage_counts_its_owned_net() {
+        use solidcore::{geom::axis2_placement::Axis2Placement, surface::sphere::Sphere};
+        let kernel = super::make_kernel_context();
+        let centre = Point3::ZERO;
+        let radius = 2.0;
+        let mut sphere =
+            Sphere::create_canonical(&kernel, &Axis2Placement::IDENTITY, radius).unwrap();
+        sphere.make_nurb(&kernel).unwrap();
+        let net = sphere.base().base();
+        let patch = BallPatch::create(net, centre, radius).unwrap();
+        assert_eq!(
+            surface_owned_bytes(&Surface::from(patch)),
+            std::mem::size_of::<Surface>()
+                + std::mem::size_of::<BallPatch>()
+                + bspline_surface_bytes(net)
+        );
     }
 }
 
