@@ -648,6 +648,7 @@ fn arrange(ui: &mut Ui) {
                 "Long named bracket — 固定部品 · 2".into(),
             ),
         ],
+        true,
     );
     ui.data_mut(|d| d.insert_temp(id, request));
 }

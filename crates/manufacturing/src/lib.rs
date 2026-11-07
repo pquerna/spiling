@@ -25,9 +25,9 @@ use std::sync::{
 };
 
 /// Binds native material authority and physical per-occurrence material events.
-pub const PLANNER_VERSION: &str = "67";
+pub const PLANNER_VERSION: &str = "68";
 pub const EMITTER_VERSION: &str = "14";
-pub const VERIFIER_VERSION: &str = "28";
+pub const VERIFIER_VERSION: &str = "29";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,

@@ -78,6 +78,8 @@ Automatic mixed-width controls compare the qualified primary reference, synchron
 
 The scoped interior-policy reassessment uses a Core-stamped pin context and a typed detached edit through existing alternative Operations. The actual-child consumer checks a newly deliberate pin stays quiet, changed-goal eligibility, cancellation without Current mutation, exact comparison/bundle binding, stale refusal, scoped adoption, equivalent freshly emitted bytes, source-deleted saved return and export. Native Check default/Review/Use defaults and semantic-context Dismiss use the existing Infill editor; comparison estimates retain unknown startup. No general recommendation catalog, automatic idle search, arbitrary regional routing or physical timing claim is established.
 
+Whole-plate mixed-tool admission preserves per-occurrence classified ownership through widths, coarse intervals and landing replay, with shared definitions/profiles and one bounded whole-job candidate set. The source-diverse `smoke-mixed-plate.mjs` cohort uses the unchanged protected bore plus shared rectangular source instances. JSON/protobuf/domain cardinality gates agree; foreign regional ownership refuses. Core copy trials/commit retain explicit translated reservations, scoped intent and undo/redo atomically; ordinary native Make copies consumes that trial intent and separately qualifies final construction. Native Material edits the selected part while showing shared loaded tools. These are software envelope and resource claims, not physical printing, maximal packing or incremental-slicing performance qualification.
+
 The [engine G-code comparison](gcode-parity.md) independently audits a bounded
 analytic cube matrix against a versioned mature slicer. It retains explicit
 refusals and unresolved process/material differences; reference agreement is
@@ -508,8 +510,8 @@ Source-bound planar surface color is exercised through the real CLI on the commi
 
 Retained optical studies apply through typed Core/engine/client/CLI transactions with complete accepted report/selection and explicit two-material evidence/declaration bindings. Queued cancellation and stale revisions preserve the committed project; ACK commits one revision without changing SceneRevision or publishing scene artifacts. Both native source workflows exercise application, physical depth/history edits, changed-pose reassessment and source/palette/study-deleted fresh verification/export. Inspection distinguishes the small requested patch from complete realized side exposure and reuses the existing model with captured evidence; it does not reuse the requested prediction as a printed outcome. Unknown evidence/conditions remain unassessed and backing optics remain unmodelled. The native Review panel supports source-hidden actual replay and catalog metadata tint by decoded tool, plus requested/realized inspection and fresh four-file export. The native window can consume a CLI-produced recovered project; local hardware evidence does not qualify other GPUs/platforms or physical color.
 
-Current identities are project10/manufacturing11/process3/surface3, source21/planner67,
-emitter14/verifier28 and SPLR6; executable constants and exact native pins remain authoritative.
+Current identities are project10/manufacturing11/process3/surface3, source21/planner68,
+emitter14/verifier29 and SPLR6; executable constants and exact native pins remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
 Raw inspection, an older producer's successful job or historical hardware

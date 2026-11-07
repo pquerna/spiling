@@ -74,7 +74,8 @@ pub(super) fn validate_landing_alignment(
     let landing_owner = Some(DepositionOwner::Regional {
         region_index: landing_index as u16,
     });
-    let width = job.assignments[0]
+    let width = job
+        .assignment_for_region(region)?
         .active_interior()
         .map_or(intent.recipe.bead_width_mm, |binding| binding.bead_width_mm);
     let mut coarse_rows = BTreeSet::new();

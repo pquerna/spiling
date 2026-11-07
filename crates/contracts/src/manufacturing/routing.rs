@@ -287,6 +287,9 @@ impl OccurrenceMaterial {
     }
 }
 
+/// Explicit software admission ceiling; existing segment/byte/route gates remain independent.
+pub const MAX_FIXED_DUAL_OCCURRENCES: usize = 32;
+
 /// Eligible interior routing is separate from product identity and external skins.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -362,9 +365,18 @@ fn temperature(value: f64, maximum: f64) -> bool {
 }
 
 impl FixedDualJob {
+    pub fn uniform_without_construction(&self) -> bool {
+        self.functional_construction.is_none()
+            && self.surface_constructions.is_empty()
+            && self
+                .assignments
+                .iter()
+                .all(|a| matches!(a.material, OccurrenceMaterial::Uniform { .. }))
+    }
     pub fn has_bound_interior(&self) -> bool {
-        self.assignments.len() == 1
-            && self.assignments[0].interior.is_some()
+        !self.assignments.is_empty()
+            && self.assignments.len() <= MAX_FIXED_DUAL_OCCURRENCES
+            && self.assignments.iter().any(|a| a.interior.is_some())
             && self.surface_constructions.is_empty()
             && self.functional_construction.is_none()
     }
@@ -465,15 +477,30 @@ impl FixedDualJob {
                 ));
             }
         }
-        if self.assignments.is_empty() || self.assignments.len() > 2 {
-            return Err(invalid(
-                "fixed-dual job requires one or two assigned occurrences",
+        if self.assignments.is_empty() || self.assignments.len() > MAX_FIXED_DUAL_OCCURRENCES {
+            return Err(resource(
+                "fixed-dual job requires 1–32 explicitly assigned occurrences",
             ));
         }
-        if self.assignments.len() == 2
-            && self.assignments[0].occurrence_id == self.assignments[1].occurrence_id
+        if self.assignments.len() > 2
+            && (!self.surface_constructions.is_empty()
+                || self.functional_construction.is_some()
+                || self
+                    .assignments
+                    .iter()
+                    .any(|a| !matches!(a.material, OccurrenceMaterial::Uniform { .. })))
         {
-            return Err(invalid("each routed occurrence must have one assignment"));
+            return Err(invalid(
+                "larger fixed-dual plates require uniform separated occurrences without material constructions",
+            ));
+        }
+        for (index, assignment) in self.assignments.iter().enumerate() {
+            if self.assignments[..index]
+                .iter()
+                .any(|a| a.occurrence_id == assignment.occurrence_id)
+            {
+                return Err(invalid("each routed occurrence must have one assignment"));
+            }
         }
         for assignment in &self.assignments {
             assignment.material.validate_for_z_bounds([
@@ -497,12 +524,10 @@ impl FixedDualJob {
         }
         for assignment in &self.assignments {
             if let Some(interior) = &assignment.interior {
-                if self.assignments.len() != 1
-                    || !self.surface_constructions.is_empty()
-                    || self.functional_construction.is_some()
+                if !self.surface_constructions.is_empty() || self.functional_construction.is_some()
                 {
                     return Err(invalid(
-                        "mixed-width interior currently requires one uniform native source without material construction",
+                        "mixed-width interior requires uniform native sources without material construction",
                     ));
                 }
                 let OccurrenceMaterial::Uniform { material_id } = &assignment.material else {
@@ -555,11 +580,7 @@ impl FixedDualJob {
         if let Some(construction) = &self.functional_construction {
             construction.validate(self)?;
         }
-        let uniform_without_construction = self.functional_construction.is_none()
-            && self.surface_constructions.is_empty()
-            && self.assignments.iter().all(|assignment| {
-                matches!(&assignment.material, OccurrenceMaterial::Uniform { .. })
-            });
+        let uniform_without_construction = self.uniform_without_construction();
         if self.tools[0].material.polymer_family != self.tools[1].material.polymer_family
             && !uniform_without_construction
             && !matches!(
@@ -574,16 +595,42 @@ impl FixedDualJob {
                 "the reference route requires a declared common polymer family unless all occurrences are uniform without construction or a complete functional construction explicitly requests mechanical capture",
             ));
         }
-        if self.assignments.len() == 2 {
-            let a = &self.assignments[0].work_envelope_mm;
-            let b = &self.assignments[1].work_envelope_mm;
-            if !(0..2).any(|axis| a.max[axis] < b.min[axis] || b.max[axis] < a.min[axis]) {
-                return Err(invalid(
-                    "routed occurrence work envelopes must be strictly separated in XY",
-                ));
+        for (index, assignment) in self.assignments.iter().enumerate() {
+            let a = &assignment.work_envelope_mm;
+            for other in &self.assignments[..index] {
+                let b = &other.work_envelope_mm;
+                if !(0..2).any(|axis| a.max[axis] < b.min[axis] || b.max[axis] < a.min[axis]) {
+                    return Err(invalid(
+                        "routed occurrence work envelopes must be strictly separated in XY",
+                    ));
+                }
             }
         }
         Ok(())
+    }
+
+    /// The classifier preserves source ownership before width-dependent generation.
+    pub fn assignment_for_region(
+        &self,
+        region: &ProcessRegionCoverage,
+    ) -> Result<&OccurrenceMaterialAssignment, ManufacturingError> {
+        let first = region
+            .contributions
+            .first()
+            .ok_or_else(|| invalid("routed interior has no occurrence provenance"))?;
+        if region
+            .contributions
+            .iter()
+            .any(|c| c.occurrence_id != first.occurrence_id)
+        {
+            return Err(invalid(
+                "routed interior combines different occurrence owners",
+            ));
+        }
+        self.assignments
+            .iter()
+            .find(|a| a.occurrence_id == first.occurrence_id)
+            .ok_or_else(|| invalid("routed interior has no captured occurrence assignment"))
     }
 
     pub fn tool_for_material(&self, material_id: &str) -> Result<u8, ManufacturingError> {
@@ -875,7 +922,7 @@ impl FixedDualVerification {
 fn assignments<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Vec<OccurrenceMaterialAssignment>, D::Error> {
-    bounded_vec::<D, _, 2>(d)
+    bounded_vec::<D, _, MAX_FIXED_DUAL_OCCURRENCES>(d)
 }
 
 #[cfg(test)]
@@ -1578,5 +1625,50 @@ mod mixed_width_tests {
             }
             assert!(bad.validate().is_err(), "case{case}");
         }
+    }
+}
+
+#[cfg(test)]
+mod plate_count_tests {
+    use super::*;
+    #[test]
+    fn plate_count_bound_is_shared_by_json_proto_and_domain_admission() {
+        let mut intent = decode_intent(include_bytes!(
+            "../../../../fixtures/manufacturing/mixed-width-combined.intent.json"
+        ))
+        .unwrap();
+        let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+            unreachable!()
+        };
+        let template = job.assignments[0].clone();
+        job.assignments = (0..32)
+            .map(|i| {
+                let x = 20.0 + (i % 4) as f64 * 50.0;
+                let y = 20.0 + (i / 4) as f64 * 25.0;
+                OccurrenceMaterialAssignment {
+                    occurrence_id: OccurrenceId::new(i + 1).unwrap(),
+                    work_envelope_mm: AabbMm::new(
+                        [x - 2.0, y - 2.0, 0.0],
+                        [x + 22.0, y + 12.0, 8.01],
+                    )
+                    .unwrap(),
+                    ..template.clone()
+                }
+            })
+            .collect();
+        job.validate_declaration().unwrap();
+        let wire: crate::rpc::FixedDualJob = job.clone().try_into().unwrap();
+        assert_eq!(FixedDualJob::try_from(wire.clone()).unwrap(), *job);
+        let mut over = wire;
+        over.assignments.push(over.assignments[0].clone());
+        assert!(FixedDualJob::try_from(over).is_err());
+        let bytes = serde_json::to_vec(&intent).unwrap();
+        assert_eq!(decode_intent(&bytes).unwrap(), intent);
+        let mut json = serde_json::to_value(&intent).unwrap();
+        let rows = json["printer"]["workflow"]["job"]["assignments"]
+            .as_array_mut()
+            .unwrap();
+        rows.push(rows[0].clone());
+        assert!(decode_intent(&serde_json::to_vec(&json).unwrap()).is_err());
     }
 }

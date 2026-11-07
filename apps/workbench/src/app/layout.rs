@@ -199,7 +199,7 @@ impl Workbench {
                     LayoutLimit::SearchBudget => "Search limit reached",
                     LayoutLimit::RequestedQuantity => "Quantity limit reached",
                     LayoutLimit::PlateBudget => "Project plate limit reached",
-                    LayoutLimit::OccurrenceBudget => "Project part limit reached",
+                    LayoutLimit::OccurrenceBudget => "Part limit reached",
                 });
             }
             ui.weak(format!(
@@ -236,7 +236,20 @@ impl Workbench {
             .id_salt("arrange-body")
             .show(ui, |ui| {
                 ui.add_enabled_ui(!self.state.active_operation, |ui| {
-                    ui::layout_fields(ui, &mut self.layout.request, &parts)
+                    let allow_additional_plates = !matches!(
+                        self.state
+                            .manufacturing
+                            .intent
+                            .as_ref()
+                            .map(|i| &i.printer.workflow),
+                        Some(spiling_contracts::manufacturing::JobWorkflow::FixedDualMarlin { .. })
+                    );
+                    ui::layout_fields(
+                        ui,
+                        &mut self.layout.request,
+                        &parts,
+                        allow_additional_plates,
+                    )
                 });
                 if let Some(p) = &proposal {
                     let bed = self.state.manufacturing.intent.as_ref().map(|i| {

@@ -2878,7 +2878,7 @@ impl TryFrom<rpc::FixedDualJob> for FixedDualJob {
             .try_into()
             .map_err(|_| "fixed-dual job requires exactly two tools")?;
         if value.assignments.is_empty()
-            || value.assignments.len() > 2
+            || value.assignments.len() > MAX_FIXED_DUAL_OCCURRENCES
             || value.surface_constructions.len() > 16
         {
             return Err("fixed-dual assignment/construction limits exceeded".into());

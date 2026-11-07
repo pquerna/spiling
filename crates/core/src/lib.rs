@@ -7,6 +7,7 @@ mod hardware;
 mod print_layouts;
 pub use print_layouts::PrintLayoutSnapshot;
 mod placement;
+mod routed_placement;
 pub use placement::PlacementDraft;
 mod interior_policy;
 mod manufacturing_options;

@@ -4741,3 +4741,143 @@ fn automatic_interior_retains_primary_for_slow_bulk_and_unknown_timing() {
         visit_fresh_replayed_object_segments(&bundle, |_, _| {});
     }
 }
+
+fn mixed_plate(count: usize) -> (NativeScene, ManufacturingIntent) {
+    let poses: Vec<_> = (0..count)
+        .map(|i| RigidPoseMm {
+            translation_mm: [
+                20.0 + (i % 4) as f64 * 50.0,
+                20.0 + (i / 4) as f64 * 25.0,
+                0.0,
+            ],
+            ..RigidPoseMm::IDENTITY
+        })
+        .collect();
+    let mut scene = NativeScene::new(
+        include_bytes!("../../../../fixtures/geometry/through-hole.step"),
+        &poses[..1],
+    );
+    if count > 1 {
+        scene.add(
+            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+            &poses[1..],
+        );
+    }
+    let mut intent = decode_intent(include_bytes!(
+        "../../../../fixtures/manufacturing/mixed-width-combined.intent.json"
+    ))
+    .unwrap();
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    for tool in &mut job.tools {
+        for point in &mut tool.waste_line_xy_mm {
+            point[1] = 215.0;
+        }
+    }
+    let template = job.assignments[0].clone();
+    job.assignments = poses
+        .iter()
+        .enumerate()
+        .map(|(i, pose)| {
+            let [x, y, _] = pose.translation_mm;
+            OccurrenceMaterialAssignment {
+                occurrence_id: OccurrenceId::new(i as u32 + 1).unwrap(),
+                work_envelope_mm: AabbMm::new(
+                    [x - 2.0, y - 2.0, 0.0],
+                    [x + 22.0, y + if i == 0 { 22.0 } else { 12.0 }, 8.01],
+                )
+                .unwrap(),
+                ..template.clone()
+            }
+        })
+        .collect();
+    (scene, intent)
+}
+
+#[test]
+fn two_part_mixed_plate_owns_each_width_and_qualifies_one_complete_job() {
+    let (scene, intent) = mixed_plate(2);
+    let cancel = AtomicBool::new(false);
+    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    let selection = bundle.plan.interior_selection.as_ref().unwrap();
+    assert_eq!(
+        selection.reason,
+        InteriorSelectionReason::ImprovedModeledWork
+    );
+    let resolved = bundle.plan.execution_intent(&intent).unwrap();
+    let JobWorkflow::FixedDualMarlin { job } = &resolved.printer.workflow else {
+        unreachable!()
+    };
+    let mut interior = [0usize; 2];
+    for layer in &bundle.plan.layers {
+        for path in &layer.paths {
+            let owner = job.assignment_for_path(path).unwrap();
+            if matches!(path.owner, Some(DepositionOwner::Regional { .. })) {
+                assert_eq!(job.tool_for_path(path).unwrap(), 1);
+                assert_eq!(path.width.constant_width_mm(), Some(0.6));
+                interior[owner] += path.points_mm.len() - 1;
+            } else {
+                assert_eq!(job.tool_for_path(path).unwrap(), 0);
+            }
+        }
+    }
+    assert!(interior.iter().all(|n| *n > 0));
+    assert_eq!(scene.definitions.len(), 2);
+    visit_fresh_replayed_object_segments(&bundle, |_, _| {});
+    let mut corrupt = bundle.plan.clone();
+    let region = corrupt
+        .layers
+        .iter_mut()
+        .find_map(|layer| layer.region_coverage.process_regions.first_mut())
+        .unwrap();
+    region.contributions[0].occurrence_id = if region.contributions[0].occurrence_id.get() == 1 {
+        OccurrenceId::new(2).unwrap()
+    } else {
+        OccurrenceId::new(1).unwrap()
+    };
+    assert!(
+        crate::verifier::verify(&bundle.program, &corrupt, &intent, &cancel).is_err(),
+        "foreign regional ownership must not borrow another part's actual beads"
+    );
+    let mut one_pin = intent.clone();
+    if let JobWorkflow::FixedDualMarlin { job } = &mut one_pin.printer.workflow {
+        job.assignments[1]
+            .interior
+            .as_mut()
+            .unwrap()
+            .policy_override = Some(InteriorToolOverride {
+            enabled: true,
+            value: InteriorToolPolicy::PrimaryOnly,
+        });
+    }
+    let pinned = compile(scene.input(&one_pin), &cancel).unwrap();
+    let resolved = pinned.plan.execution_intent(&one_pin).unwrap();
+    let JobWorkflow::FixedDualMarlin { job } = &resolved.printer.workflow else {
+        unreachable!()
+    };
+    let mut seen = [false; 2];
+    for path in pinned
+        .plan
+        .layers
+        .iter()
+        .flat_map(|l| &l.paths)
+        .filter(|p| matches!(p.owner, Some(DepositionOwner::Regional { .. })))
+    {
+        let owner = job.assignment_for_path(path).unwrap();
+        seen[owner] = true;
+        assert_eq!(
+            job.tool_for_path(path).unwrap(),
+            if owner == 1 { 0 } else { 1 }
+        );
+        assert_eq!(
+            path.width.constant_width_mm(),
+            Some(if owner == 1 {
+                one_pin.recipe.bead_width_mm
+            } else {
+                0.6
+            })
+        );
+    }
+    assert!(seen.into_iter().all(|v| v));
+}

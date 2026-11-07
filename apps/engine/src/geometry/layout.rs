@@ -34,6 +34,12 @@ impl Rect {
             max: [b.max[0] + padding, b.max[1] + padding],
         }
     }
+    fn from_axis_bounds(b: AabbMm, padding: [f64; 2]) -> Self {
+        Self {
+            min: std::array::from_fn(|a| b.min[a] - padding[a]),
+            max: std::array::from_fn(|a| b.max[a] + padding[a]),
+        }
+    }
     fn overlaps(self, b: Self) -> bool {
         (0..2).all(|a| self.min[a] < b.max[a] && b.min[a] < self.max[a])
     }
@@ -165,7 +171,7 @@ fn prepare_single(
     progress("layout_preparing_native_footprints".into());
     let bounds =
         spiling_manufacturing::planner::layout_footprints(&input(&r.capture, definitions), cancel)?;
-    let bounds: BTreeMap<_, _> = bounds.into_iter().collect();
+    let mut bounds: BTreeMap<_, _> = bounds.into_iter().collect();
     let intent = &r.capture.intent;
     let mut bed_bounds = intent.printer.build_envelope;
     if let Some(h) = &intent.hardware {
@@ -186,7 +192,53 @@ fn prepare_single(
             } => xy_clearance_mm,
         };
     let padding = construction_margin + r.request.spacing_mm * 0.5;
+    let mut axis_padding = [padding; 2];
     let mut obstacles = vec![];
+    if let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow {
+        if r.request.use_additional_plates {
+            return Err(fail("Fixed-dual copies currently stay on the active plate"));
+        }
+        // Pairwise packing reserves half the maximum captured relative reach
+        // on each part. Their separation therefore covers the complete reach.
+        // These rectangles only propose a layout; actual route replay remains mandatory.
+        for (axis, margin) in axis_padding.iter_mut().enumerate() {
+            let mut reach = 0.0_f64;
+            for tool in &job.tools {
+                reach = reach
+                    .max((job.carriage_body_bounds_mm.min[axis] - tool.offset_xy_mm[axis]).abs())
+                    .max((job.carriage_body_bounds_mm.max[axis] - tool.offset_xy_mm[axis]).abs());
+                for other in &job.tools {
+                    reach = reach.max(
+                        (other.offset_xy_mm[axis] - tool.offset_xy_mm[axis]).abs()
+                            + job.inactive_nozzle_radius_mm,
+                    );
+                }
+            }
+            *margin += reach.next_up() * 0.5;
+        }
+        for assignment in &job.assignments {
+            if let Some(b) = bounds.get_mut(&assignment.occurrence_id) {
+                for axis in 0..2 {
+                    b.min[axis] = b.min[axis].min(assignment.work_envelope_mm.min[axis]);
+                    b.max[axis] = b.max[axis].max(assignment.work_envelope_mm.max[axis]);
+                }
+            }
+        }
+        for tool in &job.tools {
+            obstacles.push(Rect {
+                min: std::array::from_fn(|a| {
+                    tool.waste_line_xy_mm[0][a].min(tool.waste_line_xy_mm[1][a])
+                        - tool.waste_bead_width_mm * 0.5
+                        - axis_padding[a]
+                }),
+                max: std::array::from_fn(|a| {
+                    tool.waste_line_xy_mm[0][a].max(tool.waste_line_xy_mm[1][a])
+                        + tool.waste_bead_width_mm * 0.5
+                        + axis_padding[a]
+                }),
+            });
+        }
+    }
     if let Some(h) = &intent.hardware {
         obstacles.extend(
             h.selected_face()
@@ -236,7 +288,7 @@ fn prepare_single(
     let mut occupied = obstacles.clone();
     for id in &r.request.pinned {
         let b = bounds[id];
-        let rect = Rect::from_bounds(b, padding);
+        let rect = Rect::from_axis_bounds(b, axis_padding);
         if !rect.inside(bed) || occupied.iter().any(|o| rect.overlaps(*o)) {
             return Err(fail(
                 "A pinned part conflicts with the build area, another pin or a reserved print structure",
@@ -273,14 +325,23 @@ fn prepare_single(
             (r.request.quantity - 1) as usize,
         ));
     }
+    let route_count_limit =
+        if matches!(intent.printer.workflow, JobWorkflow::FixedDualMarlin { .. }) {
+            MAX_FIXED_DUAL_OCCURRENCES
+        } else {
+            MAX_OCCURRENCES as usize
+        };
     let mut work = 0;
     for (index, (id, copy)) in sources.into_iter().enumerate() {
+        if footprints.len() >= route_count_limit {
+            break;
+        }
         progress(format!(
             "layout_placing_{}_of_{desired}",
             index + r.request.pinned.len() + 1
         ));
         let b = bounds[&id];
-        let shape = Rect::from_bounds(b, padding);
+        let shape = Rect::from_axis_bounds(b, axis_padding);
         let Some(placed) = candidate(
             shape,
             bed,
@@ -325,7 +386,7 @@ fn prepare_single(
                 max: [f64::NEG_INFINITY; 2],
             },
             |mut g, b| {
-                let b = Rect::from_bounds(*b, padding);
+                let b = Rect::from_axis_bounds(*b, axis_padding);
                 for a in 0..2 {
                     g.min[a] = g.min[a].min(b.min[a]);
                     g.max[a] = g.max[a].max(b.max[a]);
@@ -337,7 +398,7 @@ fn prepare_single(
             (bed.min[a] + bed.max[a] - group.min[a] - group.max[a]) * 0.5
         });
         if footprints.iter().all(|b| {
-            let p = Rect::from_bounds(*b, padding).translated(shift);
+            let p = Rect::from_axis_bounds(*b, axis_padding).translated(shift);
             p.inside(bed) && !obstacles.iter().any(|o| p.overlaps(*o))
         }) {
             for p in &mut placements {
@@ -355,6 +416,8 @@ fn prepare_single(
     }
     let mut limited_by = if footprints.len() as u32 == desired {
         LayoutLimit::RequestedQuantity
+    } else if footprints.len() >= route_count_limit {
+        LayoutLimit::OccurrenceBudget
     } else if work >= budget {
         LayoutLimit::SearchBudget
     } else {
@@ -370,6 +433,10 @@ fn prepare_single(
         let attempt = (|| -> Result<_, JobError> {
             let trial = r.draft.preview(&placements)?;
             r.capture.occurrences = trial.occurrences.values().cloned().collect();
+            r.capture.intent = trial
+                .manufacturing_intent
+                .clone()
+                .ok_or_else(|| fail("Layout trial lost captured manufacturing intent"))?;
             let (surface, process) = trial.scoped_documents();
             r.capture
                 .surface_images

@@ -1325,6 +1325,7 @@ async fn execute(
     let mut stock_saved = None;
     let mut stock_evidence = Vec::new();
     for operation in workflow.operations {
+        let operation_started = std::time::Instant::now();
         let current_layout = info(client).await?.layout_id;
         let base_revision = geometry::scene(client, &session).await?.revision;
         let label;
@@ -2940,7 +2941,7 @@ async fn execute(
         }
         let project = info(client).await?;
         history.push(serde_json::json!({
-            "operation": label, "project": project, "manufacturing": manufacturing,
+            "operation": label, "elapsed_us": operation_started.elapsed().as_micros(), "project": project, "manufacturing": manufacturing,
             "storage_maintenance": storage_maintenance,
             "alternative": if label == "evaluate_alternative" { alternative_evaluation.as_ref().map(|evaluation| serde_json::json!({"context_hash":evaluation.context_hash,"captured_revision":evaluation.captured_revision,"record":evaluation.record,"report":evaluation.report,"changed_inputs":evaluation.changed_inputs,"changed_inputs_complete":evaluation.changed_inputs_complete,"duration_seconds":null})) } else { None },
             "hardware_association": if label == "save" { hardware_association.as_ref() } else { None },

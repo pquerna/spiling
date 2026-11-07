@@ -1208,7 +1208,7 @@ fn admit_schedule<'model>(
                     )?
                     .with_process(
                         &sections[current].process_domains,
-                        recipe,
+                        input.intent,
                         classification::fixed_owned_budget(
                             skin_retained_points(
                                 retained_points,
@@ -1810,7 +1810,7 @@ fn admit_schedule<'model>(
                     )?
                     .with_process(
                         &sections[current].process_domains,
-                        recipe,
+                        input.intent,
                         classification::fixed_owned_budget(
                             skin_retained_points(
                                 live_retained_points,

@@ -2798,6 +2798,23 @@ impl NormalizedPrintPlan {
                         ));
                     }
                     let tool = job.tool_for_path(path)?;
+                    if job.has_bound_interior()
+                        && let Some(DepositionOwner::Regional { region_index }) = path.owner
+                    {
+                        let region = layer
+                            .region_coverage
+                            .process_regions
+                            .get(usize::from(region_index))
+                            .ok_or_else(|| invalid("routed interior region is absent"))?;
+                        let owner = job.assignment_for_region(region)?;
+                        if job.assignments[job.assignment_for_path(path)?].occurrence_id
+                            != owner.occurrence_id
+                        {
+                            return Err(invalid(
+                                "routed complete bead disagrees with its interior occurrence provenance",
+                            ));
+                        }
+                    }
                     routed_segments = routed_segments
                         .checked_add(path.points_mm.len() - 1)
                         .ok_or_else(|| resource("fixed-dual model and waste count overflow"))?;

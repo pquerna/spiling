@@ -208,13 +208,11 @@ pub fn layout_footprints(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<Vec<(OccurrenceId, AabbMm)>, ManufacturingError> {
-    if matches!(
-        input.intent.printer.workflow,
-        JobWorkflow::FixedDualMarlin { .. }
-    ) {
+    if matches!(&input.intent.printer.workflow, JobWorkflow::FixedDualMarlin { job } if !job.uniform_without_construction())
+    {
         return Err(error(
             ManufacturingErrorCode::UnsupportedGeometry,
-            "Automatic arrangement is not yet qualified for fixed-dual reservations",
+            "Fixed-dual arrangement currently requires uniform parts without material construction",
         ));
     }
     let mut work = spiling_geometry::GeometryWorkBudget::compile();

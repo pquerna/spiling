@@ -245,7 +245,7 @@ pub(super) fn combine(
         )?
         .with_process(
             &section.process_domains,
-            recipe,
+            intent,
             classification::fixed_owned_budget(live_geometry, live_owned_bytes),
             neighborhoods.work_mut(),
             cancel,
@@ -317,7 +317,7 @@ pub(super) fn combine(
             let area = (width - height) * height + std::f64::consts::PI * (height * 0.5).powi(2);
             let tool = match &intent.printer.workflow {
                 JobWorkflow::FixedDualMarlin { job } => {
-                    let assignment = &job.assignments[0];
+                    let assignment = job.assignment_for_region(&interior.coverage)?;
                     let material = assignment.material.material_id_for_interval([lower_z, z])?;
                     Some(
                         job.resolve_tool(

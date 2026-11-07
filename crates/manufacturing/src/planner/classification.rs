@@ -352,7 +352,7 @@ impl ClassifiedRegions {
     pub(super) fn with_process(
         mut self,
         domains: &[super::ProcessDomain],
-        recipe: &PlanarPrintRecipe,
+        intent: &ManufacturingIntent,
         mut admit: impl FnMut(usize, usize) -> Result<(), ManufacturingError>,
         work: &mut usize,
         cancel: &AtomicBool,
@@ -360,8 +360,11 @@ impl ClassifiedRegions {
         if domains.is_empty() || self.interiors.is_empty() {
             return Ok(self);
         }
+        let recipe = &intent.recipe;
         let spatial = domains.iter().any(|domain| domain.zone.is_some());
-        if !spatial
+        let separate_sources = spatial
+            || matches!(&intent.printer.workflow, JobWorkflow::FixedDualMarlin { job } if job.has_bound_interior() && job.assignments.len() > 1);
+        if !separate_sources
             && domains
                 .iter()
                 .all(|d| d.coverage.fraction == domains[0].coverage.fraction)
@@ -430,7 +433,7 @@ impl ClassifiedRegions {
         let mut partial_cut = false;
         for (domain_index, domain) in domains.iter().enumerate() {
             let fraction = domain.coverage.fraction;
-            if !spatial
+            if !separate_sources
                 && domains[..domain_index]
                     .iter()
                     .any(|prior| prior.coverage.fraction == fraction)
@@ -444,7 +447,7 @@ impl ClassifiedRegions {
             for (index, source) in domains
                 .iter()
                 .filter(|source| {
-                    if spatial {
+                    if separate_sources {
                         std::ptr::eq(*source, domain)
                     } else {
                         source.coverage.fraction == fraction
@@ -816,17 +819,21 @@ impl ClassifiedRegions {
         let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow else {
             return Ok(());
         };
-        let Some(binding) = job.assignments.first().and_then(|a| a.active_interior()) else {
+        if !job.has_bound_interior() {
             return Ok(());
-        };
-        let additional_radius = (binding.bead_width_mm - intent.recipe.bead_width_mm) * 0.5;
-        if additional_radius <= 0.0 {
-            return Err(error(
-                ManufacturingErrorCode::InvalidSpecification,
-                "mixed interior requires a larger declared bead width",
-            ));
         }
         for index in 0..self.interiors.len() {
+            let assignment = job.assignment_for_region(&self.interiors[index].coverage)?;
+            let Some(binding) = assignment.active_interior() else {
+                continue;
+            };
+            let additional_radius = (binding.bead_width_mm - intent.recipe.bead_width_mm) * 0.5;
+            if additional_radius <= 0.0 {
+                return Err(error(
+                    ManufacturingErrorCode::InvalidSpecification,
+                    "mixed interior requires a larger declared bead width",
+                ));
+            }
             check_cancel(cancel)?;
             let base_points = self.retained_points();
             let base_bytes = self.retained_bytes();

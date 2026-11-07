@@ -140,12 +140,14 @@ pub(crate) fn apply(
     validate_layout_placements(placements).map_err(|e| invalid(e.message))?;
     // Capture originals before moving or copying any: order must never change copy inheritance.
     let original = snapshot.clone();
+    let mut routed = Vec::with_capacity(placements.len());
     for p in placements {
         let source = original
             .occurrences
             .get(&p.source)
             .ok_or_else(|| invalid("Unknown placement source"))?;
         if !p.copy {
+            routed.push((p.source, p.source, p.pose));
             snapshot
                 .occurrences
                 .get_mut(&p.source)
@@ -154,6 +156,7 @@ pub(crate) fn apply(
             continue;
         }
         let id = OccurrenceId::new(*next_occurrence).map_err(|e| invalid(e.message))?;
+        routed.push((p.source, id, p.pose));
         add_occurrence(
             snapshot,
             source.definition_id.clone(),
@@ -181,6 +184,7 @@ pub(crate) fn apply(
             Arc::make_mut(&mut snapshot.process_document).layers.push(layer);
         }
     }
+    crate::routed_placement::apply(snapshot, &original, &routed)?;
     Ok(())
 }
 
@@ -409,5 +413,117 @@ mod distribution_tests {
                 .is_err()
         );
         assert_eq!(project.info(), before);
+    }
+}
+
+#[cfg(test)]
+mod routed_tests {
+    use super::*;
+    use spiling_contracts::manufacturing::*;
+    fn commit(project: &mut Project, edit: Edit) {
+        let prepared = project.prepare(edit).unwrap();
+        project.commit(prepared).unwrap();
+    }
+    #[test]
+    fn routed_copies_transport_explicit_reservations_share_setup_and_undo_atomically() {
+        let mut project = crate::tests::imported();
+        let id = OccurrenceId::new(1).unwrap();
+        let pose = RigidPoseMm {
+            translation_mm: [20.0, 20.0, 0.0],
+            ..RigidPoseMm::IDENTITY
+        };
+        commit(
+            &mut project,
+            Edit::SetPose {
+                occurrence_id: id,
+                pose,
+            },
+        );
+        let intent = decode_intent(include_bytes!(
+            "../../../fixtures/manufacturing/mixed-width-combined.intent.json"
+        ))
+        .unwrap();
+        commit(
+            &mut project,
+            Edit::SetManufacturingIntent {
+                intent: Arc::new(intent),
+            },
+        );
+        let baseline = project.snapshot();
+        let copy_pose = RigidPoseMm {
+            translation_mm: [70.0, 20.0, 0.0],
+            ..pose
+        };
+        let placements = vec![LayoutPlacement {
+            source: id,
+            copy: true,
+            pose: copy_pose,
+        }];
+        let trial = project.placement_draft().preview(&placements).unwrap();
+        assert!(Arc::ptr_eq(&baseline, &project.snapshot()));
+        commit(
+            &mut project,
+            Edit::ApplyPlacement {
+                placements,
+                additional: vec![],
+            },
+        );
+        let copied = project.snapshot();
+        assert_eq!(copied.manufacturing_intent, trial.manufacturing_intent);
+        assert!(Arc::ptr_eq(
+            baseline.sources.values().next().unwrap(),
+            copied.sources.values().next().unwrap()
+        ));
+        let JobWorkflow::FixedDualMarlin { job } = &copied
+            .manufacturing_intent
+            .as_ref()
+            .unwrap()
+            .printer
+            .workflow
+        else {
+            unreachable!()
+        };
+        assert_eq!(job.assignments.len(), 2);
+        assert_eq!(job.assignments[0].tool_id, job.assignments[1].tool_id);
+        assert_eq!(job.assignments[0].interior, job.assignments[1].interior);
+        assert!(
+            job.assignments[1].work_envelope_mm.min[0] <= 69.0
+                && job.assignments[1].work_envelope_mm.min[0] > 68.999999999
+        );
+        assert!(
+            job.assignments[1].work_envelope_mm.max[0] >= 91.0
+                && job.assignments[1].work_envelope_mm.max[0] < 91.000000001
+        );
+        project.undo().unwrap();
+        assert_eq!(
+            project.snapshot().manufacturing_intent,
+            baseline.manufacturing_intent
+        );
+        assert_eq!(project.snapshot().occurrences.len(), 1);
+        project.redo().unwrap();
+        assert_eq!(
+            project.snapshot().manufacturing_intent,
+            copied.manufacturing_intent
+        );
+        let before = project.snapshot();
+        let overflow = (0..32)
+            .map(|i| LayoutPlacement {
+                source: id,
+                copy: true,
+                pose: RigidPoseMm {
+                    translation_mm: [200.0 + i as f64 * 50.0, 20.0, 0.0],
+                    ..pose
+                },
+            })
+            .collect();
+        assert!(
+            project
+                .prepare(Edit::ApplyPlacement {
+                    placements: overflow,
+                    additional: vec![]
+                })
+                .is_err()
+        );
+        assert!(Arc::ptr_eq(&before, &project.snapshot()));
     }
 }

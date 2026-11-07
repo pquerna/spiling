@@ -4,7 +4,12 @@
 use egui::Ui;
 use spiling_contracts::geometry::*;
 
-pub fn layout_fields(ui: &mut Ui, request: &mut LayoutRequest, parts: &[(OccurrenceId, String)]) {
+pub fn layout_fields(
+    ui: &mut Ui,
+    request: &mut LayoutRequest,
+    parts: &[(OccurrenceId, String)],
+    allow_additional_plates: bool,
+) {
     let previous = request.objective;
     super::group(ui, "Goal");
     ui.horizontal_wrapped(|ui| {
@@ -20,7 +25,7 @@ pub fn layout_fields(ui: &mut Ui, request: &mut LayoutRequest, parts: &[(Occurre
         );
         ui.selectable_value(&mut request.objective, LayoutObjective::Fill, "Fill plate");
     });
-    if request.objective != LayoutObjective::Copies {
+    if request.objective != LayoutObjective::Copies || !allow_additional_plates {
         request.use_additional_plates = false;
     }
     if request.objective != previous {
@@ -58,8 +63,16 @@ pub fn layout_fields(ui: &mut Ui, request: &mut LayoutRequest, parts: &[(Occurre
         });
         if request.objective == LayoutObjective::Copies {
             ui.weak("Includes the selected original");
-            ui.checkbox(&mut request.use_additional_plates, "Use additional plates")
-                .on_hover_text("Create additional print jobs with the same setup when the requested quantity cannot fit. Review every proposed plate before Apply.");
+            let explanation = if allow_additional_plates {
+                "Create additional print jobs with the same setup when the requested quantity cannot fit. Review every proposed plate before Apply."
+            } else {
+                "This tool setup supports copies on the active plate."
+            };
+            ui.add_enabled(
+                allow_additional_plates,
+                egui::Checkbox::new(&mut request.use_additional_plates, "Use additional plates"),
+            )
+            .on_hover_text(explanation);
         } else {
             ui.weak("Best count found, up to this limit");
         }

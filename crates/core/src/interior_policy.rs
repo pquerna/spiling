@@ -73,6 +73,33 @@ pub(crate) fn apply(
     manufacturing_options::set_intent(snapshot, Arc::new(intent))
 }
 
+/// A copied explicit pin is a deliberate new instruction in the completed layout.
+pub(crate) fn stamp_copied_pins(
+    snapshot: &mut Snapshot,
+    copied: &[spiling_contracts::geometry::OccurrenceId],
+) -> Result<(), ProjectError> {
+    if copied.is_empty() {
+        return Ok(());
+    }
+    let context = hashes(snapshot)?.0;
+    let intent = snapshot
+        .manufacturing_intent
+        .as_mut()
+        .ok_or_else(|| invalid("copied policy lost its intent"))?;
+    let JobWorkflow::FixedDualMarlin { job } = &mut Arc::make_mut(intent).printer.workflow else {
+        return Ok(());
+    };
+    for assignment in &mut job.assignments {
+        if copied.contains(&assignment.occurrence_id)
+            && let Some(binding) = &mut assignment.interior
+            && binding.policy_override.is_some_and(|p| p.enabled)
+        {
+            binding.policy_context = Some(context.clone());
+        }
+    }
+    Ok(())
+}
+
 /// Metadata eligibility only. A changed context is never evidence of benefit.
 pub fn interior_policy_opportunity(
     snapshot: &Snapshot,

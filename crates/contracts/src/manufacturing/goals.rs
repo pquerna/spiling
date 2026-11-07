@@ -32,17 +32,18 @@ impl ManufacturingIntent {
         let mut limits = self.effective_deposition_limits();
         limits.validate()?;
         if let JobWorkflow::FixedDualMarlin { job } = &self.printer.workflow {
-            let primary = if job.has_bound_interior() {
-                let assignment = &job.assignments[0];
-                let OccurrenceMaterial::Uniform { material_id } = &assignment.material else {
-                    return Err(invalid(
-                        "bound interior requires a uniform primary material",
-                    ));
-                };
-                usize::from(job.resolve_tool(material_id, assignment.tool_id.as_deref())?)
-            } else {
-                0
-            };
+            let mut primary = [true, false];
+            if job.has_bound_interior() {
+                primary = [false; 2];
+                for assignment in &job.assignments {
+                    let OccurrenceMaterial::Uniform { material_id } = &assignment.material else {
+                        return Err(invalid("bound interior requires uniform primary materials"));
+                    };
+                    primary[usize::from(
+                        job.resolve_tool(material_id, assignment.tool_id.as_deref())?,
+                    )] = true;
+                }
+            }
             for (index, tool) in job.tools.iter().enumerate() {
                 let mut capture = tool.deposition_limits;
                 capture.validate()?;
@@ -58,7 +59,7 @@ impl ManufacturingIntent {
                     capture.max_bead_height_mm =
                         capture.max_bead_height_mm.min(profile.max_bead_height_mm);
                 }
-                if index == primary {
+                if primary[index] {
                     limits.min_bead_width_mm =
                         limits.min_bead_width_mm.max(capture.min_bead_width_mm);
                     limits.max_bead_width_mm =

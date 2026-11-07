@@ -233,7 +233,7 @@ impl Workbench {
                 ui.weak("Project changed · draft retained");
             }
             if let JobWorkflow::FixedDualMarlin { job } = &mut d.value.printer.workflow {
-                ui::routed_material_fields(ui, job, writable && !conflict);
+                ui::routed_material_fields(ui, job, writable && !conflict, self.occurrence);
             }
             let settings_changed = m.intent.as_deref() != Some(&d.value);
             if let JobWorkflow::FixedDualMarlin { job } = &d.value.printer.workflow {

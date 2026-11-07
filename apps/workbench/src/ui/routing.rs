@@ -11,7 +11,12 @@ pub fn tool_reference(index: usize, tool: &FixedDualTool) -> String {
 }
 
 /// Only edits the caller's captured intent draft. Core/engine owns adoption and validation.
-pub fn routed_material_fields(ui: &mut egui::Ui, job: &mut FixedDualJob, writable: bool) {
+pub fn routed_material_fields(
+    ui: &mut egui::Ui,
+    job: &mut FixedDualJob,
+    writable: bool,
+    selected: Option<spiling_contracts::geometry::OccurrenceId>,
+) {
     super::group(ui, "Loaded tools");
     for (index, tool) in job.tools.iter().enumerate() {
         ui.push_id(("loaded-tool", &tool.id), |ui| {
@@ -63,8 +68,27 @@ pub fn routed_material_fields(ui: &mut egui::Ui, job: &mut FixedDualJob, writabl
             _ => None,
         })
         .collect();
-    let one_part = job.assignments.len() == 1;
-    for (assignment, resolved) in job.assignments.iter_mut().zip(resolved) {
+    let selected = selected.or_else(|| {
+        if job.assignments.len() == 1 {
+            Some(job.assignments[0].occurrence_id)
+        } else {
+            None
+        }
+    });
+    if selected.is_none() {
+        ui.weak(format!(
+            "{} bound parts · select a part to edit",
+            job.assignments.len()
+        ));
+    }
+    let has_construction =
+        !job.surface_constructions.is_empty() || job.functional_construction.is_some();
+    for (assignment, resolved) in job
+        .assignments
+        .iter_mut()
+        .zip(resolved)
+        .filter(|(a, _)| Some(a.occurrence_id) == selected)
+    {
         ui.push_id(("part-tool", assignment.occurrence_id), |ui| {
             ui.label(format!("Part {}", assignment.occurrence_id.get()));
             let constructed = job
@@ -101,7 +125,7 @@ pub fn routed_material_fields(ui: &mut egui::Ui, job: &mut FixedDualJob, writabl
                             }
                         }
                     });
-                if one_part {
+                if !has_construction {
                     ui.label("Interior fill");
                     egui::ComboBox::from_id_salt("interior-tool")
                         .selected_text(assignment.interior.as_ref().map_or_else(
@@ -148,8 +172,14 @@ pub fn routed_material_fields(ui: &mut egui::Ui, job: &mut FixedDualJob, writabl
                                     .clicked()
                                 {
                                     assignment.interior = Some(InteriorToolBinding {
-                                        policy_context: None,
-                                        policy_override: None,
+                                        policy_context: assignment
+                                            .interior
+                                            .as_ref()
+                                            .and_then(|b| b.policy_context.clone()),
+                                        policy_override: assignment
+                                            .interior
+                                            .as_ref()
+                                            .and_then(|b| b.policy_override),
                                         tool_id: tool.id.clone(),
                                         bead_width_mm: tool.nozzle_diameter_mm,
                                     });

@@ -325,7 +325,7 @@ In the component gallery compare all densities, declared-name precedence, white/
 ## Material authority and qualification
 
 [ADR005](../adr/ADR005-native-first-development-geometry.md) adopts the implemented
-source21/planner67 DEVELOPMENT route: one imported SolidCore BREP, exact
+source21/planner68 DEVELOPMENT route: one imported SolidCore BREP, exact
 kernel/tolerance binding, original STEP identity/provenance and original finish
 inputs. Qualify preserved operators with the actual coherent producer; do not
 relabel source5/planner24 reports or transfer older runtime evidence.
@@ -656,6 +656,8 @@ the same phase. Counts alone cannot distinguish a real cycle from static colorin
 Swap both phase values in a disposable intent to obtain a different actual program;
 undo/redo/undo must restore the original manufacturing input and output. A changed
 height/origin must re-resolve or refuse, never silently advance by layer number.
+
+Mixed-tool plate scale uses `tools/smoke-mixed-plate.mjs` with coherent binaries and the same external memory/task limits. `SPILING_PLATE_COUNTS=1,2,8,32` selects the sequential source-diverse cohort. Eight parts repeat compilation in one child; every case removes external source/intent copies before fresh saved return, actual SPLR observation and export. The runner records per-step CLI `elapsed_us`, bounded candidate work, counts and cgroup peak where available. `SPILING_PLATE_COPY=1 SPILING_PLATE_COUNTS=1` also exercises Make copies, Apply, Undo/Redo and source-independent saved return. Repetition is not a claim of incremental caching or latency improvement. Keep detailed results in ignored evidence. `tools/project-smoke.mjs` shares bounded invocation with the single-part mixed-tool runner; observers do not become another planner or actual-program interpreter.
 
 ### Source-bound planar surface-color smoke
 
