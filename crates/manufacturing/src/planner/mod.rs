@@ -1273,6 +1273,7 @@ fn admit_schedule<'model>(
                         &owned.domain,
                         &owned.coverage,
                         plate.physical_z_mm,
+                        recipe.bead_width_mm,
                         input.intent,
                         native_coverage.source_captures(),
                         retained_support_native_bytes.saturating_add(native::output_bytes(

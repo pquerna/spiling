@@ -2190,6 +2190,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     plan.layers[0].paths.push(fine_anchor);
     intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
     plan.sparse_bands.push(SparseBandDecision {
+        landing_aligned: false,
         first_layer: 1,
         last_layer: 2,
         owner: None,
@@ -2413,6 +2414,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
         points_mm: vec![[1.0, 3.0, 0.4], [2.775, 3.0, 0.4]],
     });
     plan.sparse_bands = vec![SparseBandDecision {
+        landing_aligned: false,
         first_layer: 1,
         last_layer: 3,
         owner: Some(DepositionOwner::Regional { region_index: 1 }),

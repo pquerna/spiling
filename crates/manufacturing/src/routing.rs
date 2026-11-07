@@ -84,10 +84,11 @@ pub(crate) fn validate_plan(
     job.validate(&intent.printer)?;
     if !matches!(intent.recipe.process.retraction, RetractionPolicy::Disabled)
         || !matches!(intent.recipe.supports, SupportPolicy::Disabled)
-        || !matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Fine)
+        || (!matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Fine)
+            && !job.has_bound_interior())
     {
         return Err(invalid(
-            "fixed-dual route requires disabled body retraction/support and fine layers",
+            "fixed-dual route requires disabled body retraction/support and an explicit bound tool for combined interiors",
         ));
     }
     let safe = safe_z(plan, job)?;
@@ -139,16 +140,14 @@ pub(crate) fn validate_plan(
         let mut present = [false; 2];
         for path in &layer.paths {
             check_cancel(cancel)?;
-            if path.physical_z_mm != [layer.lower_z_mm, layer.z_mm]
-                || matches!(
-                    path.kind,
-                    DepositionKind::Support
-                        | DepositionKind::SupportInterface
-                        | DepositionKind::SeparatorWall
-                )
-            {
+            if matches!(
+                path.kind,
+                DepositionKind::Support
+                    | DepositionKind::SupportInterface
+                    | DepositionKind::SeparatorWall
+            ) {
                 return Err(invalid(
-                    "fixed-dual model paths must be unsupported fine actual-layer beads",
+                    "fixed-dual model paths cannot contain supports or separators",
                 ));
             }
             present[usize::from(job.tool_for_path(path)?)] = true;

@@ -161,7 +161,16 @@ const decoded = await decodeReplayDisplay(
   returned.manufacturing.replay_display,
 );
 const counts = [0, 0];
+let coarseEvents = 0;
 for (let i = 0; i < decoded.eventCount; i++) {
+  if (decoded.kind(i) === 15 && intentName === "mixed-width-combined") {
+    const association = decoded.association(i);
+    assert.ok(association);
+    assert.ok(
+      Math.abs(association.physicalZMm[1] - association.physicalZMm[0] - 0.2) < 1e-8,
+      "auxiliary strips must retain their admitted physical cadence",
+    );
+  }
   if (![1, 2, 3, 4, 5, 8].includes(decoded.kind(i))) continue;
   const tool = decoded.activeTool(i),
     point = decoded.position(i);
@@ -171,7 +180,10 @@ for (let i = 0; i < decoded.eventCount; i++) {
   const expected = singlePart ? (interior ? 1 : 0) : point[0] < 80 ? 0 : 1;
   if (singlePart) {
     assert.ok(association);
-    if (interior) assert.equal(association.beadWidthMm, job.assignments[0].interior.bead_width_mm);
+    if (interior) {
+      assert.equal(association.beadWidthMm, job.assignments[0].interior.bead_width_mm);
+      if (association.physicalZMm[1]-association.physicalZMm[0] > 0.21) coarseEvents++;
+    }
     // Independent analytic fixture observer: actual XYZ6 full beads retain the
     // original20x20 source and radius3 bore, under the existing0.005 mm policy.
     const from = decoded.position(i - 1),
@@ -216,6 +228,8 @@ for (let i = 0; i < decoded.eventCount; i++) {
   counts[tool]++;
 }
 assert.ok(counts.every((n) => n > 0));
+if (intentName === "mixed-width-combined")
+  assert.ok(coarseEvents > 0, "the selected bulk tool must occupy real thicker intervals");
 assert.deepEqual(
   await readFile(
     join(
@@ -240,6 +254,7 @@ assert.match(error, /explicit tool binding/);
 const after = await invoke("after-refusal", ["inspect", project]);
 assert.deepEqual(after.manufacturing.intent, returned.manufacturing.intent);
 evidence.model_events_per_tool = counts;
+evidence.coarse_model_events = coarseEvents;
 await writeFile(join(output, "acceptance.json"), JSON.stringify(evidence, null, 2) + "\n");
 console.log(
   JSON.stringify({

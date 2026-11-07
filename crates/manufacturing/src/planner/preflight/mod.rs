@@ -382,7 +382,8 @@ pub(super) fn admit<'a>(
             );
         }
         if !matches!(input.intent.recipe.supports, SupportPolicy::Disabled)
-            || !matches!(input.intent.recipe.sparse_infill, SparseInfillPolicy::Fine)
+            || (!matches!(input.intent.recipe.sparse_infill, SparseInfillPolicy::Fine)
+                && !job.has_bound_interior())
             || !matches!(
                 input.intent.recipe.process.retraction,
                 RetractionPolicy::Disabled
@@ -393,7 +394,7 @@ pub(super) fn admit<'a>(
                 .iter()
                 .any(|layer| layer.enabled && !layer.operations.is_empty())
         {
-            add("fixed_dual_policy", "Fixed-dual routing admits only fine layers without body retraction, supports or enabled process constructions".into(), None, None);
+            add("fixed_dual_policy", "Fixed-dual routing requires disabled body retraction/support/process constructions; combined interiors require an explicit same-formulation tool binding".into(), None, None);
         }
     }
     if input.definitions.len() > MAX_DEFINITIONS as usize

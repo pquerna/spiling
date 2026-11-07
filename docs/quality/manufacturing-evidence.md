@@ -62,7 +62,7 @@ refinement does not advance physical phase. Full bead reservations and conservat
 inactive-tip/carriage-prefix sweeps remain separate from native source qualification.
 The source-reviewed Marlin configuration and pressure/material records are declarations,
 not deployable firmware, physical nozzle measurements, clean color or printability.
-Enabled finishes/process constructions, supports, coarse bands and fixtures refuse this
+Enabled finishes/process constructions, supports, unbound coarse bands and fixtures refuse this
 route. Original single-tool operator evidence retains its producer/input identity;
 the routing increment does not requalify every historical geometry journey.
 
@@ -70,7 +70,7 @@ The same-formulation fixed-dual reference keeps equal nozzle diameters and the e
 
 The equal-diameter `fixed-dual-profiles` reference captures independent tool feeds, first-layer speed factors, queued fans and hotend targets. Run `SPILING_MIXED_INTENT=fixed-dual-profiles node --experimental-strip-types tools/smoke-mixed-tools.mjs` with coherent binaries and external process bounds. It also exercises addressed profile resolution/history before source/profile-deleted fresh replay/export. The independent numeric replay test varies flow factors and rejects a swapped model feed and excessive active-tool flow. Shared bed/cooling disagreement, changed material/nozzle and unsupported regional bridge spans remain explicit refusals.
 
-The `mixed-width-interior` reference uses the unchanged original through-hole source with fine exterior/skins and a larger-width same-formulation interior tool at common physical heights. `SPILING_MIXED_INTENT=mixed-width-interior` selects it in the same externally bounded runner. An independent analytic observer checks actual XYZ6 full-bead bore/exterior clearance under the existing offset policy; a native comparison retains the fine wall/bore paths and rejects missing/doubled actual work and relabelled fine widths. This does not establish physical nozzle calibration, arbitrary material painting, heterogeneous waste/layer intervals or automatic whole-job optimization.
+The `mixed-width-interior` reference uses the unchanged original through-hole source with fine exterior/skins and a larger-width same-formulation interior tool at common physical heights. `SPILING_MIXED_INTENT=mixed-width-interior` selects it in the same externally bounded runner. An independent analytic observer checks actual XYZ6 full-bead bore/exterior clearance under the existing offset policy; a native comparison retains the fine wall/bore paths and rejects missing/doubled actual work and relabelled fine widths. The `mixed-width-combined` control uses the same source, genuinely thicker interior intervals and retained fine landings. Its bounded alignment alternative consumes full-height native inner-material authority over whole rows, not sampled section equality; fine walls, actual base/landing anchors and supported waste remain independently checked. Run it with `SPILING_MIXED_INTENT=mixed-width-combined`. This does not establish physical nozzle calibration, arbitrary material painting, heterogeneous auxiliary intervals or automatic whole-job optimization.
 
 The [engine G-code comparison](gcode-parity.md) independently audits a bounded
 analytic cube matrix against a versioned mature slicer. It retains explicit
@@ -322,7 +322,7 @@ boundaries, including a boundary wholly inside the candidate, participate.
 Actual outer XYZ6 Z scope and strict bead/projection/error margin are mandatory.
 Final-D/field invariance, skins/events, process ownership and actual deposited
 support remain separate gates. The
-[band contract](../protocol/manufacturing.md#same-nozzle-combined-sparse-bands)
+[band contract](../protocol/manufacturing.md#combined-sparse-bands)
 owns the current construction details; ADR005 alone does not independently qualify
 this operation. Require its actual current-producer operator and replay evidence.
 
@@ -502,8 +502,8 @@ Source-bound planar surface color is exercised through the real CLI on the commi
 
 Retained optical studies apply through typed Core/engine/client/CLI transactions with complete accepted report/selection and explicit two-material evidence/declaration bindings. Queued cancellation and stale revisions preserve the committed project; ACK commits one revision without changing SceneRevision or publishing scene artifacts. Both native source workflows exercise application, physical depth/history edits, changed-pose reassessment and source/palette/study-deleted fresh verification/export. Inspection distinguishes the small requested patch from complete realized side exposure and reuses the existing model with captured evidence; it does not reuse the requested prediction as a printed outcome. Unknown evidence/conditions remain unassessed and backing optics remain unmodelled. The native Review panel supports source-hidden actual replay and catalog metadata tint by decoded tool, plus requested/realized inspection and fresh four-file export. The native window can consume a CLI-produced recovered project; local hardware evidence does not qualify other GPUs/platforms or physical color.
 
-Current identities are project10/manufacturing11/process3/surface3, source21/planner65,
-emitter13/verifier25 and SPLR6; executable constants and exact native pins remain authoritative.
+Current identities are project10/manufacturing11/process3/surface3, source21/planner66,
+emitter13/verifier26 and SPLR6; executable constants and exact native pins remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
 Raw inspection, an older producer's successful job or historical hardware

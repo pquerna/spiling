@@ -3911,6 +3911,7 @@ fn deposition_limits_and_sparse_records_are_explicit_and_strict() {
         assert!(changed.validate().is_err());
     }
     let decision = SparseBandDecision {
+        landing_aligned: false,
         first_layer: 1,
         last_layer: 2,
         owner: None,
@@ -3919,7 +3920,13 @@ fn deposition_limits_and_sparse_records_are_explicit_and_strict() {
         },
     };
     let value = serde_json::to_value(decision).unwrap();
-    for field in ["first_layer", "last_layer", "owner", "disposition"] {
+    for field in [
+        "first_layer",
+        "last_layer",
+        "owner",
+        "disposition",
+        "landing_aligned",
+    ] {
         let mut missing = value.clone();
         missing.as_object_mut().unwrap().remove(field);
         assert!(serde_json::from_value::<SparseBandDecision>(missing).is_err());
@@ -4289,4 +4296,51 @@ fn material_capture_is_required_nullable_and_typed_profile_adapters_reject_unkno
     };
     let wire = crate::rpc::ManufacturingRequest::try_from(command.clone()).unwrap();
     assert_eq!(ManufacturingCommand::try_from(wire).unwrap(), command);
+}
+
+#[test]
+fn mixed_tool_fine_schedule_uses_primary_profile_and_every_waste_interval() {
+    let mut intent = decode_intent(include_bytes!(
+        "../../../../fixtures/manufacturing/mixed-width-combined.intent.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        intent
+            .fine_layer_deposition_limits()
+            .unwrap()
+            .max_bead_height_mm,
+        0.3
+    );
+    intent.recipe.layer_height_policy = LayerHeightPolicy::Preferred;
+    intent.recipe.layer_height_mm = 0.4;
+    assert_eq!(intent.select_layer_height().unwrap().height_mm, 0.3);
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    job.tools.swap(0, 1);
+    // A logical tool ordinal does not define the primary process.
+    assert_eq!(intent.select_layer_height().unwrap().height_mm, 0.3);
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    let bulk = job
+        .tools
+        .iter_mut()
+        .find(|t| t.nozzle_diameter_mm == 0.6)
+        .unwrap();
+    bulk.deposition_limits.min_bead_height_mm = 0.25;
+    bulk.material_profile
+        .as_mut()
+        .unwrap()
+        .selection
+        .profile
+        .deposition_limits
+        .min_bead_height_mm = 0.25;
+    intent.recipe.layer_height_mm = 0.2;
+    assert_eq!(intent.select_layer_height().unwrap().height_mm, 0.25);
+    intent.recipe.layer_height_policy = LayerHeightPolicy::ProtectedMaximum;
+    assert!(
+        intent.select_layer_height().is_err(),
+        "thin waste must not be silently skipped or widened"
+    );
 }

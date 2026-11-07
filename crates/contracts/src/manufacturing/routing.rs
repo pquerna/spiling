@@ -353,6 +353,12 @@ fn temperature(value: f64, maximum: f64) -> bool {
 }
 
 impl FixedDualJob {
+    pub fn has_bound_interior(&self) -> bool {
+        self.assignments.len() == 1
+            && self.assignments[0].interior.is_some()
+            && self.surface_constructions.is_empty()
+            && self.functional_construction.is_none()
+    }
     pub fn validate_declaration(&self) -> Result<(), ManufacturingError> {
         label(&self.machine_id)?;
         if self.firmware_revision != FIXED_DUAL_FIRMWARE_REVISION {

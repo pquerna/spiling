@@ -1558,6 +1558,7 @@ fn housing_horizontal_plate_is_supported_permanent_construction_with_exact_actua
     );
     let mut crossing = combined.plan.clone();
     crossing.sparse_bands.push(SparseBandDecision {
+        landing_aligned: false,
         first_layer: first_plate as u32 - 1,
         last_layer: first_plate as u32,
         owner: Some(DepositionOwner::Regional {

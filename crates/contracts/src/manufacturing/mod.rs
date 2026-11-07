@@ -34,6 +34,7 @@ mod resolution;
 pub use resolution::*;
 mod diaphragm;
 pub use diaphragm::*;
+mod bands;
 mod skin_fit_decode;
 
 mod construction;
@@ -1225,26 +1226,31 @@ impl ManufacturingIntent {
         }
         if let JobWorkflow::FixedDualMarlin { job } = &p.workflow {
             if !matches!(r.supports, SupportPolicy::Disabled)
-                || !matches!(r.sparse_infill, SparseInfillPolicy::Fine)
+                || (!matches!(r.sparse_infill, SparseInfillPolicy::Fine)
+                    && !job.has_bound_interior())
                 || !matches!(r.process.retraction, RetractionPolicy::Disabled)
             {
                 return Err(invalid(
-                    "fixed-dual routing requires fine model deposition without generated supports",
+                    "fixed-dual combined deposition requires an explicit interior tool, without supports or body retraction",
                 ));
             }
-            for tool in &job.tools {
+            for (index, tool) in job.tools.iter().enumerate() {
                 let tool_filament_area =
                     std::f64::consts::PI * (tool.filament_diameter_mm * 0.5).powi(2);
                 let waste_length = (tool.waste_line_xy_mm[1][0] - tool.waste_line_xy_mm[0][0])
                     .hypot(tool.waste_line_xy_mm[1][1] - tool.waste_line_xy_mm[0][1]);
+                let process = self.process_for_tool(Some(index as u8))?;
+                let height = selected_height;
+                let waste_area = ((tool.waste_bead_width_mm - height) * height
+                    + std::f64::consts::PI * (height * 0.5).powi(2))
+                    * process.flow_multiplier
+                    * process.policy.first_layer_flow_factor.min(1.0);
                 if !tool_filament_area.is_finite()
                     || tool_filament_area <= 0.0
                     || !waste_length.is_finite()
                     || waste_length <= 0.0
-                    || !tool
-                        .deposition_limits
-                        .admits(r.bead_width_mm, r.layer_height_mm)
-                    || area * waste_length < tool.minimum_reprime_volume_mm3
+                    || !tool.admits_deposition(tool.waste_bead_width_mm, selected_height)
+                    || waste_area * waste_length < tool.minimum_reprime_volume_mm3
                 {
                     return Err(invalid(
                         "fixed-dual waste or loaded-tool recipe envelope is invalid",
@@ -2377,6 +2383,7 @@ pub enum SparseBandVeto {
     UnsupportedLanding,
     FlowLimit,
     InterfaceBond,
+    NominalDose,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -2392,6 +2399,8 @@ pub struct SparseBandDecision {
     #[serde(deserialize_with = "required_band_owner")]
     pub owner: Option<DepositionOwner>,
     pub disposition: SparseBandDisposition,
+    /// Complete coarse rows aligned with an explicitly retained fine landing.
+    pub landing_aligned: bool,
 }
 fn required_band_owner<'de, D: serde::Deserializer<'de>>(
     d: D,
@@ -2749,10 +2758,13 @@ impl NormalizedPrintPlan {
                     }
                 }
             }
+            bands::validate_landing_alignment(self, intent, band)?;
         }
         if let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow {
-            if !self.sparse_bands.is_empty() {
-                return Err(invalid("fixed-dual routing admits no coarse sparse bands"));
+            if !self.sparse_bands.is_empty() && !job.has_bound_interior() {
+                return Err(invalid(
+                    "routed coarse bands require an explicit same-formulation interior tool",
+                ));
             }
             let mut routed_segments = self
                 .layers
@@ -2763,16 +2775,14 @@ impl NormalizedPrintPlan {
                 let mut seen = [false; 2];
                 let mut previous_tool = 0;
                 for path in &layer.paths {
-                    if path.physical_z_mm != [layer.lower_z_mm, layer.z_mm]
-                        || matches!(
-                            path.kind,
-                            DepositionKind::Support
-                                | DepositionKind::SupportInterface
-                                | DepositionKind::SeparatorWall
-                        )
-                    {
+                    if matches!(
+                        path.kind,
+                        DepositionKind::Support
+                            | DepositionKind::SupportInterface
+                            | DepositionKind::SeparatorWall
+                    ) {
                         return Err(invalid(
-                            "fixed-dual model paths require ordinary fine intervals without supports or separators",
+                            "fixed-dual model paths cannot contain supports or separators",
                         ));
                     }
                     let tool = job.tool_for_path(path)?;
@@ -2885,18 +2895,18 @@ impl NormalizedPrintPlan {
                 ));
             }
             lower_z = layer.z_mm;
-            let fixed_axis_for = |policy| match policy {
+            let fixed_axis_for = |policy, index: u32| match policy {
                 RectilinearAxisPolicy::X => 1,
                 RectilinearAxisPolicy::Y => 0,
                 RectilinearAxisPolicy::AlternatingXY => {
-                    if layer.index.is_multiple_of(2) {
+                    if index.is_multiple_of(2) {
                         1
                     } else {
                         0
                     }
                 }
                 RectilinearAxisPolicy::AlternatingYX => {
-                    if layer.index.is_multiple_of(2) {
+                    if index.is_multiple_of(2) {
                         0
                     } else {
                         1
@@ -3150,11 +3160,26 @@ impl NormalizedPrintPlan {
                         | DepositionKind::SparseFill
                 )
                 .then(|| {
-                    fixed_axis_for(if path.kind == DepositionKind::TopSkin {
-                        intent.recipe.top_skin_axis
+                    let index = if path.physical_z_mm[0] == layer.lower_z_mm {
+                        layer.index
                     } else {
-                        intent.recipe.rectilinear_axis
-                    })
+                        self.sparse_bands
+                            .iter()
+                            .find(|band| {
+                                band.landing_aligned
+                                    && band.last_layer == layer.index
+                                    && band.owner == path.owner
+                            })
+                            .map_or(layer.index, |band| band.last_layer + 1)
+                    };
+                    fixed_axis_for(
+                        if path.kind == DepositionKind::TopSkin {
+                            intent.recipe.top_skin_axis
+                        } else {
+                            intent.recipe.rectilinear_axis
+                        },
+                        index,
+                    )
                 });
                 let mut previous_fixed_coordinate = None;
                 for point in &path.points_mm {

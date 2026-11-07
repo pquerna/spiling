@@ -1973,6 +1973,7 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
         ("fixed-dual-shared-material", false),
         ("fixed-dual-profiles", false),
         ("mixed-width-interior", false),
+        ("mixed-width-combined", false),
         ("fixed-dual-cycle", false),
     ] {
         let host = Host::new(
@@ -1988,7 +1989,7 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
             &host,
             Action::Import(native(&repo.join(if cylinder {
                 "fixtures/geometry/independent-exporters/occt-cylinder-mm.step"
-            } else if name == "mixed-width-interior" {
+            } else if name.starts_with("mixed-width-") {
                 "fixtures/geometry/through-hole.step"
             } else {
                 "fixtures/geometry/box-mm.step"
@@ -1998,6 +1999,8 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
             decode_intent(
                 &std::fs::read(repo.join(if cylinder {
                     "fixtures/manufacturing/solid-fill.intent.json"
+                } else if name == "mixed-width-combined" {
+                    "fixtures/manufacturing/mixed-width-combined.intent.json"
                 } else if name == "mixed-width-interior" {
                     "fixtures/manufacturing/mixed-width-interior.intent.json"
                 } else if name == "fixed-dual-profiles" {
@@ -2083,7 +2086,7 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
             })
             .unwrap();
             let s = idle_after(&host, serial);
-            if name != "mixed-width-interior" {
+            if !name.starts_with("mixed-width-") {
                 let scene = s.scene.as_ref().unwrap();
                 let serial = s.serial;
                 host.geometry(GeometryCommand::AddInstance {

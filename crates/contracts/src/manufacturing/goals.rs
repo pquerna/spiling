@@ -27,12 +27,60 @@ pub struct LayerHeightSelection {
 }
 
 impl ManufacturingIntent {
+    /// Fine schedule limits are distinct from a bulk tool's thicker occupied interval.
+    pub fn fine_layer_deposition_limits(&self) -> Result<DepositionLimits, ManufacturingError> {
+        let mut limits = self.effective_deposition_limits();
+        limits.validate()?;
+        if let JobWorkflow::FixedDualMarlin { job } = &self.printer.workflow {
+            let primary = if job.has_bound_interior() {
+                let assignment = &job.assignments[0];
+                let OccurrenceMaterial::Uniform { material_id } = &assignment.material else {
+                    return Err(invalid(
+                        "bound interior requires a uniform primary material",
+                    ));
+                };
+                usize::from(job.resolve_tool(material_id, assignment.tool_id.as_deref())?)
+            } else {
+                0
+            };
+            for (index, tool) in job.tools.iter().enumerate() {
+                let mut capture = tool.deposition_limits;
+                capture.validate()?;
+                if let Some(profile) = &tool.material_profile {
+                    let profile = profile.selection.profile.deposition_limits;
+                    profile.validate()?;
+                    capture.min_bead_width_mm =
+                        capture.min_bead_width_mm.max(profile.min_bead_width_mm);
+                    capture.max_bead_width_mm =
+                        capture.max_bead_width_mm.min(profile.max_bead_width_mm);
+                    capture.min_bead_height_mm =
+                        capture.min_bead_height_mm.max(profile.min_bead_height_mm);
+                    capture.max_bead_height_mm =
+                        capture.max_bead_height_mm.min(profile.max_bead_height_mm);
+                }
+                if index == primary {
+                    limits.min_bead_width_mm =
+                        limits.min_bead_width_mm.max(capture.min_bead_width_mm);
+                    limits.max_bead_width_mm =
+                        limits.max_bead_width_mm.min(capture.max_bead_width_mm);
+                }
+                // Both supported waste strips still occupy every fine interval.
+                limits.min_bead_height_mm =
+                    limits.min_bead_height_mm.max(capture.min_bead_height_mm);
+                limits.max_bead_height_mm =
+                    limits.max_bead_height_mm.min(capture.max_bead_height_mm);
+            }
+        }
+        limits.validate()?;
+        Ok(limits)
+    }
+
     pub fn layer_height_ceiling_mm(&self) -> Result<f64, ManufacturingError> {
         let selected = self.select_layer_height()?;
         Ok(match self.recipe.layer_height_policy {
             LayerHeightPolicy::ProtectedMaximum => selected.height_mm,
             LayerHeightPolicy::Preferred => self
-                .effective_deposition_limits()
+                .fine_layer_deposition_limits()?
                 .max_bead_height_mm
                 .min(self.recipe.bead_width_mm),
         })
@@ -42,7 +90,7 @@ impl ManufacturingIntent {
     pub fn select_layer_height(&self) -> Result<LayerHeightSelection, ManufacturingError> {
         let requested = self.recipe.layer_height_mm;
         positive(&[requested, self.recipe.bead_width_mm])?;
-        let limits = self.effective_deposition_limits();
+        let limits = self.fine_layer_deposition_limits()?;
         limits.validate()?;
         let maximum = limits.max_bead_height_mm.min(self.recipe.bead_width_mm);
         if limits.min_bead_height_mm > maximum
@@ -64,7 +112,7 @@ impl ManufacturingIntent {
                 requested
             }
         };
-        if matches!(self.printer.workflow, JobWorkflow::FixedDualMarlin { .. })
+        if matches!(&self.printer.workflow, JobWorkflow::FixedDualMarlin { job } if !job.has_bound_interior())
             && self.recipe.layer_height_policy != LayerHeightPolicy::ProtectedMaximum
         {
             return Err(invalid(

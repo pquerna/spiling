@@ -4510,3 +4510,138 @@ fn mixed_width_native_bore_keeps_fine_walls_and_rejects_missing_or_doubled_actua
         "fine paths cannot be relabeled as bulk work"
     );
 }
+
+#[test]
+fn mixed_tool_coarse_intervals_retain_fine_landing_and_exact_bore() {
+    let scene = NativeScene::new(
+        include_bytes!("../../../../fixtures/geometry/through-hole.step"),
+        &[RigidPoseMm {
+            translation_mm: [20.0, 20.0, 0.0],
+            ..RigidPoseMm::IDENTITY
+        }],
+    );
+    let intent = decode_intent(include_bytes!(
+        "../../../../fixtures/manufacturing/mixed-width-combined.intent.json"
+    ))
+    .unwrap();
+    let cancel = AtomicBool::new(false);
+    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    let bands: Vec<_> = bundle
+        .plan
+        .sparse_bands
+        .iter()
+        .filter(|band| band.disposition == SparseBandDisposition::Combined)
+        .collect();
+    assert!(
+        !bands.is_empty(),
+        "a fine-only fallback does not qualify coarse work"
+    );
+    assert!(bands.iter().any(|band| band.landing_aligned));
+    assert_eq!(
+        program_coordinates::project_xyz6_coordinate_mm(bundle.plan.layers.last().unwrap().z_mm)
+            .unwrap(),
+        8.0
+    );
+    for band in &bands {
+        let first = &bundle.plan.layers[band.first_layer as usize];
+        let terminal = &bundle.plan.layers[band.last_layer as usize];
+        let physical = [first.lower_z_mm, terminal.z_mm];
+        assert!(physical[1] - physical[0] > terminal.height_mm);
+        assert!(
+            terminal
+                .paths
+                .iter()
+                .filter(|p| p.owner == band.owner)
+                .all(|p| p.physical_z_mm == physical)
+        );
+    }
+    visit_fresh_replayed_object_segments(&bundle, |_, _| {});
+    let band = bands.iter().find(|band| band.landing_aligned).unwrap();
+    let index = band.last_layer as usize;
+    let owner = band.owner;
+    let path_index = bundle.plan.layers[index]
+        .paths
+        .iter()
+        .position(|p| p.owner == owner)
+        .unwrap();
+    for mutation in 0..4 {
+        let mut plan = bundle.plan.clone();
+        match mutation {
+            0 => {
+                plan.layers[index].paths.remove(path_index);
+            }
+            1 => {
+                let path = plan.layers[index].paths[path_index].clone();
+                plan.layers[index].paths.push(path);
+            }
+            2 => {
+                plan.layers[index].paths[path_index].points_mm[0][0] += 0.01;
+            }
+            _ => {
+                plan.layers[index].paths[path_index].physical_z_mm[0] =
+                    plan.layers[index].lower_z_mm;
+            }
+        }
+        assert!(
+            plan.validate(&intent).is_err(),
+            "mutation {mutation} must reject before emission"
+        );
+        assert!(crate::verifier::verify(&bundle.program, &plan, &intent, &cancel).is_err());
+    }
+    let mut future = bundle.plan.clone();
+    let first = band.first_layer as usize;
+    future.layers[first - 1].paths.clear();
+    assert!(
+        crate::verifier::verify(&bundle.program, &future, &intent, &cancel).is_err(),
+        "the retained future landing must never authorize the coarse base"
+    );
+}
+
+#[test]
+fn mixed_tool_coarse_work_consumes_non_grid_fine_intervals_without_erasing_top() {
+    let scene = NativeScene::new(
+        include_bytes!("../../../../fixtures/geometry/through-hole.step"),
+        &[RigidPoseMm {
+            translation_mm: [20.0, 20.0, 0.0],
+            ..RigidPoseMm::IDENTITY
+        }],
+    );
+    let mut intent = decode_intent(include_bytes!(
+        "../../../../fixtures/manufacturing/mixed-width-combined.intent.json"
+    ))
+    .unwrap();
+    intent.recipe.layer_height_mm = 0.19;
+    intent.recipe.layer_height_policy = LayerHeightPolicy::Preferred;
+    let bundle = compile(scene.input(&intent), &AtomicBool::new(false)).unwrap();
+    assert!(
+        bundle
+            .plan
+            .sparse_bands
+            .iter()
+            .any(|b| b.disposition == SparseBandDisposition::Combined)
+    );
+    assert_eq!(
+        program_coordinates::project_xyz6_coordinate_mm(bundle.plan.layers.last().unwrap().z_mm)
+            .unwrap(),
+        8.0
+    );
+    for band in bundle
+        .plan
+        .sparse_bands
+        .iter()
+        .filter(|b| b.disposition == SparseBandDisposition::Combined)
+    {
+        let layers = &bundle.plan.layers[band.first_layer as usize..=band.last_layer as usize];
+        let sum: f64 = layers.iter().map(|l| l.z_mm - l.lower_z_mm).sum();
+        let actual = layers
+            .last()
+            .unwrap()
+            .paths
+            .iter()
+            .find(|p| p.owner == band.owner)
+            .unwrap()
+            .height_mm();
+        assert!((sum - actual).abs() < 1e-14);
+    }
+    visit_fresh_replayed_object_segments(&bundle, |_, _| {});
+}

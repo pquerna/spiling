@@ -807,11 +807,15 @@ owner: DepositionOwner | null, width: WidthProfile,
  */
 physical_z_mm: [number, number], points_mm: Array<[number, number, number]>, };
 
-export type SparseBandDecision = { first_layer: number, last_layer: number, owner: DepositionOwner | null, disposition: SparseBandDisposition, };
+export type SparseBandDecision = { first_layer: number, last_layer: number, owner: DepositionOwner | null, disposition: SparseBandDisposition,
+/**
+ * Complete coarse rows aligned with an explicitly retained fine landing.
+ */
+landing_aligned: boolean, };
 
 export type SparseBandDisposition = { "kind": "combined" } | { "kind": "retained_fine", reason: SparseBandVeto, };
 
-export type SparseBandVeto = "process_height" | "mandatory_neighborhood" | "changing_domain" | "missing_lower_anchor" | "unsupported_landing" | "flow_limit" | "interface_bond";
+export type SparseBandVeto = "process_height" | "mandatory_neighborhood" | "changing_domain" | "missing_lower_anchor" | "unsupported_landing" | "flow_limit" | "interface_bond" | "nominal_dose";
 
 export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, process_diaphragms: Array<ProcessDiaphragmCoverage>, diaphragm_area_mm2: number, skin_bridge_domains: Array<SkinBridgeDomain>, };
 
