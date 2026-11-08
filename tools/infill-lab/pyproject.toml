@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# Licensed under the Open Software License version 3.0
+[project]
+name = "spiling-infill-lab"
+version = "0.1.0"
+description = "Reproducible offline interior-construction research over verified Spiling replay"
+requires-python = ">=3.12,<3.13"
+license = "OSL-3.0"
+dependencies = [
+  "numpy==2.5.4", "scipy==1.18.1", "scikit-fem==12.0.2", "pyamg==5.4.1",
+  "shapely==2.2.0", "matplotlib==3.11.2",
+]
+[project.optional-dependencies]
+fixtures = ["cadquery-ocp==7.9.3.1"]
+test = ["pytest==9.2.0"]
+[tool.uv]
+package = false

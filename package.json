@@ -30,7 +30,8 @@
     "materials:check": "node tools/run.mjs materials:check",
     "test:material-catalogs": "node tools/run.mjs test:material-catalogs",
     "test:materials": "node tools/run.mjs test:materials",
-    "test:parity": "node tools/run.mjs test:parity"
+    "test:parity": "node tools/run.mjs test:parity",
+    "infill:lab": "node tools/run.mjs infill:lab"
   },
   "devDependencies": {
     "prettier": "3.8.3",

@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# Licensed under the Open Software License version 3.0
+"""Immutable research inputs; no project, kernel or manufacturing authority."""
+
+from __future__ import annotations
+from dataclasses import asdict, dataclass
+import hashlib
+import json
+import math
+from pathlib import Path
+
+SCHEMA = 1
+
+
+def digest(value) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode()
+    ).hexdigest()
+
+
+def file_hash(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+@dataclass(frozen=True)
+class Candidate:
+    family: str = "uniform"
+    fraction: float = 0.2
+    axis: str = "alternating_xy"
+    cut: float = 0.7
+    region_fraction: float = 0.6
+    plate: float = 0.2
+    layer_height: float = 0.2
+    combine_height: float = 0.0
+
+    def __post_init__(self):
+        if self.family not in {"uniform", "crown", "flanges", "separator"}:
+            raise ValueError("unknown construction family")
+        if self.axis not in {"x", "y", "alternating_xy", "alternating_yx"}:
+            raise ValueError("unknown hatch axis")
+        if not all(
+            math.isfinite(x)
+            for x in (
+                self.fraction,
+                self.cut,
+                self.region_fraction,
+                self.plate,
+                self.layer_height,
+                self.combine_height,
+            )
+        ):
+            raise ValueError("nonfinite candidate")
+        if not (
+            0 < self.fraction <= 1
+            and 0 < self.region_fraction <= 1
+            and 0.1 <= self.cut <= 0.9
+            and 0.1 <= self.plate <= 0.8
+        ):
+            raise ValueError("candidate outside declared grammar")
+        if self.layer_height not in (0.1, 0.2) or self.combine_height not in (0.0, 0.3):
+            raise ValueError("unsupported study cadence")
+        if self.family == "flanges" and self.cut <= 0.5:
+            raise ValueError("flange bands must be disjoint")
+        if self.family == "separator" and self.axis not in {"x", "y"}:
+            raise ValueError("separator needs an explicit aligned hatch axis")
+
+    def data(self):
+        data = asdict(self)
+        if self.family == "uniform":
+            for key in ("cut", "region_fraction", "plate"):
+                data.pop(key)
+        elif self.family == "separator":
+            data.pop("plate")
+        return data
+
+    @property
+    def identity(self):
+        return digest(self.data())[:16]
+
+
+@dataclass(frozen=True)
+class Material:
+    young_mpa: float = 2300.0
+    poisson: float = 0.35
+    density_g_mm3: float = 0.00124
+    status: str = "assumed_isotropic_elastic_not_strength_calibration"
+
+    def __post_init__(self):
+        if not (
+            math.isfinite(self.young_mpa)
+            and self.young_mpa > 0
+            and -1 < self.poisson < 0.5
+            and math.isfinite(self.poisson)
+            and math.isfinite(self.density_g_mm3)
+            and self.density_g_mm3 > 0
+        ):
+            raise ValueError("invalid linear elastic material")
