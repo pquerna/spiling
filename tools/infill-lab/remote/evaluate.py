@@ -222,11 +222,17 @@ def main():
     p.add_argument("--input", type=Path, default=Path("/input"))
     p.add_argument("--output", type=Path, default=Path("/output"))
     p.add_argument(
-        "--backend", choices=("scipy", "warp", "coupon", "reference"), required=True
+        "--backend",
+        choices=("scipy", "warp", "coupon", "reference", "quadratic"),
+        required=True,
     )
     args = p.parse_args()
     try:
-        if args.backend == "reference":
+        if args.backend == "quadratic":
+            from quadratic import evaluate as evaluate_quadratic
+
+            result = evaluate_quadratic(args.input, args.output)
+        elif args.backend == "reference":
             from reference import evaluate as evaluate_reference
 
             result = evaluate_reference(args.input, args.output)
@@ -246,7 +252,7 @@ def main():
         json.dumps(result, indent=2, allow_nan=False) + "\n"
     )
     print(json.dumps(result, allow_nan=False), flush=True)
-    if args.backend == "reference" and result["status"] != "ok":
+    if args.backend in ("reference", "quadratic") and result["status"] != "ok":
         raise RuntimeError(
             "independent element scenarios failed; retained in trials.jsonl"
         )

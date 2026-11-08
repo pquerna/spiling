@@ -69,7 +69,14 @@ def context(destination):
     for name in (*CONTEXT, "launch.py"):
         origin = (
             HERE / name
-            if name in {"model.py", "geometry.py", "mechanics.py", "reference.py"}
+            if name
+            in {
+                "model.py",
+                "geometry.py",
+                "mechanics.py",
+                "reference.py",
+                "quadratic.py",
+            }
             else HERE / "remote" / name
         )
         shutil.copyfile(origin, destination / name)
@@ -466,7 +473,9 @@ def main():
     d.add_argument("--remote-root", required=True)
     d.add_argument("--run-id", required=True)
     d.add_argument("--seconds", type=int, default=600)
-    d.add_argument("--backend", choices=("coupon", "reference"), default="coupon")
+    d.add_argument(
+        "--backend", choices=("coupon", "reference", "quadratic"), default="coupon"
+    )
     d.add_argument("--cpus", type=int)
     d.add_argument("--blas-threads", type=int)
     for phase in ("results", "stiffness", "equation"):

@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# Reuse the exact installed scientific libraries; add no packages or compilers.
+ARG BASE=spiling/reference-base:must-be-selected
+FROM ${BASE}
+COPY evaluate.py model.py geometry.py mechanics.py coupon.py reference.py quadratic.py /opt/spiling-eval/

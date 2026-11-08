@@ -23,6 +23,7 @@ import uuid
 CONTEXT = (
     "Dockerfile",
     "Dockerfile.reference",
+    "Dockerfile.quadratic",
     "requirements.in",
     "requirements.lock",
     "build-requirements.in",
@@ -35,6 +36,7 @@ CONTEXT = (
     "mechanics.py",
     "coupon.py",
     "reference.py",
+    "quadratic.py",
 )
 
 
@@ -91,7 +93,10 @@ def image_tag(context):
 def build(args, root):
     context = args.context.resolve()
     tag = image_tag(context)
-    base = getattr(args, "reference_base", None)
+    quadratic_base = getattr(args, "quadratic_base", None)
+    base = quadratic_base or getattr(args, "reference_base", None)
+    if quadratic_base and getattr(args, "reference_base", None):
+        raise ValueError("select one research image recipe")
     if base is not None:
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", base):
             raise ValueError("immutable local reference base image required")
@@ -109,7 +114,10 @@ def build(args, root):
             "docker",
             "build",
             "--file",
-            str(context / "Dockerfile.reference"),
+            str(
+                context
+                / ("Dockerfile.quadratic" if quadratic_base else "Dockerfile.reference")
+            ),
             "--build-arg",
             "BASE=" + base_tag,
         ]
@@ -250,6 +258,8 @@ def run(args, root):
     ]
     for phase, count in phase_threads.items():
         create += ["--env", f"CCX_NPROC_{phase}={count}"]
+    if args.backend == "quadratic":
+        create += ["--env", "SPILING_INFILL_PROGRESS=1"]
     if args.backend == "warp":
         create += ["--device=nvidia.com/gpu=all"]
     create += [image["id"], "--backend", args.backend]
@@ -302,6 +312,9 @@ def main():
     b = sub.add_parser("build")
     b.add_argument("--context", type=Path, required=True)
     b.add_argument(
+        "--quadratic-base", help="exact existing evaluator image for TetP2 research"
+    )
+    b.add_argument(
         "--reference-base",
         help="exact existing evaluator image ID for isolated CalculiX layer",
     )
@@ -309,7 +322,9 @@ def main():
     r.add_argument("--input", type=Path, required=True)
     r.add_argument("--run-id", required=True)
     r.add_argument(
-        "--backend", choices=("scipy", "warp", "coupon", "reference"), required=True
+        "--backend",
+        choices=("scipy", "warp", "coupon", "reference", "quadratic"),
+        required=True,
     )
     r.add_argument("--seconds", type=float, default=300)
     r.add_argument("--memory-gib", type=float)

@@ -132,3 +132,46 @@ single-thread default. Retain solver logs, failures and exact complete panels.
 The official reference is the [CalculiX manual](https://www.dhondt.de/ccx_2.22.pdf);
 its element rules and environment controls do not replace testing the exact
 installed executable/image.
+
+## Scalable quadratic reference
+
+`quadratic_study.py` binds a TetP2 panel to the exact retained C3D10 case/result
+bytes. `quadratic.py` consumes the same conforming tetrahedral split and node
+identities as the external reference. scikit-fem supplies the quadratic basis
+and exact affine-tetrahedron quadrature; bounded sparse chunks assemble its
+matrix without retaining global basis/gradient arrays. The existing SciPy/PyAMG
+solver uses all corner/edge displacement DOFs, explicit rigid-body candidates,
+and the unchanged physical/scaled residual, reaction and energy checks. There
+is no fallback to a cheaper element, different contact model or looser tolerance.
+
+Build an optional image with `launch.py ... build --context CONTEXT
+--quadratic-base sha256:EXACT_EXISTING_IMAGE_ID`. This recipe copies only reviewed
+source into the exact existing scientific image: no packages, compiler, host
+software or drivers are added. Copy the resulting immutable image to the other
+host and verify its ID before dispatch. The earlier CalculiX cohort stays frozen.
+
+```sh
+python tools/infill-lab/quadratic_study.py --inputs FROZEN_CCX_INPUTS \
+  --results RETAINED_CCX_RESULTS --context FROZEN_CONTEXT --output NEW_INPUTS \
+  --solvers amg --divisions 1 2 4 8
+python tools/infill-lab/campaign.py dispatch --backend quadratic \
+  --input NEW_INPUTS --output NEW_RESULTS --hosts HOST1 HOST2 \
+  --remote-root DEDICATED_PREFIX --run-id quadratic --seconds 1800 \
+  --blas-threads 1
+python tools/infill-lab/quadratic_report.py --input NEW_INPUTS \
+  --results NEW_RESULTS --output REPORT.json
+```
+
+Reference-parity cases require the original component inventory and selected
+response within 1e-5 (external DAT precision), alongside the stricter existing
+FP64 solve checks. Cases lacking an external response are explicitly refinement
+work, not external positives. Missing or rejected fine cases remain required.
+Admit the largest cases from observed matrix/AMG memory, with external CPU/RAM/PID
+and wall limits; unused physical RAM is not a reason to shrink the geometry.
+
+`--solvers superlu_mmd amg` permits a controlled same-matrix cost pair. The report
+only provides a speed ratio for matching image/thread policy, host and resource
+limits, with agreeing complete numerical responses. Order, background work and
+single-case scope still belong in the evidence. Numerical parity and a refined
+TetP2 response do not by themselves qualify independent-formulation convergence,
+whole-part behavior, buckling, calibrated interfaces or physical strength.
