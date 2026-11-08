@@ -68,6 +68,130 @@ const POSE: &str =
 const MOVED: &str = r#"{"translation_mm":[60,0,0],"rotation_xyzw":[0,0,0,1]}"#;
 
 #[test]
+#[ignore = "actual native Analyze case workflow; requires SPILING_TEST_ENGINE"]
+fn analysis_cases_roundtrip_through_separate_cli_processes_without_the_source_file() {
+    let root = root();
+    let project = root.join("analysis.spil");
+    let source = root.join("part.step");
+    std::fs::copy(fixture("box-mm.step"), &source).unwrap();
+    let created = report(
+        cli("create", &project)
+            .arg("--import")
+            .arg(&source)
+            .args(["--analysis-case", "Hook load", "1", "basic"])
+            .output()
+            .unwrap(),
+    );
+    let load = created["definitions"][0]["faces"][0]["face_id"]
+        .as_str()
+        .unwrap();
+    let fixed = created["definitions"][0]["faces"][1]["face_id"]
+        .as_str()
+        .unwrap();
+    let edited = report(
+        cli("edit", &project)
+            .args([
+                "--analysis-load",
+                "Hook load",
+                load,
+                "0",
+                "-12",
+                "0",
+                "15",
+                "0",
+                "0",
+                "--analysis-fix",
+                "Hook load",
+                fixed,
+            ])
+            .output()
+            .unwrap(),
+    );
+    let case = &edited["project"]["analysis"]["cases"][0]["case"];
+    assert_eq!(case["mode"], "basic");
+    assert_eq!(
+        case["loads"][0]["force_n"],
+        serde_json::json!([0.0, -12.0, 0.0])
+    );
+    assert_eq!(
+        case["loads"][0]["moment_n_mm"],
+        serde_json::json!([15.0, 0.0, 0.0])
+    );
+    assert_eq!(
+        case["restraints"][0]["fixed_translation"],
+        serde_json::json!([true, true, true])
+    );
+    std::fs::remove_file(source).unwrap();
+    let reopened = report(cli("inspect", &project).output().unwrap());
+    assert_eq!(
+        reopened["project"]["analysis"],
+        edited["project"]["analysis"]
+    );
+    assert_eq!(
+        reopened["project"]["revision"],
+        edited["project"]["revision"]
+    );
+    let changed = report(
+        cli("edit", &project)
+            .args([
+                "--analysis-case",
+                "Hook load",
+                "1",
+                "enhanced",
+                "--analysis-load",
+                "Hook load",
+                load,
+                "0",
+                "-24",
+                "0",
+                "15",
+                "0",
+                "0",
+                "--undo",
+                "--redo",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        changed["project"]["analysis"]["cases"][0]["case"]["id"],
+        case["id"]
+    );
+    assert_eq!(
+        changed["project"]["analysis"]["cases"][0]["case"]["mode"],
+        "enhanced"
+    );
+    let rejected = cli("inspect", &project)
+        .args(["--analysis-case", "Other", "1", "basic"])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    failure(
+        cli("edit", &project)
+            .args([
+                "--analysis-load",
+                "Hook load",
+                "step:999999",
+                "0",
+                "-20",
+                "0",
+                "0",
+                "0",
+                "0",
+            ])
+            .output()
+            .unwrap(),
+        "invalid_project",
+    );
+    let final_state = report(cli("inspect", &project).output().unwrap());
+    assert_eq!(
+        final_state["project"]["analysis"],
+        changed["project"]["analysis"]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 #[ignore = "actual native CLI maintenance; requires SPILING_TEST_ENGINE"]
 fn storage_maintenance_uses_real_saved_file_and_preserves_committed_identity() {
     let root = root();

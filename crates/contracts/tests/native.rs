@@ -202,6 +202,7 @@ fn clean_new_and_semantically_clean_undo_project_info_are_valid() {
         process_document: spiling_contracts::process::ProcessDocument::empty(),
         resolved_process: vec![],
         appearance_study: spiling_contracts::appearance::AppearanceStudy::default().info(),
+        analysis: Default::default(),
         materials: None,
     };
     let wire: rpc::ProjectInfo = info.clone().try_into().unwrap();
@@ -279,6 +280,7 @@ fn failed_committed_save_keeps_operation_specific_uncertain_receipt() {
         process_document: spiling_contracts::process::ProcessDocument::empty(),
         resolved_process: vec![],
         appearance_study: spiling_contracts::appearance::AppearanceStudy::default().info(),
+        analysis: Default::default(),
         materials: None,
     };
     let result = JobResult::ProjectSaveUncertain { info: info.clone() };
@@ -511,6 +513,7 @@ fn surface_commands_have_checked_typed_roundtrips_and_no_missing_kind_defaults()
         process_document: spiling_contracts::process::ProcessDocument::empty(),
         resolved_process: vec![],
         appearance_study: spiling_contracts::appearance::AppearanceStudy::default().info(),
+        analysis: Default::default(),
         materials: None,
     };
     let mut wire: rpc::ProjectInfo = info.try_into().unwrap();
@@ -695,6 +698,7 @@ fn imported_image_receipt_matches_authoritative_metadata_and_new_layer() {
         process_document: spiling_contracts::process::ProcessDocument::empty(),
         resolved_process: vec![],
         appearance_study: spiling_contracts::appearance::AppearanceStudy::default().info(),
+        analysis: Default::default(),
         materials: None,
     };
     let result = JobResult::SurfaceImageImported {

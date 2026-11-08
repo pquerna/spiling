@@ -15,7 +15,8 @@ pub(super) enum Navigation {
 impl Workbench {
     pub(super) fn project_drafts(&self) -> bool {
         self.state.project.as_ref().is_some_and(|p| {
-            self.manufacturing.trial.is_some()
+            self.mechanics.has_changes()
+                || self.manufacturing.trial.is_some()
                 || self
                     .manufacturing
                     .has_intent_draft(&p.project_id, self.state.manufacturing.intent.as_deref())
@@ -110,6 +111,7 @@ impl Workbench {
             self.pose = self.pose_original;
             match next {
                 Navigation::Action(action) => {
+                    self.mechanics.discard();
                     if action == Action::Close {
                         self.library.discard_drafts();
                     }
@@ -124,6 +126,7 @@ impl Workbench {
                     self.queued = Some(action);
                 }
                 Navigation::Plate(id) => {
+                    self.mechanics.discard();
                     self.discard_preparation_drafts();
                     self.material.discard(
                         self.state

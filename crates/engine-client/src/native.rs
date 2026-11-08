@@ -285,6 +285,10 @@ impl EngineRpc {
         if let ProjectCommand::EditProcess { edit, .. } = &command {
             edit.validate()?;
         }
+        if let ProjectCommand::EditAnalysis { edit, .. } = &command {
+            edit.validate()
+                .map_err(|error| ClientError::InvalidRequest(error.to_string()))?;
+        }
         if let ProjectCommand::SetAppearanceTarget { target, limits, .. } = &command {
             target.validate()?;
             limits.validate()?;
@@ -333,6 +337,7 @@ impl EngineRpc {
             | ProjectCommand::Undo { .. }
             | ProjectCommand::Redo { .. }
             | ProjectCommand::EditProcess { .. }
+            | ProjectCommand::EditAnalysis { .. }
             | ProjectCommand::AddSurfaceFinish { .. }
             | ProjectCommand::GetSurfaceImage { .. }
             | ProjectCommand::SetAppearanceTarget { .. }

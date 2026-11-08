@@ -1250,6 +1250,7 @@ mod public_state_tests {
             }],
             process_document: document,
             appearance_study: crate::appearance::AppearanceStudy::default().info(),
+            analysis: Default::default(),
             materials: None,
         };
         let wire: crate::rpc::ProjectInfo = info.clone().try_into().unwrap();

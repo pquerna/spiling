@@ -13,6 +13,7 @@ fn manifest() -> ProjectManifest {
         next_process_operation: 1,
         process_document: crate::process::ProcessDocument::empty(),
         appearance_study: AppearanceStudy::default(),
+        analysis: Default::default(),
         materials: None,
         format_version: PROJECT_FORMAT_VERSION,
         project_id: ProjectId::new(),

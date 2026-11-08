@@ -10,6 +10,7 @@ pub(super) enum Panel {
     Parts,
     Prepare,
     Review,
+    Mechanics,
     Surface,
     Study,
     Alternative,
@@ -28,6 +29,7 @@ impl WorkArea {
         match self.workspace {
             Workspace::Prepare => Panel::Parts,
             Workspace::Review => Panel::Review,
+            Workspace::Analyze => Panel::Mechanics,
         }
     }
     pub fn close_task(&mut self) {
@@ -43,11 +45,13 @@ impl WorkArea {
         match self.workspace {
             Workspace::Prepare => self.prepare = self.panel,
             Workspace::Review => self.review = Some(self.panel),
+            Workspace::Analyze => {}
         }
         self.workspace = workspace;
         self.panel = match workspace {
             Workspace::Prepare => self.prepare,
             Workspace::Review => self.review.unwrap_or(Panel::Review),
+            Workspace::Analyze => Panel::Mechanics,
         };
     }
     pub fn open(&mut self, panel: Panel) {
@@ -58,6 +62,7 @@ impl WorkArea {
         } else {
             self.switch(match panel {
                 Panel::Review | Panel::Alternative | Panel::Option => Workspace::Review,
+                Panel::Mechanics => Workspace::Analyze,
                 _ => Workspace::Prepare,
             });
         }
@@ -119,6 +124,7 @@ impl Workbench {
         match action {
             Action::PrepareWorkspace => self.select_workspace(Workspace::Prepare, ctx),
             Action::ReviewWorkspace => self.select_workspace(Workspace::Review, ctx),
+            Action::AnalyzeWorkspace => self.select_workspace(Workspace::Analyze, ctx),
             Action::Properties
             | Action::Printer
             | Action::Material
@@ -184,6 +190,7 @@ impl Workbench {
             Panel::Surface => Action::Surface,
             Panel::Study => Action::Study,
             Panel::Review => Action::ReviewLayers,
+            Panel::Mechanics => Action::AnalyzeWorkspace,
             Panel::Alternative | Panel::Option => Action::Compare,
         })
     }
@@ -313,6 +320,10 @@ impl Workbench {
         });
     }
     pub(super) fn properties_pane(&mut self, ui: &mut egui::Ui) {
+        if self.work_area.workspace == Workspace::Analyze && ui::close(ui, "Back to analysis case")
+        {
+            self.show_panel(Panel::Mechanics);
+        }
         if self.work_area.workspace == Workspace::Review && ui::close(ui, "Back to layers") {
             self.show_panel(Panel::Review);
         }
@@ -350,6 +361,25 @@ impl Workbench {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn analyze_navigation_retains_other_tasks_and_section_inspection_is_not_a_case() {
+        let mut area = WorkArea::default();
+        area.open(Panel::Surface);
+        area.switch(Workspace::Analyze);
+        assert_eq!(area.panel, Panel::Mechanics);
+        area.panel = Panel::Parts;
+        area.close_task();
+        assert_eq!(area.panel, Panel::Mechanics);
+        area.switch(Workspace::Prepare);
+        assert_eq!(area.panel, Panel::Surface);
+        area.switch(Workspace::Analyze);
+        area.open(Panel::Study);
+        area.close_study();
+        assert_eq!(
+            (area.workspace, area.panel),
+            (Workspace::Analyze, Panel::Mechanics)
+        );
+    }
     #[test]
     fn completed_adoption_does_not_steal_preparation_and_plate_return_has_no_orphan_trial() {
         let mut area = WorkArea::default();

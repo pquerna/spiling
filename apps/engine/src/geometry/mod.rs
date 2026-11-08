@@ -2225,6 +2225,32 @@ impl Runtime {
                 self.metadata_base(&session_id, base_revision)?;
                 self.commit_metadata_edit(Edit::Process { edit })
             }
+            ProjectCommand::EditAnalysis {
+                session_id,
+                base_revision,
+                edit,
+            } => {
+                self.metadata_base(&session_id, base_revision)?;
+                edit.validate()?;
+                if let spiling_contracts::analysis::AnalysisEdit::Put { case } = &edit {
+                    if case.layout_id != self.project.snapshot().focused_layout {
+                        return Err(project_error(
+                            ProjectErrorCode::InvalidProject,
+                            "select the analysis case's print layout before editing",
+                        ));
+                    }
+                    for face_id in case.patch_faces() {
+                        self.live_surface_target(&FaceRef {
+                            session_id: session_id.clone(),
+                            scene_revision: self.revision,
+                            occurrence_id: case.occurrence_id,
+                            definition_id: case.definition_id.clone(),
+                            face_id: face_id.clone(),
+                        })?;
+                    }
+                }
+                self.commit_metadata_edit(Edit::Analysis { edit })
+            }
             ProjectCommand::ImportSurfaceImageFinish {
                 session_id,
                 base_revision,

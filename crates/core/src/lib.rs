@@ -236,11 +236,15 @@ pub struct Snapshot {
     pub process_document: Arc<ProcessDocument>,
     pub surface_images: BTreeMap<SourceHash, Arc<SurfaceImageAsset>>,
     pub appearance_study: Arc<AppearanceStudy>,
+    pub analysis: Arc<spiling_contracts::analysis::AnalysisDocument>,
     pub materials: Option<Arc<materials::MaterialAsset>>,
     pub appearance_palettes: BTreeMap<SourceHash, Arc<PaletteAsset>>,
 }
 #[derive(Debug, Clone)]
 pub enum Edit {
+    Analysis {
+        edit: spiling_contracts::analysis::AnalysisEdit,
+    },
     PrintLayout {
         edit: PrintLayoutEdit,
     },
@@ -382,6 +386,7 @@ struct Content {
     surface_overlays: Arc<SurfaceOverlays>,
     process_document: Arc<ProcessDocument>,
     appearance_study: AppearanceStudyInfo,
+    analysis: Arc<spiling_contracts::analysis::AnalysisDocument>,
     materials: Option<spiling_contracts::library::MaterialCollectionRecord>,
 }
 impl Content {
@@ -390,6 +395,7 @@ impl Content {
             && self.materials.as_ref() == snapshot.materials.as_ref().map(|a| a.record())
             && self.surface_overlays == snapshot.surface_overlays
             && self.process_document == snapshot.process_document
+            && self.analysis == snapshot.analysis
             && self.appearance_study.palette == snapshot.appearance_study.palette
             && self.appearance_study.target == snapshot.appearance_study.target
             && self.appearance_study.limits == snapshot.appearance_study.limits
@@ -420,6 +426,7 @@ impl Content {
             surface_overlays: Arc::new(manifest.surface_overlays.clone()),
             process_document: Arc::new(manifest.process_document.clone()),
             appearance_study: manifest.appearance_study.info(),
+            analysis: Arc::new(manifest.analysis.clone()),
             materials: manifest.materials.clone(),
         }
     }
@@ -485,6 +492,7 @@ impl Project {
             process_document: Arc::new(loaded.manifest.process_document.clone()),
             surface_images: loaded.surface_images,
             appearance_study: Arc::new(loaded.manifest.appearance_study.clone()),
+            analysis: Arc::new(loaded.manifest.analysis.clone()),
             appearance_palettes: loaded.appearance_palettes,
             materials: loaded.materials,
         };
@@ -526,6 +534,7 @@ impl Project {
                     || !self.current.surface_overlays.layers.is_empty()
                     || !self.current.process_document.layers.is_empty()
                     || *self.current.appearance_study != AppearanceStudy::default()
+                    || !self.current.analysis.cases.is_empty()
                     || self.current.materials.is_some()
                     || self.current.hardware.is_some(),
                 |(_, content)| !content.matches(&self.current),
@@ -555,6 +564,7 @@ impl Project {
             surface_overlays,
             process_document,
             appearance_study: self.current.appearance_study.info(),
+            analysis: (*self.current.analysis).clone(),
             materials: self.current.materials.as_ref().map(|a| a.record().clone()),
             hardware: self.current.hardware.clone(),
             manufacturing_options: self
@@ -911,6 +921,69 @@ impl Project {
                 study.report = None;
                 study.report_record = None;
                 study.selection = None;
+            }
+            Edit::Analysis { edit } => {
+                use spiling_contracts::analysis::{AnalysisCaseRecord, AnalysisEdit};
+                edit.validate()?;
+                if let AnalysisEdit::Put { case } = &edit {
+                    let source_matches =
+                        snapshot
+                            .sources
+                            .get(&case.definition_id)
+                            .is_some_and(|source| {
+                                source.record.provenance.source_hash == case.source_hash
+                            });
+                    let occurrence_matches = snapshot.layouts.iter().any(|layout| {
+                        layout.layout_id == case.layout_id
+                            && layout.occurrences.get(&case.occurrence_id).is_some_and(
+                                |occurrence| occurrence.definition_id == case.definition_id,
+                            )
+                    });
+                    if !source_matches || !occurrence_matches {
+                        return Err(invalid(
+                            "analysis case subject differs from the native project",
+                        ));
+                    }
+                }
+                let revision = self.revision.next()?;
+                let document = Arc::make_mut(&mut snapshot.analysis);
+                match edit {
+                    AnalysisEdit::Put { case } => {
+                        let record = AnalysisCaseRecord {
+                            case,
+                            edited_revision: revision,
+                        };
+                        if let Some(existing) = document
+                            .cases
+                            .iter_mut()
+                            .find(|existing| existing.case.id == record.case.id)
+                        {
+                            if existing.case.occurrence_id != record.case.occurrence_id
+                                || existing.case.definition_id != record.case.definition_id
+                                || existing.case.source_hash != record.case.source_hash
+                                || existing.case.layout_id != record.case.layout_id
+                            {
+                                return Err(invalid(
+                                    "analysis case source binding is immutable; create a new case",
+                                ));
+                            }
+                            if existing.case != record.case {
+                                *existing = record;
+                            }
+                        } else {
+                            document.cases.push(record);
+                        }
+                    }
+                    AnalysisEdit::Remove { case_id } => {
+                        let index = document
+                            .cases
+                            .iter()
+                            .position(|record| record.case.id == case_id)
+                            .ok_or_else(|| invalid("analysis case does not exist"))?;
+                        document.cases.remove(index);
+                    }
+                }
+                document.validate()?;
             }
             Edit::AcceptAppearanceReport { report, selection } => {
                 snapshot.appearance_study.matches_report(&report)?;
@@ -1308,6 +1381,36 @@ impl Project {
             }
         }
         snapshot.invalidate_changed_layout_results(&self.project_id)?;
+        let subjects: BTreeMap<_, _> = snapshot
+            .layouts
+            .iter()
+            .flat_map(|layout| {
+                layout.occurrences.values().map(|occurrence| {
+                    (
+                        (occurrence.occurrence_id, occurrence.definition_id.clone()),
+                        layout.layout_id.clone(),
+                    )
+                })
+            })
+            .collect();
+        if snapshot.analysis.cases.iter().any(|record| {
+            subjects.get(&(record.case.occurrence_id, record.case.definition_id.clone()))
+                != Some(&record.case.layout_id)
+        }) {
+            let document = Arc::make_mut(&mut snapshot.analysis);
+            document.cases.retain_mut(|record| {
+                let Some(layout_id) =
+                    subjects.get(&(record.case.occurrence_id, record.case.definition_id.clone()))
+                else {
+                    return false;
+                };
+                if &record.case.layout_id != layout_id {
+                    record.case.layout_id = layout_id.clone();
+                    record.edited_revision = self.revision.next().expect("revision admitted above");
+                }
+                true
+            });
+        }
         let skip = usize::from(self.undo.len() == MAX_PROJECT_HISTORY);
         validate_pins(
             std::iter::once(&snapshot)
@@ -1430,6 +1533,12 @@ impl Project {
         candidate.surface_overlays = (*snapshot.surface_overlays).clone();
         candidate.process_document = (*snapshot.process_document).clone();
         candidate.appearance_study = (*snapshot.appearance_study).clone();
+        candidate.analysis = (*snapshot.analysis).clone();
+        candidate.analysis.validate_subjects(
+            &candidate.definitions,
+            &candidate.layouts,
+            candidate.revision,
+        )?;
         validate_manifest_size(&candidate)?;
         let snapshot = Arc::new(snapshot);
         let mut staged = self
@@ -1438,6 +1547,32 @@ impl Project {
             .map_err(|_| error(ProjectErrorCode::Io, "appearance staging lock poisoned"))?;
         staged.retain(|state| state.strong_count() != 0);
         let live: Vec<_> = staged.iter().filter_map(Weak::upgrade).collect();
+        let mut analysis_allocations = BTreeMap::new();
+        for retained in std::iter::once(snapshot.as_ref())
+            .chain(std::iter::once(self.current.as_ref()))
+            .chain(self.undo.iter().map(Arc::as_ref))
+            .chain(self.redo.iter().map(Arc::as_ref))
+            .chain(live.iter().map(Arc::as_ref))
+        {
+            analysis_allocations.insert(
+                Arc::as_ptr(&retained.analysis),
+                retained.analysis.allocated_bytes(),
+            );
+        }
+        if let Some((_, saved)) = &self.saved {
+            analysis_allocations.insert(
+                Arc::as_ptr(&saved.analysis),
+                saved.analysis.allocated_bytes(),
+            );
+        }
+        if analysis_allocations.values().sum::<usize>()
+            > spiling_contracts::analysis::MAX_ANALYSIS_RETAINED_BYTES
+        {
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "retained/staged analysis exceeds 4 MiB",
+            ));
+        }
         if manufacturing_options::retained_bytes(
             std::iter::once(snapshot.as_ref())
                 .chain(std::iter::once(self.current.as_ref()))
@@ -1573,6 +1708,7 @@ impl Project {
             surface_overlays: (*self.current.surface_overlays).clone(),
             process_document: (*self.current.process_document).clone(),
             appearance_study: (*self.current.appearance_study).clone(),
+            analysis: (*self.current.analysis).clone(),
             materials: self.current.materials.as_ref().map(|a| a.record().clone()),
             next_process_layer: self.next_process_layer,
             next_process_operation: self.next_process_operation,
@@ -2194,6 +2330,8 @@ fn validate_manufacturing_input(
     }
     Ok(())
 }
+#[cfg(test)]
+mod analysis_tests;
 #[cfg(test)]
 mod optical_tests;
 #[cfg(test)]

@@ -1,0 +1,26 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
+syntax = "proto3";
+package spiling.engine;
+
+enum AnalysisMode { ANALYSIS_MODE_UNSPECIFIED = 0; ANALYSIS_MODE_BASIC = 1; ANALYSIS_MODE_ENHANCED = 2; }
+message AnalysisFaceLoad { string face_id = 1; repeated double force_n = 2; repeated double moment_n_mm = 3; }
+message AnalysisFaceRestraint { string face_id = 1; repeated bool fixed_translation = 2; }
+message AnalysisCase {
+ string id = 1;
+ string name = 2;
+ string layout_id = 3;
+ uint32 occurrence_id = 4;
+ string definition_id = 5;
+ string source_hash = 6;
+ AnalysisMode mode = 7;
+ repeated AnalysisFaceLoad loads = 8;
+ repeated AnalysisFaceRestraint restraints = 9;
+}
+message AnalysisCaseRecord { AnalysisCase case = 1; uint32 edited_revision = 2; }
+message AnalysisDocument { repeated AnalysisCaseRecord cases = 1; }
+message AnalysisEdit {
+ oneof edit { AnalysisCase put = 1; string remove = 2; }
+}
+message EditAnalysisRequest { uint32 base_revision = 1; AnalysisEdit edit = 2; }

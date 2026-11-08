@@ -1831,6 +1831,7 @@ fn root_parsing_is_strict_without_legacy_or_missing_field_defaults() {
     let original = serde_json::to_value(&manifest).unwrap();
     for missing in [
         "appearance_study",
+        "analysis",
         "next_surface_layer",
         "next_process_layer",
         "next_process_operation",

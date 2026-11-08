@@ -1022,6 +1022,7 @@ fn open(
         {
             validate_provenance(&resident.definition, source)?;
             validate_surface_targets(&resident.definition, &loaded.manifest.surface_overlays)?;
+            validate_analysis_targets(&resident.definition, &loaded.manifest.analysis)?;
             imports.push(imported(
                 &resident.definition,
                 source.clone(),
@@ -1033,6 +1034,7 @@ fn open(
             let definition = capacity.admit(source.bytes.as_slice(), cancel)?;
             validate_provenance(&definition, source)?;
             validate_surface_targets(&definition, &loaded.manifest.surface_overlays)?;
+            validate_analysis_targets(&definition, &loaded.manifest.analysis)?;
             drop(native);
             let tessellation = crate::performance::span("open_tessellate");
             let display = capacity.display(&definition, cancel, work, progress)?;
@@ -1059,6 +1061,27 @@ fn open(
         imports,
         residents: pending,
     })
+}
+fn validate_analysis_targets(
+    definition: &Definition,
+    document: &spiling_contracts::analysis::AnalysisDocument,
+) -> Result<(), ProjectError> {
+    for record in &document.cases {
+        if &record.case.definition_id == definition.id()
+            && record.case.patch_faces().any(|face_id| {
+                !definition
+                    .faces()
+                    .iter()
+                    .any(|face| &face.face_id == face_id)
+            })
+        {
+            return Err(ProjectError::new(
+                ProjectErrorCode::InvalidProject,
+                "stored analysis patch is absent from the authoritative native source face table",
+            ));
+        }
+    }
+    Ok(())
 }
 fn validate_surface_targets(
     definition: &Definition,

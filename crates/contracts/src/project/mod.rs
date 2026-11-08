@@ -178,6 +178,7 @@ pub struct ProjectManifest {
     pub next_process_operation: u32,
     pub process_document: ProcessDocument,
     pub appearance_study: AppearanceStudy,
+    pub analysis: crate::analysis::AnalysisDocument,
     #[serde(deserialize_with = "required_option")]
     pub materials: Option<crate::library::MaterialCollectionRecord>,
     pub definitions: Vec<StoredDefinition>,
@@ -280,6 +281,8 @@ impl ProjectManifest {
             self.next_process_operation,
         )?;
         self.appearance_study.validate()?;
+        self.analysis
+            .validate_subjects(&self.definitions, &self.layouts, self.revision)?;
         Ok(())
     }
 }
@@ -301,6 +304,7 @@ pub struct ProjectInfo {
     pub surface_overlays: SurfaceOverlays,
     pub process_document: ProcessDocument,
     pub appearance_study: AppearanceStudyInfo,
+    pub analysis: crate::analysis::AnalysisDocument,
     pub materials: Option<crate::library::MaterialCollectionRecord>,
     #[serde(deserialize_with = "required_option")]
     pub hardware: Option<Arc<crate::hardware::ProjectHardwareCapture>>,
@@ -310,6 +314,11 @@ pub struct ProjectInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectCommand {
+    EditAnalysis {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        edit: crate::analysis::AnalysisEdit,
+    },
     SelectPrintLayout {
         session_id: SessionId,
         base_revision: ProjectRevision,

@@ -10,6 +10,7 @@ pub fn workspace_tabs(ui: &mut Ui, workspace: Workspace) -> Option<Action> {
     for (value, action) in [
         (Workspace::Prepare, Action::PrepareWorkspace),
         (Workspace::Review, Action::ReviewWorkspace),
+        (Workspace::Analyze, Action::AnalyzeWorkspace),
     ] {
         if ui
             .selectable_label(workspace == value, action.label())
@@ -43,6 +44,10 @@ fn groups(workspace: Workspace) -> &'static [(&'static str, &'static [Action])] 
         ],
         Workspace::Review => &[
             ("Output", &[Action::ReviewLayers, Action::Compare]),
+            ("Inspect", &[Action::Properties, Action::Analysis]),
+        ],
+        Workspace::Analyze => &[
+            ("Case", &[Action::AnalyzeWorkspace]),
             ("Inspect", &[Action::Properties, Action::Analysis]),
         ],
     }
@@ -126,7 +131,7 @@ mod tests {
     fn workspace_commands_remain_inside_narrow_and_wide_surfaces() {
         for theme in [super::super::Theme::Graphite, super::super::Theme::Paper] {
             for width in [320.0, 760.0, 1180.0] {
-                for workspace in [Workspace::Prepare, Workspace::Review] {
+                for workspace in [Workspace::Prepare, Workspace::Review, Workspace::Analyze] {
                     let ctx = egui::Context::default();
                     theme.apply(&ctx);
                     for _ in 0..2 {

@@ -391,6 +391,7 @@ fn load_assets(
         surface_overlays: Arc::new(manifest.surface_overlays.clone()),
         process_document: Arc::new(manifest.process_document.clone()),
         appearance_study: Arc::new(manifest.appearance_study.clone()),
+        analysis: Arc::new(manifest.analysis.clone()),
         ..Snapshot::default()
     };
     super::hardware::share_capture(&mut snapshot);

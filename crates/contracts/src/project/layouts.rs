@@ -28,6 +28,9 @@ impl PrintLayoutId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.0.capacity()
+    }
 }
 impl Default for PrintLayoutId {
     fn default() -> Self {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod analysis;
 mod layout;
 mod plates;
 
@@ -80,6 +81,7 @@ enum OpticalChoice {
     reason = "Bounded ordered controls retain complete recipe operands inline without per-operation boxing"
 )]
 enum Operation {
+    Analysis(analysis::Action),
     Plate(plates::Action),
     StockMatch(spiling_contracts::stock::StockQuery),
     StockKeepPair(usize, String),
@@ -448,6 +450,9 @@ pub fn parse(
                 };
                 value.validate()?;
                 operations.push(Operation::ProcessSet(occurrence, scope, value));
+            }
+            Some(flag) if flag.starts_with("--analysis-") => {
+                operations.push(Operation::Analysis(analysis::parse(flag, &mut args)?));
             }
             Some("--process-set-box") => {
                 let occurrence =
@@ -1332,6 +1337,10 @@ async fn execute(
         let mut process_resolution = None;
         let mut storage_maintenance = None;
         match operation {
+            Operation::Analysis(action) => {
+                label = "analysis_edit";
+                analysis::execute(client, &session, action).await?;
+            }
             Operation::EvaluateAlternative(_)
             | Operation::EvaluateOption(_)
             | Operation::CheckInteriorDefault => {

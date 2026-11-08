@@ -12,6 +12,7 @@ mod tests {
         for action in [
             super::Action::PrepareWorkspace,
             super::Action::ReviewWorkspace,
+            super::Action::AnalyzeWorkspace,
             super::Action::Surface,
         ] {
             assert!(action.disabled(&state).is_none());
@@ -34,12 +35,14 @@ pub enum Workspace {
     #[default]
     Prepare,
     Review,
+    Analyze,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     PrepareWorkspace,
     ReviewWorkspace,
+    AnalyzeWorkspace,
     Properties,
     Printer,
     Material,
@@ -82,6 +85,7 @@ impl Action {
     pub const ALL: &[Self] = &[
         Self::PrepareWorkspace,
         Self::ReviewWorkspace,
+        Self::AnalyzeWorkspace,
         Self::Properties,
         Self::Printer,
         Self::Material,
@@ -124,6 +128,7 @@ impl Action {
         match self {
             Self::PrepareWorkspace => "Prepare",
             Self::ReviewWorkspace => "Review",
+            Self::AnalyzeWorkspace => "Analyze",
             Self::Properties => "Properties",
             Self::Printer => "Printer",
             Self::Material => "Material",
@@ -168,6 +173,7 @@ impl Action {
             self,
             Self::PrepareWorkspace
                 | Self::ReviewWorkspace
+                | Self::AnalyzeWorkspace
                 | Self::Properties
                 | Self::Printer
                 | Self::Material

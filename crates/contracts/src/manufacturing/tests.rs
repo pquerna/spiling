@@ -2515,6 +2515,7 @@ fn manifest_artifact_must_reference_current_explicit_intent_and_input_hash() {
         next_process_operation: 1,
         process_document: crate::process::ProcessDocument::empty(),
         appearance_study: crate::appearance::AppearanceStudy::default(),
+        analysis: Default::default(),
         materials: None,
         format_version: crate::project::PROJECT_FORMAT_VERSION,
         project_id: p.project_id.clone(),

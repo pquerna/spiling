@@ -443,6 +443,17 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
                 selection,
             }),
         ),
+        ProjectCommand::EditAnalysis {
+            session_id,
+            base_revision,
+            edit,
+        } => (
+            session_id,
+            C::EditAnalysis(rpc::EditAnalysisRequest {
+                base_revision: base_revision.0,
+                edit: Some(edit.try_into()?),
+            }),
+        ),
         ProjectCommand::EditProcess {
             session_id,
             base_revision,
@@ -750,6 +761,11 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
                     selection: v.selection,
                 }
             }
+            C::EditAnalysis(value) => Self::EditAnalysis {
+                session_id,
+                base_revision: ProjectRevision(value.base_revision),
+                edit: required(value.edit, "analysis edit")?.try_into()?,
+            },
             C::EditProcess(v) => Self::EditProcess {
                 session_id,
                 base_revision: ProjectRevision(v.base_revision),
@@ -948,6 +964,16 @@ pub fn validate_project_info(v: &ProjectInfo) -> Result<(), String> {
     }
     v.surface_overlays.validate().map_err(|e| e.to_string())?;
     v.process_document.validate().map_err(|e| e.to_string())?;
+    v.analysis.validate().map_err(|error| error.to_string())?;
+    if v.analysis.cases.iter().any(|record| {
+        record.edited_revision > v.revision
+            || !v
+                .layouts
+                .iter()
+                .any(|layout| layout.layout_id == record.case.layout_id)
+    }) {
+        return Err("analysis summary revision or layout is invalid".into());
+    }
     v.appearance_study
         .validate()
         .map_err(|error| error.to_string())?;
@@ -1026,6 +1052,7 @@ impl TryFrom<rpc::ProjectInfo> for ProjectInfo {
             hardware: v.hardware.map(|h| h.try_into().map(Arc::new)).transpose()?,
             appearance_study: required(v.appearance_study, "project appearance study")?
                 .try_into()?,
+            analysis: required(v.analysis, "project analysis document")?.try_into()?,
             resolved_process: v
                 .resolved_process
                 .into_iter()
@@ -1065,6 +1092,7 @@ impl TryFrom<ProjectInfo> for rpc::ProjectInfo {
             surface_overlays: Some(v.surface_overlays.try_into()?),
             process_document: Some(v.process_document.try_into()?),
             appearance_study: Some(v.appearance_study.try_into()?),
+            analysis: Some(v.analysis.try_into()?),
             materials: v.materials.map(TryInto::try_into).transpose()?,
             hardware: v.hardware.map(|h| (*h).clone().try_into()).transpose()?,
             resolved_process: v

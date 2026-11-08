@@ -18,6 +18,224 @@ use support::{copy_project, manifest, write_manifest};
 
 const ENGINE: &str = env!("CARGO_BIN_EXE_spiling-engine");
 
+#[tokio::test]
+async fn analysis_cases_check_native_patches_and_survive_history_source_absent_reopen() {
+    use spiling_contracts::analysis::*;
+    let workspace = Workspace::new();
+    let source = workspace.source("box-mm.step");
+    let path = workspace.path("analysis.spil");
+    let store = tempfile::tempdir().unwrap();
+    let mut client = EngineClient::spawn_command_with_compute(
+        Command::new(ENGINE),
+        store.path(),
+        spiling_contracts::compute::ComputeSettings {
+            default_backend: spiling_contracts::compute::ComputeBackend::Cpu,
+            fea_backend: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        client.hello().compute.default_device.backend,
+        spiling_contracts::compute::ComputeBackend::Cpu
+    );
+    let native_setup = Instant::now();
+    import(&mut client, &source, RigidPoseMm::IDENTITY).await;
+    eprintln!(
+        "analysis native_source_setup_us={} (not mechanical setup)",
+        native_setup.elapsed().as_micros()
+    );
+    let original_scene = scene(&mut client).await;
+    let original_native = native_snapshot(&mut client).await;
+    let (definitions, occurrences) = records(&mut client).await;
+    let native_faces = faces(&mut client, &definitions[0]).await;
+    let initial = info(&mut client).await;
+    let value = AnalysisCase {
+        id: AnalysisCaseId::new(),
+        name: "Bracket load".into(),
+        layout_id: initial.layout_id.clone(),
+        occurrence_id: occurrences[0].occurrence_id,
+        definition_id: definitions[0].definition_id.clone(),
+        source_hash: definitions[0].provenance.source_hash.clone(),
+        mode: AnalysisMode::Basic,
+        loads: vec![AnalysisFaceLoad {
+            face_id: native_faces[0].face_id.clone(),
+            force_n: [0.0, -12.0, 0.0],
+            moment_n_mm: [15.0, 0.0, 0.0],
+        }],
+        restraints: vec![AnalysisFaceRestraint {
+            face_id: native_faces[1].face_id.clone(),
+            fixed_translation: [true; 3],
+        }],
+    };
+    let setup = Instant::now();
+    let ProjectResponse::Status { info: added } = client
+        .project(ProjectCommand::EditAnalysis {
+            session_id: original_scene.session_id.clone(),
+            base_revision: initial.revision,
+            edit: AnalysisEdit::Put {
+                case: value.clone(),
+            },
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("analysis case status");
+    };
+    eprintln!(
+        "analysis case_metadata_setup_us={} (not mechanical setup)",
+        setup.elapsed().as_micros()
+    );
+    assert_eq!(added.analysis.cases[0].case, value);
+    assert_eq!(
+        added.analysis.cases[0].edited_revision,
+        initial.revision.next().unwrap()
+    );
+    assert_eq!(scene(&mut client).await, original_scene);
+    assert_eq!(native_snapshot(&mut client).await, original_native);
+    project_error(
+        client
+            .project(ProjectCommand::EditAnalysis {
+                session_id: original_scene.session_id.clone(),
+                base_revision: initial.revision,
+                edit: AnalysisEdit::Put {
+                    case: value.clone(),
+                },
+            })
+            .await,
+        ProjectErrorCode::StaleRevision,
+    );
+    let mut invalid = value.clone();
+    invalid.loads[0].face_id = FaceId::from_step_entity(999999).unwrap();
+    project_error(
+        client
+            .project(ProjectCommand::EditAnalysis {
+                session_id: original_scene.session_id.clone(),
+                base_revision: added.revision,
+                edit: AnalysisEdit::Put { case: invalid },
+            })
+            .await,
+        ProjectErrorCode::InvalidProject,
+    );
+    assert_eq!(info(&mut client).await, added);
+    let mut wrong_source = value.clone();
+    wrong_source.source_hash = SourceHash::from_digest(&[91; 32]);
+    project_error(
+        client
+            .project(ProjectCommand::EditAnalysis {
+                session_id: original_scene.session_id.clone(),
+                base_revision: added.revision,
+                edit: AnalysisEdit::Put { case: wrong_source },
+            })
+            .await,
+        ProjectErrorCode::InvalidProject,
+    );
+    assert_eq!(info(&mut client).await, added);
+    assert_eq!(scene(&mut client).await, original_scene);
+    let mut current = added.clone();
+    let mut samples = Vec::new();
+    for index in 0..16 {
+        let mut load_edit = value.clone();
+        load_edit.loads[0].force_n[1] -= f64::from(index + 1);
+        let started = Instant::now();
+        let ProjectResponse::Status { info: edited } = client
+            .project(ProjectCommand::EditAnalysis {
+                session_id: original_scene.session_id.clone(),
+                base_revision: current.revision,
+                edit: AnalysisEdit::Put { case: load_edit },
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("warm case authoring status");
+        };
+        samples.push(started.elapsed().as_micros());
+        current = edited;
+    }
+    samples.sort_unstable();
+    eprintln!(
+        "analysis CPU authored_load_edit_n=16 p50_us={} p95_us={} (no operator/RHS/solve/fields exist)",
+        samples[8], samples[15]
+    );
+    client
+        .project(ProjectCommand::EditAnalysis {
+            session_id: original_scene.session_id.clone(),
+            base_revision: current.revision,
+            edit: AnalysisEdit::Put {
+                case: value.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    let before_pose = info(&mut client).await;
+    let old_reference = reference(&mut client).await;
+    let moved_scene = pose(&mut client, value.occurrence_id, translated(15.0)).await;
+    let after_pose = info(&mut client).await;
+    assert_eq!(after_pose.revision, before_pose.revision.next().unwrap());
+    assert_ne!(moved_scene.revision, original_scene.revision);
+    assert_eq!(after_pose.analysis, before_pose.analysis);
+    stale_reference(&mut client, old_reference).await;
+    let fresh_reference = reference(&mut client).await;
+    assert_eq!(fresh_reference.scene_revision, moved_scene.revision);
+    assert_eq!(fresh_reference.definition_id, value.definition_id);
+    assert_eq!(fresh_reference.face_id, value.loads[0].face_id);
+    inspect(&mut client, fresh_reference).await;
+    let before_change = info(&mut client).await;
+    let mut changed = value.clone();
+    changed.loads[0].force_n[1] = -24.0;
+    changed.mode = AnalysisMode::Enhanced;
+    let warm = Instant::now();
+    client
+        .project(ProjectCommand::EditAnalysis {
+            session_id: original_scene.session_id.clone(),
+            base_revision: before_change.revision,
+            edit: AnalysisEdit::Put {
+                case: changed.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    eprintln!(
+        "analysis authored_load_edit_us={} (not RHS/solve/field latency)",
+        warm.elapsed().as_micros()
+    );
+    let (undone, _) = history(&mut client, false).await;
+    assert_eq!(undone.analysis.cases[0].case, value);
+    let (redone, _) = history(&mut client, true).await;
+    assert_eq!(redone.analysis.cases[0].case, changed);
+    let saved = save(&mut client, Some(&path)).await;
+    std::fs::remove_file(source).unwrap();
+    let mut reader = spawn().await;
+    open(&mut reader, &path, true, false, false).await;
+    let read_info = info(&mut reader).await;
+    assert_eq!(read_info.analysis, saved.analysis);
+    project_error(
+        reader
+            .project(ProjectCommand::EditAnalysis {
+                session_id: reader.hello().session_id.clone(),
+                base_revision: read_info.revision,
+                edit: AnalysisEdit::Remove {
+                    case_id: changed.id.clone(),
+                },
+            })
+            .await,
+        ProjectErrorCode::ReadOnly,
+    );
+    reader.shutdown().await.unwrap();
+    let mut corrupt = manifest(&path);
+    corrupt.analysis.cases[0].case.loads[0].face_id = FaceId::from_step_entity(999999).unwrap();
+    write_manifest(&path, &corrupt);
+    failed_open_preserves(&mut client, &path, ProjectErrorCode::InvalidProject).await;
+    let mut fresh = spawn().await;
+    let job = start_open(&mut fresh, &path, true, false, false).await;
+    project_job_error(
+        &wait_job(&mut fresh, job).await,
+        ProjectErrorCode::InvalidProject,
+    );
+    fresh.shutdown().await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
 struct Workspace(PathBuf);
 impl Workspace {
     fn new() -> Self {

@@ -84,6 +84,7 @@ pub struct Workbench {
     navigation_focus: Option<egui::Id>,
     pose_revision: Option<SceneRevision>,
     analysis: analysis::AnalysisUi,
+    mechanics: mechanics::MechanicsUi,
     layout: layout::LayoutUi,
     plates: plates::PlatesUi,
     queued_geometry: Option<GeometryCommand>,
@@ -164,6 +165,7 @@ impl Workbench {
             navigation_focus: None,
             pose_revision: None,
             analysis: analysis::AnalysisUi::default(),
+            mechanics: Default::default(),
             layout: layout::LayoutUi::default(),
             plates: Default::default(),
             queued_geometry: None,
@@ -651,6 +653,7 @@ mod layout;
 mod library;
 mod manufacturing;
 mod material;
+mod mechanics;
 mod navigation;
 mod plates;
 mod policies;
@@ -679,6 +682,7 @@ impl eframe::App for Workbench {
         self.reconcile_plate(ctx);
         self.reconcile_alternative_receipt();
         self.reconcile_process_receipt();
+        self.reconcile_mechanics();
         if self.state.phase == Phase::Running
             && !self.state.busy
             && self.awaiting_serial.is_none()
@@ -913,7 +917,12 @@ impl eframe::App for Workbench {
         } else if self.work_area.panel == Panel::Study {
             egui::CentralPanel::default_margins().show(ui, |ui| self.study_page(ui));
         } else {
-            if self.layout.open || self.analysis.open || !compact || !self.compact_tree {
+            if self.layout.open
+                || self.analysis.open
+                || self.work_area.panel == Panel::Mechanics
+                || !compact
+                || !self.compact_tree
+            {
                 egui::Panel::right("project")
                     .resizable(true)
                     .default_size(if compact { 250.0 } else { 340.0 })
@@ -931,6 +940,10 @@ impl eframe::App for Workbench {
                         }
                         if self.work_area.panel == Panel::Surface {
                             self.finish_pane(ui);
+                            return;
+                        }
+                        if self.work_area.panel == Panel::Mechanics {
+                            self.mechanics_pane(ui);
                             return;
                         }
                         if matches!(

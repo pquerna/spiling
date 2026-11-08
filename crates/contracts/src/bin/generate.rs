@@ -258,6 +258,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PrintLayoutInfo::decl(&config),
         PrintLayoutEdit::decl(&config),
         ProjectManifest::decl(&config),
+        spiling_contracts::analysis::AnalysisCaseId::decl(&config),
+        spiling_contracts::analysis::AnalysisMode::decl(&config),
+        spiling_contracts::analysis::AnalysisFaceLoad::decl(&config),
+        spiling_contracts::analysis::AnalysisFaceRestraint::decl(&config),
+        spiling_contracts::analysis::AnalysisCase::decl(&config),
+        spiling_contracts::analysis::AnalysisCaseRecord::decl(&config),
+        spiling_contracts::analysis::AnalysisDocument::decl(&config),
+        spiling_contracts::analysis::AnalysisEdit::decl(&config),
         ProjectInfo::decl(&config),
         ManufacturingOption::decl(&config),
         ManufacturingOptionInfo::decl(&config),
@@ -432,6 +440,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             MAX_APPEARANCE_REPORT_BYTES as u64,
         ),
         ("PROCESS_SCHEMA_VERSION", u64::from(PROCESS_SCHEMA_VERSION)),
+        (
+            "MAX_ANALYSIS_CASES",
+            spiling_contracts::analysis::MAX_ANALYSIS_CASES as u64,
+        ),
+        (
+            "MAX_ANALYSIS_PATCHES",
+            spiling_contracts::analysis::MAX_ANALYSIS_PATCHES as u64,
+        ),
+        (
+            "MAX_ANALYSIS_DOCUMENT_BYTES",
+            spiling_contracts::analysis::MAX_ANALYSIS_DOCUMENT_BYTES as u64,
+        ),
+        (
+            "MAX_ANALYSIS_RETAINED_BYTES",
+            spiling_contracts::analysis::MAX_ANALYSIS_RETAINED_BYTES as u64,
+        ),
         ("MAX_PROCESS_LAYERS", MAX_PROCESS_LAYERS as u64),
         ("MAX_PROCESS_OPERATIONS", MAX_PROCESS_OPERATIONS as u64),
         (

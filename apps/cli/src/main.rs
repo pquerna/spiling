@@ -19,6 +19,7 @@ struct Options {
     store: Option<PathBuf>,
 }
 const STORAGE_USAGE: &str = "Storage maintenance: project open FILE.spil --storage-stats | --collect-unreachable | --compact-to NEW.spil. Stats permits read-only inspect. Collection retains current and previous roots; compact exclusively creates a new project file without switching the open attachment. Maintenance does not change project history or scene. Interrupted scratch and uncertain publication require explicit inspection, never automatic retry.";
+const ANALYSIS_USAGE: &str = "Analyze case authoring (ordered): --analysis-case NAME OCC basic|enhanced creates a source-bound draft or changes the named case's mode on the selected plate. --analysis-load NAME FACE FX FY FZ MX MY MZ sets a finite whole-source-face load: N and N.mm, source-local axes, total moment about the source origin. --analysis-fix NAME FACE fixes XYZ translation over another whole face. --analysis-edit EDIT_JSON supports typed put/remove and directional restraints. Names are unique per plate; no force or lever arm is inferred. project.analysis returns saved case intent in inspect/read-only mode. These commands do not solve equilibrium or produce stress, displacement or strength. Both modes are FDM-specialized; reference is not a third mode. See docs/protocol/analysis.md.";
 const ALTERNATIVE_USAGE: &str = "Try and Compare: --evaluate INTENT_JSON and --compare-option ID compile and independently replay a transient alternative without changing Current; read-only inspection is supported. --options lists retained names; --get-option ID retrieves exact input. --keep-option NAME retains only the latest successful current-revision evaluation; --remove-option ID removes it; --apply-option ID explicitly adopts its intent and invalidates Current output. Retained options keep their original source context and refuse after incompatible context edits. Ordinary --manufacturing-out and --replay-out always inspect Current, never alternatives. Material and segment counts describe actual replay; duration is undefined, not estimated.";
 enum Command {
     Diagnose,
@@ -407,7 +408,7 @@ async fn main() -> ExitCode {
         Ok(Some(options)) => run(options).await,
         Ok(None) => {
             println!(
-                "{USAGE}\n\n{STORAGE_USAGE}\n\n{ALTERNATIVE_USAGE}\n{}",
+                "{USAGE}\n\n{STORAGE_USAGE}\n\n{ANALYSIS_USAGE}\n\n{ALTERNATIVE_USAGE}\n{}",
                 library::USAGE
             );
             println!(

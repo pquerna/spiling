@@ -41,18 +41,26 @@ When several read-only rows share one evidence source, disclose that source once
 
 ## Workspace navigation
 
-Prepare and Review are the persistent workspaces. The application bar contains
+Prepare, Review and Analyze are the persistent workspaces. The application bar contains
 Project/Edit/View/Help, project save state and command search. Grouped commands
 below the workspace tabs change with the task: Parts/Setup/Construction in Prepare,
-Output/Inspect in Review. Narrow surfaces collapse whole groups into menus in the
+Output/Inspect in Review and Case/Inspect in Analyze. Narrow surfaces collapse whole groups into menus in the
 same order; workflow tabs do not wrap together with arbitrary commands.
 
-Properties and Section analysis remain available in both workspaces. Selecting a
+Properties and Section analysis remain available in all workspaces. Selecting a
 face does not switch workspace. Surface finish is an authoring task within Prepare;
 Color study is a focused page with an explicit return to its invoking task. Plate
 navigation retains workspace/task and compatible inspection state. Background
 completion never activates another workspace. Camera controls remain at the canvas;
 gesture instructions use deliberate help.
+
+Analyze currently authors source-bound finite-face load/restraint cases, with
+Basic/Enhanced FDM intent, native face selection and one explicit Apply. Save
+writes the ordinary project checkpoint. Unapplied/stale/rejected drafts remain
+distinct from saved cases; source geometry is not a numerical heatmap. The pane
+names missing construction, boundary transfer and mechanical solve/assessment
+instead of presenting authored inputs as a result. [Analysis contracts](../protocol/analysis.md)
+own this boundary and the next consuming whole-part result.
 
 Focus on selection frames a selected source part or face without editing its pose.
 Faces use checked display extents and an area-weighted normal only when it is
