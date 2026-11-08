@@ -132,7 +132,7 @@ def main():
     for name in ("inputs", "results", "context", "output"):
         p.add_argument("--" + name, type=Path, required=True)
     p.add_argument(
-        "--solvers", nargs="+", choices=("amg", "superlu_mmd"), default=["amg"]
+        "--solvers", nargs="+", choices=("amg", "p_amg", "superlu_mmd"), default=["amg"]
     )
     p.add_argument(
         "--divisions", nargs="+", type=int, choices=(1, 2, 4, 8), default=[1, 2, 4]

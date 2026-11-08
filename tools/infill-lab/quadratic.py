@@ -27,6 +27,7 @@ from reference import beam_mesh, element_mesh, fixture
 
 JUDGE = (
     "quadratic.py",
+    "quadratic_preconditioner.py",
     "reference.py",
     "geometry.py",
     "mechanics.py",
@@ -131,15 +132,23 @@ def prepare(mesh, material=Material(), *, chunk=2048):
 
 def solve_body(body, case, bounds, *, solver="amg"):
     if case != "pure_bending":
+        if solver == "p_amg":
+            from quadratic_preconditioner import auxiliary_preconditioner
+
+            factory = auxiliary_preconditioner(body, kernels(body.material)[1])
+        else:
+            factory = None
         result = solve(
             body.mesh,
             case,
             body.material,
             fixture_bounds=bounds,
             prepared=body,
-            solver=solver,
+            solver="amg" if solver == "p_amg" else solver,
+            preconditioner_factory=factory,
         )
         result.update(
+            linear_solver=solver,
             model="effective_nominal_footprint_TetP2_elastic_not_strength",
             assembly_wall_s=body.assembly_s,
         )

@@ -15,12 +15,26 @@ def collect(inputs, outputs):
     manifest = json.loads((inputs / "jobs.json").read_text())
     rows = []
     missing = []
+    incomplete = []
     images = set()
     threads = set()
     for job in manifest["jobs"]:
         folder = outputs / job["id"]
         if not (folder / "trials.jsonl").exists():
             missing.append(job["id"])
+            if (folder / "launch.json").exists():
+                launch = json.loads((folder / "launch.json").read_text())
+                detail = dict(
+                    job=job["id"],
+                    failure=launch.get("failure"),
+                    removed=launch.get("removed"),
+                    docker_exit=launch.get("docker_exit"),
+                )
+                if (folder / "container.json").exists():
+                    detail["oom_killed"] = json.loads(
+                        (folder / "container.json").read_text()
+                    )[0]["State"]["OOMKilled"]
+                incomplete.append(detail)
             continue
         spec = json.loads((inputs / job["id"] / "case.json").read_text())
         if digest(spec) != job["id"] or spec["judge"] != manifest["judge"]:
@@ -99,20 +113,26 @@ def collect(inputs, outputs):
     if len(images) > 1 or len(threads) > 1:
         raise ValueError("separate images/thread profiles require separate reports")
     checks = []
-    for name in ("cube32", "beam80"):
+    for name, method in (
+        (n, m)
+        for n in ("cube32", "beam80")
+        for m in sorted(
+            {j["solver"] for j in manifest["jobs"] if j["solver"] in ("amg", "p_amg")}
+        )
+    ):
         required = sorted(
             {
                 j["case"]["refinement"]["divisions"]
                 for j in manifest["jobs"]
-                if j["specimen"] == name and j["solver"] == "amg"
+                if j["specimen"] == name and j["solver"] == method
             }
         )
         found = {
             r["scenario"]["refinement"]["divisions"]: r
             for r in rows
-            if r["specimen"] == name and r["solver"] == "amg" and r["status"] == "ok"
+            if r["specimen"] == name and r["solver"] == method and r["status"] == "ok"
         }
-        check = dict(specimen=name, passed=False)
+        check = dict(specimen=name, solver=method, passed=False)
         if len(required) >= 2:
             a, b = required[-2:]
             check.update(coarse=a, fine=b)
@@ -129,14 +149,19 @@ def collect(inputs, outputs):
     pairs = []
     for row in rows:
         if (
-            row["solver"] != "amg"
+            row["solver"] not in ("amg", "p_amg")
             or row["status"] != "ok"
             or "stiffness_n_mm" not in row
         ):
             continue
         for base in rows:
             if (
-                base["solver"] != "superlu_mmd"
+                base["solver"]
+                not in (
+                    ("amg", "superlu_mmd")
+                    if row["solver"] == "p_amg"
+                    else ("superlu_mmd",)
+                )
                 or base["status"] != "ok"
                 or base["reference_case_sha256"] != row["reference_case_sha256"]
             ):
@@ -149,6 +174,8 @@ def collect(inputs, outputs):
             pairs.append(
                 dict(
                     specimen=row["specimen"],
+                    baseline_solver=base["solver"],
+                    candidate_solver=row["solver"],
                     case_sha256=row["reference_case_sha256"],
                     matched_host_limits=matched,
                     response_relative_error=error,
@@ -156,10 +183,10 @@ def collect(inputs, outputs):
                     wall_speedup=base["wall_s"] / row["wall_s"]
                     if matched and error <= 1e-7
                     else None,
-                    direct_wall_s=base["wall_s"],
-                    amg_wall_s=row["wall_s"],
-                    direct_peak_rss_kib=base["peak_rss_kib"],
-                    amg_peak_rss_kib=row["peak_rss_kib"],
+                    baseline_wall_s=base["wall_s"],
+                    candidate_wall_s=row["wall_s"],
+                    baseline_peak_rss_kib=base["peak_rss_kib"],
+                    candidate_peak_rss_kib=row["peak_rss_kib"],
                 )
             )
     failed = [r["job"] for r in rows if r["status"] != "ok"]
@@ -172,6 +199,7 @@ def collect(inputs, outputs):
         completed=len(rows),
         accepted=len(rows) - len(failed),
         missing=missing,
+        incomplete=incomplete,
         failed=failed,
         image_ids=sorted(images),
         blas_threads=sorted(threads),
@@ -197,6 +225,7 @@ def main():
                     "required",
                     "completed",
                     "accepted",
+                    "incomplete",
                     "refinement_checks",
                     "controlled_solver_pairs",
                 )

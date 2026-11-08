@@ -37,6 +37,7 @@ CONTEXT = (
     "coupon.py",
     "reference.py",
     "quadratic.py",
+    "quadratic_preconditioner.py",
 )
 
 

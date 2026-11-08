@@ -184,3 +184,18 @@ constant. Sum all concurrent prefix reservations before applying an override;
 keep Docker memory and memory-swap equal, and retain the measured machine,
 launcher identity and effective CPU/RAM/PID/deadline receipt. Larger allocation
 never changes physical or numerical acceptance.
+
+`--solvers p_amg` selects a P1 auxiliary-space preconditioner for the unchanged
+TetP2 operator. Parent edges retain node identity. Galerkin projection builds
+only the coarse preconditioner; the fine quadratic matrix, Dirichlet fixture,
+FP64 residual, full physical reaction and energy checks stay authoritative.
+Jacobi smoothing acts on the fine level and the existing elasticity AMG acts on
+the smaller coarse level. There is no successful fallback to a linear physical
+model. `mechanics.solve` accepts a narrow preconditioner factory for this adapter;
+ordinary AMG/direct callers retain their existing default behavior.
+
+A same-image study with `--solvers amg p_amg` compares both algorithms. The
+collector names the baseline/candidate explicitly and keeps an uncompleted
+run's deadline/OOM and cleanup receipt instead of treating it as zero or a
+successful subset. Degree coarsening is a numerical acceleration, not effective
+material homogenization or a change in the nominal deposition geometry.

@@ -275,7 +275,10 @@ def solve(
     fixture_bounds=None,
     prepared: ElasticBody | None = None,
     solver="amg",
+    preconditioner_factory=None,
 ):
+    if preconditioner_factory is not None and solver != "amg":
+        raise ValueError("custom preconditioners require the iterative solver")
     np.random.seed(0)  # Freeze AMG randomized setup; this is a research solve.
     began = time.monotonic()
     reused = prepared is not None
@@ -420,15 +423,16 @@ def solve(
         info = 0
         iterations = [0]
     else:
-        null = np.zeros((basis.N, 6))
-        for axis in range(3):
-            null[basis.nodal_dofs[axis], axis] = 1.0
-        for axis in range(3):
-            rotation = np.cross(np.eye(3)[axis], p.T - (lo + hi) / 2).T
-            for dim in range(3):
-                null[basis.nodal_dofs[dim], axis + 3] = rotation[dim]
-        null[fixed] = 0.0
-        null /= scaling[:, None]
+        if preconditioner_factory is None:
+            null = np.zeros((basis.N, 6))
+            for axis in range(3):
+                null[basis.nodal_dofs[axis], axis] = 1.0
+            for axis in range(3):
+                rotation = np.cross(np.eye(3)[axis], p.T - (lo + hi) / 2).T
+                for dim in range(3):
+                    null[basis.nodal_dofs[dim], axis + 3] = rotation[dim]
+            null[fixed] = 0.0
+            null /= scaling[:, None]
         setup_started = time.monotonic()
         progress = os.environ.get("SPILING_INFILL_PROGRESS") == "1"
         if progress:
@@ -439,16 +443,20 @@ def solve(
                 file=sys.stderr,
                 flush=True,
             )
-        import pyamg
+        if preconditioner_factory is None:
+            import pyamg
 
-        ml = pyamg.smoothed_aggregation_solver(
-            kff,
-            B=null,
-            symmetry="symmetric",
-            strength=("symmetric", {"theta": 0.05}),
-            smooth=("energy", {"degree": 2}),
-            max_coarse=80,
-        )
+            ml = pyamg.smoothed_aggregation_solver(
+                kff,
+                B=null,
+                symmetry="symmetric",
+                strength=("symmetric", {"theta": 0.05}),
+                smooth=("energy", {"degree": 2}),
+                max_coarse=80,
+            )
+            preconditioner = ml.aspreconditioner()
+        else:
+            preconditioner = preconditioner_factory(kff, scaling, fixed)
         setup_s = time.monotonic() - setup_started
         solve_started = time.monotonic()
         iterations = [0]
@@ -476,7 +484,7 @@ def solve(
         interior, info = cg(
             kff,
             rhs,
-            M=ml.aspreconditioner(),
+            M=preconditioner,
             rtol=rtol * 0.01,
             atol=0.0,
             maxiter=maxiter,

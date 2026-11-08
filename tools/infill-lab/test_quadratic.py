@@ -138,3 +138,64 @@ def test_rejected_external_result_cannot_seed_a_parity_study(tmp_path):
     )
     with pytest.raises(ValueError, match="rejected/mismatched"):
         pack(inputs, results, context, tmp_path / "out")
+
+
+def test_auxiliary_space_keeps_quadratic_physical_response_and_symmetric_action():
+    from quadratic import kernels
+    from quadratic_preconditioner import auxiliary_preconditioner
+
+    mesh = beam_mesh(3, ny=2, nz=2)
+    body = prepare(mesh, Material(z_ratio=0.25))
+    for case in ("compression_x", "compression_y", "compression_z"):
+        expected = solve_body(body, case, mesh.bounds, solver="superlu_mmd")
+        actual = solve_body(body, case, mesh.bounds, solver="p_amg")
+        assert actual["stiffness_n_mm"] == pytest.approx(
+            expected["stiffness_n_mm"], rel=1e-7
+        )
+    # The coarse solve is a preconditioner, not a replacement physical mesh.
+    # Symmetric positive action is needed by the existing CG solver.
+    matrix = (body.stiffness + 10 * sparse.eye(body.basis.N)).tobsr(blocksize=(3, 3))
+    np.random.seed(0)
+    action = auxiliary_preconditioner(body, kernels(body.material)[1])(
+        matrix, np.ones(body.basis.N), np.array([], int)
+    )
+    x, y = np.random.default_rng(0).normal(size=(2, body.basis.N))
+    assert x @ (action @ x) > 0
+    assert x @ (action @ y) == pytest.approx(y @ (action @ x), rel=1e-9)
+
+
+def test_incomplete_quadratic_runs_retain_resource_failure_and_finest_obligation(
+    tmp_path,
+):
+    import json
+    from quadratic_report import collect
+
+    inputs, outputs = tmp_path / "inputs", tmp_path / "outputs"
+    inputs.mkdir()
+    jobs = []
+    for division in (4, 8):
+        key = str(division)
+        jobs.append(
+            dict(
+                id=key,
+                specimen="beam80",
+                solver="p_amg",
+                case=dict(refinement=dict(divisions=division)),
+            )
+        )
+        folder = outputs / key
+        folder.mkdir(parents=True)
+        (folder / "launch.json").write_text(
+            json.dumps(dict(failure="container_exit", removed=True, docker_exit=137))
+        )
+        (folder / "container.json").write_text(
+            json.dumps([dict(State=dict(OOMKilled=True))])
+        )
+    (inputs / "jobs.json").write_text(json.dumps(dict(jobs=jobs, judge={})))
+    report = collect(inputs, outputs)
+    assert report["accepted"] == 0 and report["completed"] == 0
+    assert report["missing"] == ["4", "8"]
+    assert all(r["oom_killed"] and r["removed"] for r in report["incomplete"])
+    beam = next(r for r in report["refinement_checks"] if r["specimen"] == "beam80")
+    assert beam["coarse"] == 4 and beam["fine"] == 8
+    assert not beam["passed"] and beam["reason"] == "missing_or_failed_required_mesh"

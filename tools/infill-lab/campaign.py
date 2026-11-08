@@ -76,6 +76,7 @@ def context(destination):
                 "mechanics.py",
                 "reference.py",
                 "quadratic.py",
+                "quadratic_preconditioner.py",
             }
             else HERE / "remote" / name
         )
