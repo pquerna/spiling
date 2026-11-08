@@ -44,6 +44,16 @@ same-process repetition. Neither clears the OS page cache nor proves incremental
 compilation. `--warmup` explicitly excludes initial iterations. `--policy primary`
 is a separate authored control, not the automatic job or a free speedup.
 
+`--compute-backend auto|cpu|vulkan` configures the immutable compute session
+before source preparation; the default is `auto`. The benchmark calls native
+services directly, so engine-launch environment overrides do not select its
+backend. Records include requested preferences, resolved devices and separate
+compute initialization time. First kernel compilation remains inside the first
+consuming sample. Keep backend/device selection unchanged for before/after
+algorithm comparisons; the comparator refuses changed or missing compute
+configuration. Cross-backend experiments are separate cohorts, not a
+like-for-like algorithm speedup.
+
 The compiler timer includes ordinary planning, candidate selection, realization,
 emission and mandatory independent verification. Source import is separately
 reported as setup. Other phases consume a captured checked bundle without source

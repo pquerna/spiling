@@ -685,7 +685,13 @@ async function main() {
       await runTestSuites([
         [
           "tooling",
-          () => run("node", ["--test", "tools/run.test.mjs", "tools/compare-open-bench.test.mjs"]),
+          () =>
+            run("node", [
+              "--test",
+              "tools/run.test.mjs",
+              "tools/compare-open-bench.test.mjs",
+              "tools/compare-slice-bench.test.mjs",
+            ]),
         ],
         ["material catalogs", () => run("node", ["--test", "tools/material-catalogs.test.mjs"])],
         [

@@ -3,6 +3,7 @@
 
 //! Fixed real-source workloads through production facades; no benchmark planner.
 use spiling_contracts::{
+    compute::{ComputeBackend, ComputeSettings},
     geometry::*,
     manufacturing::*,
     process::ProcessDocument,
@@ -162,6 +163,7 @@ fn main() -> Result<()> {
         "--policy",
         "--bundle",
         "--write-bundle",
+        "--compute-backend",
         "--bench",
     ];
     let mut i = 0;
@@ -192,6 +194,13 @@ fn main() -> Result<()> {
     if phase == "compile" && !file.is_empty() {
         return Err("compile uses frozen native sources, not --bundle".into());
     }
+    let compute_backend = ComputeBackend::parse(&option("--compute-backend", "auto")?)?;
+    let compute_started = Instant::now();
+    let compute = spiling_compute::configure(ComputeSettings {
+        default_backend: compute_backend,
+        fea_backend: None,
+    })?;
+    let compute_setup_us = compute_started.elapsed().as_micros();
     let cancel = AtomicBool::new(false);
     let setup = Instant::now();
     let scene = if file.is_empty() {
@@ -280,7 +289,7 @@ fn main() -> Result<()> {
         if sample >= warmup {
             println!(
                 "{}",
-                serde_json::json!({"benchmark":"native-manufacturing-v1", "phase":phase, "policy":if file.is_empty() { policy.as_str() } else { "captured" }, "sample":sample-warmup, "samples":samples, "warmup":warmup, "setup_us":setup_us, "elapsed_us":elapsed_us, "engine_build":spiling_contracts::ENGINE_BUILD_ID, "kernel":spiling_geometry::KERNEL_REVISION, "input_hash":b.provenance.input_hash, "program_hash":program_hash, "occurrences":b.provenance.occurrences.len(), "definitions":b.provenance.definitions.len(), "layers":b.plan.layers.len(), "deposition_segments":b.verification.deposition_segments, "geometry_work":b.plan.native_geometry.geometry_work, "selection":b.plan.interior_selection.as_ref().map(|s| s.selected), "sources":b.provenance.definitions.iter().map(|d| &d.provenance.source_hash).collect::<Vec<_>>(), "debug_assertions":cfg!(debug_assertions), "intent_source":SourceHash::from_bytes(INTENT), "available_parallelism":std::thread::available_parallelism().map(|v|v.get()).unwrap_or(1), "rayon_threads":std::env::var("RAYON_NUM_THREADS").ok(), "software_only":true})
+                serde_json::json!({"benchmark":"native-manufacturing-v1", "phase":phase, "policy":if file.is_empty() { policy.as_str() } else { "captured" }, "sample":sample-warmup, "samples":samples, "warmup":warmup, "setup_us":setup_us, "compute_setup_us":compute_setup_us, "compute":compute, "elapsed_us":elapsed_us, "engine_build":spiling_contracts::ENGINE_BUILD_ID, "kernel":spiling_geometry::KERNEL_REVISION, "input_hash":b.provenance.input_hash, "program_hash":program_hash, "occurrences":b.provenance.occurrences.len(), "definitions":b.provenance.definitions.len(), "layers":b.plan.layers.len(), "deposition_segments":b.verification.deposition_segments, "geometry_work":b.plan.native_geometry.geometry_work, "selection":b.plan.interior_selection.as_ref().map(|s| s.selected), "sources":b.provenance.definitions.iter().map(|d| &d.provenance.source_hash).collect::<Vec<_>>(), "debug_assertions":cfg!(debug_assertions), "intent_source":SourceHash::from_bytes(INTENT), "available_parallelism":std::thread::available_parallelism().map(|v|v.get()).unwrap_or(1), "rayon_threads":std::env::var("RAYON_NUM_THREADS").ok(), "software_only":true})
             );
         }
     }

@@ -21,6 +21,10 @@ async function groups(path) {
   for (const row of rows) {
     assert.equal(row.benchmark, "native-manufacturing-v1");
     assert.equal(row.software_only, true);
+    assert.ok(
+      row.compute?.settings && row.compute?.default_device && row.compute?.fea_device,
+      "missing compute configuration; rerun the benchmark with backend reporting",
+    );
     assert.ok(Number.isFinite(row.elapsed_us) && row.elapsed_us > 0);
     const key = JSON.stringify([row.phase, row.input_hash]);
     const group = result.get(key) ?? [];
@@ -64,6 +68,7 @@ const identity = (row) =>
     row.debug_assertions,
     row.available_parallelism,
     row.rayon_threads,
+    row.compute,
     row.warmup,
   ]);
 const comparisons = [];
