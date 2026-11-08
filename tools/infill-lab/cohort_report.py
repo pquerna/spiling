@@ -55,7 +55,12 @@ def scenario_key(row):
     shift = crop[0][2] - base[0][2]
     if not math.isclose(crop[1][2] - base[1][2], shift, abs_tol=1e-8):
         raise ValueError("coupon height differs from frozen panel")
-    return {k: v for k, v in scenario.items() if k != "bounds"} | {"shift_z_mm": shift}
+    # Source-origin subtraction introduces roundoff (e.g. 20.1 - 20).
+    # Canonicalize only the reporting key at the declared overlay precision;
+    # each solve retains its original physical bounds and frozen input hash.
+    return {k: v for k, v in scenario.items() if k != "bounds"} | {
+        "shift_z_mm": round(shift, 9)
+    }
 
 
 def physical_gate(row):

@@ -534,11 +534,17 @@ def test_coupon_subset_reports_only_its_selected_native_refusals(tmp_path):
     (inputs / "jobs.json").write_text(
         json.dumps({"jobs": [{"id": "case"}], "failed_captures": []})
     )
-    (inputs / "case" / "case.json").write_text(json.dumps({
-        "candidate": Candidate(fraction=1).data(),
-        "specimen": "cube32",
-        "scenarios": [{"bounds": bounds("cube32"), "material": {"z_ratio": .25}}],
-    }))
+    (inputs / "case" / "case.json").write_text(
+        json.dumps(
+            {
+                "candidate": Candidate(fraction=1).data(),
+                "specimen": "cube32",
+                "scenarios": [
+                    {"bounds": bounds("cube32"), "material": {"z_ratio": 0.25}}
+                ],
+            }
+        )
+    )
     report = collect(root, [inputs], outputs)
     assert report["missing_evaluations"] == 1
     rows = next(iter(report["groups"].values()))["rows"]
@@ -548,10 +554,38 @@ def test_coupon_subset_reports_only_its_selected_native_refusals(tmp_path):
 def test_finer_conforming_prisms_preserve_volume_and_face_connectivity():
     from geometry import prism_mesh
 
-    roads = [{"start": [0, 0, .2], "end": [2, 0, .2],
-              "lower": 0, "upper": .2, "width": .4}]
+    roads = [
+        {
+            "start": [0, 0, 0.2],
+            "end": [2, 0, 0.2],
+            "lower": 0,
+            "upper": 0.2,
+            "width": 0.4,
+        }
+    ]
     meshes = [prism_mesh(roads, divisions=d)[0] for d in (1, 2, 4, 8)]
     for i, mesh in enumerate(meshes):
         assert mesh.volume == pytest.approx(meshes[0].volume, rel=1e-12)
         assert mesh.components == 1
         assert mesh.count == meshes[0].count * 4**i
+
+
+def test_source_relative_crop_keys_do_not_split_by_origin_roundoff():
+    from campaign import bounds
+    from cohort_report import scenario_key
+
+    def key(shape, shift):
+        return scenario_key(
+            {
+                "specimen": shape,
+                "scenario": {
+                    "bounds": bounds(shape, shift=shift),
+                    "material": {"z_ratio": 0.25},
+                    "divisions": 1,
+                },
+            }
+        )
+
+    assert key("cube32", 0.1) == key("column48", 0.1)
+    assert key("cube32", -0.1) == key("column48", -0.1)
+    assert key("cube32", 0.1) != key("column48", 0.100001)
