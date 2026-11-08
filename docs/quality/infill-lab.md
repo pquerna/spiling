@@ -5,6 +5,8 @@
 
 [`tools/infill-lab`](../../tools/infill-lab) is offline Linux research tooling. It proposes inert process edits through the ordinary CLI, compiles with the engine, saves and independently replays actual emitted programs. The production checked SPLR decoder supplies the deposition roads. It does not own a planner, kernel, project writer or workbench physics engine.
 
+Remote CPU/CUDA comparisons over frozen systems use the isolated [evaluator container](../../tools/infill-lab/remote/README.md).
+
 ## Run and resume
 
 Install `uv` and the repository's pinned Node toolchain. Use `pnpm build:native` to build matching engine/CLI binaries under the normal [resource discipline](development.md), then copy them into a private, immutable experiment bin directory. Never replace shared build outputs during a campaign. The optional research dependencies install only through `infill:lab`, outside product builds and distributions. `uv.lock` freezes Python dependencies; `SPILING_UV` can select a local uv executable.
