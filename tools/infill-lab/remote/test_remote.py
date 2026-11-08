@@ -88,6 +88,10 @@ def test_limits_follow_machine_and_current_available_memory():
     budget = launcher.limits(machine)
     assert budget["cpus"] == 15 and budget["memory_bytes"] == 75 * 1024**3
     assert launcher.limits(machine, 40, 8)["memory_bytes"] == 40 * 1024**3
+    assert launcher.limits(machine, 94, 8)["memory_bytes"] == 94 * 1024**3
+    constrained = {**machine, "memory_available": 50 * 1024**3}
+    with pytest.raises(ValueError):
+        launcher.limits(constrained, 48, 8)
     for memory, cpus in [(101, 8), (1, 21), (float("nan"), 8), (1, float("nan"))]:
         with pytest.raises((ValueError, OverflowError)):
             launcher.limits(machine, memory, cpus)

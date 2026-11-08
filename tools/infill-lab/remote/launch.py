@@ -59,8 +59,15 @@ def inventory():
 
 
 def limits(machine, requested_memory=None, requested_cpus=None):
-    available = min(machine["memory_available"] * 0.75, machine["memory_total"] * 0.6)
-    memory = int(available if requested_memory is None else requested_memory * 1024**3)
+    default_memory = min(
+        machine["memory_available"] * 0.75, machine["memory_total"] * 0.6
+    )
+    # Deliberate isolated experiments may use more released RAM than the
+    # ordinary default, while retaining both physical and live host headroom.
+    available = min(machine["memory_available"] * 0.95, machine["memory_total"] * 0.9)
+    memory = int(
+        default_memory if requested_memory is None else requested_memory * 1024**3
+    )
     cpus = (
         max(1, math.floor(machine["cpus"] * 0.75))
         if requested_cpus is None

@@ -175,3 +175,12 @@ limits, with agreeing complete numerical responses. Order, background work and
 single-case scope still belong in the evidence. Numerical parity and a refined
 TetP2 response do not by themselves qualify independent-formulation convergence,
 whole-part behavior, buckling, calibrated interfaces or physical strength.
+
+Ordinary memory admission remains the smaller of 75% currently available RAM
+and 60% physical RAM. An explicit `--memory-gib` research override may use up to
+the smaller of 95% currently available and 90% physical RAM. This permits an
+isolated large solve to use released capacity without a workstation-size
+constant. Sum all concurrent prefix reservations before applying an override;
+keep Docker memory and memory-swap equal, and retain the measured machine,
+launcher identity and effective CPU/RAM/PID/deadline receipt. Larger allocation
+never changes physical or numerical acceptance.
