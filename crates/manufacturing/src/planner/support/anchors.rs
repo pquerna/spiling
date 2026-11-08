@@ -7,6 +7,8 @@ use spiling_contracts::manufacturing::{
 };
 use std::sync::atomic::AtomicBool;
 
+mod batch;
+
 pub(super) const MAX_ANCHOR_PAIR_WORK: usize = 128_000_000;
 
 /// Exact centerline intersection with previous nominal deposited capsules plus
@@ -183,9 +185,17 @@ impl<'a> PreparedAnchorPaths<'a> {
         Ok(Self { paths: prepared })
     }
     fn inputs(&self, candidate: AnchorCandidate) -> impl Iterator<Item = AnchorInput> + '_ {
+        Self::inputs_from(candidate, self.paths.iter())
+    }
+    fn inputs_from<'borrow>(
+        candidate: AnchorCandidate,
+        mut paths: impl Iterator<Item = &'borrow PreparedAnchorPath<'a>> + 'borrow,
+    ) -> impl Iterator<Item = AnchorInput> + 'borrow
+    where
+        'a: 'borrow,
+    {
         let [a, b] = candidate.endpoints_mm;
         let radius = candidate.bead_width_mm * 0.5;
-        let mut paths = self.paths.iter();
         let mut current: Option<spiling_contracts::manufacturing::DepositionEdges<'_>> = None;
         std::iter::from_fn(move || {
             loop {

@@ -545,6 +545,27 @@ Each actual XYZ6 chord deposits constant nominal area `(w-H)*H+pi*(H/2)^2`, with
 
 Native BREP sections and rigid occurrences remain geometry authority. Same-material object sections preserve holes/islands, inward walls and disjoint skin/interior ownership. Physical-distance skin horizons classify floors and roofs. Unsupported spans become bounded bridges or clearance-clipped breakaway support/interface according to explicit policy; support never mutates source BREP or object material ownership. Sloped native planar/cylindrical sections require numerical admission gates. No mesh repair, silently removed feature or triangle fallback exists; numerical residuals are not physical accuracy certification.
 
+CubeCL supplies optional exact numeric screening, not manufacturing authority.
+Hatch and required Bridge-row clipping batch half-open boundary crossings;
+host f64 interpolation, sorting, parity, row ownership, exclusions and command
+construction remain unchanged. Fine-interface replay may batch conservative
+actual-path box rejection, after the actual-byte/path bijection; surviving
+paths still use their original per-candidate bounds and complete capsule proof.
+Skipped path runs charge their complete original edge inventory, including the
+same cumulative-work refusal counter. No support, clearance or material proof
+comes from a mask. Small or oversized batches retain the original host path;
+initialization, execution and cancellation errors never request that fallback.
+
+Numeric staging has an additional bounded envelope separate from retained
+native geometry and commanded segments: at most 65,536 source edges/paths,
+256 current queries, 3 MiB hatch sidecars or less than 3 MiB anchor box/prefix
+sidecars per active consumer. The shared runtime separately bounds encoded
+inputs/queries and a 1 MiB packed result, serializes dispatch and drains bounded
+tiles before release; see [compute resource limits](../../crates/compute/README.md).
+These are application-buffer bounds, not total compiler/driver memory claims.
+Backend choice is machine-local and cannot change manufacturing provenance or
+replace fresh independent actual-program replay.
+
 ### Automatic wall ownership and qualification
 
 The ephemeral [wall owner](../../crates/manufacturing/src/planner/walls.rs) borrows final D and a separate mandatory native/C operand. Its segment-Voronoi graph is a bounded proposal, not native material or protected-void authority. Original boundary identities and f64 feet survive integer construction; exact-source crossings, overlaps, quantization collapse and unconditioned graph/curve arithmetic refuse without healing.

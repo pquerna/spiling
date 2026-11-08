@@ -725,13 +725,27 @@ pub(super) fn verify_earlier_fine_paths(
             )?;
             continue;
         }
-        for local in path.checked_edges()? {
-            let edge = local.points_mm;
-            let actual = [
-                project_xyz6_point_mm(edge[0])?,
-                project_xyz6_point_mm(edge[1])?,
-            ];
-            let length = (actual[1][0] - actual[0][0]).hypot(actual[1][1] - actual[0][1]);
+        let mut edges = path.checked_edges()?.peekable();
+        while edges.peek().is_some() {
+            let mut candidates = Vec::new();
+            candidates
+                .try_reserve_exact(edges.len().min(256))
+                .map_err(|_| {
+                    crate::error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "fine anchor query staging allocation refused",
+                    )
+                })?;
+            for local in edges.by_ref().take(256) {
+                cancelled(cancel)?;
+                candidates.push(AnchorCandidate {
+                    endpoints_mm: [
+                        project_xyz6_point_mm(local.points_mm[0])?,
+                        project_xyz6_point_mm(local.points_mm[1])?,
+                    ],
+                    bead_width_mm: local.width_mm,
+                });
+            }
             if prepared.is_none() {
                 prepared = Some(PreparedAnchorPaths::new(
                     previous.paths.iter().filter(|path| {
@@ -743,27 +757,30 @@ pub(super) fn verify_earlier_fine_paths(
                     cancel,
                 )?);
             }
-            for gap in anchors.gaps_prepared(
-                AnchorCandidate {
-                    endpoints_mm: actual,
-                    bead_width_mm: local.width_mm,
-                },
-                prepared.as_ref().expect("earlier paths prepared"),
-                work,
-                cancel,
-            )? {
-                if !matches!(
-                    gap_kind(
-                        gap,
-                        (gap.end - gap.start) * length,
-                        local.width_mm,
-                        recipe.process.max_bridge_span_mm
-                    ),
-                    GapKind::Supported
-                ) {
-                    return Err(failed(
-                        "fine ordinary deposition is unsupported by physically earlier actual strokes",
-                    ));
+            let prepared = prepared.as_ref().expect("earlier paths prepared");
+            let batch = prepared.screen(&candidates, cancel)?;
+            for (row, candidate) in candidates.into_iter().enumerate() {
+                let [start, end] = candidate.endpoints_mm;
+                let length = (end[0] - start[0]).hypot(end[1] - start[1]);
+                let gaps = if let Some(batch) = &batch {
+                    anchors.gaps_screened(candidate, prepared, batch, row, work, cancel)?
+                } else {
+                    anchors.gaps_prepared(candidate, prepared, work, cancel)?
+                };
+                for gap in gaps {
+                    if !matches!(
+                        gap_kind(
+                            gap,
+                            (gap.end - gap.start) * length,
+                            candidate.bead_width_mm,
+                            recipe.process.max_bridge_span_mm
+                        ),
+                        GapKind::Supported
+                    ) {
+                        return Err(failed(
+                            "fine ordinary deposition is unsupported by physically earlier actual strokes",
+                        ));
+                    }
                 }
             }
         }
