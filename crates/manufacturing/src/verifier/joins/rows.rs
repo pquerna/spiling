@@ -141,6 +141,10 @@ fn sweep(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Row demand, lattice, retained allocation and cumulative work remain explicit verifier inputs"
+)]
 fn append_expected(
     demand_index: usize,
     demand: &Demand,
@@ -209,7 +213,7 @@ fn append_expected(
         for ordinal in 0..count as usize {
             let row = start + ordinal as f64 * spacing;
             sweep(polygon, demand.along, row, &mut hits, work, cancel)?;
-            for pair in hits.chunks_exact(2) {
+            for pair in hits.as_chunks::<2>().0 {
                 if pair[0] >= pair[1] {
                     return Err(failed(
                         "functional complete row has no positive original extent",

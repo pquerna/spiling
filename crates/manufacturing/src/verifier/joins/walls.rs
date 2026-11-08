@@ -573,12 +573,10 @@ fn follow_source(
                     break;
                 }
             }
-            if follows {
-                if matched.replace(ring_index).is_some() {
-                    return Err(failed(
-                        "functional Wall loop has ambiguous original source-contour ownership",
-                    ));
-                }
+            if follows && matched.replace(ring_index).is_some() {
+                return Err(failed(
+                    "functional Wall loop has ambiguous original source-contour ownership",
+                ));
             }
         }
         let matched = matched.ok_or_else(|| {

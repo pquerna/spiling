@@ -100,58 +100,6 @@ fn admit(bytes: usize) -> Result<(), ManufacturingError> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn wall() -> DepositionPath {
-        DepositionPath {
-            material_domain: Some(MaterialDomainRef {
-                construction_index: 0,
-                role: MaterialConstructionRole::FunctionalBase,
-            }),
-            owner: Some(DepositionOwner::Wall),
-            kind: DepositionKind::Perimeter,
-            width: WidthProfile::Constant { width_mm: 0.45 },
-            physical_z_mm: [0.0, 0.2],
-            points_mm: vec![
-                [1.0, 1.0, 0.2],
-                [2.0, 1.0, 0.2],
-                [2.0, 2.0, 0.2],
-                [1.0, 2.0, 0.2],
-                [1.0, 1.0, 0.2],
-            ],
-        }
-    }
-
-    #[test]
-    fn functional_wall_reuse_keeps_closure_role_and_every_edge() {
-        let original = wall();
-        let check = |current: &DepositionPath| {
-            same_walls(&[&original], &[current], &mut 0, &AtomicBool::new(false)).unwrap()
-        };
-        assert!(check(&original));
-        let mut reversed = original.clone();
-        reversed.reverse();
-        assert!(check(&reversed));
-        let mut moved_seam = original.clone();
-        moved_seam.rotate_closed(2).unwrap();
-        assert!(check(&moved_seam));
-        let mut open = original.clone();
-        open.points_mm.last_mut().unwrap()[0] += 0.01;
-        assert!(!check(&open));
-        assert!(!same_walls(&[&open], &[&original], &mut 0, &AtomicBool::new(false)).unwrap());
-        let mut changed = original.clone();
-        changed.kind = DepositionKind::Bridge;
-        assert!(!check(&changed));
-        changed = original.clone();
-        changed.width = WidthProfile::PerEdge {
-            widths_mm: vec![0.45, 0.45, 0.45, 0.44],
-        };
-        assert!(!check(&changed));
-    }
-}
-
 fn along(policy: RectilinearAxisPolicy, index: u32) -> usize {
     match policy {
         RectilinearAxisPolicy::X => 0,
@@ -201,7 +149,7 @@ fn bytes(domain: &MultiPolygon<f64>) -> usize {
             .iter()
             .map(|polygon| {
                 polygon.exterior().0.capacity() * size_of::<geo::Coord<f64>>()
-                    + polygon.interiors().len() * size_of::<geo::LineString<f64>>()
+                    + std::mem::size_of_val(polygon.interiors())
                     + polygon
                         .interiors()
                         .iter()
@@ -570,4 +518,56 @@ pub(super) fn verify(
         rows::verify(layer, &demands, recipe.bead_width_mm, staged, work, cancel)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wall() -> DepositionPath {
+        DepositionPath {
+            material_domain: Some(MaterialDomainRef {
+                construction_index: 0,
+                role: MaterialConstructionRole::FunctionalBase,
+            }),
+            owner: Some(DepositionOwner::Wall),
+            kind: DepositionKind::Perimeter,
+            width: WidthProfile::Constant { width_mm: 0.45 },
+            physical_z_mm: [0.0, 0.2],
+            points_mm: vec![
+                [1.0, 1.0, 0.2],
+                [2.0, 1.0, 0.2],
+                [2.0, 2.0, 0.2],
+                [1.0, 2.0, 0.2],
+                [1.0, 1.0, 0.2],
+            ],
+        }
+    }
+
+    #[test]
+    fn functional_wall_reuse_keeps_closure_role_and_every_edge() {
+        let original = wall();
+        let check = |current: &DepositionPath| {
+            same_walls(&[&original], &[current], &mut 0, &AtomicBool::new(false)).unwrap()
+        };
+        assert!(check(&original));
+        let mut reversed = original.clone();
+        reversed.reverse();
+        assert!(check(&reversed));
+        let mut moved_seam = original.clone();
+        moved_seam.rotate_closed(2).unwrap();
+        assert!(check(&moved_seam));
+        let mut open = original.clone();
+        open.points_mm.last_mut().unwrap()[0] += 0.01;
+        assert!(!check(&open));
+        assert!(!same_walls(&[&open], &[&original], &mut 0, &AtomicBool::new(false)).unwrap());
+        let mut changed = original.clone();
+        changed.kind = DepositionKind::Bridge;
+        assert!(!check(&changed));
+        changed = original.clone();
+        changed.width = WidthProfile::PerEdge {
+            widths_mm: vec![0.45, 0.45, 0.45, 0.44],
+        };
+        assert!(!check(&changed));
+    }
 }
