@@ -14,13 +14,137 @@ fn input(root: &[u8]) -> SnapshotInput<'_> {
 }
 
 #[test]
+fn expanded_object_schema_boundaries_match_admission_without_large_allocations() {
+    for length in [1, MAX_OBJECT_BYTES] {
+        model::validate_object_length(length).unwrap();
+    }
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    schema::configure(&connection, false).unwrap();
+    schema::create(&connection, DocumentProfile::Project).unwrap();
+    let object_id = [1u8; 32];
+    connection
+        .execute(
+            "INSERT INTO objects VALUES(?1,?2,?3)",
+            rusqlite::params![
+                &object_id[..],
+                MAX_OBJECT_BYTES as i64,
+                MAX_OBJECT_CHUNKS as i64
+            ],
+        )
+        .unwrap();
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO objects VALUES(?1,?2,?3)",
+                rusqlite::params![
+                    &[2u8; 32][..],
+                    MAX_OBJECT_BYTES as i64 + 1,
+                    MAX_OBJECT_CHUNKS as i64 + 1
+                ],
+            )
+            .is_err()
+    );
+    let chunk_id = [3u8; 32];
+    connection
+        .execute("INSERT INTO chunks VALUES(?1,1,0,x'01')", [&chunk_id[..]])
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO object_chunks VALUES(?1,?2,?3)",
+            rusqlite::params![&object_id[..], MAX_OBJECT_CHUNKS as i64 - 1, &chunk_id[..]],
+        )
+        .unwrap();
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO object_chunks VALUES(?1,?2,?3)",
+                rusqlite::params![&object_id[..], MAX_OBJECT_CHUNKS as i64, &chunk_id[..]],
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn larger_objects_roots_and_memberships_survive_reopen_publication_and_compaction() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("large.spil");
+    let cancel = AtomicBool::new(false);
+    let root = vec![7; 2 * 1024 * 1024];
+    let bytes: Vec<u8> = (0..24 * 1024 * 1024)
+        .map(|index| ((index / CHUNK_BYTES + index % 251) % 256) as u8)
+        .collect();
+    let objects: Vec<_> = (1..=256)
+        .map(|role| ObjectInput {
+            role: ObjectRole::new(role).unwrap(),
+            bytes: if role == 1 {
+                &bytes
+            } else {
+                b"shared small asset"
+            },
+        })
+        .collect();
+    let snapshot = |root| SnapshotInput {
+        root,
+        objects: &objects,
+        guard: b"large capture guard",
+    };
+    let created = Container::create_new(&path, snapshot(&root), &cancel, |_| true).unwrap();
+    let container = created.container;
+    {
+        let capture = container.capture(Selection::Current, &cancel).unwrap();
+        assert_eq!(capture.root, root);
+        assert_eq!(capture.members.len(), 256);
+        capture.verify_all(&cancel).unwrap();
+        assert!(matches!(
+            capture.read_object(ObjectId::of(&bytes), 16 * 1024 * 1024, &cancel),
+            Err(Error::ResourceLimit(_))
+        ));
+        assert_eq!(
+            capture
+                .read_object(ObjectId::of(&bytes), bytes.len(), &cancel)
+                .unwrap(),
+            bytes
+        );
+    }
+    let updated = container
+        .publish(
+            created.heads,
+            Selection::Current,
+            snapshot(b"new root"),
+            &cancel,
+            |_| true,
+        )
+        .unwrap();
+    let compact = container
+        .compact_to_new(&temporary.path().join("compact.spil"), &cancel, |_| true)
+        .unwrap();
+    assert_eq!(compact.heads.current(), updated.heads.current());
+    assert_eq!(compact.heads.previous(), updated.heads.previous());
+    compact.container.check(&cancel).unwrap();
+    drop(updated);
+    drop(container);
+    let reopened = Container::open_existing(&path, false).unwrap();
+    reopened.check(&cancel).unwrap();
+    let previous = reopened.capture(Selection::Previous, &cancel).unwrap();
+    assert_eq!(previous.root, root);
+    assert_eq!(
+        previous
+            .read_object(ObjectId::of(&bytes), bytes.len(), &cancel)
+            .unwrap(),
+        bytes
+    );
+    drop(previous);
+    assert_eq!(reopened.stats(&cancel).unwrap().limits, STORAGE_LIMITS);
+}
+
+#[test]
 #[ignore = "explicit bounded storage workload measurement"]
 fn bounded_storage_workload_measurements() {
     use std::time::Instant;
     for (name, count, length, shared) in [
         ("shared-small", 128, 4096, true),
-        ("max-object", 1, MAX_OBJECT_BYTES, false),
-        ("large-combined-capture", 9, MAX_OBJECT_BYTES, false),
+        ("large-object", 1, 32 * 1024 * 1024, false),
+        ("large-combined-capture", 9, 32 * 1024 * 1024, false),
     ] {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("workload.spil");

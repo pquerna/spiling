@@ -37,13 +37,13 @@ CREATE TABLE chunks (
 ) STRICT;
 CREATE TABLE objects (
  object_id BLOB NOT NULL PRIMARY KEY CHECK(length(object_id)=32),
- raw_length INTEGER NOT NULL CHECK(raw_length BETWEEN 1 AND 16777216),
- chunk_count INTEGER NOT NULL CHECK(chunk_count BETWEEN 1 AND 64),
+ raw_length INTEGER NOT NULL CHECK(raw_length BETWEEN 1 AND 1073741824),
+ chunk_count INTEGER NOT NULL CHECK(chunk_count BETWEEN 1 AND 4096),
  CHECK(chunk_count=(raw_length+262143)/262144)
 ) STRICT;
 CREATE TABLE object_chunks (
  object_id BLOB NOT NULL REFERENCES objects(object_id),
- ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 63),
+ ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 4095),
  chunk_id BLOB NOT NULL REFERENCES chunks(chunk_id),
  PRIMARY KEY(object_id,ordinal)
 ) STRICT;

@@ -6,7 +6,8 @@
 //! while SQLite is live: closing an independently opened main-file descriptor can drop
 //! SQLite's POSIX locks. Only the separate lease and directories retain OS handles.
 use crate::{
-    APPLICATION_ID, Error, MAX_DATABASE_BYTES, MAX_JOURNAL_BYTES, Result, SCHEMA_VERSION, invalid,
+    APPLICATION_ID, Error, MAX_DATABASE_BYTES, MAX_JOURNAL_BYTES, MAX_SCRATCH_BYTES,
+    MAX_SCRATCH_ENTRIES, Result, SCHEMA_VERSION, invalid,
 };
 use std::{
     collections::BTreeMap,
@@ -641,8 +642,10 @@ impl Scratch {
                 ));
             }
         }
-        if active.values().filter(|(owner, _)| *owner == group).count() >= 8 {
-            return Err(crate::limit("eight aggregate owned scratch entries"));
+        if active.values().filter(|(owner, _)| *owner == group).count() as u64
+            >= MAX_SCRATCH_ENTRIES
+        {
+            return Err(crate::limit("aggregate owned scratch entries"));
         }
         active.insert(path.to_path_buf(), (group, 0));
         Ok(Self {
@@ -663,8 +666,8 @@ impl Scratch {
             .filter(|(owner, _)| owner == group)
             .try_fold(bytes as u64, |total, (_, size)| total.checked_add(*size))
             .ok_or_else(|| crate::limit("scratch byte arithmetic"))?;
-        if total > 192 * 1024 * 1024 {
-            return Err(crate::limit("192 MiB aggregate scratch bytes"));
+        if total > MAX_SCRATCH_BYTES {
+            return Err(crate::limit("aggregate scratch bytes"));
         }
         active
             .get_mut(&self.path)

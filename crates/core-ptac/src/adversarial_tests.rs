@@ -470,9 +470,9 @@ fn input_boundary_limits_and_duplicate_roles_are_not_compatibility_defaults() {
             Err(Error::ResourceLimit(_))
         ));
     }
-    for bytes in [Vec::new(), vec![0; MAX_OBJECT_BYTES + 1]] {
+    for length in [0, MAX_OBJECT_BYTES + 1, usize::MAX] {
         assert!(matches!(
-            Candidate::checked(snapshot(OLD_ROOT, &[object(&bytes)], OLD_GUARD)),
+            model::validate_object_length(length),
             Err(Error::ResourceLimit(_))
         ));
     }
@@ -916,7 +916,12 @@ fn sqlite_execution_scope_interrupts_and_unregisters_bounded_work() {
     let query = "WITH RECURSIVE work(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM work WHERE value<1000000000) SELECT sum(value) FROM work";
     for cancel in [AtomicBool::new(true), uncancelled()] {
         let started = Instant::now();
-        let execution = crate::execution::Execution::new(&connection, &cancel);
+        let execution = crate::execution::Execution::with_limits(
+            &connection,
+            &cancel,
+            50_000,
+            Duration::from_secs(1),
+        );
         let result = connection.query_row(query, [], |row| row.get::<_, i64>(0));
         assert!(
             matches!(result, Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == rusqlite::ErrorCode::OperationInterrupted)

@@ -20,6 +20,8 @@ struct Budget<'a> {
     steps: u64,
     waited: Duration,
     committed_decision: bool,
+    max_steps: u64,
+    max_duration: Duration,
 }
 
 pub(crate) struct Execution<'a> {
@@ -29,12 +31,22 @@ pub(crate) struct Execution<'a> {
 
 impl<'a> Execution<'a> {
     pub fn new(connection: &Connection, cancel: &'a AtomicBool) -> Self {
+        Self::with_limits(connection, cancel, 5_000_000_000, Duration::from_secs(600))
+    }
+    pub(crate) fn with_limits(
+        connection: &Connection,
+        cancel: &'a AtomicBool,
+        max_steps: u64,
+        max_duration: Duration,
+    ) -> Self {
         let mut budget = Box::new(Budget {
             cancel,
             started: Instant::now(),
             steps: 0,
             waited: Duration::ZERO,
             committed_decision: false,
+            max_steps,
+            max_duration,
         });
         let handle = unsafe { connection.handle() };
         unsafe {
@@ -76,8 +88,8 @@ unsafe extern "C" fn progress(pointer: *mut c_void) -> c_int {
     budget.steps += 1000;
     c_int::from(
         (!budget.committed_decision && budget.cancel.load(Ordering::Acquire))
-            || budget.steps > 50_000_000
-            || budget.started.elapsed() > Duration::from_secs(30),
+            || budget.steps > budget.max_steps
+            || budget.started.elapsed() > budget.max_duration,
     )
 }
 
@@ -85,7 +97,7 @@ unsafe extern "C" fn busy(pointer: *mut c_void, _attempt: c_int) -> c_int {
     let budget = unsafe { &mut *pointer.cast::<Budget<'_>>() };
     if budget.waited >= Duration::from_millis(249)
         || (!budget.committed_decision && budget.cancel.load(Ordering::Acquire))
-        || budget.started.elapsed() > Duration::from_secs(30)
+        || budget.started.elapsed() > budget.max_duration
     {
         return 0;
     }

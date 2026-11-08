@@ -11,13 +11,16 @@ use std::{
 };
 
 pub const CHUNK_BYTES: usize = 256 * 1024;
-pub const MAX_OBJECT_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_ROOT_BYTES: usize = 1024 * 1024;
+pub const MAX_OBJECT_BYTES: usize = 1024 * 1024 * 1024;
+pub const MAX_OBJECT_CHUNKS: usize = MAX_OBJECT_BYTES.div_ceil(CHUNK_BYTES);
+pub const MAX_ROOT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_GUARD_BYTES: usize = 4096;
-pub const MAX_MEMBERS: usize = 128;
-pub const MAX_SNAPSHOT_BYTES: usize = 160 * 1024 * 1024;
-pub const MAX_DATABASE_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_MEMBERS: usize = 8192;
+pub const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+pub const MAX_DATABASE_BYTES: u64 = 256 * 1024 * 1024 * 1024;
 pub const MAX_JOURNAL_BYTES: u64 = 2 * MAX_DATABASE_BYTES;
+pub const MAX_SCRATCH_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+pub const MAX_SCRATCH_ENTRIES: u64 = 16;
 pub const PROFILE: &str = "spiling.project";
 
 /// Closed application profiles; callers select the expected document authority.
@@ -37,11 +40,11 @@ impl DocumentProfile {
 
 pub const APPLICATION_ID: u32 = 0x50544143;
 pub const SCHEMA_VERSION: u32 = 1;
-pub const MAX_SNAPSHOTS: u64 = 512;
-pub const MAX_MEMBERSHIP_ROWS: u64 = 16384;
-pub const MAX_OBJECTS: u64 = 4096;
-pub const MAX_MAPPING_ROWS: u64 = 262144;
-pub const MAX_CHUNKS: u64 = 4096;
+pub const MAX_SNAPSHOTS: u64 = 4096;
+pub const MAX_MEMBERSHIP_ROWS: u64 = 1_048_576;
+pub const MAX_OBJECTS: u64 = 262_144;
+pub const MAX_MAPPING_ROWS: u64 = 16_777_216;
+pub const MAX_CHUNKS: u64 = 1_048_576;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StorageLimits {
@@ -67,11 +70,11 @@ pub const STORAGE_LIMITS: StorageLimits = StorageLimits {
     object_bytes: MAX_OBJECT_BYTES as u64,
     root_bytes: MAX_ROOT_BYTES as u64,
     guard_bytes: MAX_GUARD_BYTES as u64,
-    snapshot_bytes: MAX_SNAPSHOT_BYTES as u64,
+    snapshot_bytes: MAX_SNAPSHOT_BYTES,
     database_bytes: MAX_DATABASE_BYTES,
     journal_bytes: MAX_JOURNAL_BYTES,
-    scratch_bytes: 192 * 1024 * 1024,
-    scratch_entries: 8,
+    scratch_bytes: MAX_SCRATCH_BYTES,
+    scratch_entries: MAX_SCRATCH_ENTRIES,
     snapshots: MAX_SNAPSHOTS,
     membership_rows: MAX_MEMBERSHIP_ROWS,
     objects: MAX_OBJECTS,
@@ -193,7 +196,7 @@ pub(crate) struct Candidate<'a> {
 impl<'a> Candidate<'a> {
     pub fn checked(input: SnapshotInput<'a>) -> Result<Self> {
         if input.root.is_empty() || input.root.len() > MAX_ROOT_BYTES {
-            return Err(limit("root must contain 1..1 MiB"));
+            return Err(limit("root must contain 1..16 MiB"));
         }
         if input.guard.is_empty() || input.guard.len() > MAX_GUARD_BYTES {
             return Err(limit("guard must contain 1..4096 bytes"));
@@ -205,9 +208,7 @@ impl<'a> Candidate<'a> {
         let mut objects = BTreeMap::from([(root, input.root)]);
         let mut members = Vec::with_capacity(input.objects.len());
         for input_object in input.objects {
-            if input_object.bytes.is_empty() || input_object.bytes.len() > MAX_OBJECT_BYTES {
-                return Err(limit("object must contain 1..16 MiB"));
-            }
+            validate_object_length(input_object.bytes.len())?;
             let object = ObjectId::of(input_object.bytes);
             objects.insert(object, input_object.bytes);
             members.push(Member {
@@ -221,7 +222,7 @@ impl<'a> Candidate<'a> {
         }
         let total = objects
             .values()
-            .try_fold(0usize, |total, bytes| total.checked_add(bytes.len()))
+            .try_fold(0u64, |total, bytes| total.checked_add(bytes.len() as u64))
             .ok_or_else(|| limit("snapshot byte arithmetic"))?;
         if total > MAX_SNAPSHOT_BYTES {
             return Err(limit("snapshot raw bytes"));
@@ -234,6 +235,13 @@ impl<'a> Candidate<'a> {
             guard: input.guard,
         })
     }
+}
+
+pub(crate) fn validate_object_length(length: usize) -> Result<()> {
+    if length == 0 || length > MAX_OBJECT_BYTES {
+        return Err(limit("object must contain 1..1 GiB"));
+    }
+    Ok(())
 }
 
 pub(crate) fn hash(bytes: &[u8]) -> [u8; 32] {

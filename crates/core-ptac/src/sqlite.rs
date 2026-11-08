@@ -68,7 +68,10 @@ impl Database {
             }
         }
         if !read_only {
-            connection.execute_batch("PRAGMA max_page_count=262144;")?;
+            connection.execute_batch(&format!(
+                "PRAGMA max_page_count={};",
+                MAX_DATABASE_BYTES / 4096
+            ))?;
         }
         connection.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
             use rusqlite::hooks::{AuthAction, Authorization};
@@ -684,8 +687,9 @@ impl Container {
                 "INSERT INTO objects VALUES(?1,?2,?3)",
                 params![&id.as_bytes()[..], length, count],
             )?;
-            let mut statement = source.prepare("SELECT m.ordinal,c.chunk_id,c.raw_length,c.codec,c.data FROM object_chunks m JOIN chunks c ON c.chunk_id=m.chunk_id WHERE m.object_id=?1 ORDER BY m.ordinal LIMIT 65")?;
-            let mut rows = statement.query([&id.as_bytes()[..]])?;
+            let mut statement = source.prepare("SELECT m.ordinal,c.chunk_id,c.raw_length,c.codec,c.data FROM object_chunks m JOIN chunks c ON c.chunk_id=m.chunk_id WHERE m.object_id=?1 ORDER BY m.ordinal LIMIT ?2")?;
+            let mut rows =
+                statement.query(params![&id.as_bytes()[..], (MAX_OBJECT_CHUNKS + 1) as i64])?;
             while let Some(row) = rows.next()? {
                 cancelled(cancel)?;
                 let chunk = digest_bytes(
@@ -881,8 +885,8 @@ fn check_connection(
         return Err(invalid("SQLite foreign key check failed"));
     }
     let connection = &connection;
-    let mut snapshots = connection.prepare("SELECT snapshot_id FROM snapshots LIMIT 513")?;
-    let mut rows = snapshots.query([])?;
+    let mut snapshots = connection.prepare("SELECT snapshot_id FROM snapshots LIMIT ?1")?;
+    let mut rows = snapshots.query([(MAX_SNAPSHOTS + 1) as i64])?;
     while let Some(row) = rows.next()? {
         cancelled(cancel)?;
         graph(
@@ -894,8 +898,8 @@ fn check_connection(
             )?),
         )?;
     }
-    let mut objects = connection.prepare("SELECT object_id FROM objects LIMIT 4097")?;
-    let mut rows = objects.query([])?;
+    let mut objects = connection.prepare("SELECT object_id FROM objects LIMIT ?1")?;
+    let mut rows = objects.query([(MAX_OBJECTS + 1) as i64])?;
     while let Some(row) = rows.next()? {
         let id = ObjectId::from_bytes(digest_bytes(
             row.get_ref(0)?
@@ -905,8 +909,8 @@ fn check_connection(
         stream_object(connection, id, MAX_OBJECT_BYTES, cancel, |_| Ok(()))?;
     }
     let mut chunks =
-        connection.prepare("SELECT chunk_id,raw_length,codec,data FROM chunks LIMIT 4097")?;
-    let mut rows = chunks.query([])?;
+        connection.prepare("SELECT chunk_id,raw_length,codec,data FROM chunks LIMIT ?1")?;
+    let mut rows = chunks.query([(MAX_CHUNKS + 1) as i64])?;
     while let Some(row) = rows.next()? {
         cancelled(cancel)?;
         let digest = digest_bytes(
@@ -1010,8 +1014,8 @@ fn graph(connection: &Connection, id: SnapshotId) -> Result<(ObjectId, Vec<Membe
     )?);
     drop(root_rows);
     drop(root_statement);
-    let mut statement = connection.prepare("SELECT role,object_id FROM snapshot_objects WHERE snapshot_id=?1 ORDER BY role,object_id LIMIT 129")?;
-    let mut rows = statement.query([&id.0[..]])?;
+    let mut statement = connection.prepare("SELECT role,object_id FROM snapshot_objects WHERE snapshot_id=?1 ORDER BY role,object_id LIMIT ?2")?;
+    let mut rows = statement.query(params![&id.0[..], (MAX_MEMBERS + 1) as i64])?;
     let mut members = Vec::new();
     let mut ids = BTreeSet::from([root]);
     while let Some(row) = rows.next()? {
@@ -1033,7 +1037,7 @@ fn graph(connection: &Connection, id: SnapshotId) -> Result<(ObjectId, Vec<Membe
     if snapshot_id(root, &members) != id {
         return Err(invalid("snapshot digest/membership"));
     }
-    if sum_lengths(connection, &ids)? > MAX_SNAPSHOT_BYTES as u64 {
+    if sum_lengths(connection, &ids)? > MAX_SNAPSHOT_BYTES {
         return Err(limit("snapshot raw bytes"));
     }
     Ok((root, members))
@@ -1054,9 +1058,7 @@ fn object_length(connection: &Connection, id: ObjectId) -> Result<usize> {
         |row| row.get(0),
     )?;
     let length = usize::try_from(length).map_err(|_| invalid("negative object size"))?;
-    if length == 0 || length > MAX_OBJECT_BYTES {
-        return Err(limit("object size"));
-    }
+    model::validate_object_length(length)?;
     Ok(length)
 }
 
@@ -1089,8 +1091,8 @@ fn stream_object(
     if length > budget {
         return Err(limit("incoming object byte budget"));
     }
-    let mut statement = connection.prepare("SELECT m.ordinal,c.chunk_id,c.raw_length,c.codec,c.data FROM object_chunks m LEFT JOIN chunks c ON c.chunk_id=m.chunk_id WHERE m.object_id=?1 ORDER BY m.ordinal LIMIT 65")?;
-    let mut rows = statement.query([&id.as_bytes()[..]])?;
+    let mut statement = connection.prepare("SELECT m.ordinal,c.chunk_id,c.raw_length,c.codec,c.data FROM object_chunks m LEFT JOIN chunks c ON c.chunk_id=m.chunk_id WHERE m.object_id=?1 ORDER BY m.ordinal LIMIT ?2")?;
+    let mut rows = statement.query(params![&id.as_bytes()[..], (MAX_OBJECT_CHUNKS + 1) as i64])?;
     let mut total = 0usize;
     let mut ordinal = 0i64;
     let mut digest = Sha256::new();
@@ -1100,7 +1102,7 @@ fn stream_object(
         let raw_length =
             usize::try_from(row.get::<_, i64>(2)?).map_err(|_| invalid("negative chunk length"))?;
         if actual != ordinal
-            || ordinal >= 64
+            || ordinal >= MAX_OBJECT_CHUNKS as i64
             || total >= length
             || raw_length != (length - total).min(CHUNK_BYTES)
             || raw_length == 0
@@ -1182,7 +1184,7 @@ impl Staged {
                     continue;
                 }
                 let encoded = chunks::encode(raw)?;
-                if offset + encoded.data.len() as u64 > 192 * 1024 * 1024 {
+                if offset + encoded.data.len() as u64 > MAX_SCRATCH_BYTES {
                     return Err(limit("staged encoded bytes"));
                 }
                 staged.spool.append(&encoded.data)?;

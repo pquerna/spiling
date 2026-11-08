@@ -37,6 +37,10 @@ input. Bounded structural and row checks precede graph/domain decoding. Full che
 also runs SQLite integrity/foreign-key checks and verifies retained and unreachable
 logical rows; it never repairs the file.
 
+Pre-release capacity changes update these exact schema constraints in place.
+Containers created with earlier development constraints must be recreated; a
+matching `user_version` does not bypass catalog admission or imply migration.
+
 All IDs/hashes are exactly 32 raw bytes. Object identity is SHA-256 of exact complete
 raw bytes; chunk identity is SHA-256 of its raw bytes. Snapshot identity hashes
 `spiling:ptac:snapshot:v1\0`, root ID, `member_count:u32_le`, then each
@@ -53,23 +57,31 @@ content size, no dictionary/reserved flags, window at most 256 KiB, no trailing,
 skippable or concatenated frames, bounded output and both chunk/object digests.
 The first verified encoding wins; reused content is verified, never overwritten.
 
-| Resource                         | Bound                                                                                                                                            |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Root / guard                     | 1 MiB / 4096 bytes                                                                                                                               |
-| Object / mappings                | 16 MiB / 64                                                                                                                                      |
-| Selected membership / raw graph  | 128 rows / 160 MiB                                                                                                                               |
-| Database / rollback journal      | 1 GiB / 2 GiB                                                                                                                                    |
-| Retained snapshots / memberships | 512 / 16384                                                                                                                                      |
-| Objects / mappings / chunks      | 4096 / 262144 / 4096                                                                                                                             |
-| Owned scratch                    | Eight entries / 192 MiB aggregate encoded spool bytes                                                                                            |
-| SQLite                           | 1 MiB row limit, 64 KiB SQL, 32 columns, expression depth 64, 128 variables, zero attached databases                                             |
-| Working policy                   | 8 MiB cache target, mmap off, memory temp, 250 ms cumulative lock waiting, 1000-instruction progress checks, bounded per-operation work/deadline |
+| Resource                         | Bound                                                                                                                                                            |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Root / guard                     | 16 MiB / 4096 bytes                                                                                                                                              |
+| Object / mappings                | 1 GiB / 4096                                                                                                                                                     |
+| Selected membership / raw graph  | 8192 rows / 16 GiB                                                                                                                                               |
+| Database / rollback journal      | 256 GiB / 512 GiB                                                                                                                                                |
+| Retained snapshots / memberships | 4096 / 1048576                                                                                                                                                   |
+| Objects / mappings / chunks      | 262144 / 16777216 / 1048576                                                                                                                                      |
+| Owned scratch                    | 16 entries / 20 GiB aggregate encoded spool bytes                                                                                                                |
+| SQLite                           | 1 MiB row limit, 64 KiB SQL, 32 columns, expression depth 64, 128 variables, zero attached databases                                                             |
+| Working policy                   | 8 MiB cache target, mmap off, memory temp, 250 ms cumulative lock waiting, 1000-instruction cancellation checks, 5 billion VM instructions / 600 s per operation |
 
 Counts stop at limit+1; integer conversions and lengths are checked before copying
 BLOBs or decompressing. Domain retained/history/prepared budgets can be smaller and
 are charged separately; page cache is not a process heap cap. No global SQLite heap
 limit affects Jobs. Stale/foreign scratch is not recursively removed or treated as
 owned by filename; inspect it explicitly before retrying a refused save.
+
+Container capacity does not authorize whole-object allocation: streamed validation
+still decodes at most one 256 KiB chunk at a time, and materializing an object
+requires the caller's separate incoming-byte budget. Geometry import, manufacturing
+retention, transfer and solver limits remain independent admission policies. Keep
+large analysis fields and model payloads chunked rather than growing control RPCs
+or requiring every saved field to be resident. These are capacity ceilings, not a
+claim that a maximum-sized workflow has been qualified on every machine.
 
 ## Recovery and filesystem admission
 
@@ -158,6 +170,7 @@ These mutation campaigns are not an exhaustive fuzzer or electrical-power-loss
 simulation. Retain seeds, minimized failures and campaign logs outside this runbook.
 Run the ignored `tests::bounded_storage_workload_measurements` explicitly with
 `cargo test -p spiling-core-ptac --lib tests::bounded_storage_workload_measurements -- --ignored --exact --nocapture`
-for phase timings and exact space accounting of shared small members, a maximum
-object and a large combined synthetic capture. It exercises container capacity,
-not domain-valid maximum STEP/image/bundle admission or physical disk latency.
+for phase timings and exact space accounting of shared small members, a 32 MiB
+object and a 288 MiB combined synthetic capture. It exercises streaming and
+maintenance beyond the former small-container ceilings, not maximum container
+capacity, domain-valid maximum STEP/image/bundle admission or physical disk latency.
