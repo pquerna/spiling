@@ -32,8 +32,7 @@ pub fn modifier_delta(ui: &mut Ui, property: &str, before: &str, after: &str) {
             egui::vec2(12.0, 0.0),
             egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
         );
-        response
-            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, "changes to"));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, "changes to"));
         ui.label(egui::RichText::new(after).strong());
     });
 }
