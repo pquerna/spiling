@@ -231,6 +231,21 @@ wheels = [
 ]
 
 [[package]]
+name = "pymetis"
+version = "2025.2.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/90/4e/c56ce33ddca372050ae829e5c3a3659e8096234c5c96ea010d27293d661b/pymetis-2025.2.2.tar.gz", hash = "sha256:79c6d56c30c6f3df7cc755617cbadcfc252a175ce4e5a59982edad0f1ab71c99", size = 348479, upload-time = "2025-11-06T17:40:09.73Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/98/5f/56fbe4dfdd25bcf3ac870de96bb4a7ce11083701465d25127b9e9933dde3/pymetis-2025.2.2-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:fccafb50056dc93e22effe14abadb87921d0314741ff0a4d6208df5c42ffdb68", size = 251291, upload-time = "2025-11-06T17:39:43.771Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/5b/17aed510e825e4d7f3a9bb195836fbf9d259e23114175c80e65bb4a749ae/pymetis-2025.2.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:b2758f36952c9fcf864838b6d01b5eab067f5f35ce80721f8d185276e97fe640", size = 236808, upload-time = "2025-11-06T17:39:45.451Z" },
+    { url = "https://files.pythonhosted.org/packages/87/46/bb55dd838496cc9c8a905d8f20f11e6ad1316d23e451678664a853930580/pymetis-2025.2.2-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e355cd0de2ee17e50f8022970727c7edc98a56136f2db6d623c632b6e7150a96", size = 275908, upload-time = "2025-11-06T17:39:47.696Z" },
+    { url = "https://files.pythonhosted.org/packages/91/ce/0f9db4a760e58486d4553ad5ad53d9a6f53f288f341d78851aa241409130/pymetis-2025.2.2-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:904d190253492bb48c0dd2e179adb590c4a94e8bbeacbdfe82d0b21a29ccda7f", size = 1312039, upload-time = "2025-11-06T17:39:49.214Z" },
+]
+
+[[package]]
 name = "pyparsing"
 version = "3.3.3"
 source = { registry = "https://pypi.org/simple" }
@@ -329,6 +344,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "pyamg" },
+    { name = "pymetis" },
     { name = "scikit-fem" },
     { name = "scipy" },
     { name = "shapely" },
@@ -348,12 +364,22 @@ requires-dist = [
     { name = "matplotlib", specifier = "==3.11.2" },
     { name = "numpy", specifier = "==2.5.4" },
     { name = "pyamg", specifier = "==5.4.1" },
+    { name = "pymetis", specifier = "==2025.2.2" },
     { name = "pytest", marker = "extra == 'test'", specifier = "==9.2.0" },
     { name = "scikit-fem", specifier = "==12.0.2" },
     { name = "scipy", specifier = "==1.18.1" },
     { name = "shapely", specifier = "==2.2.0" },
 ]
 provides-extras = ["fixtures", "test"]
+
+[[package]]
+name = "typing-extensions"
+version = "4.16.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/cc/6253133b5bb138fc3306cebfbda2c520f545d36b5be2c7255cc528bb45d6/typing_extensions-4.16.0.tar.gz", hash = "sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5", size = 113555, upload-time = "2026-07-02T08:40:05.92Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl", hash = "sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8", size = 45571, upload-time = "2026-07-02T08:40:04.659Z" },
+]
 
 [[package]]
 name = "tzdata"

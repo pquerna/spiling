@@ -7,10 +7,23 @@ from pathlib import Path
 import json
 from model import file_hash
 
-SIZES = {"beam": (12.0, 5.0, 4.0), "cube": (6.0, 6.0, 6.0), "holdout": (16.0, 6.0, 4.0)}
+SIZES = {
+    "beam": (12.0, 5.0, 4.0),
+    "cube": (6.0, 6.0, 6.0),
+    "holdout": (16.0, 6.0, 4.0),
+    "cube32": (32.0, 32.0, 32.0),
+    "beam80": (80.0, 30.0, 30.0),
+    "cube40": (40.0, 40.0, 40.0),
+    "column48": (24.0, 24.0, 48.0),
+    "panel48": (48.0, 48.0, 16.0),
+    "tube32": (32.0, 32.0, 32.0),
+    "angle40": (40.0, 40.0, 24.0),
+}
 
 
 def generate(folder: Path):
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+    from OCP.gp import gp_Pnt
     from OCP.BRepCheck import BRepCheck_Analyzer
     from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
     from OCP.IFSelect import IFSelect_RetDone
@@ -35,6 +48,12 @@ def generate(folder: Path):
                 )
             continue
         shape = BRepPrimAPI_MakeBox(*size).Shape()
+        if name == "tube32":
+            hole = BRepPrimAPI_MakeBox(gp_Pnt(12, 12, -1), 8, 8, 34).Shape()
+            shape = BRepAlgoAPI_Cut(shape, hole).Shape()
+        elif name == "angle40":
+            notch = BRepPrimAPI_MakeBox(gp_Pnt(20, 20, -1), 21, 21, 26).Shape()
+            shape = BRepAlgoAPI_Cut(shape, notch).Shape()
         if not BRepCheck_Analyzer(shape).IsValid():
             raise RuntimeError("original study solid is invalid")
         writer = STEPControl_Writer()

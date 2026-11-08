@@ -221,10 +221,15 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--input", type=Path, default=Path("/input"))
     p.add_argument("--output", type=Path, default=Path("/output"))
-    p.add_argument("--backend", choices=("scipy", "warp"), required=True)
+    p.add_argument("--backend", choices=("scipy", "warp", "coupon"), required=True)
     args = p.parse_args()
     try:
-        result = evaluate(args.input, args.backend)
+        if args.backend == "coupon":
+            from coupon import evaluate as evaluate_coupon
+
+            result = evaluate_coupon(args.input, args.output)
+        else:
+            result = evaluate(args.input, args.backend)
     except Exception as error:
         result = {"status": "failed", "backend": args.backend, "error": str(error)}
         (args.output / "result.json").write_text(

@@ -1,0 +1,2 @@
+# Exact source; build only inside the image.
+pymetis==2025.2.2 --hash=sha256:79c6d56c30c6f3df7cc755617cbadcfc252a175ce4e5a59982edad0f1ab71c99

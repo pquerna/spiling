@@ -29,6 +29,7 @@ JUDGE_FILES = [
     "export-replay.mjs",
     "specimens.py",
     "uv.lock",
+    "sweep.py",
 ]
 
 
@@ -124,8 +125,8 @@ def mutations(parent, rng):
 
 def evaluate(request):
     bounded()
-    from geometry import voxelize
-    from mechanics import solve, prepare
+    from geometry import voxelize, prism_mesh
+    from mechanics import solve, prepare, solve_coupon
 
     began = time.monotonic()
     root = Path(request["root"])
@@ -190,22 +191,64 @@ def evaluate(request):
             },
         )
     mesh_start = time.monotonic()
-    mesh = voxelize(
-        data["roads"], dx=request["dx"], dz=request["dz"], phase=tuple(request["phase"])
-    )
+    coupon = request.get("coupon_bounds")
+    roads = data["roads"]
+    if coupon is not None:
+        if (
+            request["mesh_method"] != "prisms"
+            or request["case"] != "compression_envelope"
+        ):
+            raise ValueError(
+                "coupon requires conforming prisms and independent compression"
+            )
+        roads = [
+            r
+            for r in roads
+            if r["kind"] in (2, 5, 13) or (r["kind"] == 8 and type(r["owner"]) is int)
+        ]
+    if request.get("mesh_method", "uniform") == "prisms":
+        mesh, mesh_info = prism_mesh(
+            roads,
+            window=coupon,
+            max_xy=request["dx"],
+            max_z=request["dz"],
+            divisions=request["divisions"],
+        )
+    else:
+        mesh = voxelize(
+            data["roads"],
+            dx=request["dx"],
+            dz=request["dz"],
+            phase=tuple(request["phase"]),
+        )
+        mesh_info = {"method": "uniform", "dx": request["dx"], "dz": request["dz"]}
+
     mesh_s = time.monotonic() - mesh_start
     origin = [20.0, 20.0, 0.0]
     fixture = [origin, [a + b for a, b in zip(origin, SIZES[specimen])]]
     material = Material(**request["material"])
-    if request["case"] == "compression_envelope":
+    if coupon is not None:
+        result = solve_coupon(mesh, material, coupon, solver=request["solver"])
+    elif request["case"] in ("compression_envelope", "all_loads"):
         started = time.monotonic()
         body = prepare(mesh, material)
         cases = [
-            solve(mesh, case, material, fixture_bounds=fixture, prepared=body)
-            for case in ("compression_x", "compression_y", "compression_z")
+            solve(
+                mesh,
+                case,
+                material,
+                fixture_bounds=fixture,
+                prepared=body,
+                solver=request["solver"],
+            )
+            for case in (
+                ("compression_x", "compression_y", "compression_z", "bend_z")
+                if request["case"] == "all_loads"
+                else ("compression_x", "compression_y", "compression_z")
+            )
         ]
         result = {
-            "case": "compression_envelope",
+            "case": request["case"],
             "stiffness_n_mm": min(r["stiffness_n_mm"] for r in cases),
             "cases": cases,
             "assembly_wall_s": body.assembly_s,
@@ -217,7 +260,13 @@ def evaluate(request):
             "fixture_bounds_mm": fixture,
         }
     else:
-        result = solve(mesh, request["case"], material, fixture_bounds=fixture)
+        result = solve(
+            mesh,
+            request["case"],
+            material,
+            fixture_bounds=fixture,
+            solver=request["solver"],
+        )
     return {
         "status": "ok",
         "candidate": c.data(),
@@ -233,6 +282,7 @@ def evaluate(request):
         "segments": len(data["roads"]),
         "compile_s": data["compile_wall_s"],
         "mesh_s": mesh_s,
+        "mesh": mesh_info,
         "mechanics": result,
         "wall_s": time.monotonic() - began,
         "peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
@@ -250,13 +300,21 @@ def study(args):
             "identity": identity(args.bin_dir.resolve()),
             "specimen": args.specimen,
             "source_sha256": file_hash(root / "specimens" / f"{args.specimen}.step"),
+            "mesh_method": args.mesh_method,
+            "solver": args.solver,
+            "coupon_bounds": [args.coupon_bounds[:3], args.coupon_bounds[3:]]
+            if args.coupon_bounds
+            else None,
+            "divisions": args.divisions,
             "dx": args.dx,
             "dz": args.dz,
             "phase": args.phase,
             "case": args.case,
             "material": asdict(Material(poisson=args.poisson, z_ratio=args.z_ratio)),
             "seed": args.seed,
-            "search": "controls_then_pareto_mutation_v1",
+            "search": "fixed_controls_v1"
+            if args.controls_only
+            else "controls_then_pareto_mutation_v1",
         }
         judge = digest(spec)
         segment = root / "campaigns" / judge[:20]
@@ -305,6 +363,8 @@ def study(args):
             if queue:
                 c = queue.pop(0)
             else:
+                if args.controls_only:
+                    break
                 archive = pareto(rows)
                 if not archive:
                     break
@@ -396,9 +456,14 @@ def main():
             "compression_y",
             "compression_z",
             "compression_envelope",
+            "all_loads",
         ],
         default="bend_z",
     )
+    s.add_argument("--solver", choices=["amg", "superlu", "superlu_mmd"], default="amg")
+    s.add_argument("--coupon-bounds", type=float, nargs=6)
+    s.add_argument("--mesh-method", choices=["uniform", "prisms"], default="uniform")
+    s.add_argument("--divisions", type=int, choices=[1, 2, 3, 4], default=2)
     s.add_argument("--dx", type=float, default=0.225)
     s.add_argument("--dz", type=float, default=0.2)
     s.add_argument("--phase", type=float, nargs=2, default=[0.0, 0.0])
@@ -408,6 +473,7 @@ def main():
     s.add_argument("--seconds", type=float, default=900)
     s.add_argument("--trial-seconds", type=float, default=120)
     s.add_argument("--seed", type=int, default=41)
+    s.add_argument("--controls-only", action="store_true")
     s.add_argument("--candidates", type=Path)
     w = sub.add_parser("worker")
     w.add_argument("request", type=Path)

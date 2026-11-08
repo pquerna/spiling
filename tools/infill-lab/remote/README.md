@@ -9,7 +9,7 @@ The host needs existing SSH, Python 3, Docker and, for GPU runs, working NVIDIA 
 
 ## Prepare
 
-Copy only this directory's explicit source files to a versioned directory under `~/src/spiling-eval/tooling/`. Do not send the whole development checkout, SSH configuration, credentials, Docker socket or private brain as a build context. Build through SSH:
+Run `pnpm infill:lab campaign context --output NEW_CONTEXT` and copy only that context's explicit source files to a versioned directory under `~/src/spiling-eval/tooling/`. Do not send the whole development checkout, SSH configuration, credentials, Docker socket or private brain as a build context. Build through SSH:
 
 ```sh
 python3 ~/src/spiling-eval/tooling/RECIPE/launch.py \
@@ -17,7 +17,7 @@ python3 ~/src/spiling-eval/tooling/RECIPE/launch.py \
   --context ~/src/spiling-eval/tooling/RECIPE
 ```
 
-The official Python base is digest-pinned. `requirements.lock` contains exact package versions and distribution hashes; installation refuses source builds. Regenerate it with `uv pip compile requirements.in --python-platform aarch64-manylinux_2_36 --python-version 3.12 --only-binary :all: --generate-hashes --no-header --no-annotate --output-file requirements.lock`. Debian runtime-library resolution stays inside the image and is recorded in `/opt/spiling-eval/os-packages.txt`; Python packages are recorded alongside it. Rebuilds can resolve different Debian updates. Capture the resulting image ID in `image.json`; copy that image with `docker image save`/`load` when comparing machines rather than assuming two rebuilds are identical.
+The official Python base is digest-pinned. `requirements.lock` contains exact package versions and distribution hashes; ordinary dependencies install only from hash-locked wheels. The multi-stage image separately compiles exact-source PyMetis using hash-locked Python build tools and a contained compiler, then copies its wheel into the runtime stage. No host compiler is installed; build and runtime package inventories remain in the image. The exact resulting image ID remains comparison authority. Regenerate it with `uv pip compile requirements.in --python-platform aarch64-manylinux_2_36 --python-version 3.12 --only-binary :all: --generate-hashes --no-header --no-annotate --output-file requirements.lock`. Debian runtime-library resolution stays inside the image and is recorded in `/opt/spiling-eval/os-packages.txt`; Python packages are recorded alongside it. Rebuilds can resolve different Debian updates. Capture the resulting image ID in `image.json`; copy that image with `docker image save`/`load` when comparing machines rather than assuming two rebuilds are identical.
 
 Do not expose a Docker TCP endpoint. A normal SSH command invoking the launcher is sufficient; no API server, ports or agent service is installed. A committed private brain snapshot may live elsewhere under the prefix; it is never mounted in the evaluator.
 
@@ -33,6 +33,12 @@ Each new input directory under `PREFIX/inputs/` contains:
 Retain native source/actual-replay hashes, material assumptions, mesh/fixture descriptions and evaluator identities in provenance. Keep inputs unchanged and read-only after capture. Successful solver residual alone does not qualify an unvalidated material or fixture. Reference capture and geometry qualification remain the originating evaluator's responsibility.
 
 The reader checks inventory, hashes, shape, finite values, symmetry and reference residual. It compares the computed solution, residual and quadratic energy in FP64. Physical cases additionally reconstruct original displacement and independently check free-force residual, fixture reaction, global force balance and boundary-work/strain-energy agreement. Nonconvergence or absent CUDA fails; it never becomes a zero-stiffness or successful fallback result.
+
+## Finite actual-interior jobs
+
+Schema2 `actual_interior_coupon` inputs contain `case.json` and hashed `roads.json` captured by the ordinary native CLI/engine. The manifest binds candidate, source, actual-replay identity, evaluator source/dependency hashes and explicit coupon/material/refinement scenarios. `--backend coupon` constructs conforming nominal-deposition prisms and solves independent frictionless XYZ compression with PyMetis-ordered FP64 SuperLU. Completed nonspanning directions retain a witnessed zero; mesh/solver/physical-gate failures retain failures. This is not whole-part strength, buckling, bond-failure or calibrated material qualification. All object material and motion costs remain from fresh complete native replay.
+
+The public `campaign capture/context/pack/dispatch` commands separate sequential native production from independent remote numerical work. Use one frozen image across hosts. Completed per-job `trials.jsonl` and launch receipts are retrieved; outputs from different material/refinement/cut scenarios must be reported separately. The old `scipy`/`warp` frozen-matrix comparison remains available and does not inherit a measured GPU speedup from the coupon CPU path.
 
 ## Run and retrieve
 

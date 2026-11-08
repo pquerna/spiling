@@ -198,7 +198,7 @@ def build(campaign: Path, output: Path):
             interior = (
                 road["kind"] in (5, 13)
                 or road["kind"] == 8
-                and road.get("owner") is not None
+                and type(road.get("owner")) is int
             )
             tints.append(
                 matplotlib.colors.to_rgba(
@@ -291,7 +291,7 @@ const roads=items[selected].roads,points=roads.flatMap(r=>[r.start,r.end]),lo=[0
 const zoom=Math.min(canvas.clientWidth/(extent[0]+extent[1])*1.25,260/(extent[1]+extent[2]));const cut=lo[2]+(hi[2]-lo[2])*document.getElementById('cut').value/100;document.getElementById('height').textContent=(cut-lo[2]+.2).toFixed(1)+' mm';
 function project(p){const [x,y,z]=p.map((v,j)=>v-center[j]);const u=Math.cos(yaw)*x-Math.sin(yaw)*y,v=Math.sin(yaw)*x+Math.cos(yaw)*y;return [canvas.clientWidth/2+zoom*u,170-zoom*(Math.cos(pitch)*z-Math.sin(pitch)*v),Math.sin(pitch)*z+Math.cos(pitch)*v]}
 const ordered=roads.filter(r=>r.upper<=cut+1e-6&&Math.min(r.start[1],r.end[1])>=lo[1]+.25).map(r=>({r,a:project(r.start),b:project(r.end)})).sort((a,b)=>a.a[2]+a.b[2]-b.a[2]-b.b[2]);
-for(const {r,a,b} of ordered){const interior=r.kind===5||r.kind===13||(r.kind===8&&r.owner!==null);ctx.strokeStyle=interior?'#1ac6bb':colors[r.kind]||'#efad59';ctx.globalAlpha=interior?.95:.25;ctx.lineWidth=Math.max(1,zoom*r.width*.65);ctx.lineCap='round';ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke()}ctx.globalAlpha=1}
+for(const {r,a,b} of ordered){const interior=r.kind===5||r.kind===13||(r.kind===8&&typeof r.owner==='number');ctx.strokeStyle=interior?'#1ac6bb':colors[r.kind]||'#efad59';ctx.globalAlpha=interior?.95:.25;ctx.lineWidth=Math.max(1,zoom*r.width*.65);ctx.lineCap='round';ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke()}ctx.globalAlpha=1}
 canvas.onpointerdown=e=>{drag=[e.clientX,e.clientY];canvas.setPointerCapture(e.pointerId)};canvas.onpointerup=()=>drag=null;canvas.onpointermove=e=>{if(!drag)return;yaw+=(e.clientX-drag[0])*.008;pitch=Math.max(-.2,Math.min(1.4,pitch+(e.clientY-drag[1])*.008));drag=[e.clientX,e.clientY];draw()};document.getElementById('cut').oninput=draw;window.addEventListener('resize',draw);choose(0);
 </script></body></html>"""
 

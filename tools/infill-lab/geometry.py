@@ -18,7 +18,7 @@ from scipy.sparse.csgraph import connected_components
 
 
 @dataclass
-class VoxelMesh:
+class AnalysisMesh:
     points: np.ndarray
     cells: np.ndarray
     volume: float
@@ -27,6 +27,7 @@ class VoxelMesh:
     bounds: np.ndarray
     spacing: tuple
     grid_shape: tuple
+    cell_kind: str = "hex"
 
 
 def road_contains(road, x, y, z, *, inset=1e-10):
@@ -156,7 +157,7 @@ def mesh_from_voxels(occupied, grids):
     volumes = np.ones(n)
     for axis, g in enumerate(grids):
         volumes *= np.diff(g)[indices[:, axis]]
-    return VoxelMesh(
+    return AnalysisMesh(
         points,
         cells,
         float(volumes.sum()),
@@ -233,3 +234,329 @@ def voxelize(roads, *, dx=0.1125, dz=0.2, phase=(0.0, 0.0), max_cells=2_000_000)
             cache[signature] = shapely.covers(domain, tiles)
         occupied[:, :, k] = cache[signature]
     return mesh_from_voxels(occupied, grids)
+
+
+def footprint_slabs(roads):
+    import shapely
+    from shapely.geometry import LineString
+
+    width = min(r["width"] for r in roads)
+    if not math.isfinite(width) or width <= 0:
+        raise ValueError("invalid road width")
+    starts, ends = {}, {}
+    for i, r in enumerate(roads):
+        low, high = round(r["lower"], 10), round(r["upper"], 10)
+        if not low < high:
+            raise ValueError("invalid physical interval")
+        starts.setdefault(low, []).append(i)
+        ends.setdefault(high, []).append(i)
+    levels = sorted(set(starts) | set(ends))
+    if len(levels) > 4097:
+        raise ValueError("physical slab budget exceeded")
+    active, domains, cache = set(), [], {}
+    for low, high in zip(levels, levels[1:]):
+        active.difference_update(ends.get(low, ()))
+        active.update(starts.get(low, ()))
+        signature = tuple(
+            sorted(
+                (
+                    tuple(
+                        sorted(
+                            (tuple(roads[i]["start"][:2]), tuple(roads[i]["end"][:2]))
+                        )
+                    ),
+                    roads[i]["width"],
+                )
+                for i in active
+            )
+        )
+        if signature not in cache:
+            polygons = [
+                LineString(pair).buffer(w / 2, quad_segs=32) for pair, w in signature
+            ]
+            cache[signature] = shapely.union_all(polygons, grid_size=1e-9)
+        domains.append(cache[signature])
+    return width, levels, domains, list(cache.values())
+
+
+def refine_triangles(points, triangles, max_edge, *, uniform=False, owners=None):
+    """Conforming marked-edge bisection; no independent hanging-side refinement."""
+    owners = np.arange(len(triangles)) if owners is None else owners
+    for iteration in range(20):
+        edges = np.concatenate(
+            [triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]]
+        )
+        unique, inverse = np.unique(np.sort(edges, axis=1), axis=0, return_inverse=True)
+        marked = (
+            np.ones(len(unique), dtype=bool)
+            if uniform
+            else np.linalg.norm(points[unique[:, 1]] - points[unique[:, 0]], axis=1)
+            > max_edge * (1 + 1e-10)
+        )
+        if not np.any(marked):
+            return points, triangles, owners
+        mids = np.full(len(unique), -1, dtype=int)
+        mids[marked] = len(points) + np.arange(marked.sum())
+        points = np.vstack([points, points[unique[marked]].mean(axis=1)])
+        local = mids[inverse].reshape(3, -1).T
+        out, new_owners = [], []
+        for index, ((a, b, c), (ab, bc, ca)) in enumerate(zip(triangles, local)):
+            before = len(out)
+            count = int(ab >= 0) + int(bc >= 0) + int(ca >= 0)
+            if count == 0:
+                out.append((a, b, c))
+            elif count == 3:
+                out.extend([(a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca)])
+            elif count == 1:
+                if ab >= 0:
+                    out.extend([(a, ab, c), (ab, b, c)])
+                elif bc >= 0:
+                    out.extend([(b, bc, a), (bc, c, a)])
+                else:
+                    out.extend([(c, ca, b), (ca, a, b)])
+            else:
+                if ab < 0:
+                    out.extend([(c, ca, bc), (ca, a, b), (ca, b, bc)])
+                elif bc < 0:
+                    out.extend([(a, ab, ca), (ab, b, c), (ab, c, ca)])
+                else:
+                    out.extend([(b, bc, ab), (bc, c, a), (bc, a, ab)])
+            new_owners.extend([owners[index]] * (len(out) - before))
+        triangles = np.asarray(out, dtype=int)
+        owners = np.asarray(new_owners)
+        if len(triangles) > 200000:
+            raise ValueError("planar triangle budget exceeded")
+        if uniform:
+            return points, triangles, owners
+    raise ValueError("planar refinement did not terminate")
+
+
+def mesh_from_prisms(xy, triangles, z, occupied):
+    """Share node DOFs through identical full faces only, never point contacts."""
+    indices = np.column_stack(np.nonzero(occupied))
+    n = len(indices)
+    if not n:
+        raise ValueError("no deposited prisms")
+    nxy = len(xy)
+    base = triangles[indices[:, 0]]
+    lower = base + nxy * indices[:, 1, None]
+    upper = base + nxy * (indices[:, 1, None] + 1)
+    raw = np.hstack([lower, upper])
+    faces = [(0, 1, 2), (3, 4, 5), (0, 1, 4, 3), (1, 2, 5, 4), (2, 0, 3, 5)]
+    keys, corners = [], []
+    for face in faces:
+        ids = raw[:, face]
+        perm = np.argsort(ids, axis=1)
+        sorted_ids = np.take_along_axis(ids, perm, axis=1)
+        sorted_corners = np.take_along_axis(
+            np.broadcast_to(face, ids.shape), perm, axis=1
+        )
+        if len(face) == 3:
+            sorted_ids = np.column_stack([sorted_ids, np.full(n, -1)])
+            sorted_corners = np.column_stack([sorted_corners, np.full(n, -1)])
+        keys.append(sorted_ids)
+        corners.append(
+            np.where(
+                sorted_corners >= 0, np.arange(n)[:, None] * 6 + sorted_corners, -1
+            )
+        )
+    keys = np.concatenate(keys)
+    corners = np.concatenate(corners)
+    _, labels, counts = np.unique(keys, axis=0, return_inverse=True, return_counts=True)
+    if counts.max() > 2:
+        raise ValueError("nonmanifold prism face")
+    order = np.argsort(labels, kind="stable")
+    starts = np.r_[0, np.cumsum(counts)[:-1]]
+    paired = starts[counts == 2]
+    a, b = order[paired], order[paired + 1]
+    valid = corners[a] >= 0
+    src, dst = corners[a][valid], corners[b][valid]
+    _, node_labels = connected_components(
+        sparse.coo_matrix(
+            (np.ones(len(src), np.int8), (src, dst)), shape=(n * 6, n * 6)
+        ).tocsr(),
+        directed=False,
+    )
+    _, representatives = np.unique(node_labels, return_index=True)
+    node_xy = xy[raw.reshape(-1) % nxy]
+    node_z = np.asarray(z)[raw.reshape(-1) // nxy]
+    points = np.column_stack([node_xy, node_z])[representatives].T
+    cells = node_labels.reshape(n, 6).T
+    cell_a, cell_b = a % n, b % n
+    components = connected_components(
+        sparse.coo_matrix((np.ones(len(a)), (cell_a, cell_b)), shape=(n, n)).tocsr(),
+        directed=False,
+        return_labels=False,
+    )
+    tri_xy = xy[base]
+    u, v = tri_xy[:, 1] - tri_xy[:, 0], tri_xy[:, 2] - tri_xy[:, 0]
+    volume = np.sum(
+        abs(u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0]) / 2 * np.diff(z)[indices[:, 1]]
+    )
+    return AnalysisMesh(
+        points,
+        cells,
+        float(volume),
+        n,
+        int(components),
+        np.array([points.min(axis=1), points.max(axis=1)]),
+        (float(np.ptp(xy[:, 0])), float(np.ptp(xy[:, 1])), float(max(np.diff(z)))),
+        occupied.shape,
+        "wedge",
+    )
+
+
+def prism_mesh(
+    roads, *, max_xy=4.0, max_z=1.0, divisions=1, window=None, max_cells=2_000_000
+):
+    """GEOS constrained planar arrangement, extruded over actual physical slabs."""
+    import shapely
+
+    if not roads or max_xy <= 0 or max_z <= 0 or divisions not in (1, 2):
+        raise ValueError("invalid conforming prism request")
+    _, levels, domains, unique = footprint_slabs(roads)
+    if window is not None:
+        window = np.asarray(window, dtype=float)
+        if (
+            window.shape != (2, 3)
+            or not np.all(np.isfinite(window))
+            or np.any(window[1] <= window[0])
+        ):
+            raise ValueError("invalid source-frame coupon bounds")
+        selected = [
+            k
+            for k in range(len(domains))
+            if levels[k + 1] > window[0, 2] + 1e-9 and levels[k] < window[1, 2] - 1e-9
+        ]
+        if not selected:
+            raise ValueError("coupon has no deposition intervals")
+        xy = shapely.box(window[0, 0], window[0, 1], window[1, 0], window[1, 1])
+        clipped = {id(d): shapely.intersection(d, xy, grid_size=1e-9) for d in unique}
+        domains = [clipped[id(domains[k])] for k in selected]
+        levels = [max(levels[selected[0]], window[0, 2])] + [
+            min(levels[k + 1], window[1, 2]) for k in selected
+        ]
+        unique = list({id(d): d for d in domains}.values())
+    linework = shapely.union_all([d.boundary for d in unique], grid_size=1e-9)
+    faces = shapely.get_parts(shapely.polygonize(shapely.get_parts(linework)))
+    triangles, face_ids = shapely.get_parts(
+        shapely.constrained_delaunay_triangles(faces), return_index=True
+    )
+    coords = np.asarray([np.asarray(t.exterior.coords)[:3] for t in triangles])
+    xy, inverse = np.unique(coords.reshape(-1, 2), axis=0, return_inverse=True)
+    tri = inverse.reshape(-1, 3)
+    xy, tri, face_ids = refine_triangles(xy, tri, max_xy, owners=face_ids)
+    if divisions == 2:
+        xy, tri, face_ids = refine_triangles(
+            xy, tri, max_xy, uniform=True, owners=face_ids
+        )
+    # Every internal edge must have an exact mate. A T-junction is not licensed
+    # by globally merging equal-coordinate vertices elsewhere in the mesh.
+    edges = np.concatenate([tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]]])
+    edges, counts = np.unique(np.sort(edges, axis=1), axis=0, return_counts=True)
+    if counts.max() > 2:
+        raise ValueError("nonmanifold planar triangulation")
+    whole = shapely.union_all(unique, grid_size=1e-9)
+    free_edges = shapely.linestrings(xy[edges[counts == 1]])
+    # Overlay intersections are represented on the declared 1e-9 mm grid.
+    # This check admits only outer-boundary roundoff, never a material tie.
+    covered = shapely.covers(whole.boundary.buffer(2e-9), free_edges)
+    if not np.all(covered):
+        midpoints = shapely.line_interpolate_point(
+            free_edges[~covered], 0.5, normalized=True
+        )
+        distances = shapely.distance(midpoints, whole.boundary)
+        raise ValueError(
+            f"hanging internal triangulation edge: count={sum(~covered)}, max_midpoint_distance={max(distances):.9g}, example={shapely.get_coordinates(free_edges[~covered][:2]).tolist()}"
+        )
+    # Classify the original noded faces, then inherit ownership through exact
+    # subdivision. Rounding new midpoint vertices and reclassifying triangles
+    # can erase their connecting neighbors and manufacture numerical islands.
+    masks = {}
+    for domain in unique:
+        outside = shapely.area(shapely.difference(faces, domain, grid_size=1e-9))
+        inside = shapely.area(shapely.intersection(faces, domain, grid_size=1e-9))
+        if np.any((outside > 0) & (inside > 0)):
+            bad = np.flatnonzero((outside > 0) & (inside > 0))
+            raise ValueError(
+                f"arrangement face straddles deposition: {len(bad)} faces; outside={outside[bad[0]]:.9g}, inside={inside[bad[0]]:.9g}"
+            )
+        masks[id(domain)] = (outside == 0)[face_ids]
+    runs = []
+    nominal = 0.0
+    for k, d in enumerate(domains):
+        low, high = levels[k : k + 2]
+        nominal += d.area * (high - low)
+        mask = masks[id(d)]
+        if runs and np.array_equal(runs[-1][2], mask):
+            runs[-1][1] = high
+        else:
+            runs.append([low, high, mask])
+    z = [levels[0]]
+    slabs = []
+    for low, high, mask in runs:
+        n = max(1, math.ceil((high - low - 1e-9) / max_z))
+        z.extend(np.linspace(low, high, n + 1)[1:])
+        slabs.extend([mask] * n)
+    occupied = np.stack(slabs, axis=1)
+    if occupied.sum() > max_cells:
+        raise ValueError("prism element budget exceeded")
+    mesh = mesh_from_prisms(xy, tri, np.asarray(z), occupied)
+    if mesh.volume > (1 + 1e-8) * nominal:
+        raise ValueError("analysis mesh exceeds nominal deposited volume")
+    if mesh.volume < 0.97 * nominal:
+        raise ValueError(
+            f"prism mesh retains only {mesh.volume / nominal:.2%} of footprint volume; refine"
+        )
+    return mesh, {
+        "method": "conforming_footprint_prisms",
+        "max_xy_mm": max_xy,
+        "max_z_mm": max_z,
+        "divisions": divisions,
+        "physical_slabs": len(domains),
+        "mesh_slabs": len(slabs),
+        "planar_triangles": len(tri),
+        "nominal_footprint_volume_mm3": nominal,
+        "retained_volume_fraction": mesh.volume / nominal,
+    }
+
+
+def connected_meshes(mesh):
+    """Separate existing DOF-connected bodies; never join coincident vertices."""
+    if mesh.components == 1:
+        return [mesh]
+    a = np.tile(mesh.cells[0], mesh.cells.shape[0] - 1)
+    b = mesh.cells[1:].reshape(-1)
+    _, labels = connected_components(
+        sparse.coo_matrix(
+            (np.ones(len(a), np.int8), (a, b)), shape=(mesh.points.shape[1],) * 2
+        ).tocsr(),
+        directed=False,
+    )
+    cell_labels = labels[mesh.cells[0]]
+    out = []
+    for label in np.unique(cell_labels):
+        raw = mesh.cells[:, cell_labels == label]
+        used, inverse = np.unique(raw, return_inverse=True)
+        cells = inverse.reshape(raw.shape)
+        points = mesh.points[:, used]
+        p = points[:, cells]
+        if mesh.cell_kind == "wedge":
+            u, v = p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]
+            volume = np.sum(abs(u[0] * v[1] - u[1] * v[0]) / 2 * (p[2, 3] - p[2, 0]))
+        else:
+            volume = np.prod(p.max(axis=1) - p.min(axis=1), axis=0).sum()
+        out.append(
+            AnalysisMesh(
+                points,
+                cells,
+                float(volume),
+                raw.shape[1],
+                1,
+                np.array([points.min(axis=1), points.max(axis=1)]),
+                mesh.spacing,
+                mesh.grid_shape,
+                mesh.cell_kind,
+            )
+        )
+    return out

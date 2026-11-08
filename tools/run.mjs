@@ -577,7 +577,14 @@ async function main() {
     case "infill:lab": {
       const args = process.argv.slice(3);
       const mode = args[0];
-      const pythonArgs = ["report", "budget", "summary"].includes(mode)
+      const pythonArgs = [
+        "report",
+        "budget",
+        "summary",
+        "sweep",
+        "campaign",
+        "cohort_report",
+      ].includes(mode)
         ? [`tools/infill-lab/${mode}.py`, ...args.slice(1)]
         : mode === "test"
           ? ["-m", "pytest", "-q", "tools/infill-lab/test_lab.py", ...args.slice(1)]

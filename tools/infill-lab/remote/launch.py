@@ -20,7 +20,19 @@ import subprocess
 import time
 import uuid
 
-CONTEXT = ("Dockerfile", "requirements.in", "requirements.lock", "evaluate.py")
+CONTEXT = (
+    "Dockerfile",
+    "requirements.in",
+    "requirements.lock",
+    "build-requirements.in",
+    "build-requirements.lock",
+    "pymetis.lock",
+    "evaluate.py",
+    "model.py",
+    "geometry.py",
+    "mechanics.py",
+    "coupon.py",
+)
 
 
 def command(args, **kwargs):
@@ -209,7 +221,7 @@ def main():
     r = sub.add_parser("run")
     r.add_argument("--input", type=Path, required=True)
     r.add_argument("--run-id", required=True)
-    r.add_argument("--backend", choices=("scipy", "warp"), required=True)
+    r.add_argument("--backend", choices=("scipy", "warp", "coupon"), required=True)
     r.add_argument("--seconds", type=float, default=300)
     r.add_argument("--memory-gib", type=float)
     r.add_argument("--cpus", type=float)
