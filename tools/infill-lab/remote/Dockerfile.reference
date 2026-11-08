@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# BASE is a checked existing hash-locked evaluator image, never a moving tag.
+ARG BASE=spiling/reference-base:must-be-selected
+FROM ${BASE}
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends calculix-ccx=2.20-1 \
+    && dpkg-query -W > /opt/spiling-eval/reference-os-packages.txt \
+    && rm -rf /var/lib/apt/lists/*
+COPY evaluate.py model.py geometry.py mechanics.py coupon.py reference.py /opt/spiling-eval/
+USER 65532:65532

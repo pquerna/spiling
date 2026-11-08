@@ -22,6 +22,7 @@ import uuid
 
 CONTEXT = (
     "Dockerfile",
+    "Dockerfile.reference",
     "requirements.in",
     "requirements.lock",
     "build-requirements.in",
@@ -33,6 +34,7 @@ CONTEXT = (
     "geometry.py",
     "mechanics.py",
     "coupon.py",
+    "reference.py",
 )
 
 
@@ -89,14 +91,60 @@ def image_tag(context):
 def build(args, root):
     context = args.context.resolve()
     tag = image_tag(context)
-    command(["docker", "build", "--pull", "--tag", tag, context], timeout=900)
+    base = getattr(args, "reference_base", None)
+    if base is not None:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", base):
+            raise ValueError("immutable local reference base image required")
+        command(["docker", "image", "inspect", base], capture_output=True, timeout=30)
+        # Dockerfile FROM interprets a bare image ID as a registry repository.
+        # Bind a dedicated local tag to the checked ID, and verify its layer
+        # ancestry after build rather than treating the tag as authority.
+        base_tag = "spiling/reference-base:" + base.removeprefix("sha256:")
+        command(["docker", "tag", base, base_tag], timeout=30)
+        tag = (
+            "spiling/interior-reference:"
+            + hashlib.sha256((tag + base).encode()).hexdigest()[:20]
+        )
+        recipe = [
+            "docker",
+            "build",
+            "--file",
+            str(context / "Dockerfile.reference"),
+            "--build-arg",
+            "BASE=" + base_tag,
+        ]
+    else:
+        recipe = ["docker", "build", "--pull"]
+    command([*recipe, "--tag", tag, context], timeout=900)
     info = json.loads(
         command(
             ["docker", "image", "inspect", tag], capture_output=True, text=True
         ).stdout
     )[0]
+    if base is not None:
+        parent = json.loads(
+            command(
+                ["docker", "image", "inspect", base],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            ).stdout
+        )[0]
+        parent_layers = parent["RootFS"]["Layers"]
+        if info["RootFS"]["Layers"][: len(parent_layers)] != parent_layers:
+            raise ValueError(
+                "reference image does not retain the exact selected base layers"
+            )
     (root / "image.json").write_text(
-        json.dumps({"tag": tag, "id": info["Id"], "context": str(context)}, indent=2)
+        json.dumps(
+            {
+                "tag": tag,
+                "id": info["Id"],
+                "context": str(context),
+                "reference_base": base,
+            },
+            indent=2,
+        )
         + "\n"
     )
     print(json.dumps({"image": tag, "id": info["Id"]}), flush=True)
@@ -139,7 +187,13 @@ def run(args, root):
         "container": name,
     }
     (output / "launch.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    thread_count = blas_threads(budget["cpus"], args.blas_threads)
+    # Reference reproducibility requires explicit thread control. Parallel jobs
+    # can still use separate bounded containers; new intra-solve profiles need
+    # their own numerical cohort before scores can be compared.
+    requested_threads = args.blas_threads
+    if args.backend == "reference" and requested_threads is None:
+        requested_threads = 1
+    thread_count = blas_threads(budget["cpus"], requested_threads)
     receipt["blas_threads"] = thread_count
     threads = str(thread_count)
     create = [
@@ -228,10 +282,16 @@ def main():
     sub = p.add_subparsers(dest="action", required=True)
     b = sub.add_parser("build")
     b.add_argument("--context", type=Path, required=True)
+    b.add_argument(
+        "--reference-base",
+        help="exact existing evaluator image ID for isolated CalculiX layer",
+    )
     r = sub.add_parser("run")
     r.add_argument("--input", type=Path, required=True)
     r.add_argument("--run-id", required=True)
-    r.add_argument("--backend", choices=("scipy", "warp", "coupon"), required=True)
+    r.add_argument(
+        "--backend", choices=("scipy", "warp", "coupon", "reference"), required=True
+    )
     r.add_argument("--seconds", type=float, default=300)
     r.add_argument("--memory-gib", type=float)
     r.add_argument("--cpus", type=float)

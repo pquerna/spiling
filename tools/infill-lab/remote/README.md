@@ -60,3 +60,58 @@ Each job uses an immutable image ID, non-root UID, read-only root/input, no netw
 Inspect owned containers with `docker ps -a --filter label=org.spiling.purpose=offline-interior-evaluator`. Normal jobs remove themselves. For an interrupted launcher, inspect and remove only the exact named owned container. After retrieving evidence and confirming no owned job is active, remove that prefix and the exact evaluator image IDs/tags recorded in its receipts. Do not use global Docker prune, remove other images, modify the daemon or change host CUDA/driver packages.
 
 Validation: `python -m pytest tools/infill-lab/remote/test_remote.py`, followed by actual CPU/GPU cases and an externally interrupted/deadline job on the intended host. Unit tests cannot establish CUDA or container lifecycle acceptance.
+
+## Independent bending-element qualification
+
+`element_study.py` packs analytical pure-bending/axial controls and the retained
+native cube/beam crossing-road controls into an explicit `element_reference`
+cohort. It verifies the original native capture manifest before copying inert
+roads. `reference.py` exports existing prism topology as C3D6/C3D15, or a
+conforming three-tetrahedra subdivision as C3D10; added edge nodes follow node
+identity, never coordinate welding. An independent structured C3D8I beam is a
+formulation control. None of these elements replaces the existing coupon judge.
+
+The adapter uses an external CalculiX process, not a new FE implementation or a
+product dependency. The optional `Dockerfile.reference` installs exact Debian
+`calculix-ccx=2.20-1` inside a selected existing evaluator image. Generate a context
+with `campaign context`; on the host use `launch.py ... build --context CONTEXT
+--reference-base sha256:EXACT_EXISTING_IMAGE_ID`. The launcher verifies inherited
+base layers; retain its immutable result ID and copy that image to the other host.
+No host packages, drivers, services or network listeners are installed. CalculiX
+is separately licensed GPL software; it is not linked into the Spiling application.
+
+```sh
+python tools/infill-lab/element_study.py --capture RETAINED_NATIVE_CAPTURE \
+  --context FROZEN_CONTEXT --output NEW_INPUTS
+python tools/infill-lab/campaign.py dispatch --backend reference \
+  --input NEW_INPUTS --output NEW_RESULTS --hosts HOST1 HOST2 \
+  --remote-root DEDICATED_PREFIX --run-id element-n1 --seconds 1200 \
+  --cpus 15 --memory-gib 64 --blas-threads 1
+```
+
+The example resource overrides apply only when the measured host envelope admits
+them; ordinary adaptive defaults remain available. Each case retains its exact
+input deck, solver output, reaction work, integrated energy/volume and errors.
+DAT precision is checked at 1e-5 for these independent output gates; that does not
+relax the existing FP64 coupon gates. Child RSS is explicitly a cumulative
+high-water mark. The original 5% response/refinement criterion stays separate.
+Analytical success alone cannot qualify an actual crossing-road or whole part.
+
+CalculiX C3D6 uses two integration points, whereas the existing Wedge1 judge uses
+an explicit full triangle-by-line rule. They describe the same continuum geometry
+but are **not identical discrete matrices**. C3D15 uses nine integration points;
+C3D10 provides a different quadratic formulation on the preserved solid. Keep
+formulation, quadrature, geometry/contact assumptions and refinement in the
+record; do not pool their scores. The official CalculiX manual owns these element
+and `*ELASTIC`/`*EL PRINT` definitions. This remains perfectly bonded nominal
+linear elasticity, with no calibrated strength, buckling or adhesion claim.
+
+Reference runs default to one OMP/BLAS thread. A controlled ARM64 CalculiX 2.20
+cohort returned completed but unbalanced reactions/energy with four threads;
+same-input single-thread controls passed. This is an environment-specific
+reliability observation, not an attribution to a particular solver subsystem.
+Thread profiles are explicit evidence; the report refuses to pool them. Keep
+failed runs and deliberate thread controls separate from candidate comparisons.
+`--extra-divisions 4` (or `4 8`) packs additional planar refinements with explicit
+1800-second per-solve budgets. The report checks the finest required pair, even
+when that solve failed, and retains the entire panel's failures.

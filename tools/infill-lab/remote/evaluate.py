@@ -221,10 +221,16 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--input", type=Path, default=Path("/input"))
     p.add_argument("--output", type=Path, default=Path("/output"))
-    p.add_argument("--backend", choices=("scipy", "warp", "coupon"), required=True)
+    p.add_argument(
+        "--backend", choices=("scipy", "warp", "coupon", "reference"), required=True
+    )
     args = p.parse_args()
     try:
-        if args.backend == "coupon":
+        if args.backend == "reference":
+            from reference import evaluate as evaluate_reference
+
+            result = evaluate_reference(args.input, args.output)
+        elif args.backend == "coupon":
             from coupon import evaluate as evaluate_coupon
 
             result = evaluate_coupon(args.input, args.output)
@@ -240,6 +246,10 @@ def main():
         json.dumps(result, indent=2, allow_nan=False) + "\n"
     )
     print(json.dumps(result, allow_nan=False), flush=True)
+    if args.backend == "reference" and result["status"] != "ok":
+        raise RuntimeError(
+            "independent element scenarios failed; retained in trials.jsonl"
+        )
 
 
 if __name__ == "__main__":

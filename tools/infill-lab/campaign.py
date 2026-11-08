@@ -69,7 +69,7 @@ def context(destination):
     for name in (*CONTEXT, "launch.py"):
         origin = (
             HERE / name
-            if name in {"model.py", "geometry.py", "mechanics.py"}
+            if name in {"model.py", "geometry.py", "mechanics.py", "reference.py"}
             else HERE / "remote" / name
         )
         shutil.copyfile(origin, destination / name)
@@ -372,7 +372,7 @@ def dispatch(args):
             )
             if copy.returncode:
                 raise RuntimeError(copy.stderr)
-            cmd = f"python3 {remote}/tooling/launch.py --root {remote} run --input {remote}/inputs/{key} --run-id {remote_id} --backend coupon --seconds {args.seconds}"
+            cmd = f"python3 {remote}/tooling/launch.py --root {remote} run --input {remote}/inputs/{key} --run-id {remote_id} --backend {args.backend} --seconds {args.seconds}"
             if args.blas_threads is not None:
                 cmd += f" --blas-threads {args.blas_threads}"
             if args.cpus is not None:
@@ -450,7 +450,9 @@ def main():
     b.add_argument("--dx", type=float, default=4)
     b.add_argument("--dz", type=float, default=1)
     b.add_argument("--z-ratios", type=float, nargs="+", default=[0.25])
-    b.add_argument("--divisions", type=int, nargs="+", choices=(1, 2, 4, 8), default=[1])
+    b.add_argument(
+        "--divisions", type=int, nargs="+", choices=(1, 2, 4, 8), default=[1]
+    )
     b.add_argument("--shifts", type=float, nargs="+", default=[0])
     d = sub.add_parser("dispatch")
     d.add_argument("--input", type=Path, required=True)
@@ -460,6 +462,7 @@ def main():
     d.add_argument("--remote-root", required=True)
     d.add_argument("--run-id", required=True)
     d.add_argument("--seconds", type=int, default=600)
+    d.add_argument("--backend", choices=("coupon", "reference"), default="coupon")
     d.add_argument("--cpus", type=int)
     d.add_argument("--blas-threads", type=int)
     d.add_argument("--memory-gib", type=float)
