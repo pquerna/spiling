@@ -27,6 +27,7 @@ CONTEXT = (
     "build-requirements.in",
     "build-requirements.lock",
     "pymetis.lock",
+    "pyamg.lock",
     "evaluate.py",
     "model.py",
     "geometry.py",

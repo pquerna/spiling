@@ -7,7 +7,6 @@ its frozen input/judge; the retained native capture owns compilation/replay.
 """
 
 from __future__ import annotations
-from dataclasses import asdict
 import json
 import math
 from pathlib import Path
@@ -85,6 +84,7 @@ def evaluate(folder, output):
     rows = []
     for scenario in spec["scenarios"]:
         before = time.monotonic()
+        print(json.dumps({"phase": "mesh", "scenario": scenario}), flush=True)
         material = Material(**scenario["material"])
         row = {
             "candidate": spec["candidate"],
@@ -112,6 +112,16 @@ def evaluate(folder, output):
                 divisions=scenario["divisions"],
             )
             row["mesh_s"] = time.monotonic() - before
+            print(
+                json.dumps(
+                    {
+                        "phase": "mechanics",
+                        "nodes": int(mesh.points.shape[1]),
+                        "mesh_s": row["mesh_s"],
+                    }
+                ),
+                flush=True,
+            )
             row["mesh"] = info
             row["mechanics"] = solve_coupon(
                 mesh, material, scenario["bounds"], solver=scenario["solver"]
@@ -146,5 +156,5 @@ def evaluate(folder, output):
         "trials": len(rows),
         "accepted": sum(r["status"] == "ok" for r in rows),
         "wall_s": time.monotonic() - started,
-        "material_model": asdict(Material()),
+        "materials": [s["material"] for s in spec["scenarios"]],
     }

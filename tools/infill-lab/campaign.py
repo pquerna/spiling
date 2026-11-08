@@ -239,7 +239,7 @@ def pack(args):
                         {
                             "material": asdict(Material(z_ratio=z_ratio)),
                             "bounds": bounds(row["specimen"], shift=shift),
-                            "solver": "superlu",
+                            "solver": args.solver,
                             "max_xy": args.dx,
                             "max_z": args.dz,
                             "divisions": division,
@@ -365,7 +365,11 @@ def dispatch(args):
             )
             if copy.returncode:
                 raise RuntimeError(copy.stderr)
-            cmd = f"python3 {remote}/tooling/launch.py --root {remote} run --input {remote}/inputs/{key} --run-id {remote_id} --backend coupon --seconds {args.seconds} --cpus {args.cpus} --memory-gib {args.memory_gib}"
+            cmd = f"python3 {remote}/tooling/launch.py --root {remote} run --input {remote}/inputs/{key} --run-id {remote_id} --backend coupon --seconds {args.seconds}"
+            if args.cpus is not None:
+                cmd += f" --cpus {args.cpus}"
+            if args.memory_gib is not None:
+                cmd += f" --memory-gib {args.memory_gib}"
             with (destination / "ssh.log").open("w") as log:
                 result = subprocess.run(
                     [
@@ -430,6 +434,9 @@ def main():
     b.add_argument("--study-root", type=Path, required=True)
     b.add_argument("--context", type=Path, required=True)
     b.add_argument("--panel", default="inputs")
+    b.add_argument(
+        "--solver", choices=("superlu", "superlu_mmd", "amg"), default="superlu"
+    )
     b.add_argument("--dx", type=float, default=4)
     b.add_argument("--dz", type=float, default=1)
     b.add_argument("--z-ratios", type=float, nargs="+", default=[0.25])
@@ -443,8 +450,8 @@ def main():
     d.add_argument("--remote-root", required=True)
     d.add_argument("--run-id", required=True)
     d.add_argument("--seconds", type=int, default=600)
-    d.add_argument("--cpus", type=int, default=12)
-    d.add_argument("--memory-gib", type=float, default=64)
+    d.add_argument("--cpus", type=int)
+    d.add_argument("--memory-gib", type=float)
     args = p.parse_args()
     if args.command == "context":
         print(context(args.output))

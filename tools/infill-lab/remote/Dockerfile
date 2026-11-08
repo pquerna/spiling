@@ -7,10 +7,10 @@ FROM runtime-base AS wheel-builder
 RUN apt-get update && apt-get install -y --no-install-recommends g++ \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-COPY build-requirements.lock pymetis.lock ./
+COPY build-requirements.lock pymetis.lock pyamg.lock ./
 RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes -r build-requirements.lock \
     && python -m pip wheel --no-build-isolation --no-deps --require-hashes \
-      --config-settings=compile-args=-j2 --wheel-dir=/wheels -r pymetis.lock \
+      --config-settings=compile-args=-j2 --wheel-dir=/wheels -r pymetis.lock -r pyamg.lock \
     && dpkg-query -W > /wheels/build-os-packages.txt \
     && python -m pip freeze > /wheels/build-python-packages.txt
 FROM runtime-base

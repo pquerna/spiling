@@ -3,3 +3,6 @@ meson-python==0.22.1
 meson==1.12.1
 pybind11==3.1.0
 ninja==1.13.2
+numpy==2.5.4
+wheel==0.48.0
+versioningit==3.3.0
