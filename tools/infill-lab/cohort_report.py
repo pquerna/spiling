@@ -11,7 +11,7 @@ from pathlib import Path
 
 from campaign import bounds
 from model import digest, file_hash
-from sweep import aggregate, geometric_score
+from sweep import aggregate, geometric_score, frontier
 
 COLORS = {
     "Alternating XY": "#dc9c36",
@@ -249,6 +249,18 @@ def charts(report, output):
                             textcoords="offset points",
                             fontsize=7,
                         )
+            # Frontier is metric-specific; a Z frontier need not match XYZ.
+            front = frontier([{**r, "score": r[metric]} for r in points])
+            ax.scatter(
+                [100 * r["score"] for r in front],
+                [100 * r["material_ratio"] for r in front],
+                s=70,
+                facecolors="none",
+                edgecolors="#26333b",
+                linewidths=1.1,
+                label="Nondominated",
+                zorder=4,
+            )
             ax.set(
                 xlabel=f"{title} / same-source solid (%)",
                 ylabel="Complete object material / solid (%)",
@@ -258,7 +270,7 @@ def charts(report, output):
             ax.legend(fontsize=8, loc="best")
         z = group["scenario"]["material"]["z_ratio"]
         fig.suptitle(
-            f"Actual-interior coupons · {len(report['capture']['specimens'])} source shapes · assumed Eᵥ/Eₕ = {z:g}\nWalls + skins paid in full; stiffness is not strength",
+            f"Actual-interior screening · {len(report['capture']['specimens'])} shapes · Eᵥ/Eₕ = {z:g} · planar division {group['scenario']['divisions']}\nWalls + skins paid in full · mesh convergence and physical strength not established",
             fontsize=12,
         )
         fig.savefig(output / (key[:12] + "-pareto.png"), dpi=180)
@@ -286,7 +298,7 @@ def interactive(group, shapes):
     return (
         """<!doctype html><html><head><meta charset="utf-8"><style>
 :root{font-family:var(--font-sans,system-ui);color:var(--foreground,#253543)}body{margin:0}.controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}select{padding:6px;background:var(--card,#fff);color:inherit;border:1px solid var(--border,#cbd2d9);border-radius:6px}svg{width:100%;height:390px}svg text{fill:currentColor;font:11px system-ui}p{font-size:13px;color:var(--muted-foreground,#64717f)}table{border-collapse:collapse;width:100%;font-size:12px}td,th{text-align:left;padding:5px;border-bottom:1px solid var(--border,#ccd5db)}.details{padding:16px;background:var(--card,#f1f5f7);border-radius:var(--radius,8px)}</style></head><body>
-<div class="controls"><b>Interior stiffness · complete object cost</b><select id="metric"><option value="score">XYZ geometric mean</option><option value="z_score">Z compression</option><option value="worst_ratio">Weakest response</option></select><select id="cost"><option value="material_ratio">Material</option><option value="time_ratio">Motion time</option></select></div><svg id="plot" viewBox="0 0 700 390" role="img" aria-label="Pareto chart of simulated interior stiffness and actual complete object material"></svg><div class="details" id="detail">Select a point for the actual directional results and costs.</div><p id="limits"></p><script>
+<div class="controls"><b>Interior stiffness screening · complete object cost</b><select id="metric"><option value="score">XYZ geometric mean</option><option value="z_score">Z compression</option><option value="worst_ratio">Weakest response</option></select><select id="cost"><option value="material_ratio">Material</option><option value="time_ratio">Motion time</option></select></div><svg id="plot" viewBox="0 0 700 390" role="img" aria-label="Pareto chart of simulated interior stiffness and actual complete object material"></svg><div class="details" id="detail">Select a point for the actual directional results and costs.</div><p id="limits"></p><script>
 const d=PAYLOAD,colors=COLORS,svg=document.getElementById('plot'),ns='http://www.w3.org/2000/svg',pct=x=>(100*x).toFixed(1)+'%';
 function el(n,a,t){const e=document.createElementNS(ns,n);for(const[k,v]of Object.entries(a))e.setAttribute(k,v);if(t)e.textContent=t;svg.appendChild(e);return e}
 function draw(){svg.replaceChildren();const m=document.getElementById('metric').value,cost=document.getElementById('cost').value,xmax=Math.max(1.05,...d.points.map(r=>r[m]*1.1)),ymax=Math.max(1.05,...d.points.map(r=>r[cost]*1.1)),X=v=>65+590*v/xmax,Y=v=>325-285*v/ymax;
@@ -294,7 +306,7 @@ for(let i=0;i<=4;i++){let x=xmax*i/4,y=ymax*i/4;el('line',{x1:X(x),x2:X(x),y1:Y(
 el('text',{x:350,y:375,'text-anchor':'middle'},document.getElementById('metric').selectedOptions[0].text+' / same-source solid');
 for(const[name,color]of Object.entries(colors)){let rs=d.points.filter(r=>r.group===name).sort((a,b)=>a.material_ratio-b.material_ratio);el('polyline',{points:rs.map(r=>X(r[m])+','+Y(r[cost])).join(' '),stroke:color,fill:'none','stroke-width':2});for(const r of rs){const front=!d.points.some(t=>t[m]>=r[m]&&t[cost]<=r[cost]&&(t[m]>r[m]||t[cost]<r[cost]));const p=el('circle',{cx:X(r[m]),cy:Y(r[cost]),r:6,fill:color,stroke:front?'var(--foreground,#26333b)':'none','stroke-width':2,tabindex:0});p.appendChild(document.createElementNS(ns,'title')).textContent=name+' '+r.label;p.onclick=p.onfocus=()=>select(r);if(name!=='Solid')el('text',{x:X(r[m])+6,y:Y(r[cost])-8},r.label)}}}
 function select(r){let s='<b>'+r.group+' · '+r.label+'</b> · XYZ '+pct(r.score)+' · Z '+pct(r.z_score)+' · material '+pct(r.material_ratio)+' · motion '+pct(r.time_ratio);s+='<table><tr><th>Source</th><th>X / solid</th><th>Y / solid</th><th>Z / solid</th><th>Object material</th></tr>';for(const [name,v]of Object.entries(r.specimens)){const t=r.tests.filter(t=>t.specimen===name);s+='<tr><td>'+name+'</td>'+t.map(t=>'<td>'+pct(t.ratio)+'</td>').join('')+'<td>'+v.mass_g.toFixed(2)+' g</td></tr>'}document.getElementById('detail').innerHTML=s+'</table>'}
-document.getElementById('metric').onchange=draw;document.getElementById('cost').onchange=draw;document.getElementById('limits').textContent='Finite cut interiors from SHAPES. Assumed linear elasticity; Z/XY modulus '+d.scenario.material.z_ratio+'. No whole-part strength, buckling or bond-failure claim. Walls and skins remain fully charged. Motion excludes heat-up and acceleration. Lines join measured settings. Incomplete candidate panels: '+d.incomplete.length+'.';draw();
+document.getElementById('metric').onchange=draw;document.getElementById('cost').onchange=draw;document.getElementById('limits').textContent='Finite cut interiors from SHAPES. Assumed linear elasticity; Z/XY modulus '+d.scenario.material.z_ratio+'. Mesh convergence is not established. No whole-part strength, buckling or bond-failure claim. Walls and skins remain fully charged. Motion excludes heat-up and acceleration. Lines join measured settings. Incomplete candidate panels: '+d.incomplete.length+'.';draw();
 </script></body></html>""".replace("PAYLOAD", data)
         .replace("COLORS", json.dumps(COLORS))
         .replace("SHAPES", ", ".join(shapes))
