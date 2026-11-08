@@ -105,7 +105,7 @@ def build(campaign: Path, output: Path):
         fontsize=8,
         loc="upper left",
     )
-    axes[0].set_xlabel("Commanded deposited material (g)")
+    axes[0].set_xlabel("Verified object material (g)")
     axes[1].set_xlabel("Motion time lower bound (s)")
     fig.suptitle(
         f"{config['specimen']} / {config['case']} — same shell, skins and material model"
@@ -141,6 +141,18 @@ def build(campaign: Path, output: Path):
         default=budget_best,
     )
     stiffest = max(valid, key=lambda r: r["mechanics"]["stiffness_n_mm"])
+    longitudinal = next(
+        (
+            r
+            for r in valid
+            if r["candidate"]["family"] == "uniform"
+            and r["candidate"]["axis"] == "x"
+            and r["candidate"]["fraction"] == 0.1
+            and r["candidate"].get("pattern", "rectilinear") == "rectilinear"
+            and r["candidate"].get("layer_height", 0.2) == 0.2
+        ),
+        budget_best,
+    )
     regional = max(
         (r for r in valid if r["candidate"]["family"] != "uniform"),
         key=lambda r: r["mechanics"]["stiffness_n_mm"] / r["mass_g"],
@@ -148,11 +160,24 @@ def build(campaign: Path, output: Path):
     )
     selected = list(
         {
-            r["id"]: r for r in [ordinary, budget_best, grid_best, regional, stiffest]
+            r["id"]: r
+            for r in [
+                ordinary,
+                longitudinal,
+                budget_best,
+                grid_best,
+                regional,
+                stiffest,
+            ]
         }.values()
     )
     gallery = []
-    fig = plt.figure(figsize=(12, 3.7 * len(selected)), layout="constrained")
+    nrows = (len(selected) + 1) // 2
+    fig = plt.figure(figsize=(13, 3.8 * nrows), layout="constrained")
+    fig.suptitle(
+        "Actual construction · cutaway\nTeal: interior, including genuine bridges · gray: walls and skins",
+        fontsize=15,
+    )
     for index, r in enumerate(selected):
         roads = json.loads((root / r["native"] / "roads.json").read_text())["roads"]
         points = np.array([p[k] for p in roads for k in ("start", "end")])
@@ -170,22 +195,30 @@ def build(campaign: Path, output: Path):
             ):
                 continue
             segments.append([a - center, b - center])
-            tints.append("#008d8e" if road["kind"] in (5, 13) else "#91a0af")
-        ax = fig.add_subplot(len(selected), 1, index + 1, projection="3d")
-        ax.add_collection3d(
-            Line3DCollection(segments, colors=tints, linewidths=1.4, alpha=0.9)
-        )
+            interior = (
+                road["kind"] in (5, 13)
+                or road["kind"] == 8
+                and road.get("owner") is not None
+            )
+            tints.append(
+                matplotlib.colors.to_rgba(
+                    "#008d8e" if interior else "#91a0af", 0.95 if interior else 0.28
+                )
+            )
+        ax = fig.add_subplot(nrows, 2, index + 1, projection="3d")
+        ax.add_collection3d(Line3DCollection(segments, colors=tints, linewidths=1.8))
         size = hi - lo
         ax.set_xlim(-size[0] / 2, size[0] / 2)
         ax.set_ylim(-size[1] / 2, size[1] / 2)
         ax.set_zlim(-size[2] / 2, size[2] / 2)
-        ax.set_box_aspect(size)
+        ax.set_box_aspect(size, zoom=1.1)
+        ax.set_proj_type("ortho")
         ax.view_init(elev=28, azim=-65)
         ax.set_axis_off()
         ax.set_title(
-            f"{label(r)}   |   {r['mass_g']:.3f} g   |   {r['mechanics']['stiffness_n_mm']:.0f} N/mm",
+            f"{label(r)}\n{r['mass_g']:.3f} g · {r['mechanics']['stiffness_n_mm']:.0f} N/mm simulated",
             loc="left",
-            fontsize=12,
+            fontsize=11,
         )
         gallery.append({"label": label(r), "row": r, "roads": roads})
     fig.savefig(output / "gallery.png", dpi=180)
@@ -247,18 +280,18 @@ label{display:flex;gap:12px;align-items:center;font-size:13px}input{flex:1}summa
 <canvas id="view" aria-label="Interactive view of actual independently replayed deposition paths"></canvas>
 <label>Cutaway <input id="cut" type="range" min="15" max="100" value="70"><output id="height"></output></label>
 <p>Drag to orbit. The roof and front wall are cut away to reveal actual paths.</p></div>
-<details><summary>Model and limits</summary><p>BREP → native compile → emitted G-code → fresh independent replay → nominal footprint-prism mesh → full-integration Q1 elasticity. __MATERIAL__. Nominal interfaces are perfectly bonded. These are stiffness estimates, not failure loads, crushing tests, calibration or machine readiness. Commanded material includes startup prime; FE volume remains separate. Time excludes acceleration, heating and firmware delays. Different densities are sampled, not an exhaustive or equal-mass optimization proof. Border rings mark the sampled three-objective Pareto frontier.</p></details>
+<details><summary>Model and limits</summary><p>BREP → native compile → emitted G-code → fresh independent replay → nominal footprint-prism mesh → full-integration Q1 elasticity. __MATERIAL__. Nominal interfaces are perfectly bonded. These are stiffness estimates, not failure loads, crushing tests, calibration or machine readiness. Object material includes startup prime; FE volume remains separate. Time excludes acceleration, heating and firmware delays. Different densities are sampled, not an exhaustive or equal-mass optimization proof. Border rings mark the sampled three-objective Pareto frontier.</p></details>
 <script>const items=__DATA__;let selected=0,yaw=-.8,pitch=.55,drag=null;const canvas=document.getElementById('view'),ctx=canvas.getContext('2d');
 const colors=['#91a0af','#91a0af','#91a0af','#91a0af','#91a0af','#1ac6bb'];
 function choose(i){selected=i;document.querySelectorAll('#choices button').forEach((b,j)=>b.setAttribute('aria-pressed',String(i===j)));const r=items[i].row;
-document.getElementById('metrics').innerHTML=`<div><strong>${r.mass_g.toFixed(3)} g</strong><span>Commanded material</span></div><div><strong>${r.mechanics.stiffness_n_mm.toFixed(0)} N/mm</strong><span>Simulated elastic stiffness</span></div><div><strong>${r.motion_s.toFixed(1)} s</strong><span>Motion lower bound</span></div>`;draw()}
+document.getElementById('metrics').innerHTML=`<div><strong>${r.mass_g.toFixed(3)} g</strong><span>Object material</span></div><div><strong>${r.mechanics.stiffness_n_mm.toFixed(0)} N/mm</strong><span>Simulated elastic stiffness</span></div><div><strong>${r.motion_s.toFixed(1)} s</strong><span>Motion lower bound</span></div>`;draw()}
 items.forEach((item,i)=>{let b=document.createElement('button');b.textContent=item.label;b.onclick=()=>choose(i);document.getElementById('choices').append(b)});
 function draw(){const scale=window.devicePixelRatio||1;canvas.width=canvas.clientWidth*scale;canvas.height=340*scale;ctx.setTransform(scale,0,0,scale,0,0);ctx.clearRect(0,0,canvas.clientWidth,340);
 const roads=items[selected].roads,points=roads.flatMap(r=>[r.start,r.end]),lo=[0,1,2].map(j=>Math.min(...points.map(p=>p[j]))),hi=[0,1,2].map(j=>Math.max(...points.map(p=>p[j]))),center=lo.map((v,j)=>(v+hi[j])/2),extent=hi.map((v,j)=>v-lo[j]);
 const zoom=Math.min(canvas.clientWidth/(extent[0]+extent[1])*1.25,260/(extent[1]+extent[2]));const cut=lo[2]+(hi[2]-lo[2])*document.getElementById('cut').value/100;document.getElementById('height').textContent=(cut-lo[2]+.2).toFixed(1)+' mm';
 function project(p){const [x,y,z]=p.map((v,j)=>v-center[j]);const u=Math.cos(yaw)*x-Math.sin(yaw)*y,v=Math.sin(yaw)*x+Math.cos(yaw)*y;return [canvas.clientWidth/2+zoom*u,170-zoom*(Math.cos(pitch)*z-Math.sin(pitch)*v),Math.sin(pitch)*z+Math.cos(pitch)*v]}
 const ordered=roads.filter(r=>r.upper<=cut+1e-6&&Math.min(r.start[1],r.end[1])>=lo[1]+.25).map(r=>({r,a:project(r.start),b:project(r.end)})).sort((a,b)=>a.a[2]+a.b[2]-b.a[2]-b.b[2]);
-for(const {r,a,b} of ordered){ctx.strokeStyle=colors[r.kind]||'#efad59';ctx.globalAlpha=r.kind===5||r.kind===13?.95:.4;ctx.lineWidth=Math.max(1,zoom*r.width*.65);ctx.lineCap='round';ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke()}ctx.globalAlpha=1}
+for(const {r,a,b} of ordered){const interior=r.kind===5||r.kind===13||(r.kind===8&&r.owner!==null);ctx.strokeStyle=interior?'#1ac6bb':colors[r.kind]||'#efad59';ctx.globalAlpha=interior?.95:.25;ctx.lineWidth=Math.max(1,zoom*r.width*.65);ctx.lineCap='round';ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke()}ctx.globalAlpha=1}
 canvas.onpointerdown=e=>{drag=[e.clientX,e.clientY];canvas.setPointerCapture(e.pointerId)};canvas.onpointerup=()=>drag=null;canvas.onpointermove=e=>{if(!drag)return;yaw+=(e.clientX-drag[0])*.008;pitch=Math.max(-.2,Math.min(1.4,pitch+(e.clientY-drag[1])*.008));drag=[e.clientX,e.clientY];draw()};document.getElementById('cut').oninput=draw;window.addEventListener('resize',draw);choose(0);
 </script></body></html>"""
 

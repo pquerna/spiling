@@ -198,3 +198,37 @@ def test_trial_timeout_stops_nested_work_in_the_owned_process_group(tmp_path):
     stat = Path(f"/proc/{pid}/stat")
     # A killed grandchild can briefly await init's reap, but must not execute.
     assert not stat.exists() or stat.read_text().split()[2] == "Z"
+
+
+def test_material_budget_proposals_use_only_measured_discrete_dose():
+    from budget import refine_budget
+    import math
+
+    calls = []
+
+    def measure(fraction):
+        calls.append(fraction)
+        return 100 + 10 * math.ceil(fraction * 10)
+
+    rows = refine_budget(measure, 120, rounds=4)
+    assert len(calls) == 4
+    assert all(r["volume_mm3"] <= 120 for r in rows if r["within_budget"])
+
+    def refused(_):
+        raise RuntimeError("native authority unavailable")
+
+    rows = refine_budget(refused, 120)
+    assert len(rows) == 1 and rows[0]["status"] == "refused"
+
+
+def test_summary_refuses_to_pool_changed_judges(tmp_path):
+    import json
+    from summary import read_study
+
+    for i in (1, 2):
+        p = tmp_path / "campaigns" / str(i)
+        p.mkdir(parents=True)
+        (p / "config.json").write_text(json.dumps({"identity": {"judge": i}}))
+        (p / "trials.jsonl").write_text("")
+    with pytest.raises(ValueError, match="one frozen judge"):
+        read_study(tmp_path)

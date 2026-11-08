@@ -577,12 +577,11 @@ async function main() {
     case "infill:lab": {
       const args = process.argv.slice(3);
       const mode = args[0];
-      const pythonArgs =
-        mode === "report"
-          ? ["tools/infill-lab/report.py", ...args.slice(1)]
-          : mode === "test"
-            ? ["-m", "pytest", "-q", "tools/infill-lab/test_lab.py", ...args.slice(1)]
-            : ["tools/infill-lab/lab.py", ...args];
+      const pythonArgs = ["report", "budget", "summary"].includes(mode)
+        ? [`tools/infill-lab/${mode}.py`, ...args.slice(1)]
+        : mode === "test"
+          ? ["-m", "pytest", "-q", "tools/infill-lab/test_lab.py", ...args.slice(1)]
+          : ["tools/infill-lab/lab.py", ...args];
       await run(process.env.SPILING_UV ?? "uv", [
         "run",
         "--locked",
