@@ -91,3 +91,13 @@ def test_limits_follow_machine_and_current_available_memory():
     for memory, cpus in [(101, 8), (1, 21), (float("nan"), 8), (1, float("nan"))]:
         with pytest.raises((ValueError, OverflowError)):
             launcher.limits(machine, memory, cpus)
+
+
+def test_blas_team_is_independent_of_cpu_allocation_and_bounded():
+    launcher = module("launch")
+    assert launcher.blas_threads(12, 1) == 1
+    assert launcher.blas_threads(12) == 12
+    assert launcher.blas_threads(0.5) == 1
+    for count in (0, -1, 13, 1.5, True):
+        with pytest.raises(ValueError, match="BLAS threads"):
+            launcher.blas_threads(12, count)

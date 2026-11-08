@@ -221,6 +221,13 @@ def pack(args):
     rows = [
         json.loads(line) for line in (root / "captures.jsonl").read_text().splitlines()
     ]
+    if args.candidates:
+        allowed = {
+            digest(Candidate(**json.loads(line)).data())
+            for line in args.candidates.read_text().splitlines()
+            if line.strip()
+        }
+        rows = [r for r in rows if digest(r["candidate"]) in allowed]
     inputs = root / args.panel
     inputs.mkdir(exist_ok=False)
     jobs = []
@@ -366,6 +373,8 @@ def dispatch(args):
             if copy.returncode:
                 raise RuntimeError(copy.stderr)
             cmd = f"python3 {remote}/tooling/launch.py --root {remote} run --input {remote}/inputs/{key} --run-id {remote_id} --backend coupon --seconds {args.seconds}"
+            if args.blas_threads is not None:
+                cmd += f" --blas-threads {args.blas_threads}"
             if args.cpus is not None:
                 cmd += f" --cpus {args.cpus}"
             if args.memory_gib is not None:
@@ -434,13 +443,14 @@ def main():
     b.add_argument("--study-root", type=Path, required=True)
     b.add_argument("--context", type=Path, required=True)
     b.add_argument("--panel", default="inputs")
+    b.add_argument("--candidates", type=Path)
     b.add_argument(
         "--solver", choices=("superlu", "superlu_mmd", "amg"), default="superlu"
     )
     b.add_argument("--dx", type=float, default=4)
     b.add_argument("--dz", type=float, default=1)
     b.add_argument("--z-ratios", type=float, nargs="+", default=[0.25])
-    b.add_argument("--divisions", type=int, nargs="+", choices=(1, 2), default=[1])
+    b.add_argument("--divisions", type=int, nargs="+", choices=(1, 2, 4, 8), default=[1])
     b.add_argument("--shifts", type=float, nargs="+", default=[0])
     d = sub.add_parser("dispatch")
     d.add_argument("--input", type=Path, required=True)
@@ -451,6 +461,7 @@ def main():
     d.add_argument("--run-id", required=True)
     d.add_argument("--seconds", type=int, default=600)
     d.add_argument("--cpus", type=int)
+    d.add_argument("--blas-threads", type=int)
     d.add_argument("--memory-gib", type=float)
     args = p.parse_args()
     if args.command == "context":

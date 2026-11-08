@@ -101,8 +101,11 @@ def physical_gate(row):
 def collect(root, inputs, outputs):
     capture = json.loads((root / "capture.json").read_text())
     groups, seen, images, accepted, missing = {}, set(), set(), [], []
+    failed_captures = {}
     for folder in inputs:
         manifest = json.loads((folder / "jobs.json").read_text())
+        for failure in manifest["failed_captures"]:
+            failed_captures[digest((failure["specimen"], failure["candidate"]))] = failure
         for job in manifest["jobs"]:
             spec = json.loads((folder / job["id"] / "case.json").read_text())
             input_hash = file_hash(folder / job["id"] / "case.json")
@@ -156,6 +159,8 @@ def collect(root, inputs, outputs):
                         "host"
                     ]
                     if row["status"] == "ok":
+                        if launch.get("removed") is not True:
+                            raise ValueError("accepted result lacks owned-container cleanup")
                         physical_gate(row)
                         accepted.append(row)
                 key = digest(scenario_key(row))
@@ -178,14 +183,7 @@ def collect(root, inputs, outputs):
         raise ValueError("cannot pool different evaluator/producer identities")
     for group in groups.values():
         # Include failed native candidates, so an absent positive is visible.
-        group["rows"] += [
-            r
-            for r in [
-                json.loads(line)
-                for line in (root / "captures.jsonl").read_text().splitlines()
-            ]
-            if r["status"] != "ok"
-        ]
+        group["rows"] += list(failed_captures.values())
         shapes = capture["specimens"]
         tests = [
             (s, "compression_" + axis, 1 / (len(shapes) * 3))

@@ -518,3 +518,40 @@ def test_coupon_report_keeps_physical_failures_and_cut_scenarios_separate():
     }
     with pytest.raises(ValueError, match="witness"):
         physical_gate(invented)
+
+
+def test_coupon_subset_reports_only_its_selected_native_refusals(tmp_path):
+    import json
+    from campaign import bounds
+    from cohort_report import collect
+
+    root, inputs, outputs = (tmp_path / n for n in ("study", "inputs", "outputs"))
+    for path in (root, inputs, outputs, inputs / "case"):
+        path.mkdir(parents=True, exist_ok=True)
+    (root / "capture.json").write_text(json.dumps({"specimens": ["cube32"]}))
+    # There is deliberately no study-wide captures.jsonl: this panel's manifest
+    # owns selected refusals, rather than unrelated candidates in the study.
+    (inputs / "jobs.json").write_text(
+        json.dumps({"jobs": [{"id": "case"}], "failed_captures": []})
+    )
+    (inputs / "case" / "case.json").write_text(json.dumps({
+        "candidate": Candidate(fraction=1).data(),
+        "specimen": "cube32",
+        "scenarios": [{"bounds": bounds("cube32"), "material": {"z_ratio": .25}}],
+    }))
+    report = collect(root, [inputs], outputs)
+    assert report["missing_evaluations"] == 1
+    rows = next(iter(report["groups"].values()))["rows"]
+    assert len(rows) == 1 and rows[0]["status"] == "missing_or_interrupted"
+
+
+def test_finer_conforming_prisms_preserve_volume_and_face_connectivity():
+    from geometry import prism_mesh
+
+    roads = [{"start": [0, 0, .2], "end": [2, 0, .2],
+              "lower": 0, "upper": .2, "width": .4}]
+    meshes = [prism_mesh(roads, divisions=d)[0] for d in (1, 2, 4, 8)]
+    for i, mesh in enumerate(meshes):
+        assert mesh.volume == pytest.approx(meshes[0].volume, rel=1e-12)
+        assert mesh.components == 1
+        assert mesh.count == meshes[0].count * 4**i

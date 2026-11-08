@@ -71,6 +71,13 @@ def limits(machine, requested_memory=None, requested_cpus=None):
     }
 
 
+def blas_threads(cpus, requested=None):
+    count = max(1, math.floor(cpus)) if requested is None else requested
+    if type(count) is not int or not 1 <= count <= math.ceil(cpus):
+        raise ValueError("BLAS threads must fit the job CPU envelope")
+    return count
+
+
 def image_tag(context):
     h = hashlib.sha256()
     for name in CONTEXT:
@@ -132,7 +139,9 @@ def run(args, root):
         "container": name,
     }
     (output / "launch.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    threads = str(max(1, math.floor(budget["cpus"])))
+    thread_count = blas_threads(budget["cpus"], args.blas_threads)
+    receipt["blas_threads"] = thread_count
+    threads = str(thread_count)
     create = [
         "docker",
         "create",
@@ -226,6 +235,7 @@ def main():
     r.add_argument("--seconds", type=float, default=300)
     r.add_argument("--memory-gib", type=float)
     r.add_argument("--cpus", type=float)
+    r.add_argument("--blas-threads", type=int)
     args = p.parse_args()
     root = args.root.expanduser().resolve()
     if not root.is_relative_to(Path.home()) or root == Path.home():

@@ -412,7 +412,7 @@ def prism_mesh(
     """GEOS constrained planar arrangement, extruded over actual physical slabs."""
     import shapely
 
-    if not roads or max_xy <= 0 or max_z <= 0 or divisions not in (1, 2):
+    if not roads or max_xy <= 0 or max_z <= 0 or divisions not in (1, 2, 4, 8):
         raise ValueError("invalid conforming prism request")
     _, levels, domains, unique = footprint_slabs(roads)
     if window is not None:
@@ -446,7 +446,7 @@ def prism_mesh(
     xy, inverse = np.unique(coords.reshape(-1, 2), axis=0, return_inverse=True)
     tri = inverse.reshape(-1, 3)
     xy, tri, face_ids = refine_triangles(xy, tri, max_xy, owners=face_ids)
-    if divisions == 2:
+    for _ in range(int(math.log2(divisions))):
         xy, tri, face_ids = refine_triangles(
             xy, tri, max_xy, uniform=True, owners=face_ids
         )
