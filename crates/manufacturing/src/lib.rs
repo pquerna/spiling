@@ -344,5 +344,14 @@ pub(crate) fn check_cancel(cancel: &AtomicBool) -> Result<(), ManufacturingError
     }
 }
 
+pub(crate) fn compute_error(cause: spiling_compute::ComputeError) -> ManufacturingError {
+    let code = match &cause {
+        spiling_compute::ComputeError::Cancelled => ManufacturingErrorCode::Cancelled,
+        spiling_compute::ComputeError::Allocation => ManufacturingErrorCode::ResourceLimit,
+        _ => ManufacturingErrorCode::UnsupportedCapability,
+    };
+    error(code, cause.to_string())
+}
+
 #[cfg(test)]
 mod tests;

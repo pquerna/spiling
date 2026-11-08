@@ -16,6 +16,8 @@ use spiling_contracts::geometry::RigidPoseMm;
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
+mod hatch;
+
 /// Borrowed mandatory coverage operand. Requested relief may contain fine
 /// additions, but these source/ordinary material pieces must remain reachable.
 pub(super) struct RequiredMaterial<'a> {
@@ -1016,20 +1018,35 @@ pub(super) fn hatch_polygon(
     let mut hits = Vec::new();
     hits.try_reserve_exact(rows.edges)
         .map_err(|_| resource("component hatch intersection allocation refused"))?;
-    for row in 0..rows.count {
-        check_cancel(cancel)?;
-        hits.clear();
-        let coordinate = rows.start + row as f64 * rows.spacing;
-        row_intersections(polygon, coordinate, layer.axis, &mut hits, cancel)?;
-        append_hatch_row(
-            &hits,
-            coordinate,
-            kind,
-            layer,
-            row % 2 == 1,
-            paths,
-            segments,
-        )?;
+    let prepared = hatch::PreparedHatch::new(polygon, rows, layer.axis, cancel)?;
+    let tile_rows = prepared.as_ref().map_or(1, |batch| batch.tile_rows());
+    for first in (0..rows.count).step_by(tile_rows) {
+        let count = tile_rows.min(rows.count - first);
+        let mask = prepared
+            .as_ref()
+            .map(|batch| batch.mask(first, count, rows, cancel))
+            .transpose()?
+            .flatten();
+        for offset in 0..count {
+            check_cancel(cancel)?;
+            let row = first + offset;
+            hits.clear();
+            let coordinate = rows.start + row as f64 * rows.spacing;
+            if let (Some(batch), Some(mask)) = (&prepared, &mask) {
+                batch.intersections(mask, offset, coordinate, &mut hits, cancel)?;
+            } else {
+                row_intersections(polygon, coordinate, layer.axis, &mut hits, cancel)?;
+            }
+            append_hatch_row(
+                &hits,
+                coordinate,
+                kind,
+                layer,
+                row % 2 == 1,
+                paths,
+                segments,
+            )?;
+        }
     }
     Ok(())
 }
