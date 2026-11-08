@@ -39,8 +39,13 @@ class Candidate:
     plate: float = 0.2
     layer_height: float = 0.2
     combine_height: float = 0.0
+    pattern: str = "rectilinear"
 
     def __post_init__(self):
+        if self.pattern not in {"rectilinear", "grid"}:
+            raise ValueError("unknown production infill pattern")
+        if self.pattern == "grid" and (self.family != "uniform" or self.combine_height):
+            raise ValueError("grid study requires uniform fine-cadence input")
         if self.family not in {"uniform", "crown", "flanges", "separator"}:
             raise ValueError("unknown construction family")
         if self.axis not in {"x", "y", "alternating_xy", "alternating_yx"}:
@@ -90,7 +95,8 @@ class Material:
     young_mpa: float = 2300.0
     poisson: float = 0.35
     density_g_mm3: float = 0.00124
-    status: str = "assumed_isotropic_elastic_not_strength_calibration"
+    z_ratio: float = 1.0
+    status: str = "assumed_elastic_not_strength_calibration"
 
     def __post_init__(self):
         if not (
@@ -100,5 +106,7 @@ class Material:
             and math.isfinite(self.poisson)
             and math.isfinite(self.density_g_mm3)
             and self.density_g_mm3 > 0
+            and math.isfinite(self.z_ratio)
+            and 0 < self.z_ratio <= 1.0
         ):
             raise ValueError("invalid linear elastic material")

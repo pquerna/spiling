@@ -13,6 +13,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from lab import pareto
 
@@ -23,7 +24,12 @@ def label(row):
         c["axis"]
     ]
     cadence = " · combined" if c.get("combine_height") else ""
-    return f"{c['family'].title()} {100 * c['fraction']:g}% · {axis}{cadence}"
+    family = (
+        "Grid"
+        if c.get("pattern") == "grid"
+        else ("Rectilinear" if c["family"] == "uniform" else c["family"].title())
+    )
+    return f"{family} {100 * c['fraction']:g}% · {axis}{cadence}"
 
 
 def build(campaign: Path, output: Path):
@@ -56,7 +62,13 @@ def build(campaign: Path, output: Path):
         marker = (
             "s"
             if c.get("combine_height")
-            else ("D" if c["family"] != "uniform" else "o")
+            else (
+                "^"
+                if c.get("pattern") == "grid"
+                else "D"
+                if c["family"] != "uniform"
+                else "o"
+            )
         )
         for ax, x in zip(axes, [r["mass_g"], r["motion_s"]]):
             ax.scatter(
@@ -72,6 +84,27 @@ def build(campaign: Path, output: Path):
     for ax in axes:
         ax.set_ylabel("Simulated elastic stiffness (N/mm)")
         ax.grid(alpha=0.15)
+    axes[0].legend(
+        handles=[
+            Line2D([], [], linestyle="", marker="o", color=color, label=axis)
+            for axis, color in colors.items()
+        ],
+        fontsize=8,
+        loc="upper left",
+    )
+    axes[1].legend(
+        handles=[
+            Line2D([], [], linestyle="", marker=marker, color="#4a6575", label=name)
+            for marker, name in [
+                ("o", "Rectilinear"),
+                ("^", "Grid"),
+                ("s", "Combined"),
+                ("D", "Regional"),
+            ]
+        ],
+        fontsize=8,
+        loc="upper left",
+    )
     axes[0].set_xlabel("Commanded deposited material (g)")
     axes[1].set_xlabel("Motion time lower bound (s)")
     fig.suptitle(
@@ -89,18 +122,34 @@ def build(campaign: Path, output: Path):
             and r["candidate"]["axis"] == "alternating_xy"
             and r["candidate"]["fraction"] == 0.2
             and r["candidate"].get("layer_height", 0.2) == 0.2
+            and r["candidate"].get("pattern", "rectilinear") == "rectilinear"
         ),
         valid[0],
     )
-    efficient = max(valid, key=lambda r: r["mechanics"]["stiffness_n_mm"] / r["mass_g"])
+    budget_best = max(
+        (
+            r
+            for r in valid
+            if r["mass_g"] <= ordinary["mass_g"]
+            and r["motion_s"] <= ordinary["motion_s"]
+        ),
+        key=lambda r: r["mechanics"]["stiffness_n_mm"],
+    )
+    grid_best = max(
+        (r for r in valid if r["candidate"].get("pattern") == "grid"),
+        key=lambda r: r["mechanics"]["stiffness_n_mm"] / r["mass_g"],
+        default=budget_best,
+    )
     stiffest = max(valid, key=lambda r: r["mechanics"]["stiffness_n_mm"])
     regional = max(
         (r for r in valid if r["candidate"]["family"] != "uniform"),
         key=lambda r: r["mechanics"]["stiffness_n_mm"] / r["mass_g"],
-        default=efficient,
+        default=budget_best,
     )
     selected = list(
-        {r["id"]: r for r in [ordinary, efficient, regional, stiffest]}.values()
+        {
+            r["id"]: r for r in [ordinary, budget_best, grid_best, regional, stiffest]
+        }.values()
     )
     gallery = []
     fig = plt.figure(figsize=(12, 3.7 * len(selected)), layout="constrained")
@@ -149,6 +198,13 @@ def build(campaign: Path, output: Path):
         "pareto_ids": sorted(front),
         "rows": rows,
         "selected": [g["row"]["id"] for g in gallery],
+        "same_or_lower_material_and_motion": {
+            "reference": ordinary["id"],
+            "candidate": budget_best["id"],
+            "stiffness_gain": budget_best["mechanics"]["stiffness_n_mm"]
+            / ordinary["mechanics"]["stiffness_n_mm"]
+            - 1,
+        },
     }
     (output / "results.json").write_text(
         json.dumps(brief, sort_keys=True, allow_nan=False)
@@ -162,6 +218,13 @@ def build(campaign: Path, output: Path):
     )
     import base64
 
+    material = config["material"]
+    content = content.replace(
+        "__MATERIAL__",
+        html.escape(
+            f"Assumed elastic material: E_X/Y {material['young_mpa']:g} MPa, E_Z/E_X {material.get('z_ratio', 1):g}, ν {material['poisson']:g}, density {material['density_g_mm3'] * 1000:g} g/cm³"
+        ),
+    )
     content = content.replace(
         "__CHART__", base64.b64encode((output / "pareto.png").read_bytes()).decode()
     )
@@ -184,7 +247,7 @@ label{display:flex;gap:12px;align-items:center;font-size:13px}input{flex:1}summa
 <canvas id="view" aria-label="Interactive view of actual independently replayed deposition paths"></canvas>
 <label>Cutaway <input id="cut" type="range" min="15" max="100" value="70"><output id="height"></output></label>
 <p>Drag to orbit. The roof and front wall are cut away to reveal actual paths.</p></div>
-<details><summary>Model and limits</summary><p>BREP → native compile → emitted G-code → fresh independent replay → nominal footprint-prism mesh → full-integration Q1 elasticity. Assumed isotropic PLA: E 2300 MPa, ν 0.35, density 1.24 g/cm³. Nominal interfaces are perfectly bonded. These are stiffness estimates, not failure loads, crushing tests, calibration or machine readiness. Commanded material includes startup prime; FE volume remains separate. Time excludes acceleration, heating and firmware delays. Different densities are sampled, not an exhaustive or equal-mass optimization proof. Border rings mark the sampled three-objective Pareto frontier.</p></details>
+<details><summary>Model and limits</summary><p>BREP → native compile → emitted G-code → fresh independent replay → nominal footprint-prism mesh → full-integration Q1 elasticity. __MATERIAL__. Nominal interfaces are perfectly bonded. These are stiffness estimates, not failure loads, crushing tests, calibration or machine readiness. Commanded material includes startup prime; FE volume remains separate. Time excludes acceleration, heating and firmware delays. Different densities are sampled, not an exhaustive or equal-mass optimization proof. Border rings mark the sampled three-objective Pareto frontier.</p></details>
 <script>const items=__DATA__;let selected=0,yaw=-.8,pitch=.55,drag=null;const canvas=document.getElementById('view'),ctx=canvas.getContext('2d');
 const colors=['#91a0af','#91a0af','#91a0af','#91a0af','#91a0af','#1ac6bb'];
 function choose(i){selected=i;document.querySelectorAll('#choices button').forEach((b,j)=>b.setAttribute('aria-pressed',String(i===j)));const r=items[i].row;

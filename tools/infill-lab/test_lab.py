@@ -112,3 +112,89 @@ def test_producer_identity_includes_checked_decoder_and_frozen_executables(tmp_p
     before = value["binaries"]["spiling-engine"]
     (tmp_path / "spiling-engine").write_text("different producer")
     assert identity(tmp_path)["binaries"]["spiling-engine"] != before
+
+
+def test_grid_is_an_explicit_production_candidate_with_qualified_cadence():
+    c = Candidate(pattern="grid", fraction=0.3)
+    assert c.data()["pattern"] == "grid"
+    with pytest.raises(ValueError):
+        Candidate(pattern="gyroid")
+    with pytest.raises(ValueError):
+        Candidate(pattern="grid", combine_height=0.3)
+    with pytest.raises(ValueError):
+        Candidate(pattern="grid", family="separator", axis="x")
+
+
+def test_source_fixture_datums_survive_an_inscribed_mesh():
+    # The effective body can shrink with discretization; support/load positions
+    # must still refer to the unchanged source specimen rather than its grid.
+    g = mesh_from_voxels(
+        np.ones((8, 2, 2), bool),
+        [np.linspace(0.1, 11.9, 9), np.linspace(0, 5, 3), np.linspace(0, 4, 3)],
+    )
+    r = solve(g, "bend_z", fixture_bounds=[[0, 0, 0], [12, 5, 4]])
+    assert r["fixture_bounds_mm"] == [[0.0, 0.0, 0.0], [12.0, 5.0, 4.0]]
+    assert r["delta_mm"] == pytest.approx(0.004)
+    assert r["energy_error"] < 1e-6
+
+
+def test_one_elastic_body_handles_independent_loads_without_cross_material_reuse():
+    from mechanics import prepare
+
+    g = mesh_from_voxels(
+        np.ones((2, 2, 4), bool),
+        [np.linspace(0, 10, 3), np.linspace(0, 10, 3), np.linspace(0, 20, 5)],
+    )
+    body = prepare(g)
+    for case, expected in [("compression_x", 46000.0), ("compression_z", 11500.0)]:
+        r = solve(g, case, prepared=body)
+        assert r["stiffness_n_mm"] == pytest.approx(expected, rel=1e-7)
+        assert r["matrix_reused"] and r["assembly_wall_s"] == 0.0
+    with pytest.raises(ValueError, match="another mesh/material"):
+        solve(g, material=Material(young_mpa=1000.0), prepared=body)
+
+
+def test_weak_z_material_is_reciprocal_positive_and_matches_axial_moduli():
+    from mechanics import prepare, elastic_tensor
+
+    material = Material(z_ratio=0.25)
+    tensor = elastic_tensor(material)
+    assert np.allclose(tensor, tensor.T)
+    assert np.linalg.eigvalsh(tensor).min() > 0
+    g = mesh_from_voxels(
+        np.ones((2, 2, 4), bool),
+        [np.linspace(0, 10, 3), np.linspace(0, 10, 3), np.linspace(0, 20, 5)],
+    )
+    body = prepare(g, material)
+    assert solve(g, "compression_z", material, prepared=body)[
+        "reaction_n"
+    ] == pytest.approx(57.5, rel=1e-7)
+    assert solve(g, "compression_x", material, prepared=body)[
+        "stiffness_n_mm"
+    ] == pytest.approx(46000.0, rel=1e-7)
+
+
+def test_trial_timeout_stops_nested_work_in_the_owned_process_group(tmp_path):
+    import sys
+    from pathlib import Path
+    from native import run
+
+    worker = tmp_path / "worker.py"
+    pid_file = tmp_path / "descendant.pid"
+    worker.write_text(
+        "import sys,subprocess\nfrom pathlib import Path\nsys.path.insert(0,"
+        + repr(str(Path(__file__).resolve().parent))
+        + ")\nfrom native import enter_trial_group,run\nenter_trial_group()\nrun([sys.executable,'-c',"
+        + repr(
+            "import os,time;from pathlib import Path;Path("
+            + repr(str(pid_file))
+            + ").write_text(str(os.getpid()));time.sleep(30)"
+        )
+        + "],timeout=20)\n"
+    )
+    with pytest.raises(TimeoutError):
+        run([sys.executable, worker], timeout=0.5)
+    pid = int(pid_file.read_text())
+    stat = Path(f"/proc/{pid}/stat")
+    # A killed grandchild can briefly await init's reap, but must not execute.
+    assert not stat.exists() or stat.read_text().split()[2] == "Z"

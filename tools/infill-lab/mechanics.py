@@ -8,14 +8,85 @@ Q1 hexahedra; compare with an external C3D8 solver and convergence controls.
 """
 
 from __future__ import annotations
+from dataclasses import dataclass
 import time
 import numpy as np
 from scipy.sparse.linalg import cg
 import pyamg
-from skfem import MeshHex, Basis, ElementHex1, ElementVector, asm
+from skfem import MeshHex, Basis, ElementHex1, ElementVector, asm, BilinearForm
+from skfem.helpers import sym_grad
 from skfem.models.elasticity import linear_elasticity, lame_parameters
 from model import Material
 from geometry import VoxelMesh
+
+
+@dataclass(frozen=True)
+class ElasticBody:
+    mesh: VoxelMesh
+    material: Material
+    basis: Basis
+    stiffness: object
+    assembly_s: float
+
+
+def elastic_tensor(material):
+    """Symmetric compliance; weak-Z scenarios are assumptions, not calibration.
+
+    Engineering Voigt order xx, yy, zz, yz, xz, xy. Reciprocal Poisson ratios
+    follow from symmetric compliance rather than guessing independent ratios.
+    """
+    e, nu, beta = material.young_mpa, material.poisson, material.z_ratio
+    compliance = np.diag(
+        [
+            1 / e,
+            1 / e,
+            1 / (beta * e),
+            2 * (1 + nu) / (beta * e),
+            2 * (1 + nu) / (beta * e),
+            2 * (1 + nu) / e,
+        ]
+    )
+    for i, j in ((0, 1), (0, 2), (1, 2)):
+        compliance[i, j] = compliance[j, i] = -nu / e
+    if np.linalg.eigvalsh(compliance).min() <= 0:
+        raise ValueError("material compliance is not positive definite")
+    return np.linalg.inv(compliance)
+
+
+def prepare(mesh: VoxelMesh, material=Material()):
+    """One material/mesh matrix shared by independent loads, never by candidates."""
+    if mesh.components != 1:
+        raise ValueError(
+            f"inscribed mesh has {mesh.components} disconnected components; refine, do not invent bonds"
+        )
+    began = time.monotonic()
+    m = MeshHex(mesh.points, mesh.cells, sort_t=False)
+    basis = Basis(m, ElementVector(ElementHex1()), intorder=2)
+    lam, mu = lame_parameters(material.young_mpa, material.poisson)
+    if material.z_ratio == 1.0:
+        stiffness = asm(linear_elasticity(lam, mu), basis).tocsr()
+    else:
+        tensor = elastic_tensor(material)
+
+        def strain(u):
+            eps = sym_grad(u)
+            return np.array(
+                [
+                    eps[0, 0],
+                    eps[1, 1],
+                    eps[2, 2],
+                    2 * eps[1, 2],
+                    2 * eps[0, 2],
+                    2 * eps[0, 1],
+                ]
+            )
+
+        @BilinearForm
+        def elasticity(u, v, w):
+            return np.einsum("i...,ij,j...->...", strain(v), tensor, strain(u))
+
+        stiffness = asm(elasticity, basis).tocsr()
+    return ElasticBody(mesh, material, basis, stiffness, time.monotonic() - began)
 
 
 def solve(
@@ -25,20 +96,29 @@ def solve(
     *,
     rtol=1e-8,
     maxiter=2000,
+    fixture_bounds=None,
+    prepared: ElasticBody | None = None,
 ):
-    if mesh.components != 1:
-        raise ValueError(
-            f"inscribed mesh has {mesh.components} disconnected components; refine, do not invent bonds"
-        )
     np.random.seed(0)  # Freeze AMG randomized setup; this is a research solve.
     began = time.monotonic()
-    m = MeshHex(mesh.points, mesh.cells, sort_t=False)
-    basis = Basis(m, ElementVector(ElementHex1()), intorder=2)
-    lam, mu = lame_parameters(material.young_mpa, material.poisson)
-    stiffness = asm(linear_elasticity(lam, mu), basis).tocsr()
+    reused = prepared is not None
+    body = prepared if prepared is not None else prepare(mesh, material)
+    if body.mesh is not mesh or body.material != material:
+        raise ValueError("prepared elasticity belongs to another mesh/material")
+    basis, stiffness = body.basis, body.stiffness
     p = mesh.points
     lo, hi = mesh.bounds
-    extent = hi - lo
+    datums = (
+        mesh.bounds
+        if fixture_bounds is None
+        else np.asarray(fixture_bounds, dtype=float)
+    )
+    if datums.shape != (2, 3):
+        raise ValueError("fixture bounds require two three-dimensional points")
+    datum_lo, datum_hi = datums
+    datum_extent = datum_hi - datum_lo
+    if np.any(~np.isfinite(datum_extent)) or np.any(datum_extent <= 0):
+        raise ValueError("invalid source fixture bounds")
 
     def dofs(nodes, axis):
         return basis.nodal_dofs[axis, np.asarray(nodes, dtype=int)]
@@ -46,12 +126,12 @@ def solve(
     def at(axis, value):
         return np.flatnonzero(np.isclose(p[axis], value, rtol=0, atol=1e-8))
 
-    delta = 0.001 * float(extent[2])
+    delta = 0.001 * float(datum_extent[2])
     conditions = {}
     loaded = []
     if case.startswith("compression_"):
         axis = {"x": 0, "y": 1, "z": 2}[case[-1]]
-        delta = 0.001 * float(extent[axis])
+        delta = 0.001 * float(datum_extent[axis])
         lower, upper = at(axis, lo[axis]), at(axis, hi[axis])
         conditions.update({int(i): 0.0 for i in dofs(lower, axis)})
         loaded = dofs(upper, axis)
@@ -67,9 +147,9 @@ def solve(
         # Two finite support strips; design-independent specimen-frame positions.
         bottom = at(2, lo[2])
         top = at(2, hi[2])
-        span = 0.75 * extent[0]
-        center = (lo[0] + hi[0]) / 2
-        width = max(mesh.spacing[0] * 1.1, 0.05 * extent[0])
+        span = 0.75 * datum_extent[0]
+        center = (datum_lo[0] + datum_hi[0]) / 2
+        width = 0.05 * datum_extent[0]
         left = bottom[np.abs(p[0, bottom] - (center - span / 2)) <= width]
         right = bottom[np.abs(p[0, bottom] - (center + span / 2)) <= width]
         load = top[np.abs(p[0, top] - center) <= width]
@@ -153,7 +233,10 @@ def solve(
         "iterations": iterations[0],
         "dof": int(basis.N),
         "elements": int(mesh.count),
+        "fixture_bounds_mm": [datum_lo.tolist(), datum_hi.tolist()],
         "mesh_volume_mm3": mesh.volume,
         "wall_s": time.monotonic() - began,
-        "model": "effective_nominal_footprint_prisms_isotropic_Q1_not_strength",
+        "matrix_reused": reused,
+        "assembly_wall_s": 0.0 if reused else body.assembly_s,
+        "model": "effective_nominal_footprint_prisms_elastic_Q1_not_strength",
     }

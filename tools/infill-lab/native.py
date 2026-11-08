@@ -11,10 +11,20 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from model import Candidate, file_hash
 
 ROOT = Path(__file__).resolve().parents[2]
+_TRIAL_GROUP = None
+
+
+def enter_trial_group():
+    """Only the fresh session-leading worker may own this cancellation group."""
+    global _TRIAL_GROUP
+    if os.getpgrp() != os.getpid():
+        raise RuntimeError("trial worker must lead its own process group")
+    _TRIAL_GROUP = os.getpid()
 
 
 def run(command, *, timeout=120, cwd=ROOT, output: Path | None = None):
@@ -25,6 +35,7 @@ def run(command, *, timeout=120, cwd=ROOT, output: Path | None = None):
         "OMP_NUM_THREADS": "1",
     }
     started = time.monotonic()
+    owns_group = _TRIAL_GROUP is None
     import tempfile
 
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
@@ -34,7 +45,7 @@ def run(command, *, timeout=120, cwd=ROOT, output: Path | None = None):
             env=env,
             stdout=stdout,
             stderr=stderr,
-            start_new_session=True,
+            start_new_session=owns_group,
         ) as p:
             try:
                 while p.poll() is None:
@@ -53,14 +64,29 @@ def run(command, *, timeout=120, cwd=ROOT, output: Path | None = None):
                     > 32 * 1024 * 1024
                 ):
                     raise RuntimeError("native receipt exceeds output budget")
-            except BaseException:
+            except BaseException as error:
                 # The group includes the supervised sidecar; do not leave an orphan.
+                if not owns_group:
+                    print(
+                        f"trial process group cancelled: {error}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    os.killpg(_TRIAL_GROUP, signal.SIGKILL)
                 try:
                     os.killpg(p.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
                 p.wait()
                 raise
+            finally:
+                # The worker's CLI/sidecar descendants share this group. Kill
+                # remaining descendants even after a worker exits successfully.
+                if owns_group:
+                    try:
+                        os.killpg(p.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
         stdout.seek(0)
         stderr.seek(0)
         out, err = stdout.read(), stderr.read()
@@ -95,6 +121,7 @@ class Native:
         folder.mkdir(parents=True, exist_ok=False)
         owned_source = folder / "source.step"
         shutil.copyfile(source, owned_source)
+        source_hash = file_hash(owned_source)
         intent = json.loads(self.base_intent.read_text())
         recipe = intent["recipe"]
         recipe.update(
@@ -105,7 +132,7 @@ class Native:
             sparse_infill=(
                 {"kind": "combine_eligible", "max_height_mm": candidate.combine_height}
                 if candidate.combine_height
-                else {"kind": "fine"}
+                else {"kind": "grid" if candidate.pattern == "grid" else "fine"}
             ),
         )
         # Preserve walls/skins/process from the captured public base recipe.
@@ -232,7 +259,7 @@ class Native:
         data = json.loads((folder / "roads.json").read_text())
         data.update(
             candidate=candidate.data(),
-            source_sha256=file_hash(source),
+            source_sha256=source_hash,
             size_mm=size,
             compile_wall_s=elapsed + create_time + replay_time,
             process_edits=edits,

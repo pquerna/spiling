@@ -16,7 +16,7 @@ import sys
 import time
 
 from model import Candidate, Material, digest, file_hash
-from native import Native, ROOT, run
+from native import Native, ROOT, run, enter_trial_group
 from specimens import SIZES, generate
 
 HERE = Path(__file__).resolve().parent
@@ -82,6 +82,8 @@ def seeds():
     for fraction in (0.1, 0.2, 0.35, 0.5, 0.75, 1.0):
         for axis in ("alternating_xy", "alternating_yx", "x", "y"):
             yield Candidate(fraction=fraction, axis=axis)
+    for fraction in (0.1, 0.2, 0.35, 0.5, 0.75):
+        yield Candidate(fraction=fraction, pattern="grid")
     for fraction in (0.1, 0.35):
         for axis in ("alternating_xy", "x"):
             for combined in (0.0, 0.3):
@@ -123,7 +125,7 @@ def mutations(parent, rng):
 def evaluate(request):
     bounded()
     from geometry import voxelize
-    from mechanics import solve
+    from mechanics import solve, prepare
 
     began = time.monotonic()
     root = Path(request["root"])
@@ -133,6 +135,8 @@ def evaluate(request):
     c = Candidate(**request["candidate"])
     specimen = request["specimen"]
     source = root / "specimens" / f"{specimen}.step"
+    if file_hash(source) != request["source_sha256"]:
+        raise RuntimeError("source changed; start a new campaign")
     native_key = digest(
         {
             "candidate": c.data(),
@@ -176,6 +180,8 @@ def evaluate(request):
         data = json.loads((folder / "roads.json").read_text())
     else:
         data = native.compile(source, SIZES[specimen], c, folder)
+        if data["source_sha256"] != request["source_sha256"]:
+            raise RuntimeError("source changed while the native trial was captured")
         dump(
             folder / "manifest.json",
             {
@@ -188,7 +194,30 @@ def evaluate(request):
         data["roads"], dx=request["dx"], dz=request["dz"], phase=tuple(request["phase"])
     )
     mesh_s = time.monotonic() - mesh_start
-    result = solve(mesh, request["case"], Material(**request["material"]))
+    origin = [20.0, 20.0, 0.0]
+    fixture = [origin, [a + b for a, b in zip(origin, SIZES[specimen])]]
+    material = Material(**request["material"])
+    if request["case"] == "compression_envelope":
+        started = time.monotonic()
+        body = prepare(mesh, material)
+        cases = [
+            solve(mesh, case, material, fixture_bounds=fixture, prepared=body)
+            for case in ("compression_x", "compression_y", "compression_z")
+        ]
+        result = {
+            "case": "compression_envelope",
+            "stiffness_n_mm": min(r["stiffness_n_mm"] for r in cases),
+            "cases": cases,
+            "assembly_wall_s": body.assembly_s,
+            "wall_s": time.monotonic() - started,
+            "model": cases[0]["model"],
+            "elements": mesh.count,
+            "dof": cases[0]["dof"],
+            "mesh_volume_mm3": mesh.volume,
+            "fixture_bounds_mm": fixture,
+        }
+    else:
+        result = solve(mesh, request["case"], material, fixture_bounds=fixture)
     return {
         "status": "ok",
         "candidate": c.data(),
@@ -220,11 +249,12 @@ def study(args):
         spec = {
             "identity": identity(args.bin_dir.resolve()),
             "specimen": args.specimen,
+            "source_sha256": file_hash(root / "specimens" / f"{args.specimen}.step"),
             "dx": args.dx,
             "dz": args.dz,
             "phase": args.phase,
             "case": args.case,
-            "material": asdict(Material(poisson=args.poisson)),
+            "material": asdict(Material(poisson=args.poisson, z_ratio=args.z_ratio)),
             "seed": args.seed,
             "search": "controls_then_pareto_mutation_v1",
         }
@@ -262,6 +292,13 @@ def study(args):
             if identity(args.bin_dir.resolve()) != spec["identity"]:
                 raise RuntimeError(
                     "judge/producer changed during campaign; stopped before another trial"
+                )
+            if (
+                file_hash(root / "specimens" / f"{args.specimen}.step")
+                != spec["source_sha256"]
+            ):
+                raise RuntimeError(
+                    "source changed during campaign; stopped before another trial"
                 )
             attempts += 1
             parent = None
@@ -353,13 +390,20 @@ def main():
     s.add_argument("--specimen", choices=SIZES, default="beam")
     s.add_argument(
         "--case",
-        choices=["bend_z", "compression_x", "compression_y", "compression_z"],
+        choices=[
+            "bend_z",
+            "compression_x",
+            "compression_y",
+            "compression_z",
+            "compression_envelope",
+        ],
         default="bend_z",
     )
     s.add_argument("--dx", type=float, default=0.225)
     s.add_argument("--dz", type=float, default=0.2)
     s.add_argument("--phase", type=float, nargs=2, default=[0.0, 0.0])
     s.add_argument("--poisson", type=float, default=0.35)
+    s.add_argument("--z-ratio", type=float, default=1.0)
     s.add_argument("--limit", type=int, default=25)
     s.add_argument("--seconds", type=float, default=900)
     s.add_argument("--trial-seconds", type=float, default=120)
@@ -372,7 +416,18 @@ def main():
     if a.command == "study":
         study(a)
     else:
-        dump(a.result, evaluate(json.loads(a.request.read_text())))
+        enter_trial_group()
+        request = json.loads(a.request.read_text())
+        try:
+            result = evaluate(request)
+        except Exception as error:
+            result = {
+                "status": "refused_or_failed",
+                "candidate": request["candidate"],
+                "error_type": type(error).__name__,
+                "error": str(error)[-6000:],
+            }
+        dump(a.result, result)
 
 
 if __name__ == "__main__":
