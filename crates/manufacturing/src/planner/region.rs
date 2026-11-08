@@ -1134,9 +1134,33 @@ pub(super) fn bridge_rows<'a>(
             local.len() * (usize::BITS - local.len().leading_zeros()) as usize,
         )?;
         local.sort_unstable_by(|a, b| a.2.total_cmp(&b.2).then(a.0.total_cmp(&b.0)));
+        let prepared = hatch::PreparedHatch::for_queries(polygon, local.len(), layer.axis, cancel)?;
+        let mut mask = None;
+        let mut tile_stop = 0;
+        let mut mask_row = 0;
+        let mut coordinates = Vec::new();
+        if let Some(prepared) = &prepared {
+            coordinates
+                .try_reserve_exact(prepared.tile_rows())
+                .map_err(|_| resource("bridge compute query allocation refused"))?;
+        }
         let mut first = 0;
         while first < local.len() {
             check_cancel(cancel)?;
+            if let Some(prepared) = &prepared
+                && first >= tile_stop
+            {
+                coordinates.clear();
+                tile_stop = first;
+                while tile_stop < local.len() && coordinates.len() < prepared.tile_rows() {
+                    check_cancel(cancel)?;
+                    coordinates.push(local[tile_stop].3);
+                    let key = local[tile_stop].2;
+                    tile_stop += local[tile_stop..].partition_point(|piece| piece.2 <= key);
+                }
+                mask = prepared.mask_coordinates(&coordinates, cancel)?;
+                mask_row = 0;
+            }
             let key = local[first].2;
             let stop = first + local[first..].partition_point(|piece| piece.2 <= key);
             let owners = &local[first..stop];
@@ -1149,7 +1173,12 @@ pub(super) fn bridge_rows<'a>(
                     .map(|ring| ring.0.len())
                     .sum::<usize>();
             charge_bridge_rows(&mut work, edges + owners.len())?;
-            row_intersections(polygon, coordinate, layer.axis, &mut hits, cancel)?;
+            if let (Some(prepared), Some(mask)) = (&prepared, &mask) {
+                prepared.intersections(mask, mask_row, coordinate, &mut hits, cancel)?;
+            } else {
+                row_intersections(polygon, coordinate, layer.axis, &mut hits, cancel)?;
+            }
+            mask_row += 1;
             excluded.clear();
             charge_bridge_rows(&mut work, exclusion_edges)?;
             for polygon in exclusions.iter().flat_map(|region| &region.0) {
