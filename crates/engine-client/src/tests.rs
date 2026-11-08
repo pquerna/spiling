@@ -371,6 +371,19 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
             revision: "test-kernel-revision".into(),
         },
         geometry_limits: GeometryLimits::FROZEN,
+        compute: spiling_contracts::compute::ComputeStatus {
+            settings: Default::default(),
+            default_device: spiling_contracts::compute::ComputeDevice {
+                backend: spiling_contracts::compute::ComputeBackend::Cpu,
+                name: "Test CPU".into(),
+                hardware_accelerated: false,
+            },
+            fea_device: spiling_contracts::compute::ComputeDevice {
+                backend: spiling_contracts::compute::ComputeBackend::Cpu,
+                name: "Test CPU".into(),
+                hardware_accelerated: false,
+            },
+        },
     };
     super::validate_engine_cutover(&hello).unwrap();
     hello.kernel = "unsupported-kernel".into();

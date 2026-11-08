@@ -15,6 +15,33 @@ fn engine() -> PathBuf {
         .map(PathBuf::from)
         .expect("set SPILING_TEST_ENGINE to the built native spiling-engine")
 }
+
+#[tokio::test]
+#[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
+async fn compute_preferences_reach_checked_engine_and_inherit_resolved_device() {
+    use spiling_contracts::compute::{ComputeBackend, ComputeSettings};
+    let store = tempfile::tempdir().unwrap();
+    let settings = ComputeSettings {
+        default_backend: ComputeBackend::Cpu,
+        fea_backend: None,
+    };
+    let mut command = tokio::process::Command::new(engine());
+    command.env("SPILING_COMPUTE_BACKEND", "invalid-overridden-value");
+    command.env("SPILING_FEA_COMPUTE_BACKEND", "invalid-overridden-value");
+    let mut client = EngineClient::spawn_command_with_compute(command, store.path(), settings)
+        .await
+        .unwrap();
+    assert_eq!(client.hello().compute.settings, settings);
+    assert_eq!(
+        client.hello().compute.default_device.backend,
+        ComputeBackend::Cpu
+    );
+    assert_eq!(
+        client.hello().compute.default_device,
+        client.hello().compute.fea_device
+    );
+    client.shutdown().await.unwrap();
+}
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/geometry")

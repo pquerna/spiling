@@ -11,6 +11,7 @@ use ts_rs::TS;
 pub mod appearance;
 pub mod catalog;
 pub mod color_naming;
+pub mod compute;
 pub mod display;
 pub mod geometry;
 pub mod hardware;
@@ -52,7 +53,7 @@ pub use spiling::engine as rpc;
 
 pub const ENGINE_BUILD_ID: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    ";project10;manufacturing11;surface3;planner70;emitter14;verifier31;splr6;fixed-dual2;optical-prusa-v7-007bb922-cycle2;color-names1-xkcd450cca88;libraries3;hardware1;catalog2;stock1;alternatives2;layouts6"
+    ";project10;manufacturing11;surface3;planner70;emitter14;verifier31;splr6;fixed-dual2;optical-prusa-v7-007bb922-cycle2;color-names1-xkcd450cca88;libraries3;hardware1;catalog2;stock1;alternatives2;layouts6;compute1"
 );
 pub const PROJECT_FORMAT_CAPABILITY: &str = "ptac_projects_v1";
 pub const MANUFACTURING_SCHEMA_CAPABILITY: &str = "manufacturing_schema11";
@@ -84,6 +85,7 @@ pub struct Hello {
     pub geometry_limits: geometry::GeometryLimits,
     pub manufacturing_capabilities: Vec<String>,
     pub project_capabilities: Vec<String>,
+    pub compute: compute::ComputeStatus,
 }
 impl TryFrom<rpc::EngineInfo> for Hello {
     type Error = String;
@@ -132,6 +134,7 @@ impl TryFrom<rpc::EngineInfo> for Hello {
                 .try_into()?,
             manufacturing_capabilities: info.manufacturing_capabilities,
             project_capabilities: info.project_capabilities,
+            compute: info.compute.ok_or("compute status missing")?.try_into()?,
         })
     }
 }

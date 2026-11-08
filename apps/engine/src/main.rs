@@ -872,10 +872,32 @@ pub(crate) fn diagnostic(level: &str, event: &str, message: &str) {
     );
 }
 
+fn parse_compute_settings(
+    backend: Option<std::ffi::OsString>,
+    fea: Option<std::ffi::OsString>,
+) -> Result<spiling_contracts::compute::ComputeSettings, String> {
+    use spiling_contracts::compute::{ComputeBackend, ComputeSettings};
+    let parse = |value: std::ffi::OsString| {
+        ComputeBackend::parse(value.to_str().ok_or("compute backend must be UTF-8")?)
+    };
+    let default_backend = backend.map(parse).transpose()?.unwrap_or_default();
+    let fea_backend = match fea {
+        Some(value) if value == "inherit" => None,
+        Some(value) => Some(parse(value)?),
+        None => None,
+    };
+    Ok(ComputeSettings {
+        default_backend,
+        fea_backend,
+    })
+}
+
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);
     let mut store = None;
     let mut library_path = None;
+    let mut compute_backend = None;
+    let mut fea_backend = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--store") if store.is_none() => {
@@ -884,10 +906,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             Some("--library") if library_path.is_none() => {
                 library_path = Some(PathBuf::from(args.next().ok_or("library path missing")?))
             }
+            Some("--compute-backend") if compute_backend.is_none() => {
+                compute_backend = Some(args.next().ok_or("compute backend missing")?)
+            }
+            Some("--fea-compute-backend") if fea_backend.is_none() => {
+                fea_backend = Some(args.next().ok_or("FEA compute backend missing")?)
+            }
             _ => return Err("unexpected or duplicate engine argument".into()),
         }
     }
     let store = store.ok_or("engine requires --store PATH")?;
+    let compute_settings = parse_compute_settings(
+        compute_backend.or_else(|| std::env::var_os("SPILING_COMPUTE_BACKEND")),
+        fea_backend.or_else(|| std::env::var_os("SPILING_FEA_COMPUTE_BACKEND")),
+    )?;
     if library_path
         .as_ref()
         .is_some_and(|path| !path.is_absolute())
@@ -918,6 +950,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("invalid startup capability".into());
     }
     let capability = String::from_utf8(capability[..64].to_vec())?;
+    let compute =
+        tokio::task::spawn_blocking(move || spiling_compute::configure(compute_settings)).await??;
+    diagnostic(
+        "info",
+        "compute_selected",
+        &format!(
+            "default={}:{}; fea={}:{}",
+            compute.default_device.backend.as_str(),
+            compute.default_device.name,
+            compute.fea_device.backend.as_str(),
+            compute.fea_device.name,
+        ),
+    );
     let jobs = Jobs::open(&store)?;
     let native = NativeHost::with_library(
         jobs.clone(),
@@ -928,6 +973,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let instance_id = Uuid::new_v4().to_string();
     let info = EngineInfo {
+        compute: Some((&compute).try_into().map_err(jobs::internal)?),
         instance_id: instance_id.clone(),
         engine_build: spiling_contracts::ENGINE_BUILD_ID.into(),
         pid: std::process::id(),
@@ -1107,6 +1153,24 @@ mod transport_tests {
     use super::grpc_incoming;
     use tokio::net::{TcpListener, TcpStream};
     use tokio_stream::StreamExt;
+
+    #[test]
+    fn compute_launch_preferences_are_strict_and_inheritable() {
+        use spiling_contracts::compute::{ComputeBackend, ComputeSettings};
+        assert_eq!(
+            super::parse_compute_settings(None, None).unwrap(),
+            ComputeSettings::default()
+        );
+        let settings =
+            super::parse_compute_settings(Some("vulkan".into()), Some("inherit".into())).unwrap();
+        assert_eq!(settings.default_backend, ComputeBackend::Vulkan);
+        assert_eq!(settings.fea_backend, None);
+        let settings =
+            super::parse_compute_settings(Some("cpu".into()), Some("auto".into())).unwrap();
+        assert_eq!(settings.fea_backend, Some(ComputeBackend::Auto));
+        assert!(super::parse_compute_settings(Some("inherit".into()), None).is_err());
+        assert!(super::parse_compute_settings(None, Some("unknown".into())).is_err());
+    }
 
     #[tokio::test]
     async fn accepted_grpc_socket_disables_nagle() {

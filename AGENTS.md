@@ -91,6 +91,7 @@ B0 establishes contracts and a shared `crates/engine-client` used by the CLI and
 | `apps/cli/`                                    | Client commands using the same protocol and services; no alternate planner               |
 | `crates/contracts/`                            | IDs, revisions, commands, events, errors, manifest schemas                               |
 | `crates/engine-client/`                        | Shared protocol client, child-process lifecycle, request deadlines                       |
+| `crates/compute/`                              | CubeCL backend/device policy and bounded exact numeric batches; no geometry authority    |
 | `crates/core/`                                 | Project transactions, undo, persistence/recovery, artifacts, jobs                        |
 | `crates/core-ptac/`                            | Closed SQLite container, checked immutable objects, filesystem admission and publication |
 | `crates/geometry/`                             | Kernel adapter, import, tessellation, sections, capability contract                      |
@@ -105,6 +106,7 @@ B0 establishes contracts and a shared `crates/engine-client` used by the CLI and
 Dependencies flow inward:
 
 - Contracts have no desktop runtime, kernel or renderer dependencies.
+- Compute depends on contracts and pinned CubeCL CPU/Vulkan runtimes, not Core, native geometry or the workbench renderer. Machine-local default/FEA policies resolve per engine session; FEA inherits the resolved default unless explicitly overridden. Numeric screening does not replace native material or actual-program verification authority. See [compute policy](docs/protocol/control.md#compute-policy).
 - Core depends on contracts and core-ptac. Core-ptac owns container bytes and publication, with no domain, engine or kernel dependency; Core owns semantic admission. Geometry depends on contracts and SolidCore through its kernel adapter.
 - Surface-fields depends on contracts, not Core, geometry, renderer or planner. Core owns canonical immutable image storage; engine enables the optional image codec; manufacturing consumes borrowed scalar fields and geometry services. Engine composes these services with Core.
 - Appearance depends only on contracts: no Core, kernel, manufacturing, UI or GPU dependency. Core owns immutable original/canonical palettes, prepared identity caches and Arc-owned studies/reports; engine composes typed Projects/Operations/ByteStream for engine-client and CLI. Named reference-model math stays separate from unclipped target colorimetry and does not confer calibration or routing authority. See [appearance contracts](docs/protocol/project.md#optical-reference-construction-studies).

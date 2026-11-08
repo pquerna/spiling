@@ -410,6 +410,29 @@ impl EngineClient {
 
     /// Start the same supervised engine with caller-scoped environment/arguments.
     /// The client still owns authentication, storage, stdio and child cleanup.
+    pub async fn spawn_command_with_compute(
+        mut command: Command,
+        store: impl AsRef<Path>,
+        settings: spiling_contracts::compute::ComputeSettings,
+    ) -> Result<Self, ClientError> {
+        command
+            .arg("--compute-backend")
+            .arg(settings.default_backend.as_str())
+            .arg("--fea-compute-backend")
+            .arg(
+                settings
+                    .fea_backend
+                    .map_or("inherit", |backend| backend.as_str()),
+            );
+        let client = Self::spawn_command(command, store).await?;
+        if client.hello().compute.settings != settings {
+            return Err(ClientError::Protocol(
+                "engine compute settings differ from launch".into(),
+            ));
+        }
+        Ok(client)
+    }
+
     pub async fn spawn_command(
         mut command: Command,
         store: impl AsRef<Path>,

@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+
+[package]
+name = "spiling-compute"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+spiling-contracts.workspace = true
+cubecl.workspace = true
+cubecl-environment = { version = "=0.11.3", default-features = false, features = ["std"] }

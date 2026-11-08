@@ -83,6 +83,70 @@ fn imported(host: &Host) -> Snapshot {
 
 #[test]
 #[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
+fn compute_preferences_apply_on_guarded_restart_only() {
+    use spiling_contracts::compute::{ComputeBackend, ComputeSettings};
+    let root = tempfile::tempdir().unwrap();
+    let settings = ComputeSettings {
+        default_backend: ComputeBackend::Cpu,
+        fea_backend: None,
+    };
+    let host = Host::with_compute(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        settings,
+        || {},
+    )
+    .unwrap();
+    let initial = wait(&host, |state| state.phase != Phase::Starting);
+    assert_eq!(initial.phase, Phase::Running, "{:?}", initial.problems);
+    let initial_hello = initial.hello.as_ref().unwrap();
+    assert_eq!(initial_hello.compute.settings, settings);
+    assert_eq!(
+        initial_hello.compute.default_device,
+        initial_hello.compute.fea_device
+    );
+    let next = ComputeSettings {
+        fea_backend: Some(ComputeBackend::Cpu),
+        ..settings
+    };
+    host.compute_settings(next).unwrap();
+    let dirty = imported(&host);
+    let original_project = dirty.project.as_ref().unwrap().project_id.clone();
+    assert_eq!(dirty.hello.as_ref().unwrap().compute.settings, settings);
+    host.command(Command::Restart).unwrap();
+    let pending = wait(&host, |state| state.confirmation.is_some());
+    host.confirm(pending.confirmation.as_ref().unwrap().id, false)
+        .unwrap();
+    let kept = wait(&host, |state| {
+        state.serial > pending.serial && !state.busy && state.confirmation.is_none()
+    });
+    assert_eq!(kept.project.as_ref().unwrap().project_id, original_project);
+    assert_eq!(
+        kept.hello.as_ref().unwrap().instance_id,
+        initial_hello.instance_id
+    );
+    assert_eq!(kept.hello.as_ref().unwrap().compute.settings, settings);
+    host.command(Command::Restart).unwrap();
+    let pending = wait(&host, |state| state.confirmation.is_some());
+    host.confirm(pending.confirmation.as_ref().unwrap().id, true)
+        .unwrap();
+    let restarted = wait(&host, |state| {
+        state.phase == Phase::Running
+            && !state.busy
+            && state
+                .hello
+                .as_ref()
+                .is_some_and(|hello| hello.instance_id != initial_hello.instance_id)
+    });
+    assert_eq!(restarted.hello.as_ref().unwrap().compute.settings, next);
+    assert!(!restarted.project.as_ref().unwrap().dirty);
+    assert_eq!(restarted.scene.as_ref().unwrap().occurrence_count, 0);
+}
+
+#[test]
+#[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
 fn project_receipts_discard_read_only_restart_and_reap() {
     let root = tempfile::tempdir().unwrap();
     let host = Host::new(
@@ -241,6 +305,7 @@ fn native_path_limit_and_problem_history_are_bounded() {
     let root = tempfile::tempdir().unwrap();
     let (updates, _) = watch::channel(Snapshot::default());
     let mut actor = Actor {
+        compute_settings: Default::default(),
         library_location: None,
         config: Config {
             engine: root.path().join("missing"),

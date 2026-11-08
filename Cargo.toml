@@ -4,8 +4,8 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/contracts", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench", "tests"]
-default-members = ["crates/contracts", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench"]
+members = ["crates/contracts", "crates/compute", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench", "tests"]
+default-members = ["crates/contracts", "crates/compute", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench"]
 exclude = ["vendor/solidcraft/crates/geom", "vendor/solidcraft/crates/step"]
 
 [workspace.package]
@@ -32,6 +32,8 @@ spiling-core-ptac = { path = "crates/core-ptac" }
 tempfile = "=3.27.0"
 ts-rs = { version = "=12.0.1", features = ["serde-compat"] }
 spiling-contracts = { path = "crates/contracts" }
+spiling-compute = { path = "crates/compute" }
+cubecl = { version = "=0.11.3", default-features = false, features = ["std", "cpu", "vulkan"] }
 spiling-engine-client = { path = "crates/engine-client" }
 spiling-surface-fields = { path = "crates/surface-fields" }
 spiling-appearance = { path = "crates/appearance" }

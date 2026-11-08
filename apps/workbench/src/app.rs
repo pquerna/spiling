@@ -24,6 +24,8 @@ const LICENSE: &str = include_str!("../../../LICENSE.md");
 const PREFS: &str = "spiling-native-preferences-v1";
 #[derive(Serialize, Deserialize)]
 struct Preferences {
+    #[serde(default)]
+    compute: spiling_contracts::compute::ComputeSettings,
     theme: Theme,
     accepted_osl3: bool,
     #[serde(default)]
@@ -36,6 +38,7 @@ struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            compute: Default::default(),
             theme: Theme::Graphite,
             accepted_osl3: false,
             library_location: None,
@@ -59,6 +62,8 @@ pub struct Workbench {
     show_gallery: bool,
     show_commands: bool,
     show_feedback: bool,
+    show_compute: bool,
+    queued_compute: Option<spiling_contracts::compute::ComputeSettings>,
     command_selection: Option<usize>,
     command_return_focus: Option<egui::Id>,
     surface_focus: [Option<egui::Id>; 5],
@@ -138,6 +143,8 @@ impl Workbench {
             show_gallery: false,
             show_commands: false,
             show_feedback: false,
+            show_compute: false,
+            queued_compute: None,
             command_selection: None,
             command_return_focus: None,
             surface_focus: [None; 5],
@@ -178,9 +185,9 @@ impl Workbench {
     }
     fn start(&mut self, ctx: &egui::Context) {
         let wake = ctx.clone();
-        match Config::installed()
-            .and_then(|config| Host::new(config, move || wake.request_repaint()))
-        {
+        match Config::installed().and_then(|config| {
+            Host::with_compute(config, self.prefs.compute, move || wake.request_repaint())
+        }) {
             Ok(host) => self.host = Some(host),
             Err(error) => {
                 self.state.phase = Phase::Interrupted;
@@ -637,6 +644,7 @@ impl Workbench {
     }
 }
 mod analysis;
+mod compute;
 mod functional_material;
 mod interior_policy;
 mod layout;
@@ -719,7 +727,15 @@ impl eframe::App for Workbench {
         }) {
             self.selected = None;
         }
-        if let Some(command) = self.queued_host.take()
+        if let Some(settings) = self.queued_compute.take()
+            && let Some(host) = &self.host
+            && let Err(error) = host.compute_settings(settings)
+        {
+            self.local_problem = Some(error);
+            self.queued_compute = Some(settings);
+        }
+        if self.queued_compute.is_none()
+            && let Some(command) = self.queued_host.take()
             && let Some(host) = &self.host
             && let Err(error) = host.command(command)
         {
@@ -1197,6 +1213,7 @@ impl eframe::App for Workbench {
             }
         }
         self.navigation_dialog(&ctx);
+        self.compute_dialog(&ctx);
         self.plate_dialog(&ctx);
         if let Some(confirmation) = &self.state.confirmation {
             let id = confirmation.id;
@@ -1220,6 +1237,7 @@ impl eframe::App for Workbench {
 
         // Side effects execute once in logic(), even if egui lays out the UI in multiple passes.
         if self.queued.is_some()
+            || self.queued_compute.is_some()
             || self.confirmation.is_some()
             || self.queued_geometry.is_some()
             || self.queued_host.is_some()
@@ -1234,5 +1252,31 @@ impl eframe::App for Workbench {
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, PREFS, &self.prefs);
+    }
+}
+
+#[cfg(test)]
+mod compute_preferences_tests {
+    use super::*;
+    use spiling_contracts::compute::{ComputeBackend, ComputeSettings};
+
+    #[test]
+    fn machine_compute_preferences_roundtrip_and_default_to_inheritance() {
+        let mut prefs = Preferences::default();
+        assert_eq!(prefs.compute, ComputeSettings::default());
+        prefs.compute = ComputeSettings {
+            default_backend: ComputeBackend::Cpu,
+            fea_backend: Some(ComputeBackend::Vulkan),
+        };
+        let bytes = serde_json::to_vec(&prefs).unwrap();
+        let decoded: Preferences = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.compute, prefs.compute);
+        let mut legacy_preferences = serde_json::to_value(&prefs).unwrap();
+        legacy_preferences
+            .as_object_mut()
+            .unwrap()
+            .remove("compute");
+        let decoded: Preferences = serde_json::from_value(legacy_preferences).unwrap();
+        assert_eq!(decoded.compute, ComputeSettings::default());
     }
 }

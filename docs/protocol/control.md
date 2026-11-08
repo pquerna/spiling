@@ -18,6 +18,33 @@ All RPCs require the capability in authorization metadata. This is local plainte
 
 Unary calls have five-second deadlines; watches are explicitly long-lived. Expiring/dropping an RPC or watcher does not kill the engine or cancel accepted work. Shutdown/owner EOF interrupt remaining work and bound server drain to two seconds. The process owner waits for observed exit, can explicitly terminate, and uses kill-on-drop. Logs go to stderr; stdout is not a custom frame transport.
 
+## Compute policy
+
+CubeCL compute preferences are machine-local, not project or manufacturing input.
+The default backend is `auto`; an optional FEA/Analyze backend defaults to
+`inherit`, using the same resolved default device. This reserved override does
+not enable an FEA operation. The initial compiled backends are CPU/LLVM and
+Vulkan. Automatic selection prefers an eligible hardware Vulkan adapter,
+otherwise CPU; this deterministic preference is not a measured fastest-device
+claim. An explicit unavailable backend refuses startup rather than downgrading.
+
+The workbench persists these two preferences under **Edit → Compute settings**.
+Changes apply on the next supervised engine session, through the ordinary
+save/discard/restart protection. The engine accepts `--compute-backend
+auto|cpu|vulkan` and `--fea-compute-backend inherit|auto|cpu|vulkan`; CLI/headless
+launches can use `SPILING_COMPUTE_BACKEND` and `SPILING_FEA_COMPUTE_BACKEND`.
+Explicit launch arguments take precedence over environment values. Settings
+are immutable during an engine session. Checked `EngineInfo.compute` returns
+the requested policy and both resolved device identities; missing, unspecified,
+unknown or inconsistent responses refuse readiness.
+
+Compute owns bounded numeric staging and synchronized dispatch, not native
+geometry, project mutation, manufacturing admission or verification authority.
+Backend errors and cancellation are explicit; optional small/oversize numeric
+batches may retain their original host algorithm. Compute device selection is
+independent of the workbench's rendering adapter and is not platform or physical
+machine qualification.
+
 ## Services and Google API patterns
 
 - `Engine.GetEngineInfo`, `Shutdown`, `RunDiagnostic`, `WatchOperation`.

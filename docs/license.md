@@ -20,6 +20,13 @@ Keep the license's own Lawrence Rosen copyright notice intact. Do not insert Spi
 
 Third-party dependencies, vendored code, fonts, fixtures, and other imported assets retain their own licensing and attribution. This project declaration does not relicense them. Check provenance and compatibility before incorporating or distributing them; a dependency's SPDX label alone does not establish compatibility.
 
+CubeCL and its runtime/compiler dependencies retain their upstream licenses.
+The CPU backend incorporates bundled LLVM through `tracel-llvm-bundler`; LLVM's
+Apache-2.0 license with LLVM exceptions and its third-party notices remain
+independent of Spiling's OSL-3.0 code. Include the resolved native compiler bundle,
+its source/provenance and notices in distribution review, not only the Rust
+wrapper crates. Enabling a backend is not a completed packaging qualification.
+
 The PTAC adapter uses pinned bundled SQLite through rusqlite, the MIT zstd Rust
 binding, BSD-3-Clause zstd-safe/zstd-sys and MIT/Apache-2.0 fs2. Native Zstandard
 retains its upstream BSD/GPL alternative texts; this integration selects its BSD

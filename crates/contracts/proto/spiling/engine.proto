@@ -45,6 +45,31 @@ message EngineInfo {
   GeometryLimits geometry_limits = 10;
   repeated string manufacturing_capabilities = 11;
   repeated string project_capabilities = 12;
+  ComputeStatus compute = 13;
+}
+
+enum ComputeBackend {
+  COMPUTE_BACKEND_UNSPECIFIED = 0;
+  COMPUTE_BACKEND_AUTO = 1;
+  COMPUTE_BACKEND_CPU = 2;
+  COMPUTE_BACKEND_VULKAN = 3;
+}
+
+message ComputeSettings {
+  ComputeBackend default_backend = 1;
+  optional ComputeBackend fea_backend = 2;
+}
+
+message ComputeDevice {
+  ComputeBackend backend = 1;
+  string name = 2;
+  bool hardware_accelerated = 3;
+}
+
+message ComputeStatus {
+  ComputeSettings settings = 1;
+  ComputeDevice default_device = 2;
+  ComputeDevice fea_device = 3;
 }
 
 message RunDiagnosticRequest {

@@ -300,6 +300,7 @@ impl Action {
     }
 }
 enum Request {
+    ComputeSettings(spiling_contracts::compute::ComputeSettings),
     Library(Box<LibraryAction>),
     Geometry(Box<GeometryCommand>),
     StartupOpen(crate::launch::Open),
@@ -333,6 +334,14 @@ pub struct Host {
 }
 impl Host {
     pub fn new(config: Config, wake: impl Fn() + Send + Sync + 'static) -> Result<Self, String> {
+        Self::with_compute(config, Default::default(), wake)
+    }
+
+    pub fn with_compute(
+        config: Config,
+        compute_settings: spiling_contracts::compute::ComputeSettings,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self, String> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             // Bounded debug-build frames for generated typed operations and nested restart/open.
@@ -345,6 +354,7 @@ impl Host {
         let (stop, stopped) = oneshot::channel();
         let actor = Actor {
             config,
+            compute_settings,
             updates,
             wake: Arc::new(wake),
             state: Snapshot::default(),
@@ -434,6 +444,13 @@ impl Host {
         }
         self.send(Request::Project(Box::new(command)))
     }
+    pub fn compute_settings(
+        &self,
+        settings: spiling_contracts::compute::ComputeSettings,
+    ) -> Result<(), String> {
+        self.send(Request::ComputeSettings(settings))
+    }
+
     pub fn command(&self, command: Command) -> Result<(), String> {
         self.send(Request::Command(command))
     }
@@ -621,6 +638,7 @@ struct GuardedAction {
 }
 struct Actor {
     config: Config,
+    compute_settings: spiling_contracts::compute::ComputeSettings,
     updates: watch::Sender<Snapshot>,
     wake: Arc<dyn Fn() + Send + Sync>,
     state: Snapshot,
@@ -924,13 +942,16 @@ impl Actor {
         // Restart must preserve the chosen private store even when it becomes unavailable.
         // Passing the exact location at launch avoids briefly selecting a different library.
         let startup = async {
+            let mut command = tokio::process::Command::new(&self.config.engine);
             if let Some(location) = &self.library_location {
-                let mut command = tokio::process::Command::new(&self.config.engine);
                 command.arg("--library").arg(location.to_os_string()?);
-                EngineClient::spawn_command(command, self.config.store.clone()).await
-            } else {
-                EngineClient::spawn_in(&self.config.engine, &self.config.store).await
             }
+            EngineClient::spawn_command_with_compute(
+                command,
+                &self.config.store,
+                self.compute_settings,
+            )
+            .await
         }
         .await;
         match startup {
@@ -1267,6 +1288,7 @@ impl Actor {
     }
     async fn request(&mut self, request: Request) {
         match request {
+            Request::ComputeSettings(settings) => self.compute_settings = settings,
             Request::StartupOpen(open) => {
                 self.admit(Action::Open {
                     path: open.path,

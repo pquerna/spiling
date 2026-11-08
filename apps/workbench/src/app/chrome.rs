@@ -220,6 +220,11 @@ impl Workbench {
                     for action in [Action::Undo, Action::Redo] {
                         self.button(ui, action);
                     }
+                    ui.separator();
+                    if ui.button("Compute settings…").clicked() {
+                        self.show_compute = true;
+                        ui.close();
+                    }
                 });
                 ui.menu_button("View", |ui| {
                     for action in [
