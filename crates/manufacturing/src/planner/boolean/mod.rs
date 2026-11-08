@@ -13,6 +13,10 @@ use spiling_contracts::manufacturing::{
 use std::sync::atomic::AtomicBool;
 
 mod prepared;
+#[cfg(test)]
+mod sift_tests;
+#[cfg(test)]
+mod sweep_tests;
 pub(super) use prepared::{Prepared, Workspace};
 
 #[derive(Clone, Copy)]
@@ -69,6 +73,38 @@ pub(super) fn overlay_padding(min: [f64; 2], max: [f64; 2]) -> Result<f64, Manuf
 // panic/comparator short circuit and no assumed standard-sort comparison count.
 fn sift<T>(
     edges: &mut [T],
+    root: usize,
+    end: usize,
+    key: &impl Fn(&T) -> f64,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    let allowance = 3 * (usize::BITS - end.leading_zeros()) as usize;
+    if work
+        .checked_add(allowance)
+        .is_some_and(|total| total <= MAX_BOOLEAN_PAIRS)
+    {
+        let mut consumed = 0;
+        let result = sift_inner::<_, true>(edges, root, end, key, &mut consumed, cancel);
+        charge(work, consumed)?;
+        result
+    } else {
+        sift_inner::<_, false>(edges, root, end, key, work, cancel)
+    }
+}
+
+#[inline]
+fn charge_one<const BATCHED: bool>(work: &mut usize) -> Result<(), ManufacturingError> {
+    if BATCHED {
+        *work += 1;
+        Ok(())
+    } else {
+        charge(work, 1)
+    }
+}
+
+fn sift_inner<T, const BATCHED: bool>(
+    edges: &mut [T],
     mut root: usize,
     end: usize,
     key: &impl Fn(&T) -> f64,
@@ -84,7 +120,7 @@ fn sift<T>(
             return Ok(());
         }
         if child + 1 < end {
-            charge(work, 1)?;
+            charge_one::<BATCHED>(work)?;
             if key(&edges[child])
                 .total_cmp(&key(&edges[child + 1]))
                 .is_lt()
@@ -92,11 +128,11 @@ fn sift<T>(
                 child += 1;
             }
         }
-        charge(work, 1)?;
+        charge_one::<BATCHED>(work)?;
         if !key(&edges[root]).total_cmp(&key(&edges[child])).is_lt() {
             return Ok(());
         }
-        charge(work, 1)?;
+        charge_one::<BATCHED>(work)?;
         edges.swap(root, child);
         root = child;
     }
@@ -116,6 +152,53 @@ pub(super) fn sort_by<T>(
         charge(work, 1)?;
         edges.swap(0, end);
         sift(edges, 0, end, &key, work, cancel)?;
+    }
+    Ok(())
+}
+
+fn sweep_active<T>(
+    active: &mut Vec<T>,
+    edge: EdgeBounds,
+    bounds: impl Fn(&T) -> EdgeBounds,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    if active
+        .len()
+        .checked_mul(2)
+        .and_then(|allowance| work.checked_add(allowance))
+        .is_some_and(|total| total <= MAX_BOOLEAN_PAIRS)
+    {
+        let mut consumed = 0;
+        let result = sweep_active_inner::<_, true>(active, edge, bounds, &mut consumed, cancel);
+        charge(work, consumed)?;
+        result
+    } else {
+        sweep_active_inner::<_, false>(active, edge, bounds, work, cancel)
+    }
+}
+
+fn sweep_active_inner<T, const BATCHED: bool>(
+    active: &mut Vec<T>,
+    edge: EdgeBounds,
+    bounds: impl Fn(&T) -> EdgeBounds,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    let mut position = 0;
+    while position < active.len() {
+        check_cancel(cancel)?;
+        charge_one::<BATCHED>(work)?;
+        let previous = bounds(&active[position]);
+        if previous.max[0] < edge.min[0] {
+            charge_one::<BATCHED>(work)?;
+            active.swap_remove(position);
+            continue;
+        }
+        if previous.min[1] <= edge.max[1] && edge.min[1] <= previous.max[1] {
+            charge_one::<BATCHED>(work)?;
+        }
+        position += 1;
     }
     Ok(())
 }
@@ -348,21 +431,7 @@ fn polygon_budget<'a>(
     sort_by(&mut edges, |edge| edge.min[0], work, cancel)?;
     let mut active = Vec::<usize>::with_capacity(count);
     for (index, edge) in edges.iter().enumerate() {
-        let mut position = 0;
-        while position < active.len() {
-            check_cancel(cancel)?;
-            charge(work, 1)?; // Includes expiration and every rejected box.
-            let previous = &edges[active[position]];
-            if previous.max[0] < edge.min[0] {
-                charge(work, 1)?;
-                active.swap_remove(position);
-                continue;
-            }
-            if previous.min[1] <= edge.max[1] && edge.min[1] <= previous.max[1] {
-                charge(work, 1)?; // EVERY intra- and cross-operand predicate candidate.
-            }
-            position += 1;
-        }
+        sweep_active(&mut active, *edge, |index| edges[*index], work, cancel)?;
         active.push(index);
     }
     check_cancel(cancel)

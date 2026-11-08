@@ -307,21 +307,7 @@ fn sweep(
         };
         // Uniform query padding is monotone, so unpadded order stays valid.
         let edge = padded(raw, padding)?;
-        let mut position = 0;
-        while position < active.len() {
-            check_cancel(cancel)?;
-            charge(work, 1)?;
-            let previous = &active[position];
-            if previous.max[0] < edge.min[0] {
-                charge(work, 1)?;
-                active.swap_remove(position);
-                continue;
-            }
-            if previous.min[1] <= edge.max[1] && edge.min[1] <= previous.max[1] {
-                charge(work, 1)?; // ALL repeated intra- AND cross-operand candidates.
-            }
-            position += 1;
-        }
+        sweep_active(active, edge, |previous| *previous, work, cancel)?;
         active.push(edge);
     }
     check_cancel(cancel)
