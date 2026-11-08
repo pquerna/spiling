@@ -5,6 +5,7 @@
 use super::*;
 
 pub const MAX_FUNCTIONAL_KEYS: usize = 16;
+pub const MAX_FUNCTIONAL_BASE_SOLID_ZONES: usize = 3;
 
 /// Authored interface intent, never adhesion or physical-retention qualification.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -30,6 +31,7 @@ pub struct FunctionalMaterialConstruction {
     pub material_id: String,
     pub base_material_id: String,
     pub minimum_pure_depth_mm: f64,
+    pub minimum_solid_base_root_depth_mm: f64,
     pub join: PlanarTKeyJoin,
 }
 
@@ -88,10 +90,14 @@ impl FunctionalMaterialConstruction {
             patch.validate()?;
         }
         self.join.validate()?;
-        positive(&[self.minimum_pure_depth_mm])?;
+        positive(&[
+            self.minimum_pure_depth_mm,
+            self.minimum_solid_base_root_depth_mm,
+        ])?;
         if !(self.minimum_pure_depth_mm
             + self.join.reach_into_region_mm
-            + self.join.reach_into_base_mm)
+            + self.join.reach_into_base_mm
+            + self.minimum_solid_base_root_depth_mm)
             .is_finite()
         {
             return Err(invalid("functional construction depth overflow"));
@@ -146,6 +152,42 @@ impl PlanarTKeyJoin {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FunctionalBaseSolidZoneKind {
+    Root,
+    LowerLanding,
+    UpperCover,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FunctionalBaseSolidZone {
+    pub kind: FunctionalBaseSolidZoneKind,
+    pub inward_depth_mm: [f64; 2],
+    pub physical_z_mm: [f64; 2],
+}
+
+impl FunctionalBaseSolidZone {
+    pub fn validate_values(&self) -> Result<(), ManufacturingError> {
+        if !ordered_interval(self.inward_depth_mm)
+            || self.inward_depth_mm[0] < 0.0
+            || !ordered_interval(self.physical_z_mm)
+        {
+            return Err(invalid(
+                "functional solid base zone requires finite ordered native depth/Z intervals and nonnegative depth",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn solid_base_zones<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<FunctionalBaseSolidZone>, D::Error> {
+    bounded_vec::<D, _, MAX_FUNCTIONAL_BASE_SOLID_ZONES>(deserializer)
+}
+
 /// Inspectable source-local face and world-Z key placement, never a certificate
 /// of pure depth, retention, material contact or physical printability.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
@@ -173,6 +215,8 @@ pub struct FunctionalMaterialFrame {
     pub key_middle_z_mm: [f64; 2],
     #[serde(deserialize_with = "key_centers")]
     pub key_centers_u_mm: Vec<f64>,
+    #[serde(deserialize_with = "solid_base_zones")]
+    pub solid_base_zones: Vec<FunctionalBaseSolidZone>,
 }
 
 fn key_centers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<f64>, D::Error> {
@@ -266,6 +310,29 @@ impl FunctionalMaterialFrame {
             return Err(invalid(
                 "functional frame does not preserve the literal stock face and exterior corners",
             ));
+        }
+        if self.solid_base_zones.len() > MAX_FUNCTIONAL_BASE_SOLID_ZONES {
+            return Err(resource("functional solid base zone limit exceeded"));
+        }
+        let native_depth = bounds.max[depth_axis] - bounds.min[depth_axis];
+        if !native_depth.is_finite() {
+            return Err(invalid("functional native stock depth must be finite"));
+        }
+        for (index, zone) in self.solid_base_zones.iter().enumerate() {
+            zone.validate_values()?;
+            if zone.inward_depth_mm[1] > native_depth
+                || zone.physical_z_mm[0] < bounds.min[2]
+                || zone.physical_z_mm[1] > bounds.max[2]
+                || self.solid_base_zones[..index].iter().any(|other| {
+                    other.kind == zone.kind
+                        || (other.physical_z_mm[0] < zone.physical_z_mm[1]
+                            && zone.physical_z_mm[0] < other.physical_z_mm[1])
+                })
+            {
+                return Err(invalid(
+                    "functional solid base zones exceed native depth/Z scope, repeat a kind or overlap in positive Z",
+                ));
+            }
         }
         Ok(())
     }
@@ -366,6 +433,7 @@ pub(super) fn validate_material_domains(
     plan: &NormalizedPrintPlan,
     construction: &FunctionalMaterialConstruction,
     job: &FixedDualJob,
+    base_infill_fraction: f64,
 ) -> Result<(), ManufacturingError> {
     let frame = plan
         .functional_material_frame
@@ -485,12 +553,28 @@ pub(super) fn validate_material_domains(
                 d.reference == reference
                     && d.physical_z_mm[0] <= layer.lower_z_mm
                     && layer.z_mm <= d.physical_z_mm[1]
-            }) || region.fraction != 1.0
-                || region.contributions.iter().any(|source| {
-                    source.occurrence_id != construction.occurrence_id
-                        || source.definition_id != construction.definition_id
-                })
-            {
+            }) || match reference.role {
+                MaterialConstructionRole::FunctionalRegion => {
+                    region.fraction != 1.0 || region.functional_solid_zone.is_some()
+                }
+                MaterialConstructionRole::FunctionalBase => match region.functional_solid_zone {
+                    Some(index) => {
+                        region.fraction != 1.0
+                            || !frame
+                                .solid_base_zones
+                                .get(usize::from(index))
+                                .is_some_and(|zone| {
+                                    zone.physical_z_mm[0] <= layer.lower_z_mm
+                                        && layer.z_mm <= zone.physical_z_mm[1]
+                                })
+                    }
+                    None => region.fraction != base_infill_fraction,
+                },
+                _ => true,
+            } || region.contributions.iter().any(|source| {
+                source.occurrence_id != construction.occurrence_id
+                    || source.definition_id != construction.definition_id
+            }) {
                 return Err(invalid(
                     "functional process region disagrees with its material domain",
                 ));

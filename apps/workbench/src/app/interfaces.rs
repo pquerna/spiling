@@ -3,6 +3,8 @@
 // Licensed under the Open Software License version 3.0
 
 use super::*;
+use crate::inspection::FunctionalArea;
+use spiling_contracts::project::{ProjectId, ProjectRevision};
 use std::sync::{Arc, Weak};
 
 #[cfg(test)]
@@ -66,6 +68,36 @@ mod tests {
             FunctionalLayerScope::Crossing
         );
     }
+
+    #[test]
+    fn every_functional_highlight_requires_the_current_project_capture() {
+        let project = ProjectId::new();
+        let other = ProjectId::new();
+        let revision = ProjectRevision(7);
+        for kind in [
+            Kind::Functional(0),
+            Kind::FunctionalCommands(FunctionalArea::Region),
+            Kind::FunctionalCommands(FunctionalArea::ProtectedBase),
+            Kind::FunctionalCommands(FunctionalArea::InheritedBase),
+        ] {
+            assert!(kind.is_functional());
+        }
+        assert!(current_functional_revision(
+            (&project, revision),
+            Some((&project, revision))
+        ));
+        assert!(!current_functional_revision(
+            (&project, revision),
+            Some((&project, revision.next().unwrap()))
+        ));
+        assert!(!current_functional_revision(
+            (&project, revision),
+            Some((&other, revision))
+        ));
+        assert!(!current_functional_revision((&project, revision), None));
+        assert!(!Kind::Separator(0).is_functional());
+        assert!(!Kind::Plate(0).is_functional());
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -73,6 +105,43 @@ enum Kind {
     Separator(usize),
     Plate(usize),
     Functional(usize),
+    FunctionalCommands(FunctionalArea),
+}
+impl Kind {
+    fn is_functional(self) -> bool {
+        matches!(self, Self::Functional(_) | Self::FunctionalCommands(_))
+    }
+}
+fn current_functional_revision(
+    captured: (&ProjectId, ProjectRevision),
+    current: Option<(&ProjectId, ProjectRevision)>,
+) -> bool {
+    current == Some(captured)
+}
+fn functional_source_matches(
+    scene: &crate::scene::Scene,
+    review: &crate::manufacture::Review,
+) -> bool {
+    use spiling_contracts::manufacturing::JobWorkflow;
+    let JobWorkflow::FixedDualMarlin { job } = &review.bundle.provenance.intent.printer.workflow
+    else {
+        return false;
+    };
+    let Some(request) = &job.functional_construction else {
+        return false;
+    };
+    let Some(frame) = &review.bundle.plan.functional_material_frame else {
+        return false;
+    };
+    scene.summary.session_id == review.capture.session
+        && scene.summary.layout_id == review.capture.layout_id
+        && frame.validate(request, job).is_ok()
+        && scene.occurrences.iter().any(|o| {
+            o.occurrence_id == frame.occurrence_id && o.definition_id == frame.definition_id
+        })
+        && scene
+            .definition(&frame.definition_id)
+            .is_some_and(|d| d.record.provenance.source_hash == frame.source_hash)
 }
 struct Selection {
     review: Weak<crate::manufacture::Review>,
@@ -127,11 +196,17 @@ impl Workbench {
             && scene.zip(review).is_some_and(|(scene, review)| {
                 selected.matches(scene, review)
                     && review.capture.report.verified
-                    && (!matches!(selected.kind, Kind::Functional(_))
-                        || self.state.project.as_ref().is_some_and(|project| {
-                            review.capture.provenance.project_id == project.project_id
-                                && review.capture.observed_revision == project.revision
-                        }))
+                    && (!selected.kind.is_functional()
+                        || (current_functional_revision(
+                            (
+                                &review.capture.provenance.project_id,
+                                review.capture.observed_revision,
+                            ),
+                            self.state
+                                .project
+                                .as_ref()
+                                .map(|project| (&project.project_id, project.revision)),
+                        ) && functional_source_matches(scene, review)))
             })
         {
             Some(selected.area.clone())
@@ -196,7 +271,7 @@ impl Workbench {
                             let value=&coverage.process_diaphragms[index];
                             (value.occurrence_id,&value.definition_id,crate::inspection::Area::plate(value,origin))
                         }
-                        Kind::Functional(_)=>return Err("Select a density construction record".into()),
+                        Kind::Functional(_) | Kind::FunctionalCommands(_)=>return Err("Select a density construction record".into()),
                     };
                     if !scene.occurrences.iter().any(|item|item.occurrence_id==occurrence && &item.definition_id==definition) {return Err("Construction owner is absent from the current source".into());}
                     let area=Arc::new(area?);
@@ -215,9 +290,9 @@ impl Workbench {
             let mut clear=false;
             if let Some(selected)=&self.interfaces.selected
                 && selected.matches(&scene,review) && selected.layer==layer_index
-                && !matches!(selected.kind,Kind::Functional(_))
+                && !selected.kind.is_functional()
             {
-                ui.label(match selected.kind {Kind::Separator(_)=>"Highlighted: separator centerlines over their physical layer interval",Kind::Plate(_)=>"Highlighted: permanent plate extent, including hole boundaries",Kind::Functional(_)=>return});
+                ui.label(match selected.kind {Kind::Separator(_)=>"Highlighted: separator centerlines over their physical layer interval",Kind::Plate(_)=>"Highlighted: permanent plate extent, including hole boundaries",Kind::Functional(_) | Kind::FunctionalCommands(_)=>return});
                 match selected.kind {
                     Kind::Separator(index)=>{
                         let value=&coverage.process_interfaces[index];
@@ -229,7 +304,7 @@ impl Workbench {
                         ui.label(format!("Requested thickness {:.3} mm · physical interval {:.6}…{:.6} mm",value.requested_thickness_mm,value.physical_z_mm[0],value.physical_z_mm[1]));
                         ui.label(format!("Neighbor sparse fractions {:.1}% ↔ {:.1}%",value.neighbors[0].fraction*100.0,value.neighbors[1].fraction*100.0));
                     }
-                    Kind::Functional(_)=>return,
+                    Kind::Functional(_) | Kind::FunctionalCommands(_)=>return,
                 }
                 ui.weak("Construction outlines are not deposited bead surfaces or measured bond strength. Layer/tool filters still control the actual program.");
                 ui.horizontal_wrapped(|ui| {
@@ -270,10 +345,10 @@ impl Workbench {
             } else {
                 ui.label("Requested scope · full native face");
             }
-            if !self.state.project.as_ref().is_some_and(|project| {
-                review.capture.provenance.project_id == project.project_id
-                    && review.capture.observed_revision == project.revision
-            }) {
+            if !current_functional_revision(
+                (&review.capture.provenance.project_id, review.capture.observed_revision),
+                self.state.project.as_ref().map(|project| (&project.project_id, project.revision)),
+            ) {
                 ui.label("Earlier capture · verify this construction against the current project revision before inspecting realized joins");
                 return;
             }
@@ -295,7 +370,17 @@ impl Workbench {
                 return;
             }
             ui.label(format!("Selected active scope · face U {:.3}…{:.3} mm · world Z {:.3}…{:.3} mm", frame.selected_u_mm[0], frame.selected_u_mm[1], frame.region_z_mm[0], frame.region_z_mm[1]));
-            ui.weak(format!("Whole source face Z {:.3}…{:.3} mm · solid base; sparse base is not enabled", frame.source_z_mm[0], frame.source_z_mm[1]));
+            ui.weak(format!("Whole source face Z {:.3}…{:.3} mm", frame.source_z_mm[0], frame.source_z_mm[1]));
+            ui.label(format!("Base infill: {:.0}% · join reinforcement: solid", review.bundle.provenance.intent.recipe.infill_fraction * 100.0));
+            ui.label(format!("Minimum solid base root depth: {:.3} mm beyond the join · pure region remains solid", request.minimum_solid_base_root_depth_mm));
+            for zone in &frame.solid_base_zones {
+                let purpose = match zone.kind {
+                    FunctionalBaseSolidZoneKind::Root => "Join backbone",
+                    FunctionalBaseSolidZoneKind::LowerLanding => "Lower landing",
+                    FunctionalBaseSolidZoneKind::UpperCover => "Upper cover",
+                };
+                ui.weak(format!("{purpose} · full face width · inward depth {:.3}…{:.3} mm · world Z {:.3}…{:.3} mm", zone.inward_depth_mm[0], zone.inward_depth_mm[1], zone.physical_z_mm[0], zone.physical_z_mm[1]));
+            }
             ui.label(format!("Pure-material ownership ≥ {:.3} mm · join reach {:.3} mm into region / {:.3} mm into base", request.minimum_pure_depth_mm, request.join.reach_into_region_mm, request.join.reach_into_base_mm));
             ui.label(match request.interface_policy {
                 FunctionalInterfacePolicy::DeclaredSameFamily => "Policy: declared same family · not an adhesion measurement",
@@ -309,57 +394,111 @@ impl Workbench {
             };
             let Some(layer) = review.bundle.plan.layers.get(layer_index) else { return; };
             ui.label(format!("Selected layer {} · world Z {:.3}…{:.3} mm", layer_index + 1, layer.lower_z_mm, layer.z_mm));
-            match functional_layer_scope(frame.region_z_mm, [layer.lower_z_mm, layer.z_mm]) {
-                FunctionalLayerScope::Inactive => {
-                    ui.label("Inactive layer · outside the selected patch height; base material only, no functional join");
-                    return;
+            let physical = [layer.lower_z_mm, layer.z_mm];
+            let zone = crate::inspection::functional_zone_bounds(frame, physical);
+            match &zone {
+                Ok(Some(_)) => {
+                    for zone in &frame.solid_base_zones {
+                        if zone.physical_z_mm[0] <= physical[0] && physical[1] <= zone.physical_z_mm[1] {
+                            let purpose = match zone.kind {
+                                FunctionalBaseSolidZoneKind::Root => "Join backbone",
+                                FunctionalBaseSolidZoneKind::LowerLanding => "Lower landing",
+                                FunctionalBaseSolidZoneKind::UpperCover => "Upper cover",
+                            };
+                            ui.weak(format!("Active protected Base · {purpose} · full face U · inward depth {:.3}…{:.3} mm", zone.inward_depth_mm[0], zone.inward_depth_mm[1]));
+                        }
+                    }
                 }
-                FunctionalLayerScope::Crossing => {
-                    ui.label("This layer crosses the active patch boundary; no complete functional interval is available to inspect");
-                    return;
-                }
-                FunctionalLayerScope::Active => {}
+                Ok(None) => { ui.weak("No active captured solid zone · Inherited Base shows all Base command centerlines"); }
+                Err(error) => { ui.colored_label(ui.visuals().warn_fg_color, error); }
             }
-            let Some((index, domain)) = review.bundle.plan.material_domains.iter().enumerate().find(|(_, domain)| {
-                domain.reference.role == MaterialConstructionRole::FunctionalRegion
-                    && domain.physical_z_mm[0] <= layer.lower_z_mm && layer.z_mm <= domain.physical_z_mm[1]
-            }) else { ui.label("No complete functional region domain for this active physical layer"); return; };
-            ui.label(format!("Realized {} phase · world Z {:.3}…{:.3} mm", if domain.physical_z_mm[0] >= frame.key_middle_z_mm[0] && domain.physical_z_mm[1] <= frame.key_middle_z_mm[1] { "middle-head" } else { "end-collar" }, domain.physical_z_mm[0], domain.physical_z_mm[1]));
-            if ui.button("Show realized join").clicked() {
-                let result = scene.summary.bounds_mm.ok_or_else(|| "No source display origin".to_owned()).and_then(|bounds| {
-                    let origin = DVec3::from_array(bounds.min) * 0.5 + DVec3::from_array(bounds.max) * 0.5;
-                    let base = review.bundle.plan.material_domains.iter().find(|base| {
-                        base.reference.role == MaterialConstructionRole::FunctionalBase
-                            && base.reference.construction_index == domain.reference.construction_index
-                            && base.physical_z_mm == domain.physical_z_mm
-                    }).ok_or_else(|| "No matching realized base owner for this join".to_owned())?;
-                    crate::inspection::Area::functional_join(domain, base, frame.stock_bounds_mm, origin).map(Arc::new)
-                });
-                match result {
-                    Ok(area) => {
-                        self.viewport.focus_area(&scene, area.target, &[frame.occurrence_id]);
-                        self.interfaces.selected = Some(Selection {
-                            review: Arc::downgrade(review), scene: Arc::downgrade(&scene), layer: layer_index,
-                            kind: Kind::Functional(index), occurrence: frame.occurrence_id, area,
+            ui.horizontal_wrapped(|ui| {
+                for (scope, label) in [
+                    (FunctionalArea::Region, "Show Region"),
+                    (FunctionalArea::ProtectedBase, "Show Protected Base"),
+                    (FunctionalArea::InheritedBase, "Show Inherited Base"),
+                ] {
+                    if ui.button(label).on_hover_text(scope.label()).clicked() {
+                        let result = scene.summary.bounds_mm.ok_or_else(|| "No source display origin".to_owned()).and_then(|bounds| {
+                            let origin = DVec3::from_array(bounds.min) * 0.5 + DVec3::from_array(bounds.max) * 0.5;
+                            crate::inspection::Area::functional_commands(&layer.paths, physical, frame, scope, origin).map(Arc::new)
                         });
-                        self.interfaces.problem = None;
-                    }
-                    Err(error) => {
-                        self.viewport.cancel_area();
-                        self.interfaces.selected = None;
-                        self.interfaces.problem = Some(error);
+                        match result {
+                            Ok(area) => {
+                                self.viewport.focus_area(&scene, area.target, &[frame.occurrence_id]);
+                                self.interfaces.selected = Some(Selection {
+                                    review: Arc::downgrade(review), scene: Arc::downgrade(&scene), layer: layer_index,
+                                    kind: Kind::FunctionalCommands(scope), occurrence: frame.occurrence_id, area,
+                                });
+                                self.interfaces.problem = None;
+                                ui.ctx().request_repaint();
+                            }
+                            Err(error) => {
+                                self.viewport.cancel_area();
+                                self.interfaces.selected = None;
+                                self.interfaces.problem = Some(error);
+                            }
+                        }
                     }
                 }
-            }
+            });
+            ui.weak("Display-only actual XYZ6 command centerlines · no extrusion or material-boundary representation · no strength claim. Clipped endpoints are display cuts; inherited Base includes walls and skins.");
+            ui.scope(|ui| {
+                match functional_layer_scope(frame.region_z_mm, physical) {
+                    FunctionalLayerScope::Inactive => {
+                        ui.label("Inactive layer · outside the selected patch height; base material only, no functional join");
+                        return;
+                    }
+                    FunctionalLayerScope::Crossing => {
+                        ui.label("This layer crosses the active patch boundary; no complete functional interval is available to inspect");
+                        return;
+                    }
+                    FunctionalLayerScope::Active => {}
+                }
+                let Some((index, domain)) = review.bundle.plan.material_domains.iter().enumerate().find(|(_, domain)| {
+                    domain.reference.role == MaterialConstructionRole::FunctionalRegion
+                        && domain.physical_z_mm[0] <= layer.lower_z_mm && layer.z_mm <= domain.physical_z_mm[1]
+                }) else { ui.label("No complete functional region domain for this active physical layer"); return; };
+                ui.label(format!("Realized {} phase · world Z {:.3}…{:.3} mm", if domain.physical_z_mm[0] >= frame.key_middle_z_mm[0] && domain.physical_z_mm[1] <= frame.key_middle_z_mm[1] { "middle-head" } else { "end-collar" }, domain.physical_z_mm[0], domain.physical_z_mm[1]));
+                if ui.button("Show realized join").clicked() {
+                    let result = scene.summary.bounds_mm.ok_or_else(|| "No source display origin".to_owned()).and_then(|bounds| {
+                        let origin = DVec3::from_array(bounds.min) * 0.5 + DVec3::from_array(bounds.max) * 0.5;
+                        let base = review.bundle.plan.material_domains.iter().find(|base| {
+                            base.reference.role == MaterialConstructionRole::FunctionalBase
+                                && base.reference.construction_index == domain.reference.construction_index
+                                && base.physical_z_mm == domain.physical_z_mm
+                        }).ok_or_else(|| "No matching realized base owner for this join".to_owned())?;
+                        crate::inspection::Area::functional_join(domain, base, frame.stock_bounds_mm, origin).map(Arc::new)
+                    });
+                    match result {
+                        Ok(area) => {
+                            self.viewport.focus_area(&scene, area.target, &[frame.occurrence_id]);
+                            self.interfaces.selected = Some(Selection {
+                                review: Arc::downgrade(review), scene: Arc::downgrade(&scene), layer: layer_index,
+                                kind: Kind::Functional(index), occurrence: frame.occurrence_id, area,
+                            });
+                            self.interfaces.problem = None;
+                        }
+                        Err(error) => {
+                            self.viewport.cancel_area();
+                            self.interfaces.selected = None;
+                            self.interfaces.problem = Some(error);
+                        }
+                    }
+                }
+            });
             if let Some(selected) = self.interfaces.selected.as_ref().filter(|selected| {
-                selected.matches(&scene, review) && selected.layer == layer_index && selected.kind == Kind::Functional(index)
+                selected.matches(&scene, review) && selected.layer == layer_index && selected.kind.is_functional()
             }) {
-                ui.weak("Shared interface outline; exterior edges excluded. Not deposited bead surfaces.");
+                ui.weak(match selected.kind {
+                    Kind::FunctionalCommands(scope) => scope.label(),
+                    _ => "Shared interface outline; exterior edges excluded. Not deposited bead surfaces.",
+                });
                 let mut clear = false;
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Focus join").clicked() { self.viewport.focus_area(&scene, selected.area.target, &[selected.occurrence]); }
-                    if ui.button("Reveal join").clicked() { self.viewport.reveal_area(&scene, selected.area.target, &[selected.occurrence]); }
-                    clear = ui.button("Clear join highlight").clicked();
+                    if ui.button("Focus").clicked() { self.viewport.focus_area(&scene, selected.area.target, &[selected.occurrence]); }
+                    if ui.button("Reveal").clicked() { self.viewport.reveal_area(&scene, selected.area.target, &[selected.occurrence]); }
+                    clear = ui.button("Clear highlight").clicked();
                 });
                 if clear {
                     self.viewport.close_reveal(ui.input(|input| input.time), ui.style().animation_time > 0.0);

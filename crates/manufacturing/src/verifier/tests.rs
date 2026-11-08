@@ -2299,6 +2299,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
         layer.region_coverage.sparse_interior_area_mm2 = 16.0;
         layer.region_coverage.intentional_void_area_mm2 = 12.8;
         layer.region_coverage.process_regions = vec![ProcessRegionCoverage {
+            functional_solid_zone: None,
             material_domain: None,
             area_mm2: 16.0,
             fraction: 0.2,
@@ -2350,6 +2351,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
         operation_id: ProcessOperationId::new(1).unwrap(),
     };
     let region = ProcessRegionCoverage {
+        functional_solid_zone: None,
         material_domain: None,
         area_mm2: 4.0,
         fraction: 0.2,
@@ -2642,6 +2644,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
     ]);
     fine.region_coverage.process_regions = [0.2, 0.4]
         .map(|fraction| ProcessRegionCoverage {
+            functional_solid_zone: None,
             material_domain: None,
             area_mm2: 4.0,
             fraction,
@@ -2713,6 +2716,7 @@ fn affected_fine_regional_rows_require_actual_support_or_genuine_bounded_bridge(
     following.region_coverage.sparse_interior_area_mm2 = 16.0;
     following.region_coverage.intentional_void_area_mm2 = 12.8;
     following.region_coverage.process_regions = vec![ProcessRegionCoverage {
+        functional_solid_zone: None,
         material_domain: None,
         area_mm2: 16.0,
         fraction: 0.2,
@@ -2786,6 +2790,7 @@ fn minimum_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     plan.layers.truncate(1);
     let layer = &mut plan.layers[0];
     let region = ProcessRegionCoverage {
+        functional_solid_zone: None,
         material_domain: None,
         area_mm2: 15.98,
         fraction: 1.0,
@@ -3137,6 +3142,7 @@ fn mixed_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     layer.region_coverage.bottom_skin_area_mm2 = 1.2;
     layer.region_coverage.solid_interior_area_mm2 = 0.8;
     layer.region_coverage.process_regions = vec![ProcessRegionCoverage {
+        functional_solid_zone: None,
         material_domain: None,
         area_mm2: 0.8,
         fraction: 1.0,

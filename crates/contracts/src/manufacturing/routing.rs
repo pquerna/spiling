@@ -1023,6 +1023,7 @@ mod uniform_family_tests {
             material_id: job.tools[1 - base].material.id.clone(),
             base_material_id: job.tools[base].material.id.clone(),
             minimum_pure_depth_mm: 2.0,
+            minimum_solid_base_root_depth_mm: 0.8,
             join: PlanarTKeyJoin {
                 reach_into_region_mm: 2.0,
                 reach_into_base_mm: 3.0,

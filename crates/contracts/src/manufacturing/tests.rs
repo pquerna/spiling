@@ -24,6 +24,7 @@ fn functional_job() -> FixedDualJob {
         material_id: job.tools[1].material.id.clone(),
         base_material_id: job.tools[0].material.id.clone(),
         minimum_pure_depth_mm: 2.0,
+        minimum_solid_base_root_depth_mm: 0.8,
         face_patch: None,
         join: PlanarTKeyJoin {
             reach_into_region_mm: 2.0,
@@ -44,6 +45,7 @@ fn functional_plan(job: &FixedDualJob) -> NormalizedPrintPlan {
     let c = job.functional_construction.as_ref().unwrap();
     let mut plan = plan();
     plan.functional_material_frame = Some(FunctionalMaterialFrame {
+        solid_base_zones: vec![],
         stock_bounds_mm: AabbMm::new([0.0, 0.0, 0.0], [20.0, 20.0, 20.0]).unwrap(),
         occurrence_id: c.occurrence_id,
         definition_id: c.definition_id.clone(),
@@ -103,15 +105,217 @@ fn functional_plan(job: &FixedDualJob) -> NormalizedPrintPlan {
 }
 
 #[test]
+fn functional_root_depth_and_solid_zones_are_required_bounded_and_source_scoped() {
+    use prost::Message;
+    let job = functional_job();
+    let construction = job.functional_construction.as_ref().unwrap();
+    let mut encoded = serde_json::to_value(construction).unwrap();
+    encoded
+        .as_object_mut()
+        .unwrap()
+        .remove("minimum_solid_base_root_depth_mm");
+    assert!(serde_json::from_value::<FunctionalMaterialConstruction>(encoded).is_err());
+    let mut frame = functional_plan(&job).functional_material_frame.unwrap();
+    frame.validate(construction, &job).unwrap();
+    let mut encoded = serde_json::to_value(&frame).unwrap();
+    encoded.as_object_mut().unwrap().remove("solid_base_zones");
+    assert!(serde_json::from_value::<FunctionalMaterialFrame>(encoded).is_err());
+    frame.solid_base_zones = vec![
+        FunctionalBaseSolidZone {
+            kind: FunctionalBaseSolidZoneKind::LowerLanding,
+            inward_depth_mm: [0.0, 8.0],
+            physical_z_mm: [0.0, 1.0],
+        },
+        FunctionalBaseSolidZone {
+            kind: FunctionalBaseSolidZoneKind::Root,
+            inward_depth_mm: [7.0, 7.8],
+            physical_z_mm: [1.0, 19.0],
+        },
+        FunctionalBaseSolidZone {
+            kind: FunctionalBaseSolidZoneKind::UpperCover,
+            inward_depth_mm: [0.0, 8.0],
+            physical_z_mm: [19.0, 20.0],
+        },
+    ];
+    frame.validate(construction, &job).unwrap();
+    let wire = crate::rpc::FunctionalMaterialFrame::try_from(frame.clone()).unwrap();
+    let decoded =
+        crate::rpc::FunctionalMaterialFrame::decode(wire.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(FunctionalMaterialFrame::try_from(decoded).unwrap(), frame);
+    for change in 0..13 {
+        let mut bad = frame.clone();
+        match change {
+            0 => bad.solid_base_zones[1].inward_depth_mm[0] = -1.0,
+            1 => bad.solid_base_zones[1].inward_depth_mm = [8.0, 7.0],
+            2 => bad.solid_base_zones[1].inward_depth_mm = [7.0, 7.0],
+            3 => bad.solid_base_zones[1].inward_depth_mm[1] = f64::NAN,
+            4 => bad.solid_base_zones[1].inward_depth_mm[1] = 21.0,
+            5 => bad.solid_base_zones[1].physical_z_mm[0] = -1.0,
+            6 => bad.solid_base_zones[1].physical_z_mm[1] = 21.0,
+            7 => bad.solid_base_zones[1].physical_z_mm = [19.0, 1.0],
+            8 => bad.solid_base_zones[1].physical_z_mm[1] = f64::INFINITY,
+            9 => bad.solid_base_zones[1].kind = FunctionalBaseSolidZoneKind::LowerLanding,
+            10 => bad.solid_base_zones[1].physical_z_mm[0] = 0.5,
+            11 => bad.solid_base_zones[1].physical_z_mm = [1.0, 1.0],
+            _ => bad.solid_base_zones.push(bad.solid_base_zones[0].clone()),
+        }
+        assert!(bad.validate_values().is_err(), "zone change {change}");
+        assert!(crate::rpc::FunctionalMaterialFrame::try_from(bad).is_err());
+    }
+    for change in 0..9 {
+        let mut bad = wire.clone();
+        match change {
+            0 => bad.solid_base_zones[1].kind = 0,
+            1 => bad.solid_base_zones[1].kind = i32::MAX,
+            2 => bad.solid_base_zones[1].inward_depth_mm.clear(),
+            3 => bad.solid_base_zones[1].physical_z_mm.push(20.0),
+            4 => bad.solid_base_zones[1].physical_z_mm[0] = f64::NEG_INFINITY,
+            5 => bad.solid_base_zones[1].inward_depth_mm[1] = 21.0,
+            6 => bad.solid_base_zones[1].kind = bad.solid_base_zones[0].kind,
+            7 => bad.solid_base_zones[1].physical_z_mm[0] = 0.5,
+            _ => bad.solid_base_zones.push(bad.solid_base_zones[0].clone()),
+        }
+        assert!(
+            FunctionalMaterialFrame::try_from(bad).is_err(),
+            "wire zone change {change}"
+        );
+    }
+    for zones in [
+        serde_json::Value::Null,
+        serde_json::json!(vec![&frame.solid_base_zones[0]; 4]),
+        serde_json::json!([{"kind": "unknown", "inward_depth_mm": [1.0, 2.0], "physical_z_mm": [0.0, 1.0]}]),
+        serde_json::json!([{"kind": "root", "physical_z_mm": [0.0, 1.0]}]),
+    ] {
+        let mut bad = serde_json::to_value(&frame).unwrap();
+        bad["solid_base_zones"] = zones;
+        assert!(serde_json::from_value::<FunctionalMaterialFrame>(bad).is_err());
+    }
+}
+
+#[test]
+fn functional_sparse_base_coverage_requires_complete_solid_zone_references() {
+    let job = functional_job();
+    let construction = job.functional_construction.as_ref().unwrap();
+    let mut plan = functional_plan(&job);
+    let base = plan.material_domains[1].reference;
+    let region = plan.material_domains[0].reference;
+    plan.layers[0].region_coverage.process_regions = vec![ProcessRegionCoverage {
+        material_domain: Some(base),
+        functional_solid_zone: None,
+        area_mm2: 1.0,
+        fraction: 0.2,
+        contributions: vec![ProcessRegionContribution {
+            occurrence_id: construction.occurrence_id,
+            definition_id: construction.definition_id.clone(),
+            provenance: None,
+        }],
+    }];
+    functional::validate_material_domains(&plan, construction, &job, 0.2).unwrap();
+    let mut bad = plan.clone();
+    bad.layers[0].region_coverage.process_regions[0].fraction = 1.0;
+    assert!(functional::validate_material_domains(&bad, construction, &job, 0.2).is_err());
+    plan.functional_material_frame
+        .as_mut()
+        .unwrap()
+        .solid_base_zones = vec![FunctionalBaseSolidZone {
+        kind: FunctionalBaseSolidZoneKind::Root,
+        inward_depth_mm: [7.0, 7.8],
+        physical_z_mm: [0.0, 20.0],
+    }];
+    let coverage = &mut plan.layers[0].region_coverage.process_regions[0];
+    coverage.fraction = 1.0;
+    coverage.functional_solid_zone = Some(0);
+    functional::validate_material_domains(&plan, construction, &job, 0.2).unwrap();
+    for change in 0..6 {
+        let mut bad = plan.clone();
+        match change {
+            0 => bad.layers[0].region_coverage.process_regions[0].fraction = 0.2,
+            1 => bad.layers[0].region_coverage.process_regions[0].functional_solid_zone = Some(1),
+            2 => {
+                bad.layers[0].region_coverage.process_regions[0].functional_solid_zone =
+                    Some(u8::MAX)
+            }
+            3 => bad.layers[0].region_coverage.process_regions[0].material_domain = Some(region),
+            4 => {
+                bad.functional_material_frame
+                    .as_mut()
+                    .unwrap()
+                    .solid_base_zones[0]
+                    .physical_z_mm[0] = 0.1
+            }
+            _ => {
+                bad.functional_material_frame
+                    .as_mut()
+                    .unwrap()
+                    .solid_base_zones[0]
+                    .physical_z_mm[1] = 0.1
+            }
+        }
+        assert!(
+            functional::validate_material_domains(&bad, construction, &job, 0.2).is_err(),
+            "coverage change {change}"
+        );
+    }
+    let coverage = &mut plan.layers[0].region_coverage.process_regions[0];
+    coverage.material_domain = Some(region);
+    coverage.functional_solid_zone = None;
+    functional::validate_material_domains(&plan, construction, &job, 0.2).unwrap();
+    plan.layers[0].region_coverage.process_regions[0].fraction = 0.2;
+    assert!(functional::validate_material_domains(&plan, construction, &job, 0.2).is_err());
+    let mut nonfunctional = self::plan();
+    nonfunctional.layers[0].region_coverage.process_regions = vec![ProcessRegionCoverage {
+        material_domain: None,
+        functional_solid_zone: Some(0),
+        area_mm2: 1.0,
+        fraction: 1.0,
+        contributions: vec![],
+    }];
+    assert!(construction::validate_material_domains(&nonfunctional, &intent()).is_err());
+}
+
+#[test]
+fn process_region_solid_zone_is_required_nullable_without_a_serde_default() {
+    let region = ProcessRegionCoverage {
+        material_domain: None,
+        functional_solid_zone: None,
+        area_mm2: 1.0,
+        fraction: 1.0,
+        contributions: vec![],
+    };
+    let encoded = serde_json::to_value(&region).unwrap();
+    assert_eq!(
+        serde_json::from_value::<ProcessRegionCoverage>(encoded.clone()).unwrap(),
+        region
+    );
+    let mut missing = encoded.clone();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("functional_solid_zone");
+    assert!(serde_json::from_value::<ProcessRegionCoverage>(missing).is_err());
+    for index in [
+        serde_json::json!(-1),
+        serde_json::json!(256),
+        serde_json::json!(0.5),
+        serde_json::json!("0"),
+    ] {
+        let mut bad = encoded.clone();
+        bad["functional_solid_zone"] = index;
+        assert!(serde_json::from_value::<ProcessRegionCoverage>(bad).is_err());
+    }
+}
+
+#[test]
 fn functional_dimensions_collars_and_common_polymer_remain_strict() {
     let job = functional_job();
     job.validate_declaration().unwrap();
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
-        for field in 0..10 {
+        for field in 0..11 {
             let mut bad = job.clone();
             let c = bad.functional_construction.as_mut().unwrap();
             let values = [
                 &mut c.minimum_pure_depth_mm,
+                &mut c.minimum_solid_base_root_depth_mm,
                 &mut c.join.reach_into_region_mm,
                 &mut c.join.reach_into_base_mm,
                 &mut c.join.pitch_mm,
@@ -606,7 +810,7 @@ fn functional_domains_bind_source_roles_and_complete_intervals() {
     let job = functional_job();
     let plan = functional_plan(&job);
     let c = job.functional_construction.as_ref().unwrap();
-    functional::validate_material_domains(&plan, c, &job).unwrap();
+    functional::validate_material_domains(&plan, c, &job, 1.0).unwrap();
     assert_eq!(job.tool_for_path(&plan.layers[0].paths[0]).unwrap(), 1);
     let mut base = plan.layers[0].paths[0].clone();
     base.material_domain = Some(plan.material_domains[1].reference);
@@ -619,7 +823,7 @@ fn functional_domains_bind_source_roles_and_complete_intervals() {
         let mut bad = plan.clone();
         bad.material_domains[0].reference.role = role;
         bad.layers[0].paths[0].material_domain = Some(bad.material_domains[0].reference);
-        assert!(functional::validate_material_domains(&bad, c, &job).is_err());
+        assert!(functional::validate_material_domains(&bad, c, &job, 1.0).is_err());
         assert!(job.tool_for_path(&bad.layers[0].paths[0]).is_err());
     }
     for change in 0..14 {
@@ -669,7 +873,7 @@ fn functional_domains_bind_source_roles_and_complete_intervals() {
             }
         }
         assert!(
-            functional::validate_material_domains(&bad, c, &job).is_err(),
+            functional::validate_material_domains(&bad, c, &job, 1.0).is_err(),
             "change {change}"
         );
     }
@@ -719,7 +923,7 @@ fn functional_partial_domains_require_base_everywhere_and_exact_active_pairs() {
             plan.material_domains.push(region);
         }
     }
-    functional::validate_material_domains(&plan, c, &job).unwrap();
+    functional::validate_material_domains(&plan, c, &job, 1.0).unwrap();
     for change in 0..15 {
         let mut bad = plan.clone();
         match change {
@@ -756,7 +960,7 @@ fn functional_partial_domains_require_base_everywhere_and_exact_active_pairs() {
             }
         }
         assert!(
-            functional::validate_material_domains(&bad, c, &job).is_err(),
+            functional::validate_material_domains(&bad, c, &job, 1.0).is_err(),
             "change {change}"
         );
     }
@@ -771,6 +975,7 @@ fn functional_regional_owners_and_existing_domain_budget_are_enforced() {
         .region_coverage
         .process_regions
         .push(ProcessRegionCoverage {
+            functional_solid_zone: None,
             material_domain: Some(plan.material_domains[0].reference),
             area_mm2: 1.0,
             fraction: 1.0,
@@ -781,7 +986,7 @@ fn functional_regional_owners_and_existing_domain_budget_are_enforced() {
             }],
         });
     plan.layers[0].paths[0].owner = Some(DepositionOwner::Regional { region_index: 0 });
-    functional::validate_material_domains(&plan, c, &job).unwrap();
+    functional::validate_material_domains(&plan, c, &job, 1.0).unwrap();
     for change in 0..4 {
         let mut bad = plan.clone();
         let region = &mut bad.layers[0].region_coverage.process_regions[0];
@@ -791,7 +996,7 @@ fn functional_regional_owners_and_existing_domain_budget_are_enforced() {
             2 => region.contributions[0].occurrence_id = OccurrenceId::new(2).unwrap(),
             _ => region.fraction = 0.5,
         }
-        assert!(functional::validate_material_domains(&bad, c, &job).is_err());
+        assert!(functional::validate_material_domains(&bad, c, &job, 1.0).is_err());
     }
     let template = functional_plan(&job);
     let cuts = [
@@ -824,10 +1029,10 @@ fn functional_regional_owners_and_existing_domain_budget_are_enforced() {
         }
     }
     assert_eq!(plan.material_domains.len(), MAX_MATERIAL_DOMAINS);
-    functional::validate_material_domains(&plan, c, &job).unwrap();
+    functional::validate_material_domains(&plan, c, &job, 1.0).unwrap();
     plan.material_domains.push(plan.material_domains[0].clone());
     assert_eq!(
-        functional::validate_material_domains(&plan, c, &job)
+        functional::validate_material_domains(&plan, c, &job, 1.0)
             .unwrap_err()
             .code,
         ManufacturingErrorCode::ResourceLimit
@@ -1058,6 +1263,7 @@ fn regional_bundle() -> ManufacturingBundle {
                 captured.provenance.intent.recipe.infill_fraction,
             );
             ProcessRegionCoverage {
+                functional_solid_zone: None,
                 material_domain: None,
                 area_mm2,
                 fraction: resolved.fraction,
@@ -1228,6 +1434,7 @@ fn regional_bundle_accepts_compatible_contributors_and_global_no_override_record
     coverage.wall_area_mm2 = 0.0;
     coverage.solid_interior_area_mm2 = 50.0;
     coverage.process_regions = vec![ProcessRegionCoverage {
+        functional_solid_zone: None,
         material_domain: None,
         area_mm2: 50.0,
         fraction: 1.0,
@@ -1251,6 +1458,7 @@ fn regional_admission_caps_regions_and_cumulative_contributions() {
     coverage.solid_interior_area_mm2 = 50.0;
     coverage.process_regions = vec![
         ProcessRegionCoverage {
+            functional_solid_zone: None,
             material_domain: None,
             area_mm2: 50.0 / MAX_PROCESS_REGIONS as f64,
             fraction: 1.0,
@@ -1283,6 +1491,7 @@ fn regional_admission_caps_regions_and_cumulative_contributions() {
         ManufacturingErrorCode::ResourceLimit
     );
     let oversized = ProcessRegionCoverage {
+        functional_solid_zone: None,
         material_domain: None,
         area_mm2: 1.0,
         fraction: 1.0,
@@ -1298,7 +1507,13 @@ fn regional_admission_caps_regions_and_cumulative_contributions() {
 fn regional_admission_requires_strict_region_and_contribution_shapes() {
     let captured = regional_bundle();
     let value = serde_json::to_value(&captured).unwrap();
-    for field in ["area_mm2", "fraction", "contributions", "material_domain"] {
+    for field in [
+        "area_mm2",
+        "fraction",
+        "contributions",
+        "material_domain",
+        "functional_solid_zone",
+    ] {
         let mut missing = value.clone();
         missing["plan"]["layers"][0]["region_coverage"]["process_regions"][0]
             .as_object_mut()
@@ -1997,6 +2212,7 @@ fn ordinary_deposition_rejects_orthogonal_and_diagonal_segments_for_each_axis_po
                 }
                 if matches!(kind, DepositionKind::SolidFill | DepositionKind::SparseFill) {
                     coverage.process_regions = vec![ProcessRegionCoverage {
+                        functional_solid_zone: None,
                         material_domain: None,
                         area_mm2: 50.0,
                         fraction: data.recipe.infill_fraction,
@@ -3522,6 +3738,7 @@ fn separator_accounting_is_distinct_and_actual_centerlines_are_bijective() {
     ]
     .into_iter()
     .map(|(fraction, provenance)| ProcessRegionCoverage {
+        functional_solid_zone: None,
         material_domain: None,
         area_mm2: 1.0,
         fraction,
@@ -3660,6 +3877,7 @@ fn separator_bundle_requires_explicit_permission_and_consistent_source_binding()
     ]
     .into_iter()
     .map(|(fraction, provenance)| ProcessRegionCoverage {
+        functional_solid_zone: None,
         material_domain: None,
         area_mm2: 1.0,
         fraction,
@@ -4200,6 +4418,7 @@ fn skin_witness_deserialization_shares_remaining_allowance_across_domains() {
     let domain = SkinCommandFitDomain {
         region_index: 0,
         region: ProcessRegionCoverage {
+            functional_solid_zone: None,
             material_domain: None,
             area_mm2: 0.99,
             fraction: 1.0,
@@ -4253,6 +4472,7 @@ fn global_zero_infill_retains_the_whole_interior_as_intentional_void() {
     coverage.sparse_interior_area_mm2 = 40.0;
     coverage.intentional_void_area_mm2 = 40.0;
     coverage.process_regions.push(ProcessRegionCoverage {
+        functional_solid_zone: None,
         material_domain: None,
         area_mm2: 40.0,
         fraction: 0.0,

@@ -157,6 +157,46 @@ pub(super) fn budget_accumulated(
     polygon_budget(a.0.iter().chain(other.iter()), work, 256, cancel)
 }
 
+pub(crate) fn budget_limited(
+    left: &MultiPolygon<f64>,
+    right: &MultiPolygon<f64>,
+    work: &mut usize,
+    limit: usize,
+    available_bytes: usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    check_cancel(cancel)?;
+    let offset = MAX_BOOLEAN_PAIRS
+        .checked_sub(limit)
+        .ok_or_else(|| resource("Boolean caller ceiling exceeds the shared maximum"))?;
+    let mut bounded = offset
+        .checked_add(*work)
+        .filter(|total| *total <= MAX_BOOLEAN_PAIRS)
+        .ok_or_else(|| resource("Boolean caller work limit exceeded"))?;
+    let other = if std::ptr::eq(left, right) {
+        &right.0[..0]
+    } else {
+        &right.0[..]
+    };
+    let polygons = left.0.iter().chain(other.iter());
+    let mut count = 0usize;
+    for polygon in polygons.clone() {
+        for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+            charge(&mut bounded, 1)?;
+            count = count
+                .checked_add(ring.0.len().saturating_sub(1))
+                .ok_or_else(|| resource("Boolean caller edge count overflow"))?;
+        }
+    }
+    count
+        .checked_mul(std::mem::size_of::<EdgeBounds>() + std::mem::size_of::<usize>())
+        .filter(|bytes| *bytes <= available_bytes)
+        .ok_or_else(|| resource("Boolean caller scratch byte limit exceeded"))?;
+    let result = polygon_budget(polygons, &mut bounded, 256, cancel);
+    *work = bounded - offset;
+    result
+}
+
 pub(super) fn budget_polygon_accumulated(
     polygon: &Polygon<f64>,
     work: &mut usize,

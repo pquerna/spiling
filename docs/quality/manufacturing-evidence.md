@@ -88,7 +88,7 @@ separate from the native verifier and physical qualification.
 ## Functional region and join inspection
 
 The [functional construction contract](../protocol/manufacturing.md#functional-material-region-and-captive-keys)
-owns the bounded one-part, one-face, solid rectangular-stock lane, including
+owns the bounded one-part, one-face rectangular-stock lane, including
 localized source-U/Z pads, height bands and partial-width full-height strips. It retains
 pure-material depth separately from either transition reach and uses wider
 middle heads with narrower end collars. Explicit `mechanical_capture` permits
@@ -107,7 +107,7 @@ Focused checks are `cargo test -p spiling-manufacturing --lib functional_`,
 `cargo test -p spiling-manufacturing --lib mechanical_capture_` and
 `cargo test -p spiling-contracts functional_`. Use
 `cargo test -p spiling-manufacturing --lib uniform_mixed_material` for separated
-parts and waste-only unused tools. They cover the one-perimeter solid
+parts and waste-only unused tools. They cover the one-perimeter solid/sparse
 reference, fresh actual-byte verification, strict source/material/role/frame
 binding, pure-depth conditioning, active/inactive ownership and native hole/depth
 refusals. Localized coverage exercises all four Cartesian face directions. They do not
@@ -123,9 +123,25 @@ sequentially under the external resource limits in
 [development](development.md). Shared-bed/cooling suitability, flexible-material
 extraction and physical printing remain unqualified.
 
-Sparse functional parents remain refused: enabling them requires a protected
-solid root/retainer process domain and independent actual attachment, not merely
-removing the solid-recipe check. Nonrectangular stock needs a native boundary-aware
+Sparse functional parents retain a solid Region and independently requested solid
+Base root/backbone, with inherited recipe density elsewhere. Localized scopes
+derive full-U landings and covers; these remain process regions within Base, not
+new material owners or walls. `planner/joins.rs` resolves scopes;
+`planner/color.rs` consumes them in initial and recovery classification.
+`verifier/joins/{walls,inventory,rows}.rs` independently qualifies walls and complete
+original row inventories; matched plan/program row deletion must refuse.
+`verifier/joins/parents.rs` checks finite same-material root connectivity, including
+contiguous adjacent-layer finished bonds. Those bonds do not replace earlier
+actual printing support. Resource limits apply to retained plan plus reconstruction
+scratch, and exact wall reuse cannot ignore a changed closing edge.
+
+The CLI smoke includes a full-height 20% versus solid Base comparison, separating
+model deposition from repeated waste, fresh replay and source-independent export.
+It also exercises a non-grid localized sparse pad and its landing/cover scopes.
+Sparse wall replay can refuse shallow multi-key layouts whose fitted strip
+overlaps lack independent source-local turn allowances, even when the ordinary
+solid wall planner admits them.
+Nonrectangular stock needs a native boundary-aware
 filled corridor proof and conservative stock partition/replay; matching bounds,
 face metadata or sampled sections cannot supply that authority.
 

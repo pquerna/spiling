@@ -7,6 +7,12 @@ use geo::{Contains, Coord, Intersects, Line, LineString, MultiPolygon, Point, Po
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
+mod demand;
+mod inventory;
+mod parents;
+mod rows;
+mod walls;
+
 fn charge(work: &mut usize, count: usize) -> Result<(), ManufacturingError> {
     *work = work
         .checked_add(count)
@@ -111,38 +117,6 @@ fn core_radius(edge: &DepositionEdge<'_>, height: f64) -> Result<f64, Manufactur
     Ok(radius)
 }
 
-fn connected(
-    left: &DepositionPath,
-    right: &DepositionPath,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<bool, ManufacturingError> {
-    let height = left.physical_z_mm[1] - left.physical_z_mm[0];
-    for a in left.checked_edges()? {
-        for b in right.checked_edges()? {
-            cancelled(cancel)?;
-            charge(work, 1)?;
-            let a_points = [
-                project_xyz6_point_mm(a.points_mm[0])?,
-                project_xyz6_point_mm(a.points_mm[1])?,
-            ];
-            let b_points = [
-                project_xyz6_point_mm(b.points_mm[0])?,
-                project_xyz6_point_mm(b.points_mm[1])?,
-            ];
-            let radius = (core_radius(&a, height)? + core_radius(&b, height)?).next_down();
-            if strict_capsule_point(a_points[0], b_points, radius)?
-                || strict_capsule_point(a_points[1], b_points, radius)?
-                || strict_capsule_point(b_points[0], a_points, radius)?
-                || strict_capsule_point(b_points[1], a_points, radius)?
-            {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
 pub(super) fn verify(
     plan: &NormalizedPrintPlan,
     intent: &ManufacturingIntent,
@@ -159,6 +133,7 @@ pub(super) fn verify(
         .functional_material_frame
         .as_ref()
         .ok_or_else(|| failed("functional replay has no captured frame"))?;
+    demand::verify(frame, request, &intent.recipe, cancel)?;
     let join = &request.join;
     let total_depth =
         request.minimum_pure_depth_mm + join.reach_into_region_mm + join.reach_into_base_mm;
@@ -234,92 +209,23 @@ pub(super) fn verify(
             cancel,
         )?;
     }
-    let roles = [
-        MaterialConstructionRole::FunctionalRegion,
-        MaterialConstructionRole::FunctionalBase,
-    ];
-    let mut rooted = Vec::new();
+    inventory::verify(plan, intent, frame, request, work, cancel)?;
     for (layer_index, layer) in plan.layers.iter().enumerate() {
         cancelled(cancel)?;
-        charge(work, layer.paths.len())?;
-        rooted.clear();
-        rooted.try_reserve_exact(layer.paths.len()).map_err(|_| {
-            ManufacturingError::new(
-                ManufacturingErrorCode::ResourceLimit,
-                "functional attachment workspace allocation refused",
-            )
-        })?;
-        rooted.resize(layer.paths.len(), false);
-        for role in roles {
-            let owns = |path: &DepositionPath| {
-                path.material_domain
-                    .is_some_and(|reference| reference.role == role)
-            };
-            let mut remaining = layer.paths.iter().filter(|path| owns(path)).count();
-            for (index, path) in layer
-                .paths
-                .iter()
-                .enumerate()
-                .filter(|(_, path)| owns(path))
-            {
-                for edge in path.checked_edges()? {
-                    charge(work, 1)?;
-                    core_radius(&edge, path.physical_z_mm[1] - path.physical_z_mm[0])?;
-                    for point in edge.points_mm {
-                        let point = project_xyz6_point_mm(*point)?;
-                        let depth = -(point[0] - frame.world_origin_mm[0])
-                            * frame.outward_normal[0]
-                            - (point[1] - frame.world_origin_mm[1]) * frame.outward_normal[1];
-                        if (role == MaterialConstructionRole::FunctionalRegion
-                            && depth < request.minimum_pure_depth_mm - intent.recipe.bead_width_mm)
-                            || (role == MaterialConstructionRole::FunctionalBase
-                                && depth > total_depth + intent.recipe.bead_width_mm * 0.5)
-                        {
-                            rooted[index] = true;
-                        }
-                    }
-                }
-                if rooted[index] {
-                    remaining -= 1;
-                }
-            }
-            while remaining > 0 {
-                let before = remaining;
-                for (index, path) in layer
-                    .paths
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, path)| owns(path))
-                {
-                    cancelled(cancel)?;
-                    charge(work, layer.paths.len())?;
-                    if rooted[index] {
-                        continue;
-                    }
-                    for (other, witness) in layer.paths.iter().enumerate() {
-                        if other != index
-                            && rooted[other]
-                            && owns(witness)
-                            && connected(path, witness, work, cancel)?
-                        {
-                            rooted[index] = true;
-                            remaining -= 1;
-                            break;
-                        }
-                    }
-                }
-                if before == remaining {
-                    return Err(failed(
-                        "functional key or retainer has no positive same-material core path to its parent",
-                    ));
-                }
-            }
-        }
         let middle =
             layer.lower_z_mm >= frame.key_middle_z_mm[0] && layer.z_mm <= frame.key_middle_z_mm[1];
         if layer.z_mm <= frame.region_z_mm[0] || layer.lower_z_mm >= frame.region_z_mm[1] {
             continue;
         }
+        let parents = parents::verify(
+            plan,
+            layer_index,
+            frame,
+            request,
+            &intent.recipe,
+            work,
+            cancel,
+        )?;
         let role = if middle {
             MaterialConstructionRole::FunctionalRegion
         } else {
@@ -365,14 +271,14 @@ pub(super) fn verify(
                     path.material_domain
                         .is_some_and(|reference| reference.role == role)
                 }) {
-                    for edge in path.checked_edges()? {
+                    for (edge_index, edge) in path.checked_edges()?.enumerate() {
                         cancelled(cancel)?;
                         charge(work, 1)?;
                         let a = project_xyz6_point_mm(edge.points_mm[0])?;
                         let b = project_xyz6_point_mm(edge.points_mm[1])?;
                         let line =
                             Line::new(Coord { x: a[0], y: a[1] }, Coord { x: b[0], y: b[1] });
-                        present |= rooted[index]
+                        present |= parents.attached(index, edge_index)
                             && (bounds.intersects(&line)
                                 || bounds.contains(&Point::from(line.start)));
                     }

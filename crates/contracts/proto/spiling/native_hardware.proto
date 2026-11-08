@@ -319,6 +319,18 @@ message FunctionalMaterialConstruction {
     FunctionalFacePatch patch = 10;
     bool no_face_patch = 11;
   }
+  double minimum_solid_base_root_depth_mm = 12;
+}
+enum FunctionalBaseSolidZoneKind {
+  FUNCTIONAL_BASE_SOLID_ZONE_KIND_UNSPECIFIED = 0;
+  FUNCTIONAL_BASE_SOLID_ZONE_KIND_ROOT = 1;
+  FUNCTIONAL_BASE_SOLID_ZONE_KIND_LOWER_LANDING = 2;
+  FUNCTIONAL_BASE_SOLID_ZONE_KIND_UPPER_COVER = 3;
+}
+message FunctionalBaseSolidZone {
+  FunctionalBaseSolidZoneKind kind = 1;
+  repeated double inward_depth_mm = 2;
+  repeated double physical_z_mm = 3;
 }
 // Inspectable frame only; source/native/replay proof remains independent.
 message FunctionalMaterialFrame {
@@ -341,6 +353,7 @@ message FunctionalMaterialFrame {
   // Required pairs: selected U in the full native face and active world Z.
   repeated double selected_u_mm = 14;
   repeated double region_z_mm = 15;
+  repeated FunctionalBaseSolidZone solid_base_zones = 16;
 }
 message SurfaceColorFace {
   string face_id = 1;

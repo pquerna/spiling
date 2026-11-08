@@ -8,6 +8,34 @@ use spiling_contracts::{geometry::AabbMm, manufacturing::*};
 
 pub const MAX_INSPECTION_VERTICES: usize = 4096;
 pub const INSPECTION_RESERVE_BYTES: usize = MAX_INSPECTION_VERTICES * size_of::<Vertex>() * 4;
+const MAX_INSPECTION_WORK: usize = 262_144;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionalArea {
+    Region,
+    ProtectedBase,
+    InheritedBase,
+}
+impl FunctionalArea {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Region => "Region · actual region command centerlines",
+            Self::ProtectedBase => {
+                "Protected Base · base command centerlines inside the captured solid zone"
+            }
+            Self::InheritedBase => {
+                "Inherited Base · base command centerlines outside the captured solid zone"
+            }
+        }
+    }
+    fn color(self) -> [f32; 3] {
+        match self {
+            Self::Region => [0.9, 0.45, 1.0],
+            Self::ProtectedBase => [1.0, 0.7, 0.2],
+            Self::InheritedBase => [0.3, 0.9, 0.55],
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct Area {
@@ -15,6 +43,88 @@ pub struct Area {
     pub(crate) target: FocusTarget,
 }
 impl Area {
+    /// Display-only subsets of XYZ6 strokes bound by the caller to fresh actual
+    /// replay. Clipping does not construct material or a new machine command.
+    pub fn functional_commands(
+        paths: &[DepositionPath],
+        physical_z_mm: [f64; 2],
+        frame: &FunctionalMaterialFrame,
+        scope: FunctionalArea,
+        origin: DVec3,
+    ) -> Result<Self, String> {
+        let zone = functional_zone_bounds(frame, physical_z_mm)?;
+        if scope == FunctionalArea::ProtectedBase && zone.is_none() {
+            return Err("No captured solid base zone is active on this physical interval".into());
+        }
+        let role = if scope == FunctionalArea::Region {
+            MaterialConstructionRole::FunctionalRegion
+        } else {
+            MaterialConstructionRole::FunctionalBase
+        };
+        let reference = MaterialDomainRef {
+            construction_index: 0,
+            role,
+        };
+        let mut builder = Builder::new(origin, DVec3::from_array(frame.outward_normal));
+        let mut work = paths.len();
+        for path in paths {
+            work = work
+                .checked_add(path.points_mm.len())
+                .ok_or("Command inspection work overflow")?;
+            if work > MAX_INSPECTION_WORK {
+                return Err("Command centerlines exceed the bounded inspection work budget".into());
+            }
+            if path.material_domain != Some(reference) || path.physical_z_mm != physical_z_mm {
+                continue;
+            }
+            for edge in path.points_mm.windows(2) {
+                let start = DVec3::from_array(
+                    program_coordinates::project_xyz6_point_mm(edge[0])
+                        .map_err(|error| error.to_string())?,
+                );
+                let end = DVec3::from_array(
+                    program_coordinates::project_xyz6_point_mm(edge[1])
+                        .map_err(|error| error.to_string())?,
+                );
+                if start == end {
+                    continue;
+                }
+                let clipped = if scope == FunctionalArea::Region {
+                    None
+                } else {
+                    zone.map(|bounds| segment_aabb_interval(start, end, bounds))
+                        .transpose()?
+                        .flatten()
+                };
+                match (scope, clipped) {
+                    (FunctionalArea::ProtectedBase, Some([low, high])) => {
+                        builder.segment(start.lerp(end, low), start.lerp(end, high))?
+                    }
+                    (FunctionalArea::ProtectedBase, None) => {}
+                    (FunctionalArea::InheritedBase, Some([low, high])) => {
+                        if low > 0.0 {
+                            builder.segment(start, start.lerp(end, low))?;
+                        }
+                        if high < 1.0 {
+                            builder.segment(start.lerp(end, high), end)?;
+                        }
+                    }
+                    _ => builder.segment(start, end)?,
+                }
+            }
+        }
+        if builder.vertices.is_empty() {
+            return Err(
+                "No actual command centerlines match this material and physical interval scope"
+                    .into(),
+            );
+        }
+        let mut area = builder.finish()?;
+        for vertex in &mut area.vertices {
+            vertex.color = scope.color();
+        }
+        Ok(area)
+    }
     pub fn functional_join(
         value: &ResolvedMaterialDomain,
         base: &ResolvedMaterialDomain,
@@ -41,7 +151,7 @@ impl Area {
         };
         if rings(value)
             .checked_mul(rings(base))
-            .is_none_or(|work| work > 262_144)
+            .is_none_or(|work| work > MAX_INSPECTION_WORK)
         {
             return Err("Shared join outline exceeds the bounded inspection work budget".into());
         }
@@ -158,6 +268,80 @@ impl Area {
     }
 }
 
+/// The full face U extent is captured stock width, not the authored patch U.
+/// A crossing physical interval refuses rather than borrowing a nearby zone.
+pub fn functional_zone_bounds(
+    frame: &FunctionalMaterialFrame,
+    physical: [f64; 2],
+) -> Result<Option<AabbMm>, String> {
+    frame.validate_values().map_err(|error| error.to_string())?;
+    if !physical.iter().all(|height| height.is_finite())
+        || physical[0] >= physical[1]
+        || physical[0] < frame.stock_bounds_mm.min[2]
+        || physical[1] > frame.stock_bounds_mm.max[2]
+    {
+        return Err("Command inspection requires a complete current physical interval".into());
+    }
+    let Some(zone) = frame
+        .solid_base_zones
+        .iter()
+        .find(|zone| zone.physical_z_mm[0] < physical[1] && physical[0] < zone.physical_z_mm[1])
+    else {
+        return Ok(None);
+    };
+    if zone.physical_z_mm[0] > physical[0] || physical[1] > zone.physical_z_mm[1] {
+        return Err("Physical interval crosses a captured solid base zone boundary".into());
+    }
+    let axis = usize::from(frame.outward_normal[1] != 0.0);
+    let depth = zone
+        .inward_depth_mm
+        .map(|depth| frame.world_origin_mm[axis] - frame.outward_normal[axis] * depth);
+    let mut bounds = frame.stock_bounds_mm;
+    bounds.min[axis] = depth[0].min(depth[1]);
+    bounds.max[axis] = depth[0].max(depth[1]);
+    bounds.min[2] = program_coordinates::project_xyz6_coordinate_mm(physical[0])
+        .map_err(|error| error.to_string())?;
+    bounds.max[2] = program_coordinates::project_xyz6_coordinate_mm(physical[1])
+        .map_err(|error| error.to_string())?;
+    bounds.validate().map_err(|error| error.to_string())?;
+    Ok(Some(bounds))
+}
+
+/// Finite parametric segment/slab clipping for display only. Tangency has no
+/// positive-length protected subsegment; the complement retains that stroke.
+fn segment_aabb_interval(
+    start: DVec3,
+    end: DVec3,
+    bounds: AabbMm,
+) -> Result<Option<[f64; 2]>, String> {
+    bounds.validate().map_err(|error| error.to_string())?;
+    let direction = end - start;
+    if !start.is_finite() || !end.is_finite() || !direction.is_finite() {
+        return Err("Nonfinite command centerline cannot be clipped for display".into());
+    }
+    let mut low: f64 = 0.0;
+    let mut high: f64 = 1.0;
+    for axis in 0..3 {
+        if direction[axis] == 0.0 {
+            if start[axis] < bounds.min[axis] || start[axis] > bounds.max[axis] {
+                return Ok(None);
+            }
+            continue;
+        }
+        let lower_cut = (bounds.min[axis] - start[axis]) / direction[axis];
+        let upper_cut = (bounds.max[axis] - start[axis]) / direction[axis];
+        if !lower_cut.is_finite() || !upper_cut.is_finite() {
+            return Err("Command clipping exceeds finite display arithmetic".into());
+        }
+        low = low.max(lower_cut.min(upper_cut));
+        high = high.min(lower_cut.max(upper_cut));
+        if low >= high {
+            return Ok(None);
+        }
+    }
+    Ok(Some([low, high]))
+}
+
 struct Builder {
     origin: DVec3,
     min: DVec3,
@@ -217,6 +401,294 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn functional_frame() -> FunctionalMaterialFrame {
+        use spiling_contracts::geometry::*;
+        FunctionalMaterialFrame {
+            occurrence_id: OccurrenceId::new(1).unwrap(),
+            definition_id: DefinitionId::from_source_sha256(&[1; 32]),
+            source_hash: SourceHash::from_digest(&[1; 32]),
+            face_id: FaceId::from_step_entity(1).unwrap(),
+            origin_mm: [0.0; 3],
+            world_origin_mm: [0.0; 3],
+            stock_bounds_mm: AabbMm::new([0.0; 3], [20.0; 3]).unwrap(),
+            horizontal_direction: [1.0, 0.0, 0.0],
+            outward_normal: [0.0, -1.0, 0.0],
+            width_mm: 20.0,
+            source_z_mm: [0.0, 20.0],
+            selected_u_mm: [6.0, 14.0],
+            region_z_mm: [5.0, 15.0],
+            key_middle_z_mm: [6.0, 14.0],
+            key_centers_u_mm: vec![10.0],
+            solid_base_zones: vec![FunctionalBaseSolidZone {
+                kind: FunctionalBaseSolidZoneKind::Root,
+                inward_depth_mm: [3.0, 8.0],
+                physical_z_mm: [5.0, 15.0],
+            }],
+        }
+    }
+    fn command_path(role: MaterialConstructionRole, physical: [f64; 2]) -> DepositionPath {
+        DepositionPath {
+            material_domain: Some(MaterialDomainRef {
+                construction_index: 0,
+                role,
+            }),
+            kind: DepositionKind::SolidFill,
+            owner: None,
+            width: WidthProfile::Constant { width_mm: 0.45 },
+            physical_z_mm: physical,
+            points_mm: vec![
+                [2.0000004, 1.0, physical[1]],
+                [2.0000004, 11.0, physical[1]],
+            ],
+        }
+    }
+    #[test]
+    fn commands_clip_and_complement_the_same_full_u_zone_after_xyz6_projection() {
+        let frame = functional_frame();
+        let physical = [8.0, 8.2];
+        let path = command_path(MaterialConstructionRole::FunctionalBase, physical);
+        let protected = Area::functional_commands(
+            std::slice::from_ref(&path),
+            physical,
+            &frame,
+            FunctionalArea::ProtectedBase,
+            DVec3::ZERO,
+        )
+        .unwrap();
+        let inherited = Area::functional_commands(
+            std::slice::from_ref(&path),
+            physical,
+            &frame,
+            FunctionalArea::InheritedBase,
+            DVec3::ZERO,
+        )
+        .unwrap();
+        let positions = |area: &Area| {
+            area.vertices
+                .iter()
+                .map(|vertex| vertex.position)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(positions(&protected), [[2.0, 3.0, 8.2], [2.0, 8.0, 8.2]]);
+        assert_eq!(
+            positions(&inherited),
+            [
+                [2.0, 1.0, 8.2],
+                [2.0, 3.0, 8.2],
+                [2.0, 8.0, 8.2],
+                [2.0, 11.0, 8.2]
+            ]
+        );
+        assert_ne!(protected.vertices[0].color, inherited.vertices[0].color);
+        let bounds = functional_zone_bounds(&frame, physical).unwrap().unwrap();
+        let start = DVec3::new(2.0, 1.0, 8.2);
+        let end = DVec3::new(2.0, 11.0, 8.2);
+        assert_eq!(
+            segment_aabb_interval(start, end, bounds).unwrap(),
+            Some([0.2, 0.7])
+        );
+        assert_eq!(
+            segment_aabb_interval(end, start, bounds).unwrap(),
+            Some([0.3, 0.8])
+        );
+        assert_eq!(
+            segment_aabb_interval(
+                DVec3::new(1.0, 3.0, 8.2),
+                DVec3::new(19.0, 3.0, 8.2),
+                bounds
+            )
+            .unwrap(),
+            Some([0.0, 1.0])
+        );
+        assert_eq!(
+            segment_aabb_interval(
+                DVec3::new(1.0, 2.0, 8.2),
+                DVec3::new(19.0, 2.0, 8.2),
+                bounds
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            segment_aabb_interval(
+                DVec3::new(-1.0, 4.0, 8.2),
+                DVec3::new(1.0, 2.0, 8.2),
+                bounds
+            )
+            .unwrap(),
+            None
+        );
+    }
+    #[test]
+    fn command_selection_excludes_foreign_material_construction_and_physical_intervals() {
+        let frame = functional_frame();
+        let physical = [8.0, 8.2];
+        let region = command_path(MaterialConstructionRole::FunctionalRegion, physical);
+        let mut foreign = region.clone();
+        foreign.material_domain.as_mut().unwrap().construction_index = 1;
+        let paths = vec![
+            command_path(MaterialConstructionRole::FunctionalBase, physical),
+            command_path(MaterialConstructionRole::Core, physical),
+            command_path(MaterialConstructionRole::FunctionalRegion, [8.2, 8.4]),
+            foreign,
+            region.clone(),
+        ];
+        let area = Area::functional_commands(
+            &paths,
+            physical,
+            &frame,
+            FunctionalArea::Region,
+            DVec3::ZERO,
+        )
+        .unwrap();
+        assert_eq!(area.vertices.len(), 2);
+        assert_eq!(area.vertices[0].position, [2.0, 1.0, 8.2]);
+        assert_eq!(area.vertices[1].position, [2.0, 11.0, 8.2]);
+        assert!(
+            Area::functional_commands(
+                &[region],
+                physical,
+                &frame,
+                FunctionalArea::ProtectedBase,
+                DVec3::ZERO
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn absent_zone_inherits_all_base_and_landings_and_covers_work_outside_region_z() {
+        let mut frame = functional_frame();
+        for (kind, physical) in [
+            (FunctionalBaseSolidZoneKind::LowerLanding, [4.0, 5.0]),
+            (FunctionalBaseSolidZoneKind::UpperCover, [15.0, 16.0]),
+        ] {
+            frame.solid_base_zones.push(FunctionalBaseSolidZone {
+                kind,
+                physical_z_mm: physical,
+                inward_depth_mm: [0.0, 8.0],
+            });
+            let path = command_path(MaterialConstructionRole::FunctionalBase, physical);
+            let area = Area::functional_commands(
+                &[path],
+                physical,
+                &frame,
+                FunctionalArea::ProtectedBase,
+                DVec3::ZERO,
+            )
+            .unwrap();
+            assert_eq!(area.vertices.len(), 2);
+            assert_eq!(area.vertices[0].position[1], 1.0);
+            assert_eq!(area.vertices[1].position[1], 8.0);
+        }
+        let physical = [16.0, 16.2];
+        assert!(functional_zone_bounds(&frame, physical).unwrap().is_none());
+        let path = command_path(MaterialConstructionRole::FunctionalBase, physical);
+        let area = Area::functional_commands(
+            std::slice::from_ref(&path),
+            physical,
+            &frame,
+            FunctionalArea::InheritedBase,
+            DVec3::ZERO,
+        )
+        .unwrap();
+        assert_eq!(area.vertices.len(), 2);
+        assert_eq!(area.vertices[1].position[1], 11.0);
+        assert!(
+            Area::functional_commands(
+                &[path],
+                physical,
+                &frame,
+                FunctionalArea::ProtectedBase,
+                DVec3::ZERO
+            )
+            .is_err()
+        );
+        assert!(functional_zone_bounds(&frame, [4.9, 5.1]).is_err());
+        assert!(functional_zone_bounds(&frame, [f64::NAN, 5.1]).is_err());
+    }
+    #[test]
+    fn captured_zone_clipping_uses_world_frame_and_command_top() {
+        let mut frame = functional_frame();
+        frame.outward_normal = [1.0, 0.0, 0.0];
+        frame.horizontal_direction = [0.0, -1.0, 0.0];
+        frame.world_origin_mm = [20.0, 20.0, 0.0];
+        let physical = [8.0, 8.2000004];
+        let bounds = functional_zone_bounds(&frame, physical).unwrap().unwrap();
+        assert_eq!(bounds.min, [12.0, 0.0, 8.0]);
+        assert_eq!(bounds.max, [17.0, 20.0, 8.2]);
+        let mut path = command_path(MaterialConstructionRole::FunctionalBase, physical);
+        path.points_mm = vec![[10.0, 2.0, physical[1]], [19.0, 2.0, physical[1]]];
+        assert_eq!(
+            Area::functional_commands(
+                &[path],
+                physical,
+                &frame,
+                FunctionalArea::ProtectedBase,
+                DVec3::ZERO
+            )
+            .unwrap()
+            .vertices
+            .len(),
+            2
+        );
+    }
+    #[test]
+    fn command_overlay_refuses_work_and_vertex_overflow_without_partial_publication() {
+        let frame = functional_frame();
+        let physical = [8.0, 8.2];
+        let mut path = command_path(MaterialConstructionRole::FunctionalRegion, physical);
+        path.points_mm = (0..=MAX_INSPECTION_VERTICES / 2)
+            .map(|index| [2.0, 1.0 + (index % 2) as f64, 8.2])
+            .collect();
+        assert_eq!(
+            Area::functional_commands(
+                std::slice::from_ref(&path),
+                physical,
+                &frame,
+                FunctionalArea::Region,
+                DVec3::ZERO
+            )
+            .unwrap()
+            .vertices
+            .len(),
+            MAX_INSPECTION_VERTICES
+        );
+        path.points_mm.push([2.0, 3.0, 8.2]);
+        assert!(
+            Area::functional_commands(
+                std::slice::from_ref(&path),
+                physical,
+                &frame,
+                FunctionalArea::Region,
+                DVec3::ZERO
+            )
+            .is_err()
+        );
+        path.points_mm = vec![[2.0, 1.0, 8.2]; MAX_INSPECTION_WORK];
+        assert!(
+            Area::functional_commands(
+                &[path],
+                physical,
+                &frame,
+                FunctionalArea::Region,
+                DVec3::ZERO
+            )
+            .unwrap_err()
+            .contains("work budget")
+        );
+        let mut path = command_path(MaterialConstructionRole::FunctionalRegion, physical);
+        path.points_mm[1][0] = f64::INFINITY;
+        assert!(
+            Area::functional_commands(
+                &[path],
+                physical,
+                &frame,
+                FunctionalArea::Region,
+                DVec3::ZERO
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn functional_outline_keeps_shared_concave_join_and_excludes_source_exterior() {
         let origin = DVec3::new(1e9, 2e9, 30.0);
@@ -286,8 +758,16 @@ mod tests {
             area.target.bounds_mm.max,
             [origin.x + 12.0, origin.y + 9.0, 35.0]
         );
-        assert!(area.vertices.iter().any(|v| v.position == [5.0, 8.0, 1.0]));
-        assert!(area.vertices.iter().any(|v| v.position == [5.0, 8.0, 5.0]));
+        assert!(
+            area.vertices
+                .iter()
+                .any(|vertex| vertex.position == [5.0, 8.0, 1.0])
+        );
+        assert!(
+            area.vertices
+                .iter()
+                .any(|vertex| vertex.position == [5.0, 8.0, 5.0])
+        );
         assert_eq!(area.vertices.len(), (boundary.len() - 4) * 6);
         base.physical_z_mm[1] = 34.0;
         assert!(Area::functional_join(&domain, &base, stock, origin).is_err());

@@ -287,6 +287,7 @@ fn functional_material_intent(scene: &Scene) -> ManufacturingIntent {
         interface_policy: FunctionalInterfacePolicy::DeclaredSameFamily,
         face_patch: None,
         minimum_pure_depth_mm: 5.0,
+        minimum_solid_base_root_depth_mm: 0.8,
         join: PlanarTKeyJoin {
             reach_into_region_mm: 1.6,
             reach_into_base_mm: 1.6,
@@ -300,6 +301,309 @@ fn functional_material_intent(scene: &Scene) -> ManufacturingIntent {
         },
     });
     intent
+}
+
+fn sparse_functional_intent(scene: &Scene) -> ManufacturingIntent {
+    let native = scene.definitions.values().next().unwrap();
+    let face_id = native
+        .faces()
+        .iter()
+        .find(|face| {
+            native
+                .vertical_wall_face(&face.face_id)
+                .is_ok_and(|frame| frame.outward_normal[0] == -1.0)
+        })
+        .unwrap()
+        .face_id
+        .clone();
+    let mut requested = functional_material_intent(scene);
+    let JobWorkflow::FixedDualMarlin { job } = &mut requested.printer.workflow else {
+        unreachable!()
+    };
+    job.functional_construction.as_mut().unwrap().face_id = face_id;
+    requested.recipe.infill_fraction = 0.2;
+    requested
+}
+
+#[test]
+fn functional_sparse_parent_retains_solid_root_and_inherited_infill() {
+    let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+    let mut requested = sparse_functional_intent(&scene);
+    let sparse = scene.compile(&requested).unwrap();
+    let frame = sparse.plan.functional_material_frame.as_ref().unwrap();
+    assert_eq!(frame.solid_base_zones.len(), 1);
+    assert_eq!(
+        frame.solid_base_zones[0].kind,
+        FunctionalBaseSolidZoneKind::Root
+    );
+    assert!(sparse.plan.layers.iter().any(|layer| {
+        layer
+            .region_coverage
+            .process_regions
+            .iter()
+            .any(|region| region.functional_solid_zone == Some(0) && region.fraction == 1.0)
+            && layer.region_coverage.process_regions.iter().any(|region| {
+                region
+                    .material_domain
+                    .is_some_and(|owner| owner.role == MaterialConstructionRole::FunctionalBase)
+                    && region.functional_solid_zone.is_none()
+                    && region.fraction == 0.2
+            })
+    }));
+    assert!(
+        sparse
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.paths)
+            .any(|path| path.kind == DepositionKind::SparseFill)
+    );
+    requested.recipe.infill_fraction = 1.0;
+    let solid = scene.compile(&requested).unwrap();
+    let volume = |bundle: &ManufacturingBundle| {
+        bundle
+            .plan
+            .layers
+            .iter()
+            .map(|layer| layer.region_coverage.nominal_deposition_volume_mm3)
+            .sum::<f64>()
+    };
+    assert!(volume(&sparse) < volume(&solid));
+}
+
+#[test]
+fn functional_sparse_parent_rejects_matched_program_and_plan_row_deletion() {
+    let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+    let requested = sparse_functional_intent(&scene);
+    let bundle = scene.compile(&requested).unwrap();
+    for role in [
+        MaterialConstructionRole::FunctionalRegion,
+        MaterialConstructionRole::FunctionalBase,
+    ] {
+        let mut changed = bundle.plan.clone();
+        let layer = changed
+            .layers
+            .iter_mut()
+            .find(|layer| {
+                layer
+                    .region_coverage
+                    .process_regions
+                    .iter()
+                    .any(|region| region.functional_solid_zone == Some(0))
+            })
+            .unwrap();
+        let mut candidates = 0;
+        let mut removed = 0;
+        layer.paths.retain(|path| {
+            let target = path.kind == DepositionKind::SolidFill
+                && path
+                    .material_domain
+                    .is_some_and(|domain| domain.role == role)
+                && matches!(path.owner, Some(DepositionOwner::Regional { .. }))
+                && !layer
+                    .skin_command_fits
+                    .iter()
+                    .flat_map(|domain| &domain.fits)
+                    .any(|fit| fit.fitted_mm.as_slice() == path.points_mm.as_slice());
+            if !target {
+                return true;
+            }
+            candidates += 1;
+            if candidates % 2 == 0 {
+                removed += 1;
+                return false;
+            }
+            true
+        });
+        assert!(removed > 0, "no removable {role:?} rows");
+        let error = assert_reemitted_interface_refuses(changed, &requested);
+        assert!(
+            error.message.contains("no complete common legal phase"),
+            "{role:?}: {error:?}"
+        );
+    }
+    let mut changed = bundle.plan.clone();
+    let layer = changed
+        .layers
+        .iter_mut()
+        .filter(|layer| layer.lower_z_mm > 2.0 && layer.z_mm < 6.0)
+        .find(|layer| {
+            layer
+                .paths
+                .iter()
+                .any(|path| path.owner == Some(DepositionOwner::Wall))
+        })
+        .unwrap();
+    let wall = layer
+        .paths
+        .iter_mut()
+        .find(|path| path.owner == Some(DepositionOwner::Wall))
+        .unwrap();
+    let last = wall.points_mm.len() - 1;
+    for axis in 0..2 {
+        wall.points_mm[last][axis] +=
+            (wall.points_mm[last - 1][axis] - wall.points_mm[last][axis]) * 0.01;
+    }
+    let error = assert_reemitted_interface_refuses(changed, &requested);
+    assert!(error.message.contains("closed"), "{error:?}");
+
+    let mut changed = bundle.plan.clone();
+    let root = &mut changed
+        .functional_material_frame
+        .as_mut()
+        .unwrap()
+        .solid_base_zones[0];
+    root.inward_depth_mm[0] += 0.125;
+    root.inward_depth_mm[1] += 0.125;
+    let error = assert_reemitted_interface_refuses(changed, &requested);
+    assert!(
+        error.message.contains("functional solid demand"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn functional_sparse_parent_density_and_face_directions() {
+    for (axis, sign, fraction) in [
+        (0, -1.0, 0.15),
+        (0, 1.0, 0.3),
+        (0, -1.0, 0.6),
+        (1, -1.0, 1.0),
+        (1, 1.0, 1.0),
+    ] {
+        let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+        let native = scene.definitions.values().next().unwrap();
+        let face_id = native
+            .faces()
+            .iter()
+            .find(|face| {
+                native
+                    .vertical_wall_face(&face.face_id)
+                    .is_ok_and(|frame| frame.outward_normal[axis] == sign)
+            })
+            .unwrap()
+            .face_id
+            .clone();
+        let mut requested = sparse_functional_intent(&scene);
+        requested.recipe.infill_fraction = fraction;
+        let JobWorkflow::FixedDualMarlin { job } = &mut requested.printer.workflow else {
+            unreachable!()
+        };
+        job.functional_construction.as_mut().unwrap().face_id = face_id;
+        let bundle = scene.compile(&requested).unwrap_or_else(|error| {
+            panic!("axis {axis}, sign {sign}, density {fraction}: {error:?}")
+        });
+        assert!(
+            fraction == 1.0
+                || bundle
+                    .plan
+                    .layers
+                    .iter()
+                    .flat_map(|layer| &layer.region_coverage.process_regions)
+                    .any(|region| region.functional_solid_zone.is_some() && region.fraction == 1.0)
+        );
+        assert!(
+            bundle
+                .plan
+                .layers
+                .iter()
+                .flat_map(|layer| &layer.region_coverage.process_regions)
+                .any(|region| region
+                    .material_domain
+                    .is_some_and(|owner| owner.role == MaterialConstructionRole::FunctionalBase)
+                    && region.functional_solid_zone.is_none()
+                    && region.fraction == fraction)
+        );
+    }
+}
+
+#[test]
+fn functional_sparse_parent_actual_bridge_recovery_preserves_protected_ownership() {
+    let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+    for patch in [
+        None,
+        Some(FunctionalFacePatch {
+            horizontal_mm: [0.0, 10.0],
+            source_z_mm: [1.2, 6.8],
+        }),
+    ] {
+        let mut requested = sparse_functional_intent(&scene);
+        requested.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+        requested.recipe.top_skin_axis = RectilinearAxisPolicy::X;
+        requested.recipe.process.max_bridge_span_mm = 15.0;
+        let JobWorkflow::FixedDualMarlin { job } = &mut requested.printer.workflow else {
+            unreachable!()
+        };
+        job.functional_construction.as_mut().unwrap().face_patch = patch;
+        let bundle = scene.compile(&requested).unwrap();
+        assert!(
+            bundle
+                .plan
+                .layers
+                .iter()
+                .flat_map(|layer| &layer.paths)
+                .any(|path| path.kind == DepositionKind::Bridge)
+        );
+        assert!(
+            bundle
+                .plan
+                .layers
+                .iter()
+                .flat_map(|layer| &layer.region_coverage.process_regions)
+                .any(|region| region.functional_solid_zone.is_some() && region.fraction == 1.0)
+        );
+    }
+}
+
+#[test]
+fn functional_sparse_parent_localized_landings_and_cover_preserve_density() {
+    for (horizontal, heights) in [
+        ([0.0, 10.0], [1.2, 6.8]),
+        ([1.0, 9.0], [1.13, 6.87]),
+        ([0.0, 10.0], [0.0, 5.6]),
+        ([0.0, 10.0], [2.4, 8.0]),
+    ] {
+        let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+        let mut requested = sparse_functional_intent(&scene);
+        requested.recipe.top_skin_axis = RectilinearAxisPolicy::X;
+        let JobWorkflow::FixedDualMarlin { job } = &mut requested.printer.workflow else {
+            unreachable!()
+        };
+        job.functional_construction.as_mut().unwrap().face_patch = Some(FunctionalFacePatch {
+            horizontal_mm: horizontal,
+            source_z_mm: heights,
+        });
+        let bundle = scene
+            .compile(&requested)
+            .unwrap_or_else(|error| panic!("U {horizontal:?}, Z {heights:?}: {error:?}"));
+        let frame = bundle.plan.functional_material_frame.as_ref().unwrap();
+        for layer in &bundle.plan.layers {
+            let zone = frame.solid_base_zones.iter().position(|zone| {
+                zone.physical_z_mm[0] <= layer.lower_z_mm && layer.z_mm <= zone.physical_z_mm[1]
+            });
+            for coverage in &layer.region_coverage.process_regions {
+                if coverage
+                    .material_domain
+                    .is_some_and(|owner| owner.role == MaterialConstructionRole::FunctionalBase)
+                {
+                    if let Some(index) = coverage.functional_solid_zone {
+                        assert_eq!(Some(index as usize), zone);
+                        assert_eq!(coverage.fraction, 1.0);
+                    } else {
+                        assert_eq!(coverage.fraction, 0.2);
+                    }
+                }
+            }
+        }
+        let bytes = serde_json::to_vec(&bundle).unwrap();
+        inspect_bundle(
+            &decode_bundle(&bytes).unwrap(),
+            &SourceHash::from_bytes(&bytes),
+            VerificationOutput::ReportOnly,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    }
 }
 
 #[test]
@@ -1775,7 +2079,10 @@ fn pocketed_housing_end_zone_emits_two_actual_cadences_and_one_bonded_open_separ
     assert_reemitted_interface_refuses(island, &recipe);
 }
 
-fn assert_reemitted_interface_refuses(mut plan: NormalizedPrintPlan, intent: &ManufacturingIntent) {
+fn assert_reemitted_interface_refuses(
+    mut plan: NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+) -> ManufacturingError {
     for layer in &mut plan.layers {
         // Re-emission mutations retain each actual path's explicit dimensions.
         layer.region_coverage.nominal_deposition_volume_mm3 = layer
@@ -1817,12 +2124,10 @@ fn assert_reemitted_interface_refuses(mut plan: NormalizedPrintPlan, intent: &Ma
     plan.validate(intent).unwrap();
     realization::canonicalize(&mut plan, intent, &AtomicBool::new(false)).unwrap();
     let actual = backend::emit(&plan, intent, &AtomicBool::new(false)).unwrap();
-    assert_eq!(
-        verifier::verify_actual(&actual, &plan, intent, &AtomicBool::new(false), None)
-            .unwrap_err()
-            .code,
-        ManufacturingErrorCode::VerificationFailed
-    );
+    let error =
+        verifier::verify_actual(&actual, &plan, intent, &AtomicBool::new(false), None).unwrap_err();
+    assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
+    error
 }
 
 #[test]

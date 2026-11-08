@@ -32,6 +32,7 @@ pub(super) struct ClassifiedRegions {
 
 pub(super) struct InteriorRegion {
     pub(super) bead_width_mm: Option<f64>,
+    pub(super) source_material: Option<MultiPolygon<f64>>,
     pub(super) domain: MultiPolygon<f64>,
     pub(super) coverage: ProcessRegionCoverage,
     pub(super) frame_origin_mm: Option<[f64; 2]>,
@@ -146,7 +147,10 @@ impl ClassifiedRegions {
             + self
                 .interiors
                 .iter()
-                .map(|i| region::point_count(&i.domain))
+                .map(|i| {
+                    region::point_count(&i.domain)
+                        + i.source_material.as_ref().map_or(0, region::point_count)
+                })
                 .sum::<usize>()
             + super::bonds::coverage_bytes(&self.coverage)
                 .div_ceil(std::mem::size_of::<geo::Coord<f64>>())
@@ -166,6 +170,9 @@ impl ClassifiedRegions {
         for interior in &mut self.interiors {
             bytes += super::native::material_bytes(&mut interior.domain)
                 + process_coverage_bytes(&interior.coverage);
+            if let Some(source) = &mut interior.source_material {
+                bytes += super::native::material_bytes(source);
+            }
         }
         for band in &mut self.separator_bands {
             bytes += super::native::material_bytes(band);
@@ -313,6 +320,7 @@ impl ClassifiedRegions {
             process_interfaces: Vec::new(),
             process_regions: if interior_area > 0.0 {
                 vec![ProcessRegionCoverage {
+                    functional_solid_zone: None,
                     material_domain: None,
                     area_mm2: interior_area,
                     fraction: recipe.infill_fraction,
@@ -331,6 +339,7 @@ impl ClassifiedRegions {
             interiors: if interior_area > 0.0 {
                 vec![InteriorRegion {
                     bead_width_mm: None,
+                    source_material: None,
                     domain: interior,
                     coverage: coverage.process_regions[0].clone(),
                     frame_origin_mm: None,
@@ -614,9 +623,11 @@ impl ClassifiedRegions {
                 completed.reserve_exact(target - completed.len());
                 completed.push(InteriorRegion {
                     bead_width_mm: None,
+                    source_material: None,
                     domain: owned,
                     frame_origin_mm: None,
                     coverage: ProcessRegionCoverage {
+                        functional_solid_zone: None,
                         material_domain: None,
                         area_mm2: area,
                         fraction,
@@ -1527,10 +1538,14 @@ impl ClassifiedRegions {
                         domain.coverage.fraction == interior.coverage.fraction
                             && domain.coverage.contributions == interior.coverage.contributions
                     });
-                    let source_owner = match (sources.next(), sources.next()) {
-                        (Some(source), None) => Some(source.material.as_ref()),
-                        (None, None) if self.interiors.len() == 1 => Some(&self.layout.fill),
-                        _ => None,
+                    let source_owner = if let Some(source) = &interior.source_material {
+                        Some(source)
+                    } else {
+                        match (sources.next(), sources.next()) {
+                            (Some(source), None) => Some(source.material.as_ref()),
+                            (None, None) if self.interiors.len() == 1 => Some(&self.layout.fill),
+                            _ => None,
+                        }
                     };
                     let first_mixed = bridge.paths.len();
                     let repaired = if let Some(source_owner) = source_owner {
@@ -4173,8 +4188,10 @@ mod skin_bridge_tests {
         );
         let interior = InteriorRegion {
             bead_width_mm: None,
+            source_material: None,
             domain: MultiPolygon(vec![regional.clone()]),
             coverage: ProcessRegionCoverage {
+                functional_solid_zone: None,
                 material_domain: None,
                 area_mm2: regional.unsigned_area(),
                 fraction: 0.20,

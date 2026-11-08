@@ -278,6 +278,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         FunctionalMaterialConstruction::decl(&config),
         FunctionalFacePatch::decl(&config),
         PlanarTKeyJoin::decl(&config),
+        FunctionalBaseSolidZoneKind::decl(&config),
+        FunctionalBaseSolidZone::decl(&config),
         FunctionalMaterialFrame::decl(&config),
         SurfaceColorConstruction::decl(&config),
         OpticalMaterialBinding::decl(&config),

@@ -1645,6 +1645,8 @@ pub struct ProcessRegionContribution {
 pub struct ProcessRegionCoverage {
     #[serde(deserialize_with = "required_option")]
     pub material_domain: Option<MaterialDomainRef>,
+    #[serde(deserialize_with = "required_option")]
+    pub functional_solid_zone: Option<u8>,
     pub area_mm2: f64,
     pub fraction: f64,
     #[serde(deserialize_with = "process_contributions")]
@@ -1933,6 +1935,7 @@ fn process_contributions<'de, D: serde::Deserializer<'de>>(
 #[serde(field_identifier, rename_all = "snake_case")]
 enum ProcessRegionField {
     MaterialDomain,
+    FunctionalSolidZone,
     AreaMm2,
     Fraction,
     Contributions,
@@ -1943,7 +1946,13 @@ impl<'de> serde::de::DeserializeSeed<'de> for ProcessRegionSeed<'_> {
     fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
         d.deserialize_struct(
             "ProcessRegionCoverage",
-            &["material_domain", "area_mm2", "fraction", "contributions"],
+            &[
+                "material_domain",
+                "functional_solid_zone",
+                "area_mm2",
+                "fraction",
+                "contributions",
+            ],
             self,
         )
     }
@@ -1955,6 +1964,7 @@ impl<'de> serde::de::Visitor<'de> for ProcessRegionSeed<'_> {
     }
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut material_domain = None;
+        let mut functional_solid_zone = None;
         let mut area_mm2 = None;
         let mut fraction = None;
         let mut contributions = None;
@@ -1965,6 +1975,12 @@ impl<'de> serde::de::Visitor<'de> for ProcessRegionSeed<'_> {
                         return Err(serde::de::Error::duplicate_field("material_domain"));
                     }
                     material_domain = Some(map.next_value()?);
+                }
+                ProcessRegionField::FunctionalSolidZone => {
+                    if functional_solid_zone.is_some() {
+                        return Err(serde::de::Error::duplicate_field("functional_solid_zone"));
+                    }
+                    functional_solid_zone = Some(map.next_value()?);
                 }
                 ProcessRegionField::AreaMm2 => {
                     if area_mm2.is_some() {
@@ -1988,6 +2004,8 @@ impl<'de> serde::de::Visitor<'de> for ProcessRegionSeed<'_> {
             }
         }
         Ok(ProcessRegionCoverage {
+            functional_solid_zone: functional_solid_zone
+                .ok_or_else(|| serde::de::Error::missing_field("functional_solid_zone"))?,
             material_domain: material_domain
                 .ok_or_else(|| serde::de::Error::missing_field("material_domain"))?,
             area_mm2: area_mm2.ok_or_else(|| serde::de::Error::missing_field("area_mm2"))?,
@@ -2154,6 +2172,13 @@ impl PlanarRegionCoverage {
                 || !region.fraction.is_finite()
                 || region.fraction < 0.0
                 || region.fraction > 1.0
+                || region.functional_solid_zone.is_some_and(|zone| {
+                    usize::from(zone) >= MAX_FUNCTIONAL_BASE_SOLID_ZONES
+                        || region.fraction != 1.0
+                        || !region.material_domain.is_some_and(|reference| {
+                            reference.role == MaterialConstructionRole::FunctionalBase
+                        })
+                })
                 || (region.contributions.is_empty()
                     && region.fraction != recipe.infill_fraction
                     && !(region.fraction == 1.0
@@ -3840,9 +3865,21 @@ impl ManufacturingBundle {
                 });
                 // Without spatial geometry, validate captured operation/source/value
                 // binding, not an invented whole-volume winner for a box partition.
+                let required_functional_solid = region.material_domain.is_some_and(|reference| {
+                    reference.role == MaterialConstructionRole::FunctionalRegion
+                        || (reference.role == MaterialConstructionRole::FunctionalBase
+                            && region.functional_solid_zone.is_some())
+                });
                 let valid = if spatial {
                     match contribution.provenance {
-                        None => region.fraction == recipe.infill_fraction,
+                        None => {
+                            region.fraction
+                                == if required_functional_solid {
+                                    1.0
+                                } else {
+                                    recipe.infill_fraction
+                                }
+                        }
                         Some(provenance) => process.layers.iter().any(|layer| {
                             layer.enabled
                                 && layer.layer_id == provenance.layer_id
@@ -3877,7 +3914,10 @@ impl ManufacturingBundle {
                     }
                 } else {
                     resolved.provenance == contribution.provenance
-                        && resolved.fraction == region.fraction
+                        && (resolved.fraction == region.fraction
+                            || (required_functional_solid
+                                && contribution.provenance.is_none()
+                                && region.fraction == 1.0))
                 };
                 if !valid {
                     return Err(invalid(

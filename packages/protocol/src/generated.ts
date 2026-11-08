@@ -496,7 +496,7 @@ export type ProcessEdit = { "op": "set_sparse_fraction", scope: SurfaceScope, fr
 
 export type ProcessRegionContribution = { occurrence_id: OccurrenceId, definition_id: DefinitionId, provenance: ProcessProvenance | null, };
 
-export type ProcessRegionCoverage = { material_domain: MaterialDomainRef | null, area_mm2: number, fraction: number, contributions: Array<ProcessRegionContribution>, };
+export type ProcessRegionCoverage = { material_domain: MaterialDomainRef | null, functional_solid_zone: number | null, area_mm2: number, fraction: number, contributions: Array<ProcessRegionContribution>, };
 
 export type ProcessSkinKind = "bottom_skin" | "top_skin";
 
@@ -598,11 +598,15 @@ export type FunctionalMaterialConstruction = { interface_policy: FunctionalInter
 /**
  * Required nullable selection in the full native face frame.
  */
-face_patch: FunctionalFacePatch | null, material_id: string, base_material_id: string, minimum_pure_depth_mm: number, join: PlanarTKeyJoin, };
+face_patch: FunctionalFacePatch | null, material_id: string, base_material_id: string, minimum_pure_depth_mm: number, minimum_solid_base_root_depth_mm: number, join: PlanarTKeyJoin, };
 
 export type FunctionalFacePatch = { horizontal_mm: [number, number], source_z_mm: [number, number], };
 
 export type PlanarTKeyJoin = { reach_into_region_mm: number, reach_into_base_mm: number, pitch_mm: number, stem_width_mm: number, head_width_mm: number, head_depth_mm: number, edge_margin_mm: number, end_collar_height_mm: number, collar_head_width_mm: number, };
+
+export type FunctionalBaseSolidZoneKind = "root" | "lower_landing" | "upper_cover";
+
+export type FunctionalBaseSolidZone = { kind: FunctionalBaseSolidZoneKind, inward_depth_mm: [number, number], physical_z_mm: [number, number], };
 
 export type FunctionalMaterialFrame = { occurrence_id: OccurrenceId, definition_id: DefinitionId, source_hash: SourceHash, face_id: FaceId,
 /**
@@ -628,7 +632,7 @@ region_z_mm: [number, number],
 /**
  * Closed world interval where the wider middle heads apply.
  */
-key_middle_z_mm: [number, number], key_centers_u_mm: Array<number>, };
+key_middle_z_mm: [number, number], key_centers_u_mm: Array<number>, solid_base_zones: Array<FunctionalBaseSolidZone>, };
 
 export type SurfaceColorConstruction = { occurrence_id: OccurrenceId, definition_id: DefinitionId, source_hash: SourceHash, faces: Array<SurfaceColorFace>, shell: OccurrenceMaterial, white_material_id: string, optical_origin: OpticalConstructionOrigin | null, };
 

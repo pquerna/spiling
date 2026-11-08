@@ -201,14 +201,26 @@ function area(domain) {
   );
 }
 
-function checkPlan(plan, request, stockBounds) {
+function faceCoordinates(frame, point) {
+  const offset = point.slice(0, 2).map((v, axis) => v - frame.world_origin_mm[axis]);
+  return [
+    offset.reduce((sum, v, axis) => sum + v * frame.horizontal_direction[axis], 0),
+    offset.reduce((sum, v, axis) => sum - v * frame.outward_normal[axis], 0),
+  ];
+}
+
+function checkPlan(plan, request, stockBounds, baseFraction = 1, normal = [0, -1, 0]) {
   assert.deepEqual(plan.material_frames, [], "functional construction acquired optical frames");
   const frame = plan.functional_material_frame;
   assert.ok(frame, "missing captured functional frame");
   for (const key of ["occurrence_id", "definition_id", "source_hash", "face_id"])
     assert.deepEqual(frame[key], request[key]);
-  assert.deepEqual(frame.outward_normal, [0, -1, 0]);
-  assert.deepEqual(frame.horizontal_direction, [1, 0, 0]);
+  const depthAxis = normal[0] === 0 ? 1 : 0;
+  const horizontalAxis = 1 - depthAxis;
+  frame.outward_normal.forEach((v, axis) => near(v, normal[axis], "selected face normal"));
+  frame.horizontal_direction.forEach((v, axis) =>
+    near(v, Number(axis === horizontalAxis), "canonical positive face U direction"),
+  );
   assert.deepEqual(frame.stock_bounds_mm, {
     min: stockBounds.min.map((v, axis) => v + pose.translation_mm[axis]),
     max: stockBounds.max.map((v, axis) => v + pose.translation_mm[axis]),
@@ -216,7 +228,11 @@ function checkPlan(plan, request, stockBounds) {
   frame.world_origin_mm.forEach((v, axis) =>
     near(v, frame.origin_mm[axis] + pose.translation_mm[axis], "placed frame"),
   );
-  near(frame.width_mm, stockBounds.max[0] - stockBounds.min[0], "full face width");
+  near(
+    frame.width_mm,
+    stockBounds.max[horizontalAxis] - stockBounds.min[horizontalAxis],
+    "full face width",
+  );
   const bottom = stockBounds.min[2] + pose.translation_mm[2];
   const top = stockBounds.max[2] + pose.translation_mm[2];
   const selectedU = request.face_patch?.horizontal_mm ?? [0, frame.width_mm];
@@ -251,9 +267,23 @@ function checkPlan(plan, request, stockBounds) {
   const pure = request.minimum_pure_depth_mm;
   const end = pure + request.join.reach_into_region_mm + request.join.reach_into_base_mm;
   const neckEnd = end - request.join.head_depth_mm;
-  const stockDepth = stockBounds.max[1] - stockBounds.min[1];
-  const world = (u, depth) => [frame.world_origin_mm[0] + u, frame.world_origin_mm[1] + depth];
-  const depth = (point) => point[1] - frame.world_origin_mm[1];
+  const stockDepth = stockBounds.max[depthAxis] - stockBounds.min[depthAxis];
+  const world = (u, depth) =>
+    frame.world_origin_mm
+      .slice(0, 2)
+      .map((v, axis) => v + u * frame.horizontal_direction[axis] - depth * normal[axis]);
+  const local = (point) => faceCoordinates(frame, point);
+  const depth = (point) => local(point)[1];
+  assert.equal(request.minimum_solid_base_root_depth_mm, 0.8);
+  assert.ok(frame.solid_base_zones.length >= 1);
+  const root = frame.solid_base_zones[0];
+  assert.equal(root.kind, "root");
+  root.inward_depth_mm.forEach((v, i) =>
+    near(v, [pure, end + request.minimum_solid_base_root_depth_mm][i], "solid root depth"),
+  );
+  assert.deepEqual(root.physical_z_mm, regionZ);
+  assert.ok(root.inward_depth_mm[1] < stockDepth, "root leaves no inherited Base interior");
+  if (!request.face_patch) assert.equal(frame.solid_base_zones.length, 1);
   const roles = ["functional_region", "functional_base"];
   assert.ok(plan.material_domains.length >= 6 && plan.material_domains.length <= maxDomains);
   const intervals = new Map();
@@ -287,7 +317,7 @@ function checkPlan(plan, request, stockBounds) {
       domain.polygons.flatMap((polygon) => [polygon.exterior_mm, ...polygon.holes_mm].flat()),
     );
     const cuts = [
-      [0, frame.width_mm, ...selectedU, ...vertices.map((p) => p[0] - frame.world_origin_mm[0])],
+      [0, frame.width_mm, ...selectedU, ...vertices.map((p) => local(p)[0])],
       [0, stockDepth, pure, ...vertices.map(depth)],
     ].map((values) => [...new Set(values)].sort((a, b) => a - b));
     for (let x = 1; x < cuts[0].length; x++) {
@@ -350,22 +380,21 @@ function checkPlan(plan, request, stockBounds) {
     }
     for (const p of pair.functional_base.polygons)
       for (const point of p.exterior_mm)
-        if (
-          point[0] - frame.world_origin_mm[0] > selectedU[0] + epsilon &&
-          point[0] - frame.world_origin_mm[0] < selectedU[1] - epsilon
-        )
+        if (local(point)[0] > selectedU[0] + epsilon && local(point)[0] < selectedU[1] - epsilon)
           assert.ok(depth(point) >= pure - epsilon, "base boundary enters selected pure depth");
   }
-  assert.deepEqual(
-    [...phases].sort(),
-    request.face_patch
-      ? ["above", "below", "bottom", "middle", "top"]
-      : ["bottom", "middle", "top"],
-  );
+  assert.deepEqual([...phases].sort(), [
+    ...(regionZ[1] < top ? ["above"] : []),
+    ...(regionZ[0] > bottom ? ["below"] : []),
+    "bottom",
+    "middle",
+    "top",
+  ]);
   near(volume, frame.width_mm * stockDepth * (top - bottom), "complete stock volume");
   for (let i = 1; i < ordered.length; i++)
     near(ordered[i][0][0], ordered[i - 1][0][1], "continuous domains");
   assert.ok(plan.layers.length > 0);
+  let rootAndInheritedLayers = 0;
   for (const layer of plan.layers) {
     assert.ok(layer.paths.length > 0);
     assert.ok(
@@ -373,6 +402,36 @@ function checkPlan(plan, request, stockBounds) {
       "bead crosses collar event",
     );
     const active = layer.lower_z_mm >= regionZ[0] - epsilon && layer.z_mm <= regionZ[1] + epsilon;
+    const regions = layer.region_coverage.process_regions;
+    for (const region of regions) {
+      assert.ok(region.area_mm2 > 0, "empty functional process region");
+      assert.equal(region.material_domain.construction_index, 0);
+      if (region.material_domain.role === "functional_region") {
+        near(region.fraction, 1, "functional pure region remains solid");
+        assert.equal(region.functional_solid_zone, null);
+      } else {
+        assert.equal(region.material_domain.role, "functional_base");
+        if (region.functional_solid_zone === null) {
+          near(region.fraction, baseFraction, "Base inherits the captured infill fraction");
+        } else {
+          const zone = frame.solid_base_zones[region.functional_solid_zone];
+          assert.ok(zone, "unknown functional solid zone");
+          near(region.fraction, 1, "protected Base zone remains solid");
+          assert.ok(layer.lower_z_mm >= zone.physical_z_mm[0] - epsilon);
+          assert.ok(layer.z_mm <= zone.physical_z_mm[1] + epsilon);
+        }
+      }
+    }
+    if (
+      regions.some((region) => region.functional_solid_zone === 0 && region.fraction === 1) &&
+      regions.some(
+        (region) =>
+          region.material_domain.role === "functional_base" &&
+          region.functional_solid_zone === null &&
+          region.fraction === baseFraction,
+      )
+    )
+      rootAndInheritedLayers++;
     assert.deepEqual(
       [...new Set(layer.paths.map((p) => p.material_domain?.role))].sort(),
       active ? [...roles].sort() : ["functional_base"],
@@ -394,7 +453,7 @@ function checkPlan(plan, request, stockBounds) {
             path.width.kind === "constant" ? path.width.width_mm : path.width.widths_mm[i - 1];
           assert.ok(width > 0);
           for (const point of [path.points_mm[i - 1], path.points_mm[i]]) {
-            const u = point[0] - frame.world_origin_mm[0];
+            const u = local(point)[0];
             if (u <= selectedU[0] + epsilon || u >= selectedU[1] - epsilon) continue;
             assert.ok(
               depth(point) - width / 2 >= pure - epsilon,
@@ -405,6 +464,17 @@ function checkPlan(plan, request, stockBounds) {
       }
     }
   }
+  if (baseFraction < 1) {
+    assert.ok(rootAndInheritedLayers > 0, "missing solid root beside inherited sparse Base");
+    assert.ok(
+      plan.layers.some((layer) =>
+        layer.paths.some(
+          (path) => path.kind === "sparse_fill" && path.material_domain.role === "functional_base",
+        ),
+      ),
+      "sparse Base has no sparse-fill paths",
+    );
+  }
   return {
     layers: plan.layers.length,
     domains: plan.material_domains.length,
@@ -413,6 +483,10 @@ function checkPlan(plan, request, stockBounds) {
     selected_u_mm: frame.selected_u_mm,
     region_z_mm: frame.region_z_mm,
     stock_volume_mm3: volume,
+    stock_depth_mm: stockDepth,
+    base_infill_fraction: baseFraction,
+    solid_base_zones: frame.solid_base_zones,
+    root_and_inherited_layers: rootAndInheritedLayers,
   };
 }
 
@@ -480,6 +554,7 @@ async function checkReplay(file, directory, report, intent, plan) {
   const frame = plan.functional_material_frame;
   const layers = plan.layers.map(() => [0, 1].map(() => ({ epochs: 0, waste: 0, model: 0 })));
   const totals = [0, 0];
+  const filament = [0, 1].map(() => ({ model: 0, waste: 0 }));
   for (let event = 0; event < decoded.eventCount; event++) {
     const kind = decoded.kind(event);
     if (![1, 2, 3, 4, 5, 8, 14, 15].includes(kind)) continue;
@@ -487,6 +562,12 @@ async function checkReplay(file, directory, report, intent, plan) {
     const layer = decoded.layer(event);
     assert.ok(tool === 0 || tool === 1);
     assert.ok(layer < layers.length);
+    if (kind !== 14) {
+      assert.ok(event > 0 && decoded.activeTool(event - 1) === tool);
+      const delta = decoded.extrusion(event) - decoded.extrusion(event - 1);
+      assert.ok(delta > 0, "actual deposition has no positive filament movement");
+      filament[tool][kind === 15 ? "waste" : "model"] += delta;
+    }
     if (kind === 14) layers[layer][tool].epochs++;
     else if (kind === 15) layers[layer][tool].waste++;
     else {
@@ -500,7 +581,7 @@ async function checkReplay(file, directory, report, intent, plan) {
         assert.ok(association.physicalZMm[0] >= frame.region_z_mm[0] - epsilon);
         assert.ok(association.physicalZMm[1] <= frame.region_z_mm[1] + epsilon);
         for (const point of [decoded.position(event - 1), decoded.position(event)]) {
-          const u = point[0] - frame.world_origin_mm[0];
+          const u = faceCoordinates(frame, point)[0];
           assert.ok(
             u >= frame.selected_u_mm[0] - epsilon && u <= frame.selected_u_mm[1] + epsilon,
             "actual functional material escaped selected U",
@@ -549,11 +630,23 @@ async function checkReplay(file, directory, report, intent, plan) {
       );
     }
   }
-  for (const tool of [0, 1])
-    assert.equal(
-      totals[tool],
-      report.manufacturing.verification.routing.tools[tool].model_deposition_segments,
-    );
+  for (const tool of [0, 1]) {
+    const accounting = report.manufacturing.verification.routing.tools[tool];
+    assert.equal(totals[tool], accounting.model_deposition_segments);
+    const filamentArea = Math.PI * (job.tools[tool].filament_diameter_mm / 2) ** 2;
+    for (const kind of ["model", "waste"]) {
+      near(
+        filament[tool][kind],
+        accounting[`${kind}_filament_length_mm`],
+        `actual ${kind} filament`,
+      );
+      near(
+        filament[tool][kind] * filamentArea,
+        accounting[`${kind}_volume_mm3`],
+        `actual ${kind} volume`,
+      );
+    }
+  }
   return bytes;
 }
 
@@ -662,6 +755,7 @@ try {
     interface_policy: "mechanical_capture",
     face_patch: null,
     minimum_pure_depth_mm: 5,
+    minimum_solid_base_root_depth_mm: 0.8,
     join: {
       reach_into_region_mm: 1.6,
       reach_into_base_mm: 1.6,
@@ -677,7 +771,14 @@ try {
   intent.recipe.infill_fraction = 1;
   intent.recipe.perimeter_count = 1;
   const recoveryCases = [];
-  async function compileCase(name, seed, capturedIntent, modelTools, extraArgs = []) {
+  async function compileCase(
+    name,
+    seed,
+    capturedIntent,
+    modelTools,
+    extraArgs = [],
+    normal = [0, -1, 0],
+  ) {
     const caseProject = join(output, `${name}.spil`);
     const caseIntentFile = join(output, `${name}.intent.json`);
     const caseExport = join(output, `${name}-export`);
@@ -715,12 +816,16 @@ try {
       replayFile,
     ]);
     checkVerified(replayReport, capturedIntent, modelTools);
+    assert.notEqual(replayReport.hello.session_id, report.hello.session_id);
+    assert.equal(replayReport.manufacturing.artifact.hash, report.manufacturing.artifact.hash);
     await checkReplay(replayFile, caseExport, replayReport, capturedIntent, casePlan);
     if (capturedIntent.printer.workflow.job.functional_construction) {
       evidence[name] = checkPlan(
         casePlan,
         capturedIntent.printer.workflow.job.functional_construction,
         fixtureStock,
+        capturedIntent.recipe.infill_fraction,
+        normal,
       );
     } else {
       checkUniformPlan(casePlan, capturedIntent.printer.workflow.job.assignments.length);
@@ -735,6 +840,7 @@ try {
       exported: caseExport,
       replayFile,
       report,
+      normal,
     });
     return report;
   }
@@ -797,6 +903,7 @@ try {
   );
   const baselineHash = compiled.manufacturing.artifact.hash;
   const changed = structuredClone(intent);
+  changed.printer.workflow.job.functional_construction.minimum_solid_base_root_depth_mm = 1.2;
   changed.printer.workflow.job.functional_construction.minimum_pure_depth_mm = 4.5;
   const changedFile = join(output, "changed.intent.json");
   await save("changed.intent.json", changed);
@@ -842,6 +949,118 @@ try {
     patched.manufacturing.artifact.hash,
     baselineHash,
     "patch edit retained the full-face artifact identity",
+  );
+
+  const negativeX = inspected.face_inspections.find((row) => {
+    const plane = row.face.geometry.analytic;
+    return (
+      plane?.kind === "plane" &&
+      plane.normal[0] === -1 &&
+      plane.normal[1] === 0 &&
+      plane.normal[2] === 0
+    );
+  });
+  assert.ok(negativeX, "native CLI inspection has no -X planar face for 20 mm-deep stock");
+  assert.equal(negativeX.provenance.source_hash, sourceHash);
+  const sparseBase = structuredClone(intent);
+  sparseBase.printer.workflow.job.functional_construction.face_id = negativeX.face.face_id;
+  sparseBase.recipe.infill_fraction = 0.2;
+  const solidBase = structuredClone(sparseBase);
+  solidBase.recipe.infill_fraction = 1;
+  const sparseReport = await compileCase(
+    "full-height-negative-x-base-20",
+    unconfiguredProject,
+    sparseBase,
+    [0, 1],
+    [],
+    [-1, 0, 0],
+  );
+  const solidReport = await compileCase(
+    "full-height-negative-x-base-100",
+    unconfiguredProject,
+    solidBase,
+    [0, 1],
+    [],
+    [-1, 0, 0],
+  );
+  const sparseEntry = recoveryCases.find(
+    (entry) => entry.name === "full-height-negative-x-base-20",
+  );
+  const solidEntry = recoveryCases.find(
+    (entry) => entry.name === "full-height-negative-x-base-100",
+  );
+  const sparsePlan = await json(join(sparseEntry.exported, "plan.json"));
+  const solidPlan = await json(join(solidEntry.exported, "plan.json"));
+  assert.equal(evidence[sparseEntry.name].stock_depth_mm, 20);
+  assert.deepEqual(sparsePlan.functional_material_frame, solidPlan.functional_material_frame);
+  assert.deepEqual(
+    sparsePlan.material_domains,
+    solidPlan.material_domains,
+    "density changed geometry",
+  );
+  assert.deepEqual(
+    sparsePlan.layers.map((layer) => [layer.lower_z_mm, layer.z_mm]),
+    solidPlan.layers.map((layer) => [layer.lower_z_mm, layer.z_mm]),
+    "density changed physical layer intervals",
+  );
+  assert.notEqual(
+    sparseReport.manufacturing.artifact.hash,
+    solidReport.manufacturing.artifact.hash,
+  );
+  const baseTool = job.tools.findIndex(
+    (tool) => tool.material.id === job.functional_construction.base_material_id,
+  );
+  assert.ok(baseTool >= 0);
+  const sparseAccounting = sparseReport.manufacturing.verification.routing.tools[baseTool];
+  const solidAccounting = solidReport.manufacturing.verification.routing.tools[baseTool];
+  assert.ok(
+    sparseAccounting.model_volume_mm3 < solidAccounting.model_volume_mm3 - epsilon,
+    "Base 20% must use less actual MODEL volume than identical Base 100% geometry",
+  );
+  assert.ok(
+    sparseAccounting.model_filament_length_mm < solidAccounting.model_filament_length_mm - epsilon,
+    "Base 20% must use less actual MODEL filament than Base 100%",
+  );
+  near(sparseAccounting.waste_volume_mm3, solidAccounting.waste_volume_mm3, "separate Base waste");
+  near(
+    sparseAccounting.waste_filament_length_mm,
+    solidAccounting.waste_filament_length_mm,
+    "separate Base waste filament",
+  );
+  evidence.sparse_base_comparison = {
+    base_tool: baseTool,
+    base_20: sparseAccounting,
+    base_100: solidAccounting,
+    same_geometry: true,
+    lower_actual_base_model_deposition: true,
+  };
+
+  const sparsePad = structuredClone(sparseBase);
+  sparsePad.printer.workflow.job.functional_construction.face_patch = {
+    horizontal_mm: [1, 9],
+    source_z_mm: [1.13, 6.87],
+  };
+  sparsePad.recipe.top_skin_axis = "x";
+  await compileCase(
+    "localized-negative-x-base-20",
+    unconfiguredProject,
+    sparsePad,
+    [0, 1],
+    [],
+    [-1, 0, 0],
+  );
+  const raisedPad = structuredClone(sparsePad);
+  raisedPad.printer.workflow.job.functional_construction.face_patch = {
+    horizontal_mm: [0, 10],
+    source_z_mm: [2.4, 8],
+  };
+  await compileCase(
+    "raised-negative-x-base-20",
+    unconfiguredProject,
+    raisedPad,
+    [0, 1],
+    [],
+    [-1, 0, 0],
   );
 
   for (const base of [0, 1]) {
@@ -950,6 +1169,8 @@ try {
         recoveredPlan,
         entry.intent.printer.workflow.job.functional_construction,
         fixtureStock,
+        entry.intent.recipe.infill_fraction,
+        entry.normal,
       );
     } else {
       checkUniformPlan(recoveredPlan, entry.intent.printer.workflow.job.assignments.length);

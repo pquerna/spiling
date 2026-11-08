@@ -2773,6 +2773,7 @@ impl TryFrom<rpc::FunctionalMaterialConstruction> for FunctionalMaterialConstruc
             material_id: v.material_id,
             base_material_id: v.base_material_id,
             minimum_pure_depth_mm: v.minimum_pure_depth_mm,
+            minimum_solid_base_root_depth_mm: v.minimum_solid_base_root_depth_mm,
             join: required(v.join, "functional T-key join")?.try_into()?,
         };
         result.validate_dimensions().map_err(|e| e.to_string())?;
@@ -2798,7 +2799,59 @@ impl TryFrom<FunctionalMaterialConstruction> for rpc::FunctionalMaterialConstruc
             material_id: v.material_id,
             base_material_id: v.base_material_id,
             minimum_pure_depth_mm: v.minimum_pure_depth_mm,
+            minimum_solid_base_root_depth_mm: v.minimum_solid_base_root_depth_mm,
             join: Some(v.join.try_into()?),
+        })
+    }
+}
+
+impl TryFrom<rpc::FunctionalBaseSolidZone> for FunctionalBaseSolidZone {
+    type Error = String;
+    fn try_from(value: rpc::FunctionalBaseSolidZone) -> Result<Self, String> {
+        let kind = match rpc::FunctionalBaseSolidZoneKind::try_from(value.kind)
+            .map_err(|_| "unknown functional solid base zone kind")?
+        {
+            rpc::FunctionalBaseSolidZoneKind::Root => FunctionalBaseSolidZoneKind::Root,
+            rpc::FunctionalBaseSolidZoneKind::LowerLanding => {
+                FunctionalBaseSolidZoneKind::LowerLanding
+            }
+            rpc::FunctionalBaseSolidZoneKind::UpperCover => FunctionalBaseSolidZoneKind::UpperCover,
+            _ => return Err("functional solid base zone kind is required".into()),
+        };
+        let result = Self {
+            kind,
+            inward_depth_mm: value
+                .inward_depth_mm
+                .try_into()
+                .map_err(|_| "functional solid base zone depth requires two endpoints")?,
+            physical_z_mm: value
+                .physical_z_mm
+                .try_into()
+                .map_err(|_| "functional solid base zone Z requires two endpoints")?,
+        };
+        result
+            .validate_values()
+            .map_err(|error| error.to_string())?;
+        Ok(result)
+    }
+}
+
+impl TryFrom<FunctionalBaseSolidZone> for rpc::FunctionalBaseSolidZone {
+    type Error = String;
+    fn try_from(value: FunctionalBaseSolidZone) -> Result<Self, String> {
+        value.validate_values().map_err(|error| error.to_string())?;
+        Ok(Self {
+            kind: match value.kind {
+                FunctionalBaseSolidZoneKind::Root => rpc::FunctionalBaseSolidZoneKind::Root,
+                FunctionalBaseSolidZoneKind::LowerLanding => {
+                    rpc::FunctionalBaseSolidZoneKind::LowerLanding
+                }
+                FunctionalBaseSolidZoneKind::UpperCover => {
+                    rpc::FunctionalBaseSolidZoneKind::UpperCover
+                }
+            } as i32,
+            inward_depth_mm: value.inward_depth_mm.into(),
+            physical_z_mm: value.physical_z_mm.into(),
         })
     }
 }
@@ -2806,6 +2859,9 @@ impl TryFrom<FunctionalMaterialConstruction> for rpc::FunctionalMaterialConstruc
 impl TryFrom<rpc::FunctionalMaterialFrame> for FunctionalMaterialFrame {
     type Error = String;
     fn try_from(v: rpc::FunctionalMaterialFrame) -> Result<Self, String> {
+        if v.solid_base_zones.len() > MAX_FUNCTIONAL_BASE_SOLID_ZONES {
+            return Err("functional solid base zone limit exceeded".into());
+        }
         if v.key_centers_u_mm.len() > MAX_FUNCTIONAL_KEYS {
             return Err("functional key count exceeds sixteen".into());
         }
@@ -2841,6 +2897,11 @@ impl TryFrom<rpc::FunctionalMaterialFrame> for FunctionalMaterialFrame {
                 .try_into()
                 .map_err(|_| "functional middle interval requires two endpoints")?,
             key_centers_u_mm: v.key_centers_u_mm,
+            solid_base_zones: v
+                .solid_base_zones
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
         };
         result.validate_values().map_err(|e| e.to_string())?;
         Ok(result)
@@ -2866,6 +2927,11 @@ impl TryFrom<FunctionalMaterialFrame> for rpc::FunctionalMaterialFrame {
             region_z_mm: v.region_z_mm.into(),
             key_middle_z_mm: v.key_middle_z_mm.into(),
             key_centers_u_mm: v.key_centers_u_mm,
+            solid_base_zones: v
+                .solid_base_zones
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
         })
     }
 }
@@ -3148,6 +3214,7 @@ mod fixed_dual_wire_tests {
             material_id: domain.tools[1].material.id.clone(),
             base_material_id: domain.tools[0].material.id.clone(),
             minimum_pure_depth_mm: 2.0,
+            minimum_solid_base_root_depth_mm: 0.8,
             face_patch: None,
             join: PlanarTKeyJoin {
                 reach_into_region_mm: 2.0,
@@ -3185,6 +3252,17 @@ mod fixed_dual_wire_tests {
         let original = domain.functional_construction.as_ref().unwrap();
         let wire_construction =
             rpc::FunctionalMaterialConstruction::try_from(original.clone()).unwrap();
+        for depth in [0.0, -0.8, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut bad = wire_construction.clone();
+            bad.minimum_solid_base_root_depth_mm = depth;
+            let decoded =
+                rpc::FunctionalMaterialConstruction::decode(bad.encode_to_vec().as_slice())
+                    .unwrap();
+            assert!(FunctionalMaterialConstruction::try_from(decoded).is_err());
+            let mut bad = original.clone();
+            bad.minimum_solid_base_root_depth_mm = depth;
+            assert!(rpc::FunctionalMaterialConstruction::try_from(bad).is_err());
+        }
         for policy in [
             FunctionalInterfacePolicy::DeclaredSameFamily,
             FunctionalInterfacePolicy::MechanicalCapture,
@@ -3229,7 +3307,7 @@ mod fixed_dual_wire_tests {
         let mut unknown = wire_construction.clone();
         unknown.face_patch = None;
         let mut bytes = unknown.encode_to_vec();
-        bytes.extend_from_slice(&[0x62, 0]); // field12, length-delimited empty value
+        bytes.extend_from_slice(&[0x72, 0]); // field14, length-delimited empty value
         let decoded = rpc::FunctionalMaterialConstruction::decode(bytes.as_slice()).unwrap();
         assert!(FunctionalMaterialConstruction::try_from(decoded).is_err());
         for change in 0..10 {

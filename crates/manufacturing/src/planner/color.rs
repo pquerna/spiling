@@ -479,39 +479,143 @@ impl Construction {
         &self,
         classified: &mut classification::ClassifiedRegions,
         interval: [f64; 2],
+        mut admit: impl FnMut(usize, usize) -> Result<(), ManufacturingError>,
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<(), ManufacturingError> {
         if self.domains.is_empty() {
             return Ok(());
         }
-        let mut result = Vec::new();
+        let base_points = classified.retained_points();
+        let base_bytes = classified.retained_bytes();
+        let mut result: Vec<classification::InteriorRegion> = Vec::new();
+        let mut result_points = 0;
+        let mut result_bytes = 0;
         for interior in &classified.interiors {
             for domain in self.active(interval) {
                 boolean::budget_accumulated(&interior.domain, &domain.material, work, cancel)?;
                 let material = interior.domain.intersection(&domain.material);
-                let area = material.unsigned_area();
                 if material.0.is_empty() {
                     continue;
                 }
-                let fraction = if domain.reference.role == MaterialConstructionRole::Core {
+                let fraction = if matches!(
+                    domain.reference.role,
+                    MaterialConstructionRole::Core | MaterialConstructionRole::FunctionalBase
+                ) {
                     interior.coverage.fraction
                 } else {
                     1.0
                 };
-                result.push(classification::InteriorRegion {
-                    bead_width_mm: None,
-                    domain: material,
-                    coverage: ProcessRegionCoverage {
-                        material_domain: Some(domain.reference),
-                        area_mm2: area,
-                        fraction,
-                        contributions: interior.coverage.contributions.clone(),
-                    },
-                    frame_origin_mm: interior.frame_origin_mm,
+                let protected = self.functional_frame.as_ref().and_then(|frame| {
+                    (domain.reference.role == MaterialConstructionRole::FunctionalBase
+                        && fraction < 1.0)
+                        .then(|| {
+                            frame
+                                .solid_base_zones
+                                .iter()
+                                .enumerate()
+                                .find(|(_, zone)| {
+                                    zone.physical_z_mm[0] <= interval[0]
+                                        && interval[1] <= zone.physical_z_mm[1]
+                                })
+                                .map(|(index, zone)| {
+                                    (index as u8, super::joins::solid_zone_material(frame, zone))
+                                })
+                        })
+                        .flatten()
                 });
+                let mut pieces = if let Some((index, zone)) = protected {
+                    boolean::budget_accumulated(&material, &zone, work, cancel)?;
+                    let solid = material.intersection(&zone);
+                    boolean::budget_accumulated(&material, &zone, work, cancel)?;
+                    let remainder = material.difference(&zone);
+                    drop(material);
+                    vec![(solid, 1.0, Some(index)), (remainder, fraction, None)]
+                } else {
+                    vec![(material, fraction, None)]
+                };
+                let mut pending_points = pieces
+                    .iter()
+                    .map(|(piece, _, _)| region::point_count(piece))
+                    .sum::<usize>();
+                let mut pending_bytes = pieces
+                    .iter_mut()
+                    .map(|(piece, _, _)| native::material_bytes(piece))
+                    .sum::<usize>();
+                for (mut piece, fraction, functional_solid_zone) in pieces {
+                    let area = piece.unsigned_area();
+                    if area == 0.0 {
+                        continue;
+                    }
+                    region::check_size(&piece)?;
+                    let piece_points = region::point_count(&piece);
+                    let piece_bytes = native::material_bytes(&mut piece);
+                    let functional = matches!(
+                        domain.reference.role,
+                        MaterialConstructionRole::FunctionalRegion
+                            | MaterialConstructionRole::FunctionalBase
+                    );
+                    let source_points = if functional {
+                        region::point_count(&domain.material)
+                    } else {
+                        0
+                    };
+                    let source_bytes = if functional {
+                        region::cloned_polygons_bytes(&domain.material.0)?
+                    } else {
+                        0
+                    };
+                    let contribution_bytes = interior.coverage.contributions.len()
+                        * size_of::<ProcessRegionContribution>()
+                        + interior
+                            .coverage
+                            .contributions
+                            .iter()
+                            .map(|value| value.definition_id.allocated_bytes())
+                            .sum::<usize>();
+                    admit(
+                        base_points + result_points + pending_points + source_points,
+                        base_bytes
+                            + result_bytes
+                            + pending_bytes
+                            + source_bytes
+                            + contribution_bytes
+                            + (result.capacity() + result.len() + 1)
+                                * size_of::<classification::InteriorRegion>(),
+                    )?;
+                    result.try_reserve_exact(1).map_err(|_| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "functional process partition allocation refused",
+                        )
+                    })?;
+                    result.push(classification::InteriorRegion {
+                        bead_width_mm: None,
+                        source_material: functional.then(|| domain.material.clone()),
+                        domain: piece,
+                        coverage: ProcessRegionCoverage {
+                            functional_solid_zone,
+                            material_domain: Some(domain.reference),
+                            area_mm2: area,
+                            fraction,
+                            contributions: interior.coverage.contributions.clone(),
+                        },
+                        frame_origin_mm: interior.frame_origin_mm,
+                    });
+                    pending_points -= piece_points;
+                    pending_bytes -= piece_bytes;
+                    result_points += piece_points + source_points;
+                    result_bytes += piece_bytes + source_bytes + contribution_bytes;
+                }
             }
         }
+        admit(
+            base_points + result_points,
+            base_bytes
+                + result_bytes * 2
+                + result.capacity() * size_of::<classification::InteriorRegion>()
+                + result.len() * size_of::<ProcessRegionCoverage>(),
+        )?;
         classified.coverage.process_regions = result.iter().map(|i| i.coverage.clone()).collect();
         classified.coverage.solid_interior_area_mm2 = result
             .iter()

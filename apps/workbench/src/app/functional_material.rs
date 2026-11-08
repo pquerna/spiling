@@ -48,6 +48,7 @@ fn request_for_face(
         material_id: region.material.id.clone(),
         base_material_id: base.clone(),
         minimum_pure_depth_mm: 5.0,
+        minimum_solid_base_root_depth_mm: 0.8,
         join: PlanarTKeyJoin {
             reach_into_region_mm: 1.6,
             reach_into_base_mm: 1.6,
@@ -168,7 +169,7 @@ fn patch_scope_ui(
     } else {
         ui.label("Full native face requested · complete source width and height");
     }
-    ui.weak("Stage changes here, then Apply settings to commit the complete intent. Sparse base recipes remain unsupported.");
+    ui.weak("Stage changes here, then Apply settings to commit the complete intent. The base inherits the recipe density outside required solid root, landing and cover zones.");
 }
 
 fn bind_region(job: &mut FixedDualJob, region_tool: usize) {
@@ -238,13 +239,13 @@ impl Workbench {
     pub(super) fn functional_material_ui(&mut self, ui: &mut egui::Ui, writable: bool) {
         ui::group(ui, "Material region");
         ui.weak(
-            "One full face or localized pad/band on solid rectangular stock. Physical retention remains unqualified.",
+            "One full face or localized pad/band on native rectangular stock. Physical retention remains unqualified.",
         );
         ui::help(
             ui,
             "functional-region-scope",
             "Scope and qualification",
-            "Requires one upright rectangular native part, a full-height axis-aligned source wall and no optical construction. A localized patch selects source face U and source Z intervals within that wall; full face remains the default. The engine independently admits the geometry, complete keys and end collars. Sparse base recipes are not enabled. Software replay does not establish adhesion, physical strength or printability.",
+            "Requires one upright rectangular native part, a full-height axis-aligned source wall and no optical construction. A localized patch selects source face U and source Z intervals within that wall; full face remains the default. The engine independently admits the geometry, complete keys and end collars. The functional region and required base root, landing and cover zones remain solid; other base interior inherits the recipe density. Software replay does not establish adhesion, physical strength or printability.",
         );
         let face = self.functional_face();
         let extent = face.as_ref().ok().and_then(|face| {
@@ -271,6 +272,7 @@ impl Workbench {
             ui.label("Load an explicit manufacturing intent with a fixed-dual setup and two declared loaded materials.");
             return;
         };
+        let base_infill_fraction = draft.value.recipe.infill_fraction;
         let JobWorkflow::FixedDualMarlin { job } = &mut draft.value.printer.workflow else {
             ui.label("Functional regions require an explicit fixed-dual setup and two declared loaded materials.");
             return;
@@ -321,6 +323,9 @@ impl Workbench {
                 patch_scope_ui(ui, request, extent);
                 ui::number(ui, "Minimum pure region depth (mm)", &mut request.minimum_pure_depth_mm, 0.1);
                 ui.weak("Pure material excludes the join band; never reduced automatically.");
+                ui::number(ui, "Minimum solid base root depth (mm)", &mut request.minimum_solid_base_root_depth_mm, 0.1);
+                ui.weak("Solid base root depth is additional to the join band; neither consumes the other.");
+                ui.weak(format!("Base infill: {:.0}% · region and join reinforcement: solid. Remaining base interior keeps the recipe density.", base_infill_fraction * 100.0));
                 let mut region_tool = job.tools.iter().position(|t| t.material.id == request.material_id);
                 let previous_tool = region_tool;
                 egui::ComboBox::from_id_salt("functional-region-material")
@@ -472,6 +477,7 @@ mod tests {
         assert_eq!(request.definition_id, inspected.reference.definition_id);
         assert_eq!(request.face_id, inspected.reference.face_id);
         assert_eq!(request.minimum_pure_depth_mm, 5.0);
+        assert_eq!(request.minimum_solid_base_root_depth_mm, 0.8);
         assert_eq!(request.face_patch, None);
         assert_eq!(
             request.interface_policy,

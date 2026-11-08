@@ -317,7 +317,13 @@ impl<'de> DeserializeSeed<'de> for RegionSeed<'_> {
     fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
         d.deserialize_struct(
             "ProcessRegionCoverage",
-            &["material_domain", "area_mm2", "fraction", "contributions"],
+            &[
+                "material_domain",
+                "functional_solid_zone",
+                "area_mm2",
+                "fraction",
+                "contributions",
+            ],
             self,
         )
     }
@@ -329,6 +335,7 @@ impl<'de> Visitor<'de> for RegionSeed<'_> {
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut material_domain = None;
+        let mut functional_solid_zone = None;
         let (mut area_mm2, mut fraction, mut contributions) = (None, None, None);
         while let Some(field) = map.next_key::<ProcessRegionField>()? {
             match field {
@@ -337,6 +344,12 @@ impl<'de> Visitor<'de> for RegionSeed<'_> {
                         return Err(A::Error::duplicate_field("material_domain"));
                     }
                     material_domain = Some(map.next_value()?);
+                }
+                ProcessRegionField::FunctionalSolidZone => {
+                    if functional_solid_zone.is_some() {
+                        return Err(A::Error::duplicate_field("functional_solid_zone"));
+                    }
+                    functional_solid_zone = Some(map.next_value()?);
                 }
                 ProcessRegionField::AreaMm2 => {
                     if area_mm2.is_some() {
@@ -363,6 +376,8 @@ impl<'de> Visitor<'de> for RegionSeed<'_> {
             }
         }
         Ok(ProcessRegionCoverage {
+            functional_solid_zone: functional_solid_zone
+                .ok_or_else(|| A::Error::missing_field("functional_solid_zone"))?,
             material_domain: material_domain
                 .ok_or_else(|| A::Error::missing_field("material_domain"))?,
             area_mm2: area_mm2.ok_or_else(|| A::Error::missing_field("area_mm2"))?,
@@ -517,6 +532,7 @@ mod tests {
         SkinCommandFitDomain {
             region_index: 0,
             region: ProcessRegionCoverage {
+                functional_solid_zone: None,
                 material_domain: None,
                 area_mm2: 0.96,
                 fraction: 1.0,
@@ -537,6 +553,35 @@ mod tests {
                 required_mm: [[0.1, 0.5, 0.2], [0.2, 0.5, 0.2]],
                 fitted_mm: [[0.0, 0.5, 0.2], [0.3, 0.5, 0.2]],
             }],
+        }
+    }
+
+    #[test]
+    fn fit_region_requires_explicit_nullable_functional_solid_zone() {
+        let encoded = serde_json::to_value([domain()]).unwrap();
+        for value in [
+            None,
+            Some(serde_json::json!(-1)),
+            Some(serde_json::json!(256)),
+        ] {
+            let mut bad = encoded.clone();
+            let region = bad[0]["region"].as_object_mut().unwrap();
+            match value {
+                Some(value) => {
+                    region.insert("functional_solid_zone".into(), value);
+                }
+                None => {
+                    region.remove("functional_solid_zone");
+                }
+            }
+            let bytes = serde_json::to_vec(&bad).unwrap();
+            assert!(
+                domains(
+                    &mut SegmentBudget::new(),
+                    &mut serde_json::Deserializer::from_slice(&bytes)
+                )
+                .is_err()
+            );
         }
     }
 

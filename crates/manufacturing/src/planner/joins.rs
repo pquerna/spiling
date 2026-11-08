@@ -65,7 +65,13 @@ pub(super) fn append_z_events(
             "end collars consume the complete native height",
         ));
     }
-    for height in [region_z[0], middle[0], middle[1], region_z[1]] {
+    let source_z =
+        [face.min_z_mm, face.max_z_mm].map(|height| height + occurrence.pose.translation_mm[2]);
+    let zones = solid_base_zones(request, &input.intent.recipe, source_z, region_z)?;
+    for height in [region_z[0], middle[0], middle[1], region_z[1]]
+        .into_iter()
+        .chain(zones.iter().flat_map(|zone| zone.physical_z_mm))
+    {
         check_cancel(cancel)?;
         if let Err(position) = events.binary_search_by(|old| old.total_cmp(&height)) {
             if events.len() >= 3 * MAX_PRINT_LAYERS as usize {
@@ -78,6 +84,70 @@ pub(super) fn append_z_events(
         }
     }
     Ok(())
+}
+
+fn solid_base_zones(
+    request: &FunctionalMaterialConstruction,
+    recipe: &PlanarPrintRecipe,
+    source_z: [f64; 2],
+    region_z: [f64; 2],
+) -> Result<Vec<FunctionalBaseSolidZone>, ManufacturingError> {
+    let end = request.minimum_pure_depth_mm
+        + request.join.reach_into_region_mm
+        + request.join.reach_into_base_mm
+        + request.minimum_solid_base_root_depth_mm;
+    let mut zones = vec![FunctionalBaseSolidZone {
+        kind: FunctionalBaseSolidZoneKind::Root,
+        inward_depth_mm: [request.minimum_pure_depth_mm, end],
+        physical_z_mm: region_z,
+    }];
+    let horizon = recipe
+        .bottom_skin_thickness_mm
+        .max(recipe.top_skin_thickness_mm)
+        .max(recipe.layer_height_mm);
+    for (kind, interval) in [
+        (
+            FunctionalBaseSolidZoneKind::LowerLanding,
+            [(region_z[0] - horizon).max(source_z[0]), region_z[0]],
+        ),
+        (
+            FunctionalBaseSolidZoneKind::UpperCover,
+            [region_z[1], (region_z[1] + horizon).min(source_z[1])],
+        ),
+    ] {
+        if interval[0] < interval[1] {
+            zones.push(FunctionalBaseSolidZone {
+                kind,
+                inward_depth_mm: [0.0, end],
+                physical_z_mm: interval,
+            });
+        }
+    }
+    for zone in &zones {
+        zone.validate_values()?;
+    }
+    Ok(zones)
+}
+
+pub(super) fn solid_zone_material(
+    frame: &FunctionalMaterialFrame,
+    zone: &FunctionalBaseSolidZone,
+) -> MultiPolygon<f64> {
+    let depth_axis = usize::from(frame.outward_normal[1] != 0.0);
+    let horizontal_axis = 1 - depth_axis;
+    let depth = zone
+        .inward_depth_mm
+        .map(|value| frame.world_origin_mm[depth_axis] - frame.outward_normal[depth_axis] * value);
+    let bounds = frame.stock_bounds_mm;
+    let mut points = Vec::with_capacity(5);
+    for [horizontal, inward] in [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]] {
+        let mut point = [0.0; 2];
+        point[horizontal_axis] =
+            [bounds.min[horizontal_axis], bounds.max[horizontal_axis]][horizontal];
+        point[depth_axis] = depth[inward];
+        points.push(Coord::from(point));
+    }
+    MultiPolygon(vec![Polygon::new(LineString(points), Vec::new())])
 }
 
 #[expect(
@@ -112,11 +182,6 @@ pub(super) fn capture_or_color(
             cancel,
         );
     };
-    if input.intent.recipe.infill_fraction != 1.0 {
-        return Err(unsupported(
-            "first functional construction requires an explicitly solid base recipe",
-        ));
-    }
     if input.occurrences.len() != 1 {
         return Err(unsupported("requires one native occurrence"));
     }
@@ -261,7 +326,8 @@ pub(super) fn capture_or_color(
             })
             || (extents[horizontal_axis][1] - extents[horizontal_axis][0]) != face.width_mm
             || !extents[depth_axis].contains(&origin[depth_axis])
-            || extents[depth_axis][1] - extents[depth_axis][0] < total_depth + 2.0 * width
+            || extents[depth_axis][1] - extents[depth_axis][0]
+                < total_depth + request.minimum_solid_base_root_depth_mm.max(2.0 * width)
         {
             return Err(unsupported(
                 "protected pure depth, complete keys and a two-bead parent root do not fit this native rectangular stock",
@@ -399,6 +465,12 @@ pub(super) fn capture_or_color(
         }
     }
     construction.functional_frame = Some(FunctionalMaterialFrame {
+        solid_base_zones: solid_base_zones(
+            request,
+            &input.intent.recipe,
+            [face.min_z_mm, face.max_z_mm].map(|height| height + occurrence.pose.translation_mm[2]),
+            region_z,
+        )?,
         occurrence_id: request.occurrence_id,
         definition_id: request.definition_id.clone(),
         source_hash: request.source_hash.clone(),
@@ -417,6 +489,13 @@ pub(super) fn capture_or_color(
         key_centers_u_mm: centers,
     });
     construction.bytes += size_of::<FunctionalMaterialFrame>()
+        + construction
+            .functional_frame
+            .as_ref()
+            .expect("captured functional frame")
+            .solid_base_zones
+            .capacity()
+            * size_of::<FunctionalBaseSolidZone>()
         + MAX_FUNCTIONAL_KEYS * size_of::<f64>()
         + request.definition_id.as_str().len()
         + request.source_hash.as_str().len()
@@ -466,7 +545,14 @@ fn paired_domains(
         depth_sign * depth_end,
         depth_sign * (origin[axis] + depth_sign * end),
     )?;
-    if pure_lower < pure || root_lower <= 0.0 {
+    let solid_root_lower = program_coordinates::enclosed_vertical_gap_mm(
+        depth_sign * (origin[axis] + depth_sign * (end + request.minimum_solid_base_root_depth_mm)),
+        depth_sign * (origin[axis] + depth_sign * end),
+    )?;
+    if pure_lower < pure
+        || root_lower < request.minimum_solid_base_root_depth_mm
+        || solid_root_lower < request.minimum_solid_base_root_depth_mm
+    {
         return Err(error(
             ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
             "functional cut cannot establish the requested minimum pure depth and a positive parent root",

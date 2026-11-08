@@ -196,7 +196,7 @@ macro_rules! hash_id {
 hash_id!(DefinitionId);
 hash_id!(SourceHash);
 impl SourceHash {
-    pub(crate) fn allocated_bytes(&self) -> usize {
+    pub fn allocated_bytes(&self) -> usize {
         self.0.capacity()
     }
     pub fn from_bytes(bytes: &[u8]) -> Self {

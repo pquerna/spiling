@@ -22,6 +22,7 @@ fn domain() -> SkinCommandFitDomain {
     SkinCommandFitDomain {
         region_index: 0,
         region: ProcessRegionCoverage {
+            functional_solid_zone: None,
             material_domain: None,
             area_mm2: 23.96,
             fraction: 1.0,

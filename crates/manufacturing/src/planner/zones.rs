@@ -655,7 +655,9 @@ pub(super) fn partition(
             if !outside.0.is_empty() {
                 next.push(InteriorRegion {
                     bead_width_mm: None,
+                    source_material: None,
                     coverage: ProcessRegionCoverage {
+                        functional_solid_zone: None,
                         material_domain: None,
                         area_mm2: outside.unsigned_area(),
                         ..owner.coverage.clone()
@@ -735,7 +737,9 @@ pub(super) fn partition(
                 }
                 next.push(InteriorRegion {
                     bead_width_mm: None,
+                    source_material: None,
                     coverage: ProcessRegionCoverage {
+                        functional_solid_zone: None,
                         material_domain: None,
                         area_mm2: eligible.unsigned_area(),
                         fraction: value.fraction,
@@ -963,7 +967,9 @@ pub(super) fn partition(
                 }
                 next.push(InteriorRegion {
                     bead_width_mm: None,
+                    source_material: None,
                     coverage: ProcessRegionCoverage {
+                        functional_solid_zone: None,
                         material_domain: None,
                         area_mm2: piece.unsigned_area(),
                         fraction: zone.values[side].fraction,

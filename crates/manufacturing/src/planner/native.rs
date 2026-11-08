@@ -4327,6 +4327,7 @@ mod actual_deposition_tests {
                 support_nominal_deposition_volume_mm3: support_area * volume,
                 process_regions: if object_area > 0.0 {
                     vec![ProcessRegionCoverage {
+                        functional_solid_zone: None,
                 material_domain: None,
                         area_mm2: object_area,
                         fraction: 1.0,

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-mod boolean;
+pub(crate) mod boolean;
 use boolean::budget as boolean_budget;
 mod classification;
 mod color;
@@ -47,6 +47,10 @@ const MAX_BOOLEAN_PAIRS: usize = 16_384_000_000;
 // This coarse arithmetic bound never replaces actual allocated-byte admission.
 const MAX_RETAINED_GEOMETRY_UNITS: usize =
     MAX_MANUFACTURING_RETAINED_BYTES as usize / std::mem::size_of::<geo::Coord<f64>>();
+
+pub(crate) fn retained_coverage_bytes(coverage: &PlanarRegionCoverage) -> usize {
+    bonds::coverage_bytes(coverage)
+}
 
 fn remaining_geometry_units(
     retained: usize,
@@ -1056,6 +1060,11 @@ fn admit_schedule<'model>(
                 top_axis,
                 required_owner,
                 construction_phase,
+                construction.functional_frame.as_ref().and_then(|frame| {
+                    frame.solid_base_zones.iter().position(|zone| {
+                        zone.physical_z_mm[0] <= elevation.lower_z && z <= zone.physical_z_mm[1]
+                    })
+                }),
             );
             if key != Some(next_key) {
                 // Drop the prior classification before allocating its replacement.
@@ -1228,6 +1237,10 @@ fn admit_schedule<'model>(
                 construction.classify(
                     classified.as_mut().expect("classified material regions"),
                     [elevation.lower_z, z],
+                    classification::fixed_owned_budget(
+                        skin_retained_points(retained_points, &neighborhoods, &[&lower, &upper])?,
+                        skin_retained_bytes(skin_owned_bytes, &neighborhoods, &[&lower, &upper])?,
+                    ),
                     neighborhoods.work_mut(),
                     cancel,
                 )?;
@@ -1826,6 +1839,24 @@ fn admit_schedule<'model>(
                         neighborhoods.work_mut(),
                         cancel,
                     )?;
+                    construction.classify(
+                        &mut classified,
+                        [elevation.lower_z, elevation.z],
+                        classification::fixed_owned_budget(
+                            skin_retained_points(
+                                live_retained_points,
+                                &neighborhoods,
+                                &[&lower, &upper],
+                            )?,
+                            skin_retained_bytes(
+                                live_owned_bytes,
+                                &neighborhoods,
+                                &[&lower, &upper],
+                            )?,
+                        ),
+                        neighborhoods.work_mut(),
+                        cancel,
+                    )?;
                     classified.with_tool_widths(
                         input.intent,
                         classification::fixed_owned_budget(
@@ -2235,6 +2266,7 @@ fn admit_schedule<'model>(
             neighborhoods.work_mut(),
             cancel,
         )?;
+        construction.attribute(&mut layers, neighborhoods.work_mut(), cancel)?;
         support::object_volumes(&mut layers, input.intent)?;
         for layer in &mut layers {
             bonds::refresh_witness_kinds(layer)?;
@@ -2314,7 +2346,6 @@ fn admit_schedule<'model>(
             surface_tolerance_mm: surface::SURFACE_TOLERANCE_MM,
             layer_quantization_mm: LAYER_QUANTIZATION_MM,
         };
-        construction.attribute(&mut result.layers, neighborhoods.work_mut(), cancel)?;
         if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
             for layer in &mut result.layers {
                 let mut right = layer.paths.len();
@@ -2417,6 +2448,7 @@ fn process_domain(
     Ok(ProcessDomain {
         material,
         coverage: ProcessRegionCoverage {
+            functional_solid_zone: None,
             material_domain: None,
             area_mm2: 0.0,
             fraction: value.fraction,

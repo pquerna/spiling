@@ -226,7 +226,23 @@ pub(super) fn validate_material_domains(
     if let Some(job) = job
         && let Some(construction) = &job.functional_construction
     {
-        return functional::validate_material_domains(plan, construction, job);
+        return functional::validate_material_domains(
+            plan,
+            construction,
+            job,
+            intent.recipe.infill_fraction,
+        );
+    }
+    if plan.layers.iter().any(|layer| {
+        layer
+            .region_coverage
+            .process_regions
+            .iter()
+            .any(|region| region.functional_solid_zone.is_some())
+    }) {
+        return Err(invalid(
+            "nonfunctional process coverage must have a null functional solid zone",
+        ));
     }
     if plan.functional_material_frame.is_some() {
         return Err(invalid("functional frame has no functional construction"));
