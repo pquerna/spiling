@@ -105,7 +105,9 @@ def collect(root, inputs, outputs):
     for folder in inputs:
         manifest = json.loads((folder / "jobs.json").read_text())
         for failure in manifest["failed_captures"]:
-            failed_captures[digest((failure["specimen"], failure["candidate"]))] = failure
+            failed_captures[digest((failure["specimen"], failure["candidate"]))] = (
+                failure
+            )
         for job in manifest["jobs"]:
             spec = json.loads((folder / job["id"] / "case.json").read_text())
             input_hash = file_hash(folder / job["id"] / "case.json")
@@ -160,7 +162,9 @@ def collect(root, inputs, outputs):
                     ]
                     if row["status"] == "ok":
                         if launch.get("removed") is not True:
-                            raise ValueError("accepted result lacks owned-container cleanup")
+                            raise ValueError(
+                                "accepted result lacks owned-container cleanup"
+                            )
                         physical_gate(row)
                         accepted.append(row)
                 key = digest(scenario_key(row))
@@ -387,6 +391,74 @@ def gallery(root, report, output):
         )
         fig.savefig(output / (shape + "-gallery.png"), dpi=180)
         plt.close(fig)
+        layer_gallery(root, rows, shape, families, output)
+
+
+def layer_gallery(root, rows, shape, families, output):
+    """Two adjacent real intervals expose alternation versus continuous webs."""
+    import matplotlib.pyplot as plt
+    from shapely.plotting import plot_polygon
+    from geometry import footprint_slabs
+
+    fig, axes = plt.subplots(2, len(families), figsize=(13, 6), layout="constrained")
+    for column, (name, fraction) in enumerate(families):
+        row = next(
+            (
+                r
+                for r in rows
+                if r["specimen"] == shape
+                and family(r["candidate"]) == name
+                and r["candidate"]["fraction"] == fraction
+            ),
+            None,
+        )
+        if row is None:
+            for ax in axes[:, column]:
+                ax.set_axis_off()
+            axes[0, column].set_title(name + " · no admitted construction", fontsize=10)
+            continue
+        data = json.loads((root / row["native"] / "roads.json").read_text())
+        x, y, z = data["size_mm"]
+        height = row["candidate"]["layer_height"]
+        for index, ax in enumerate(axes[:, column]):
+            sample_z = z / 2 + (index - 0.5) * height
+            roads = [r for r in data["roads"] if r["lower"] <= sample_z < r["upper"]]
+            for interior, color in ((False, "#bcc4ca"), (True, COLORS[name])):
+                selected = [
+                    r
+                    for r in roads
+                    if (
+                        r["kind"] in (2, 5, 13)
+                        or (r["kind"] == 8 and type(r["owner"]) is int)
+                    )
+                    == interior
+                ]
+                if selected:
+                    _, _, domains, _ = footprint_slabs(selected)
+                    plot_polygon(
+                        domains[0],
+                        ax=ax,
+                        add_points=False,
+                        facecolor=color,
+                        edgecolor="none",
+                    )
+            ax.set(xlim=(19, 21 + x), ylim=(19, 21 + y), aspect="equal")
+            ax.set_axis_off()
+            if index == 0:
+                ax.set_title(name + " " + setting(row["candidate"]), fontsize=10)
+            if column == 0 and roads:
+                ax.text(
+                    0,
+                    -0.05,
+                    f"Z {min(r['lower'] for r in roads):g}–{max(r['upper'] for r in roads):g} mm",
+                    transform=ax.transAxes,
+                    fontsize=9,
+                )
+    fig.suptitle(
+        shape + " · adjacent actual layers · nominal road footprints", fontsize=13
+    )
+    fig.savefig(output / (shape + "-layers.png"), dpi=180)
+    plt.close(fig)
 
 
 def main():
