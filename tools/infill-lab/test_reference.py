@@ -149,16 +149,33 @@ def test_element_gate_cannot_promote_a_subset_without_analytical_controls():
 
     assert not analytical_gate([])
     assert not analytical_gate(
-        [dict(element="C3D15", case="pure_bending", required=True, passed=True)]
+        [
+            dict(
+                element="C3D15",
+                case="pure_bending",
+                required=True,
+                passed=True,
+                refinement=dict(nx=2, ny=1, nz=1),
+                relative_error=0.0,
+            )
+        ]
     )
     cases = [
         dict(
-            element=e, case=c, required=c != "pure_bending" or e != "C3D6", passed=True
+            element=e,
+            case=c,
+            required=c != "pure_bending" or e != "C3D6",
+            passed=True,
+            refinement=dict(nx=2, ny=1, nz=1),
+            relative_error=27.0 if e == "C3D6" and c == "pure_bending" else 0.0,
         )
         for e in ("C3D6", "C3D15", "C3D10", "C3D8I")
         for c in ("pure_bending", "compression_x", "compression_y", "compression_z")
     ]
     assert analytical_gate(cases)
+    cases[0]["relative_error"] = 0.0
+    assert not analytical_gate(cases)
+    cases[0]["relative_error"] = 27.0
     cases[-1]["passed"] = False
     assert not analytical_gate(cases)
 
@@ -179,7 +196,12 @@ def reference_panel(tmp_path, entries):
             case="compression_z",
             refinement=dict(divisions=division, max_z=1.0),
         )
-        spec = dict(judge=judge, kind_source="actual_roads", scenarios=[scenario])
+        spec = dict(
+            judge=judge,
+            kind_source="actual_roads",
+            specimen="cube32",
+            scenarios=[scenario],
+        )
         key = digest(spec)
         folder, result = inputs / key, outputs / key
         folder.mkdir()
@@ -240,3 +262,21 @@ def test_rejected_finest_required_mesh_cannot_promote_coarser_successes(tmp_path
     assert check["coarse"] == ("C3D15", 2, 1.0)
     assert check["fine"] == ("C3D15", 4, 1.0)
     assert not check["passed"] and report["status"] == "element_gate_open"
+
+
+@pytest.mark.parametrize(
+    "field", ("ccx_nproc_results", "ccx_nproc_stiffness", "ccx_nproc_equation_solver")
+)
+def test_element_report_refuses_hidden_result_thread_profile_change(tmp_path, field):
+    import json
+    from element_report import collect
+
+    inputs, outputs = reference_panel(
+        tmp_path, [("C3D15", 1, 4, "ok"), ("C3D15", 2, 4, "ok")]
+    )
+    path = next(outputs.glob("*/launch.json"))
+    launch = json.loads(path.read_text())
+    launch[field] = 1
+    path.write_text(json.dumps(launch))
+    with pytest.raises(ValueError, match="thread profiles"):
+        collect(inputs, outputs)

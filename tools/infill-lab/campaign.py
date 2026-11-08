@@ -375,6 +375,10 @@ def dispatch(args):
             cmd = f"python3 {remote}/tooling/launch.py --root {remote} run --input {remote}/inputs/{key} --run-id {remote_id} --backend {args.backend} --seconds {args.seconds}"
             if args.blas_threads is not None:
                 cmd += f" --blas-threads {args.blas_threads}"
+            for phase in ("results", "stiffness", "equation"):
+                count = getattr(args, f"ccx_{phase}_threads")
+                if count is not None:
+                    cmd += f" --ccx-{phase}-threads {count}"
             if args.cpus is not None:
                 cmd += f" --cpus {args.cpus}"
             if args.memory_gib is not None:
@@ -465,6 +469,8 @@ def main():
     d.add_argument("--backend", choices=("coupon", "reference"), default="coupon")
     d.add_argument("--cpus", type=int)
     d.add_argument("--blas-threads", type=int)
+    for phase in ("results", "stiffness", "equation"):
+        d.add_argument(f"--ccx-{phase}-threads", type=int)
     d.add_argument("--memory-gib", type=float)
     args = p.parse_args()
     if args.command == "context":

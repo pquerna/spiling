@@ -25,7 +25,18 @@ def analytical_gate(checks):
         for case in ("pure_bending", "compression_x", "compression_y", "compression_z")
     }
     present = {(c["element"], c["case"]) for c in checks}
-    return expected <= present and all(c["passed"] for c in checks if c["required"])
+    coarse_linear_control = any(
+        c["element"] == "C3D6"
+        and c["case"] == "pure_bending"
+        and c["refinement"] == dict(nx=2, ny=1, nz=1)
+        and c["relative_error"] > 1
+        for c in checks
+    )
+    return (
+        expected <= present
+        and coarse_linear_control
+        and all(c["passed"] for c in checks if c["required"])
+    )
 
 
 def collect(inputs, outputs):
@@ -54,7 +65,17 @@ def collect(inputs, outputs):
         threads = launch.get("blas_threads")
         if type(threads) is not int or threads < 1:
             raise ValueError("independent result lacks explicit thread profile")
-        thread_profiles.add(threads)
+        profile = [threads]
+        for field in (
+            "ccx_nproc_results",
+            "ccx_nproc_stiffness",
+            "ccx_nproc_equation_solver",
+        ):
+            count = launch.get(field, threads)
+            if type(count) is not int or count < 1:
+                raise ValueError("invalid independent solver thread profile")
+            profile.append(count)
+        thread_profiles.add(tuple(profile))
         images.add(launch["image"]["id"])
         if len(entries) != len(spec["scenarios"]):
             raise ValueError("incomplete/duplicate independent scenario result")
@@ -189,7 +210,10 @@ def collect(inputs, outputs):
     return dict(
         scope="independent_element_qualification_not_whole_part_strength",
         image_ids=sorted(images),
-        thread_profiles=sorted(thread_profiles),
+        thread_profiles=[
+            dict(omp_blas=t, ccx_results=r, ccx_stiffness=s, ccx_equation_solver=e)
+            for t, r, s, e in sorted(thread_profiles)
+        ],
         status="element_gate_passed" if qualified else "element_gate_open",
         required_cases=len(manifest["jobs"]),
         completed=len(rows),
@@ -202,14 +226,78 @@ def collect(inputs, outputs):
     )
 
 
+def plot(report, destination):
+    """Export a scientific diagnostic, never an infill-strength Pareto claim."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), layout="constrained")
+    for ax, specimen, title in zip(
+        axes,
+        ("cube32", "beam80"),
+        ("Cube · 28 × 28 × 8 mm cut", "Beam · 76 × 26 × 8 mm cut"),
+    ):
+        for element, label, color in (
+            ("C3D6", "Linear prisms", "#64748b"),
+            ("C3D15", "Quadratic prisms", "#0072b2"),
+            ("C3D10", "Quadratic tetrahedra", "#d55e00"),
+        ):
+            selected = sorted(
+                [
+                    r
+                    for r in report["rows"]
+                    if r["specimen"] == specimen
+                    and r["status"] == "ok"
+                    and r["scenario"]["element"] == element
+                    and r["scenario"]["refinement"]["max_z"] == 1.0
+                ],
+                key=lambda r: r["scenario"]["refinement"]["divisions"],
+            )
+            if selected:
+                ax.plot(
+                    [r["scenario"]["refinement"]["divisions"] for r in selected],
+                    [r["stiffness_n_mm"] for r in selected],
+                    marker="o",
+                    color=color,
+                    label=label,
+                )
+        ax.set(
+            title=title,
+            xlabel="Planar refinement factor",
+            ylabel="Z stiffness (N/mm)",
+            ylim=(0, None),
+        )
+        ax.set_xscale("log", base=2)
+        ax.set_xticks([1, 2, 4, 8], ["1", "2", "4", "8"])
+        ax.grid(alpha=0.2)
+        ax.legend(frameon=False)
+    fig.suptitle(
+        "Crossing-road element qualification · "
+        + ("gate passed" if report["status"] == "element_gate_passed" else "gate open"),
+        weight="bold",
+    )
+    fig.supxlabel(
+        "Same nominal deposition · assumed weak-Z elasticity · accepted numerical results only; missing/rejected cases remain in the report",
+        fontsize=9,
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(destination, dpi=180)
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--results", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--plot", type=Path)
     args = parser.parse_args()
     report = collect(args.input, args.results)
     write(args.output, report)
+    if args.plot:
+        plot(report, args.plot)
     print(
         json.dumps(
             {

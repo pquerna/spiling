@@ -110,8 +110,25 @@ Reference runs default to one OMP/BLAS thread. A controlled ARM64 CalculiX 2.20
 cohort returned completed but unbalanced reactions/energy with four threads;
 same-input single-thread controls passed. This is an environment-specific
 reliability observation, not an attribution to a particular solver subsystem.
-Thread profiles are explicit evidence; the report refuses to pool them. Keep
+`--ccx-results-threads`, `--ccx-stiffness-threads` and
+`--ccx-equation-threads` permit explicit phase-isolation controls; these are not
+admitted parallel optimizations. Thread profiles retain OMP/BLAS, result,
+stiffness and equation-solver overrides; the report refuses to pool them. Keep
 failed runs and deliberate thread controls separate from candidate comparisons.
 `--extra-divisions 4` (or `4 8`) packs additional planar refinements with explicit
 1800-second per-solve budgets. The report checks the finest required pair, even
 when that solve failed, and retains the entire panel's failures.
+
+`element_report.py --input INPUTS --results RESULTS --output REPORT.json
+--plot convergence.png` retains failed/missing cases and exports a diagnostic of
+accepted responses. This is element convergence, not an infill strength chart.
+
+For the Debian 2.20 ARM64 cohort, isolated controls with a single equation-solver
+thread and four assembly/result threads match the single-thread reference;
+result-only and result-plus-stiffness restrictions still reject other cases.
+This narrows the investigation to the parallel equation-solve path for those
+controls. It is not universal solver qualification or a reason to change the
+single-thread default. Retain solver logs, failures and exact complete panels.
+The official reference is the [CalculiX manual](https://www.dhondt.de/ccx_2.22.pdf);
+its element rules and environment controls do not replace testing the exact
+installed executable/image.

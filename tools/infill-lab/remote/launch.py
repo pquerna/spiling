@@ -195,6 +195,23 @@ def run(args, root):
         requested_threads = 1
     thread_count = blas_threads(budget["cpus"], requested_threads)
     receipt["blas_threads"] = thread_count
+    phase_overrides = {
+        "RESULTS": args.ccx_results_threads,
+        "STIFFNESS": args.ccx_stiffness_threads,
+        "EQUATION_SOLVER": args.ccx_equation_threads,
+    }
+    if args.backend != "reference" and any(
+        v is not None for v in phase_overrides.values()
+    ):
+        raise ValueError("CalculiX thread controls apply only to reference jobs")
+    phase_threads = {}
+    if args.backend == "reference":
+        for phase, requested in phase_overrides.items():
+            count = blas_threads(
+                budget["cpus"], thread_count if requested is None else requested
+            )
+            phase_threads[phase] = count
+            receipt["ccx_nproc_" + phase.lower()] = count
     threads = str(thread_count)
     create = [
         "docker",
@@ -231,6 +248,8 @@ def run(args, root):
         "--env",
         f"OMP_NUM_THREADS={threads}",
     ]
+    for phase, count in phase_threads.items():
+        create += ["--env", f"CCX_NPROC_{phase}={count}"]
     if args.backend == "warp":
         create += ["--device=nvidia.com/gpu=all"]
     create += [image["id"], "--backend", args.backend]
@@ -296,6 +315,8 @@ def main():
     r.add_argument("--memory-gib", type=float)
     r.add_argument("--cpus", type=float)
     r.add_argument("--blas-threads", type=int)
+    for phase in ("results", "stiffness", "equation"):
+        r.add_argument(f"--ccx-{phase}-threads", type=int)
     args = p.parse_args()
     root = args.root.expanduser().resolve()
     if not root.is_relative_to(Path.home()) or root == Path.home():
