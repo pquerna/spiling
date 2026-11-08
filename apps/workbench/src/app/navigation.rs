@@ -8,9 +8,25 @@ pub(super) enum Navigation {
     Action(Action),
     Face(FaceRef),
     Occurrence(OccurrenceId),
+    AnalysisCase(spiling_contracts::analysis::AnalysisCaseId),
     InfillScope(bool, bool),
     ClearSelection,
     Plate(spiling_contracts::project::PrintLayoutId),
+}
+fn select_occurrence(
+    selected: &mut Option<FaceRef>,
+    occurrence: &mut Option<OccurrenceId>,
+    pose_revision: &mut Option<SceneRevision>,
+    subject_drafts: bool,
+    target: OccurrenceId,
+) -> bool {
+    if *occurrence != Some(target) && subject_drafts {
+        return false;
+    }
+    *selected = None;
+    *occurrence = Some(target);
+    *pose_revision = None;
+    true
 }
 impl Workbench {
     pub(super) fn project_drafts(&self) -> bool {
@@ -70,12 +86,15 @@ impl Workbench {
         self.surface.has_changes() || self.process.has_changes() || self.pose != self.pose_original
     }
     pub(super) fn choose_occurrence(&mut self, id: OccurrenceId) {
-        if self.occurrence != Some(id) && self.subject_drafts() {
+        let subject_drafts = self.subject_drafts();
+        if !select_occurrence(
+            &mut self.selected,
+            &mut self.occurrence,
+            &mut self.pose_revision,
+            subject_drafts,
+            id,
+        ) {
             self.navigation = Some(Navigation::Occurrence(id));
-        } else {
-            self.selected = None;
-            self.occurrence = Some(id);
-            self.pose_revision = None;
         }
     }
     pub(super) fn navigation_dialog(&mut self, ctx: &egui::Context) {
@@ -139,11 +158,76 @@ impl Workbench {
                 }
                 Navigation::Face(reference) => self.select_face(reference),
                 Navigation::Occurrence(id) => self.choose_occurrence(id),
+                Navigation::AnalysisCase(id) => self.choose_analysis_case(id),
                 Navigation::ClearSelection => self.clear_selection(),
                 Navigation::InfillScope(definition, boxed) => {
                     self.process.set_scope(definition, boxed)
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn selected_face(occurrence_id: OccurrenceId) -> FaceRef {
+        FaceRef {
+            session_id: SessionId::new(),
+            scene_revision: SceneRevision(3),
+            occurrence_id,
+            definition_id: DefinitionId::from_source_sha256(&[42; 32]),
+            face_id: FaceId::from_step_entity(1).unwrap(),
+        }
+    }
+
+    #[test]
+    fn analysis_case_subject_selection_invalidates_the_other_parts_pose_cache() {
+        let original = OccurrenceId::new(1).unwrap();
+        let target = OccurrenceId::new(2).unwrap();
+        let mut selected = Some(selected_face(original));
+        let mut occurrence = Some(original);
+        let mut pose_revision = Some(SceneRevision(3));
+        assert!(select_occurrence(
+            &mut selected,
+            &mut occurrence,
+            &mut pose_revision,
+            false,
+            target,
+        ));
+        assert_eq!(occurrence, Some(target));
+        assert!(selected.is_none());
+        assert!(pose_revision.is_none());
+    }
+
+    #[test]
+    fn analysis_case_subject_selection_preserves_dirty_pose_until_discard() {
+        let original = OccurrenceId::new(1).unwrap();
+        let target = OccurrenceId::new(2).unwrap();
+        let face = selected_face(original);
+        let mut selected = Some(face.clone());
+        let mut occurrence = Some(original);
+        let mut pose_revision = Some(SceneRevision(3));
+        assert!(!select_occurrence(
+            &mut selected,
+            &mut occurrence,
+            &mut pose_revision,
+            true,
+            target,
+        ));
+        assert_eq!(occurrence, Some(original));
+        assert_eq!(selected, Some(face));
+        assert_eq!(pose_revision, Some(SceneRevision(3)));
+        assert!(select_occurrence(
+            &mut selected,
+            &mut occurrence,
+            &mut pose_revision,
+            false,
+            target,
+        ));
+        assert_eq!(occurrence, Some(target));
+        assert!(selected.is_none());
+        assert!(pose_revision.is_none());
     }
 }

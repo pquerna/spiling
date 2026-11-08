@@ -48,6 +48,37 @@ impl MechanicsUi {
     }
 }
 impl Workbench {
+    pub(super) fn choose_analysis_case(&mut self, id: AnalysisCaseId) {
+        if self.mechanics.has_changes() {
+            return;
+        }
+        let (Some(project), Some(hello)) = (self.state.project.clone(), self.state.hello.clone())
+        else {
+            return;
+        };
+        let Some(record) = project
+            .analysis
+            .cases
+            .iter()
+            .find(|record| record.case.id == id && record.case.layout_id == project.layout_id)
+        else {
+            return;
+        };
+        if self.subject_drafts() {
+            self.navigation = Some(navigation::Navigation::AnalysisCase(id));
+            return;
+        }
+        self.choose_occurrence(record.case.occurrence_id);
+        self.mechanics.draft = Some(Draft {
+            project: project.project_id.clone(),
+            session: hello.session_id.clone(),
+            base: project.revision,
+            original: Some(record.case.clone()),
+            value: record.case.clone(),
+            submitted: None,
+            removing: false,
+        });
+    }
     pub(super) fn reconcile_mechanics(&mut self) {
         let Some(draft) = &mut self.mechanics.draft else {
             return;
@@ -138,16 +169,7 @@ impl Workbench {
                 )
                 .clicked()
             {
-                self.mechanics.draft = Some(Draft {
-                    project: project.project_id.clone(),
-                    session: hello.session_id.clone(),
-                    base: project.revision,
-                    original: Some(record.case.clone()),
-                    value: record.case.clone(),
-                    submitted: None,
-                    removing: false,
-                });
-                self.occurrence = Some(record.case.occurrence_id);
+                self.choose_analysis_case(record.case.id.clone());
             }
         }
         let subject = self.state.display.as_ref().and_then(|scene| {
