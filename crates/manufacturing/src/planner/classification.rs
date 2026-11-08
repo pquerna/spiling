@@ -926,6 +926,11 @@ impl ClassifiedRegions {
         cancel: &AtomicBool,
     ) -> Result<region::OrdinaryHatchPhase, ManufacturingError> {
         check_cancel(cancel)?;
+        // Grid families retain the same centered X/Y lattices on every fine
+        // interval. A single-family phase proposal cannot guide this pattern.
+        if matches!(layer.recipe.sparse_infill, SparseInfillPolicy::Grid) {
+            return Ok(region::OrdinaryHatchPhase::Centered);
+        }
         let class_points = self.retained_points();
         admit(
             point_sum(class_points, anchors.retained_records())?,
@@ -1330,6 +1335,18 @@ impl ClassifiedRegions {
         constructed_domains: &mut Vec<SkinBridgeDomain>,
         cancel: &AtomicBool,
     ) -> Result<Vec<DepositionPath>, ManufacturingError> {
+        if matches!(layer.recipe.sparse_infill, SparseInfillPolicy::Grid)
+            && self.interiors.iter().any(|interior| {
+                interior.coverage.fraction > 0.0
+                    && interior.coverage.fraction < 1.0
+                    && !interior.domain.0.is_empty()
+            })
+        {
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "grid infill requires direct lower anchors; sparse bridge recovery is not implemented",
+            ));
+        }
         let initial_segments = *segments;
         let mut normal = super::support::RasterCandidate {
             skin_command_fits: Vec::new(),

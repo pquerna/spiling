@@ -924,7 +924,7 @@ pub(crate) fn verify_actual(
                 } else {
                     recipe.rectilinear_axis
                 };
-                let fixed_axis = match policy {
+                let mut fixed_axis = match policy {
                     RectilinearAxisPolicy::X => 1,
                     RectilinearAxisPolicy::Y => 0,
                     RectilinearAxisPolicy::AlternatingXY => {
@@ -942,6 +942,17 @@ pub(crate) fn verify_actual(
                         }
                     }
                 };
+                if deposition_kind == DepositionKind::SparseFill
+                    && matches!(recipe.sparse_infill, SparseInfillPolicy::Grid)
+                {
+                    fixed_axis = if from[0] == position[0] {
+                        0
+                    } else if from[1] == position[1] {
+                        1
+                    } else {
+                        return Err(failed("actual grid deposition must follow build X or Y"));
+                    };
+                }
                 if from[fixed_axis] != position[fixed_axis] {
                     return Err(failed(
                         "actual ordinary deposition violates its authored axis policy",
@@ -1160,6 +1171,7 @@ pub(crate) fn verify_actual(
     let mut geometry_work = 0usize;
     let mut anchors = crate::planner::support::AnchorWorkspace::default();
     let mut plate_contacts = Vec::new();
+    interfaces::verify_grid(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     interfaces::verify_projected_byte_geometry(
         plan,
         recipe,

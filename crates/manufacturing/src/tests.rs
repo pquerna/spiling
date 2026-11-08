@@ -3123,3 +3123,80 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         assert_eq!(committed, fixture, "native replay ABI golden drift");
     }
 }
+
+#[test]
+fn native_grid_infill_emits_both_half_density_families_and_replays() {
+    let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0)]);
+    let mut requested = intent();
+    requested.recipe.infill_fraction = 0.3;
+    requested.recipe.sparse_infill = SparseInfillPolicy::Grid;
+    requested.recipe.layer_height_mm = 0.2;
+    requested.recipe.bead_width_mm = 0.45;
+    requested.recipe.perimeter_count = 2;
+    requested.recipe.process.max_bridge_span_mm = 10.0;
+    let bundle = scene.compile(&requested).unwrap();
+    assert!(bundle.verification.verified);
+    let motion = actual_motion(&bundle);
+    let mut families = std::collections::BTreeMap::<u32, u8>::new();
+    for pair in motion.windows(2) {
+        let (kind, layer, end) = pair[1];
+        if kind != 5 {
+            continue;
+        }
+        let start = pair[0].2;
+        let family = if start[0] == end[0] && start[1] != end[1] {
+            1
+        } else if start[1] == end[1] && start[0] != end[0] {
+            2
+        } else {
+            panic!("noncardinal grid row")
+        };
+        *families.entry(layer).or_default() |= family;
+    }
+    assert!(!families.is_empty());
+    assert!(families.values().all(|bits| *bits == 3));
+    assert!(bundle.plan.sparse_bands.is_empty());
+    let height: f64 = 0.2;
+    let expected_pitch =
+        ((0.45 - height) * height + std::f64::consts::PI * (height / 2.0).powi(2)) / height / 0.15;
+    for layer in &bundle.plan.layers {
+        for fixed in [0, 1] {
+            let mut coordinates: Vec<_> = layer
+                .paths
+                .iter()
+                .filter(|p| {
+                    p.kind == DepositionKind::SparseFill
+                        && p.points_mm[0][fixed] == p.points_mm[1][fixed]
+                })
+                .map(|p| p.points_mm[0][fixed])
+                .collect();
+            coordinates.sort_by(f64::total_cmp);
+            coordinates.dedup();
+            for pair in coordinates.windows(2) {
+                assert!((pair[1] - pair[0] - expected_pitch).abs() < 1e-7);
+            }
+        }
+    }
+    // Remove an entire family from plan AND emitted bytes, and reconcile dose.
+    // Fresh replay must reject this self-consistent but incomplete grid.
+    let mut missing = bundle.plan.clone();
+    for layer in &mut missing.layers {
+        layer.paths.retain(|p| {
+            p.kind != DepositionKind::SparseFill || p.points_mm[0][0] != p.points_mm[1][0]
+        });
+    }
+    let error = assert_reemitted_interface_refuses(missing, &requested);
+    assert!(error.message.contains("orthogonal line family"));
+    // Changing only the captured policy cannot bless a different pattern.
+    let mut wrong = bundle.clone();
+    wrong.provenance.intent.recipe.sparse_infill = SparseInfillPolicy::Fine;
+    assert!(
+        inspect_bundle(
+            &wrong,
+            &SourceHash::from_bytes(&serde_json::to_vec(&wrong).unwrap()),
+            VerificationOutput::ReportOnly,
+            &AtomicBool::new(false)
+        )
+        .is_err()
+    );
+}

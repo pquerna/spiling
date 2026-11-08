@@ -32,12 +32,39 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
         ui::number(ui,"Maximum wall width (mm)",&mut intent.printer.deposition_limits.max_bead_width_mm,0.01);
         ui.weak("Declared software limits; native admission and actual-program verification remain mandatory.");
     });
-    egui::CollapsingHeader::new(format!("Infill bands · {}", if matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Fine) { "Fine" } else { "Combined" })).id_salt("infill-bands").show(ui,|ui|{
-        let mut combine=matches!(intent.recipe.sparse_infill,SparseInfillPolicy::CombineEligible{..});
-        if ui.checkbox(&mut combine,"Combine eligible sparse interiors").changed(){intent.recipe.sparse_infill=if combine{SparseInfillPolicy::CombineEligible{max_height_mm:0.0}}else{SparseInfillPolicy::Fine};}
-        if let SparseInfillPolicy::CombineEligible{max_height_mm}=&mut intent.recipe.sparse_infill {ui::number(ui,"Maximum physical height (mm)",max_height_mm,0.01);}
-        ui.weak("Walls, skins and protected construction remain fine. Native vetoes can retain fine sparse intervals.");
-    });
+    let infill_label = match intent.recipe.sparse_infill {
+        SparseInfillPolicy::Fine => "Rectilinear",
+        SparseInfillPolicy::Grid => "Grid",
+        SparseInfillPolicy::CombineEligible { .. } => "Rectilinear · combined",
+    };
+    egui::CollapsingHeader::new(format!("Infill · {infill_label}"))
+        .id_salt("infill-bands")
+        .show(ui, |ui| {
+            let mut grid = matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Grid);
+            egui::ComboBox::from_id_salt("infill-pattern")
+                .selected_text(if grid { "Grid" } else { "Rectilinear" })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut grid, false, "Rectilinear");
+                    ui.selectable_value(&mut grid, true, "Grid")
+                        .on_hover_text("Two perpendicular line families in every fine interval. Single tool; supports, process regions and finishes are currently excluded.");
+                });
+            if grid != matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Grid) {
+                intent.recipe.sparse_infill = if grid { SparseInfillPolicy::Grid } else { SparseInfillPolicy::Fine };
+            }
+            if !grid {
+                let mut combine = matches!(intent.recipe.sparse_infill, SparseInfillPolicy::CombineEligible { .. });
+                if ui.checkbox(&mut combine, "Combine sparse bands").changed() {
+                    intent.recipe.sparse_infill = if combine {
+                        SparseInfillPolicy::CombineEligible { max_height_mm: 0.0 }
+                    } else { SparseInfillPolicy::Fine };
+                }
+                if let SparseInfillPolicy::CombineEligible { max_height_mm } = &mut intent.recipe.sparse_infill {
+                    ui::number(ui, "Maximum height (mm)", max_height_mm, 0.01);
+                }
+            } else if !matches!(intent.recipe.supports, SupportPolicy::Disabled) {
+                ui.colored_label(ui.visuals().warn_fg_color, "Grid requires supports off");
+            }
+        });
     ui.add_enabled_ui(intent.material_profile.is_none(), |ui| {
         ui.push_id("recipe-process", |ui| {
             process_fields(ui, &mut intent.recipe.process)
@@ -90,7 +117,14 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
         .id_salt("hatch-directions")
         .show(ui, |ui| {
             for (label, value) in [
-                ("Interior hatch", &mut intent.recipe.rectilinear_axis),
+                (
+                    if matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Grid) {
+                        "Solid / bottom hatch"
+                    } else {
+                        "Interior hatch"
+                    },
+                    &mut intent.recipe.rectilinear_axis,
+                ),
                 ("Top skin hatch", &mut intent.recipe.top_skin_axis),
             ] {
                 egui::ComboBox::from_id_salt(label)

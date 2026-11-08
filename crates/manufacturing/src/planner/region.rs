@@ -821,6 +821,24 @@ pub(super) fn hatch_with_phase(
     segments: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    if kind == DepositionKind::SparseFill
+        && matches!(layer.recipe.sparse_infill, SparseInfillPolicy::Grid)
+    {
+        if common_phase.is_some() || phase != OrdinaryHatchPhase::Centered {
+            return Err(unsupported(
+                "grid infill requires its centered two-family lattice",
+            ));
+        }
+        for axis in [HatchAxis::X, HatchAxis::Y] {
+            let grid_layer = HatchLayer { axis, ..*layer };
+            for polygon in &fill.0 {
+                check_cancel(cancel)?;
+                let rows = HatchRows::new(polygon, fraction * 0.5, &grid_layer)?;
+                hatch_polygon(polygon, kind, &rows, &grid_layer, paths, segments, cancel)?;
+            }
+        }
+        return Ok(());
+    }
     for polygon in &fill.0 {
         let rows = if let Some(origin) = common_phase {
             HatchRows::common(polygon, fraction, layer, origin)?

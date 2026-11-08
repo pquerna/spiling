@@ -21,6 +21,17 @@ program/process decoding remains mandatory and explicitly reports native-kernel
 reliance, not independent certification of original STEP topology/embedding.
 There is no custom original-source material reconstruction or fallback.
 
+## Grid and rectilinear interiors
+
+The native Infill pattern selector captures Rectilinear or Grid through the same intent transaction. [Grid's contract](../protocol/manufacturing.md#grid-sparse-infill) owns the two-family density, fine-interval/direct-anchor and initial single-tool scope; the typed [software input](../../fixtures/manufacturing/grid.intent.ts) has an inert JSON companion. Grid is an available software construction, not a physical crossing-quality or strength claim.
+
+```sh
+spiling-cli project create grid.spil --import fixtures/geometry/box-mm.step --intent fixtures/manufacturing/grid.intent.json --compile --verify --save --manufacturing-out grid-output --replay-out grid.splr --engine spiling-engine
+spiling-cli project inspect grid.spil --verify --manufacturing-out grid-returned --replay-out grid-returned.splr --engine spiling-engine
+```
+
+Fresh replay rejects a self-consistent plan/program missing an orthogonal family. Supports, enabled process/finish layers and fixed-dual routes remain explicit Grid refusals. [The offline research lab](infill-lab.md) compares actual emitted constructions and solid controls without granting mechanical authority.
+
 ## Preferred layer-height review
 
 The [goal contract](../protocol/manufacturing.md#construction-goals-and-protected-layer-heights)

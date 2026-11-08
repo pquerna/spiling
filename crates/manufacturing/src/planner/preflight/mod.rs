@@ -323,6 +323,21 @@ pub(super) fn admit<'a, 'work>(
     if let Err(e) = input.intent.validate() {
         add("invalid_intent", e.to_string(), None, None);
     }
+    if matches!(input.intent.recipe.sparse_infill, SparseInfillPolicy::Grid)
+        && (!matches!(input.intent.recipe.supports, SupportPolicy::Disabled)
+            || input
+                .process_document
+                .layers
+                .iter()
+                .any(|layer| layer.enabled && !layer.operations.is_empty())
+            || input
+                .surface_overlays
+                .layers
+                .iter()
+                .any(|layer| layer.enabled))
+    {
+        add("grid_scope", "Grid infill currently requires disabled supports and no enabled process or finish layers".into(), None, None);
+    }
     if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
         if let Some(construction) = &job.functional_construction {
             let source = input

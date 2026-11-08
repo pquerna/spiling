@@ -1090,6 +1090,7 @@ impl TryFrom<rpc::SparseInfillPolicy> for SparseInfillPolicy {
         valid(
             match required(value.policy, "sparse infill policy selection")? {
                 Policy::Fine(_) => Self::Fine,
+                Policy::Grid(_) => Self::Grid,
                 Policy::CombineEligible(policy) => Self::CombineEligible {
                     max_height_mm: policy.max_height_mm,
                 },
@@ -1106,6 +1107,7 @@ impl TryFrom<SparseInfillPolicy> for rpc::SparseInfillPolicy {
         Ok(Self {
             policy: Some(match value {
                 SparseInfillPolicy::Fine => Policy::Fine(rpc::FineSparseInfill {}),
+                SparseInfillPolicy::Grid => Policy::Grid(rpc::GridSparseInfill {}),
                 SparseInfillPolicy::CombineEligible { max_height_mm } => {
                     Policy::CombineEligible(rpc::CombineEligibleSparseInfill { max_height_mm })
                 }
@@ -1773,7 +1775,7 @@ mod tests {
         for policy in [
             None,
             Some(rpc::SparseInfillPolicy { policy: None }),
-            Some(rpc::SparseInfillPolicy::decode([0x1a, 0x00].as_slice()).unwrap()),
+            Some(rpc::SparseInfillPolicy::decode([0x22, 0x00].as_slice()).unwrap()),
         ] {
             let mut missing = wire.clone();
             missing.recipe.as_mut().unwrap().sparse_infill = policy;
@@ -1812,6 +1814,7 @@ mod tests {
         assert!(ManufacturingIntent::try_from(invalid).is_err());
         for policy in [
             SparseInfillPolicy::Fine,
+            SparseInfillPolicy::Grid,
             SparseInfillPolicy::CombineEligible { max_height_mm: 0.3 },
         ] {
             let mut value = intent();

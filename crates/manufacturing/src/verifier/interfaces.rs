@@ -13,6 +13,94 @@ use crate::planner::support::{
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
+/// Run after the actual-byte/path bijection. Grid's second direction must not
+/// borrow an authored ordinary axis or the current layer as lower support.
+pub(super) fn verify_grid(
+    plan: &NormalizedPrintPlan,
+    recipe: &PlanarPrintRecipe,
+    work: &mut usize,
+    anchors: &mut AnchorWorkspace,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    if !matches!(recipe.sparse_infill, SparseInfillPolicy::Grid) {
+        return Ok(());
+    }
+    for (index, layer) in plan.layers.iter().enumerate() {
+        let mut families = [0u8; MAX_PROCESS_REGIONS];
+        for path in layer
+            .paths
+            .iter()
+            .filter(|path| path.kind == DepositionKind::SparseFill)
+        {
+            cancelled(cancel)?;
+            charge(work)?;
+            let Some(DepositionOwner::Regional { region_index }) = path.owner else {
+                return Err(failed("grid row lacks its classified interior owner"));
+            };
+            if path.points_mm.len() != 2 || path.physical_z_mm != [layer.lower_z_mm, layer.z_mm] {
+                return Err(failed("grid row changed its fine physical interval"));
+            }
+            let a = project_xyz6_point_mm(path.points_mm[0])?;
+            let b = project_xyz6_point_mm(path.points_mm[1])?;
+            let family = if a[0] == b[0] && a[1] != b[1] {
+                1
+            } else if a[1] == b[1] && a[0] != b[0] {
+                2
+            } else {
+                return Err(failed("grid row is not a positive build-X/Y segment"));
+            };
+            let slot = families
+                .get_mut(usize::from(region_index))
+                .ok_or_else(|| failed("grid row owner exceeds the region budget"))?;
+            *slot |= family;
+            let Some(previous) = index.checked_sub(1).map(|i| &plan.layers[i]) else {
+                if layer.lower_z_mm != 0.0 {
+                    return Err(failed("grid first interval is not bed rooted"));
+                }
+                continue;
+            };
+            if previous.z_mm != layer.lower_z_mm {
+                return Err(failed("grid row crosses a lower physical gap"));
+            }
+            let ends = [a, b];
+            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+            let width = constant_width(path)?;
+            for gap in anchors.gaps_edges(
+                AnchorCandidate {
+                    endpoints_mm: ends,
+                    bead_width_mm: width,
+                },
+                projected_edges(previous.paths.iter(), true),
+                work,
+                cancel,
+            )? {
+                if !matches!(
+                    gap_kind(
+                        gap,
+                        (gap.end - gap.start) * length,
+                        width,
+                        recipe.process.max_bridge_span_mm,
+                    ),
+                    GapKind::Supported
+                ) {
+                    return Err(failed("actual grid row lacks direct earlier-layer anchors"));
+                }
+            }
+        }
+        for (region_index, region) in layer.region_coverage.process_regions.iter().enumerate() {
+            charge(work)?;
+            if region.area_mm2 > 0.0
+                && region.fraction > 0.0
+                && region.fraction < 1.0
+                && families[region_index] != 3
+            {
+                return Err(failed("grid interior is missing an orthogonal line family"));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn verify_projected_byte_geometry(
     plan: &NormalizedPrintPlan,
     recipe: &PlanarPrintRecipe,
