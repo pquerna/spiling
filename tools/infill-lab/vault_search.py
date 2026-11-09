@@ -321,6 +321,25 @@ def pack(args):
     print(json.dumps(dict(jobs=len(jobs), refused=len(rows) - len(jobs))))
 
 
+def roof_cohort(case, image):
+    # CLI parsing emits 1.0 while a Python caller can supply 1. These are the
+    # same physical mesh bound. Normalize only this declared floating field;
+    # exact case/result hashes remain unchanged and all other identity binds.
+    scenario = dict(case["scenario"])
+    if "refinement" in scenario:
+        scenario["refinement"] = dict(scenario["refinement"])
+        scenario["refinement"]["max_z"] = float(scenario["refinement"]["max_z"])
+    return digest(
+        dict(
+            judge=case["judge"],
+            scenario=scenario,
+            source=case["source_sha256"],
+            binaries=case["binaries"],
+            image=image,
+        )
+    )
+
+
 def collect(args):
     jobs = json.loads((args.input / "jobs.json").read_text())
     proposal_rows = json.loads(args.proposals.read_text())["proposals"]
@@ -333,17 +352,11 @@ def collect(args):
         case = json.loads(case_path.read_text())
         if digest(case) != key or case["judge"] != jobs["judge"]:
             raise ValueError("job identity differs")
-        cohort = dict(
-            judge=case["judge"],
-            scenario=case["scenario"],
-            source=case["source_sha256"],
-            binaries=case["binaries"],
-        )
         folder = args.results / key
         launch = json.loads((folder / "launch.json").read_text())
         dispatch = json.loads((folder / "dispatch.json").read_text())
-        cohort["image"] = launch["image"]["id"]
-        cohorts.add(digest(cohort))
+        cohort = roof_cohort(case, launch["image"]["id"])
+        cohorts.add(cohort)
         proposal = attribution[digest(job["candidate"])]
         lines = (
             (folder / "trials.jsonl").read_text().splitlines()
@@ -394,7 +407,7 @@ def collect(args):
                 row,
                 capture_id=job["capture_id"],
                 job=key,
-                cohort=digest(cohort),
+                cohort=cohort,
                 image=launch["image"]["id"],
                 parent=proposal["parent"],
                 reason=proposal["reason"],

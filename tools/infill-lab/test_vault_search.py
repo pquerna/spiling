@@ -218,3 +218,31 @@ def test_worker_admission_adapts_to_live_memory_and_cores():
     )
     with pytest.raises(ValueError, match="headroom"):
         admitted_slots([dict(memory_available=30 * 1024**3, cpus=20)], workers, 8)
+
+
+def test_roof_cohort_normalizes_only_the_declared_float_bound():
+    from copy import deepcopy
+    from vault_search import roof_cohort
+
+    case = dict(
+        judge={"immutable": "judge"},
+        source_sha256="source",
+        binaries={"engine": "binary"},
+        scenario=dict(
+            refinement=dict(max_xy=4, max_z=1, divisions=1),
+            solver="superlu_mmd",
+            bounds=[[40, 40, 44], [48, 48, 48]],
+        ),
+    )
+    original = deepcopy(case)
+    floating = deepcopy(case)
+    floating["scenario"]["refinement"]["max_z"] = 1.0
+    assert roof_cohort(case, "image") == roof_cohort(floating, "image")
+    assert case == original
+    assert digest(case) != digest(floating)  # Exact input identities are retained.
+    floating["scenario"]["refinement"]["max_z"] = 0.5
+    assert roof_cohort(case, "image") != roof_cohort(floating, "image")
+    assert roof_cohort(case, "image") != roof_cohort(case, "other-image")
+    floating = deepcopy(case)
+    floating["scenario"]["solver"] = "p_amg"
+    assert roof_cohort(case, "image") != roof_cohort(floating, "image")
