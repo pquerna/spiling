@@ -3733,6 +3733,153 @@ fn previous_planner_identity_cannot_acquire_current_fresh_inspection_authority()
 }
 
 #[test]
+fn startup_wall_handoff_preserves_fresh_complete_admission_and_pressure_release() {
+    let cancel = AtomicBool::new(false);
+    let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let run = |full: bool, pressure: bool| {
+        let mut intent = intent(false);
+        if full {
+            intent.recipe.top_skin_thickness_mm = 100.0;
+        }
+        let input = scene.input(&intent);
+        let mut geometry_work = spiling_geometry::GeometryWorkBudget::compile();
+        let (mut admission, sources) =
+            preflight::admit(&input, &cancel, &mut geometry_work).unwrap();
+        let mut work = 0;
+        preflight::resolve_native_events(&input, &mut admission, &sources, &mut work, &cancel)
+            .unwrap();
+        let mut captures = input
+            .occurrences
+            .iter()
+            .map(|occurrence| {
+                zones::capture(
+                    &input,
+                    &admission,
+                    occurrence.occurrence_id,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        admit_source_captures(
+            &sources,
+            admission.native_capture_proposal_bytes(),
+            admission.geometry_work,
+            &cancel,
+        )
+        .unwrap();
+        let mut schedule = scheduled_layers(&input, &mut admission, &captures, &cancel).unwrap();
+        let probe = deposition_probe(
+            &input,
+            &admission,
+            &captures,
+            &schedule,
+            AnchorProbeScope::StartupPair {
+                top_mm: schedule[1].z,
+            },
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        let mut support_work = support::SupportWork::default();
+        let mut sizing = native::NativeSpanSizing::default();
+        let mut pool = native::NativeSlabPool::default();
+        let ScheduleAdmission::PrefixAdmitted(mut capture) = admit_schedule(
+            &input,
+            &cancel,
+            &mut admission,
+            &sources,
+            &mut captures,
+            &mut schedule,
+            &mut work,
+            &mut support_work,
+            Some(probe),
+            None,
+            &mut sizing,
+            &mut pool,
+        )
+        .unwrap() else {
+            panic!("box startup must be admitted without refinement");
+        };
+        assert_eq!(capture.startup_wall.is_some(), full);
+        if let Some(wall) = &capture.startup_wall {
+            assert!(wall.layout.point_count() > 0);
+            assert!(wall.matches(&capture.sections, &schedule));
+        }
+        pool.clear();
+        let live = geometry_bytes(&[
+            native_retry_outside_bytes(&sources, &admission, &schedule, &captures, &sizing)
+                .unwrap(),
+            native::output_bytes(
+                &capture.sections,
+                &capture.native_surfaces,
+                capture.retained_section_bytes,
+            ),
+            capture.stage.retained_proof_bytes(),
+        ])
+        .unwrap();
+        let original_work = admission.geometry_work.consumed();
+        let cancelled = capture
+            .stage
+            .materialize_pending_voids_with_startup_wall(
+                &input,
+                live,
+                admission.geometry_work,
+                &AtomicBool::new(true),
+                &mut capture.startup_wall,
+            )
+            .unwrap_err();
+        assert_eq!(cancelled.code, ManufacturingErrorCode::Cancelled);
+        assert_eq!(capture.startup_wall.is_some(), full);
+        assert_eq!(admission.geometry_work.consumed(), original_work);
+        let live = if pressure {
+            spiling_geometry::MAX_PREPARED_SECTION_BYTES
+                - spiling_geometry::NativeVoidProjectionCapture::MAX_CAPTURE_BYTES
+        } else {
+            live
+        };
+        capture
+            .stage
+            .materialize_pending_voids_with_startup_wall(
+                &input,
+                live,
+                admission.geometry_work,
+                &cancel,
+                &mut capture.startup_wall,
+            )
+            .unwrap();
+        assert_eq!(capture.startup_wall.is_some(), full && !pressure);
+        let ScheduleAdmission::Complete(plan) = admit_schedule(
+            &input,
+            &cancel,
+            &mut admission,
+            &sources,
+            &mut captures,
+            &mut schedule,
+            &mut work,
+            &mut support_work,
+            None,
+            Some(capture),
+            &mut sizing,
+            &mut pool,
+        )
+        .unwrap() else {
+            panic!("full admission must complete");
+        };
+        let mut plan = serde_json::to_value(plan).unwrap();
+        plan["native_geometry"]
+            .as_object_mut()
+            .unwrap()
+            .remove("geometry_work");
+        plan
+    };
+    run(false, false);
+    assert_eq!(run(true, false), run(true, true));
+}
+
+#[test]
 fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
     let intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
         "../../../../fixtures/manufacturing/housing-ordinary.intent.json",

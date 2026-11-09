@@ -154,6 +154,8 @@ pub struct NativeVoidProjectionCapture {
     closed_complement: Option<ClosedSourceComplementCover>,
 }
 impl NativeVoidProjectionCapture {
+    pub const MAX_CAPTURE_BYTES: usize = MAX_BYTES;
+
     pub fn definition_id(&self) -> &DefinitionId {
         &self.definition_id
     }

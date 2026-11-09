@@ -477,9 +477,20 @@ impl NativeStageState {
     pub(super) fn materialize_pending_voids(
         &mut self,
         input: &CompilerInput<'_>,
+        live_bytes: usize,
+        work: &mut spiling_geometry::GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        self.materialize_pending_voids_with_startup_wall(input, live_bytes, work, cancel, &mut None)
+    }
+
+    pub(super) fn materialize_pending_voids_with_startup_wall(
+        &mut self,
+        input: &CompilerInput<'_>,
         mut live_bytes: usize,
         work: &mut spiling_geometry::GeometryWorkBudget,
         cancel: &AtomicBool,
+        startup_wall: &mut Option<super::StartupWall>,
     ) -> Result<(), ManufacturingError> {
         check_cancel(cancel)?;
         if self.pending_voids.is_empty() {
@@ -499,7 +510,13 @@ impl NativeStageState {
         let growth = required
             .saturating_sub(old_capacity)
             .saturating_mul(std::mem::size_of::<CapturedProtectedVoid>());
-        admit_bytes(live_bytes, growth, 0)?;
+        let optional = super::StartupWall::retain_for(
+            startup_wall,
+            live_bytes,
+            growth,
+            spiling_geometry::MAX_PREPARED_SECTION_BYTES,
+        );
+        admit_bytes(live_bytes, growth, optional)?;
         self.protected_voids
             .try_reserve_exact(self.pending_voids.len())
             .map_err(|_| {
@@ -510,7 +527,13 @@ impl NativeStageState {
             })?;
         let actual_growth = (self.protected_voids.capacity() - old_capacity)
             .saturating_mul(std::mem::size_of::<CapturedProtectedVoid>());
-        live_bytes = admit_bytes(live_bytes, actual_growth, 0)?;
+        let optional = super::StartupWall::retain_for(
+            startup_wall,
+            live_bytes,
+            actual_growth,
+            spiling_geometry::MAX_PREPARED_SECTION_BYTES,
+        );
+        live_bytes = admit_bytes(live_bytes, actual_growth, optional)?;
         self.void_bytes = void_capture_bytes(&self.protected_voids);
         for evidence in self.pending_voids.drain(..) {
             check_cancel(cancel)?;
@@ -538,8 +561,14 @@ impl NativeStageState {
                         "pending native void lost its source occurrence",
                     )
                 })?;
+            let optional = super::StartupWall::retain_for(
+                startup_wall,
+                live_bytes,
+                spiling_geometry::NativeVoidProjectionCapture::MAX_CAPTURE_BYTES,
+                spiling_geometry::MAX_PREPARED_SECTION_BYTES,
+            );
             let available = spiling_geometry::MAX_PREPARED_SECTION_BYTES
-                .checked_sub(live_bytes)
+                .checked_sub(live_bytes.saturating_add(optional))
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
@@ -585,7 +614,13 @@ impl NativeStageState {
                     )
                 })?;
             self.void_bytes = void_capture_bytes(&self.protected_voids);
-            admit_bytes(live_bytes, 0, 0)?;
+            let optional = super::StartupWall::retain_for(
+                startup_wall,
+                live_bytes,
+                0,
+                spiling_geometry::MAX_PREPARED_SECTION_BYTES,
+            );
+            admit_bytes(live_bytes, 0, optional)?;
         }
         drop(std::mem::take(&mut self.pending_voids));
         Ok(())

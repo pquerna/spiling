@@ -15,6 +15,8 @@ mod native;
 mod partition;
 mod preflight;
 mod region;
+mod startup;
+use startup::StartupWall;
 pub(crate) mod support;
 mod surface;
 mod walls;
@@ -261,11 +263,12 @@ pub(crate) fn plan(
                 ),
                 capture.stage.retained_proof_bytes(),
             ])?;
-            capture.stage.materialize_pending_voids(
+            capture.stage.materialize_pending_voids_with_startup_wall(
                 input,
                 live,
                 admission.geometry_work,
                 cancel,
+                &mut capture.startup_wall,
             )?;
         }
         match outcome? {
@@ -352,6 +355,7 @@ struct NativeScheduleCapture {
     retained_section_bytes: usize,
     retained_points: usize,
     stage: native::NativeStageState,
+    startup_wall: Option<StartupWall>,
 }
 
 #[expect(
@@ -453,6 +457,7 @@ fn admit_schedule<'model>(
         mut retained_section_bytes,
         mut retained_points,
         stage: mut native_stage,
+        mut startup_wall,
     } = match native_prefix {
         Some(capture) => capture,
         None => NativeScheduleCapture {
@@ -464,8 +469,16 @@ fn admit_schedule<'model>(
                 input.intent.printer.build_envelope.min[2],
                 schedule.last().expect("nonempty schedule").z,
             ])?,
+            startup_wall: None,
         },
     };
+    if !StartupWall::permits(input)
+        || startup_wall
+            .as_ref()
+            .is_some_and(|wall| !wall.matches(&sections, schedule))
+    {
+        startup_wall = None;
+    }
     if !continuing {
         native_stage.replace_span_sizing(std::mem::take(span_sizing));
     }
@@ -919,7 +932,21 @@ fn admit_schedule<'model>(
         retained_support_native_bytes,
         native_coverage.retained_bytes(),
         schedule.capacity() * std::mem::size_of::<LayerElevation>(),
+        startup_wall.as_ref().map_or(0, StartupWall::layout_bytes),
     ])?;
+    retained_points = retained_points
+        .checked_add(
+            startup_wall
+                .as_ref()
+                .map_or(0, |wall| wall.layout.point_count()),
+        )
+        .filter(|points| *points <= MAX_RETAINED_GEOMETRY_UNITS)
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "startup wall retained-point overflow",
+            )
+        })?;
     let web_roof_z = if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. }) {
         let first = sections.first().ok_or_else(|| {
             error(
@@ -1021,6 +1048,7 @@ fn admit_schedule<'model>(
         let mut wall_layout = None;
         let mut wall_layouts = (0..schedule.len()).map(|_| None).collect::<Vec<_>>();
         let mut wall_cache = BTreeMap::<WallCacheKey, Arc<walls::WallPlan>>::new();
+        let mut first_wall_key = None;
         let mut retained_wall_bytes = 0usize;
         // Same conservative sparse-BTree node convention as native::output_bytes:
         // a live entry covers all key/value/child slots of its possible node.
@@ -1056,8 +1084,19 @@ fn admit_schedule<'model>(
             })?;
         remaining_geometry_units(
             retained_points,
-            geometry_bytes(&[wall_static_base_bytes, retained_plan_bytes, phase_bytes])?,
+            geometry_bytes(&[
+                wall_static_base_bytes,
+                retained_plan_bytes,
+                phase_bytes,
+                startup_wall.as_ref().map_or(0, |wall| {
+                    wall.layout_bytes().saturating_add(wall_index_entry_bytes)
+                }),
+            ])?,
         )?;
+        if let Some(startup) = startup_wall.take() {
+            retained_wall_bytes = startup.layout_bytes();
+            wall_cache.insert(startup.key, startup.layout);
+        }
         let mut phase_by_layer = Vec::new();
         phase_by_layer
             .try_reserve_exact(schedule.len())
@@ -1080,7 +1119,12 @@ fn admit_schedule<'model>(
         let wall_static_base_bytes = geometry_bytes(&[wall_static_base_bytes, phase_bytes])?;
         remaining_geometry_units(
             retained_points,
-            geometry_bytes(&[wall_static_base_bytes, retained_plan_bytes])?,
+            geometry_bytes(&[
+                wall_static_base_bytes,
+                retained_plan_bytes,
+                retained_wall_bytes,
+                wall_cache.len() * wall_index_entry_bytes,
+            ])?,
         )?;
         let mut phase_anchors = support::AnchorWorkspace::default();
         let mut templates: [Option<OrdinaryTemplate>; 2] = [None, None];
@@ -1157,6 +1201,9 @@ fn admit_schedule<'model>(
                     limits.min_bead_width_mm.max(actual_height).to_bits(),
                 ];
                 let layout_key = (current, required_owner, envelope_key, construction_phase);
+                if index == 0 {
+                    first_wall_key = Some(layout_key);
+                }
                 if layout_span != Some(layout_key) {
                     drop(wall_layout.take());
                     if let Some(cached) = wall_cache.get(&layout_key) {
@@ -2331,12 +2378,27 @@ fn admit_schedule<'model>(
                 let ScheduleNativeAuthority::Tentative { stage, .. } = native_coverage else {
                     unreachable!("tentative admission retains its unfinished ledger")
                 };
+                let startup_key = first_wall_key
+                    .filter(|_| StartupWall::permits(input))
+                    .filter(|_| {
+                        sections
+                            .last()
+                            .is_some_and(|span| span.end as usize == schedule.len())
+                    });
+                let startup_layout = startup_key.and_then(|key| wall_cache.remove(&key));
+                drop(wall_layouts);
+                drop(wall_cache);
+                let startup_wall = startup_key
+                    .zip(startup_layout)
+                    .filter(|(_, layout)| Arc::strong_count(layout) == 1)
+                    .map(|(key, layout)| StartupWall::new(key, layout, &schedule[0]));
                 return Ok(ScheduleAdmission::PrefixAdmitted(NativeScheduleCapture {
                     sections: Vec::new(),
                     native_surfaces: Vec::new(),
                     retained_section_bytes,
                     retained_points: native_retained_points,
                     stage,
+                    startup_wall,
                 }));
             }
             support::SupportAdmission::Complete => {}
