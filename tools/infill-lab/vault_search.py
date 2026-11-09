@@ -255,6 +255,11 @@ def pack(args):
     from vault_mechanics import JUDGE
 
     spec, rows = native_rows(args.capture)
+    if args.selection:
+        selected = set(json.loads(args.selection.read_text()))
+        if not selected or not selected <= {r["id"] for r in rows}:
+            raise ValueError("selection contains unknown native captures")
+        rows = [r for r in rows if r["id"] in selected]
     args.output.mkdir(parents=True, exist_ok=False)
     judge = {p: file_hash(args.context / p) for p in JUDGE}
     jobs = []
@@ -270,7 +275,7 @@ def pack(args):
                 [cx + width / 2, cy + width / 2, z],
             ],
             material=asdict(Material(z_ratio=0.25)),
-            refinement=dict(max_xy=4, max_z=0.2, divisions=args.divisions),
+            refinement=dict(max_xy=4, max_z=args.max_z, divisions=args.divisions),
         )
         case = dict(
             schema=1,
@@ -313,6 +318,8 @@ def pack(args):
 
 def collect(args):
     jobs = json.loads((args.input / "jobs.json").read_text())
+    proposal_rows = json.loads(args.proposals.read_text())["proposals"]
+    attribution = {digest(p["candidate"]): p for p in proposal_rows}
     rows = []
     cohorts = set()
     for job in jobs["jobs"]:
@@ -327,10 +334,12 @@ def collect(args):
             source=case["source_sha256"],
             binaries=case["binaries"],
         )
-        cohorts.add(digest(cohort))
         folder = args.results / key
         launch = json.loads((folder / "launch.json").read_text())
         dispatch = json.loads((folder / "dispatch.json").read_text())
+        cohort["image"] = launch["image"]["id"]
+        cohorts.add(digest(cohort))
+        proposal = attribution[digest(job["candidate"])]
         lines = (
             (folder / "trials.jsonl").read_text().splitlines()
             if (folder / "trials.jsonl").exists()
@@ -341,6 +350,8 @@ def collect(args):
         if len(lines) != 1:
             rows.append(
                 dict(
+                    parent=proposal["parent"],
+                    reason=proposal["reason"],
                     status="failed",
                     capture_id=job["capture_id"],
                     candidate=job["candidate"],
@@ -376,10 +387,25 @@ def collect(args):
                 job=key,
                 cohort=digest(cohort),
                 image=launch["image"]["id"],
+                parent=proposal["parent"],
+                reason=proposal["reason"],
             )
         )
     if len(cohorts) != 1:
         raise ValueError("one fixed specimen/fixture/judge cohort required")
+    for refused in jobs["refused"]:
+        proposal = attribution[digest(refused["candidate"])]
+        rows.append(
+            dict(
+                status="failed",
+                stage="native",
+                capture_id=refused["id"],
+                candidate=refused["candidate"],
+                error=refused["error"],
+                parent=proposal["parent"],
+                reason=proposal["reason"],
+            )
+        )
     prior = json.loads(args.history.read_text())["rows"] if args.history else []
     if prior and any(
         r.get("cohort") not in cohorts for r in prior if r["status"] == "ok"
@@ -418,13 +444,16 @@ def main():
     q = sub.add_parser("pack")
     for field in ("capture", "context", "output"):
         q.add_argument("--" + field, type=Path, required=True)
+    q.add_argument("--selection", type=Path)
     q.add_argument("--divisions", type=int, choices=(1, 2, 4, 8), default=1)
     q.add_argument("--width", type=float, default=16)
+    q.add_argument("--max-z", type=float, default=1)
     q.add_argument("--shift", type=float, default=0)
     q = sub.add_parser("collect")
     for field in ("input", "results", "output"):
         q.add_argument("--" + field, type=Path, required=True)
     q.add_argument("--history", type=Path)
+    q.add_argument("--proposals", type=Path, required=True)
     args = p.parse_args()
     {"propose": propose, "pack": pack, "collect": collect}[args.command](args)
 

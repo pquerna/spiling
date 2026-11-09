@@ -104,3 +104,84 @@ def test_real_nominal_roof_patch_matches_homogeneous_weak_z_solution():
     scenario["bounds"][1][2] = 1.9
     with pytest.raises(ValueError, match="actual top skin"):
         patch_response(dict(roads=roads, size_mm=[4, 4, 2]), scenario)
+
+
+def test_collector_retains_parentage_and_refusals_but_rejects_bad_residuals(tmp_path):
+    import json
+    from types import SimpleNamespace
+    from model import file_hash
+    from vault_search import collect
+
+    candidate = proposals(0, [])[7]["candidate"]
+    case = dict(
+        candidate=candidate,
+        judge={"immutable": "judge"},
+        scenario={"fixed": "fixture"},
+        source_sha256="source",
+        roads_sha256="roads",
+        binaries={"engine": "binary"},
+    )
+    key = digest(case)
+    inputs, results = tmp_path / "input", tmp_path / "results"
+    (inputs / key).mkdir(parents=True)
+    (results / key).mkdir(parents=True)
+
+    def save(path, data):
+        path.write_text(json.dumps(data))
+
+    save(inputs / key / "case.json", case)
+    save(
+        inputs / "jobs.json",
+        dict(
+            judge=case["judge"],
+            jobs=[dict(id=key, capture_id="native", candidate=candidate)],
+            refused=[dict(id="refused", candidate=candidate, error="unsupported roof")],
+        ),
+    )
+    save(
+        results / key / "launch.json",
+        dict(removed=True, docker_exit=0, image=dict(id="image")),
+    )
+    save(results / key / "dispatch.json", dict(exit_code=0))
+    response = dict(
+        input_sha256=file_hash(inputs / key / "case.json"),
+        judge=case["judge"],
+        scenario=case["scenario"],
+        candidate=candidate,
+        roads_sha256="roads",
+        source_sha256="source",
+        status="ok",
+        components=[
+            dict(relative_residual=1e-9, energy_error=1e-9, force_balance=1e-9)
+        ],
+        stiffness_n_mm=dict(x=10, y=10, z=10),
+        volume_mm3=10,
+        motion_s=10,
+    )
+    save(results / key / "trials.jsonl", response)
+    provenance = tmp_path / "proposals.json"
+    save(
+        provenance,
+        dict(
+            proposals=[
+                dict(candidate=candidate, parent="previous", reason="local_mutation")
+            ]
+        ),
+    )
+    args = SimpleNamespace(
+        input=inputs,
+        results=results,
+        proposals=provenance,
+        history=None,
+        output=tmp_path / "archive.json",
+    )
+    collect(args)
+    rows = json.loads(args.output.read_text())["rows"]
+    assert rows[0]["parent"] == "previous"
+    assert rows[1]["stage"] == "native" and rows[1]["status"] == "failed"
+    response["components"][0]["energy_error"] = 0.1
+    save(results / key / "trials.jsonl", response)
+    args.output = tmp_path / "bad.json"
+    with pytest.raises(ValueError, match="numerical checks"):
+        collect(args)
+    assert not args.output.exists()
