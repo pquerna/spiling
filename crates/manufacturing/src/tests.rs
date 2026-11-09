@@ -2319,6 +2319,82 @@ fn authored_rectilinear_axes_change_actual_skin_and_interior_motion() {
 }
 
 #[test]
+fn independent_top_skin_axis_survives_template_reuse() {
+    let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0)]);
+    for (ordinary, top) in [
+        (
+            RectilinearAxisPolicy::X,
+            RectilinearAxisPolicy::AlternatingXY,
+        ),
+        (
+            RectilinearAxisPolicy::Y,
+            RectilinearAxisPolicy::AlternatingYX,
+        ),
+        (
+            RectilinearAxisPolicy::AlternatingXY,
+            RectilinearAxisPolicy::Y,
+        ),
+        (
+            RectilinearAxisPolicy::AlternatingYX,
+            RectilinearAxisPolicy::X,
+        ),
+        (
+            RectilinearAxisPolicy::AlternatingXY,
+            RectilinearAxisPolicy::AlternatingXY,
+        ),
+        (
+            RectilinearAxisPolicy::AlternatingYX,
+            RectilinearAxisPolicy::AlternatingXY,
+        ),
+    ] {
+        let mut intent = intent();
+        intent.recipe.layer_height_mm = 0.25;
+        intent.recipe.top_skin_thickness_mm = 1.0;
+        intent.recipe.bottom_skin_thickness_mm = 1.0;
+        intent.recipe.rectilinear_axis = ordinary;
+        intent.recipe.top_skin_axis = top;
+        let bundle = scene.compile(&intent).unwrap();
+        let motion = actual_motion(&bundle);
+        let mut top_layers = std::collections::BTreeSet::new();
+        let mut ordinary_layers = std::collections::BTreeSet::new();
+        for pair in motion.windows(2) {
+            let (kind, index, end) = pair[1];
+            if !(2..=5).contains(&kind) {
+                continue;
+            }
+            let policy = if kind == 4 {
+                top_layers.insert(index);
+                top
+            } else {
+                ordinary_layers.insert(index);
+                ordinary
+            };
+            let along_x = match policy {
+                RectilinearAxisPolicy::X => true,
+                RectilinearAxisPolicy::Y => false,
+                RectilinearAxisPolicy::AlternatingXY => index.is_multiple_of(2),
+                RectilinearAxisPolicy::AlternatingYX => !index.is_multiple_of(2),
+            };
+            let start = pair[0].2;
+            let fixed = usize::from(along_x);
+            assert_eq!(
+                start[fixed], end[fixed],
+                "{ordinary:?}/{top:?}, layer {index}"
+            );
+            assert_ne!(start[1 - fixed], end[1 - fixed]);
+        }
+        assert!(top_layers.len() >= 4);
+        assert!(ordinary_layers.len() >= 4);
+        assert!(bundle.plan.layers.windows(2).any(|pair| {
+            top_layers.contains(&pair[0].index)
+                && top_layers.contains(&pair[1].index)
+                && (pair[0].z_mm - pair[0].lower_z_mm).to_bits()
+                    == (pair[1].z_mm - pair[1].lower_z_mm).to_bits()
+        }));
+    }
+}
+
+#[test]
 fn authored_housing_bridge_recovery_keeps_supported_fill_on_its_axis() {
     let scene = Scene::new(
         include_bytes!(

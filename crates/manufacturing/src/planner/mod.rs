@@ -338,6 +338,7 @@ enum ScheduleAdmission {
 
 struct OrdinaryTemplate {
     phase: region::OrdinaryHatchPhase,
+    top_axis: region::HatchAxis,
     paths: Vec<DepositionPath>,
     coverage: PlanarRegionCoverage,
     fits: Vec<SkinCommandFitDomain>,
@@ -1132,7 +1133,6 @@ fn admit_schedule<'model>(
                 below,
                 above,
                 (z - elevation.lower_z).to_bits(),
-                top_axis,
                 required_owner,
                 construction_phase,
                 construction.functional_frame.as_ref().and_then(|frame| {
@@ -1483,6 +1483,14 @@ fn admit_schedule<'model>(
             wall_layouts[index as usize] = wall_layout.as_ref().map(Arc::clone);
             let axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, index);
             let axis_slot = usize::from(axis == region::HatchAxis::Y);
+            for template in &mut templates {
+                if template
+                    .as_ref()
+                    .is_some_and(|template| template.top_axis != top_axis)
+                {
+                    *template = None;
+                }
+            }
             // Selection is an initial construction proposal, not a reusable anchor
             // receipt. It is recomputed against this layer's earlier initial paths,
             // then frozen for every reconstruction of these required normal rows.
@@ -1536,10 +1544,8 @@ fn admit_schedule<'model>(
             phase_by_layer[index as usize] = phase;
             if templates[axis_slot]
                 .as_ref()
-                .is_some_and(|template| template.phase != phase)
+                .is_some_and(|template| template.phase != phase || template.top_axis != top_axis)
             {
-                // The geometry/classification owner is unchanged. Only this axis's
-                // nominal path template depends on the chosen ordinary quarter.
                 templates[axis_slot] = None;
             }
             let wall_static_bytes =
@@ -1607,6 +1613,7 @@ fn admit_schedule<'model>(
                 let coverage = proposed.clone();
                 templates[axis_slot] = Some(OrdinaryTemplate {
                     phase,
+                    top_axis,
                     paths,
                     coverage,
                     fits,
