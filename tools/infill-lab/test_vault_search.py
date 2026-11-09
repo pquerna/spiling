@@ -246,3 +246,41 @@ def test_roof_cohort_normalizes_only_the_declared_float_bound():
     floating = deepcopy(case)
     floating["scenario"]["solver"] = "p_amg"
     assert roof_cohort(case, "image") != roof_cohort(floating, "image")
+
+
+def test_independent_pair_preserves_small_gains_and_zero_directions():
+    from vault_pair import compare
+
+    parent = dict(row("parent", 100, [10, 10, 0]), cohort="fixed")
+    child = dict(row("child", 99.9, [10.001, 9.999, 1]), cohort="fixed")
+    pair = dict(parent="parent", child="child")
+    result = compare(dict(rows=[parent, child]), pair)
+    assert result["material_ratio"] == pytest.approx(0.999)
+    assert result["response_ratios"] == dict(x=1.0001, y=0.9999, z=None)
+    child["cohort"] = "changed"
+    with pytest.raises(ValueError, match="physical cohorts"):
+        compare(dict(rows=[parent, child]), pair)
+    child["status"] = "failed"
+    assert compare(dict(rows=[parent, child]), pair)["status"] == "incomplete"
+
+
+def test_pair_subset_rejects_unmatched_sources_and_producers(tmp_path, monkeypatch):
+    import vault_pair
+
+    roots = [tmp_path / "one", tmp_path / "two"]
+    records = {
+        root: (
+            dict(identity="same"),
+            [dict(id=key, status="ok", specimen="cube48", source_sha256="source")],
+        )
+        for root, key in zip(roots, ("parent", "child"), strict=True)
+    }
+    monkeypatch.setattr(vault_pair, "native_rows", lambda root: records[root])
+    records[roots[1]][0]["identity"] = "different"
+    with pytest.raises(ValueError, match="producers differ"):
+        vault_pair.subset(roots, ["parent", "child"], tmp_path / "bad")
+    records[roots[1]][0]["identity"] = "same"
+    records[roots[1]][1][0]["source_sha256"] = "changed"
+    with pytest.raises(ValueError, match="identical native source"):
+        vault_pair.subset(roots, ["parent", "child"], tmp_path / "bad")
+    assert not (tmp_path / "bad").exists()
