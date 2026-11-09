@@ -20,10 +20,15 @@ def report(archive, captures, output):
         for row in rows:
             native[row["id"]] = (root, row)
     rows = data["rows"]
+    programs = {}
     for row in rows:
         root, construction = native[row["capture_id"]]
         if construction["candidate"] != row["candidate"]:
             raise ValueError("archive candidate differs from capture")
+        if construction["status"] == "ok":
+            programs.setdefault(construction["replay_sha256"], []).append(
+                row["capture_id"]
+            )
         if row["status"] == "ok" and (
             construction["status"] != "ok"
             or row["roads_sha256"] != construction["roads_sha256"]
@@ -102,6 +107,7 @@ def report(archive, captures, output):
         output / "report.json",
         dict(
             scope=data["scope"],
+            native_programs=programs,
             rows=rows,
             pairs=pairs,
             frontier=sorted(pareto_ids),
@@ -112,12 +118,20 @@ def report(archive, captures, output):
         ),
     )
     native_refusals = sum(r.get("stage") == "native" for r in rows)
-    plot(valid, baseline, output, total=len(rows), native_refusals=native_refusals)
+    plot(
+        valid,
+        baseline,
+        output,
+        total=len(rows),
+        native_refusals=native_refusals,
+        program_count=len(programs),
+    )
     gallery(selected, native, output)
     print(
         json.dumps(
             dict(
                 rows=len(rows),
+                distinct_native_programs=len(programs),
                 admitted=len(valid),
                 vault=len(vault),
                 frontier=len(pareto_ids),
@@ -155,7 +169,7 @@ def label(r):
     return f"{100 * c['fraction']:g}% webs · {roof}"
 
 
-def plot(rows, baseline, output, *, total, native_refusals):
+def plot(rows, baseline, output, *, total, native_refusals, program_count):
     plt = style()
     fig, axes = plt.subplots(1, 2, figsize=(14, 6), layout="constrained")
     for pattern, title, color, marker in [
@@ -237,7 +251,7 @@ def plot(rows, baseline, output, *, total, native_refusals):
     )
     fig.supxlabel(
         "Right and down is better within this fixed local elasticity model. White outline: multi-axis Pareto.\n"
-        f"{len(rows)} complete constructions (solid reference off-plot); {native_refusals} native refusal(s); "
+        f"{total} settings / {program_count} distinct native programs; {len(rows)} scored (solid off-plot); {native_refusals} native refusal(s); "
         f"{total - len(rows) - native_refusals} incomplete mechanics.\n"
         "Whole-object costs; nominal bonded footprints, weak-Z 0.25. Not strength or full-part qualification.",
         fontsize=10,

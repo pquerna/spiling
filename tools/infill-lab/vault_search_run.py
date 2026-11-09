@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import json
 import math
 import shlex
+import shutil
 from pathlib import Path
 import subprocess
 import time
@@ -115,6 +116,23 @@ def dispatch_panel(workers, kind, inputs, results, round_number, trial_seconds):
             pass
 
 
+def freeze_specimens(seed, capture):
+    """Reuse exact original inputs; an exporter may contain process-global state."""
+    originals = seed / "specimens"
+    files = sorted(p for p in originals.iterdir() if p.suffix in (".step", ".json"))
+    if not files or not any(p.suffix == ".step" for p in files):
+        raise ValueError("frozen seed specimens are missing")
+    destination = capture / "specimens"
+    destination.mkdir(parents=True, exist_ok=True)
+    for original in files:
+        target = destination / original.name
+        if target.exists():
+            if file_hash(target) != file_hash(original):
+                raise ValueError("existing specimen differs from frozen seed")
+        else:
+            shutil.copyfile(original, target)
+
+
 def run(args):
     bounded()
     root = args.output.resolve()
@@ -149,6 +167,8 @@ def run(args):
         if not proposals.exists():
             propose(Args(round=number, history=previous, output=proposals))
         native = root / f"capture{number}"
+        if number:
+            freeze_specimens(root / "capture0", native)
         capture(
             Args(
                 output=native,

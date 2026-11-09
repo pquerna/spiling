@@ -284,3 +284,22 @@ def test_pair_subset_rejects_unmatched_sources_and_producers(tmp_path, monkeypat
     with pytest.raises(ValueError, match="identical native source"):
         vault_pair.subset(roots, ["parent", "child"], tmp_path / "bad")
     assert not (tmp_path / "bad").exists()
+
+
+def test_later_rounds_reuse_exact_original_source_bytes(tmp_path):
+    from vault_search_run import freeze_specimens
+
+    seed, later = tmp_path / "seed", tmp_path / "later"
+    (seed / "specimens").mkdir(parents=True)
+    original = seed / "specimens" / "cube.step"
+    original.write_bytes(b"original exporter product identity\n")
+    (seed / "specimens" / "cube.json").write_text('{"source":"frozen"}')
+    freeze_specimens(seed, later)
+    assert (later / "specimens" / "cube.step").read_bytes() == original.read_bytes()
+    freeze_specimens(seed, later)  # Resume is idempotent, not a regeneration.
+    (later / "specimens" / "cube.step").write_bytes(b"different product counter")
+    with pytest.raises(ValueError, match="differs from frozen seed"):
+        freeze_specimens(seed, later)
+    assert (
+        later / "specimens" / "cube.step"
+    ).read_bytes() == b"different product counter"
