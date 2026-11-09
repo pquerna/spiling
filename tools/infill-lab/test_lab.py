@@ -615,8 +615,8 @@ def test_vault_search_uses_explicit_production_spacing_and_distinct_identity():
     auto = Candidate(pattern="web_roof", fraction=0.1)
     tighter = Candidate(pattern="web_roof", fraction=0.1, roof_spacing_mm=2.0)
     assert "roof_spacing_mm" not in auto.data()
-    assert auto.sparse_policy() == {"kind": "web_roof", "roof_spacing_mm": None}
-    assert tighter.sparse_policy() == {"kind": "web_roof", "roof_spacing_mm": 2.0}
+    assert auto.sparse_policy() == {"kind": "web_roof", "roof_spacing_mm": None, "architecture": None}
+    assert tighter.sparse_policy() == {"kind": "web_roof", "roof_spacing_mm": 2.0, "architecture": None}
     assert auto.identity != tighter.identity
     assert Candidate(**tighter.data()) == tighter
     for spacing in (float("nan"), 0.2, 8.0, True):

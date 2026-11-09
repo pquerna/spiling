@@ -1083,6 +1083,40 @@ impl TryFrom<DepositionLimits> for rpc::DepositionLimits {
         })
     }
 }
+impl TryFrom<rpc::WebArchitecture> for WebArchitecture {
+    type Error = String;
+    fn try_from(value: rpc::WebArchitecture) -> Result<Self, String> {
+        valid(
+            Self {
+                opening: value.opening.map(|o| WebOpening {
+                    bottom_z_mm: o.bottom_z_mm,
+                    height_mm: o.height_mm,
+                    width_mm: o.width_mm,
+                    cap_height_mm: o.cap_height_mm,
+                    pier_width_mm: o.pier_width_mm,
+                }),
+                pier_rib_depth_mm: value.pier_rib_depth_mm,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<WebArchitecture> for rpc::WebArchitecture {
+    type Error = String;
+    fn try_from(value: WebArchitecture) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            opening: value.opening.map(|o| rpc::WebOpening {
+                bottom_z_mm: o.bottom_z_mm,
+                height_mm: o.height_mm,
+                width_mm: o.width_mm,
+                cap_height_mm: o.cap_height_mm,
+                pier_width_mm: o.pier_width_mm,
+            }),
+            pier_rib_depth_mm: value.pier_rib_depth_mm,
+        })
+    }
+}
 impl TryFrom<rpc::SparseInfillPolicy> for SparseInfillPolicy {
     type Error = String;
     fn try_from(value: rpc::SparseInfillPolicy) -> Result<Self, String> {
@@ -1093,6 +1127,7 @@ impl TryFrom<rpc::SparseInfillPolicy> for SparseInfillPolicy {
                 Policy::Grid(_) => Self::Grid,
                 Policy::WebRoof(policy) => Self::WebRoof {
                     roof_spacing_mm: policy.roof_spacing_mm,
+                    architecture: policy.architecture.map(TryInto::try_into).transpose()?,
                 },
                 Policy::CombineEligible(policy) => Self::CombineEligible {
                     max_height_mm: policy.max_height_mm,
@@ -1111,9 +1146,13 @@ impl TryFrom<SparseInfillPolicy> for rpc::SparseInfillPolicy {
             policy: Some(match value {
                 SparseInfillPolicy::Fine => Policy::Fine(rpc::FineSparseInfill {}),
                 SparseInfillPolicy::Grid => Policy::Grid(rpc::GridSparseInfill {}),
-                SparseInfillPolicy::WebRoof { roof_spacing_mm } => {
-                    Policy::WebRoof(rpc::WebRoofSparseInfill { roof_spacing_mm })
-                }
+                SparseInfillPolicy::WebRoof {
+                    roof_spacing_mm,
+                    architecture,
+                } => Policy::WebRoof(rpc::WebRoofSparseInfill {
+                    roof_spacing_mm,
+                    architecture: architecture.map(TryInto::try_into).transpose()?,
+                }),
                 SparseInfillPolicy::CombineEligible { max_height_mm } => {
                     Policy::CombineEligible(rpc::CombineEligibleSparseInfill { max_height_mm })
                 }
@@ -1824,6 +1863,20 @@ mod tests {
             SparseInfillPolicy::web_roof(),
             SparseInfillPolicy::WebRoof {
                 roof_spacing_mm: Some(1.5),
+                architecture: None,
+            },
+            SparseInfillPolicy::WebRoof {
+                roof_spacing_mm: None,
+                architecture: Some(WebArchitecture {
+                    opening: Some(WebOpening {
+                        bottom_z_mm: 2.,
+                        height_mm: 10.,
+                        width_mm: 4.,
+                        cap_height_mm: 4.,
+                        pier_width_mm: 1.8,
+                    }),
+                    pier_rib_depth_mm: Some(0.9),
+                }),
             },
             SparseInfillPolicy::CombineEligible { max_height_mm: 0.3 },
         ] {

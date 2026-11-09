@@ -797,7 +797,11 @@ export type SeamPolicy = { "kind": "nearest" } | { "kind": "preferred_build_dire
 
 export type RectilinearAxisPolicy = "x" | "y" | "alternating_xy" | "alternating_yx";
 
-export type SparseInfillPolicy = { "kind": "fine" } | { "kind": "grid" } | { "kind": "web_roof", roof_spacing_mm: number | null, } | { "kind": "combine_eligible", max_height_mm: number, };
+export type SparseInfillPolicy = { "kind": "fine" } | { "kind": "grid" } | { "kind": "web_roof", roof_spacing_mm: number | null, architecture: WebArchitecture | null, } | { "kind": "combine_eligible", max_height_mm: number, };
+
+export type WebArchitecture = { opening: WebOpening | null, pier_rib_depth_mm: number | null, };
+
+export type WebOpening = { bottom_z_mm: number, height_mm: number, width_mm: number, cap_height_mm: number, pier_width_mm: number, };
 
 export type ProcessPolicy = { first_layer_speed_factor: number, first_layer_flow_factor: number, fan_first_layers: number, fan_after_first_layers: number, bridge_speed_factor: number, bridge_flow_factor: number, bridge_fan_pwm: number, max_bridge_span_mm: number, retraction: RetractionPolicy, };
 

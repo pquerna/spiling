@@ -3,6 +3,53 @@
 
 use super::*;
 
+/// Opt-in construction study. No mechanical law or strength credit is implied.
+/// Piers, source walls and the complete roof-root corridor remain protected.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WebArchitecture {
+    #[serde(deserialize_with = "required_option")]
+    pub opening: Option<WebOpening>,
+    #[serde(deserialize_with = "required_option")]
+    pub pier_rib_depth_mm: Option<f64>,
+}
+
+/// A flat-bottom window with a linear supported closing cap. Heights address
+/// absolute build Z, including printers whose bed is not at Z=0. Windows occur
+/// only between two retained orthogonal web roots with sufficient pier reserve.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WebOpening {
+    pub bottom_z_mm: f64,
+    pub height_mm: f64,
+    pub width_mm: f64,
+    pub cap_height_mm: f64,
+    pub pier_width_mm: f64,
+}
+impl WebArchitecture {
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        if self.opening.is_none() && self.pier_rib_depth_mm.is_none() {
+            return Err(invalid("web architecture requires an opening or pier rib"));
+        }
+        if let Some(depth) = self.pier_rib_depth_mm {
+            positive(&[depth])?;
+        }
+        if let Some(o) = self.opening {
+            positive(&[o.height_mm, o.width_mm, o.cap_height_mm, o.pier_width_mm])?;
+            if !o.bottom_z_mm.is_finite()
+                || !(o.bottom_z_mm + o.height_mm).is_finite()
+                || o.cap_height_mm > o.height_mm
+                || o.width_mm > o.cap_height_mm
+            {
+                return Err(invalid(
+                    "web opening requires finite heights and a closing advance no greater than 0.5 mm per mm rise",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Classified centerline domain retained independently of proposed sparse roads.
 /// Includes holes and disconnected components; it conveys no load qualification.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]

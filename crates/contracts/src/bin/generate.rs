@@ -348,6 +348,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SeamPolicy::decl(&config),
         RectilinearAxisPolicy::decl(&config),
         SparseInfillPolicy::decl(&config),
+        WebArchitecture::decl(&config),
+        WebOpening::decl(&config),
         ProcessPolicy::decl(&config),
         RetractionPolicy::decl(&config),
         SupportPolicy::decl(&config),

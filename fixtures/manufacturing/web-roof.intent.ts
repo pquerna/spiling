@@ -14,7 +14,7 @@ export default {
     layer_height_mm: 0.2,
     bead_width_mm: 0.45,
     infill_fraction: 0.08,
-    sparse_infill: { kind: "web_roof", roof_spacing_mm: null },
+    sparse_infill: { kind: "web_roof", roof_spacing_mm: null, architecture: null },
     supports: { kind: "disabled" },
     process: { ...base.recipe.process, max_bridge_span_mm: 2 },
   },

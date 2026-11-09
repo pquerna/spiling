@@ -981,6 +981,20 @@ fn admit_schedule<'model>(
             failure.message = format!("web + roof: {}", failure.message);
             failure
         })?;
+        if let SparseInfillPolicy::WebRoof {
+            architecture: Some(a),
+            ..
+        } = recipe.sparse_infill
+            && let Some(o) = a.opening
+        {
+            let landing = bounds.min[2] + recipe.bottom_skin_thickness_mm + recipe.layer_height_mm;
+            if o.bottom_z_mm < landing {
+                return Err(error(
+                    ManufacturingErrorCode::UnsupportedGeometry,
+                    format!("web opening must retain its bottom landing through {landing} mm"),
+                ));
+            }
+        }
         // The source's actual carrier/pose eligibility and every native slab
         // remain separate. In particular, an endpoint collar is not reclassified
         // as invariant merely because its rectangular footprint matches.

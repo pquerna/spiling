@@ -41,8 +41,22 @@ class Candidate:
     combine_height: float = 0.0
     pattern: str = "rectilinear"
     roof_spacing_mm: float | None = None
+    web_opening: tuple[float, float, float, float, float] | None = None
+    pier_rib_depth_mm: float | None = None
 
     def __post_init__(self):
+        if self.web_opening is not None:
+            # JSON trial receipts use an array; freeze it at the input boundary.
+            object.__setattr__(self, "web_opening", tuple(self.web_opening))
+            if len(self.web_opening) != 5 or any(type(v) not in (int, float) or not math.isfinite(v) for v in self.web_opening):
+                raise ValueError("opening requires finite bottom/height/width/cap/pier values")
+            bottom, height, width, cap, pier = self.web_opening
+            if min(height, width, cap, pier) <= 0 or cap > height or width > cap:
+                raise ValueError("opening closing cap exceeds the admitted slope")
+        if self.pier_rib_depth_mm is not None and (type(self.pier_rib_depth_mm) not in (int, float) or not math.isfinite(self.pier_rib_depth_mm) or not 0.45 <= self.pier_rib_depth_mm <= 3.6):
+            raise ValueError("pier rib outside study bead envelope")
+        if (self.web_opening is not None or self.pier_rib_depth_mm is not None) and self.pattern != "web_roof":
+            raise ValueError("web architecture requires Vault")
         if self.pattern not in {"rectilinear", "grid", "web_roof"}:
             raise ValueError("unknown production infill pattern")
         if self.pattern in {"grid", "web_roof"} and (
@@ -92,8 +106,11 @@ class Candidate:
 
     def data(self):
         data = asdict(self)
-        if self.roof_spacing_mm is None:
-            data.pop("roof_spacing_mm")
+        if self.web_opening is not None:
+            data["web_opening"] = list(self.web_opening)
+        for key in ("roof_spacing_mm", "web_opening", "pier_rib_depth_mm"):
+            if data[key] is None:
+                data.pop(key)
         if self.family == "uniform":
             for key in ("cut", "region_fraction", "plate"):
                 data.pop(key)
@@ -106,7 +123,12 @@ class Candidate:
         if self.combine_height:
             return {"kind": "combine_eligible", "max_height_mm": self.combine_height}
         if self.pattern == "web_roof":
-            return {"kind": "web_roof", "roof_spacing_mm": self.roof_spacing_mm}
+            architecture = None
+            if self.web_opening is not None or self.pier_rib_depth_mm is not None:
+                opening = None if self.web_opening is None else dict(zip(
+                    ("bottom_z_mm", "height_mm", "width_mm", "cap_height_mm", "pier_width_mm"), self.web_opening, strict=True))
+                architecture = {"opening": opening, "pier_rib_depth_mm": self.pier_rib_depth_mm}
+            return {"kind": "web_roof", "roof_spacing_mm": self.roof_spacing_mm, "architecture": architecture}
         return {"kind": {"grid": "grid", "rectilinear": "fine"}[self.pattern]}
 
     @property

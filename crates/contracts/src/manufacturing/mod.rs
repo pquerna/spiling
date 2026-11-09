@@ -964,6 +964,8 @@ pub enum SparseInfillPolicy {
     WebRoof {
         #[serde(deserialize_with = "required_option")]
         roof_spacing_mm: Option<f64>,
+        #[serde(deserialize_with = "required_option")]
+        architecture: Option<WebArchitecture>,
     },
     CombineEligible {
         max_height_mm: f64,
@@ -973,14 +975,23 @@ impl SparseInfillPolicy {
     pub fn web_roof() -> Self {
         Self::WebRoof {
             roof_spacing_mm: None,
+            architecture: None,
         }
     }
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         if let Self::WebRoof {
             roof_spacing_mm: Some(spacing),
+            ..
         } = self
         {
             positive(&[*spacing])?;
+        }
+        if let Self::WebRoof {
+            architecture: Some(architecture),
+            ..
+        } = self
+        {
+            architecture.validate()?;
         }
         if let Self::CombineEligible { max_height_mm } = self {
             positive(&[*max_height_mm])?;
@@ -1025,6 +1036,7 @@ impl PlanarPrintRecipe {
         match self.sparse_infill {
             SparseInfillPolicy::WebRoof {
                 roof_spacing_mm: Some(spacing),
+                ..
             } => spacing,
             _ => self.automatic_web_roof_spacing_mm(),
         }
@@ -1038,6 +1050,25 @@ impl PlanarPrintRecipe {
         self.supports.validate()?;
         self.seam_policy.validate()?;
         self.sparse_infill.validate()?;
+        if let SparseInfillPolicy::WebRoof {
+            architecture: Some(a),
+            ..
+        } = self.sparse_infill
+            && (a
+                .pier_rib_depth_mm
+                .is_some_and(|d| d < self.bead_width_mm || d > 8.0 * self.bead_width_mm)
+                || a.opening.is_some_and(|o| {
+                    o.width_mm < self.bead_width_mm
+                        || o.pier_width_mm < 2.0 * self.bead_width_mm
+                        || o.cap_height_mm < 2.0 * self.layer_height_mm
+                        || a.pier_rib_depth_mm
+                            .is_some_and(|d| d + self.bead_width_mm > o.pier_width_mm)
+                }))
+        {
+            return Err(invalid(
+                "web architecture requires bead-sized openings, two-width piers and bounded pier ribs",
+            ));
+        }
         if matches!(self.sparse_infill, SparseInfillPolicy::WebRoof { .. })
             && (self.web_roof_spacing_mm() < self.bead_width_mm
                 || self.web_roof_spacing_mm() > self.automatic_web_roof_spacing_mm())

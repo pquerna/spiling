@@ -8,6 +8,7 @@
 use super::{cancelled, failed, project_xyz6_point_mm};
 use spiling_contracts::manufacturing::*;
 use std::{collections::BTreeSet, sync::atomic::AtomicBool};
+mod architecture;
 
 type Road = [u64; 4];
 fn key(a: [f64; 3], b: [f64; 3]) -> Result<Road, ManufacturingError> {
@@ -234,31 +235,66 @@ pub(super) fn verify(
                         }
                     }
                 }
+                let a = match recipe.sparse_infill {
+                    SparseInfillPolicy::WebRoof { architecture, .. } => architecture,
+                    _ => None,
+                };
+                architecture::admit(
+                    a,
+                    &web_coordinates,
+                    min,
+                    max,
+                    roof_z,
+                    first_layer.lower_z_mm,
+                    recipe,
+                )?;
+                let mut expected = Vec::new();
                 let mut require = |fixed: usize,
                                    coordinate: f64,
                                    start: f64,
                                    stop: f64,
                                    work: &mut usize| {
                     charge(work, cancel)?;
-                    let mut a = [0.0, 0.0, layer.z_mm];
-                    let mut b = a;
-                    a[fixed] = coordinate;
-                    b[fixed] = coordinate;
-                    a[1 - fixed] = start;
-                    b[1 - fixed] = stop;
-                    if !roads.remove(&(region_index as u16, key(a, b)?)) {
-                        return Err(failed(format!(
-                            "web + roof missing a required web/roof road at layer {}: {:?} to {:?}",
-                            layer.index, a, b
-                        )));
+                    if a.is_none() {
+                        let mut lo = [0., 0., layer.z_mm];
+                        let mut hi = lo;
+                        lo[fixed] = coordinate;
+                        hi[fixed] = coordinate;
+                        lo[1 - fixed] = start;
+                        hi[1 - fixed] = stop;
+                        if !roads.remove(&(region_index as u16, key(lo, hi)?)) {
+                            return Err(failed(format!(
+                                "web + roof missing a required web/roof road at layer {}: {:?} to {:?}",
+                                layer.index, lo, hi
+                            )));
+                        }
+                        return Ok(());
                     }
+                    if expected.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                        return Err(failed("web architecture expected-road budget exceeded"));
+                    }
+                    expected.push((fixed, coordinate, start, stop));
                     Ok(())
                 };
                 for fixed in 0..2 {
                     for &c in &web_coordinates[fixed] {
                         crossing_intervals(polygon, fixed, c, &mut hits, work, cancel)?;
                         for pair in hits.as_chunks::<2>().0 {
-                            require(fixed, c, pair[0], pair[1], work)?;
+                            if let Some(opening) = a.and_then(|v| v.opening) {
+                                let intervals = architecture::panel_intervals(
+                                    [pair[0], pair[1]],
+                                    &web_coordinates[1 - fixed],
+                                    Some(opening),
+                                    layer.z_mm,
+                                    work,
+                                    cancel,
+                                )?;
+                                for [lo, hi] in intervals {
+                                    require(fixed, c, lo, hi, work)?;
+                                }
+                            } else {
+                                require(fixed, c, pair[0], pair[1], work)?;
+                            }
                         }
                     }
                     for gap in 0..=count[fixed] {
@@ -333,6 +369,25 @@ pub(super) fn verify(
                         }
                     }
                 }
+                if let Some(depth) = a.and_then(|v| v.pier_rib_depth_mm) {
+                    architecture::pier_roads(
+                        polygon,
+                        &web_coordinates,
+                        depth,
+                        recipe.bead_width_mm,
+                        &mut expected,
+                        work,
+                        cancel,
+                    )?;
+                }
+                architecture::consume(
+                    &mut expected,
+                    &mut roads,
+                    region_index as u16,
+                    layer,
+                    work,
+                    cancel,
+                )?;
             }
             if !area.is_finite() || (area - region.area_mm2).abs() > 1e-9 * region.area_mm2.max(1.0)
             {

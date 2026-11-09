@@ -163,7 +163,7 @@ def exercise(args, name, source, fraction, spacing, metadata):
     intent["recipe"].update(
         infill_fraction=fraction,
         sparse_infill=(
-            {"kind": "web_roof", "roof_spacing_mm": spacing}
+            {"kind": "web_roof", "roof_spacing_mm": spacing, "architecture": None}
             if args.pattern == "web_roof"
             else {"kind": args.pattern}
         ),
