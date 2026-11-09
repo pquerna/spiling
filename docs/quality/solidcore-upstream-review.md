@@ -15,13 +15,21 @@ An upstreaming recommendation is not authorization to open an upstream PR or
 issue. Current Spiling manufacturing refusals need a standalone kernel contract
 violation before they become upstream bug candidates.
 
+Upstream development lives in
+[`tangency-labs/solidcraft/solidcore/`](https://github.com/tangency-labs/solidcraft/tree/main/solidcore).
+`tangency-labs/solidcore` is its automatic read-only mirror, retained as our
+standalone synchronization source; mirror commits record their SolidCraft source
+in `solidcraft:` trailers. Any explicitly approved upstream issue or PR belongs
+in SolidCraft, with kernel-only PRs against `kernel`. Historical mirror issue/PR
+links below are context, not submission destinations.
+
 ## Baselines and refresh state
 
-| Role                                      | Exact identity                                                                                                                                                                                                                                                      |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Upstream baseline                         | [`61efb2a31c9c1de9ba25617a798ce72d65764d9c`](https://github.com/tangency-labs/solidcore/commit/61efb2a31c9c1de9ba25617a798ce72d65764d9c)                                                                                                                            |
-| Published fork `main` and integration tip | [`a1ce2e536d0e405f2f2338c621fe136590202450`](https://github.com/pquerna/solidcore/commit/a1ce2e536d0e405f2f2338c621fe136590202450), branch [`pquerna/integration-spiling-tracking`](https://github.com/pquerna/solidcore/tree/pquerna/integration-spiling-tracking) |
-| Qualified Spiling consumer pin            | [`a1ce2e536d0e405f2f2338c621fe136590202450`](https://github.com/pquerna/solidcore/commit/a1ce2e536d0e405f2f2338c621fe136590202450); both declarations in [`Cargo.toml`](../../Cargo.toml), their lockfile sources and `geometry::KERNEL_REVISION` agree             |
+| Role                                      | Exact identity                                                                                                                                                                                                                                                          |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream baseline                         | [`e4f040d3fb9c9442af4d94b0fdfcad01e4c577d6`](https://github.com/tangency-labs/solidcore/commit/e4f040d3fb9c9442af4d94b0fdfcad01e4c577d6), mirroring [SolidCraft `8babea5`](https://github.com/tangency-labs/solidcraft/commit/8babea5c63bb431c45098aa78a8e7c02f86bfc81) |
+| Published fork `main` and integration tip | [`aad5640cc8e55d6490192aab329581353cc93b41`](https://github.com/pquerna/solidcore/commit/aad5640cc8e55d6490192aab329581353cc93b41), branch [`pquerna/integration-spiling-tracking`](https://github.com/pquerna/solidcore/tree/pquerna/integration-spiling-tracking)     |
+| Qualified Spiling consumer pin            | [`aad5640cc8e55d6490192aab329581353cc93b41`](https://github.com/pquerna/solidcore/commit/aad5640cc8e55d6490192aab329581353cc93b41); both declarations in [`Cargo.toml`](../../Cargo.toml), their lockfile sources and `geometry::KERNEL_REVISION` agree                 |
 
 Refreshing the fork does not automatically promote its moving tip into Spiling.
 Promotion requires native source/query controls and real engine/CLI consumer
@@ -32,8 +40,10 @@ The [geometry](geometry-evidence.md) and [manufacturing](manufacturing-evidence.
 runbooks own the current support envelope. Passing selected upgrade controls does
 not clear remaining development gates or qualify every native geometry family.
 
-Keep upstream `Kernel::fixes` at its default opt-out policy; new optional fixes
-require their own consumer qualification. SolidCraft's geometry/STEP companion
+Keep surviving upstream `Kernel::fixes` at their defaults; new optional fixes
+require their own consumer qualification. Retired flags and off paths are not
+restored: their unconditional replacements require consumer qualification with
+the new pin. SolidCraft's geometry/STEP companion
 libraries remain the coherent vendored snapshot recorded in
 [`UPSTREAM.toml`](../../vendor/solidcraft/UPSTREAM.toml); upstream application
 `main` is not an interchangeable version upgrade.
