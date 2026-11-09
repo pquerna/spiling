@@ -78,6 +78,7 @@ def context(destination):
                 "quadratic.py",
                 "quadratic_preconditioner.py",
                 "quadratic_fields.py",
+                "vault_mechanics.py",
             }
             else HERE / "remote" / name
         )
@@ -476,7 +477,9 @@ def main():
     d.add_argument("--run-id", required=True)
     d.add_argument("--seconds", type=int, default=600)
     d.add_argument(
-        "--backend", choices=("coupon", "reference", "quadratic"), default="coupon"
+        "--backend",
+        choices=("coupon", "reference", "quadratic", "vault"),
+        default="coupon",
     )
     d.add_argument("--cpus", type=int)
     d.add_argument("--blas-threads", type=int)

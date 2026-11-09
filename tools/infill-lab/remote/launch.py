@@ -39,6 +39,7 @@ CONTEXT = (
     "quadratic.py",
     "quadratic_preconditioner.py",
     "quadratic_fields.py",
+    "vault_mechanics.py",
 )
 
 
@@ -332,7 +333,7 @@ def main():
     r.add_argument("--run-id", required=True)
     r.add_argument(
         "--backend",
-        choices=("scipy", "warp", "coupon", "reference", "quadratic"),
+        choices=("scipy", "warp", "coupon", "reference", "quadratic", "vault"),
         required=True,
     )
     r.add_argument("--seconds", type=float, default=300)
