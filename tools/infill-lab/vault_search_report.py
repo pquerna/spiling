@@ -111,7 +111,8 @@ def report(archive, captures, output):
             solid=solid["capture_id"],
         ),
     )
-    plot(valid, baseline, output)
+    native_refusals = sum(r.get("stage") == "native" for r in rows)
+    plot(valid, baseline, output, total=len(rows), native_refusals=native_refusals)
     gallery(selected, native, output)
     print(
         json.dumps(
@@ -154,7 +155,7 @@ def label(r):
     return f"{100 * c['fraction']:g}% webs · {roof}"
 
 
-def plot(rows, baseline, output):
+def plot(rows, baseline, output, *, total, native_refusals):
     plt = style()
     fig, axes = plt.subplots(1, 2, figsize=(14, 6), layout="constrained")
     for pattern, title, color, marker in [
@@ -235,7 +236,10 @@ def plot(rows, baseline, output):
         weight="bold",
     )
     fig.supxlabel(
-        "Right and down is better within this fixed local elasticity model. White outline: multi-axis Pareto.\nWhole-object costs; nominal bonded footprints, weak-Z 0.25. Not strength or full-part qualification.",
+        "Right and down is better within this fixed local elasticity model. White outline: multi-axis Pareto.\n"
+        f"{len(rows)} complete constructions (solid reference off-plot); {native_refusals} native refusal(s); "
+        f"{total - len(rows) - native_refusals} incomplete mechanics.\n"
+        "Whole-object costs; nominal bonded footprints, weak-Z 0.25. Not strength or full-part qualification.",
         fontsize=10,
     )
     fig.savefig(output / "pareto.png", dpi=170)
