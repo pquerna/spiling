@@ -362,10 +362,13 @@ hide it by skipping the test or weaken its PCurve assertion.
 ## SolidCore fork freshness
 
 The integration owner refreshes upstream at the start of each active UTC workday
-and before a new fork change or consumer pin. `origin` is
-`tangency-labs/solidcore`; `fork` is `pquerna/solidcore`. Upstream `origin/main`
-is the baseline; fork `main` publishes the tested Spiling integration, including
-its maintained overlays.
+and before a new fork change or consumer pin. Development lives in
+[`tangency-labs/solidcraft`, under `solidcore/`](https://github.com/tangency-labs/solidcraft/tree/main/solidcore).
+`origin` is its automatic read-only `tangency-labs/solidcore` mirror; `fork` is
+`pquerna/solidcore`. Upstream `origin/main` is the standalone kernel baseline;
+fork `main` publishes the tested Spiling integration, including its maintained
+overlays. The mirror preserves kernel-only trees and records SolidCraft source
+commits in `solidcraft:` trailers; it is not a separate development repository.
 
 ```mermaid
 flowchart LR
@@ -384,7 +387,9 @@ upstream `origin/main`, not the composed fork `main`. Publish the tested
 integration directly to fork `main`; GitHub issues, PRs and API authentication
 are not prerequisites. Keep scope, rationale, SMLib relationship, evidence and
 removal criteria in the [patch registry](solidcore-upstream-review.md). Never
-create an upstream issue or PR without explicit approval.
+create an upstream issue or PR without explicit approval. If approved, use
+`tangency-labs/solidcraft`, with kernel-only PRs targeting its `kernel` branch,
+not the read-only mirror.
 
 ### Daily synchronization and promotion
 
@@ -399,11 +404,20 @@ the updated mesher lane into the budget lane. Then merge the current budget and
 STEP-copy lanes into `pquerna/integration-spiling-tracking`. Follow SolidCore's
 commit-attribution rules for new synchronization commits.
 
+If upstream rewrites its history, do not rewrite our published lanes to match.
+First locate an upstream commit whose complete tree is byte-identical to the
+previous upstream baseline, and verify equality with `git rev-parse COMMIT^{tree}`.
+On each independent lane, an explicit `--allow-unrelated-histories --strategy=ours`
+merge of that equivalent baseline may connect the histories without changing the
+overlay tree; then merge current upstream normally. Record both baseline commits
+and their shared tree in the bridge commit. Without an exact tree match, stop and
+assess the content delta rather than treating unrelated histories as an empty base.
+
 Published patch branches and the integration branch advance by normal merges.
 Rebase only new, unpublished work when first preparing or reorganizing a change;
-never rewrite a branch or commit already used by a consumer. This follows the
-kernel's published-branch policy while keeping branch URLs stable and old exact
-pins reachable. Do not replace the composed fork `main` with an upstream mirror.
+never rewrite a branch or commit already used by a consumer. Keep our branch URLs
+stable and old exact pins reachable independently of upstream's history policy.
+Do not replace the composed fork `main` with an upstream mirror.
 
 Run the owning resource/backend controls and actual native consumer on the
 combined integration tree. Prefer producer-specific Cargo targets when comparing

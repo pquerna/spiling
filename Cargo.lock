@@ -4675,7 +4675,7 @@ dependencies = [
 [[package]]
 name = "nurbs-grid-mesh"
 version = "0.1.0"
-source = "git+https://github.com/pquerna/solidcore?rev=a1ce2e536d0e405f2f2338c621fe136590202450#a1ce2e536d0e405f2f2338c621fe136590202450"
+source = "git+https://github.com/pquerna/solidcore?rev=aad5640cc8e55d6490192aab329581353cc93b41#aad5640cc8e55d6490192aab329581353cc93b41"
 
 [[package]]
 name = "nvml-wrapper"
@@ -6652,7 +6652,7 @@ checksum = "c4fdfe13e1c42e45f497416afb8dc4e783bf0e25b7be9077c1c77c5fb14cb998"
 [[package]]
 name = "solidcore"
 version = "1.0.1"
-source = "git+https://github.com/pquerna/solidcore?rev=a1ce2e536d0e405f2f2338c621fe136590202450#a1ce2e536d0e405f2f2338c621fe136590202450"
+source = "git+https://github.com/pquerna/solidcore?rev=aad5640cc8e55d6490192aab329581353cc93b41#aad5640cc8e55d6490192aab329581353cc93b41"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -6661,7 +6661,7 @@ dependencies = [
 [[package]]
 name = "solidcore-mesh"
 version = "0.0.1"
-source = "git+https://github.com/pquerna/solidcore?rev=a1ce2e536d0e405f2f2338c621fe136590202450#a1ce2e536d0e405f2f2338c621fe136590202450"
+source = "git+https://github.com/pquerna/solidcore?rev=aad5640cc8e55d6490192aab329581353cc93b41#aad5640cc8e55d6490192aab329581353cc93b41"
 dependencies = [
  "nurbs-grid-mesh",
  "solidcore",

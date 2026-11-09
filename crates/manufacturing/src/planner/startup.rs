@@ -1,0 +1,165 @@
+use super::{LayerElevation, SectionSpan, WallCacheKey, walls};
+use std::sync::Arc;
+
+pub(super) struct StartupWall {
+    pub key: WallCacheKey,
+    pub layout: Arc<walls::WallPlan>,
+    elevation: [u64; 3],
+}
+
+impl StartupWall {
+    pub fn permits(input: &crate::CompilerInput<'_>) -> bool {
+        !matches!(
+            input.intent.recipe.sparse_infill,
+            spiling_contracts::manufacturing::SparseInfillPolicy::WebRoof { .. }
+        ) && !matches!(&input.intent.printer.workflow,
+            spiling_contracts::manufacturing::JobWorkflow::FixedDualMarlin { job }
+                if job.functional_construction.is_some() || !job.surface_constructions.is_empty())
+    }
+
+    pub fn new(key: WallCacheKey, layout: Arc<walls::WallPlan>, first: &LayerElevation) -> Self {
+        Self {
+            key,
+            layout,
+            elevation: Self::elevation(first),
+        }
+    }
+
+    fn elevation(first: &LayerElevation) -> [u64; 3] {
+        [
+            first.lower_z.to_bits(),
+            first.z.to_bits(),
+            first.sample.to_bits(),
+        ]
+    }
+
+    pub fn matches(&self, sections: &[SectionSpan], schedule: &[LayerElevation]) -> bool {
+        self.key.0 == 0
+            && sections
+                .last()
+                .is_some_and(|span| span.end as usize == schedule.len())
+            && schedule
+                .first()
+                .is_some_and(|first| Self::elevation(first) == self.elevation)
+    }
+
+    pub fn layout_bytes(&self) -> usize {
+        self.layout
+            .retained_bytes
+            .saturating_add(2 * std::mem::size_of::<usize>())
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.layout_bytes()
+            .saturating_add(std::mem::size_of::<Self>())
+    }
+
+    pub fn retain_for(
+        owner: &mut Option<Self>,
+        mandatory: usize,
+        additional: usize,
+        limit: usize,
+    ) -> usize {
+        let bytes = owner.as_ref().map_or(0, Self::retained_bytes);
+        if mandatory
+            .checked_add(additional)
+            .and_then(|total| total.checked_add(bytes))
+            .is_none_or(|total| total > limit)
+        {
+            *owner = None;
+            0
+        } else {
+            bytes
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geo::MultiPolygon;
+
+    fn first() -> LayerElevation {
+        LayerElevation {
+            lower_z: 0.0,
+            z: 0.2,
+            sample: 0.1,
+            height: 0.2,
+        }
+    }
+
+    fn wall() -> StartupWall {
+        StartupWall::new(
+            (0, None, [0; 3], None),
+            Arc::new(walls::WallPlan {
+                paths: Vec::new(),
+                fill: MultiPolygon(Vec::new()),
+                correspondence: Vec::new(),
+                retained_points: 0,
+                retained_bytes: std::mem::size_of::<walls::WallPlan>(),
+                section_area_mm2: 0.0,
+                wall_area_mm2: 0.0,
+                protected_hole_area_mm2: 0.0,
+            }),
+            &first(),
+        )
+    }
+
+    #[test]
+    fn startup_handoff_requires_complete_capture_and_exact_first_interval() {
+        let wall = wall();
+        let mut schedule = vec![
+            first(),
+            LayerElevation {
+                lower_z: 0.2,
+                z: 0.4,
+                sample: 0.3,
+                height: 0.2,
+            },
+        ];
+        let mut sections = vec![SectionSpan {
+            start: 0,
+            end: 1,
+            invariant: true,
+            inner_material: None,
+            material: Arc::new(MultiPolygon(Vec::new())),
+            process_domains: Vec::new(),
+            occupied: None,
+            source_area_mm2: 0.0,
+        }];
+        assert!(!wall.matches(&sections, &schedule));
+        sections[0].end = 2;
+        assert!(wall.matches(&sections, &schedule));
+        schedule[0].lower_z = -0.0;
+        assert!(!wall.matches(&sections, &schedule));
+        schedule[0] = first();
+        schedule[0].z = schedule[0].z.next_up();
+        assert!(!wall.matches(&sections, &schedule));
+        schedule[0] = first();
+        schedule[0].sample = schedule[0].sample.next_down();
+        assert!(!wall.matches(&sections, &schedule));
+    }
+
+    #[test]
+    fn startup_handoff_releases_before_capacity_pressure_and_overflow() {
+        let mut owner = Some(wall());
+        let bytes = owner.as_ref().unwrap().retained_bytes();
+        assert_eq!(
+            StartupWall::retain_for(&mut owner, 100, 200, 300 + bytes),
+            bytes
+        );
+        assert!(owner.is_some());
+        assert_eq!(
+            StartupWall::retain_for(&mut owner, 100, 200, 299 + bytes),
+            0
+        );
+        assert!(owner.is_none());
+        assert_eq!(StartupWall::retain_for(&mut owner, 100, 200, 300), 0);
+        owner = Some(wall());
+        assert_eq!(
+            StartupWall::retain_for(&mut owner, usize::MAX, 1, usize::MAX),
+            0
+        );
+        assert!(owner.is_none());
+    }
+}
