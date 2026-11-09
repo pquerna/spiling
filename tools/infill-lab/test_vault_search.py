@@ -303,3 +303,106 @@ def test_later_rounds_reuse_exact_original_source_bytes(tmp_path):
     assert (
         later / "specimens" / "cube.step"
     ).read_bytes() == b"different product counter"
+
+
+def test_core_cohort_binds_solver_and_physics_but_groups_axes():
+    from copy import deepcopy
+    from vault_search import core_cohort
+
+    case = dict(judge={"source": "frozen"}, solver="p_amg")
+    target = dict(
+        source_sha256="solid",
+        scenarios=[
+            dict(
+                case="compression_x",
+                material={"z_ratio": 0.25},
+                refinement={"divisions": 1},
+            )
+        ],
+    )
+    base = core_cohort(case, target, "image")
+    changed = deepcopy(target)
+    changed["scenarios"][0]["case"] = "compression_z"
+    assert core_cohort(case, changed, "image") == base
+    assert core_cohort(dict(case, solver="superlu_mmd"), target, "image") != base
+    assert core_cohort(case, target, "other-image") != base
+    changed["scenarios"][0]["material"]["z_ratio"] = 1.0
+    assert core_cohort(case, changed, "image") != base
+
+
+def test_join_retains_all_failed_panel_and_rejects_wrong_solver(tmp_path):
+    import json
+    from types import SimpleNamespace as Args
+    from model import file_hash
+    from vault_search import join_core, write
+
+    candidate = proposals(0, [])[7]["candidate"]
+    judge = {"immutable": "judge"}
+    scenario = {"case": "compression_x", "fixed": "fixture"}
+    target = dict(
+        candidate=candidate,
+        roads_sha256="roads",
+        source_sha256="source",
+        scenarios=[scenario],
+    )
+    text = json.dumps(target) + "\n"
+    reference = tmp_path / "reference.json"
+    reference.write_text(text)
+    case = dict(judge=judge, solver="p_amg", reference_case_sha256=file_hash(reference))
+    key = digest(case)
+    inputs, results = tmp_path / "inputs", tmp_path / "results"
+    (inputs / key).mkdir(parents=True)
+    (results / key).mkdir(parents=True)
+    write(inputs / key / "case.json", case)
+    (inputs / key / "reference-case.json").write_text(text)
+    write(
+        inputs / "jobs.json",
+        dict(
+            judge=judge,
+            jobs=[dict(id=key, capture_id="native", candidate=candidate, axis="x")],
+        ),
+    )
+    write(results / key / "launch.json", dict(removed=True, image={"id": "image"}))
+    write(results / key / "dispatch.json", dict(exit_code=1))
+    response = dict(
+        input_sha256=file_hash(inputs / key / "case.json"),
+        judge=judge,
+        scenario=scenario,
+        solver="p_amg",
+        status="failed",
+    )
+    write(results / key / "trials.jsonl", response)
+    roof = tmp_path / "roof.json"
+    write(
+        roof,
+        dict(
+            rows=[
+                dict(
+                    capture_id="native",
+                    candidate=candidate,
+                    roads_sha256="roads",
+                    source_sha256="source",
+                    status="failed",
+                    stage="roof_mechanics",
+                )
+            ]
+        ),
+    )
+    args = Args(
+        roof=roof,
+        input=inputs,
+        results=results,
+        history=None,
+        output=tmp_path / "complete-but-unscored.json",
+    )
+    join_core(args)
+    archive = json.loads(args.output.read_text())
+    assert archive["frontier"] == []
+    assert archive["rows"][0]["status"] == "failed"
+    (results / key / "trials.jsonl").write_text(
+        json.dumps(dict(response, solver="superlu_mmd"))
+    )
+    args.output = tmp_path / "wrong-solver.json"
+    with pytest.raises(ValueError, match="response identity"):
+        join_core(args)
+    assert not args.output.exists()

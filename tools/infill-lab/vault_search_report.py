@@ -250,7 +250,7 @@ def plot(rows, baseline, output, *, total, native_refusals, program_count):
         weight="bold",
     )
     fig.supxlabel(
-        "Right and down is better within this fixed local elasticity model. White outline: multi-axis Pareto.\n"
+        "Right and down is better within this fixed local elasticity model. White outline: provisional multi-axis Pareto among scored settings.\n"
         f"{total} settings / {program_count} distinct native programs; {len(rows)} scored (solid off-plot); {native_refusals} native refusal(s); "
         f"{total - len(rows) - native_refusals} incomplete mechanics.\n"
         "Whole-object costs; nominal bonded footprints, weak-Z 0.25. Not strength or full-part qualification.",

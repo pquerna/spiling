@@ -522,6 +522,20 @@ def core_pack(args):
     print(json.dumps(dict(jobs=len(jobs))))
 
 
+def core_cohort(case, target, image):
+    """Bind the solver as well as physical inputs; axes form one fixed panel."""
+    scenario = target["scenarios"][0]
+    return digest(
+        dict(
+            image=image,
+            judge=case["judge"],
+            source=target["source_sha256"],
+            solver=case["solver"],
+            scenario={k: v for k, v in scenario.items() if k != "case"},
+        )
+    )
+
+
 def join_core(args):
     """Combine explicitly named fixtures, never pretend different cohorts are one."""
     roof = json.loads(args.roof.read_text())
@@ -554,16 +568,7 @@ def join_core(args):
         if not launch["removed"]:
             raise ValueError("core container not removed")
         scenario = target["scenarios"][0]
-        core_cohorts.add(
-            digest(
-                dict(
-                    image=launch["image"]["id"],
-                    judge=manifest["judge"],
-                    source=target["source_sha256"],
-                    scenario={k: v for k, v in scenario.items() if k != "case"},
-                )
-            )
-        )
+        core_cohorts.add(core_cohort(case, target, launch["image"]["id"]))
         lines = (
             (result_folder / "trials.jsonl").read_text().splitlines()
             if (result_folder / "trials.jsonl").exists()
@@ -577,6 +582,7 @@ def join_core(args):
                 row["input_sha256"] != file_hash(folder / "case.json")
                 or row["judge"] != manifest["judge"]
                 or row["scenario"] != scenario
+                or row.get("solver") != case["solver"]
             ):
                 raise ValueError("core response identity differs")
             if row["status"] == "ok":
@@ -594,7 +600,7 @@ def join_core(args):
         axes[job["axis"]] = dict(row, job=job["id"])
     if len(core_cohorts) != 1:
         raise ValueError("one fixed core cohort required")
-    core_cohort = next(iter(core_cohorts))
+    panel_cohort = next(iter(core_cohorts))
     rows = []
     for original in roof["rows"]:
         key = original["capture_id"]
@@ -611,8 +617,8 @@ def join_core(args):
             row["roof_response"] = row["stiffness_n_mm"]
             row["core_response"] = core
             row["roof_cohort"] = row["cohort"]
-            row["core_cohort"] = core_cohort
-            row["cohort"] = digest(dict(roof=row["cohort"], core=core_cohort))
+            row["core_cohort"] = panel_cohort
+            row["cohort"] = digest(dict(roof=row["cohort"], core=panel_cohort))
             if all(c["status"] == "ok" for c in core.values()):
                 row["stiffness_n_mm"] = {
                     **{"roof_" + a: row["roof_response"][a] for a in "xyz"},
@@ -626,7 +632,7 @@ def join_core(args):
                 )
         rows.append(row)
     valid = [r for r in rows if r["status"] == "ok"]
-    if len({r["cohort"] for r in valid}) != 1:
+    if len({r["cohort"] for r in valid}) > 1:
         raise ValueError("paired fixture cohorts differ")
     write(
         args.output,
