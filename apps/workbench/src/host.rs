@@ -17,7 +17,9 @@ use spiling_contracts::{
         GeometryCommand, GeometryResponse, JobError, JobResult, JobStatus, NativePath, RigidPoseMm,
         SceneSummary,
     },
-    project::{ProjectCommand, ProjectId, ProjectInfo, ProjectResponse, ProjectRevision},
+    project::{
+        ProjectCommand, ProjectErrorCode, ProjectId, ProjectInfo, ProjectResponse, ProjectRevision,
+    },
 };
 use spiling_engine_client::{ClientError, EngineClient, NativeOperationWatch};
 use std::{
@@ -689,6 +691,7 @@ impl Actor {
             self.pending.is_some() || self.state.diagnostic.as_ref().is_some_and(|d| !d.done);
         self.state.busy = self.executing
             || self.state.active_operation
+            || self.mechanics_task.is_some()
             || self.state.phase == Phase::Starting
             || self.deferred.is_some()
             || self.export_task.is_some();
@@ -768,26 +771,7 @@ impl Actor {
                         None => std::future::pending().await,
                     }
                 } => {
-                    self.mechanics_task = None;
-                    match result {
-                        Ok(Ok(report)) if self.state.project.as_ref().is_some_and(|project|
-                            project.project_id == report.project && project.revision == report.revision
-                        ) => {
-                            self.state.mechanics_previous = self.state.mechanics.clone().filter(|previous|
-                                previous.project == report.project
-                                && previous.summary.source_hash == report.summary.source_hash
-                                && previous.summary.case.case.id == report.summary.case.case.id
-                                && previous.summary.case.case.loads == report.summary.case.case.loads
-                                && previous.summary.case.case.restraints == report.summary.case.case.restraints
-                                && (previous.summary.pose != report.summary.pose
-                                    || previous.summary.settings != report.summary.settings)
-                            );
-                            self.state.mechanics = Some(report);
-                        }
-                        Ok(Ok(_)) => {},
-                        Ok(Err(error)) => self.failure(error).await,
-                        Err(error) => self.problem(error.to_string()),
-                    }
+                    self.complete_mechanics(result).await;
                 },
                 result=async{match &mut self.optical_task{Some(task)=>task.await,None=>std::future::pending().await}}=>{
                     self.optical_task=None;
@@ -1312,29 +1296,7 @@ impl Actor {
         self.state.scene = Some(scene);
         self.state.layout_overview = Some(Arc::new(overview));
         self.schedule_display();
-        if let (Some(client), Some(project)) = (&self.client, &self.state.project)
-            && let Some(record) = project.analysis.results.iter().rev().find(|result| {
-                project.analysis.cases.iter().any(|case| {
-                    case.case.id == result.case_id && case.case.layout_id == project.layout_id
-                })
-            })
-            && self.mechanics_task.is_none()
-            && self.mechanics_restore_key.as_ref()
-                != Some(&(project.project_id.clone(), record.hash.clone()))
-            && self.state.mechanics.as_ref().is_none_or(|capture| {
-                capture.project != project.project_id
-                    || capture.summary.case.case.layout_id != project.layout_id
-            })
-        {
-            self.mechanics_restore_key = Some((project.project_id.clone(), record.hash.clone()));
-            self.mechanics_task = Some(tokio::spawn(crate::assets::restore_mechanics(
-                client.rpc(),
-                client.hello().session_id.clone(),
-                project.project_id.clone(),
-                project.revision,
-                record.clone(),
-            )));
-        }
+        self.restore_mechanics();
         if self
             .state
             .project
@@ -1348,6 +1310,94 @@ impl Actor {
             state.hardware.local_selection = None;
         }
         Ok(())
+    }
+    fn restore_mechanics(&mut self) {
+        if self.pending.is_none()
+            && let (Some(client), Some(project)) = (&self.client, &self.state.project)
+            && let Some(record) = project.analysis.results.iter().rev().find(|result| {
+                project.analysis.cases.iter().any(|case| {
+                    case.case.id == result.case_id && case.case.layout_id == project.layout_id
+                })
+            })
+            && self.mechanics_task.is_none()
+            && self.mechanics_restore_key.as_ref()
+                != Some(&(project.project_id.clone(), record.hash.clone()))
+            && self.state.mechanics.as_ref().is_none_or(|capture| {
+                capture.project != project.project_id
+                    || capture.summary.case.case.layout_id != project.layout_id
+            })
+        {
+            self.mechanics_task = Some(tokio::spawn(crate::assets::restore_mechanics(
+                client.rpc(),
+                client.hello().session_id.clone(),
+                project.project_id.clone(),
+                project.revision,
+                record.clone(),
+            )));
+        }
+    }
+    async fn complete_mechanics(
+        &mut self,
+        result: Result<
+            Result<Arc<crate::assets::MechanicsCapture>, ClientError>,
+            tokio::task::JoinError,
+        >,
+    ) {
+        self.mechanics_task = None;
+        self.mechanics_restore_key = None;
+        let retry = match result {
+            Ok(Ok(report))
+                if self.state.project.as_ref().is_some_and(|project| {
+                    project.project_id == report.project && project.revision == report.revision
+                }) =>
+            {
+                self.mechanics_restore_key = self.state.project.as_ref().and_then(|project| {
+                    project
+                        .analysis
+                        .results
+                        .iter()
+                        .find(|record| record.hash.as_str() == report.resource.sha256)
+                        .map(|record| (project.project_id.clone(), record.hash.clone()))
+                });
+                self.state.mechanics_previous = self.state.mechanics.clone().filter(|previous| {
+                    previous.project == report.project
+                        && previous.summary.source_hash == report.summary.source_hash
+                        && previous.summary.case.case.id == report.summary.case.case.id
+                        && previous.summary.case.case.loads == report.summary.case.case.loads
+                        && previous.summary.case.case.restraints
+                            == report.summary.case.case.restraints
+                        && (previous.summary.pose != report.summary.pose
+                            || previous.summary.settings != report.summary.settings)
+                });
+                self.state.mechanics = Some(report);
+                false
+            }
+            Ok(Ok(_)) => true,
+            Ok(Err(ClientError::Project(error)))
+                if error.code == ProjectErrorCode::StaleRevision =>
+            {
+                true
+            }
+            Ok(Err(ClientError::Geometry(error)))
+                if error.code == spiling_contracts::geometry::GeometryErrorCode::StaleRevision =>
+            {
+                true
+            }
+            Ok(Err(error)) => {
+                self.failure(error).await;
+                false
+            }
+            Err(error) => {
+                self.problem(error.to_string());
+                false
+            }
+        };
+        if retry {
+            self.refresh_after_failure().await;
+        }
+        if let Some(action) = self.deferred.take() {
+            self.admit(action).await;
+        }
     }
     async fn request(&mut self, request: Request) {
         match request {
@@ -1373,6 +1423,7 @@ impl Actor {
                     return;
                 }
                 if self.pending.is_some()
+                    || self.mechanics_task.is_some()
                     || self.state.diagnostic.as_ref().is_some_and(|d| !d.done)
                     || self.export_task.is_some()
                     || self.dialog.is_some()
@@ -1401,7 +1452,8 @@ impl Actor {
                 }
             }
             Request::Command(Command::Diagnostic) => {
-                if self.export_task.is_some()
+                if self.mechanics_task.is_some()
+                    || self.export_task.is_some()
                     || self.dialog.is_some()
                     || self.confirmation.is_some()
                     || self.pending.is_some()
@@ -1590,6 +1642,7 @@ impl Actor {
     }
     async fn admit(&mut self, action: Action) {
         if self.pending.is_some()
+            || self.mechanics_task.is_some()
             || self.state.diagnostic.as_ref().is_some_and(|d| !d.done)
             || self.export_task.is_some()
             || self.dialog.is_some()

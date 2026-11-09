@@ -182,6 +182,9 @@ references. The source bytes remain in the same project's source closure. Live,
 history and prepared distinct field allocations share a 32 MiB Core budget;
 each SPLA remains at most 4 MiB. Missing/extra/misbound objects or invalid packed
 semantics refuse open rather than falling back to a ledger or recomputing.
+Native open checks both current case patches and historical captured load/restraint
+patches against the rebuilt or reused authoritative native face table. A stale
+capture may differ from current intent, but cannot refer to an absent source face.
 
 `GetAnalysisResult` is a read-only operation returning `AnalysisResultPrepared`:
 the read revision is distinct from the result's original captured revision. It
@@ -195,6 +198,11 @@ attachment itself does not falsify freshness merely by advancing the revision;
 freshness compares captured inputs. Transient study/draft edits cannot relabel
 old fields current. Rerun remains a distinct explicit operation. Read-only
 inspection changes no content, dirty state, history or revisions.
+Restoration participates in native action admission. Its in-flight attempt is not
+a successful restore key: a revision-raced read is discarded and retried at the
+latest read revision. Failed attempts remain retryable on subsequent refresh.
+Captured settings hydrate an uninitialized form once; later edits, including an
+empty settings draft, survive reconciliation until explicit discard or adoption.
 
 SPLA1 is explicit little-endian packed data, never Rust memory layout. Its
 32-byte header is magic `SPLA`, u32 version 1, u32 JSON-metadata length (≤48 KiB),
@@ -212,7 +220,9 @@ region volumes/energies and nodal/stress extrema against the summary. Retained
 patch points must form complete full-order exterior-face quadrature. Independently
 reassembled nodal loads and each patch's integrated resultant/source-origin
 moment must match the retained nodes and authored wrenches. These are integrity
-checks, not a new discretization or physical-accuracy receipt. Client retrieval binds hash,
+checks; retained nodal force/displacement work must also agree with twice the
+strain energy and the stored work/energy assessment. They are not a new
+discretization or physical-accuracy receipt. Client retrieval binds hash,
 size, MIME, input identity and captured revision.
 SPLA currently has Rust consumers only; no TypeScript packed decoder or
 cross-language binary interoperability qualification is claimed.

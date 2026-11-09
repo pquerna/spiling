@@ -18,11 +18,13 @@ impl Workbench {
         ui.weak("Planned, directional wall/skin/effective-core continuum; interfaces assumed tied. No witnessed road attachment, calibrated strength or Basic release qualification.");
         ui.collapsing("Explicit print recipe and assumed laws", |ui| {
             ui.label("Paste AnalysisRunSettings JSON (including law-compatible recipe). No material or load is supplied implicitly.");
-            ui.add(
+            if ui.add(
                 egui::TextEdit::multiline(&mut self.mechanics.settings_json)
                     .desired_rows(7)
                     .desired_width(f32::INFINITY),
-            );
+            ).changed() {
+                self.mechanics.settings_initialized = true;
+            }
             if self.mechanics.settings_json.len() > 48 * 1024 {
                 ui.colored_label(
                     ui.visuals().error_fg_color,

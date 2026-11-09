@@ -44,9 +44,11 @@ pub async fn load_mechanics(
         .await?;
     if !matches!(status,ProjectResponse::Status{info} if info.project_id==project && info.revision==revision)
     {
-        return Err(ClientError::InvalidRequest(
-            "Discarded mechanical fields from changed captured inputs".into(),
-        ));
+        return Err(spiling_contracts::project::ProjectError::new(
+            spiling_contracts::project::ProjectErrorCode::StaleRevision,
+            "Discarded mechanical fields from changed captured inputs",
+        )
+        .into());
     }
     Ok(Arc::new(MechanicsCapture {
         project,
@@ -81,6 +83,14 @@ pub async fn restore_mechanics(
         operation = tokio::time::timeout(std::time::Duration::from_secs(30), watch.next())
             .await
             .map_err(|_| ClientError::Protocol("Saved fields read timed out".into()))??;
+    }
+    if let Some(error) = operation.error {
+        return Err(match error {
+            spiling_contracts::geometry::JobError::Project { error } => error.into(),
+            spiling_contracts::geometry::JobError::Geometry { error } => error.into(),
+            spiling_contracts::geometry::JobError::Manufacturing { error } => error.into(),
+            spiling_contracts::geometry::JobError::Library { error } => error.into(),
+        });
     }
     let Some(spiling_contracts::geometry::JobResult::AnalysisResultPrepared {
         project_id,

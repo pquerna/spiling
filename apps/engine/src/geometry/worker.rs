@@ -1060,7 +1060,7 @@ fn open(
         {
             validate_provenance(&resident.definition, source)?;
             validate_surface_targets(&resident.definition, &loaded.manifest.surface_overlays)?;
-            validate_analysis_targets(&resident.definition, &loaded.manifest.analysis)?;
+            validate_analysis_targets(&resident.definition, &loaded)?;
             imports.push(imported(
                 &resident.definition,
                 source.clone(),
@@ -1072,7 +1072,7 @@ fn open(
             let definition = capacity.admit(source.bytes.as_slice(), cancel)?;
             validate_provenance(&definition, source)?;
             validate_surface_targets(&definition, &loaded.manifest.surface_overlays)?;
-            validate_analysis_targets(&definition, &loaded.manifest.analysis)?;
+            validate_analysis_targets(&definition, &loaded)?;
             drop(native);
             let tessellation = crate::performance::span("open_tessellate");
             let display = capacity.display(&definition, cancel, work, progress)?;
@@ -1102,9 +1102,14 @@ fn open(
 }
 fn validate_analysis_targets(
     definition: &Definition,
-    document: &spiling_contracts::analysis::AnalysisDocument,
+    loaded: &storage::LoadedProject,
 ) -> Result<(), ProjectError> {
-    for record in &document.cases {
+    for record in loaded.manifest.analysis.cases.iter().chain(
+        loaded
+            .analysis_results
+            .values()
+            .map(|asset| &asset.summary.case),
+    ) {
         if &record.case.definition_id == definition.id()
             && record.case.patch_faces().any(|face_id| {
                 !definition

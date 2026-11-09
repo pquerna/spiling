@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 use super::*;
+use spiling_contracts::geometry::{SessionId, SourceHash};
 use std::time::Instant;
 fn layout_id(host: &Host) -> spiling_contracts::project::PrintLayoutId {
     host.snapshot()
@@ -300,16 +301,14 @@ fn engine_death_is_bounded_and_restart_does_not_claim_unsaved_recovery() {
     wait(&host, |s| s.phase == Phase::Closed);
 }
 
-#[test]
-fn native_path_limit_and_problem_history_are_bounded() {
-    let root = tempfile::tempdir().unwrap();
+fn test_actor(root: &std::path::Path) -> Actor {
     let (updates, _) = watch::channel(Snapshot::default());
-    let mut actor = Actor {
+    Actor {
         compute_settings: Default::default(),
         library_location: None,
         config: Config {
-            engine: root.path().join("missing"),
-            store: root.path().join("store"),
+            engine: root.join("missing"),
+            store: root.join("store"),
         },
         updates,
         wake: Arc::new(|| {}),
@@ -337,7 +336,55 @@ fn native_path_limit_and_problem_history_are_bounded() {
         section_cancel: Arc::new(AtomicBool::new(false)),
         display_task: None,
         display_cancel: Arc::new(AtomicBool::new(false)),
-    };
+    }
+}
+
+#[test]
+fn mechanics_transfer_blocks_mutation_and_failed_attempt_does_not_become_restored() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        let mut actor = test_actor(root.path());
+        actor.state.phase = Phase::Running;
+        actor.mechanics_task = Some(tokio::spawn(std::future::pending()));
+        actor.publish();
+        assert!(actor.state.busy);
+        actor
+            .request(Request::Project(Box::new(ProjectCommand::New {
+                session_id: SessionId::new(),
+                base_revision: spiling_contracts::geometry::SceneRevision(0),
+                discard_changes: false,
+            })))
+            .await;
+        assert!(
+            actor
+                .state
+                .problems
+                .back()
+                .unwrap()
+                .contains("active native action")
+        );
+        actor.mechanics_task.take().unwrap().abort();
+        actor.mechanics_restore_key = Some((ProjectId::new(), SourceHash::from_bytes(b"failed")));
+        actor
+            .complete_mechanics(Ok(Err(ClientError::InvalidRequest(
+                "injected read failure".into(),
+            ))))
+            .await;
+        assert!(actor.mechanics_restore_key.is_none());
+        assert!(actor.state.mechanics.is_none());
+        actor.publish();
+        assert!(!actor.state.busy);
+    });
+}
+
+#[test]
+fn native_path_limit_and_problem_history_are_bounded() {
+    let root = tempfile::tempdir().unwrap();
+    let mut actor = test_actor(root.path());
     eprintln!(
         "Native request future bytes: {}",
         std::mem::size_of_val(&actor.request(Request::Command(Command::Restart)))
@@ -1102,6 +1149,14 @@ fn project_edit(
 #[test]
 #[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
 fn assumed_whole_hook_fields_reach_native_host_and_survive_a_failed_rerun() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(whole_hook_host_check)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+fn whole_hook_host_check() {
     use spiling_contracts::{
         analysis::{mechanics::*, *},
         geometry::*,
@@ -1333,6 +1388,116 @@ fn assumed_whole_hook_fields_reach_native_host_and_survive_a_failed_rerun() {
     assert!(restored_capture.revision > restored_capture.summary.captured_revision);
     assert!(restored.problems.is_empty(), "{:?}", restored.problems);
     drop(reopened);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(Box::pin(async {
+        let race_path = root.path().join("restore-race.spil");
+        std::fs::copy(&copy, &race_path).unwrap();
+        let mut actor = test_actor(root.path());
+        actor.config.engine = engine();
+        actor.config.store = root.path().join("restore-race-store");
+        actor.compute_settings = spiling_contracts::compute::ComputeSettings {
+            default_backend: spiling_contracts::compute::ComputeBackend::Cpu,
+            fea_backend: None,
+        };
+        actor.start().await;
+        Box::pin(actor.request(Request::Action(Action::Open {
+            path: native(&race_path),
+            read_only: false,
+            recover_previous: false,
+        })))
+        .await;
+        let pending = actor.pending.as_ref().unwrap().name.clone();
+        let mut watch = actor
+            .client
+            .as_ref()
+            .unwrap()
+            .rpc()
+            .watch_native_operation(pending)
+            .await
+            .unwrap();
+        loop {
+            let operation = watch.next().await.unwrap();
+            if operation.done {
+                assert_eq!(
+                    operation.status,
+                    spiling_contracts::geometry::JobStatus::Completed
+                );
+                actor.observe(operation).await;
+                break;
+            }
+        }
+        assert!(actor.mechanics_restore_key.is_none());
+        let old_read = actor.mechanics_task.as_mut().unwrap().await;
+        let original = actor.state.project.as_ref().unwrap().clone();
+        let mut edited = original.analysis.cases[0].case.clone();
+        edited.loads[0].force_n[0] += 1.0;
+        actor
+            .client
+            .as_ref()
+            .unwrap()
+            .rpc()
+            .project(ProjectCommand::EditAnalysis {
+                session_id: actor.state.hello.as_ref().unwrap().session_id.clone(),
+                base_revision: original.revision,
+                edit: spiling_contracts::analysis::AnalysisEdit::Put {
+                    case: edited.clone(),
+                },
+            })
+            .await
+            .unwrap();
+        actor.refresh().await.unwrap();
+        assert!(actor.state.project.as_ref().unwrap().revision > original.revision);
+        actor.complete_mechanics(old_read).await;
+        assert!(actor.state.mechanics.is_none());
+        assert!(actor.mechanics_restore_key.is_none());
+        assert!(
+            actor.mechanics_task.is_some(),
+            "discarded read must retry at current revision"
+        );
+        let retry = actor.mechanics_task.as_mut().unwrap().await;
+        actor.complete_mechanics(retry).await;
+        let capture = actor.state.mechanics.as_ref().unwrap();
+        assert_eq!(capture.bytes, restored_capture.bytes);
+        assert_eq!(capture.summary, restored_capture.summary);
+        assert_ne!(capture.summary.case.case, edited);
+        assert_eq!(
+            capture.revision,
+            actor.state.project.as_ref().unwrap().revision
+        );
+        assert!(actor.mechanics_restore_key.is_some());
+        for error in [
+            ClientError::Geometry(spiling_contracts::geometry::GeometryError::new(
+                spiling_contracts::geometry::GeometryErrorCode::StaleRevision,
+                "injected revision-raced read publication",
+            )),
+            ClientError::Project(spiling_contracts::project::ProjectError::new(
+                spiling_contracts::project::ProjectErrorCode::StaleRevision,
+                "injected revision-raced readback",
+            )),
+        ] {
+            actor.state.mechanics = None;
+            actor.complete_mechanics(Ok(Err(error))).await;
+            assert!(actor.mechanics_restore_key.is_none());
+            assert!(actor.mechanics_task.is_some());
+            let retry = actor.mechanics_task.as_mut().unwrap().await;
+            actor.complete_mechanics(retry).await;
+            assert_eq!(
+                actor.state.mechanics.as_ref().unwrap().bytes,
+                restored_capture.bytes
+            );
+            assert!(actor.mechanics_restore_key.is_some());
+        }
+        assert!(
+            actor.state.problems.is_empty(),
+            "{:?}",
+            actor.state.problems
+        );
+        actor.cleanup().await;
+    }));
 }
 fn manufacture_control(
     host: &Host,

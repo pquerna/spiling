@@ -671,7 +671,7 @@ async fn whole_hook_service_check() {
     }).await, Err(ClientError::Project(error)) if error.code == ProjectErrorCode::ReadOnly)
     );
     let valid_manifest = manifest(&portable_path);
-    for variant in 0..11 {
+    for variant in 0..14 {
         let target = workspace.path(&format!("invalid-result-{variant}.spil"));
         copy_project(&portable_path, &target);
         let mut root = valid_manifest.clone();
@@ -723,14 +723,36 @@ async fn whole_hook_service_check() {
                 } else if variant == 8 {
                     bytes[element_offset..element_offset + 4]
                         .copy_from_slice(&(node_count as u32).to_le_bytes());
+                } else if variant == 11 {
+                    for node in 0..node_count {
+                        for axis in 0..3 {
+                            let offset = node_offset + 72 * node + 24 + 8 * axis;
+                            let value =
+                                f64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+                            bytes[offset..offset + 8].copy_from_slice(&(-value).to_le_bytes());
+                        }
+                    }
                 } else {
                     let mut summary: serde_json::Value =
                         serde_json::from_slice(&bytes[32..32 + metadata_bytes]).unwrap();
                     if variant == 5 {
                         summary["project_id"] = serde_json::json!(ProjectId::new());
-                    } else {
+                    } else if variant == 6 {
                         summary["operator_hash"] =
                             serde_json::json!(SourceHash::from_bytes(b"invented operator"));
+                    } else {
+                        let mut captured: AnalysisRunSummary =
+                            serde_json::from_value(summary).unwrap();
+                        let absent = FaceId::from_step_entity(999999).unwrap();
+                        if variant == 12 {
+                            captured.case.case.loads[0].face_id = absent;
+                        } else {
+                            captured.case.case.restraints[0].face_id = absent;
+                        }
+                        captured.operator_hash = captured.expected_operator_hash().unwrap();
+                        captured.input_hash = captured.expected_input_hash().unwrap();
+                        root.analysis.results[0].input_hash = captured.input_hash.clone();
+                        summary = serde_json::to_value(captured).unwrap();
                     }
                     let metadata = serde_json::to_vec(&summary).unwrap();
                     let mut changed = bytes[..32].to_vec();
@@ -755,9 +777,36 @@ async fn whole_hook_service_check() {
                 false,
                 &std::sync::atomic::AtomicBool::new(false)
             )
-            .is_err(),
+            .is_err()
+                == (variant < 12),
             "invalid result closure {variant} admitted"
         );
+    }
+    for variant in [12, 13] {
+        let invalid = workspace.path(&format!("invalid-result-{variant}.spil"));
+        let rejected = start_open(&mut portable, &invalid, true, false, false).await;
+        let rejected = wait_job(&mut portable, rejected).await;
+        assert_eq!(
+            rejected.status,
+            JobStatus::Failed,
+            "reused native source accepted historical face {variant}"
+        );
+        assert!(rejected.outputs.is_empty() && rejected.result.is_none());
+        assert_eq!(info(&mut portable).await, before_read);
+        let fresh_store = tempfile::tempdir().unwrap();
+        let mut fresh =
+            EngineClient::spawn_command_with_compute(spawn(), fresh_store.path(), compute)
+                .await
+                .unwrap();
+        let rejected = start_open(&mut fresh, &invalid, true, false, false).await;
+        let rejected = wait_job(&mut fresh, rejected).await;
+        assert_eq!(
+            rejected.status,
+            JobStatus::Failed,
+            "rebuilt native source accepted historical face {variant}"
+        );
+        assert!(rejected.outputs.is_empty() && rejected.result.is_none());
+        fresh.shutdown().await.unwrap();
     }
     let rejected = start_open(
         &mut portable,

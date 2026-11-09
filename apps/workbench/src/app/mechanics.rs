@@ -11,6 +11,7 @@ mod results;
 #[derive(Default)]
 pub(super) struct MechanicsUi {
     settings_json: String,
+    settings_initialized: bool,
     field: usize,
     slice_z: Option<f64>,
     draft: Option<Draft>,
@@ -40,6 +41,15 @@ impl Draft {
     }
 }
 impl MechanicsUi {
+    fn hydrate_settings(
+        &mut self,
+        settings: &spiling_contracts::analysis::mechanics::AnalysisRunSettings,
+    ) {
+        if !self.settings_initialized {
+            self.settings_json = serde_json::to_string_pretty(settings).unwrap_or_default();
+            self.settings_initialized = true;
+        }
+    }
     pub(super) fn has_changes(&self) -> bool {
         self.wrench_dirty
             || self
@@ -101,16 +111,14 @@ impl Workbench {
         }
     }
     pub(super) fn reconcile_mechanics(&mut self) {
-        if self.mechanics.settings_json.trim().is_empty()
-            && let Some(capture) = &self.state.mechanics
+        if let Some(capture) = &self.state.mechanics
             && self
                 .state
                 .project
                 .as_ref()
                 .is_some_and(|project| project.project_id == capture.project)
         {
-            self.mechanics.settings_json =
-                serde_json::to_string_pretty(&capture.summary.settings).unwrap_or_default();
+            self.mechanics.hydrate_settings(&capture.summary.settings);
         }
         let Some(draft) = &mut self.mechanics.draft else {
             return;
@@ -399,6 +407,31 @@ impl Workbench {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn captured_settings_hydrate_once_and_preserve_deliberately_empty_drafts() {
+        let settings = serde_json::from_str(include_str!(
+            "../../../../fixtures/analysis/hook-assumptions.json"
+        ))
+        .unwrap();
+        let mut ui = MechanicsUi::default();
+        ui.hydrate_settings(&settings);
+        assert!(!ui.settings_json.is_empty());
+        for empty in ["", "  \n"] {
+            ui.settings_json = empty.into();
+            ui.hydrate_settings(&settings);
+            assert_eq!(ui.settings_json, empty);
+        }
+        ui.discard();
+        ui.hydrate_settings(&settings);
+        assert!(!ui.settings_json.is_empty());
+        let mut edited = MechanicsUi {
+            settings_json: "explicit changed settings".into(),
+            settings_initialized: true,
+            ..Default::default()
+        };
+        edited.hydrate_settings(&settings);
+        assert_eq!(edited.settings_json, "explicit changed settings");
+    }
     fn draft() -> Draft {
         Draft {
             project: ProjectId::new(),

@@ -177,6 +177,7 @@ impl<'a> AnalysisFields<'a> {
         let mut positions = BTreeSet::new();
         let mut nodal_force = [0.0; 3];
         let mut nodal_moment = [0.0; 3];
+        let mut external_work = 0.0;
         let mut maximum_displacement: f64 = 0.0;
         for index in 0..self.node_count {
             let node = self.node(index).unwrap();
@@ -190,6 +191,7 @@ impl<'a> AnalysisFields<'a> {
             for axis in 0..3 {
                 nodal_force[axis] += node.applied_force_n[axis];
                 nodal_moment[axis] += moment[axis];
+                external_work += node.applied_force_n[axis] * node.displacement_mm[axis];
             }
             maximum_displacement = maximum_displacement.max(
                 node.displacement_mm
@@ -198,6 +200,20 @@ impl<'a> AnalysisFields<'a> {
                     .sum::<f64>()
                     .sqrt(),
             );
+        }
+        let work_energy_error = (external_work - 2.0 * self.summary.strain_energy_n_mm).abs()
+            / external_work.abs().max(1e-30);
+        if !external_work.is_finite()
+            || external_work <= 0.0
+            || work_energy_error > 1e-7
+            || !close(
+                work_energy_error,
+                self.summary.assessment.work_energy_relative_error,
+            )
+        {
+            return Err(fail(
+                "SPLA displacement work differs from retained energy/assessment",
+            ));
         }
         let mut volumes = [0.0; 3];
         let mut energies = [0.0; 3];

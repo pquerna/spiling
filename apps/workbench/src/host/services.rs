@@ -145,6 +145,7 @@ impl Actor {
     }
     fn control_ready(&mut self) -> bool {
         if self.state.diagnostic.as_ref().is_some_and(|d| !d.done)
+            || self.mechanics_task.is_some()
             || self.pending.is_some()
             || self.export_task.is_some()
             || self.dialog.is_some()
