@@ -91,6 +91,7 @@ def test_real_nominal_roof_patch_matches_homogeneous_weak_z_solution():
     scenario = dict(
         bounds=[[21, 21, 1], [22, 22, 2]],
         material=asdict(material),
+        solver="p_amg",
         refinement=dict(max_xy=1, max_z=0.2, divisions=1),
     )
     result = patch_response(dict(roads=roads, size_mm=[4, 4, 2]), scenario)
@@ -101,6 +102,9 @@ def test_real_nominal_roof_patch_matches_homogeneous_weak_z_solution():
         material.young_mpa * material.z_ratio, rel=1e-6
     )
     assert all(c["force_balance"] < 1e-5 for c in result["components"])
+    scenario["solver"] = "superlu_mmd"
+    direct = patch_response(dict(roads=roads, size_mm=[4, 4, 2]), scenario)
+    assert direct["stiffness_n_mm"] == pytest.approx(result["stiffness_n_mm"], rel=1e-7)
     scenario["bounds"][1][2] = 1.9
     with pytest.raises(ValueError, match="actual top skin"):
         patch_response(dict(roads=roads, size_mm=[4, 4, 2]), scenario)

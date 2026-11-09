@@ -50,10 +50,13 @@ def report(archive, captures, output):
     solid, baseline = solids[0], baselines[0]
     pareto_ids = {r["capture_id"] for r in frontier(rows)}
     for r in valid:
-        r["relative_xyz"] = {
-            a: r["stiffness_n_mm"][a] / solid["stiffness_n_mm"][a] for a in "xyz"
+        r["relative_responses"] = {
+            a: r["stiffness_n_mm"][a] / solid["stiffness_n_mm"][a]
+            for a in r["stiffness_n_mm"]
         }
-        r["geometric_mean_vs_solid"] = geometric_mean(list(r["relative_xyz"].values()))
+        r["geometric_mean_vs_solid"] = geometric_mean(
+            list(r["relative_responses"].values())
+        )
         r["material_vs_solid"] = r["volume_mm3"] / solid["volume_mm3"]
         r["motion_vs_solid"] = r["motion_s"] / solid["motion_s"]
         r["provisional_pareto"] = r["capture_id"] in pareto_ids
@@ -72,7 +75,7 @@ def report(archive, captures, output):
                         a: child["stiffness_n_mm"][a] / parent["stiffness_n_mm"][a]
                         if parent["stiffness_n_mm"][a]
                         else None
-                        for a in "xyz"
+                        for a in child["stiffness_n_mm"]
                     },
                 )
             )
@@ -178,7 +181,7 @@ def plot(rows, baseline, output):
                 linewidths=0.6,
             )
             ax.set(
-                xlabel="Roof-patch XYZ elastic response / solid · geometric mean (%)",
+                xlabel="Roof + core elastic response / solid · geometric mean (%)",
                 ylabel=ylabel,
             )
             ax.grid(alpha=0.12)
@@ -193,7 +196,9 @@ def plot(rows, baseline, output):
         )
         ax.legend(fontsize=8)
     fig.suptitle(
-        "Vault autoresearch · 48 mm cube / finite top patch", fontsize=17, weight="bold"
+        "Vault autoresearch · 48 mm cube / finite roof + core patches",
+        fontsize=17,
+        weight="bold",
     )
     fig.supxlabel(
         "Right and down is better within this fixed local elasticity model. White outline: multi-axis Pareto.\nWhole-object costs; nominal bonded footprints, weak-Z 0.25. Not strength or full-part qualification.",

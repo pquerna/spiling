@@ -80,7 +80,9 @@ def patch_response(data, scenario):
             continue
         body = prepare(part, material)
         for axis in axes:
-            result = solve_body(body, "compression_" + axis, bounds, solver="p_amg")
+            result = solve_body(
+                body, "compression_" + axis, bounds, solver=scenario["solver"]
+            )
             responses[axis] += result["stiffness_n_mm"]
             records.append(dict(axis=axis, **result))
         del body
