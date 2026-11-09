@@ -195,9 +195,21 @@ def test_trial_timeout_stops_nested_work_in_the_owned_process_group(tmp_path):
     with pytest.raises(TimeoutError):
         run([sys.executable, worker], timeout=0.5)
     pid = int(pid_file.read_text())
+    import time
+
+    # SIGKILL delivery is asynchronous; await exit, not one scheduler-state
+    # sample. A zombie has exited even if init has not reaped it yet.
+    deadline = time.monotonic() + 1.0
     stat = Path(f"/proc/{pid}/stat")
-    # A killed grandchild can briefly await init's reap, but must not execute.
-    assert not stat.exists() or stat.read_text().split()[2] == "Z"
+    while True:
+        try:
+            state = stat.read_text().split()[2]
+        except FileNotFoundError:
+            break
+        if state == "Z":
+            break
+        assert time.monotonic() < deadline, "timed-out trial descendant is still alive"
+        time.sleep(0.005)
 
 
 def test_material_budget_proposals_use_only_measured_discrete_dose():
