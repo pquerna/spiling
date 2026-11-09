@@ -12,6 +12,8 @@ use spiling_contracts::manufacturing::{
 };
 use std::sync::atomic::AtomicBool;
 
+const MIN_ANCHOR_INVENTORY_PATHS: usize = 512;
+
 pub(crate) enum GapKind {
     Supported,
     Bridge,
@@ -73,7 +75,17 @@ pub(in crate::planner) fn analyze<'a>(
     if paths.is_empty() {
         return Ok(result);
     }
-    let prepared = NominalAnchorPaths::new(previous.clone(), contacts.clone(), anchors, cancel)?;
+    let prepared = if previous
+        .clone()
+        .chain(contacts.clone())
+        .take(MIN_ANCHOR_INVENTORY_PATHS)
+        .count()
+        == MIN_ANCHOR_INVENTORY_PATHS
+    {
+        NominalAnchorPaths::new(previous.clone(), contacts.clone(), anchors, cancel)?
+    } else {
+        None
+    };
     for (path_index, path) in paths.iter().enumerate() {
         check_cancel(cancel)?;
         let mut has_bridge = false;
