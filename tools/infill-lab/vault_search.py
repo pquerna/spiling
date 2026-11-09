@@ -361,6 +361,10 @@ def collect(args):
                     capture_id=job["capture_id"],
                     candidate=job["candidate"],
                     error="no complete mechanical result",
+                    stage="roof_mechanics",
+                    roads_sha256=case["roads_sha256"],
+                    source_sha256=case["source_sha256"],
+                    scenario=case["scenario"],
                     job=key,
                 )
             )

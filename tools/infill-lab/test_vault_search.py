@@ -204,3 +204,17 @@ def test_resource_prefix_shards_cover_each_job_once():
         shard_jobs(jobs, 3, 3)
     with pytest.raises(ValueError):
         shard_jobs(jobs, 0, 0)
+
+
+def test_worker_admission_adapts_to_live_memory_and_cores():
+    from vault_search_run import Workers, admitted_slots
+
+    workers = Workers([], [], [], memory_gib=32, cpus=5)
+    assert (
+        admitted_slots([dict(memory_available=120 * 1024**3, cpus=20)], workers, 8) == 3
+    )
+    assert (
+        admitted_slots([dict(memory_available=64 * 1024**3, cpus=16)], workers, 8) == 1
+    )
+    with pytest.raises(ValueError, match="headroom"):
+        admitted_slots([dict(memory_available=30 * 1024**3, cpus=20)], workers, 8)
