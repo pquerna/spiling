@@ -305,6 +305,55 @@ fn full_native_hook_equilibrium_and_retained_result_return_through_cli() {
         .find(|operation| operation["result"]["summary"].is_object())
         .unwrap()["result"];
     assert_eq!(returned, result);
+    let portable = report(
+        retained("edit")
+            .args(["--analysis-run-and-attach", "Whole hook"])
+            .arg(&assumptions)
+            .output()
+            .unwrap(),
+    );
+    let portable_result = &portable["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["result"]["summary"].is_object())
+        .unwrap()["result"];
+    assert_eq!(
+        portable["project"]["analysis"]["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(portable["project"]["dirty"], false);
+    let copy = root.join("portable-only.spil");
+    std::fs::copy(&project, &copy).unwrap();
+    std::fs::remove_file(&project).unwrap();
+    std::fs::remove_dir_all(&store).unwrap();
+    let restored = report(
+        cli("inspect", &copy)
+            .args(["--analysis-saved", "Whole hook"])
+            .output()
+            .unwrap(),
+    );
+    let restored_result = &restored["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["result"]["summary"].is_object())
+        .unwrap()["result"];
+    assert_eq!(restored_result["summary"], portable_result["summary"]);
+    assert_eq!(
+        restored_result["field_samples"],
+        portable_result["field_samples"]
+    );
+    assert_eq!(
+        restored_result["resource"]["sha256"],
+        portable_result["resource"]["sha256"]
+    );
+    assert_eq!(restored["project"]["dirty"], false);
+    assert_eq!(restored_result["capture_matches_project_revision"], false);
+    assert_eq!(restored_result["capture_matches_current_inputs"], true);
     std::fs::remove_dir_all(root).unwrap();
 }
 

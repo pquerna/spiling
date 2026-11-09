@@ -329,6 +329,7 @@ fn native_path_limit_and_problem_history_are_bounded() {
         image_task: None,
         review_task: None,
         mechanics_task: None,
+        mechanics_restore_key: None,
         alternative_task: None,
         preserve_current_for_option_edit: false,
         export_task: None,
@@ -1121,7 +1122,9 @@ fn assumed_whole_hook_fields_reach_native_host_and_survive_a_failed_rerun() {
     wait(&host, |state| state.phase == Phase::Running);
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/geometry/analysis-hook.step");
-    send(&host, Action::Import(native(&path)));
+    let source = root.path().join("original-hook.step");
+    std::fs::copy(&path, &source).unwrap();
+    send(&host, Action::Import(native(&source)));
     let state = wait(&host, |state| {
         state
             .display
@@ -1235,6 +1238,23 @@ fn assumed_whole_hook_fields_reach_native_host_and_survive_a_failed_rerun() {
         capture.bytes
     );
     let capture = compared.mechanics.as_ref().unwrap();
+    project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::AttachAnalysisResult {
+            session_id,
+            base_revision,
+            input_hash: capture.summary.input_hash.clone(),
+        }
+    });
+    let saved_path = root.path().join("with-results.spil");
+    send(
+        &host,
+        Action::Save {
+            target: Some(native(&saved_path)),
+        },
+    );
+    std::fs::remove_file(&source).unwrap();
+    let copy = root.path().join("only-copy.spil");
+    std::fs::copy(&saved_path, &copy).unwrap();
     assert_eq!(capture.summary.case.case.loads, case.loads);
     assert!(
         capture.summary.maximum_displacement_mm
@@ -1280,6 +1300,39 @@ fn assumed_whole_hook_fields_reach_native_host_and_survive_a_failed_rerun() {
             .any(|message| message.contains("rigid restraint ranks"))
     );
     drop(host);
+    std::fs::remove_file(&saved_path).unwrap();
+    let empty_store = root.path().join("new-empty-operations");
+    let reopened = Host::with_compute(
+        Config {
+            engine: engine(),
+            store: empty_store,
+        },
+        spiling_contracts::compute::ComputeSettings {
+            default_backend: spiling_contracts::compute::ComputeBackend::Cpu,
+            fea_backend: None,
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&reopened, |state| state.phase == Phase::Running);
+    send(
+        &reopened,
+        Action::Open {
+            path: native(&copy),
+            read_only: true,
+            recover_previous: false,
+        },
+    );
+    let restored = wait(&reopened, |state| state.mechanics.is_some());
+    assert!(restored.project.as_ref().unwrap().read_only);
+    assert!(!restored.project.as_ref().unwrap().dirty);
+    let restored_capture = restored.mechanics.as_ref().unwrap();
+    assert_eq!(restored_capture.bytes, capture.bytes);
+    assert_eq!(restored_capture.summary, capture.summary);
+    assert_eq!(restored_capture.resource.sha256, capture.resource.sha256);
+    assert!(restored_capture.revision > restored_capture.summary.captured_revision);
+    assert!(restored.problems.is_empty(), "{:?}", restored.problems);
+    drop(reopened);
 }
 fn manufacture_control(
     host: &Host,

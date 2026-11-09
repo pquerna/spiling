@@ -136,6 +136,12 @@ impl JobStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobResult {
+    AnalysisResultPrepared {
+        project_id: crate::project::ProjectId,
+        read_revision: crate::project::ProjectRevision,
+        record: crate::analysis::AnalysisResultRecord,
+        resource: crate::ArtifactView,
+    },
     AnalysisCompleted {
         project_id: crate::project::ProjectId,
         captured_revision: crate::project::ProjectRevision,

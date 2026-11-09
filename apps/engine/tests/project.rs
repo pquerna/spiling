@@ -97,8 +97,23 @@ fn whole_hook_native_closed_slab_admission() {
     assert!(result.fields.iter().any(|field| field.concentration > 1.0));
 }
 
-#[tokio::test]
-async fn whole_hook_native_mechanics_service_reuses_operator_and_retains_fields() {
+#[test]
+fn whole_hook_native_mechanics_service_reuses_operator_and_retains_fields() {
+    std::thread::Builder::new()
+        .name("portable-hook-workflow".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(Box::pin(whole_hook_service_check()));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+async fn whole_hook_service_check() {
     use spiling_contracts::analysis::{fields::AnalysisFields, mechanics::*, *};
     let workspace = Workspace::new();
     let source = workspace.source("analysis-hook.step");
@@ -448,8 +463,8 @@ async fn whole_hook_native_mechanics_service_reuses_operator_and_retains_fields(
         })
         .await
         .unwrap();
-    let (_, oriented) = run(&mut client, &case.id, &settings).await;
-    let oriented = AnalysisFields::decode(&oriented).unwrap();
+    let (_, oriented_bytes) = run(&mut client, &case.id, &settings).await;
+    let oriented = AnalysisFields::decode(&oriented_bytes).unwrap();
     assert_ne!(oriented.summary.operator_hash, second.summary.operator_hash);
     assert_ne!(
         oriented.summary.region_volume_mm3,
@@ -459,7 +474,55 @@ async fn whole_hook_native_mechanics_service_reuses_operator_and_retains_fields(
         oriented.summary.case.case.loads, second.summary.case.case.loads,
         "service wrench must stay source-bound under print rotation"
     );
+    let retained_bytes = oriented_bytes.clone();
+    let before_attach = info(&mut client).await;
+    client
+        .project(ProjectCommand::AttachAnalysisResult {
+            session_id: session.clone(),
+            base_revision: before_attach.revision,
+            input_hash: oriented.summary.input_hash.clone(),
+        })
+        .await
+        .unwrap();
+    let attached = info(&mut client).await;
+    assert_eq!(attached.revision.0, before_attach.revision.0 + 1);
+    assert!(attached.dirty);
+    assert_eq!(attached.analysis.results.len(), 1);
+    assert!(
+        client
+            .project(ProjectCommand::AttachAnalysisResult {
+                session_id: session.clone(),
+                base_revision: before_attach.revision,
+                input_hash: oriented.summary.input_hash.clone(),
+            })
+            .await
+            .is_err()
+    );
+    let undo_base = scene(&mut client).await.revision;
+    client
+        .project(ProjectCommand::Undo {
+            session_id: session.clone(),
+            base_revision: undo_base,
+        })
+        .await
+        .unwrap();
+    assert!(info(&mut client).await.analysis.results.is_empty());
+    let redo_base = scene(&mut client).await.revision;
+    client
+        .project(ProjectCommand::Redo {
+            session_id: session.clone(),
+            base_revision: redo_base,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        info(&mut client).await.analysis.results,
+        attached.analysis.results
+    );
     save(&mut client, None).await;
+    let portable_path = workspace.path("copied-hook-only.spil");
+    copy_project(&path, &portable_path);
+    let portable_record = attached.analysis.results[0].clone();
     let current = info(&mut client).await;
     case.restraints[0].fixed_translation = [true, false, false];
     client
@@ -487,6 +550,37 @@ async fn whole_hook_native_mechanics_service_reuses_operator_and_retains_fields(
     assert_eq!(failed.status, JobStatus::Failed);
     assert!(failed.outputs.is_empty());
     assert!(failed.result.is_none());
+    assert_eq!(
+        info(&mut client).await.analysis.results,
+        attached.analysis.results
+    );
+    let changed_info = info(&mut client).await;
+    let ProjectResponse::OperationAccepted { operation } = client
+        .project(ProjectCommand::GetAnalysisResult {
+            session_id: client.hello().session_id.clone(),
+            base_revision: changed_info.revision,
+            case_id: case.id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let retained = wait_job(&mut client, operation.name).await;
+    let Some(JobResult::AnalysisResultPrepared {
+        record, resource, ..
+    }) = retained.result
+    else {
+        panic!("stale result must remain inspectable")
+    };
+    assert_eq!(
+        client
+            .fetch_analysis_fields(&record.input_hash, record.captured_revision, &resource)
+            .await
+            .unwrap(),
+        retained_bytes
+    );
+    assert_eq!(info(&mut client).await, changed_info);
     client.shutdown().await.unwrap();
     let mut reader = EngineClient::spawn_command_with_compute(spawn(), store.path(), compute)
         .await
@@ -516,6 +610,172 @@ async fn whole_hook_native_mechanics_service_reuses_operator_and_retains_fields(
     assert_eq!(reopened.summary.pose, oriented.summary.pose);
     assert!(!reopened.summary.costs.operator_reused);
     reader.shutdown().await.unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let empty_store = tempfile::tempdir().unwrap();
+    let mut portable =
+        EngineClient::spawn_command_with_compute(spawn(), empty_store.path(), compute)
+            .await
+            .unwrap();
+    assert!(
+        portable.native_operation(&cold_job.name).await.is_err(),
+        "new ledger must not contain previous operations"
+    );
+    let opened = start_open(&mut portable, &portable_path, true, false, false).await;
+    completed_scene(wait_job(&mut portable, opened).await);
+    let before_read = info(&mut portable).await;
+    assert!(before_read.read_only && !before_read.dirty);
+    assert_eq!(before_read.analysis.results, vec![portable_record.clone()]);
+    let start = Instant::now();
+    let ProjectResponse::OperationAccepted { operation } = portable
+        .project(ProjectCommand::GetAnalysisResult {
+            session_id: portable.hello().session_id.clone(),
+            base_revision: before_read.revision,
+            case_id: case.id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let result = wait_job(&mut portable, operation.name).await;
+    assert_eq!(result.status, JobStatus::Completed, "{result:?}");
+    let Some(JobResult::AnalysisResultPrepared {
+        project_id,
+        read_revision,
+        record,
+        resource,
+    }) = result.result
+    else {
+        panic!()
+    };
+    let input_hash = record.input_hash;
+    let captured_revision = record.captured_revision;
+    assert_eq!(read_revision, before_read.revision);
+    assert_eq!(project_id, before_read.project_id);
+    assert_eq!(captured_revision, portable_record.captured_revision);
+    assert_eq!(
+        portable
+            .fetch_analysis_fields(&input_hash, captured_revision, &resource)
+            .await
+            .unwrap(),
+        retained_bytes
+    );
+    eprintln!(
+        "portable copied-spil read/stream/decode_ms={} (NO solve; retained numerical costs unchanged)",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    assert_eq!(info(&mut portable).await, before_read);
+    assert!(
+        matches!(portable.project(ProjectCommand::AttachAnalysisResult {
+        session_id: portable.hello().session_id.clone(), base_revision: before_read.revision, input_hash,
+    }).await, Err(ClientError::Project(error)) if error.code == ProjectErrorCode::ReadOnly)
+    );
+    let valid_manifest = manifest(&portable_path);
+    for variant in 0..11 {
+        let target = workspace.path(&format!("invalid-result-{variant}.spil"));
+        copy_project(&portable_path, &target);
+        let mut root = valid_manifest.clone();
+        match variant {
+            0 => support::corrupt_object(&target, &portable_record.hash),
+            1 => {
+                root.analysis.results.clear();
+                write_manifest(&target, &root);
+            }
+            2 => {
+                root.analysis.results[0].hash = SourceHash::from_bytes(b"absent fields");
+                write_manifest(&target, &root);
+            }
+            3 => {
+                root.analysis.results[0].captured_revision.0 -= 1;
+                write_manifest(&target, &root);
+            }
+            7 => {
+                let database = rusqlite::Connection::open(&target).unwrap();
+                database.pragma_update(None, "foreign_keys", false).unwrap();
+                database
+                    .execute(
+                        "DELETE FROM object_chunks WHERE lower(hex(object_id))=?1",
+                        [portable_record.hash.as_str()],
+                    )
+                    .unwrap();
+                database
+                    .execute(
+                        "DELETE FROM objects WHERE lower(hex(object_id))=?1",
+                        [portable_record.hash.as_str()],
+                    )
+                    .unwrap();
+            }
+            variant => {
+                let mut bytes = retained_bytes.clone();
+                let metadata_bytes = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+                let node_offset = 32 + metadata_bytes;
+                let node_count = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+                let element_count = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
+                let element_offset = node_offset + 72 * node_count;
+                let patch_offset = element_offset + 232 * element_count;
+                if let Some((offset, value)) = match variant {
+                    4 => Some((node_offset, 123.0f64)),
+                    9 => Some((patch_offset + 24, 123.0f64)),
+                    10 => Some((node_offset + 48, 123.0f64)),
+                    _ => None,
+                } {
+                    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+                } else if variant == 8 {
+                    bytes[element_offset..element_offset + 4]
+                        .copy_from_slice(&(node_count as u32).to_le_bytes());
+                } else {
+                    let mut summary: serde_json::Value =
+                        serde_json::from_slice(&bytes[32..32 + metadata_bytes]).unwrap();
+                    if variant == 5 {
+                        summary["project_id"] = serde_json::json!(ProjectId::new());
+                    } else {
+                        summary["operator_hash"] =
+                            serde_json::json!(SourceHash::from_bytes(b"invented operator"));
+                    }
+                    let metadata = serde_json::to_vec(&summary).unwrap();
+                    let mut changed = bytes[..32].to_vec();
+                    changed[8..12].copy_from_slice(&(metadata.len() as u32).to_le_bytes());
+                    changed.extend_from_slice(&metadata);
+                    changed.extend_from_slice(&bytes[32 + metadata_bytes..]);
+                    bytes = changed;
+                }
+                root.analysis.results[0].hash = SourceHash::from_bytes(&bytes);
+                root.analysis.results[0].byte_count = bytes.len() as u32;
+                support::write_root(
+                    &target,
+                    &serde_json::to_vec(&root).unwrap(),
+                    &[(portable_record.hash.clone(), bytes)],
+                );
+            }
+        }
+        assert!(
+            spiling_core::storage::open(
+                &target,
+                true,
+                false,
+                &std::sync::atomic::AtomicBool::new(false)
+            )
+            .is_err(),
+            "invalid result closure {variant} admitted"
+        );
+    }
+    let rejected = start_open(
+        &mut portable,
+        &workspace.path("invalid-result-6.spil"),
+        true,
+        false,
+        false,
+    )
+    .await;
+    let rejected = wait_job(&mut portable, rejected).await;
+    assert_eq!(rejected.status, JobStatus::Failed);
+    assert!(rejected.outputs.is_empty() && rejected.result.is_none());
+    assert_eq!(
+        info(&mut portable).await,
+        before_read,
+        "failed open must preserve attached result/project"
+    );
+    portable.shutdown().await.unwrap();
 }
 
 #[tokio::test]

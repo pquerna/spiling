@@ -158,6 +158,7 @@ message NativeOperationResult {
     ManufacturingAlternativeEvaluation manufacturing_alternative_evaluated = 17;
     LayoutProposal layout_prepared = 18;
     AnalysisCompletedResult analysis_completed = 19;
+    AnalysisResultPrepared analysis_result_prepared = 20;
   }
 }
 

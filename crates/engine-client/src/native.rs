@@ -371,6 +371,8 @@ impl EngineRpc {
             | ProjectCommand::SetAppearanceTarget { .. }
             | ProjectCommand::CompareAppearance { .. }
             | ProjectCommand::RunAnalysis { .. }
+            | ProjectCommand::GetAnalysisResult { .. }
+            | ProjectCommand::AttachAnalysisResult { .. }
             | ProjectCommand::AcceptAppearanceReport { .. }
             | ProjectCommand::GetAppearanceReport { .. }
             | ProjectCommand::SetOpticalStudy { .. }
@@ -468,6 +470,17 @@ impl EngineRpc {
             ProjectCall::ImportAppearancePalette(request) => {
                 let operation = client
                     .import_appearance_palette(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
+                Ok(ProjectResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
+                })
+            }
+            ProjectCall::GetAnalysisResult(request) => {
+                let operation = client
+                    .get_analysis_result(self.request(bounded(request)?))
                     .await
                     .map_err(rpc_error)?
                     .into_inner();

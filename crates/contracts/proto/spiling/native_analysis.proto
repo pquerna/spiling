@@ -21,7 +21,10 @@ message AnalysisCase {
  repeated AnalysisFaceRestraint restraints = 9;
 }
 message AnalysisCaseRecord { AnalysisCase case = 1; uint32 edited_revision = 2; }
-message AnalysisDocument { repeated AnalysisCaseRecord cases = 1; }
+message AnalysisResultRecord { string case_id = 1; string hash = 2; uint32 byte_count = 3; string input_hash = 4; uint32 captured_revision = 5; }
+message AnalysisDocument { repeated AnalysisCaseRecord cases = 1; repeated AnalysisResultRecord results = 2; }
+message AttachAnalysisResultRequest { uint32 base_revision = 1; string input_hash = 2; }
+message GetAnalysisResultRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; string case_id = 4; }
 message AnalysisEdit {
  oneof edit { AnalysisCase put = 1; string remove = 2; }
 }
@@ -30,3 +33,4 @@ message AssumedPrintedLaws { string name = 1; repeated double wall_mpa = 2; repe
 message AnalysisRunSettings { PlanarPrintRecipe recipe = 1; AssumedPrintedLaws laws = 2; double maximum_span_mm = 3; uint32 maximum_seconds = 4; }
 message RunAnalysisRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; string case_id = 4; AnalysisRunSettings settings = 5; }
 message AnalysisCompletedResult { string project_id = 1; uint32 captured_revision = 2; string input_hash = 3; Artifact resource = 4; }
+message AnalysisResultPrepared { string project_id = 1; uint32 read_revision = 2; AnalysisResultRecord record = 3; Artifact resource = 4; }

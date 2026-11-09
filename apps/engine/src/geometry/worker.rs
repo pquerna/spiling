@@ -73,6 +73,7 @@ pub struct OpenRequest {
     pub retained_surface_image_bytes: usize,
     pub retained_appearance_bytes: usize,
     pub retained_material_bytes: usize,
+    pub analysis_field_budget: usize,
 }
 struct Opened {
     project: Project,
@@ -98,6 +99,7 @@ pub struct CompileRequest {
 )]
 pub enum Work {
     RunAnalysis(spiling_analysis::run::RunCapture),
+    GetAnalysisResult(Arc<spiling_core::AnalysisResultAsset>),
     StorageMaintenance {
         storage: Arc<Storage>,
         action: StorageMaintenanceAction,
@@ -366,6 +368,12 @@ fn run(
         let report = |stage: String| *progress.lock() = Some((job, stage));
         let mut display_work = GeometryWorkBudget::query();
         let result = match work {
+            Work::GetAnalysisResult(asset) => Ok(Product::AnalysisCompleted(Arc::new(
+                spiling_analysis::run::RunProduct {
+                    summary: asset.summary.clone(),
+                    bytes: (*asset.bytes).clone(),
+                },
+            ))),
             Work::RunAnalysis(capture) => definitions
                 .get(&capture.case.case.definition_id)
                 .ok_or_else(|| {
@@ -975,6 +983,7 @@ fn open(
         retained_surface_image_bytes,
         retained_appearance_bytes,
         retained_material_bytes,
+        analysis_field_budget,
     } = request;
     let path = project_path(path)?;
     // Old current/history allocations survive until ACK, even for identical IDs.
@@ -999,6 +1008,7 @@ fn open(
         cancel,
         existing,
         storage::LoadBudgets {
+            analysis_bytes: analysis_field_budget,
             source_bytes: source_budget,
             material_bytes: spiling_core::materials::MAX_RETAINED_MATERIAL_BYTES
                 .checked_sub(retained_material_bytes)

@@ -3,7 +3,9 @@
 // Licensed under the Open Software License version 3.0
 
 //! Runtime-independent authoring authority. Native caches are engine-owned.
+mod analysis_results;
 mod hardware;
+pub use analysis_results::{AnalysisResultAsset, MAX_RETAINED_ANALYSIS_FIELD_BYTES};
 mod print_layouts;
 pub use print_layouts::PrintLayoutSnapshot;
 mod placement;
@@ -237,11 +239,15 @@ pub struct Snapshot {
     pub surface_images: BTreeMap<SourceHash, Arc<SurfaceImageAsset>>,
     pub appearance_study: Arc<AppearanceStudy>,
     pub analysis: Arc<spiling_contracts::analysis::AnalysisDocument>,
+    pub analysis_results: BTreeMap<SourceHash, Arc<AnalysisResultAsset>>,
     pub materials: Option<Arc<materials::MaterialAsset>>,
     pub appearance_palettes: BTreeMap<SourceHash, Arc<PaletteAsset>>,
 }
 #[derive(Debug, Clone)]
 pub enum Edit {
+    AttachAnalysisResult {
+        asset: Arc<AnalysisResultAsset>,
+    },
     Analysis {
         edit: spiling_contracts::analysis::AnalysisEdit,
     },
@@ -493,6 +499,7 @@ impl Project {
             surface_images: loaded.surface_images,
             appearance_study: Arc::new(loaded.manifest.appearance_study.clone()),
             analysis: Arc::new(loaded.manifest.analysis.clone()),
+            analysis_results: loaded.analysis_results,
             appearance_palettes: loaded.appearance_palettes,
             materials: loaded.materials,
         };
@@ -603,6 +610,9 @@ impl Project {
     }
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.current.clone()
+    }
+    pub fn remaining_analysis_field_bytes(&self) -> Result<usize, ProjectError> {
+        Ok(storage::remaining_budgets(self)?.analysis_bytes)
     }
     pub fn manufacturing_option(
         &self,
@@ -922,6 +932,25 @@ impl Project {
                 study.report_record = None;
                 study.selection = None;
             }
+            Edit::AttachAnalysisResult { asset } => {
+                asset.validate_binding(&snapshot, &self.project_id, self.revision)?;
+                if asset.summary.captured_revision != self.revision
+                    || !asset.matches_inputs(&snapshot)
+                {
+                    return Err(error(
+                        ProjectErrorCode::StaleRevision,
+                        "analysis completion no longer matches current captured inputs",
+                    ));
+                }
+                let document = Arc::make_mut(&mut snapshot.analysis);
+                document
+                    .results
+                    .retain(|record| record.case_id != asset.record.case_id);
+                document.results.push(asset.record.clone());
+                snapshot
+                    .analysis_results
+                    .insert(asset.record.hash.clone(), asset);
+            }
             Edit::Analysis { edit } => {
                 use spiling_contracts::analysis::{AnalysisCaseRecord, AnalysisEdit};
                 edit.validate()?;
@@ -981,6 +1010,7 @@ impl Project {
                             .position(|record| record.case.id == case_id)
                             .ok_or_else(|| invalid("analysis case does not exist"))?;
                         document.cases.remove(index);
+                        document.results.retain(|result| result.case_id != case_id);
                     }
                 }
                 document.validate()?;
@@ -1411,6 +1441,28 @@ impl Project {
                 true
             });
         }
+        if snapshot.analysis.results.iter().any(|result| {
+            !snapshot
+                .analysis
+                .cases
+                .iter()
+                .any(|case| case.case.id == result.case_id)
+        }) {
+            let document = Arc::make_mut(&mut snapshot.analysis);
+            document.results.retain(|result| {
+                document
+                    .cases
+                    .iter()
+                    .any(|case| case.case.id == result.case_id)
+            });
+        }
+        snapshot.analysis_results.retain(|hash, _| {
+            snapshot
+                .analysis
+                .results
+                .iter()
+                .any(|result| &result.hash == hash)
+        });
         let skip = usize::from(self.undo.len() == MAX_PROJECT_HISTORY);
         validate_pins(
             std::iter::once(&snapshot)
@@ -1548,6 +1600,19 @@ impl Project {
         staged.retain(|state| state.strong_count() != 0);
         let live: Vec<_> = staged.iter().filter_map(Weak::upgrade).collect();
         let mut analysis_allocations = BTreeMap::new();
+        if analysis_results::retained_bytes(
+            std::iter::once(snapshot.as_ref())
+                .chain(std::iter::once(self.current.as_ref()))
+                .chain(self.undo.iter().map(Arc::as_ref))
+                .chain(self.redo.iter().map(Arc::as_ref))
+                .chain(live.iter().map(Arc::as_ref)),
+        ) > MAX_RETAINED_ANALYSIS_FIELD_BYTES
+        {
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "retained/staged analysis fields exceed 32 MiB",
+            ));
+        }
         for retained in std::iter::once(snapshot.as_ref())
             .chain(std::iter::once(self.current.as_ref()))
             .chain(self.undo.iter().map(Arc::as_ref))
@@ -2098,6 +2163,14 @@ fn validate_surface_image_budget(snapshot: &Snapshot) -> Result<(), ProjectError
 }
 fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<(), ProjectError> {
     let snapshots: Vec<_> = snapshots.collect();
+    if analysis_results::retained_bytes(snapshots.iter().copied())
+        > MAX_RETAINED_ANALYSIS_FIELD_BYTES
+    {
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "retained analysis fields exceed 32 MiB",
+        ));
+    }
     if manufacturing_options::retained_bytes(snapshots.iter().copied(), None)?
         > manufacturing_options::MAX_RETAINED_OPTION_BYTES
     {
@@ -2239,6 +2312,19 @@ pub(crate) fn validate_snapshot(
     }
 
     manifest.validate()?;
+    if snapshot.analysis_results.len() != manifest.analysis.results.len() {
+        return Err(invalid(
+            "retained analysis object closure differs from manifest",
+        ));
+    }
+    for record in &manifest.analysis.results {
+        let asset = snapshot
+            .analysis_results
+            .get(&record.hash)
+            .filter(|asset| &asset.record == record)
+            .ok_or_else(|| invalid("retained analysis object is missing or misbound"))?;
+        asset.validate_binding(snapshot, &manifest.project_id, manifest.revision)?;
+    }
     if !Content::from_manifest(manifest).matches(snapshot)
         || snapshot.sources.len() != manifest.definitions.len()
         || snapshot.all_occurrences().count()

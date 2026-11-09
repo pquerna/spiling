@@ -2,8 +2,47 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 use super::required;
+use super::{request_id, session_parent};
 use crate::analysis::mechanics::*;
 use crate::{analysis::*, geometry::*, project::*, rpc};
+
+impl TryFrom<rpc::GetAnalysisResultRequest> for ProjectCommand {
+    type Error = String;
+    fn try_from(value: rpc::GetAnalysisResultRequest) -> Result<Self, String> {
+        request_id(&value.request_id)?;
+        Ok(Self::GetAnalysisResult {
+            session_id: session_parent(&value.parent)?,
+            base_revision: ProjectRevision(value.base_revision),
+            case_id: AnalysisCaseId::parse(value.case_id).map_err(|error| error.to_string())?,
+        })
+    }
+}
+impl TryFrom<rpc::AnalysisResultRecord> for AnalysisResultRecord {
+    type Error = String;
+    fn try_from(value: rpc::AnalysisResultRecord) -> Result<Self, String> {
+        if value.byte_count == 0 || value.byte_count as usize > MAX_MECHANICAL_FIELD_BYTES {
+            return Err("saved field byte budget differs".into());
+        }
+        Ok(Self {
+            case_id: AnalysisCaseId::parse(value.case_id).map_err(|error| error.to_string())?,
+            hash: SourceHash::parse(value.hash).map_err(|error| error.to_string())?,
+            byte_count: value.byte_count,
+            input_hash: SourceHash::parse(value.input_hash).map_err(|error| error.to_string())?,
+            captured_revision: ProjectRevision(value.captured_revision),
+        })
+    }
+}
+impl From<AnalysisResultRecord> for rpc::AnalysisResultRecord {
+    fn from(value: AnalysisResultRecord) -> Self {
+        Self {
+            case_id: value.case_id.as_str().into(),
+            hash: value.hash.as_str().into(),
+            byte_count: value.byte_count,
+            input_hash: value.input_hash.as_str().into(),
+            captured_revision: value.captured_revision.0,
+        }
+    }
+}
 
 impl TryFrom<rpc::AnalysisRunSettings> for AnalysisRunSettings {
     type Error = String;
@@ -169,10 +208,25 @@ impl TryFrom<AnalysisCase> for rpc::AnalysisCase {
 impl TryFrom<rpc::AnalysisDocument> for AnalysisDocument {
     type Error = String;
     fn try_from(value: rpc::AnalysisDocument) -> Result<Self, String> {
-        if value.cases.len() > MAX_ANALYSIS_CASES {
+        if value.cases.len() > MAX_ANALYSIS_CASES || value.results.len() > MAX_ANALYSIS_CASES {
             return Err("analysis case budget exceeded".into());
         }
         let document = Self {
+            results: value
+                .results
+                .into_iter()
+                .map(|record| {
+                    Ok(AnalysisResultRecord {
+                        case_id: AnalysisCaseId::parse(record.case_id)
+                            .map_err(|error| error.to_string())?,
+                        hash: SourceHash::parse(record.hash).map_err(|error| error.to_string())?,
+                        byte_count: record.byte_count,
+                        input_hash: SourceHash::parse(record.input_hash)
+                            .map_err(|error| error.to_string())?,
+                        captured_revision: ProjectRevision(record.captured_revision),
+                    })
+                })
+                .collect::<Result<_, String>>()?,
             cases: value
                 .cases
                 .into_iter()
@@ -193,6 +247,17 @@ impl TryFrom<AnalysisDocument> for rpc::AnalysisDocument {
     fn try_from(value: AnalysisDocument) -> Result<Self, String> {
         value.validate().map_err(|error| error.to_string())?;
         Ok(Self {
+            results: value
+                .results
+                .into_iter()
+                .map(|record| rpc::AnalysisResultRecord {
+                    case_id: record.case_id.as_str().into(),
+                    hash: record.hash.as_str().into(),
+                    byte_count: record.byte_count,
+                    input_hash: record.input_hash.as_str().into(),
+                    captured_revision: record.captured_revision.0,
+                })
+                .collect(),
             cases: value
                 .cases
                 .into_iter()

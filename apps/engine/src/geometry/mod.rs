@@ -117,6 +117,7 @@ impl Artifact {
     }
 }
 enum Purpose {
+    GetAnalysisResult,
     RunAnalysis {
         maximum_seconds: u32,
     },
@@ -222,6 +223,7 @@ struct Active {
 /// Native values exist exclusively on Worker; publication is a two-phase ACK boundary.
 pub struct Runtime {
     analysis_publication: Option<(JobId, Arc<spiling_analysis::run::RunProduct>)>,
+    analysis_candidate: Option<Arc<spiling_analysis::run::RunProduct>>,
     pub session_id: SessionId,
     revision: SceneRevision,
     definitions: BTreeMap<DefinitionId, DefinitionState>,
@@ -263,6 +265,7 @@ impl Runtime {
     pub fn new(fault: Option<crate::ProjectFault>) -> Self {
         Self {
             analysis_publication: None,
+            analysis_candidate: None,
             session_id: SessionId::new(),
             revision: SceneRevision::ZERO,
             definitions: BTreeMap::new(),
@@ -458,6 +461,7 @@ impl Runtime {
                                 | Purpose::ImportAppearancePalette
                                 | Purpose::CompareAppearance
                                 | Purpose::RunAnalysis { .. }
+                                | Purpose::GetAnalysisResult
                                 | Purpose::GetAppearanceReport
                                 | Purpose::CompareOptical
                                 | Purpose::MatchStock
@@ -679,10 +683,16 @@ impl Runtime {
                                 return Err("unreleased analysis field publication".into());
                             }
                             let input_hash = report.summary.input_hash.clone();
+                            let captured_revision = report.summary.captured_revision;
+                            if matches!(active.purpose, Purpose::RunAnalysis { .. }) {
+                                self.analysis_candidate = Some(report.clone());
+                            }
                             self.analysis_publication = Some((job, report));
                             Some(JobResult::AnalysisCompleted {
+                                read_revision: matches!(active.purpose, Purpose::GetAnalysisResult)
+                                    .then_some(active.project_base),
                                 project_id: self.project.info().project_id,
-                                captured_revision: active.project_base,
+                                captured_revision,
                                 input_hash,
                             })
                         }
@@ -856,7 +866,10 @@ impl Runtime {
     }
     fn prepare(&mut self, active: &Active, product: Product) -> Result<Publication, JobError> {
         match (&active.purpose, product) {
-            (Purpose::RunAnalysis { .. }, Product::AnalysisCompleted(report)) => Ok(Publication {
+            (
+                Purpose::RunAnalysis { .. } | Purpose::GetAnalysisResult,
+                Product::AnalysisCompleted(report),
+            ) => Ok(Publication {
                 kind: PublicationKind::AnalysisCompleted(report),
                 artifact: None,
             }),
@@ -2188,6 +2201,16 @@ impl Runtime {
                 self.appearance_comparison = None;
                 self.commit_metadata_edit(Edit::SetAppearanceTarget { target, limits })
             }
+            ProjectCommand::AttachAnalysisResult {
+                session_id,
+                base_revision,
+                input_hash,
+            } => self.attach_analysis_result(&session_id, base_revision, &input_hash),
+            ProjectCommand::GetAnalysisResult {
+                session_id,
+                base_revision,
+                case_id,
+            } => self.get_analysis_result(&session_id, base_revision, &case_id),
             ProjectCommand::RunAnalysis {
                 session_id,
                 base_revision,
@@ -2378,6 +2401,7 @@ impl Runtime {
                 let retained_surface_image_bytes = self.surface_image_bytes()?;
                 let retained_appearance_bytes = self.project.retained_appearance_bytes()?;
                 let retained_material_bytes = self.project.retained_material_bytes()?;
+                let analysis_field_budget = self.project.remaining_analysis_field_bytes()?;
                 let budget = worker::MeshBudget {
                     vertices: MAX_DISPLAY_VERTICES
                         - self.definitions.values().map(|d| d.vertices).sum::<u32>(),
@@ -2400,6 +2424,7 @@ impl Runtime {
                             retained_surface_image_bytes,
                             retained_appearance_bytes,
                             retained_material_bytes,
+                            analysis_field_budget,
                         })
                     })
                     .map_err(project_geometry_error)?;
@@ -2522,6 +2547,7 @@ impl Runtime {
         let cancel = Arc::new(AtomicBool::new(initially_cancelled));
         let stage = match &purpose {
             Purpose::RunAnalysis { .. } => "solving_assumed_printed_equilibrium",
+            Purpose::GetAnalysisResult => "reading_portable_analysis_fields",
             Purpose::Import { .. } => "importing",
             Purpose::Section => "sectioning",
             Purpose::PrepareLayout => "finding_and_verifying_layout",
@@ -2662,6 +2688,7 @@ fn cancelled(purpose: &Purpose) -> JobError {
         | Purpose::MatchStock
         | Purpose::GetOpticalReport
         | Purpose::GetSurfaceImage
+        | Purpose::GetAnalysisResult
         | Purpose::ApplyOpticalConstruction => project_error(
             ProjectErrorCode::Cancelled,
             "project job cancelled before publication",

@@ -375,6 +375,7 @@ impl Host {
             section_cancel: Arc::new(AtomicBool::new(false)),
             optical_task: None,
             mechanics_task: None,
+            mechanics_restore_key: None,
             stock_task: None,
             diagnostic_task: None,
             diagnostic_paused: false,
@@ -658,6 +659,7 @@ struct Actor {
     executing: bool,
     optical_task: Option<JoinHandle<Result<Arc<crate::assets::OpticalCapture>, ClientError>>>,
     mechanics_task: Option<JoinHandle<Result<Arc<crate::assets::MechanicsCapture>, ClientError>>>,
+    mechanics_restore_key: Option<(ProjectId, spiling_contracts::geometry::SourceHash)>,
     stock_task: Option<JoinHandle<Result<Arc<crate::assets::StockCapture>, ClientError>>>,
     diagnostic_task:
         Option<JoinHandle<Result<(spiling_contracts::OperationView, bool), ClientError>>>,
@@ -1039,6 +1041,7 @@ impl Actor {
         }
     }
     async fn cleanup(&mut self) {
+        self.mechanics_restore_key = None;
         if let Some(task) = self.mechanics_task.take() {
             task.abort();
             let _ = task.await;
@@ -1309,6 +1312,29 @@ impl Actor {
         self.state.scene = Some(scene);
         self.state.layout_overview = Some(Arc::new(overview));
         self.schedule_display();
+        if let (Some(client), Some(project)) = (&self.client, &self.state.project)
+            && let Some(record) = project.analysis.results.iter().rev().find(|result| {
+                project.analysis.cases.iter().any(|case| {
+                    case.case.id == result.case_id && case.case.layout_id == project.layout_id
+                })
+            })
+            && self.mechanics_task.is_none()
+            && self.mechanics_restore_key.as_ref()
+                != Some(&(project.project_id.clone(), record.hash.clone()))
+            && self.state.mechanics.as_ref().is_none_or(|capture| {
+                capture.project != project.project_id
+                    || capture.summary.case.case.layout_id != project.layout_id
+            })
+        {
+            self.mechanics_restore_key = Some((project.project_id.clone(), record.hash.clone()));
+            self.mechanics_task = Some(tokio::spawn(crate::assets::restore_mechanics(
+                client.rpc(),
+                client.hello().session_id.clone(),
+                project.project_id.clone(),
+                project.revision,
+                record.clone(),
+            )));
+        }
         if self
             .state
             .project
@@ -1865,6 +1891,12 @@ impl Actor {
         let completed = operation.status == JobStatus::Completed;
         match (&pending.receipt, &operation.result) {
             (Receipt::Open(route), Some(JobResult::Scene { summary })) if completed => {
+                self.mechanics_restore_key = None;
+                self.state.mechanics = None;
+                self.state.mechanics_previous = None;
+                if let Some(task) = self.mechanics_task.take() {
+                    task.abort();
+                }
                 crate::performance::mark("open_published");
                 self.route = Some(route.clone());
                 Arc::make_mut(&mut self.state.library)
@@ -1940,6 +1972,34 @@ impl Actor {
             ) if completed => {}
             (
                 Receipt::Project,
+                Some(JobResult::AnalysisResultPrepared {
+                    project_id,
+                    read_revision,
+                    record,
+                    resource,
+                }),
+            ) if completed => {
+                self.refresh_after_failure().await;
+                if let Some(task) = self.mechanics_task.take() {
+                    task.abort();
+                }
+                if let (Some(client), Some(project)) = (&self.client, &self.state.project)
+                    && project.project_id == *project_id
+                    && project.revision == *read_revision
+                {
+                    self.mechanics_task = Some(tokio::spawn(crate::assets::load_mechanics(
+                        client.rpc(),
+                        client.hello().session_id.clone(),
+                        project_id.clone(),
+                        *read_revision,
+                        record.captured_revision,
+                        record.input_hash.clone(),
+                        resource.clone(),
+                    )));
+                }
+            }
+            (
+                Receipt::Project,
                 Some(JobResult::AnalysisCompleted {
                     project_id,
                     captured_revision,
@@ -1953,12 +2013,12 @@ impl Actor {
                 }
                 if let (Some(client), Some(project)) = (&self.client, &self.state.project)
                     && project.project_id == *project_id
-                    && project.revision == *captured_revision
                 {
                     self.mechanics_task = Some(tokio::spawn(crate::assets::load_mechanics(
                         client.rpc(),
                         client.hello().session_id.clone(),
                         project_id.clone(),
+                        project.revision,
                         *captured_revision,
                         input_hash.clone(),
                         resource.clone(),

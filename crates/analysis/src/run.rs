@@ -12,12 +12,14 @@ use spiling_geometry::Definition;
 use std::{sync::atomic::AtomicBool, time::Instant};
 
 pub struct CachedOperator {
+    native_sample_hash: [u8; 32],
     key: SourceHash,
     hash: SourceHash,
     operator: PreparedOperator,
     shape_error_mm: f64,
 }
 pub struct RunCapture {
+    pub project_id: spiling_contracts::project::ProjectId,
     pub case: AnalysisCaseRecord,
     pub revision: ProjectRevision,
     pub pose: RigidPoseMm,
@@ -75,6 +77,7 @@ pub fn execute(
                 .map_err(|error| error.to_string())?,
         );
         *cache = Some(CachedOperator {
+            native_sample_hash: prism.native_sample_hash,
             key,
             hash,
             operator,
@@ -115,6 +118,9 @@ pub fn execute(
         operator_reused: reused,
     };
     let summary = AnalysisRunSummary {
+        project_id: capture.project_id.clone(),
+        kernel_revision: spiling_geometry::KERNEL_REVISION.into(),
+        native_sample_hash: cached.native_sample_hash,
         model_scope: AnalysisModelScope::PlannedAssumedTiedMacro,
         accuracy_evidence: AnalysisAccuracyEvidence::Unqualified,
         producer: ANALYSIS_PRODUCER.into(),

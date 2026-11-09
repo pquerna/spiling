@@ -9,7 +9,9 @@ use crate::{
 };
 use spiling_contracts::{
     ArtifactView,
-    geometry::{ArtifactChunkMetadata, ArtifactId, GeometryResponse, SceneRevision, SessionId},
+    geometry::{
+        ArtifactChunkMetadata, ArtifactId, GeometryResponse, SceneRevision, SessionId, SourceHash,
+    },
     manufacturing::{MAX_REPLAY_DISPLAY_BYTES, ManufacturingResponse, ReplayDisplayDescriptor},
     project::ProjectRevision,
     rpc::Artifact,
@@ -200,6 +202,7 @@ impl NativeHost {
                 }
                 | spiling_contracts::project::ProjectCommand::CompareAppearance { .. }
                 | spiling_contracts::project::ProjectCommand::RunAnalysis { .. }
+                | spiling_contracts::project::ProjectCommand::GetAnalysisResult { .. }
                 | spiling_contracts::project::ProjectCommand::GetAppearanceReport {
                     ..
                 }
@@ -432,6 +435,7 @@ fn publish_terminal(
         return Ok(true);
     }
     if let geometry::JobResult::AnalysisCompleted {
+        read_revision,
         project_id,
         captured_revision,
         input_hash,
@@ -450,11 +454,26 @@ fn publish_terminal(
             spiling_contracts::analysis::mechanics::ANALYSIS_FIELDS_MIME,
             spiling_contracts::analysis::mechanics::MAX_MECHANICAL_FIELD_BYTES as u64,
         )?;
-        let result = spiling_contracts::geometry::JobResult::AnalysisCompleted {
-            project_id: project_id.clone(),
-            captured_revision: *captured_revision,
-            input_hash: input_hash.clone(),
-            resource: view(&artifact)?,
+        let result = if let Some(read_revision) = read_revision {
+            spiling_contracts::geometry::JobResult::AnalysisResultPrepared {
+                project_id: project_id.clone(),
+                read_revision: *read_revision,
+                record: spiling_contracts::analysis::AnalysisResultRecord {
+                    case_id: report.summary.case.case.id.clone(),
+                    hash: SourceHash::from_bytes(&report.bytes),
+                    byte_count: report.bytes.len() as u32,
+                    input_hash: input_hash.clone(),
+                    captured_revision: *captured_revision,
+                },
+                resource: view(&artifact)?,
+            }
+        } else {
+            spiling_contracts::geometry::JobResult::AnalysisCompleted {
+                project_id: project_id.clone(),
+                captured_revision: *captured_revision,
+                input_hash: input_hash.clone(),
+                resource: view(&artifact)?,
+            }
         };
         jobs.native_finish(name, Ok(result), vec![(artifact, report.bytes.as_slice())])?;
         runtime.release_analysis_publication(id);

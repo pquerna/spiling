@@ -93,13 +93,54 @@ fn analysis_json_is_strict_and_bounded_without_compatibility_defaults() {
         case: value,
         edited_revision: ProjectRevision(1),
     };
-    let json = serde_json::json!({"cases": vec![record; MAX_ANALYSIS_CASES + 1]});
+    let json = serde_json::json!({"cases": vec![record; MAX_ANALYSIS_CASES + 1], "results": []});
     assert!(serde_json::from_value::<AnalysisDocument>(json).is_err());
+}
+#[test]
+fn retained_analysis_descriptors_are_required_bounded_and_case_bound() {
+    let value = case();
+    let result = AnalysisResultRecord {
+        case_id: value.id.clone(),
+        hash: SourceHash::from_bytes(b"field descriptor, not numerical evidence"),
+        byte_count: 100,
+        input_hash: SourceHash::from_bytes(b"captured inputs"),
+        captured_revision: ProjectRevision(3),
+    };
+    let document = AnalysisDocument {
+        cases: vec![AnalysisCaseRecord {
+            case: value,
+            edited_revision: ProjectRevision(1),
+        }],
+        results: vec![result.clone()],
+    };
+    document.validate().unwrap();
+    let json = serde_json::to_value(&document).unwrap();
+    let mut missing = json.clone();
+    missing.as_object_mut().unwrap().remove("results");
+    assert!(serde_json::from_value::<AnalysisDocument>(missing).is_err());
+    let mut oversized = json;
+    oversized["results"] = serde_json::json!(vec![result; MAX_ANALYSIS_CASES + 1]);
+    assert!(serde_json::from_value::<AnalysisDocument>(oversized).is_err());
+    for variant in 0..4 {
+        let mut invalid = document.clone();
+        match variant {
+            0 => invalid.results.push(invalid.results[0].clone()),
+            1 => invalid.results[0].case_id = AnalysisCaseId::new(),
+            2 => invalid.results[0].byte_count = 0,
+            _ => invalid.results[0].byte_count = mechanics::MAX_MECHANICAL_FIELD_BYTES as u32 + 1,
+        }
+        assert!(invalid.validate().is_err());
+        let wire = rpc::AnalysisDocument::try_from(invalid);
+        assert!(wire.is_err());
+    }
+    let wire: rpc::AnalysisDocument = document.clone().try_into().unwrap();
+    assert_eq!(AnalysisDocument::try_from(wire).unwrap(), document);
 }
 #[test]
 fn analysis_document_binds_revision_source_hash_and_layout_membership() {
     let value = case();
     let document = AnalysisDocument {
+        results: vec![],
         cases: vec![AnalysisCaseRecord {
             case: value.clone(),
             edited_revision: ProjectRevision(3),

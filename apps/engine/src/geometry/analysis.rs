@@ -6,6 +6,66 @@ use super::*;
 use spiling_contracts::analysis::{mechanics::*, *};
 
 impl Runtime {
+    pub(super) fn attach_analysis_result(
+        &mut self,
+        session: &SessionId,
+        base: ProjectRevision,
+        input: &SourceHash,
+    ) -> Result<Reply, ProjectError> {
+        self.metadata_base(session, base)?;
+        let product = self
+            .analysis_candidate
+            .as_ref()
+            .filter(|product| {
+                &product.summary.input_hash == input
+                    && product.summary.captured_revision == base
+                    && product.summary.project_id == self.project.info().project_id
+            })
+            .ok_or_else(|| {
+                project_error(
+                    ProjectErrorCode::StaleRevision,
+                    "no matching current successful analysis completion to attach",
+                )
+            })?;
+        let record = AnalysisResultRecord {
+            case_id: product.summary.case.case.id.clone(),
+            hash: SourceHash::from_bytes(&product.bytes),
+            byte_count: product.bytes.len() as u32,
+            input_hash: input.clone(),
+            captured_revision: base,
+        };
+        let asset = Arc::new(spiling_core::AnalysisResultAsset::new(
+            record,
+            product.bytes.clone(),
+        )?);
+        self.commit_metadata_edit(Edit::AttachAnalysisResult { asset })
+    }
+    pub(super) fn get_analysis_result(
+        &mut self,
+        session: &SessionId,
+        base: ProjectRevision,
+        id: &AnalysisCaseId,
+    ) -> Result<Reply, ProjectError> {
+        self.appearance_base(session, base)?;
+        let snapshot = self.project.snapshot();
+        let asset = snapshot
+            .analysis
+            .results
+            .iter()
+            .find(|record| &record.case_id == id)
+            .and_then(|record| snapshot.analysis_results.get(&record.hash))
+            .cloned()
+            .ok_or_else(|| {
+                project_error(
+                    ProjectErrorCode::MissingAsset,
+                    "no portable result attached to this case",
+                )
+            })?;
+        self.start(Purpose::GetAnalysisResult, 0, move |_, _, _| {
+            Work::GetAnalysisResult(asset)
+        })
+        .map_err(project_geometry_error)
+    }
     fn analysis_capture(
         &self,
         session: &SessionId,
@@ -71,6 +131,7 @@ impl Runtime {
             ));
         }
         Ok(spiling_analysis::run::RunCapture {
+            project_id: self.project.info().project_id,
             case,
             revision: base,
             pose: occurrence.pose,

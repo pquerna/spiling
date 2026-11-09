@@ -11,6 +11,9 @@ import "spiling/native_library.proto";
 import "spiling/native_hardware.proto";
 import "spiling/native_analysis.proto";
 service Projects {
+ rpc GetAnalysisResult(GetAnalysisResultRequest) returns (google.longrunning.Operation) {
+  option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
+ }
  rpc RunAnalysis(RunAnalysisRequest) returns (google.longrunning.Operation) {
   option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
  }
@@ -55,6 +58,7 @@ service Projects {
 message ProjectRequest {
  string parent = 1;
  oneof command {
+  AttachAnalysisResultRequest attach_analysis_result = 31;
   EditAnalysisRequest edit_analysis = 29;
   SelectPrintLayoutRequest select_print_layout = 27;
   EditPrintLayoutRequest edit_print_layout = 28;

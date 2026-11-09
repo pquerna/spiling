@@ -35,6 +35,7 @@ const IMAGE: u16 = 3;
 const PALETTE_ORIGINAL: u16 = 4;
 const PALETTE_CANONICAL: u16 = 5;
 const MATERIALS: u16 = 6;
+const ANALYSIS: u16 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveStage {
@@ -127,6 +128,7 @@ pub(crate) struct StorageBinding {
 
 #[derive(Debug)]
 pub struct LoadedProject {
+    pub analysis_results: BTreeMap<SourceHash, Arc<super::AnalysisResultAsset>>,
     pub manifest: ProjectManifest,
     pub saved_revision: ProjectRevision,
     pub sources: BTreeMap<DefinitionId, Arc<SourceAsset>>,
@@ -150,6 +152,7 @@ pub struct SaveReceipt {
 
 #[derive(Debug, Clone, Copy)]
 pub struct LoadBudgets {
+    pub analysis_bytes: usize,
     pub source_bytes: usize,
     pub manufacturing_bytes: usize,
     pub image_bytes: usize,
@@ -158,6 +161,7 @@ pub struct LoadBudgets {
 }
 impl LoadBudgets {
     pub const MAXIMUM: Self = Self {
+        analysis_bytes: super::MAX_RETAINED_ANALYSIS_FIELD_BYTES,
         source_bytes: MAX_RETAINED_SOURCE_BYTES,
         manufacturing_bytes: MAX_MANUFACTURING_RETAINED_BYTES as usize,
         image_bytes: MAX_SURFACE_IMAGE_RETAINED_BYTES,
@@ -302,6 +306,9 @@ fn member(role: u16, hash: &SourceHash) -> Member {
 
 fn expected_members(manifest: &ProjectManifest) -> BTreeSet<Member> {
     let mut result = BTreeSet::new();
+    for record in &manifest.analysis.results {
+        result.insert(member(ANALYSIS, &record.hash));
+    }
     if let Some(record) = &manifest.materials {
         result.insert(member(MATERIALS, &record.hash));
     }
@@ -395,6 +402,23 @@ fn load_assets(
         ..Snapshot::default()
     };
     super::hardware::share_capture(&mut snapshot);
+    let mut analysis_budget = budgets
+        .analysis_bytes
+        .min(super::MAX_RETAINED_ANALYSIS_FIELD_BYTES);
+    for record in &manifest.analysis.results {
+        let bytes = read_asset(
+            capture,
+            &record.hash,
+            analysis_budget.min(spiling_contracts::analysis::mechanics::MAX_MECHANICAL_FIELD_BYTES),
+            Some(record.byte_count as usize),
+            cancel,
+        )?;
+        analysis_budget -= bytes.capacity();
+        snapshot.analysis_results.insert(
+            record.hash.clone(),
+            Arc::new(super::AnalysisResultAsset::new(record.clone(), bytes)?),
+        );
+    }
     if let Some(record) = &manifest.materials {
         let bytes = read_asset(
             capture,
@@ -588,6 +612,7 @@ pub fn open_reusing(
     manifest.validate()?;
     cancelled(cancel)?;
     Ok(LoadedProject {
+        analysis_results: snapshot.analysis_results,
         manifest,
         saved_revision,
         sources: snapshot.sources,
@@ -628,6 +653,9 @@ fn validate_other_root(
 
 fn snapshot_objects(snapshot: &Snapshot) -> BTreeMap<Member, Arc<Vec<u8>>> {
     let mut objects = BTreeMap::new();
+    for asset in snapshot.analysis_results.values() {
+        objects.insert(member(ANALYSIS, &asset.record.hash), asset.bytes.clone());
+    }
     if let Some(asset) = &snapshot.materials {
         objects.insert(
             member(MATERIALS, &asset.record().hash),
@@ -708,6 +736,14 @@ pub(crate) fn remaining_budgets(project: &Project) -> Result<LoadBudgets, Projec
         }
     }
     Ok(LoadBudgets {
+        analysis_bytes: super::MAX_RETAINED_ANALYSIS_FIELD_BYTES.saturating_sub(
+            super::analysis_results::retained_bytes(
+                std::iter::once(project.current.as_ref())
+                    .chain(project.undo.iter().map(Arc::as_ref))
+                    .chain(project.redo.iter().map(Arc::as_ref))
+                    .chain(staged.iter().map(Arc::as_ref)),
+            ),
+        ),
         material_bytes: super::materials::MAX_RETAINED_MATERIAL_BYTES.saturating_sub(
             super::materials::retained_bytes(
                 std::iter::once(project.current.as_ref())
@@ -842,6 +878,7 @@ pub fn save(
                         MANUFACTURING => &mut budgets.manufacturing_bytes,
                         IMAGE => &mut budgets.image_bytes,
                         MATERIALS => &mut budgets.material_bytes,
+                        ANALYSIS => &mut budgets.analysis_bytes,
                         PALETTE_ORIGINAL | PALETTE_CANONICAL => &mut budgets.appearance_bytes,
                         _ => return Err(invalid("unknown retained project object role")),
                     };

@@ -5,7 +5,7 @@
 use super::*;
 use crate::manufacturing::PlanarPrintRecipe;
 
-pub const ANALYSIS_PRODUCER: &str = "assumed-printed-hex27-1";
+pub const ANALYSIS_PRODUCER: &str = "assumed-printed-hex27-2";
 pub const MAX_MECHANICAL_ELEMENTS: usize = 768;
 pub const MAX_MECHANICAL_DOFS: usize = 16_000;
 pub const MAX_MECHANICAL_FIELD_BYTES: usize = 4 * 1024 * 1024;
@@ -158,6 +158,9 @@ pub struct AnalysisNumericalAssessment {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AnalysisRunSummary {
+    pub project_id: ProjectId,
+    pub kernel_revision: String,
+    pub native_sample_hash: [u8; 32],
     pub model_scope: AnalysisModelScope,
     pub accuracy_evidence: AnalysisAccuracyEvidence,
     pub producer: String,
@@ -185,6 +188,35 @@ pub struct AnalysisRunSummary {
 }
 
 impl AnalysisRunSummary {
+    pub fn expected_operator_hash(&self) -> Result<SourceHash, ProjectError> {
+        let key = SourceHash::from_bytes(
+            &serde_json::to_vec(&(
+                ANALYSIS_PRODUCER,
+                &self.kernel_revision,
+                &self.case.case.definition_id,
+                &self.case.case.source_hash,
+                self.pose,
+                &self.case.case.restraints,
+                &self.settings,
+            ))
+            .map_err(|error| invalid(&error.to_string()))?,
+        );
+        Ok(SourceHash::from_bytes(
+            &serde_json::to_vec(&(&key, self.native_sample_hash))
+                .map_err(|error| invalid(&error.to_string()))?,
+        ))
+    }
+    pub fn expected_input_hash(&self) -> Result<SourceHash, ProjectError> {
+        Ok(SourceHash::from_bytes(
+            &serde_json::to_vec(&(
+                ANALYSIS_PRODUCER,
+                &self.operator_hash,
+                &self.case,
+                self.captured_revision,
+            ))
+            .map_err(|error| invalid(&error.to_string()))?,
+        ))
+    }
     pub fn validate(&self) -> Result<(), ProjectError> {
         self.settings.validate()?;
         self.case.case.validate()?;
@@ -192,6 +224,12 @@ impl AnalysisRunSummary {
             .validate()
             .map_err(|error| invalid(&error.to_string()))?;
         if self.producer != ANALYSIS_PRODUCER
+            || self.case.case.loads.is_empty()
+            || self.case.case.restraints.is_empty()
+            || self.kernel_revision.is_empty()
+            || self.kernel_revision.len() > 80
+            || self.operator_hash != self.expected_operator_hash()?
+            || self.input_hash != self.expected_input_hash()?
             || self.source_hash != self.case.case.source_hash
             || self.case.edited_revision.0 > self.captured_revision.0
             || self.elements == 0
@@ -200,6 +238,7 @@ impl AnalysisRunSummary {
             || self.dofs as usize > MAX_MECHANICAL_DOFS
             || !self.dofs.is_multiple_of(3)
             || self.components == 0
+            || self.components > self.elements
             || self.assessment.rigid_constraint_ranks.len() != self.components as usize
             || self
                 .assessment

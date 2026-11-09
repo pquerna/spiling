@@ -288,6 +288,23 @@ pub fn native_operation_view(
             return Err("uncertain save receipt requires Failed state".into());
         }
         match result {
+            JobResult::AnalysisResultPrepared {
+                read_revision,
+                record,
+                resource,
+                ..
+            } => {
+                validate_analysis_resource(resource)?;
+                if read_revision.0 != meta.captured_project_revision
+                    || record.captured_revision > *read_revision
+                    || record.hash.as_str() != resource.sha256
+                    || record.byte_count.to_string() != resource.size_bytes
+                    || meta.outputs.len() != 1
+                    || ArtifactView::from(&meta.outputs[0]) != *resource
+                {
+                    return Err("saved analysis read/output mismatch".into());
+                }
+            }
             JobResult::AnalysisCompleted {
                 captured_revision,
                 resource,
@@ -590,6 +607,28 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
                 }
                 Self::AppearancePaletteImported { info, palette }
             }
+            R::AnalysisResultPrepared(value) => {
+                let resource = artifact_to_view(
+                    required(value.resource, "saved analysis fields")?,
+                    crate::analysis::mechanics::MAX_MECHANICAL_FIELD_BYTES as u64,
+                )?;
+                validate_analysis_resource(&resource)?;
+                let record: crate::analysis::AnalysisResultRecord =
+                    required(value.record, "saved analysis record")?.try_into()?;
+                if record.hash.as_str() != resource.sha256
+                    || record.byte_count.to_string() != resource.size_bytes
+                    || record.captured_revision.0 > value.read_revision
+                {
+                    return Err("saved analysis descriptor mismatch".into());
+                }
+                Self::AnalysisResultPrepared {
+                    project_id: ProjectId::parse(value.project_id)
+                        .map_err(|error| error.to_string())?,
+                    read_revision: ProjectRevision(value.read_revision),
+                    record,
+                    resource,
+                }
+            }
             R::AnalysisCompleted(value) => {
                 let resource = artifact_to_view(
                     required(value.resource, "analysis fields")?,
@@ -789,6 +828,29 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
                 R::AppearancePaletteImported(rpc::AppearancePaletteImportedResult {
                     info: Some(info.try_into()?),
                     palette: Some(palette.try_into()?),
+                })
+            }
+            JobResult::AnalysisResultPrepared {
+                project_id,
+                read_revision,
+                record,
+                resource,
+            } => {
+                validate_analysis_resource(&resource)?;
+                if record.hash.as_str() != resource.sha256
+                    || record.byte_count.to_string() != resource.size_bytes
+                    || record.captured_revision > read_revision
+                {
+                    return Err("saved analysis descriptor mismatch".into());
+                }
+                R::AnalysisResultPrepared(rpc::AnalysisResultPrepared {
+                    project_id: project_id.as_str().into(),
+                    read_revision: read_revision.0,
+                    record: Some(record.into()),
+                    resource: Some(artifact_from_view(
+                        resource,
+                        crate::analysis::mechanics::MAX_MECHANICAL_FIELD_BYTES as u64,
+                    )?),
                 })
             }
             JobResult::AnalysisCompleted {

@@ -65,6 +65,7 @@ impl Default for Snapshot {
             surface_images: BTreeMap::new(),
             appearance_study: Default::default(),
             analysis: Default::default(),
+            analysis_results: BTreeMap::new(),
             materials: None,
             appearance_palettes: BTreeMap::new(),
         }

@@ -58,6 +58,7 @@ impl JobStatus {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum JobResult {
     AnalysisCompleted {
+        read_revision: Option<ProjectRevision>,
         project_id: ProjectId,
         captured_revision: ProjectRevision,
         input_hash: SourceHash,

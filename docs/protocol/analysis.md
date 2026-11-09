@@ -102,7 +102,17 @@ CLOSED-slab and source-leaf receipts over the entire source height, with closed
 shape allowance ≤0.001 mm. Descriptive planes only propose/filter query levels.
 Each orthogonal boundary chord must match one complete native graph interval
 enclosure and native span face ordinal. Canonical polygon start order is not
-native span order. Display triangles never supply material or face authority.
+native span order. Each owner requires a complete native vertical-rectangle trim
+receipt: native UV-on-carrier position, derivative and endpoint enclosures plus
+the actual four-edge cycle bind exact face identity and horizontal/height bounds.
+Capture checks those trim bounds against both candidate source caps, then
+independently establishes complete CLOSED-slab/source-leaf coverage over the
+whole part. A local trim rectangle alone implies neither full source height nor
+global support. Midplane ownership cannot extend a load/restraint through
+height-split coplanar faces. This Analyze path is distinct from the original
+exterior-wall proof, whose original affine, full-height and supporting-plane
+obligations remain unchanged. Display triangles never supply material or face
+authority.
 Native holes and all disconnected paths remain in the model; no cropped source,
 soft void material or removed cells can rescue admission. General curved/nonprism
 parts, cap patches, non-axis-aligned print rotations, unequal top/bottom skins
@@ -150,14 +160,41 @@ on CPU FP64, not CubeCL or a backend-name-only GPU implementation.
 
 Successful Operations return `AnalysisCompleted` with captured project revision,
 input hash and an immutable ByteStream `application/x-spiling-analysis-fields`
-artifact. Producer `assumed-printed-hex27-1`, model scope
+artifact. Producer `assumed-printed-hex27-2`, model scope
 `planned_assumed_tied_macro` and `accuracy_evidence: unqualified` are explicit.
 An explicitly retained local Operations store retains successful fields across
 engine restart (CLI `--store DIRECTORY`; the default CLI store is temporary).
-A portable `.spil` result attachment/automatic workbench result restore
-is **not implemented**. Saved cases reopen without original STEP paths and can
-be solved again. Read-only numerical studies do not change dirty state, history,
-project or scene revisions. Failed attempts preserve old immutable artifacts.
+`AttachAnalysisResult` explicitly adopts the matching successful completion at
+its unchanged captured ProjectRevision. Only the engine writer commits this
+ordinary Core transaction; workers never attach results. Attachment advances
+ProjectRevision once, preserves manufacturing/SceneRevision, participates in
+undo/redo and becomes portable on Save. Each case retains one result descriptor
+(case ID, exact SPLA hash/size, original input hash/revision). Replacement is
+explicit; a failed/cancelled/stale solve cannot replace attached fields.
+
+Core stores the exact SPLA bytes in the existing immutable PTAC graph, role 7,
+with the complete captured project/case, pose, recipe, assumed tensors, source
+identity, kernel/producer and native-sample identities, original operator/input
+fingerprints, assessment and numerical costs. The retained nodes/connectivity,
+region roles, full-order formulation and captured directional laws define the
+original operator; numerical factors/JIT caches are disposable, not durable
+references. The source bytes remain in the same project's source closure. Live,
+history and prepared distinct field allocations share a 32 MiB Core budget;
+each SPLA remains at most 4 MiB. Missing/extra/misbound objects or invalid packed
+semantics refuse open rather than falling back to a ledger or recomputing.
+
+`GetAnalysisResult` is a read-only operation returning `AnalysisResultPrepared`:
+the read revision is distinct from the result's original captured revision. It
+publishes the retained exact bytes through ordinary artifacts/ByteStream, even
+in a fresh empty Jobs store. It does not solve, change costs or create new
+convergence evidence. Native open automatically restores the latest attached
+result on the focused plate; selecting another saved case reads its attachment.
+Only the copied `.spil` is needed, not the original STEP path or old Jobs ledger.
+Case/pose/construction edits retain old fields as stale and inspectable. An
+attachment itself does not falsify freshness merely by advancing the revision;
+freshness compares captured inputs. Transient study/draft edits cannot relabel
+old fields current. Rerun remains a distinct explicit operation. Read-only
+inspection changes no content, dirty state, history or revisions.
 
 SPLA1 is explicit little-endian packed data, never Rust memory layout. Its
 32-byte header is magic `SPLA`, u32 version 1, u32 JSON-metadata length (≤48 KiB),
@@ -169,7 +206,13 @@ centroid macro stresses MPa, energy N·mm, dimensionless concentration); 64-byte
 patch samples (three f64 source coordinates mm, f64 area mm², three f64 tractions
 MPa, u32 authored load index, zero reserved u32). Checked decode validates exact
 length/counts, finite values, connectivity, units-bearing metadata and producer
-before bounded index-based partial inspection. Client retrieval binds hash,
+before bounded index-based partial inspection. Semantic admission also checks
+unique used nodes, affine Hex27 charts, disjoint element volumes, face incidence,
+region volumes/energies and nodal/stress extrema against the summary. Retained
+patch points must form complete full-order exterior-face quadrature. Independently
+reassembled nodal loads and each patch's integrated resultant/source-origin
+moment must match the retained nodes and authored wrenches. These are integrity
+checks, not a new discretization or physical-accuracy receipt. Client retrieval binds hash,
 size, MIME, input identity and captured revision.
 SPLA currently has Rust consumers only; no TypeScript packed decoder or
 cross-language binary interoperability qualification is claimed.
@@ -203,6 +246,12 @@ The complete original hook fixture and explicit uncalibrated assumptions are
 ```sh
 cargo test --locked -p spiling-engine -p spiling-analysis --lib -j 2 -- tests::
 cargo test --locked -p spiling-engine --test project whole_hook_native -j 2 -- --nocapture
+SPILING_TEST_ENGINE="$PWD/target/debug/spiling-engine" \
+  cargo test --locked -p spiling-engine -p spiling-cli --test project -j 2 \
+  full_native_hook_equilibrium_and_retained_result_return_through_cli -- --ignored --test-threads=1
+SPILING_TEST_ENGINE="$PWD/target/debug/spiling-engine" \
+  cargo test --locked -p spiling-engine -p spiling-workbench --lib -j 2 \
+  assumed_whole_hook_fields_reach_native_host_and_survive_a_failed_rerun -- --ignored --test-threads=1
 ```
 
 On Linux, run native workloads sequentially in an external cgroup with declared
@@ -261,9 +310,13 @@ retrieves a completed historical result and checks its project/input/artifact
 identity without rerunning. `capture_matches_project_revision` distinguishes a
 matching saved revision from historical evidence; returned costs belong to the
 original calculation, not the retrieval.
-The CLI's default store is temporary: without an explicit `--store DIRECTORY`,
-artifacts do not survive CLI exit. Local ledger retention is not a portable
-result attachment inside the saved project.
+`--analysis-run-and-attach NAME SETTINGS_JSON_FILE` explicitly runs and attaches
+through these same engine services; an ordinary save (including CLI `edit`'s
+final save) publishes the portable result. `--analysis-attach INPUT_HASH` exposes
+the revision-checked adoption separately within a live invocation.
+`--analysis-saved NAME` reads the attached result without solving and permits
+read-only inspection with the default temporary store. The original numerical
+costs remain historical; retrieval/streaming timings are not setup/solve costs.
 
 The real-child regression is
 `cargo test -p spiling-engine --test project analysis_cases_check_native_patches_and_survive_history_source_absent_reopen -- --nocapture`.
@@ -283,9 +336,9 @@ transfer, restraints and case/input revisions. A load-only rerun must reuse an
 eligible original operator; setup, RHS/solve, assessment and visible-field costs
 must be measured separately on the CPU baseline before claiming GPU speedup.
 The initial consumer exercises those numerical phases, orientation comparison
-and local-ledger saved return under assumed laws. It does not close portable
-project result attachment, general native coverage, substantial application
-refinement/accuracy, detailed infill/interfaces or physical/model evidence.
+and portable saved return under assumed laws. It does not close general native
+coverage, substantial application refinement/accuracy, detailed infill/interfaces
+or physical/model evidence.
 Those obligations cannot be replaced by additional case metadata or a coupon.
 
 Enhanced uses those same cases/captures with detailed infill/interfaces,

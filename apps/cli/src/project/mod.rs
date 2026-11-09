@@ -866,6 +866,7 @@ pub fn parse(
                     Operation::PrepareLayout(_)
                         | Operation::Analysis(analysis::Action::Run(..))
                         | Operation::Analysis(analysis::Action::Return(..))
+                        | Operation::Analysis(analysis::Action::Saved(..))
                         | Operation::Plate(plates::Action::Select(_))
                         | Operation::LibraryLocation(_)
                         | Operation::CheckInteriorDefault

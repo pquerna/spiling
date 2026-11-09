@@ -84,17 +84,53 @@ impl Workbench {
             return;
         };
         let current = !self.mechanics.has_changes()
-            && settings_match(&self.mechanics.settings_json, &capture.summary.settings)
-            && self.state.project.as_ref().is_some_and(|project| {
-                project.revision == capture.revision
-                    && project.layout_id == capture.summary.case.case.layout_id
-                    && project.analysis.cases.contains(&capture.summary.case)
-            })
             && self
                 .mechanics
                 .draft
                 .as_ref()
-                .is_some_and(|draft| draft.value.id == capture.summary.case.case.id);
+                .is_none_or(|draft| draft.value.id == capture.summary.case.case.id)
+            && self.display_current()
+            && settings_match(&self.mechanics.settings_json, &capture.summary.settings)
+            && self.state.project.as_ref().is_some_and(|project| {
+                project.layout_id == capture.summary.case.case.layout_id
+                    && project.analysis.cases.contains(&capture.summary.case)
+                    && project.surface_overlays.layers.is_empty()
+                    && project.process_document.layers.is_empty()
+            })
+            && self.state.display.as_ref().is_some_and(|scene| {
+                scene.occurrences.iter().any(|occurrence| {
+                    occurrence.occurrence_id == capture.summary.case.case.occurrence_id
+                        && occurrence.definition_id == capture.summary.case.case.definition_id
+                        && occurrence.pose == capture.summary.pose
+                })
+            });
+        let attached = self.state.project.as_ref().is_some_and(|project| {
+            project
+                .analysis
+                .results
+                .iter()
+                .any(|record| record.hash.as_str() == capture.resource.sha256)
+        });
+        let attach_reason = if attached {
+            Some("Already attached; save the project to publish it")
+        } else if !ready || !current {
+            Some("Only a current successful capture can be attached")
+        } else if self.state.project.as_ref().is_none_or(|project| {
+            project.read_only || project.revision != capture.summary.captured_revision
+        }) {
+            Some("Attachment requires a writable unchanged captured revision")
+        } else {
+            None
+        };
+        if ui::primary(ui, "Attach result to project", attach_reason)
+            && let (Some(project), Some(hello)) = (&self.state.project, &self.state.hello)
+        {
+            self.queued_project = Some(ProjectCommand::AttachAnalysisResult {
+                session_id: hello.session_id.clone(),
+                base_revision: project.revision,
+                input_hash: capture.summary.input_hash.clone(),
+            });
+        }
         let summary = &capture.summary;
         if let Some(previous) = self
             .state
@@ -134,7 +170,7 @@ impl Workbench {
             ui.label(&summary.settings.laws.justification);
             ui.monospace(format!("input {}", summary.input_hash.as_str()));
             ui.monospace(format!("operator {}", summary.operator_hash.as_str()));
-            ui.weak("Immutable fields are retained in the local engine operation ledger, not attached to the portable .spil project yet. Reopening a project can solve from its saved case without original STEP; a workbench restart does not restore this panel automatically.");
+            ui.weak(if attached { "Result attached to project content. Save publishes the exact bounded fields and captured assumptions into .spil; reopening restores them without solving. Input edits preserve the capture as stale." } else { "Session-only result. Explicitly attach, then save to retain it in portable .spil. Rerun is distinct from restoration." });
             ui.monospace(&capture.resource.name);
         });
         let fields = match AnalysisFields::decode(&capture.bytes) {

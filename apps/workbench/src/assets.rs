@@ -24,13 +24,19 @@ pub async fn load_mechanics(
     session: SessionId,
     project: ProjectId,
     revision: ProjectRevision,
+    captured_revision: ProjectRevision,
     input: spiling_contracts::geometry::SourceHash,
     resource: ArtifactView,
 ) -> Result<Arc<MechanicsCapture>, ClientError> {
     let bytes = rpc
-        .fetch_analysis_fields(&input, revision, &resource)
+        .fetch_analysis_fields(&input, captured_revision, &resource)
         .await?;
     let summary = spiling_contracts::analysis::fields::AnalysisFields::decode(&bytes)?.summary;
+    if summary.project_id != project {
+        return Err(ClientError::Protocol(
+            "Mechanical fields belong to another project".into(),
+        ));
+    }
     let status = rpc
         .project(ProjectCommand::Get {
             session_id: session,
@@ -49,6 +55,65 @@ pub async fn load_mechanics(
         bytes,
         resource,
     }))
+}
+
+pub async fn restore_mechanics(
+    rpc: EngineRpc,
+    session: SessionId,
+    project: ProjectId,
+    revision: ProjectRevision,
+    record: spiling_contracts::analysis::AnalysisResultRecord,
+) -> Result<Arc<MechanicsCapture>, ClientError> {
+    let response = rpc
+        .project(ProjectCommand::GetAnalysisResult {
+            session_id: session.clone(),
+            base_revision: revision,
+            case_id: record.case_id.clone(),
+        })
+        .await?;
+    let ProjectResponse::OperationAccepted { mut operation } = response else {
+        return Err(ClientError::Protocol(
+            "Saved fields read did not return an operation".into(),
+        ));
+    };
+    let mut watch = rpc.watch_native_operation(operation.name.clone()).await?;
+    while !operation.done {
+        operation = tokio::time::timeout(std::time::Duration::from_secs(30), watch.next())
+            .await
+            .map_err(|_| ClientError::Protocol("Saved fields read timed out".into()))??;
+    }
+    let Some(spiling_contracts::geometry::JobResult::AnalysisResultPrepared {
+        project_id,
+        read_revision,
+        record: returned,
+        resource,
+    }) = operation.result
+    else {
+        return Err(ClientError::Protocol(format!(
+            "Saved fields read failed: {:?}",
+            operation.error
+        )));
+    };
+    if project_id != project
+        || read_revision != revision
+        || returned != record
+        || resource.sha256 != record.hash.as_str()
+        || resource.size_bytes != record.byte_count.to_string()
+    {
+        return Err(ClientError::Protocol(
+            "Saved fields descriptor/capture mismatch".into(),
+        ));
+    }
+    load_mechanics(
+        rpc,
+        session,
+        project,
+        revision,
+        record.captured_revision,
+        record.input_hash,
+        resource,
+    )
+    .await
 }
 #[derive(Debug, Clone)]
 pub struct ImageRequest {

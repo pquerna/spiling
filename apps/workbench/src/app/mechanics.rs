@@ -82,8 +82,36 @@ impl Workbench {
             submitted: None,
             removing: false,
         });
+        if let Some(result) = project
+            .analysis
+            .results
+            .iter()
+            .find(|result| result.case_id == id)
+            && self
+                .state
+                .mechanics
+                .as_ref()
+                .is_none_or(|capture| capture.resource.sha256 != result.hash.as_str())
+        {
+            self.queued_project = Some(ProjectCommand::GetAnalysisResult {
+                session_id: hello.session_id.clone(),
+                base_revision: project.revision,
+                case_id: result.case_id.clone(),
+            });
+        }
     }
     pub(super) fn reconcile_mechanics(&mut self) {
+        if self.mechanics.settings_json.trim().is_empty()
+            && let Some(capture) = &self.state.mechanics
+            && self
+                .state
+                .project
+                .as_ref()
+                .is_some_and(|project| project.project_id == capture.project)
+        {
+            self.mechanics.settings_json =
+                serde_json::to_string_pretty(&capture.summary.settings).unwrap_or_default();
+        }
         let Some(draft) = &mut self.mechanics.draft else {
             return;
         };
@@ -396,6 +424,7 @@ mod tests {
     fn analysis_draft_confirmation_requires_exact_case_and_its_own_edit_revision() {
         let mut draft = draft();
         let mut document = AnalysisDocument {
+            results: vec![],
             cases: vec![AnalysisCaseRecord {
                 case: draft.value.clone(),
                 edited_revision: ProjectRevision(3),

@@ -9,6 +9,116 @@ fn plate_id() -> PrintLayoutId {
 }
 
 #[test]
+fn portable_analysis_read_binds_descriptor_and_read_revision_without_relaxing_completion() {
+    let hash =
+        SourceHash::from_bytes(b"retained SPLA descriptor adapter fixture, not numerical evidence");
+    let record = analysis::AnalysisResultRecord {
+        case_id: Default::default(),
+        hash: hash.clone(),
+        byte_count: 100,
+        input_hash: SourceHash::from_bytes(b"captured input"),
+        captured_revision: ProjectRevision(1),
+    };
+    let resource = ArtifactView {
+        name: format!("artifacts/{}", hash.as_str()),
+        size_bytes: "100".into(),
+        sha256: hash.as_str().into(),
+        media_type: analysis::mechanics::ANALYSIS_FIELDS_MIME.into(),
+    };
+    let result = JobResult::AnalysisResultPrepared {
+        project_id: ProjectId::new(),
+        read_revision: ProjectRevision(3),
+        record: record.clone(),
+        resource: resource.clone(),
+    };
+    let wire: rpc::NativeOperationResult = result.clone().try_into().unwrap();
+    assert_eq!(JobResult::try_from(wire.clone()).unwrap(), result);
+    for variant in 0..4 {
+        let mut wire = wire.clone();
+        let rpc::native_operation_result::Result::AnalysisResultPrepared(prepared) =
+            wire.result.as_mut().unwrap()
+        else {
+            panic!()
+        };
+        match variant {
+            0 => prepared.read_revision = 0,
+            1 => {
+                prepared.record.as_mut().unwrap().hash =
+                    SourceHash::from_bytes(b"wrong artifact").as_str().into()
+            }
+            2 => prepared.record.as_mut().unwrap().byte_count = 101,
+            _ => prepared.resource.as_mut().unwrap().media_type = "application/json".into(),
+        }
+        assert!(JobResult::try_from(wire).is_err());
+    }
+    let mut op = operation();
+    let mut meta = native_metadata(&op).unwrap();
+    meta.captured_project_revision = 3;
+    meta.state = rpc::NativeOperationState::NativeSucceeded as i32;
+    meta.completed_units = meta.total_units;
+    meta.end_time = meta.update_time;
+    meta.outputs = vec![rpc::Artifact {
+        name: resource.name.clone(),
+        size_bytes: 100,
+        sha256: resource.sha256.clone(),
+        media_type: resource.media_type.clone(),
+    }];
+    op.done = true;
+    op.metadata.as_mut().unwrap().value = meta.encode_to_vec();
+    op.result = Some(google::longrunning::operation::Result::Response(
+        prost_types::Any {
+            type_url: NATIVE_RESULT_TYPE.into(),
+            value: wire.encode_to_vec(),
+        },
+    ));
+    assert_eq!(native_operation_view(&op).unwrap().result, Some(result));
+    meta.captured_project_revision = 4;
+    op.metadata.as_mut().unwrap().value = meta.encode_to_vec();
+    assert!(native_operation_view(&op).is_err());
+    let completed = JobResult::AnalysisCompleted {
+        project_id: ProjectId::new(),
+        captured_revision: record.captured_revision,
+        input_hash: record.input_hash,
+        resource,
+    };
+    let wire: rpc::NativeOperationResult = completed.try_into().unwrap();
+    meta.captured_project_revision = 3;
+    op.metadata.as_mut().unwrap().value = meta.encode_to_vec();
+    op.result = Some(google::longrunning::operation::Result::Response(
+        prost_types::Any {
+            type_url: NATIVE_RESULT_TYPE.into(),
+            value: wire.encode_to_vec(),
+        },
+    ));
+    assert!(
+        native_operation_view(&op).is_err(),
+        "historical reads must not weaken completed-capture equality"
+    );
+    let session = SessionId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+    let command = ProjectCommand::GetAnalysisResult {
+        session_id: session.clone(),
+        base_revision: ProjectRevision(3),
+        case_id: record.case_id,
+    };
+    let native::ProjectCall::GetAnalysisResult(request) =
+        native::project_call(command.clone(), "").unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(ProjectCommand::try_from(request).unwrap(), command);
+    let attach = ProjectCommand::AttachAnalysisResult {
+        session_id: session,
+        base_revision: ProjectRevision(3),
+        input_hash: SourceHash::from_bytes(b"capture"),
+    };
+    let native::ProjectCall::Execute(request) = native::project_call(attach.clone(), "").unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(ProjectCommand::try_from(*request).unwrap(), attach);
+}
+
+#[test]
 fn assumed_mechanics_request_roundtrip_rejects_incomplete_laws_and_recipe_drift() {
     use analysis::{AnalysisCaseId, mechanics::AnalysisRunSettings};
     let settings: AnalysisRunSettings = serde_json::from_slice(include_bytes!(

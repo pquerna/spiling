@@ -72,6 +72,7 @@ impl TryFrom<ManufacturingOptionInfo> for rpc::ManufacturingOptionInfo {
     reason = "Bounded typed native request values stay inline without a per-call heap allocation"
 )]
 pub enum ProjectCall {
+    GetAnalysisResult(rpc::GetAnalysisResultRequest),
     RunAnalysis(rpc::RunAnalysisRequest),
     MatchStock(rpc::MatchStockRequest),
     StorageMaintenance(rpc::StorageMaintenanceRequest),
@@ -91,6 +92,31 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
     request_id(id)?;
     use rpc::project_request::Command as C;
     let (session_id, command) = match command {
+        ProjectCommand::GetAnalysisResult {
+            session_id,
+            base_revision,
+            case_id,
+        } => {
+            return Ok(ProjectCall::GetAnalysisResult(
+                rpc::GetAnalysisResultRequest {
+                    parent: format!("sessions/{}", session_id.as_str()),
+                    request_id: id.into(),
+                    base_revision: base_revision.0,
+                    case_id: case_id.as_str().into(),
+                },
+            ));
+        }
+        ProjectCommand::AttachAnalysisResult {
+            session_id,
+            base_revision,
+            input_hash,
+        } => (
+            session_id,
+            C::AttachAnalysisResult(rpc::AttachAnalysisResultRequest {
+                base_revision: base_revision.0,
+                input_hash: input_hash.as_str().into(),
+            }),
+        ),
         ProjectCommand::SelectPrintLayout {
             session_id,
             base_revision,
@@ -780,6 +806,12 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
                     selection: v.selection,
                 }
             }
+            C::AttachAnalysisResult(value) => Self::AttachAnalysisResult {
+                session_id,
+                base_revision: ProjectRevision(value.base_revision),
+                input_hash: SourceHash::parse(value.input_hash)
+                    .map_err(|error| error.to_string())?,
+            },
             C::EditAnalysis(value) => Self::EditAnalysis {
                 session_id,
                 base_revision: ProjectRevision(value.base_revision),

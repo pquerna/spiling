@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Authored FDM analysis intent. These records are not numerical results.
+//! Authored FDM intent and descriptors of explicitly attached immutable results.
 use crate::{geometry::*, project::*};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -199,10 +199,23 @@ pub struct AnalysisCaseRecord {
 pub struct AnalysisDocument {
     #[serde(deserialize_with = "bounded::<_, _, MAX_ANALYSIS_CASES>")]
     pub cases: Vec<AnalysisCaseRecord>,
+    #[serde(deserialize_with = "bounded::<_, _, MAX_ANALYSIS_CASES>")]
+    pub results: Vec<AnalysisResultRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisResultRecord {
+    pub case_id: AnalysisCaseId,
+    pub hash: SourceHash,
+    pub byte_count: u32,
+    pub input_hash: SourceHash,
+    pub captured_revision: ProjectRevision,
 }
 impl AnalysisDocument {
     pub fn validate(&self) -> Result<(), ProjectError> {
         if self.cases.len() > MAX_ANALYSIS_CASES
+            || self.results.len() > MAX_ANALYSIS_CASES
             || self.allocated_bytes() > MAX_ANALYSIS_DOCUMENT_BYTES
         {
             return Err(ProjectError::new(
@@ -222,6 +235,16 @@ impl AnalysisDocument {
                 ));
             }
         }
+        let mut results = BTreeSet::new();
+        for result in &self.results {
+            if !ids.contains(&result.case_id)
+                || !results.insert(&result.case_id)
+                || result.byte_count == 0
+                || result.byte_count as usize > mechanics::MAX_MECHANICAL_FIELD_BYTES
+            {
+                return Err(invalid("invalid or duplicate retained analysis result"));
+            }
+        }
         Ok(())
     }
     pub fn validate_subjects(
@@ -231,6 +254,15 @@ impl AnalysisDocument {
         revision: ProjectRevision,
     ) -> Result<(), ProjectError> {
         self.validate()?;
+        if self
+            .results
+            .iter()
+            .any(|result| result.captured_revision > revision)
+        {
+            return Err(invalid(
+                "retained analysis capture exceeds project revision",
+            ));
+        }
         for record in &self.cases {
             let case = &record.case;
             if record.edited_revision > revision
@@ -256,6 +288,16 @@ impl AnalysisDocument {
     pub fn allocated_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.cases.capacity() * std::mem::size_of::<AnalysisCaseRecord>()
+            + self.results.capacity() * std::mem::size_of::<AnalysisResultRecord>()
+            + self
+                .results
+                .iter()
+                .map(|record| {
+                    record.case_id.0.capacity()
+                        + record.hash.allocated_bytes()
+                        + record.input_hash.allocated_bytes()
+                })
+                .sum::<usize>()
             + self
                 .cases
                 .iter()

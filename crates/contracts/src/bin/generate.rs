@@ -265,6 +265,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         spiling_contracts::analysis::AnalysisCase::decl(&config),
         spiling_contracts::analysis::AnalysisCaseRecord::decl(&config),
         spiling_contracts::analysis::AnalysisDocument::decl(&config),
+        spiling_contracts::analysis::AnalysisResultRecord::decl(&config),
         spiling_contracts::analysis::AnalysisEdit::decl(&config),
         spiling_contracts::analysis::mechanics::AssumedPrintedLaws::decl(&config),
         spiling_contracts::analysis::mechanics::AnalysisModelScope::decl(&config),

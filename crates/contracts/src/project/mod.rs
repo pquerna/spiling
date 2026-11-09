@@ -437,6 +437,16 @@ pub enum ProjectCommand {
         session_id: SessionId,
         base_revision: ProjectRevision,
     },
+    AttachAnalysisResult {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        input_hash: SourceHash,
+    },
+    GetAnalysisResult {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        case_id: crate::analysis::AnalysisCaseId,
+    },
     RunAnalysis {
         session_id: SessionId,
         base_revision: ProjectRevision,
