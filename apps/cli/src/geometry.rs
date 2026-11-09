@@ -12,13 +12,12 @@ use spiling_contracts::{
     },
     geometry::*,
 };
-use spiling_engine_client::EngineClient;
+use spiling_engine_client::{EngineClient, NativeOperationWatch};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
     io::Read,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 #[derive(Deserialize)]
@@ -203,6 +202,7 @@ pub(crate) async fn wait_operation(
     mut operation: NativeOperationView,
 ) -> Result<JobResult, Error> {
     let name = operation.name.clone();
+    let mut watch: Option<NativeOperationWatch> = None;
     loop {
         if operation.name != name || &operation.session_id != session {
             return Err("native operation name/session mismatch".into());
@@ -230,8 +230,15 @@ pub(crate) async fn wait_operation(
             }
             _ => {}
         }
-        tokio::time::sleep(Duration::from_millis(JOB_POLL_INTERVAL_MS.into())).await;
-        operation = client.native_operation(name.clone()).await?;
+        operation = match watch.as_mut() {
+            Some(watch) => watch.next().await?,
+            None => {
+                let mut subscription = client.rpc().watch_native_operation(name.clone()).await?;
+                let update = subscription.next().await?;
+                watch = Some(subscription);
+                update
+            }
+        };
     }
 }
 fn next_page(
@@ -883,6 +890,135 @@ pub(crate) async fn inspect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spiling_engine_client::ClientError;
+    use std::time::Duration;
+
+    #[tokio::test]
+    #[ignore = "actual CLI operation completion; requires SPILING_TEST_ENGINE"]
+    async fn native_completion_preserves_terminal_receipts_and_typed_failures() {
+        let engine = std::env::var_os("SPILING_TEST_ENGINE").expect("set SPILING_TEST_ENGINE");
+        let mut client = EngineClient::spawn(engine).await.unwrap();
+        let session = client.hello().session_id.clone();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/geometry");
+        let before = scene(&mut client, &session).await.unwrap();
+        let GeometryResponse::OperationAccepted { operation } = control(
+            &mut client,
+            GeometryCommand::ImportPart {
+                session_id: session.clone(),
+                base_revision: before.revision,
+                source: NativePath::from_os_str(fixtures.join("box-mm.step").as_os_str()).unwrap(),
+                initial_pose: RigidPoseMm::IDENTITY,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected accepted native import")
+        };
+        let mut missing = operation.clone();
+        let name = operation.name.clone();
+        let result = tokio::time::timeout(
+            Duration::from_secs(75),
+            wait_operation(&mut client, &session, operation),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let completed = client.native_operation(name).await.unwrap();
+        assert_eq!(completed.status, JobStatus::Completed);
+        assert_eq!(completed.result.as_ref(), Some(&result));
+        assert_eq!(
+            scene(&mut client, &session).await.unwrap().occurrence_count,
+            1
+        );
+        missing.name = format!("operations/{}", uuid::Uuid::new_v4());
+        missing.done = false;
+        missing.status = JobStatus::Queued;
+        missing.result = None;
+        missing.error = None;
+        let error = wait_operation(&mut client, &session, missing)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ClientError>(),
+            Some(ClientError::Rpc(_))
+        ));
+        let before_failure = scene(&mut client, &session).await.unwrap();
+        let GeometryResponse::OperationAccepted { operation } = control(
+            &mut client,
+            GeometryCommand::ImportPart {
+                session_id: session.clone(),
+                base_revision: before_failure.revision,
+                source: NativePath::from_os_str(fixtures.join("truncated.step").as_os_str())
+                    .unwrap(),
+                initial_pose: RigidPoseMm::IDENTITY,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected accepted failed import")
+        };
+        let name = operation.name.clone();
+        let error = tokio::time::timeout(
+            Duration::from_secs(75),
+            wait_operation(&mut client, &session, operation),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ClientError>(),
+            Some(ClientError::Geometry(_))
+        ));
+        let failed = client.native_operation(name).await.unwrap();
+        assert_eq!(failed.status, JobStatus::Failed);
+        assert_eq!(scene(&mut client, &session).await.unwrap(), before_failure);
+        client.ping().await.unwrap();
+        client.shutdown().await.unwrap();
+        assert_eq!(
+            wait_operation(&mut client, &session, completed.clone())
+                .await
+                .unwrap(),
+            result
+        );
+        for status in [
+            JobStatus::Failed,
+            JobStatus::Cancelled,
+            JobStatus::Interrupted,
+        ] {
+            let mut receipt = failed.clone();
+            receipt.status = status;
+            let error = wait_operation(&mut client, &session, receipt)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<ClientError>(),
+                Some(ClientError::Geometry(_))
+            ));
+        }
+        let error = wait_operation(&mut client, &SessionId::new(), completed.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "native operation name/session mismatch");
+        let mut incomplete = completed;
+        incomplete.result = None;
+        assert_eq!(
+            wait_operation(&mut client, &session, incomplete)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "unexpected geometry response"
+        );
+        let mut unexplained = failed;
+        unexplained.error = None;
+        assert_eq!(
+            wait_operation(&mut client, &session, unexplained)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "native operation ended without result"
+        );
+    }
+
     #[test]
     fn rejects_invalid_plane_numbers_and_zero_normal() {
         for text in [

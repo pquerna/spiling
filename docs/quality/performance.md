@@ -34,6 +34,12 @@ resource use, and shipping the independently useful cut before choosing another.
 Keep the remaining opportunity ranking current in its research owner, not as a
 second implementation backlog here.
 
+CLI native operations use the shared checked operation watch, without periodic
+completion polling. Attribute short-journey savings from observation separately
+from numeric planner, kernel and verifier work; end-to-end latency includes both.
+Watch establishment has the client deadline, while the engine retains native
+work/deadline/cancellation authority.
+
 Artifact-transfer investigations must separate ledger reads from RPC copying.
 The operation ledger uses incremental BLOB reads, independent of project PTAC
 storage; [the control protocol](../protocol/control.md#incremental-artifacts-and-binary-reads)
