@@ -35,7 +35,7 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
     let infill_label = match intent.recipe.sparse_infill {
         SparseInfillPolicy::Fine => "Rectilinear",
         SparseInfillPolicy::Grid => "Grid",
-        SparseInfillPolicy::WebRoof { .. } => "Web + roof",
+        SparseInfillPolicy::WebRoof { .. } => "Vault",
         SparseInfillPolicy::CombineEligible { .. } => "Rectilinear · combined",
     };
     egui::CollapsingHeader::new(format!("Infill · {infill_label}"))
@@ -48,12 +48,12 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
             };
             let original = pattern;
             egui::ComboBox::from_id_salt("infill-pattern")
-                .selected_text(["Rectilinear", "Grid", "Web + roof"][pattern])
+                .selected_text(["Rectilinear", "Grid", "Vault"][pattern])
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut pattern, 0, "Rectilinear");
                     ui.selectable_value(&mut pattern, 1, "Grid")
                         .on_hover_text("Two perpendicular line families in every fine interval. Single tool; supports, process regions and finishes are currently excluded.");
-                    ui.selectable_value(&mut pattern, 2, "Web + roof")
+                    ui.selectable_value(&mut pattern, 2, "Vault")
                         .on_hover_text("Continuous chamber webs with retained roof branches. Base density sets web spacing; roof branches add material. One upright analytic extrusion, including qualified holes and curves. Single tool; no finishes, process modifiers or breakaway supports. Strength is unqualified.");
                 });
             if pattern != original {

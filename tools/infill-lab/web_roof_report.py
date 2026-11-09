@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Spiling contributors
 # SPDX-License-Identifier: OSL-3.0
-"""Render verified actual Web + roof roads, not proposed geometry or strength.
+"""Render verified actual Vault infill roads, not proposed geometry or strength.
 
 Tooling-only numpy/matplotlib in an isolated prefix. Run after the construction
 campaign; keep the original roads, producer receipt and result next to each plot.
@@ -38,7 +38,7 @@ def render(folder):
     receipt = json.loads((folder / "return.stdout.json").read_text())
     recipe = receipt["manufacturing"]["intent"]["recipe"]
     if recipe["sparse_infill"]["kind"] != "web_roof":
-        raise ValueError("Web + roof report does not render ordinary-pattern controls")
+        raise ValueError("Vault infill report does not render ordinary-pattern controls")
     if not replay["report"]["verified"] or result["status"] != "accepted":
         raise ValueError("fresh verified replay and accepted journey required")
     roads = replay["roads"]
@@ -152,7 +152,7 @@ def render(folder):
     ]
     ax.text(0, 0.98, "\n".join(details), va="top", linespacing=1.7)
     title = result["case"].replace("-", " ").title()
-    fig.suptitle(f"Web + roof · {title}", fontsize=20, weight="bold", ha="left", x=0.02)
+    fig.suptitle(f"Vault infill · {title}", fontsize=20, weight="bold", ha="left", x=0.02)
     fig.supxlabel(
         "Blue: continuous webs and local roots    Gold: retained roof growth    Gray: walls and skins",
         fontsize=11,
