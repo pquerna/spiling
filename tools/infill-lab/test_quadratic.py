@@ -81,6 +81,28 @@ def test_quadratic_solved_bending_and_weak_z_axial_controls():
     assert amg["stiffness_n_mm"] == pytest.approx(result["stiffness_n_mm"], rel=1e-7)
 
 
+def test_finite_cantilever_agrees_with_slender_beam_and_respects_axis_rotation():
+    # Independent Euler–Bernoulli limit; no prescribed analytical field.
+    material = Material()
+    mesh = beam_mesh(32, ny=2, nz=2, size=(8., 0.4, 0.4))
+    body = prepare(mesh, material)
+    expected = 3 * material.young_mpa * (0.4**4 / 12) / 8**3
+    for case in ("cantilever_x_y", "cantilever_x_z"):
+        r = solve_body(body, case, mesh.bounds, solver="superlu_mmd")
+        assert r["stiffness_n_mm"] == pytest.approx(expected, rel=0.015)
+        assert r["energy_error"] < 1e-7
+        assert r["force_balance"] < 1e-7
+    # Rotate the physical specimen, not the constitutive law or the fixture.
+    rotated = beam_mesh(32, ny=2, nz=2, size=(8., 0.4, 0.4))
+    rotated.points = rotated.points[[2,1,0]]
+    rotated.bounds = rotated.bounds[:,[2,1,0]]
+    # The reflection reverses tetra orientation; rotate with a proper signed map.
+    rotated.points[0] *= -1
+    rotated.bounds[:,0] = [-0.4,0.]
+    r = solve_body(prepare(rotated, material), "cantilever_z_y", rotated.bounds, solver="superlu_mmd")
+    assert r["stiffness_n_mm"] == pytest.approx(expected, rel=0.015)
+
+
 @pytest.mark.skipif(
     not os.environ.get("SPILING_CCX"), reason="external solver selected explicitly"
 )

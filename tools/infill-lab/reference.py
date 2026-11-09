@@ -148,6 +148,17 @@ def fixture(points, case, bounds, material):
             for axis, value in enumerate(values):
                 conditions[(int(node), axis)] = value
         return conditions, [], kappa
+    if case in {"cantilever_x_y", "cantilever_x_z", "cantilever_z_x", "cantilever_z_y"}:
+        a = "xyz".index(case.split("_")[1])
+        t = "xyz".index(case.split("_")[2])
+        left = at(a, lo[a])
+        right = at(a, hi[a])
+        if len(left) == 0 or len(right) == 0:
+            raise ValueError("reference cantilever does not span both end patches")
+        delta = 0.001 * (hi[t] - lo[t])
+        conditions.update({(int(n), component): 0. for n in left for component in range(3)})
+        conditions.update({(int(n), t): -delta for n in right})
+        return conditions, [(int(n), t) for n in right], delta
     if case not in ("compression_x", "compression_y", "compression_z"):
         raise ValueError("unknown independent reference fixture")
     axis = "xyz".index(case[-1])

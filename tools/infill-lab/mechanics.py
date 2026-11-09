@@ -324,6 +324,16 @@ def solve(
         for t in tangent:
             conditions[int(basis.nodal_dofs[t, a])] = 0.0
         conditions[int(basis.nodal_dofs[tangent[1], b])] = 0.0
+    elif case in {"cantilever_x_y", "cantilever_x_z", "cantilever_z_x", "cantilever_z_y"}:
+        axial, transverse = ("xyz".index(c) for c in (case[-3], case[-1]))
+        root, tip = at(axial, datum_lo[axial]), at(axial, datum_hi[axial])
+        if not len(root) or not len(tip):
+            raise ValueError("missing finite cantilever end patch")
+        delta = 0.001 * float(datum_extent[transverse])
+        for a in range(3):
+            conditions.update({int(i): 0.0 for i in dofs(root, a)})
+        loaded = dofs(tip, transverse)
+        conditions.update({int(i): -delta for i in loaded})
     elif case == "bend_z":
         # Two finite support strips; design-independent specimen-frame positions.
         bottom = at(2, lo[2])
