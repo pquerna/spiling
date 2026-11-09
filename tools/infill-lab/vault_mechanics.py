@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import resource
+import sys
 import time
 
 import numpy as np
@@ -49,7 +50,64 @@ def load(folder):
     return spec, data
 
 
-def patch_response(data, scenario):
+def volume_mesh(roads, scenario, *, workdir=None):
+    """One explicit volume method for both full roof and interior-only bays."""
+    bounds = np.asarray(scenario["bounds"], dtype=float)
+    mesh, info = prism_mesh(roads, window=bounds, **scenario["refinement"])
+    print(
+        json.dumps(
+            dict(
+                stage="source_volume_mesh",
+                cells=mesh.count,
+                points=mesh.points.shape[1],
+                components=mesh.components,
+                peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+            )
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+    method = scenario.get("mesh_method", "prisms")
+    if method == "tetgen":
+        import tempfile
+        from tetgen_mesh import remesh
+
+        def converted(destination):
+            return remesh(
+                mesh,
+                roads,
+                bounds,
+                destination,
+                cap_segments=scenario["refinement"].get("cap_segments", 32),
+                max_source_prisms=scenario.get("max_source_prisms", 250_000),
+            )
+
+        if workdir is None:
+            with tempfile.TemporaryDirectory() as temporary:
+                mesh, converted_info = converted(Path(temporary) / "mesh")
+        else:
+            mesh, converted_info = converted(Path(workdir) / "mesh")
+        info = dict(source=info, **converted_info)
+    elif method != "prisms":
+        raise ValueError("unknown explicit web-bay volume mesh method")
+    print(
+        json.dumps(
+            dict(
+                stage="selected_volume_mesh",
+                cells=mesh.count,
+                points=mesh.points.shape[1],
+                components=mesh.components,
+                method=method,
+                peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+            )
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+    return mesh, info
+
+
+def patch_response(data, scenario, *, workdir=None):
     """One assembly/component, reused across XYZ; disconnected paths earn zero."""
     bounds = np.asarray(scenario["bounds"], dtype=float)
     if (
@@ -67,7 +125,7 @@ def patch_response(data, scenario):
     material = Material(**scenario["material"])
     # Keep deposited skins and roof growth; cropping happens in the union mesher.
     # No fabricated lid, centrelines, geometry repair or missing-road fallback.
-    mesh, info = prism_mesh(data["roads"], window=bounds, **scenario["refinement"])
+    mesh, info = volume_mesh(data["roads"], scenario, workdir=workdir)
     responses = {axis: 0.0 for axis in "xyz"}
     records = []
     for part in connected_meshes(mesh):
@@ -102,29 +160,20 @@ def web_response(data, scenario, *, workdir=None):
     if cases != ["compression_x", "compression_z", "cantilever_z_y"]:
         raise ValueError("unknown web-bay fixture inventory")
     material = Material(**scenario["material"])
-    mesh, info = prism_mesh(interior_roads(data), window=bounds, **scenario["refinement"])
-    method = scenario.get("mesh_method", "prisms")
-    if method == "tetgen":
-        import tempfile
-        from tetgen_mesh import remesh
-
-        def converted(destination):
-            return remesh(mesh,interior_roads(data),bounds,destination,
-                          cap_segments=scenario["refinement"].get("cap_segments",32))
-
-        if workdir is None:
-            with tempfile.TemporaryDirectory() as temporary:
-                mesh, converted_info = converted(Path(temporary)/"mesh")
-        else:
-            mesh, converted_info = converted(Path(workdir)/"mesh")
-        info = dict(source=info,**converted_info)
-    elif method != "prisms":
-        raise ValueError("unknown explicit web-bay volume mesh method")
-    responses = dict.fromkeys(cases, 0.)
+    mesh, info = volume_mesh(interior_roads(data), scenario, workdir=workdir)
+    responses = dict.fromkeys(cases, 0.0)
     records = []
     for part in connected_meshes(mesh):
-        admitted = [c for c in cases if np.allclose(part.bounds[:, 0 if c == "compression_x" else 2],
-                        bounds[:, 0 if c == "compression_x" else 2], rtol=0, atol=1e-8)]
+        admitted = [
+            c
+            for c in cases
+            if np.allclose(
+                part.bounds[:, 0 if c == "compression_x" else 2],
+                bounds[:, 0 if c == "compression_x" else 2],
+                rtol=0,
+                atol=1e-8,
+            )
+        ]
         if not admitted:
             continue
         body = prepare(part, material)
@@ -133,8 +182,14 @@ def web_response(data, scenario, *, workdir=None):
             responses[case] += result["stiffness_n_mm"]
             records.append(result)
         del body
-    return dict(stiffness_n_mm=responses, components=records, mesh=info,
-                nonspanning_cases=[c for c in cases if not any(r["case"] == c for r in records)])
+    return dict(
+        stiffness_n_mm=responses,
+        components=records,
+        mesh=info,
+        nonspanning_cases=[
+            c for c in cases if not any(r["case"] == c for r in records)
+        ],
+    )
 
 
 def evaluate(folder, output):
@@ -150,13 +205,19 @@ def evaluate(folder, output):
         scenario=spec["scenario"],
         volume_mm3=data["report"]["deposited_volume_mm3"],
         motion_s=data["motion_seconds_lower_bound"],
-        scope=("finite_web_bay_nominal_elasticity_not_whole_part_strength" if spec["kind"] == "cathedral_web_bay"
-               else "local_roof_patch_nominal_elasticity_not_whole_part_strength"),
+        scope=(
+            "finite_web_bay_nominal_elasticity_not_whole_part_strength"
+            if spec["kind"] == "cathedral_web_bay"
+            else "local_roof_patch_nominal_elasticity_not_whole_part_strength"
+        ),
     )
     try:
-        response = (web_response(data, spec["scenario"],workdir=output)
-                    if spec["kind"] == "cathedral_web_bay" else patch_response(data,spec["scenario"]))
-        row.update(response,status="ok")
+        response = (
+            web_response(data, spec["scenario"], workdir=output)
+            if spec["kind"] == "cathedral_web_bay"
+            else patch_response(data, spec["scenario"], workdir=output)
+        )
+        row.update(response, status="ok")
     except Exception as error:
         row.update(status="failed", error_type=type(error).__name__, error=str(error))
     row.update(

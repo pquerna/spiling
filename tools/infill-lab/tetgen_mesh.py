@@ -157,13 +157,15 @@ def material_containment(points, cells, roads, bounds, *, cap_segments=32, max_r
     return checked
 
 
-def remesh(mesh, roads, bounds, workdir, *, cap_segments=32, seconds=90, max_cells=2_000_000):
+def remesh(mesh, roads, bounds, workdir, *, cap_segments=32, seconds=90, max_cells=2_000_000, max_source_prisms=250_000):
     started = time.monotonic()
     executable = shutil.which("tetgen")
     if executable is None:
         raise ValueError("explicit TetGen research executable is unavailable")
-    if mesh.cell_kind != "wedge" or mesh.components != 1 or mesh.count > 250_000:
-        raise ValueError("volume remeshing requires one bounded connected source prism mesh")
+    if type(max_source_prisms) is not int or not 1 <= max_source_prisms <= 1_000_000:
+        raise ValueError("invalid explicit source prism resource bound")
+    if mesh.cell_kind != "wedge" or mesh.components != 1 or mesh.count > max_source_prisms:
+        raise ValueError(f"volume remeshing requires one bounded connected source prism mesh: count={mesh.count}, components={mesh.components}, limit={max_source_prisms}")
     workdir = Path(workdir)
     workdir.mkdir(parents=True,exist_ok=False)
     points,elevated = element_mesh(mesh,"C3D10")

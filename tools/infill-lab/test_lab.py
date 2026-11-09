@@ -204,7 +204,7 @@ def test_trial_timeout_stops_nested_work_in_the_owned_process_group(tmp_path):
     while True:
         try:
             state = stat.read_text().split()[2]
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             break
         if state == "Z":
             break
