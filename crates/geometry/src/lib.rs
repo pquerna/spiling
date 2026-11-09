@@ -179,10 +179,10 @@ pub struct VerticalWallFace {
     pub max_z_mm: f64,
 }
 
-/// One trimmed rectangular face spanning the complete source-local Z range.
-/// Unlike an exterior wall certificate, this does not establish global support.
+/// One trimmed vertical rectangular face in source-local millimetres.
+/// This establishes neither whole-source height coverage nor global support.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FullHeightRectangularFace {
+pub struct VerticalRectangularFace {
     pub origin_mm: [f64; 3],
     pub horizontal_direction: [f64; 3],
     pub outward_normal: [f64; 3],

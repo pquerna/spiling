@@ -172,11 +172,9 @@ pub fn prepare(
     let mut bounds = vec![[[f64::INFINITY, f64::NEG_INFINITY]; 3]; mesh.components];
     for hex in &mesh.elements {
         for &node in &hex.nodes {
-            for axis in 0..3 {
-                bounds[hex.component][axis][0] =
-                    bounds[hex.component][axis][0].min(mesh.nodes[node][axis]);
-                bounds[hex.component][axis][1] =
-                    bounds[hex.component][axis][1].max(mesh.nodes[node][axis]);
+            for (range, coordinate) in bounds[hex.component].iter_mut().zip(mesh.nodes[node]) {
+                range[0] = range[0].min(coordinate);
+                range[1] = range[1].max(coordinate);
             }
         }
     }

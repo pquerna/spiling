@@ -404,7 +404,7 @@ fn native_box_wall_certificates_keep_exact_face_identity_outward_side_and_source
 }
 
 #[test]
-fn full_height_rectangular_faces_keep_trim_ownership_without_implying_support() {
+fn rectangular_faces_preserve_trim_height_without_implying_whole_source_coverage() {
     let cancel = AtomicBool::new(false);
     let hook = load("analysis-hook.step");
     let mut sides = 0;
@@ -416,7 +416,7 @@ fn full_height_rectangular_faces_keep_trim_ownership_without_implying_support() 
             continue;
         }
         let rectangle = hook
-            .full_height_rectangular_face_with_work(
+            .vertical_rectangular_face_with_work(
                 &face.face_id,
                 &mut GeometryWorkBudget::query(),
                 &cancel,
@@ -433,16 +433,17 @@ fn full_height_rectangular_faces_keep_trim_ownership_without_implying_support() 
     for face in split.faces() {
         if matches!(face.geometry.analytic, Some(AnalyticSurfaceDescription::Plane { normal, .. }) if normal[2].abs() < 0.5)
         {
-            let error = split
-                .full_height_rectangular_face_with_work(
+            let rectangle = split
+                .vertical_rectangular_face_with_work(
                     &face.face_id,
                     &mut GeometryWorkBudget::query(),
                     &cancel,
                 )
-                .unwrap_err();
+                .unwrap();
             assert!(
-                error.message.contains("complete local source height"),
-                "{error:?}"
+                (rectangle.min_z_mm == 0.0 && rectangle.max_z_mm == 2.0)
+                    || (rectangle.min_z_mm == 2.0 && rectangle.max_z_mm == 6.0),
+                "{rectangle:?}"
             );
             partial += 1;
         }

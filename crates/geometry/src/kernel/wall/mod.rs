@@ -4,7 +4,7 @@
 
 use super::Definition;
 use crate::{
-    FullHeightRectangularFace, GeometryError, GeometryWorkBudget, VerticalWallFace, check_cancel,
+    GeometryError, GeometryWorkBudget, VerticalRectangularFace, VerticalWallFace, check_cancel,
 };
 use solidcore::curve::curve::Curve;
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
@@ -92,6 +92,68 @@ fn native_line_matches(
     Ok(true)
 }
 
+fn native_trim_line_matches(
+    surface: &solidcore::surface::surface::Surface,
+    chart: &Curve,
+    range: [f64; 2],
+    orientation: bool,
+    [front, back]: [[f64; 3]; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let mut changed_axis = None;
+    for axis in 0..3 {
+        if (front[axis] - back[axis]).abs() > RESIDUAL_MM && changed_axis.replace(axis).is_some() {
+            return Ok(false);
+        }
+    }
+    let Some(axis) = changed_axis else {
+        return Ok(false);
+    };
+    let whole = crate::parametric::curve_on_surface_enclosure(
+        surface,
+        chart,
+        range,
+        [0.0, 1.0],
+        work,
+        cancel,
+    )?;
+    if whole.jet.derivative[axis].lo <= 0.0 && whole.jet.derivative[axis].hi >= 0.0 {
+        return Ok(false);
+    }
+    for coordinate in 0..3 {
+        let minimum = front[coordinate].min(back[coordinate]);
+        let maximum = front[coordinate].max(back[coordinate]);
+        if whole.jet.position[coordinate].lo < minimum - RESIDUAL_MM
+            || whole.jet.position[coordinate].hi > maximum + RESIDUAL_MM
+        {
+            return Ok(false);
+        }
+    }
+    let parameters = if orientation {
+        range
+    } else {
+        [range[1], range[0]]
+    };
+    for (parameter, vertex) in parameters.into_iter().zip([front, back]) {
+        let endpoint = crate::parametric::curve_on_surface_enclosure(
+            surface,
+            chart,
+            [parameter, parameter],
+            [0.0, 1.0],
+            work,
+            cancel,
+        )?;
+        if (0..3).any(|coordinate| {
+            (endpoint.jet.position[coordinate].lo - vertex[coordinate]).abs() > RESIDUAL_MM
+                || (endpoint.jet.position[coordinate].hi - vertex[coordinate]).abs() > RESIDUAL_MM
+        }) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 impl Definition {
     /// Certify an exact source-local, full-height rectangular exterior wall.
     /// Face identity is the admitted positional native face use, never a mesh
@@ -127,12 +189,12 @@ impl Definition {
         })
     }
 
-    pub fn full_height_rectangular_face_with_work(
+    pub fn vertical_rectangular_face_with_work(
         &self,
         face_id: &FaceId,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<FullHeightRectangularFace, GeometryError> {
+    ) -> Result<VerticalRectangularFace, GeometryError> {
         self.rectangular_face_with_work(face_id, false, work, cancel)
     }
 
@@ -142,7 +204,7 @@ impl Definition {
         require_supporting_plane: bool,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<FullHeightRectangularFace, GeometryError> {
+    ) -> Result<VerticalRectangularFace, GeometryError> {
         check_cancel(cancel)?;
         let mut selected = None;
         for (index, info) in self.faces.iter().enumerate() {
@@ -339,7 +401,25 @@ impl Definition {
             }
         }
         let mut current = first;
-        let source = super::prepare_finish_source(self, work, cancel)?;
+        let source = if require_supporting_plane {
+            super::prepare_finish_source(self, work, cancel)
+        } else {
+            let allowance = crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES
+                .checked_sub(self.retained_query_proof_bytes())
+                .ok_or_else(|| {
+                    GeometryError::new(
+                        GeometryErrorCode::ResourceLimit,
+                        "retained native proof exhausts rectangular-face allowance",
+                    )
+                })?;
+            super::PreparedNativeTrimSource::prepare_material(self, allowance, work, cancel)
+        }
+        .map_err(|error| {
+            GeometryError::new(
+                error.code,
+                format!("rectangular face source: {}", error.message),
+            )
+        })?;
         let remaining = crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES
             .checked_sub(self.retained_query_proof_bytes())
             .and_then(|bytes| bytes.checked_sub(source.retained_bytes()))
@@ -411,30 +491,59 @@ impl Definition {
                 .iter()
                 .position(|coedge| coedge.edgeuse == current)
                 .ok_or_else(|| malformed("original wall coedge binding is absent"))?;
-            if crate::parametric::CurveEvaluator::exact_affine_coefficients(
-                domain.original_spatial_restriction(coedge)?,
-                work,
-                cancel,
-            )?
-            .is_none()
-            {
-                return Err(GeometryError::new(
-                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                    "original wall edge lacks bounded exact affine authority",
-                ));
-            }
-            if !native_line_matches(
-                curve,
-                [edge.interval.min(), edge.interval.max()],
-                remaining,
-                forward,
-                [points[i], [b.x, b.y, b.z]],
-                work,
-                cancel,
-            )? {
-                return Err(malformed(
-                    "native wall line disagrees with its bounded source edge",
-                ));
+            if require_supporting_plane {
+                if crate::parametric::CurveEvaluator::exact_affine_coefficients(
+                    domain.original_spatial_restriction(coedge)?,
+                    work,
+                    cancel,
+                )
+                .map_err(|error| {
+                    GeometryError::new(
+                        error.code,
+                        format!("rectangular original line: {}", error.message),
+                    )
+                })?
+                .is_none()
+                {
+                    return Err(GeometryError::new(
+                        GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                        "original wall edge lacks bounded exact affine authority",
+                    ));
+                }
+                if !native_line_matches(
+                    curve,
+                    [edge.interval.min(), edge.interval.max()],
+                    remaining,
+                    forward,
+                    [points[i], [b.x, b.y, b.z]],
+                    work,
+                    cancel,
+                )
+                .map_err(|error| {
+                    GeometryError::new(
+                        error.code,
+                        format!("rectangular native line: {}", error.message),
+                    )
+                })? {
+                    return Err(malformed(
+                        "native wall line disagrees with its bounded source edge",
+                    ));
+                }
+            } else {
+                let coedge = &domain.coedges()[coedge];
+                if !native_trim_line_matches(
+                    surface,
+                    coedge.curve(),
+                    coedge.uv_range,
+                    forward,
+                    [points[i], [b.x, b.y, b.z]],
+                    work,
+                    cancel,
+                )? {
+                    return Err(unsupported(
+                        "native trimmed edge lacks complete straight rectangular coverage",
+                    ));
+                }
             }
             let residual = dot(sub(points[i], native_origin), outward);
             if !points[i].iter().all(|v| v.is_finite())
@@ -549,13 +658,13 @@ impl Definition {
             ));
         }
         drop(source);
-        let z_span = super::finish_support_extent(self, [0.0, 0.0, 1.0], work, cancel)?;
-        if (min_z - z_span[0]).abs() > RESIDUAL_MM || (max_z - z_span[1]).abs() > RESIDUAL_MM {
-            return Err(unsupported(
-                "surface finish requires a native wall spanning the complete local source height",
-            ));
-        }
-        if require_supporting_plane {
+        let z_span = if require_supporting_plane {
+            let z_span = super::finish_support_extent(self, [0.0, 0.0, 1.0], work, cancel)?;
+            if (min_z - z_span[0]).abs() > RESIDUAL_MM || (max_z - z_span[1]).abs() > RESIDUAL_MM {
+                return Err(unsupported(
+                    "surface finish requires a native wall spanning the complete local source height",
+                ));
+            }
             let support_span = super::finish_support_extent(self, outward, work, cancel)?;
             let support = dot(points[origin_index], outward);
             if !support.is_finite() || (support_span[1] - support).abs() > RESIDUAL_MM {
@@ -563,11 +672,14 @@ impl Definition {
                     "selected native wall is recessed or is not an outward supporting material plane",
                 ));
             }
-        }
+            z_span
+        } else {
+            [min_z, max_z]
+        };
         let mut origin = points[origin_index];
         origin[2] = z_span[0];
         check_cancel(cancel)?;
-        Ok(FullHeightRectangularFace {
+        Ok(VerticalRectangularFace {
             origin_mm: origin,
             horizontal_direction: horizontal,
             outward_normal: outward,
@@ -583,6 +695,100 @@ mod tests {
     use super::*;
     use solidcore::curve::line::Line;
     use solidcore::geom::vector3d::Point3;
+
+    #[test]
+    fn native_trim_rectangle_requires_whole_image_and_regular_direction_not_just_endpoints() {
+        use solidcore::nurbs::{b_spline_curve::BSplineCurve, crv_basic, math::CPoint};
+        use solidcore::surface::{plane::Plane, surface::Surface};
+        use solidcore::{Vec2, Vec3, geom::extent2d::Extent2d};
+        let surface = Surface::new(SurfaceKind::Plane(Plane::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec2::new(1.0, 1.0),
+            &Extent2d::from_bounds(0.0, 0.0, 2.0, 1.0),
+        )));
+        let endpoints = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let line: Curve =
+            Line::from_points(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0), 2).into();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::query();
+        assert!(
+            native_trim_line_matches(
+                &surface,
+                &line,
+                [0.0, 1.0],
+                true,
+                endpoints,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        assert!(
+            !native_trim_line_matches(
+                &surface,
+                &line,
+                [0.25, 0.75],
+                true,
+                endpoints,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        assert!(
+            !native_trim_line_matches(
+                &surface,
+                &line,
+                [0.0, 1.0],
+                false,
+                endpoints,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        for middle in [[0.5, 0.25], [2.0, 0.0]] {
+            let raw = crv_basic::Curve::new(
+                vec![
+                    CPoint::new(0.0, 0.0, 0.0, 1.0),
+                    CPoint::new(middle[0], middle[1], 0.0, 1.0),
+                    CPoint::new(1.0, 0.0, 0.0, 1.0),
+                ],
+                2,
+                vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            )
+            .unwrap();
+            let curve: Curve = BSplineCurve::from_nurb(raw, 2, true).into();
+            assert!(
+                !native_trim_line_matches(
+                    &surface,
+                    &curve,
+                    [0.0, 1.0],
+                    true,
+                    endpoints,
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!(
+            native_trim_line_matches(
+                &surface,
+                &line,
+                [0.0, 1.0],
+                true,
+                endpoints,
+                &mut work,
+                &AtomicBool::new(true)
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::Cancelled
+        );
+    }
 
     #[test]
     fn native_line_uses_actual_bounded_range_endpoints_and_coedge_sense() {

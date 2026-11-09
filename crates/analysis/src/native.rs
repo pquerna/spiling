@@ -26,7 +26,9 @@ pub fn capture(
     occurrence: OccurrenceId,
     cancel: &AtomicBool,
 ) -> Result<NativePrism, String> {
+    let mut work = GeometryWorkBudget::query();
     let mut endpoints = Vec::new();
+    let mut rectangles = std::collections::BTreeMap::new();
     for face in definition.faces() {
         let Some(AnalyticSurfaceDescription::Plane { origin_mm, normal }) = face.geometry.analytic
         else {
@@ -40,6 +42,13 @@ pub fn capture(
         }
         if normal[2].abs() > 0.99 {
             endpoints.push(origin_mm[2]);
+        } else {
+            let rectangle = definition
+                .vertical_rectangular_face_with_work(&face.face_id, &mut work, cancel)
+                .map_err(|error| {
+                    format!("UnmappedLoad: complete native side-face trim: {error:?}")
+                })?;
+            rectangles.insert(face.face_id.clone(), rectangle);
         }
     }
     endpoints.sort_by(f64::total_cmp);
@@ -49,7 +58,15 @@ pub fn capture(
             "UnsupportedModel: whole source has other than two candidate cap levels".into(),
         );
     }
-    let mut work = GeometryWorkBudget::query();
+    if rectangles.values().any(|rectangle| {
+        (rectangle.min_z_mm - endpoints[0]).abs() > 1e-7
+            || (rectangle.max_z_mm - endpoints[1]).abs() > 1e-7
+    }) {
+        return Err(
+            "UnmappedLoad: complete native side-face trim does not span both source cap levels"
+                .into(),
+        );
+    }
     let source = spiling_geometry::prepare_solid(definition, 32 * 1024 * 1024, &mut work, cancel)
         .map_err(|error| format!("native preparation: {error:?}"))?;
     let slab = source
@@ -177,11 +194,9 @@ pub fn capture(
             if definition.face_ids().get(span.source_face_ordinal) != Some(&span.face) {
                 return Err("UnmappedLoad: native span face identity differs".into());
             }
-            let rectangle = definition
-                .full_height_rectangular_face_with_work(&face.face_id, &mut work, cancel)
-                .map_err(|error| {
-                    format!("UnmappedLoad: complete native side-face trim: {error:?}")
-                })?;
+            let rectangle = rectangles
+                .get(&face.face_id)
+                .ok_or("UnmappedLoad: complete native side-face trim is absent")?;
             let ends: [[f64; 2]; 2] = [
                 [rectangle.origin_mm[0], rectangle.origin_mm[1]],
                 std::array::from_fn(|axis| {
