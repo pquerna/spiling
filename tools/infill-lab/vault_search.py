@@ -271,7 +271,7 @@ def pack(args):
         cx, cy = 20 + x / 2 + args.shift, 20 + y / 2 + args.shift
         scenario = dict(
             bounds=[
-                [cx - width / 2, cy - width / 2, z - 8],
+                [cx - width / 2, cy - width / 2, z - args.depth],
                 [cx + width / 2, cy + width / 2, z],
             ],
             material=asdict(Material(z_ratio=0.25)),
@@ -448,6 +448,7 @@ def main():
     q.add_argument("--divisions", type=int, choices=(1, 2, 4, 8), default=1)
     q.add_argument("--width", type=float, default=16)
     q.add_argument("--max-z", type=float, default=1)
+    q.add_argument("--depth", type=float, default=8)
     q.add_argument("--shift", type=float, default=0)
     q = sub.add_parser("collect")
     for field in ("input", "results", "output"):

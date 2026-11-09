@@ -383,6 +383,8 @@ def dispatch(args):
             if copy.returncode:
                 raise RuntimeError(copy.stderr)
             cmd = f"python3 {remote}/tooling/launch.py --root {remote} run --input {remote}/inputs/{key} --run-id {remote_id} --backend {args.backend} --seconds {args.seconds}"
+            if getattr(args, "cpu_profile", False):
+                cmd += " --cpu-profile"
             if args.blas_threads is not None:
                 cmd += f" --blas-threads {args.blas_threads}"
             for phase in ("results", "stiffness", "equation"):
@@ -483,6 +485,7 @@ def main():
     )
     d.add_argument("--cpus", type=int)
     d.add_argument("--blas-threads", type=int)
+    d.add_argument("--cpu-profile", action="store_true")
     for phase in ("results", "stiffness", "equation"):
         d.add_argument(f"--ccx-{phase}-threads", type=int)
     d.add_argument("--memory-gib", type=float)

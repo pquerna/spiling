@@ -199,6 +199,7 @@ def run(args, root):
         "launcher_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "input": str(source),
         "backend": args.backend,
+        "cpu_profile": getattr(args, "cpu_profile", False),
         "machine": machine,
         "limits": budget,
         "seconds": args.seconds,
@@ -272,7 +273,18 @@ def run(args, root):
         create += ["--env", "SPILING_INFILL_PROGRESS=1"]
     if args.backend == "warp":
         create += ["--device=nvidia.com/gpu=all"]
-    create += [image["id"], "--backend", args.backend]
+    if getattr(args, "cpu_profile", False):
+        create += ["--entrypoint", "python"]
+    create += [image["id"]]
+    if getattr(args, "cpu_profile", False):
+        create += [
+            "-m",
+            "cProfile",
+            "-o",
+            "/output/cpu.prof",
+            "/opt/spiling-eval/evaluate.py",
+        ]
+    create += ["--backend", args.backend]
     owned = False
     began = time.monotonic()
     try:
@@ -340,6 +352,7 @@ def main():
     r.add_argument("--memory-gib", type=float)
     r.add_argument("--cpus", type=float)
     r.add_argument("--blas-threads", type=int)
+    r.add_argument("--cpu-profile", action="store_true")
     for phase in ("results", "stiffness", "equation"):
         r.add_argument(f"--ccx-{phase}-threads", type=int)
     args = p.parse_args()
