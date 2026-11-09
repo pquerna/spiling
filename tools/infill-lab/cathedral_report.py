@@ -205,14 +205,43 @@ def render(capture, archive_path, output):
     fig.savefig(output/"whole-sections.png",dpi=160)
     plt.close(fig)
     fig,ax = plt.subplots(figsize=(8,5),layout="constrained")
-    for r in scored:
-        x,ycost = r["geometric_mean_ratio"],r["volume_mm3"]/flat["volume_mm3"]
-        ax.scatter([x],[ycost],s=65)
-        ax.annotate(label(r),(x,ycost),xytext=(7,7),textcoords="offset points")
-    if scored and max(r["geometric_mean_ratio"] for r in scored)>4:
+    def family(r):
+        c=r["candidate"]
+        if c["fraction"]==1:
+            return "Solid"
+        if c.get("web_opening"):
+            return "Windows + ribs" if c.get("pier_rib_depth_mm") else "Windows"
+        return "Pier ribs" if c.get("pier_rib_depth_mm") else "Flat"
+    with_solid = bool(scored) and max(r["geometric_mean_ratio"] for r in scored)>4
+    for group,color in (("Flat","#555555"),("Windows","#a95db7"),
+                        ("Pier ribs","#327fc0"),("Windows + ribs","#dc923e"),("Solid","#222222")):
+        members=sorted([r for r in scored if family(r)==group],key=lambda r:r["geometric_mean_ratio"])
+        if not members:
+            continue
+        x=[r["geometric_mean_ratio"] for r in members]
+        yy=[r["volume_mm3"]/flat["volume_mm3"] for r in members]
+        ax.plot(x,yy,"o-",color=color,label=group,markersize=6,linewidth=1)
+        annotations = members[:1] if len(members)==1 else ([] if with_solid else [members[0],members[-1]])
+        for r in annotations:
+            ax.annotate(label(r),(r["geometric_mean_ratio"],r["volume_mm3"]/flat["volume_mm3"]),
+                        xytext=(-8,7) if group=="Solid" else (6,7),
+                        ha="right" if group=="Solid" else "left",textcoords="offset points",fontsize=9)
+    if with_solid:
         ax.set_xscale("log")
+        inset=ax.inset_axes([.40,.32,.55,.54])
+        for group,color in (("Flat","#555555"),("Windows","#a95db7"),
+                            ("Pier ribs","#327fc0"),("Windows + ribs","#dc923e")):
+            members=sorted([r for r in scored if family(r)==group],key=lambda r:r["geometric_mean_ratio"])
+            if members:
+                inset.plot([r["geometric_mean_ratio"] for r in members],
+                           [r["volume_mm3"]/flat["volume_mm3"] for r in members],
+                           "o-",color=color,markersize=4,linewidth=1)
+        inset.set_title("Sparse constructions",fontsize=10)
+        inset.tick_params(labelsize=8)
+        inset.grid(alpha=.2)
     ax.axhline(1,color="#aaa",linewidth=.7)
     ax.axvline(1,color="#aaa",linewidth=.7)
+    ax.legend(loc="upper left",fontsize=9)
     ax.set(xlabel="Geometric mean of three local stiffness ratios / flat",
            ylabel="Complete-object deposited material / flat",
            title="Finite web-bay screening · higher response, lower material")
