@@ -34,7 +34,7 @@ def report(archive, captures, output):
     solids = [r for r in valid if r["candidate"]["fraction"] == 1]
     baselines = [
         r
-        for r in valid
+        for r in rows
         if r["candidate"]["pattern"] == "web_roof"
         and r["candidate"]["fraction"] == 0.1
         and "roof_spacing_mm" not in r["candidate"]
@@ -47,7 +47,8 @@ def report(archive, captures, output):
         raise ValueError(
             "one coherent cohort, solid and default Vault baseline required"
         )
-    solid, baseline = solids[0], baselines[0]
+    solid = solids[0]
+    baseline = baselines[0] if baselines[0]["status"] == "ok" else None
     pareto_ids = {r["capture_id"] for r in frontier(rows)}
     for r in valid:
         r["relative_responses"] = {
@@ -86,7 +87,7 @@ def report(archive, captures, output):
         {
             r["capture_id"]: r
             for r in [
-                baseline,
+                *([baseline] if baseline is not None else []),
                 min(vault, key=lambda r: r["volume_mm3"]),
                 max(
                     vault,
@@ -105,7 +106,8 @@ def report(archive, captures, output):
             pairs=pairs,
             frontier=sorted(pareto_ids),
             gallery=[r["capture_id"] for r in selected],
-            baseline=baseline["capture_id"],
+            baseline=baselines[0]["capture_id"],
+            baseline_status=baselines[0]["status"],
             solid=solid["capture_id"],
         ),
     )
@@ -186,14 +188,24 @@ def plot(rows, baseline, output):
             )
             ax.grid(alpha=0.12)
     for ax, y in zip(axes, ("material_vs_solid", "motion_vs_solid"), strict=True):
-        ax.scatter(
-            [100 * baseline["geometric_mean_vs_solid"]],
-            [100 * baseline[y]],
-            marker="*",
-            color="#faecbb",
-            s=190,
-            label="Vault 10% / Auto",
-        )
+        if baseline is not None:
+            ax.scatter(
+                [100 * baseline["geometric_mean_vs_solid"]],
+                [100 * baseline[y]],
+                marker="*",
+                color="#faecbb",
+                s=190,
+                label="Vault 10% / Auto",
+            )
+        else:
+            ax.text(
+                0.02,
+                0.98,
+                "Vault 10% / Auto: incomplete mechanics",
+                transform=ax.transAxes,
+                va="top",
+                fontsize=8,
+            )
         ax.legend(fontsize=8)
     fig.suptitle(
         "Vault autoresearch · 48 mm cube / finite roof + core patches",
@@ -289,9 +301,9 @@ def gallery(selected, native, output):
         )
         ax.add_patch(
             Rectangle(
-                (36, 36),
-                16,
-                16,
+                tuple(row["scenario"]["bounds"][0][:2]),
+                row["scenario"]["bounds"][1][0] - row["scenario"]["bounds"][0][0],
+                row["scenario"]["bounds"][1][1] - row["scenario"]["bounds"][0][1],
                 fill=False,
                 edgecolor="#eff2f9",
                 linewidth=1,

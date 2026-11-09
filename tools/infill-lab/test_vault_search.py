@@ -189,3 +189,18 @@ def test_collector_retains_parentage_and_refusals_but_rejects_bad_residuals(tmp_
     with pytest.raises(ValueError, match="numerical checks"):
         collect(args)
     assert not args.output.exists()
+
+
+def test_resource_prefix_shards_cover_each_job_once():
+    from campaign import shard_jobs
+
+    jobs = list(range(57))
+    shards = [shard_jobs(jobs, slot, 3) for slot in range(3)]
+    assert sorted(sum(shards, [])) == jobs
+    assert all(
+        not set(a) & set(b) for i, a in enumerate(shards) for b in shards[i + 1 :]
+    )
+    with pytest.raises(ValueError):
+        shard_jobs(jobs, 3, 3)
+    with pytest.raises(ValueError):
+        shard_jobs(jobs, 0, 0)

@@ -308,6 +308,18 @@ def pack(args):
     )
 
 
+def shard_jobs(jobs, index=0, count=1):
+    """Disjoint queue shards for separately admitted host/resource prefixes."""
+    if (
+        type(count) is not int
+        or not 1 <= count <= 64
+        or type(index) is not int
+        or not 0 <= index < count
+    ):
+        raise ValueError("invalid queue shard")
+    return jobs[index::count]
+
+
 def dispatch(args):
     inputs = args.input.resolve()
     manifest = json.loads((inputs / "jobs.json").read_text())
@@ -320,6 +332,11 @@ def dispatch(args):
         manifest["jobs"] = [
             job for job in manifest["jobs"] if job["id"] not in excluded
         ]
+    manifest["jobs"] = shard_jobs(
+        manifest["jobs"],
+        getattr(args, "shard_index", 0),
+        getattr(args, "shard_count", 1),
+    )
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     # Host and path are deliberately a small controlled SSH interface. Neither
@@ -486,6 +503,8 @@ def main():
     d.add_argument("--cpus", type=int)
     d.add_argument("--blas-threads", type=int)
     d.add_argument("--cpu-profile", action="store_true")
+    d.add_argument("--shard-index", type=int, default=0)
+    d.add_argument("--shard-count", type=int, default=1)
     for phase in ("results", "stiffness", "equation"):
         d.add_argument(f"--ccx-{phase}-threads", type=int)
     d.add_argument("--memory-gib", type=float)
