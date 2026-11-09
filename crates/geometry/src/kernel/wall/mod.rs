@@ -3,7 +3,9 @@
 // Licensed under the Open Software License version 3.0
 
 use super::Definition;
-use crate::{GeometryError, GeometryWorkBudget, VerticalWallFace, check_cancel};
+use crate::{
+    FullHeightRectangularFace, GeometryError, GeometryWorkBudget, VerticalWallFace, check_cancel,
+};
 use solidcore::curve::curve::Curve;
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::surface::surface::p2::SurfaceKind;
@@ -114,6 +116,33 @@ impl Definition {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<VerticalWallFace, GeometryError> {
+        let face = self.rectangular_face_with_work(face_id, true, work, cancel)?;
+        Ok(VerticalWallFace {
+            origin_mm: face.origin_mm,
+            horizontal_direction: face.horizontal_direction,
+            outward_normal: face.outward_normal,
+            width_mm: face.width_mm,
+            min_z_mm: face.min_z_mm,
+            max_z_mm: face.max_z_mm,
+        })
+    }
+
+    pub fn full_height_rectangular_face_with_work(
+        &self,
+        face_id: &FaceId,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<FullHeightRectangularFace, GeometryError> {
+        self.rectangular_face_with_work(face_id, false, work, cancel)
+    }
+
+    fn rectangular_face_with_work(
+        &self,
+        face_id: &FaceId,
+        require_supporting_plane: bool,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<FullHeightRectangularFace, GeometryError> {
         check_cancel(cancel)?;
         let mut selected = None;
         for (index, info) in self.faces.iter().enumerate() {
@@ -261,49 +290,51 @@ impl Definition {
         let LoopuseStart::Edgeuse(Some(first)) = lu.start else {
             return Err(unsupported("native wall requires an explicit coedge cycle"));
         };
-        for edge in &self.original_source().coedges {
-            work.charge(1, cancel)?;
-            for point in edge.vertex_points_mm {
-                let residual = dot(sub(point, native_origin), outward);
-                if !residual.is_finite() {
-                    return Err(malformed("nonfinite original supporting-plane witness"));
-                }
-                if residual > RESIDUAL_MM {
-                    return Err(unsupported(
-                        "selected wall has original source material beyond its supporting plane",
-                    ));
+        if require_supporting_plane {
+            for edge in &self.original_source().coedges {
+                work.charge(1, cancel)?;
+                for point in edge.vertex_points_mm {
+                    let residual = dot(sub(point, native_origin), outward);
+                    if !residual.is_finite() {
+                        return Err(malformed("nonfinite original supporting-plane witness"));
+                    }
+                    if residual > RESIDUAL_MM {
+                        return Err(unsupported(
+                            "selected wall has original source material beyond its supporting plane",
+                        ));
+                    }
                 }
             }
-        }
-        for (other_index, &other_id) in self.face_ids().iter().enumerate() {
-            work.charge(1, cancel)?;
-            if other_index == index {
-                continue;
-            }
-            let other_surface = self
-                .face_surface(other_id)
-                .ok_or_else(|| malformed("native supporting face has no carrier"))?;
-            if let SurfaceKind::Plane(other_plane) = other_surface.kind() {
-                let position = other_plane.position();
-                let p = position.origin();
-                let x = position.x_axis();
-                let y = position.y_axis();
-                let origin_mm = [p.x, p.y, p.z];
-                let other_normal = unit([
-                    x.y * y.z - x.z * y.y,
-                    x.z * y.x - x.x * y.z,
-                    x.x * y.y - x.y * y.x,
-                ])?;
-                let residual = dot(sub(origin_mm, native_origin), outward);
-                if !origin_mm.iter().all(|v| v.is_finite()) || !residual.is_finite() {
-                    return Err(malformed("native supporting-plane comparison is nonfinite"));
+            for (other_index, &other_id) in self.face_ids().iter().enumerate() {
+                work.charge(1, cancel)?;
+                if other_index == index {
+                    continue;
                 }
-                if dot(other_normal, outward).abs() >= 1.0 - ANGULAR
-                    && residual.abs() <= RESIDUAL_MM
-                {
-                    return Err(unsupported(
-                        "selected supporting plane has ambiguous additional native face trims",
-                    ));
+                let other_surface = self
+                    .face_surface(other_id)
+                    .ok_or_else(|| malformed("native supporting face has no carrier"))?;
+                if let SurfaceKind::Plane(other_plane) = other_surface.kind() {
+                    let position = other_plane.position();
+                    let p = position.origin();
+                    let x = position.x_axis();
+                    let y = position.y_axis();
+                    let origin_mm = [p.x, p.y, p.z];
+                    let other_normal = unit([
+                        x.y * y.z - x.z * y.y,
+                        x.z * y.x - x.x * y.z,
+                        x.x * y.y - x.y * y.x,
+                    ])?;
+                    let residual = dot(sub(origin_mm, native_origin), outward);
+                    if !origin_mm.iter().all(|v| v.is_finite()) || !residual.is_finite() {
+                        return Err(malformed("native supporting-plane comparison is nonfinite"));
+                    }
+                    if dot(other_normal, outward).abs() >= 1.0 - ANGULAR
+                        && residual.abs() <= RESIDUAL_MM
+                    {
+                        return Err(unsupported(
+                            "selected supporting plane has ambiguous additional native face trims",
+                        ));
+                    }
                 }
             }
         }
@@ -524,17 +555,19 @@ impl Definition {
                 "surface finish requires a native wall spanning the complete local source height",
             ));
         }
-        let support_span = super::finish_support_extent(self, outward, work, cancel)?;
-        let support = dot(points[origin_index], outward);
-        if !support.is_finite() || (support_span[1] - support).abs() > RESIDUAL_MM {
-            return Err(unsupported(
-                "selected native wall is recessed or is not an outward supporting material plane",
-            ));
+        if require_supporting_plane {
+            let support_span = super::finish_support_extent(self, outward, work, cancel)?;
+            let support = dot(points[origin_index], outward);
+            if !support.is_finite() || (support_span[1] - support).abs() > RESIDUAL_MM {
+                return Err(unsupported(
+                    "selected native wall is recessed or is not an outward supporting material plane",
+                ));
+            }
         }
         let mut origin = points[origin_index];
         origin[2] = z_span[0];
         check_cancel(cancel)?;
-        Ok(VerticalWallFace {
+        Ok(FullHeightRectangularFace {
             origin_mm: origin,
             horizontal_direction: horizontal,
             outward_normal: outward,

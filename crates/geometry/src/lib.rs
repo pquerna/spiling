@@ -179,6 +179,18 @@ pub struct VerticalWallFace {
     pub max_z_mm: f64,
 }
 
+/// One trimmed rectangular face spanning the complete source-local Z range.
+/// Unlike an exterior wall certificate, this does not establish global support.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FullHeightRectangularFace {
+    pub origin_mm: [f64; 3],
+    pub horizontal_direction: [f64; 3],
+    pub outward_normal: [f64; 3],
+    pub width_mm: f64,
+    pub min_z_mm: f64,
+    pub max_z_mm: f64,
+}
+
 /// Exact full-turn exterior cylindrical source-face certificate. Angles use
 /// source +X and right-handed +Z, not the native carrier's seam or UV chart.
 /// Manufacturing separately certifies posed invariant-extrusion eligibility.

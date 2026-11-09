@@ -169,11 +169,30 @@ pub fn prepare(
             );
         }
     }
-    let scale = mesh
-        .nodes
+    let mut bounds = vec![[[f64::INFINITY, f64::NEG_INFINITY]; 3]; mesh.components];
+    for hex in &mesh.elements {
+        for &node in &hex.nodes {
+            for axis in 0..3 {
+                bounds[hex.component][axis][0] =
+                    bounds[hex.component][axis][0].min(mesh.nodes[node][axis]);
+                bounds[hex.component][axis][1] =
+                    bounds[hex.component][axis][1].max(mesh.nodes[node][axis]);
+            }
+        }
+    }
+    let centers = bounds
         .iter()
-        .map(|point| norm(*point))
-        .fold(1.0, f64::max);
+        .map(|bounds| bounds.map(|[minimum, maximum]| minimum + 0.5 * (maximum - minimum)))
+        .collect::<Vec<_>>();
+    let scales = bounds
+        .iter()
+        .map(|bounds| {
+            bounds
+                .iter()
+                .map(|[minimum, maximum]| maximum - minimum)
+                .fold(0.0, f64::max)
+        })
+        .collect::<Vec<_>>();
     let mut grams = vec![[[0.0; 6]; 6]; mesh.components];
     let mut visited = vec![false; mesh.nodes.len()];
     for hex in &mesh.elements {
@@ -187,7 +206,10 @@ pub fn prepare(
                         for rotation in 0..3 {
                             let mut unit = [0.0; 3];
                             unit[rotation] = 1.0;
-                            row[3 + rotation] = cross(unit, mesh.nodes[node])[axis] / scale;
+                            let centered = std::array::from_fn(|coordinate| {
+                                mesh.nodes[node][coordinate] - centers[hex.component][coordinate]
+                            });
+                            row[3 + rotation] = cross(unit, centered)[axis] / scales[hex.component];
                         }
                         for first in 0..6 {
                             for second in 0..6 {

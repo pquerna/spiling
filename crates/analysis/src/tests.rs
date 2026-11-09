@@ -263,6 +263,54 @@ fn solved_pure_bending_and_source_origin_wrench() {
             .contains("rigid restraint ranks")
     );
 }
+
+#[test]
+fn complete_face_restraint_rank_is_independent_of_source_origin() {
+    let cancel = AtomicBool::new(false);
+    let budget = Budget::new(&cancel, 60);
+    let settings = settings();
+    let case = case();
+    let reference = prepare(&beam(), &settings, RigidPoseMm::IDENTITY, &case, &budget).unwrap();
+    for translation in [
+        [1_000_000.0, 0.0, 0.0],
+        [-1_000_000.0, 1_000_000.0, -1_000_000.0],
+    ] {
+        let mut prism = beam();
+        for boundary in &mut prism.loops {
+            for point in boundary {
+                for axis in 0..2 {
+                    point[axis] += translation[axis];
+                }
+            }
+        }
+        for edge in &mut prism.edges {
+            for point in &mut edge.ends {
+                for axis in 0..2 {
+                    point[axis] += translation[axis];
+                }
+            }
+        }
+        prism.height = prism.height.map(|height| height + translation[2]);
+        let translated = prepare(&prism, &settings, RigidPoseMm::IDENTITY, &case, &budget).unwrap();
+        assert_eq!(translated.ranks, reference.ranks);
+        assert_eq!(translated.mesh.nodes.len(), reference.mesh.nodes.len());
+    }
+}
+
+#[test]
+fn native_side_ownership_cannot_extend_a_height_split_face() {
+    let cancel = AtomicBool::new(false);
+    let definition = spiling_geometry::from_step_bytes_with_cancel(
+        include_bytes!("../../../fixtures/geometry/analysis-height-split-box.step"),
+        &cancel,
+    )
+    .unwrap();
+    let refusal = native::capture(&definition, OccurrenceId::new(1).unwrap(), &cancel).unwrap_err();
+    assert!(
+        refusal.contains("complete native side-face trim"),
+        "{refusal}"
+    );
+}
 #[test]
 fn engineering_shear_and_rotation() {
     let rotated = element::rotate(

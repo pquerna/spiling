@@ -174,20 +174,35 @@ pub fn capture(
                         .into(),
                 );
             }
-            let Some(AnalyticSurfaceDescription::Plane { origin_mm, normal }) =
-                face.geometry.analytic
-            else {
-                return Err("UnmappedLoad: native edge owner not planar".into());
-            };
-            if normal[2].abs() > 1e-10
-                || pair.iter().any(|point| {
-                    ((point[0] - origin_mm[0]) * normal[0] + (point[1] - origin_mm[1]) * normal[1])
-                        .abs()
-                        > 1e-7
+            if definition.face_ids().get(span.source_face_ordinal) != Some(&span.face) {
+                return Err("UnmappedLoad: native span face identity differs".into());
+            }
+            let rectangle = definition
+                .full_height_rectangular_face_with_work(&face.face_id, &mut work, cancel)
+                .map_err(|error| {
+                    format!("UnmappedLoad: complete native side-face trim: {error:?}")
+                })?;
+            let ends: [[f64; 2]; 2] = [
+                [rectangle.origin_mm[0], rectangle.origin_mm[1]],
+                std::array::from_fn(|axis| {
+                    rectangle.origin_mm[axis]
+                        + rectangle.width_mm * rectangle.horizontal_direction[axis]
+                }),
+            ];
+            if (rectangle.min_z_mm - endpoints[0]).abs() > 1e-7
+                || (rectangle.max_z_mm - endpoints[1]).abs() > 1e-7
+                || !(0..2).any(|start| {
+                    (0..2).all(|endpoint| {
+                        (0..2).all(|axis| {
+                            (pair[endpoint][axis] - ends[(start + endpoint) % 2][axis]).abs()
+                                <= 1e-7
+                        })
+                    })
                 })
             {
                 return Err(
-                    "UnmappedLoad: native span owner does not bind the entire side edge".into(),
+                    "UnmappedLoad: native trimmed face does not own the complete extruded side"
+                        .into(),
                 );
             }
             edges.push(Edge {

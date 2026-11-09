@@ -403,6 +403,53 @@ fn native_box_wall_certificates_keep_exact_face_identity_outward_side_and_source
     }
 }
 
+#[test]
+fn full_height_rectangular_faces_keep_trim_ownership_without_implying_support() {
+    let cancel = AtomicBool::new(false);
+    let hook = load("analysis-hook.step");
+    let mut sides = 0;
+    for face in hook.faces() {
+        let Some(AnalyticSurfaceDescription::Plane { normal, .. }) = face.geometry.analytic else {
+            panic!("hook is planar");
+        };
+        if normal[2].abs() > 0.5 {
+            continue;
+        }
+        let rectangle = hook
+            .full_height_rectangular_face_with_work(
+                &face.face_id,
+                &mut GeometryWorkBudget::query(),
+                &cancel,
+            )
+            .unwrap();
+        close(rectangle.min_z_mm, 0.0, 1e-7);
+        close(rectangle.max_z_mm, 6.0, 1e-7);
+        assert!(rectangle.width_mm > 0.0);
+        sides += 1;
+    }
+    assert_eq!(sides, 12);
+    let split = load("analysis-height-split-box.step");
+    let mut partial = 0;
+    for face in split.faces() {
+        if matches!(face.geometry.analytic, Some(AnalyticSurfaceDescription::Plane { normal, .. }) if normal[2].abs() < 0.5)
+        {
+            let error = split
+                .full_height_rectangular_face_with_work(
+                    &face.face_id,
+                    &mut GeometryWorkBudget::query(),
+                    &cancel,
+                )
+                .unwrap_err();
+            assert!(
+                error.message.contains("complete local source height"),
+                "{error:?}"
+            );
+            partial += 1;
+        }
+    }
+    assert_eq!(partial, 8);
+}
+
 // Frozen original STEP inputs and their historical construction provenance live in certificates/.
 #[test]
 fn recessed_rectangles_and_ambiguous_coplanar_trims_are_not_exterior_wall_certificates() {

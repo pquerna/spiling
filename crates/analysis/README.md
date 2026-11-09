@@ -10,8 +10,10 @@ The engine's sole native worker consumes this crate from saved source-bound
 Analyze cases. It isolates the CPU numerical dependencies; it is not another
 application, geometry kernel, writer, job runtime or research solver.
 
-`native::capture` requires complete native closed-slab/source-leaf and bounded
-native graph/span ownership. `run::execute` constructs disjoint wall/skin/core
+`native::capture` requires complete native closed-slab/source-leaf, bounded
+native graph/span ownership and full-height rectangular trimmed-face coverage.
+Midplane face ownership alone never authorizes a full-height load or restraint.
+`run::execute` constructs disjoint wall/skin/core
 regions, assembles full-integration Hex27, retains one immutable original factor
 for eligible warm load edits, independently assesses original coefficients, and
 produces checked SPLA fields. Missing native/model/resource premises refuse.
