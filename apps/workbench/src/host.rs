@@ -84,6 +84,8 @@ pub struct ProcessEditReceipt {
 }
 #[derive(Debug, Clone)]
 pub struct Snapshot {
+    pub mechanics_previous: Option<Arc<crate::assets::MechanicsCapture>>,
+    pub mechanics: Option<Arc<crate::assets::MechanicsCapture>>,
     pub library: Arc<library::State>,
     pub diagnostic: Option<Arc<spiling_contracts::OperationView>>,
     pub diagnostic_triangle: bool,
@@ -121,6 +123,8 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            mechanics_previous: None,
+            mechanics: None,
             library: Arc::default(),
             diagnostic: None,
             diagnostic_triangle: false,
@@ -370,6 +374,7 @@ impl Host {
             section_task: None,
             section_cancel: Arc::new(AtomicBool::new(false)),
             optical_task: None,
+            mechanics_task: None,
             stock_task: None,
             diagnostic_task: None,
             diagnostic_paused: false,
@@ -652,6 +657,7 @@ struct Actor {
     nonce: u64,
     executing: bool,
     optical_task: Option<JoinHandle<Result<Arc<crate::assets::OpticalCapture>, ClientError>>>,
+    mechanics_task: Option<JoinHandle<Result<Arc<crate::assets::MechanicsCapture>, ClientError>>>,
     stock_task: Option<JoinHandle<Result<Arc<crate::assets::StockCapture>, ClientError>>>,
     diagnostic_task:
         Option<JoinHandle<Result<(spiling_contracts::OperationView, bool), ClientError>>>,
@@ -749,6 +755,33 @@ impl Actor {
                         Ok(Ok(report)) if self.state.project.as_ref().is_some_and(|p|
                             p.project_id == report.project && p.revision == report.revision
                         ) => self.state.stock.capture = Some(report),
+                        Ok(Ok(_)) => {},
+                        Ok(Err(error)) => self.failure(error).await,
+                        Err(error) => self.problem(error.to_string()),
+                    }
+                },
+                result = async {
+                    match &mut self.mechanics_task {
+                        Some(task) => task.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.mechanics_task = None;
+                    match result {
+                        Ok(Ok(report)) if self.state.project.as_ref().is_some_and(|project|
+                            project.project_id == report.project && project.revision == report.revision
+                        ) => {
+                            self.state.mechanics_previous = self.state.mechanics.clone().filter(|previous|
+                                previous.project == report.project
+                                && previous.summary.source_hash == report.summary.source_hash
+                                && previous.summary.case.case.id == report.summary.case.case.id
+                                && previous.summary.case.case.loads == report.summary.case.case.loads
+                                && previous.summary.case.case.restraints == report.summary.case.case.restraints
+                                && (previous.summary.pose != report.summary.pose
+                                    || previous.summary.settings != report.summary.settings)
+                            );
+                            self.state.mechanics = Some(report);
+                        }
                         Ok(Ok(_)) => {},
                         Ok(Err(error)) => self.failure(error).await,
                         Err(error) => self.problem(error.to_string()),
@@ -1006,6 +1039,10 @@ impl Actor {
         }
     }
     async fn cleanup(&mut self) {
+        if let Some(task) = self.mechanics_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(task) = self.optical_task.take() {
             task.abort();
             let _ = task.await;
@@ -1901,6 +1938,33 @@ impl Actor {
                     | JobResult::OpticalConstructionApplied { .. },
                 ),
             ) if completed => {}
+            (
+                Receipt::Project,
+                Some(JobResult::AnalysisCompleted {
+                    project_id,
+                    captured_revision,
+                    input_hash,
+                    resource,
+                }),
+            ) if completed => {
+                self.refresh_after_failure().await;
+                if let Some(task) = self.mechanics_task.take() {
+                    task.abort();
+                }
+                if let (Some(client), Some(project)) = (&self.client, &self.state.project)
+                    && project.project_id == *project_id
+                    && project.revision == *captured_revision
+                {
+                    self.mechanics_task = Some(tokio::spawn(crate::assets::load_mechanics(
+                        client.rpc(),
+                        client.hello().session_id.clone(),
+                        project_id.clone(),
+                        *captured_revision,
+                        input_hash.clone(),
+                        resource.clone(),
+                    )));
+                }
+            }
             (
                 Receipt::Project,
                 Some(JobResult::StockMatched {

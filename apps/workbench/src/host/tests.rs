@@ -328,6 +328,7 @@ fn native_path_limit_and_problem_history_are_bounded() {
         diagnostic_paused: false,
         image_task: None,
         review_task: None,
+        mechanics_task: None,
         alternative_task: None,
         preserve_current_for_option_edit: false,
         export_task: None,
@@ -1095,6 +1096,190 @@ fn project_edit(
     ))
     .unwrap();
     idle_after(host, serial)
+}
+
+#[test]
+#[ignore = "actual supervised engine; requires SPILING_TEST_ENGINE"]
+fn assumed_whole_hook_fields_reach_native_host_and_survive_a_failed_rerun() {
+    use spiling_contracts::{
+        analysis::{mechanics::*, *},
+        geometry::*,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::with_compute(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        spiling_contracts::compute::ComputeSettings {
+            default_backend: spiling_contracts::compute::ComputeBackend::Cpu,
+            fea_backend: None,
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&host, |state| state.phase == Phase::Running);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/geometry/analysis-hook.step");
+    send(&host, Action::Import(native(&path)));
+    let state = wait(&host, |state| {
+        state
+            .display
+            .as_ref()
+            .is_some_and(|display| display.same_revision(state.scene.as_ref().unwrap()))
+    });
+    let display = state.display.as_ref().unwrap();
+    let occurrence = &display.occurrences[0];
+    let definition = display.definition(&occurrence.definition_id).unwrap();
+    let mut load = None;
+    let mut restraint = None;
+    for ordinal in 0..definition.faces.len() {
+        let reference = display.reference(occurrence, ordinal).unwrap();
+        host.geometry(GeometryCommand::InspectFace {
+            reference: reference.clone(),
+        })
+        .unwrap();
+        let observed = wait(&host, |state| {
+            !state.busy
+                && state
+                    .inspection
+                    .as_ref()
+                    .is_some_and(|inspection| inspection.reference == reference)
+        });
+        if let Some(AnalyticSurfaceDescription::Plane { origin_mm, normal }) =
+            observed.inspection.as_ref().unwrap().face.geometry.analytic
+        {
+            if normal[1].abs() > 0.99 && (origin_mm[1] - 24.0).abs() < 1e-7 {
+                load = Some(reference.face_id.clone());
+            }
+            if normal[0].abs() > 0.99 && origin_mm[0].abs() < 1e-7 {
+                restraint = Some(reference.face_id);
+            }
+        }
+    }
+    let mut case = AnalysisCase {
+        id: Default::default(),
+        name: "Native numerical consumer".into(),
+        layout_id: layout_id(&host),
+        occurrence_id: occurrence.occurrence_id,
+        definition_id: definition.record.definition_id.clone(),
+        source_hash: definition.record.provenance.source_hash.clone(),
+        mode: AnalysisMode::Basic,
+        loads: vec![AnalysisFaceLoad {
+            face_id: load.unwrap(),
+            force_n: [0.0, -10.0, 0.0],
+            moment_n_mm: [30.0, 0.0, -360.0],
+        }],
+        restraints: vec![AnalysisFaceRestraint {
+            face_id: restraint.unwrap(),
+            fixed_translation: [true; 3],
+        }],
+    };
+    project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::EditAnalysis {
+            session_id,
+            base_revision,
+            edit: AnalysisEdit::Put { case: case.clone() },
+        }
+    });
+    let settings = Arc::new(
+        serde_json::from_slice::<AnalysisRunSettings>(include_bytes!(
+            "../../../../fixtures/analysis/hook-assumptions.json"
+        ))
+        .unwrap(),
+    );
+    project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::RunAnalysis {
+            session_id,
+            base_revision,
+            case_id: case.id.clone(),
+            settings: settings.clone(),
+        }
+    });
+    let first = wait(&host, |state| state.mechanics.is_some());
+    let capture = first.mechanics.as_ref().unwrap();
+    assert!(capture.summary.maximum_displacement_mm > 0.0);
+    assert_eq!(capture.summary.case.case, case);
+    assert_eq!(first.phase, Phase::Running);
+    host.geometry(GeometryCommand::SetInstancePose {
+        session_id: first.hello.as_ref().unwrap().session_id.clone(),
+        base_revision: first.scene.as_ref().unwrap().revision,
+        project_revision: first.project.as_ref().unwrap().revision,
+        occurrence_id: case.occurrence_id,
+        pose: RigidPoseMm {
+            translation_mm: [0.0; 3],
+            rotation_xyzw: [
+                std::f64::consts::FRAC_1_SQRT_2,
+                0.0,
+                0.0,
+                std::f64::consts::FRAC_1_SQRT_2,
+            ],
+        },
+    })
+    .unwrap();
+    wait(&host, |state| {
+        !state.busy
+            && state.project.as_ref().unwrap().revision != first.project.as_ref().unwrap().revision
+    });
+    project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::RunAnalysis {
+            session_id,
+            base_revision,
+            case_id: case.id.clone(),
+            settings: settings.clone(),
+        }
+    });
+    let compared = wait(&host, |state| state.mechanics_previous.is_some());
+    assert_eq!(
+        compared.mechanics_previous.as_ref().unwrap().bytes,
+        capture.bytes
+    );
+    let capture = compared.mechanics.as_ref().unwrap();
+    assert_eq!(capture.summary.case.case.loads, case.loads);
+    assert!(
+        capture.summary.maximum_displacement_mm
+            != first
+                .mechanics
+                .as_ref()
+                .unwrap()
+                .summary
+                .maximum_displacement_mm
+    );
+    case.restraints[0].fixed_translation = [true, false, false];
+    project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::EditAnalysis {
+            session_id,
+            base_revision,
+            edit: AnalysisEdit::Put { case: case.clone() },
+        }
+    });
+    let changed = host.snapshot();
+    assert!(changed.project.as_ref().unwrap().revision != capture.revision);
+    assert_eq!(
+        changed.mechanics.as_ref().unwrap().summary.input_hash,
+        capture.summary.input_hash
+    );
+    let problem_count = changed.problems.len();
+    project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::RunAnalysis {
+            session_id,
+            base_revision,
+            case_id: case.id.clone(),
+            settings,
+        }
+    });
+    let failed = wait(&host, |state| {
+        !state.busy && state.problems.len() > problem_count
+    });
+    assert_eq!(failed.phase, Phase::Running);
+    assert_eq!(failed.mechanics.as_ref().unwrap().bytes, capture.bytes);
+    assert!(
+        failed
+            .problems
+            .iter()
+            .any(|message| message.contains("rigid restraint ranks"))
+    );
+    drop(host);
 }
 fn manufacture_control(
     host: &Host,

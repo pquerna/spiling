@@ -12,6 +12,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 struct Active {
+    limit: Option<Duration>,
     id: JobId,
     accepted: Instant,
     cancel_at: Option<Instant>,
@@ -75,7 +76,8 @@ impl Watchdog {
                 }
                 let deadline = if let Some(active) = &mut state.active {
                     let now = Instant::now();
-                    let automatic = active.accepted + cancel_after;
+                    let automatic =
+                        active.accepted + active.limit.unwrap_or(cancel_after).min(cancel_after);
                     if active.cancel_at.is_none() && now >= automatic {
                         active.cancel_at = Some(now);
                         if !active.committing {
@@ -115,9 +117,13 @@ impl Watchdog {
         }
     }
     pub fn start(&self, id: JobId, cancel: Arc<AtomicBool>) {
+        self.start_with_limit(id, cancel, None);
+    }
+    pub fn start_with_limit(&self, id: JobId, cancel: Arc<AtomicBool>, limit: Option<Duration>) {
         let mut state = self.shared.state.lock();
         assert!(state.active.is_none());
         state.active = Some(Active {
+            limit,
             id,
             accepted: Instant::now(),
             cancel_at: None,

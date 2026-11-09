@@ -7,6 +7,77 @@ use spiling_contracts::{geometry::*, project::*, *};
 fn plate_id() -> PrintLayoutId {
     PrintLayoutId::parse("1ccf1bc1-590b-4fe2-88b5-7e8de3da1fcb").unwrap()
 }
+
+#[test]
+fn assumed_mechanics_request_roundtrip_rejects_incomplete_laws_and_recipe_drift() {
+    use analysis::{AnalysisCaseId, mechanics::AnalysisRunSettings};
+    let settings: AnalysisRunSettings = serde_json::from_slice(include_bytes!(
+        "../../../fixtures/analysis/hook-assumptions.json"
+    ))
+    .unwrap();
+    let command = ProjectCommand::RunAnalysis {
+        session_id: SessionId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+        base_revision: ProjectRevision(7),
+        case_id: AnalysisCaseId::new(),
+        settings: std::sync::Arc::new(settings.clone()),
+    };
+    let native::ProjectCall::RunAnalysis(request) =
+        native::project_call(command.clone(), "").unwrap()
+    else {
+        panic!("typed analysis operation expected")
+    };
+    assert_eq!(ProjectCommand::try_from(request.clone()).unwrap(), command);
+    let mut missing = request.clone();
+    missing.settings = None;
+    assert!(ProjectCommand::try_from(missing).is_err());
+    let wire: rpc::AnalysisRunSettings = settings.clone().try_into().unwrap();
+    let mut incomplete = wire.clone();
+    incomplete.laws.as_mut().unwrap().effective_core_mpa.pop();
+    assert!(AnalysisRunSettings::try_from(incomplete).is_err());
+    let mut invalid = wire.clone();
+    invalid.laws.as_mut().unwrap().wall_mpa[0] = f64::NAN;
+    assert!(AnalysisRunSettings::try_from(invalid).is_err());
+    let mut indefinite = wire;
+    indefinite.laws.as_mut().unwrap().skin_mpa[0] = -1.0;
+    assert!(AnalysisRunSettings::try_from(indefinite).is_err());
+    let mut changed = settings;
+    changed.recipe.infill_fraction = 0.4;
+    assert!(rpc::AnalysisRunSettings::try_from(changed).is_err());
+}
+
+#[test]
+fn assumed_mechanics_result_roundtrip_rejects_wrong_or_missing_field_descriptor() {
+    let resource = ArtifactView {
+        name: format!("artifacts/{}", "0".repeat(64)),
+        sha256: "0".repeat(64),
+        size_bytes: "32".into(),
+        media_type: analysis::mechanics::ANALYSIS_FIELDS_MIME.into(),
+    };
+    let result = JobResult::AnalysisCompleted {
+        project_id: ProjectId::new(),
+        captured_revision: ProjectRevision(7),
+        input_hash: SourceHash::from_digest(&[1; 32]),
+        resource,
+    };
+    let wire: rpc::NativeOperationResult = result.clone().try_into().unwrap();
+    assert_eq!(JobResult::try_from(wire.clone()).unwrap(), result);
+    let mut wrong = wire.clone();
+    let rpc::native_operation_result::Result::AnalysisCompleted(value) =
+        wrong.result.as_mut().unwrap()
+    else {
+        panic!("analysis completion expected")
+    };
+    value.resource.as_mut().unwrap().media_type = "application/json".into();
+    assert!(JobResult::try_from(wrong).is_err());
+    let mut missing = wire;
+    let rpc::native_operation_result::Result::AnalysisCompleted(value) =
+        missing.result.as_mut().unwrap()
+    else {
+        panic!("analysis completion expected")
+    };
+    value.resource = None;
+    assert!(JobResult::try_from(missing).is_err());
+}
 fn plates() -> Vec<PrintLayoutInfo> {
     vec![PrintLayoutInfo {
         layout_id: plate_id(),

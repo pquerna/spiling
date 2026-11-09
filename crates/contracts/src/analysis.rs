@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use ts_rs::TS;
 
+pub mod fields;
+pub mod mechanics;
+
 #[cfg(test)]
 #[path = "analysis_tests.rs"]
 mod tests;

@@ -20,6 +20,12 @@ Keep the license's own Lawrence Rosen copyright notice intact. Do not insert Spi
 
 Third-party dependencies, vendored code, fonts, fixtures, and other imported assets retain their own licensing and attribution. This project declaration does not relicense them. Check provenance and compatibility before incorporating or distributing them; a dependency's SPDX label alone does not establish compatibility.
 
+Analyze's CPU numerical path uses exact-pinned `faer` and `dyn-stack` under their
+upstream MIT terms. Its matrix/assembly adapters are independently authored
+Spiling code. Preserve the locked numerical dependency closure's own notices
+through the existing release collector; numerical library licensing or successful
+factorization is not mechanical/model qualification.
+
 CubeCL and its runtime/compiler dependencies retain their upstream licenses.
 The CPU backend incorporates bundled LLVM through `tracel-llvm-bundler`; LLVM's
 Apache-2.0 license with LLVM exceptions and its third-party notices remain

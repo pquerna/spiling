@@ -11,6 +11,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+spiling-analysis = { path = "../../crates/analysis" }
 spiling-contracts.workspace = true
 spiling-compute.workspace = true
 directories = "=6.0.0"

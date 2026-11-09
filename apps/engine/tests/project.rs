@@ -18,6 +18,506 @@ use support::{copy_project, manifest, write_manifest};
 
 const ENGINE: &str = env!("CARGO_BIN_EXE_spiling-engine");
 
+#[test]
+fn whole_hook_native_closed_slab_admission() {
+    let source = spiling_geometry::from_step_file(fixture("analysis-hook.step")).unwrap();
+    let model = spiling_analysis::native::capture(
+        &source,
+        OccurrenceId::new(1).unwrap(),
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(model.loops().len(), 2);
+    assert!(!model.contains([5.0, 37.0, 3.0]));
+    assert!(!model.contains([20.0, 30.0, 3.0]));
+    assert!(model.contains([36.0, 20.0, 3.0]));
+    let settings: spiling_contracts::analysis::mechanics::AnalysisRunSettings =
+        serde_json::from_slice(include_bytes!(
+            "../../../fixtures/analysis/hook-assumptions.json"
+        ))
+        .unwrap();
+    let edge_at = |axis: usize, coordinate: f64| {
+        model
+            .edges()
+            .iter()
+            .find(|edge| {
+                edge.ends
+                    .iter()
+                    .all(|point| (point[axis] - coordinate).abs() < 1e-7)
+            })
+            .unwrap()
+            .face
+            .clone()
+    };
+    let case = spiling_contracts::analysis::AnalysisCase {
+        id: Default::default(),
+        name: "whole native hook".into(),
+        layout_id: PrintLayoutId::new(),
+        occurrence_id: OccurrenceId::new(1).unwrap(),
+        definition_id: source.id().clone(),
+        source_hash: source.provenance().source_hash.clone(),
+        mode: spiling_contracts::analysis::AnalysisMode::Basic,
+        loads: vec![spiling_contracts::analysis::AnalysisFaceLoad {
+            face_id: edge_at(1, 24.0),
+            force_n: [0.0, -10.0, 0.0],
+            moment_n_mm: [30.0, 0.0, -360.0],
+        }],
+        restraints: vec![spiling_contracts::analysis::AnalysisFaceRestraint {
+            face_id: edge_at(0, 0.0),
+            fixed_translation: [true; 3],
+        }],
+    };
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let budget = spiling_analysis::Budget::new(&cancel, 60);
+    let operator =
+        spiling_analysis::prepare(&model, &settings, RigidPoseMm::IDENTITY, &case, &budget)
+            .unwrap();
+    let result = spiling_analysis::solve(&operator, &case, &settings, &budget).unwrap();
+    eprintln!(
+        "whole native hook: elements={} dofs={} construction_ms={} operator_setup_ms={} rhs_ms={} solve_ms={} assessment_ms={} fields_ms={} volumes={:?} energy={:?} assessment={:?}",
+        operator.mesh.elements.len(),
+        operator.mesh.nodes.len() * 3,
+        operator.construction_ms,
+        operator.setup_ms,
+        result.rhs_ms,
+        result.solve_ms,
+        result.assessment_ms,
+        result.fields_ms,
+        result.volumes,
+        result.energy,
+        result.assessment
+    );
+    assert!(result.volumes.iter().all(|volume| *volume > 0.0));
+    assert!(
+        (result.volumes.iter().sum::<f64>()
+            - ((40.0 * 48.0 - 22.0 * 36.0 - 8.0 * 24.0 - 4.0 * 6.0) * 6.0))
+            .abs()
+            < 1e-6
+    );
+    assert!(result.fields.iter().any(|field| field.concentration > 1.0));
+}
+
+#[tokio::test]
+async fn whole_hook_native_mechanics_service_reuses_operator_and_retains_fields() {
+    use spiling_contracts::analysis::{fields::AnalysisFields, mechanics::*, *};
+    let workspace = Workspace::new();
+    let source = workspace.source("analysis-hook.step");
+    let path = workspace.path("hook.spil");
+    let store = tempfile::tempdir().unwrap();
+    let spawn = || {
+        let mut command = Command::new(ENGINE);
+        command
+            .env("TOKIO_WORKER_THREADS", "2")
+            .env("RAYON_NUM_THREADS", "2");
+        command
+    };
+    let compute = spiling_contracts::compute::ComputeSettings {
+        default_backend: spiling_contracts::compute::ComputeBackend::Cpu,
+        fea_backend: None,
+    };
+    let mut client = EngineClient::spawn_command_with_compute(spawn(), store.path(), compute)
+        .await
+        .unwrap();
+    let authoring_start = Instant::now();
+    import(&mut client, &source, RigidPoseMm::IDENTITY).await;
+    let native = spiling_geometry::from_step_file(&source).unwrap();
+    let prism = spiling_analysis::native::capture(
+        &native,
+        OccurrenceId::new(1).unwrap(),
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    let edge_at = |axis: usize, value: f64| {
+        prism
+            .edges()
+            .iter()
+            .find(|edge| {
+                edge.ends
+                    .iter()
+                    .all(|point| (point[axis] - value).abs() < 1e-7)
+            })
+            .unwrap()
+            .face
+            .clone()
+    };
+    let session = client.hello().session_id.clone();
+    let before = info(&mut client).await;
+    let (definitions, occurrences) = records(&mut client).await;
+    let mut case = AnalysisCase {
+        id: Default::default(),
+        name: "hook-service".into(),
+        layout_id: before.layout_id,
+        occurrence_id: occurrences[0].occurrence_id,
+        definition_id: definitions[0].definition_id.clone(),
+        source_hash: definitions[0].provenance.source_hash.clone(),
+        mode: AnalysisMode::Basic,
+        loads: vec![AnalysisFaceLoad {
+            face_id: edge_at(1, 24.0),
+            force_n: [0.0, -10.0, 0.0],
+            moment_n_mm: [30.0, 0.0, -360.0],
+        }],
+        restraints: vec![AnalysisFaceRestraint {
+            face_id: edge_at(0, 0.0),
+            fixed_translation: [true; 3],
+        }],
+    };
+    client
+        .project(ProjectCommand::EditAnalysis {
+            session_id: session.clone(),
+            base_revision: before.revision,
+            edit: AnalysisEdit::Put { case: case.clone() },
+        })
+        .await
+        .unwrap();
+    save(&mut client, Some(&path)).await;
+    std::fs::remove_file(&source).unwrap();
+    eprintln!(
+        "native import/case/save metadata_ms={} (NOT mechanical setup)",
+        authoring_start.elapsed().as_secs_f64() * 1000.0
+    );
+    let settings: AnalysisRunSettings = serde_json::from_slice(include_bytes!(
+        "../../../fixtures/analysis/hook-assumptions.json"
+    ))
+    .unwrap();
+    async fn run(
+        client: &mut EngineClient,
+        id: &AnalysisCaseId,
+        settings: &AnalysisRunSettings,
+    ) -> (NativeOperationView, Vec<u8>) {
+        let captured = info(client).await;
+        let session = client.hello().session_id.clone();
+        let start = Instant::now();
+        let ProjectResponse::OperationAccepted { operation } = client
+            .project(ProjectCommand::RunAnalysis {
+                session_id: session,
+                base_revision: captured.revision,
+                case_id: id.clone(),
+                settings: std::sync::Arc::new(settings.clone()),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("operation expected")
+        };
+        let job = wait_job(client, operation.name).await;
+        assert_eq!(job.status, JobStatus::Completed, "{job:?}");
+        let Some(JobResult::AnalysisCompleted {
+            input_hash,
+            captured_revision,
+            resource,
+            ..
+        }) = &job.result
+        else {
+            panic!("analysis result expected")
+        };
+        let bytes = client
+            .fetch_analysis_fields(input_hash, *captured_revision, resource)
+            .await
+            .unwrap();
+        let fields = AnalysisFields::decode(&bytes).unwrap();
+        assert_eq!(fields.summary.case.case.id, *id);
+        eprintln!(
+            "actual service_and_download_ms={} costs={:?} max_displacement_mm={} max_centroid_macro_mises_mpa={} bytes={}",
+            start.elapsed().as_secs_f64() * 1000.0,
+            fields.summary.costs,
+            fields.summary.maximum_displacement_mm,
+            fields.summary.maximum_macro_von_mises_mpa,
+            bytes.len()
+        );
+        assert_eq!(
+            info(client).await,
+            captured,
+            "a numerical read must not change project content or dirty state"
+        );
+        (job, bytes)
+    }
+    let rpc = client.rpc();
+    let blocker = rpc
+        .run_diagnostic(spiling_contracts::rpc::RunDiagnosticRequest {
+            parent: "diagnostics/analysis-publication".into(),
+            request_id: String::new(),
+            chunk_count: 4,
+            delay_ms: 1000,
+            chunk_bytes: 64,
+            input_revision: "hold-native-permit".into(),
+        })
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let operation = rpc.get_operation(&blocker.name).await.unwrap();
+            if spiling_contracts::metadata(&operation).unwrap().state
+                == spiling_contracts::rpc::DiagnosticState::Running as i32
+            {
+                break;
+            }
+            assert!(!operation.done);
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let captured = info(&mut client).await;
+    let ProjectResponse::OperationAccepted { operation } = client
+        .project(ProjectCommand::RunAnalysis {
+            session_id: session.clone(),
+            base_revision: captured.revision,
+            case_id: case.id.clone(),
+            settings: std::sync::Arc::new(settings.clone()),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("queued numerical operation expected")
+    };
+    client.cancel_operation(&operation.name).await.unwrap();
+    let cancelled = wait_job(&mut client, operation.name).await;
+    assert_eq!(cancelled.status, JobStatus::Cancelled);
+    assert!(cancelled.result.is_none() && cancelled.outputs.is_empty());
+    assert_eq!(info(&mut client).await, captured);
+    let ProjectResponse::OperationAccepted { operation } = client
+        .project(ProjectCommand::RunAnalysis {
+            session_id: session.clone(),
+            base_revision: captured.revision,
+            case_id: case.id.clone(),
+            settings: std::sync::Arc::new(settings.clone()),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("queued numerical operation expected")
+    };
+    case.name = "hook-service-revised".into();
+    client
+        .project(ProjectCommand::EditAnalysis {
+            session_id: session.clone(),
+            base_revision: captured.revision,
+            edit: AnalysisEdit::Put { case: case.clone() },
+        })
+        .await
+        .unwrap();
+    rpc.cancel_operation(&blocker.name).await.unwrap();
+    let stale = wait_job(&mut client, operation.name).await;
+    project_job_error(&stale, ProjectErrorCode::StaleRevision);
+    assert!(stale.result.is_none() && stale.outputs.is_empty());
+    let (cold_job, cold) = run(&mut client, &case.id, &settings).await;
+    let first = AnalysisFields::decode(&cold).unwrap();
+    assert!(!first.summary.costs.operator_reused);
+    let mut force = [0.0; 3];
+    let mut moment = [0.0; 3];
+    for index in 0..first.node_count {
+        let node = first.node(index).unwrap();
+        let [x_coordinate, y_coordinate, z_coordinate] = node.position_mm;
+        let [fx, fy, fz] = node.applied_force_n;
+        force[0] += fx;
+        force[1] += fy;
+        force[2] += fz;
+        moment[0] += y_coordinate * fz - z_coordinate * fy;
+        moment[1] += z_coordinate * fx - x_coordinate * fz;
+        moment[2] += x_coordinate * fy - y_coordinate * fx;
+    }
+    for axis in 0..3 {
+        assert!((force[axis] - case.loads[0].force_n[axis]).abs() < 1e-10);
+        assert!((moment[axis] - case.loads[0].moment_n_mm[axis]).abs() < 1e-9);
+    }
+    let mut quadrature_force = [0.0; 3];
+    let mut quadrature_moment = [0.0; 3];
+    let mut patch_area = 0.0;
+    for index in 0..first.patch_count {
+        let patch = first.patch(index).unwrap();
+        let [x_coordinate, y_coordinate, z_coordinate] = patch.point_mm;
+        let [x_traction, y_traction, z_traction] = patch.traction_mpa;
+        patch_area += patch.area_mm2;
+        for (axis, force) in quadrature_force.iter_mut().enumerate() {
+            *force += patch.area_mm2 * patch.traction_mpa[axis];
+        }
+        quadrature_moment[0] +=
+            patch.area_mm2 * (y_coordinate * z_traction - z_coordinate * y_traction);
+        quadrature_moment[1] +=
+            patch.area_mm2 * (z_coordinate * x_traction - x_coordinate * z_traction);
+        quadrature_moment[2] +=
+            patch.area_mm2 * (x_coordinate * y_traction - y_coordinate * x_traction);
+    }
+    assert!((patch_area - 48.0).abs() < 1e-10);
+    for axis in 0..3 {
+        assert!((quadrature_force[axis] - case.loads[0].force_n[axis]).abs() < 1e-10);
+        assert!((quadrature_moment[axis] - case.loads[0].moment_n_mm[axis]).abs() < 1e-9);
+    }
+    assert!(first.element(first.element_count).is_none());
+    assert!(AnalysisFields::decode(&cold[..cold.len() - 1]).is_err());
+    let metadata_bytes = u32::from_le_bytes(cold[8..12].try_into().unwrap()) as usize;
+    let node_offset = 32 + metadata_bytes;
+    let element_offset = node_offset + first.node_count * 72;
+    for (offset, replacement) in [
+        (24, vec![1]),
+        (12, u32::MAX.to_le_bytes().to_vec()),
+        (node_offset, f64::NAN.to_le_bytes().to_vec()),
+        (element_offset, u32::MAX.to_le_bytes().to_vec()),
+        (cold.len() - 4, 1u32.to_le_bytes().to_vec()),
+    ] {
+        let mut corrupted = cold.clone();
+        corrupted[offset..offset + replacement.len()].copy_from_slice(&replacement);
+        assert!(AnalysisFields::decode(&corrupted).is_err());
+    }
+    case.loads[0].force_n = case.loads[0].force_n.map(|value| 2.0 * value);
+    case.loads[0].moment_n_mm = case.loads[0].moment_n_mm.map(|value| 2.0 * value);
+    let base = info(&mut client).await.revision;
+    client
+        .project(ProjectCommand::EditAnalysis {
+            session_id: session.clone(),
+            base_revision: base,
+            edit: AnalysisEdit::Put { case: case.clone() },
+        })
+        .await
+        .unwrap();
+    let (_, warm) = run(&mut client, &case.id, &settings).await;
+    let second = AnalysisFields::decode(&warm).unwrap();
+    assert!(second.summary.costs.operator_reused);
+    assert_eq!(second.summary.operator_hash, first.summary.operator_hash);
+    assert_ne!(second.summary.input_hash, first.summary.input_hash);
+    assert_eq!(second.summary.costs.operator_setup_ms, 0.0);
+    assert!(
+        (second.summary.maximum_displacement_mm / first.summary.maximum_displacement_mm - 2.0)
+            .abs()
+            < 1e-9
+    );
+    let original_face = case.loads[0].face_id.clone();
+    case.loads[0].face_id = edge_at(0, 40.0);
+    let base_revision = info(&mut client).await.revision;
+    client
+        .project(ProjectCommand::EditAnalysis {
+            session_id: session.clone(),
+            base_revision,
+            edit: AnalysisEdit::Put { case: case.clone() },
+        })
+        .await
+        .unwrap();
+    let (_, moved) = run(&mut client, &case.id, &settings).await;
+    let moved = AnalysisFields::decode(&moved).unwrap();
+    assert!(moved.summary.costs.operator_reused);
+    assert_eq!(moved.summary.operator_hash, first.summary.operator_hash);
+    assert_ne!(moved.summary.input_hash, second.summary.input_hash);
+    assert!(moved.summary.assessment.patch_moment_error_n_mm < 1e-9);
+    case.loads[0].face_id = original_face;
+    let base_revision = info(&mut client).await.revision;
+    client
+        .project(ProjectCommand::EditAnalysis {
+            session_id: session.clone(),
+            base_revision,
+            edit: AnalysisEdit::Put { case: case.clone() },
+        })
+        .await
+        .unwrap();
+    let mut incompatible = settings.clone();
+    incompatible.recipe.infill_fraction = 0.4;
+    assert!(incompatible.validate().is_err());
+    let mut changed = settings.clone();
+    changed.maximum_span_mm = 6.0;
+    let (_, refined) = run(&mut client, &case.id, &changed).await;
+    let refined = AnalysisFields::decode(&refined).unwrap();
+    eprintln!(
+        "full hook refinement: elements {} -> {}, energy_relative_change={}, displacement_relative_change={} (not an N1 receipt)",
+        second.summary.elements,
+        refined.summary.elements,
+        (refined.summary.strain_energy_n_mm / second.summary.strain_energy_n_mm - 1.0).abs(),
+        (refined.summary.maximum_displacement_mm / second.summary.maximum_displacement_mm - 1.0)
+            .abs()
+    );
+    assert!(!refined.summary.costs.operator_reused);
+    assert!(
+        refined.summary.elements > second.summary.elements,
+        "a changed setting without changed mesh is not refinement evidence"
+    );
+    let current = scene(&mut client).await;
+    let project = info(&mut client).await;
+    client
+        .geometry(GeometryCommand::SetInstancePose {
+            session_id: session.clone(),
+            base_revision: current.revision,
+            project_revision: project.revision,
+            occurrence_id: case.occurrence_id,
+            pose: RigidPoseMm {
+                translation_mm: [0.0; 3],
+                rotation_xyzw: [
+                    std::f64::consts::FRAC_1_SQRT_2,
+                    0.0,
+                    0.0,
+                    std::f64::consts::FRAC_1_SQRT_2,
+                ],
+            },
+        })
+        .await
+        .unwrap();
+    let (_, oriented) = run(&mut client, &case.id, &settings).await;
+    let oriented = AnalysisFields::decode(&oriented).unwrap();
+    assert_ne!(oriented.summary.operator_hash, second.summary.operator_hash);
+    assert_ne!(
+        oriented.summary.region_volume_mm3,
+        second.summary.region_volume_mm3
+    );
+    assert_eq!(
+        oriented.summary.case.case.loads, second.summary.case.case.loads,
+        "service wrench must stay source-bound under print rotation"
+    );
+    save(&mut client, None).await;
+    let current = info(&mut client).await;
+    case.restraints[0].fixed_translation = [true, false, false];
+    client
+        .project(ProjectCommand::EditAnalysis {
+            session_id: session,
+            base_revision: current.revision,
+            edit: AnalysisEdit::Put { case: case.clone() },
+        })
+        .await
+        .unwrap();
+    let current = info(&mut client).await;
+    let ProjectResponse::OperationAccepted { operation } = client
+        .project(ProjectCommand::RunAnalysis {
+            session_id: client.hello().session_id.clone(),
+            base_revision: current.revision,
+            case_id: case.id.clone(),
+            settings: std::sync::Arc::new(settings.clone()),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let failed = wait_job(&mut client, operation.name).await;
+    assert_eq!(failed.status, JobStatus::Failed);
+    assert!(failed.outputs.is_empty());
+    assert!(failed.result.is_none());
+    client.shutdown().await.unwrap();
+    let mut reader = EngineClient::spawn_command_with_compute(spawn(), store.path(), compute)
+        .await
+        .unwrap();
+    let opened = start_open(&mut reader, &path, true, false, false).await;
+    completed_scene(wait_job(&mut reader, opened).await);
+    let historical = reader.native_operation(&cold_job.name).await.unwrap();
+    assert_eq!(historical, cold_job);
+    let Some(JobResult::AnalysisCompleted {
+        input_hash,
+        captured_revision,
+        resource,
+        ..
+    }) = historical.result
+    else {
+        panic!()
+    };
+    assert_eq!(
+        reader
+            .fetch_analysis_fields(&input_hash, captured_revision, &resource)
+            .await
+            .unwrap(),
+        cold
+    );
+    let (_, reopened) = run(&mut reader, &case.id, &settings).await;
+    let reopened = AnalysisFields::decode(&reopened).unwrap();
+    assert_eq!(reopened.summary.pose, oriented.summary.pose);
+    assert!(!reopened.summary.costs.operator_reused);
+    reader.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn analysis_cases_check_native_patches_and_survive_history_source_absent_reopen() {
     use spiling_contracts::analysis::*;

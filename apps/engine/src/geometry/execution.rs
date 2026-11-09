@@ -57,6 +57,11 @@ impl JobStatus {
 )]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum JobResult {
+    AnalysisCompleted {
+        project_id: ProjectId,
+        captured_revision: ProjectRevision,
+        input_hash: SourceHash,
+    },
     ProjectStorageMaintained {
         action: StorageMaintenanceAction,
         stats: ProjectStorageStats,

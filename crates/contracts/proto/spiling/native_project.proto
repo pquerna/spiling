@@ -11,6 +11,9 @@ import "spiling/native_library.proto";
 import "spiling/native_hardware.proto";
 import "spiling/native_analysis.proto";
 service Projects {
+ rpc RunAnalysis(RunAnalysisRequest) returns (google.longrunning.Operation) {
+  option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
+ }
  rpc MatchStock(MatchStockRequest) returns (google.longrunning.Operation) {
   option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
  }

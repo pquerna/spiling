@@ -14,6 +14,11 @@ The shared Rust client launches `spiling-engine --store PATH`. The parent sends 
 
 Readiness requires the exact shared `ENGINE_BUILD_ID` from `crates/contracts/src/lib.rs` and declared format/feature capabilities, including `ptac_projects_v1`, `manufacturing_schema11`, `fixed_dual_material_routing_v1`, `whole_occurrence_layer_cycles_v1`, `source_bound_surface_color_construction_v1`, `source_bound_process_v3`, `appearance_palette_study_c1a`, `optical_construction_reference_study_v1`, native trimmed-source/query/bed and existing finish/image capabilities. The retired project-storage capability is rejected; there is no compatibility negotiation. Executable client requirements are authoritative. These identify a coordinated semantic generation, not exact Git attestation, physical printer support or optical calibration.
 
+The `analysis2` semantic generation includes typed assumed-law whole-part
+numerical studies and checked SPLA fields as well as saved case authoring.
+It does not identify a qualified Basic/Enhanced product or physical calibration;
+[Analyze contracts](analysis.md) define the admitted model and evidence limits.
+
 All RPCs require the capability in authorization metadata. This is local plaintext HTTP/2 under a trusted-host assumption, not remote access or protection against a privileged local observer. The native Rust client connects directly without HTTP proxy routing. Only the native workbench/CLI connect. The parent never discovers engines by fixed port or adopts an unrelated process.
 
 The shared client retains two authenticated connections to that same endpoint: one for control/operation observation and one for ByteStream reads. Bulk response flow control cannot consume the control connection's HTTP/2 window. Cloned RPC handles reuse this pair; it is not another process, protocol, negotiated transport or artifact authority.

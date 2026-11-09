@@ -12,6 +12,19 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+fn validate_analysis_resource(resource: &ArtifactView) -> Result<(), String> {
+    if resource.media_type != crate::analysis::mechanics::ANALYSIS_FIELDS_MIME {
+        return Err("analysis field media type differs".into());
+    }
+    validate_artifact(
+        &artifact_from_view(
+            resource.clone(),
+            crate::analysis::mechanics::MAX_MECHANICAL_FIELD_BYTES as u64,
+        )?,
+        crate::analysis::mechanics::MAX_MECHANICAL_FIELD_BYTES as u64,
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NativeOperationView {
@@ -86,6 +99,9 @@ fn timestamp(value: &prost_types::Timestamp) -> Result<(), String> {
 }
 fn native_artifact_limit(media: &str) -> Result<u64, String> {
     match media {
+        crate::analysis::mechanics::ANALYSIS_FIELDS_MIME => {
+            Ok(crate::analysis::mechanics::MAX_MECHANICAL_FIELD_BYTES as u64)
+        }
         "application/x-spiling-mesh" | "application/x-spiling-section" => {
             Ok(u64::from(MAX_GEOMETRY_CHUNK_BYTES))
         }
@@ -272,6 +288,24 @@ pub fn native_operation_view(
             return Err("uncertain save receipt requires Failed state".into());
         }
         match result {
+            JobResult::AnalysisCompleted {
+                captured_revision,
+                resource,
+                ..
+            } => {
+                validate_analysis_resource(resource)?;
+                if captured_revision.0 != meta.captured_project_revision
+                    || meta.outputs.len() != 1
+                    || !meta.outputs.iter().any(|output| {
+                        output.name == resource.name
+                            && output.sha256 == resource.sha256
+                            && output.size_bytes.to_string() == resource.size_bytes
+                            && output.media_type == resource.media_type
+                    })
+                {
+                    return Err("analysis capture/output mismatch".into());
+                }
+            }
             JobResult::ProjectStorageMaintained { stats, .. } => {
                 stats.validate().map_err(|error| error.to_string())?;
                 if !meta.outputs.is_empty() {
@@ -556,6 +590,21 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
                 }
                 Self::AppearancePaletteImported { info, palette }
             }
+            R::AnalysisCompleted(value) => {
+                let resource = artifact_to_view(
+                    required(value.resource, "analysis fields")?,
+                    crate::analysis::mechanics::MAX_MECHANICAL_FIELD_BYTES as u64,
+                )?;
+                validate_analysis_resource(&resource)?;
+                Self::AnalysisCompleted {
+                    project_id: ProjectId::parse(value.project_id)
+                        .map_err(|error| error.to_string())?,
+                    captured_revision: ProjectRevision(value.captured_revision),
+                    input_hash: SourceHash::parse(value.input_hash)
+                        .map_err(|error| error.to_string())?,
+                    resource,
+                }
+            }
             R::AppearanceCompared(value) => {
                 let record = required(value.record, "appearance report record")?.try_into()?;
                 let resource = artifact_to_view(
@@ -740,6 +789,23 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
                 R::AppearancePaletteImported(rpc::AppearancePaletteImportedResult {
                     info: Some(info.try_into()?),
                     palette: Some(palette.try_into()?),
+                })
+            }
+            JobResult::AnalysisCompleted {
+                project_id,
+                captured_revision,
+                input_hash,
+                resource,
+            } => {
+                validate_analysis_resource(&resource)?;
+                R::AnalysisCompleted(rpc::AnalysisCompletedResult {
+                    project_id: project_id.as_str().into(),
+                    captured_revision: captured_revision.0,
+                    input_hash: input_hash.as_str().into(),
+                    resource: Some(artifact_from_view(
+                        resource,
+                        crate::analysis::mechanics::MAX_MECHANICAL_FIELD_BYTES as u64,
+                    )?),
                 })
             }
             JobResult::AppearanceCompared {

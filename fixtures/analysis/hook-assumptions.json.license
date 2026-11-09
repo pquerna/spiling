@@ -1,0 +1,6 @@
+SPDX-FileCopyrightText: 2026 Spiling contributors
+SPDX-License-Identifier: OSL-3.0
+
+Original explicit uncalibrated orthotropic numerical hypotheses for the original
+analysis-hook STEP. These constants are not measurements, RVE labels, physical
+calibration or a claim of compatibility with other density/pattern recipes.

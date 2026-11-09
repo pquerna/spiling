@@ -10,6 +10,46 @@ use spiling_contracts::{
 };
 use spiling_engine_client::{ClientError, EngineRpc};
 use std::sync::Arc;
+
+#[derive(Debug)]
+pub struct MechanicsCapture {
+    pub project: ProjectId,
+    pub revision: ProjectRevision,
+    pub summary: spiling_contracts::analysis::mechanics::AnalysisRunSummary,
+    pub bytes: Vec<u8>,
+    pub resource: ArtifactView,
+}
+pub async fn load_mechanics(
+    rpc: EngineRpc,
+    session: SessionId,
+    project: ProjectId,
+    revision: ProjectRevision,
+    input: spiling_contracts::geometry::SourceHash,
+    resource: ArtifactView,
+) -> Result<Arc<MechanicsCapture>, ClientError> {
+    let bytes = rpc
+        .fetch_analysis_fields(&input, revision, &resource)
+        .await?;
+    let summary = spiling_contracts::analysis::fields::AnalysisFields::decode(&bytes)?.summary;
+    let status = rpc
+        .project(ProjectCommand::Get {
+            session_id: session,
+        })
+        .await?;
+    if !matches!(status,ProjectResponse::Status{info} if info.project_id==project && info.revision==revision)
+    {
+        return Err(ClientError::InvalidRequest(
+            "Discarded mechanical fields from changed captured inputs".into(),
+        ));
+    }
+    Ok(Arc::new(MechanicsCapture {
+        project,
+        revision,
+        summary,
+        bytes,
+        resource,
+    }))
+}
 #[derive(Debug, Clone)]
 pub struct ImageRequest {
     pub session: SessionId,

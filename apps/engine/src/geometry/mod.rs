@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod analysis;
 mod appearance;
 mod bed_pose;
 mod execution;
@@ -116,6 +117,9 @@ impl Artifact {
     }
 }
 enum Purpose {
+    RunAnalysis {
+        maximum_seconds: u32,
+    },
     Import {
         pose: RigidPoseMm,
     },
@@ -152,6 +156,7 @@ struct Publication {
     reason = "Single-writer bounded publication values stay inline without extra heap indirection"
 )]
 enum PublicationKind {
+    AnalysisCompleted(Arc<spiling_analysis::run::RunProduct>),
     Import {
         edit: PreparedEdit,
         definition: Option<DefinitionState>,
@@ -216,6 +221,7 @@ struct Active {
 /// The dedicated native dispatcher owns bounded metadata and immutable encoded buffers.
 /// Native values exist exclusively on Worker; publication is a two-phase ACK boundary.
 pub struct Runtime {
+    analysis_publication: Option<(JobId, Arc<spiling_analysis::run::RunProduct>)>,
     pub session_id: SessionId,
     revision: SceneRevision,
     definitions: BTreeMap<DefinitionId, DefinitionState>,
@@ -256,6 +262,7 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(fault: Option<crate::ProjectFault>) -> Self {
         Self {
+            analysis_publication: None,
             session_id: SessionId::new(),
             revision: SceneRevision::ZERO,
             definitions: BTreeMap::new(),
@@ -450,6 +457,7 @@ impl Runtime {
                                 | Purpose::PrepareBedPose
                                 | Purpose::ImportAppearancePalette
                                 | Purpose::CompareAppearance
+                                | Purpose::RunAnalysis { .. }
                                 | Purpose::GetAppearanceReport
                                 | Purpose::CompareOptical
                                 | Purpose::MatchStock
@@ -666,6 +674,18 @@ impl Runtime {
                                 palette,
                             })
                         }
+                        PublicationKind::AnalysisCompleted(report) => {
+                            if self.analysis_publication.is_some() {
+                                return Err("unreleased analysis field publication".into());
+                            }
+                            let input_hash = report.summary.input_hash.clone();
+                            self.analysis_publication = Some((job, report));
+                            Some(JobResult::AnalysisCompleted {
+                                project_id: self.project.info().project_id,
+                                captured_revision: active.project_base,
+                                input_hash,
+                            })
+                        }
                         PublicationKind::AppearanceCompared(report) => {
                             if self.appearance_publication.is_some() {
                                 return Err("unreleased appearance report publication".into());
@@ -836,6 +856,10 @@ impl Runtime {
     }
     fn prepare(&mut self, active: &Active, product: Product) -> Result<Publication, JobError> {
         match (&active.purpose, product) {
+            (Purpose::RunAnalysis { .. }, Product::AnalysisCompleted(report)) => Ok(Publication {
+                kind: PublicationKind::AnalysisCompleted(report),
+                artifact: None,
+            }),
             (Purpose::MatchStock, Product::StockReport(report)) => Ok(Publication {
                 kind: PublicationKind::StockMatched(report),
                 artifact: None,
@@ -2164,6 +2188,12 @@ impl Runtime {
                 self.appearance_comparison = None;
                 self.commit_metadata_edit(Edit::SetAppearanceTarget { target, limits })
             }
+            ProjectCommand::RunAnalysis {
+                session_id,
+                base_revision,
+                case_id,
+                settings,
+            } => self.run_analysis(&session_id, base_revision, &case_id, settings),
             ProjectCommand::CompareAppearance {
                 session_id,
                 base_revision,
@@ -2491,6 +2521,7 @@ impl Runtime {
         let artifact = ArtifactId::new(allocate(&mut self.next_artifact, "artifact ID")?)?;
         let cancel = Arc::new(AtomicBool::new(initially_cancelled));
         let stage = match &purpose {
+            Purpose::RunAnalysis { .. } => "solving_assumed_printed_equilibrium",
             Purpose::Import { .. } => "importing",
             Purpose::Section => "sectioning",
             Purpose::PrepareLayout => "finding_and_verifying_layout",
@@ -2512,7 +2543,15 @@ impl Runtime {
             Purpose::GetOpticalReport => "preparing_optical_report",
             Purpose::ApplyOpticalConstruction => "applying_optical_construction",
         };
-        self.watchdog.start(job, cancel.clone());
+        if let Purpose::RunAnalysis { maximum_seconds } = purpose {
+            self.watchdog.start_with_limit(
+                job,
+                cancel.clone(),
+                Some(std::time::Duration::from_secs(maximum_seconds.into())),
+            );
+        } else {
+            self.watchdog.start(job, cancel.clone());
+        }
         let work = work(job, artifact, &self.watchdog);
         if self
             .worker

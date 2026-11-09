@@ -12,7 +12,7 @@ use spiling_contracts::{
         AabbMm, ArtifactChunkMetadata, ArtifactSummary, BedPosePreparation, GeometryCommand,
         GeometryError, GeometryErrorCode, GeometryResponse, JOB_CANCEL_AFTER_MS,
         JOB_CANCEL_GRACE_MS, JobError, JobResult, MAX_GEOMETRY_CHUNK_BYTES, OccurrenceRecord,
-        SECTION_PLANE_TOLERANCE_MM, SceneSummary, SessionId,
+        SECTION_PLANE_TOLERANCE_MM, SceneSummary, SessionId, SourceHash,
     },
     manufacturing::{
         MAX_MANUFACTURING_BUNDLE_BYTES, MAX_REPLAY_DISPLAY_BYTES, ManufacturingArtifactRecord,
@@ -120,6 +120,34 @@ impl EngineRpc {
         })
     }
 
+    pub async fn fetch_analysis_fields(
+        &self,
+        input: &SourceHash,
+        revision: ProjectRevision,
+        descriptor: &ArtifactView,
+    ) -> Result<Vec<u8>, ClientError> {
+        use spiling_contracts::analysis::{fields::AnalysisFields, mechanics::*};
+        let limit = MAX_MECHANICAL_FIELD_BYTES as u64;
+        let size =
+            native::validate_artifact_view(descriptor, limit).map_err(ClientError::Protocol)?;
+        if descriptor.media_type != ANALYSIS_FIELDS_MIME
+            || descriptor.name.strip_prefix("artifacts/") != Some(descriptor.sha256.as_str())
+        {
+            return Err(ClientError::Protocol(
+                "analysis descriptor identity/media mismatch".into(),
+            ));
+        }
+        let bytes = self
+            .read_bounded_artifact(&descriptor.name, size, &descriptor.sha256, limit)
+            .await?;
+        let fields = AnalysisFields::decode(&bytes)?;
+        if &fields.summary.input_hash != input || fields.summary.captured_revision != revision {
+            return Err(ClientError::Protocol(
+                "analysis payload capture differs from operation".into(),
+            ));
+        }
+        Ok(bytes)
+    }
     /// Retrieve a bounded immutable engine report; never evaluate colors locally.
     pub async fn fetch_appearance_report(
         &self,
@@ -342,6 +370,7 @@ impl EngineRpc {
             | ProjectCommand::GetSurfaceImage { .. }
             | ProjectCommand::SetAppearanceTarget { .. }
             | ProjectCommand::CompareAppearance { .. }
+            | ProjectCommand::RunAnalysis { .. }
             | ProjectCommand::AcceptAppearanceReport { .. }
             | ProjectCommand::GetAppearanceReport { .. }
             | ProjectCommand::SetOpticalStudy { .. }
@@ -439,6 +468,17 @@ impl EngineRpc {
             ProjectCall::ImportAppearancePalette(request) => {
                 let operation = client
                     .import_appearance_palette(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
+                Ok(ProjectResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
+                })
+            }
+            ProjectCall::RunAnalysis(request) => {
+                let operation = client
+                    .run_analysis(self.request(bounded(request)?))
                     .await
                     .map_err(rpc_error)?
                     .into_inner();
@@ -972,6 +1012,16 @@ pub(crate) fn decode_manufacturing_artifact(
 }
 
 impl EngineClient {
+    pub async fn fetch_analysis_fields(
+        &self,
+        input: &SourceHash,
+        revision: ProjectRevision,
+        descriptor: &ArtifactView,
+    ) -> Result<Vec<u8>, ClientError> {
+        self.rpc
+            .fetch_analysis_fields(input, revision, descriptor)
+            .await
+    }
     pub async fn fetch_appearance_report(
         &self,
         record: &spiling_contracts::appearance::AppearanceReportRecord,

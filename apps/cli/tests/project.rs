@@ -192,6 +192,123 @@ fn analysis_cases_roundtrip_through_separate_cli_processes_without_the_source_fi
 }
 
 #[test]
+#[ignore = "actual CLI and supervised engine; requires SPILING_TEST_ENGINE"]
+fn full_native_hook_equilibrium_and_retained_result_return_through_cli() {
+    let root = root();
+    let project = root.join("hook.spil");
+    let source = root.join("hook.step");
+    let store = root.join("operations");
+    std::fs::copy(fixture("analysis-hook.step"), &source).unwrap();
+    let retained = |mode: &str| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_spiling-cli"));
+        command
+            .arg("--engine")
+            .arg(engine())
+            .arg("--store")
+            .arg(&store)
+            .arg("project")
+            .arg(mode)
+            .arg(&project);
+        command
+    };
+    let created = report(
+        retained("create")
+            .arg("--import")
+            .arg(&source)
+            .args(["--analysis-case", "Whole hook", "1", "basic"])
+            .output()
+            .unwrap(),
+    );
+    let mut query = retained("inspect");
+    for face in created["definitions"][0]["faces"].as_array().unwrap() {
+        query.args(["--inspect-face", "1", face["face_id"].as_str().unwrap()]);
+    }
+    let inspected = report(query.output().unwrap());
+    let find = |axis: usize, value: f64| {
+        inspected["face_inspections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|face| {
+                let plane = &face["face"]["geometry"]["analytic"];
+                plane["kind"] == "plane"
+                    && plane["normal"][axis]
+                        .as_f64()
+                        .is_some_and(|normal| normal.abs() > 0.99)
+                    && plane["origin_mm"][axis]
+                        .as_f64()
+                        .is_some_and(|coordinate| (coordinate - value).abs() < 1e-7)
+            })
+            .unwrap()["reference"]["face_id"]
+            .as_str()
+            .unwrap()
+    };
+    let edited = report(
+        retained("edit")
+            .args([
+                "--analysis-load",
+                "Whole hook",
+                find(1, 24.0),
+                "0",
+                "-10",
+                "0",
+                "30",
+                "0",
+                "-360",
+                "--analysis-fix",
+                "Whole hook",
+                find(0, 0.0),
+            ])
+            .output()
+            .unwrap(),
+    );
+    std::fs::remove_file(source).unwrap();
+    let assumptions = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/analysis/hook-assumptions.json");
+    let solved = report(
+        retained("inspect")
+            .args(["--analysis-run", "Whole hook"])
+            .arg(&assumptions)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(solved["project"]["revision"], edited["project"]["revision"]);
+    assert_eq!(solved["project"]["dirty"], false);
+    let result = &solved["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["result"]["summary"].is_object())
+        .unwrap()["result"];
+    assert_eq!(
+        result["summary"]["model_scope"],
+        "planned_assumed_tied_macro"
+    );
+    assert_eq!(result["summary"]["accuracy_evidence"], "unqualified");
+    assert!(
+        result["summary"]["maximum_displacement_mm"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
+    assert_eq!(result["field_samples"].as_array().unwrap().len(), 16);
+    let returned = report(
+        retained("inspect")
+            .args(["--analysis-return", result["operation"].as_str().unwrap()])
+            .output()
+            .unwrap(),
+    );
+    let returned = &returned["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["result"]["summary"].is_object())
+        .unwrap()["result"];
+    assert_eq!(returned, result);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 #[ignore = "actual native CLI maintenance; requires SPILING_TEST_ENGINE"]
 fn storage_maintenance_uses_real_saved_file_and_preserves_committed_identity() {
     let root = root();

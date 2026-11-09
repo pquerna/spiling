@@ -2,7 +2,77 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 use super::required;
+use crate::analysis::mechanics::*;
 use crate::{analysis::*, geometry::*, project::*, rpc};
+
+impl TryFrom<rpc::AnalysisRunSettings> for AnalysisRunSettings {
+    type Error = String;
+    fn try_from(value: rpc::AnalysisRunSettings) -> Result<Self, String> {
+        fn tensor(values: Vec<f64>) -> Result<[[f64; 6]; 6], String> {
+            if values.len() != 36 {
+                return Err("assumed engineering tensor needs 36 row-major coefficients".into());
+            }
+            Ok(std::array::from_fn(|row| {
+                std::array::from_fn(|column| values[6 * row + column])
+            }))
+        }
+        let laws = required(value.laws, "assumed printed laws")?;
+        let settings = Self {
+            recipe: required(value.recipe, "explicit analysis print recipe")?.try_into()?,
+            laws: AssumedPrintedLaws {
+                name: laws.name,
+                justification: laws.justification,
+                compatible_recipe: required(laws.compatible_recipe, "law-compatible recipe")?
+                    .try_into()?,
+                wall_mpa: tensor(laws.wall_mpa)?,
+                skin_mpa: tensor(laws.skin_mpa)?,
+                effective_core_mpa: tensor(laws.effective_core_mpa)?,
+            },
+            maximum_span_mm: value.maximum_span_mm,
+            maximum_seconds: value.maximum_seconds,
+        };
+        settings.validate().map_err(|error| error.to_string())?;
+        Ok(settings)
+    }
+}
+impl TryFrom<AnalysisRunSettings> for rpc::AnalysisRunSettings {
+    type Error = String;
+    fn try_from(value: AnalysisRunSettings) -> Result<Self, String> {
+        value.validate().map_err(|error| error.to_string())?;
+        Ok(Self {
+            recipe: Some(value.recipe.try_into()?),
+            laws: Some(rpc::AssumedPrintedLaws {
+                name: value.laws.name,
+                justification: value.laws.justification,
+                compatible_recipe: Some(value.laws.compatible_recipe.try_into()?),
+                wall_mpa: value.laws.wall_mpa.into_iter().flatten().collect(),
+                skin_mpa: value.laws.skin_mpa.into_iter().flatten().collect(),
+                effective_core_mpa: value
+                    .laws
+                    .effective_core_mpa
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+            }),
+            maximum_span_mm: value.maximum_span_mm,
+            maximum_seconds: value.maximum_seconds,
+        })
+    }
+}
+impl TryFrom<rpc::RunAnalysisRequest> for ProjectCommand {
+    type Error = String;
+    fn try_from(value: rpc::RunAnalysisRequest) -> Result<Self, String> {
+        super::request_id(&value.request_id)?;
+        Ok(Self::RunAnalysis {
+            session_id: super::session_parent(&value.parent)?,
+            base_revision: ProjectRevision(value.base_revision),
+            case_id: AnalysisCaseId::parse(value.case_id).map_err(|error| error.to_string())?,
+            settings: std::sync::Arc::new(
+                required(value.settings, "analysis settings")?.try_into()?,
+            ),
+        })
+    }
+}
 
 impl TryFrom<rpc::AnalysisCase> for AnalysisCase {
     type Error = String;

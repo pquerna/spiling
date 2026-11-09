@@ -109,8 +109,8 @@
         },
         "physical_bounds_mm": {
           "max": [
-            1640.0,
-            840.0,
+            1640,
+            840,
             20
           ],
           "min": [
@@ -241,6 +241,30 @@
       "mutation": "duplicate_canonical_shell_face_use",
       "path": "duplicate-face-use.step",
       "sha256": "9c2281463275eccb3374049754614327edcdf70709eb658769371cfeca78aa4d"
+    },
+    {
+      "path": "analysis-hook.step",
+      "byte_count": 44743,
+      "sha256": "f765d1c3c1fccdb3e768c4adac5bea6b003f300cd2ac5a787604bbeb07bfd6f0",
+      "expected": "accepted",
+      "recipe": "Original OCCT 7.9.3.1; tools/generate-analysis-hook.py, not runtime geometry",
+      "expectation": {
+        "face_count": 14,
+        "physical_bounds_mm": {
+          "min": [
+            0,
+            0,
+            0
+          ],
+          "max": [
+            40,
+            48,
+            6
+          ]
+        },
+        "section_z_mm": 3,
+        "section_area_mm2": 912
+      }
     }
   ],
   "generation": {

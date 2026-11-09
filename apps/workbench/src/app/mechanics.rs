@@ -6,9 +6,13 @@ use spiling_contracts::{
     analysis::*,
     project::{ProjectCommand, ProjectId, ProjectRevision},
 };
+mod results;
 
 #[derive(Default)]
 pub(super) struct MechanicsUi {
+    settings_json: String,
+    field: usize,
+    slice_z: Option<f64>,
     draft: Option<Draft>,
     force_n: [f64; 3],
     moment_n_mm: [f64; 3],
@@ -172,6 +176,7 @@ impl Workbench {
                 self.choose_analysis_case(record.case.id.clone());
             }
         }
+        self.mechanics_results(ui, ready);
         let subject = self.state.display.as_ref().and_then(|scene| {
             let occurrence = scene
                 .occurrences

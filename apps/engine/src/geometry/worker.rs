@@ -97,6 +97,7 @@ pub struct CompileRequest {
     reason = "One bounded worker slot retains the captured save snapshot inline without per-job boxing"
 )]
 pub enum Work {
+    RunAnalysis(spiling_analysis::run::RunCapture),
     StorageMaintenance {
         storage: Arc<Storage>,
         action: StorageMaintenanceAction,
@@ -224,6 +225,7 @@ pub struct Imported {
     reason = "The single native worker returns bounded products without extra heap indirection"
 )]
 pub enum Product {
+    AnalysisCompleted(Arc<spiling_analysis::run::RunProduct>),
     StorageMaintained(super::storage::MaintenanceProduct),
     OpticalConstruction(spiling_core::OpticalConstructionCandidate),
     Import(Imported),
@@ -332,9 +334,16 @@ fn run(
     progress: Arc<Mutex<Option<(JobId, String)>>>,
 ) {
     let mut definitions = BTreeMap::<DefinitionId, Resident>::new();
+    let mut analysis_operator: Option<spiling_analysis::run::CachedOperator> = None;
     let mut epoch = 0;
     loop {
         reclaim(&mut definitions, &live, &mut epoch);
+        if analysis_operator
+            .as_ref()
+            .is_some_and(|operator| !definitions.contains_key(operator.definition_id()))
+        {
+            analysis_operator = None;
+        }
         let command = match commands.recv_timeout(Duration::from_millis(25)) {
             Ok(c) => c,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -357,6 +366,25 @@ fn run(
         let report = |stage: String| *progress.lock() = Some((job, stage));
         let mut display_work = GeometryWorkBudget::query();
         let result = match work {
+            Work::RunAnalysis(capture) => definitions
+                .get(&capture.case.case.definition_id)
+                .ok_or_else(|| {
+                    super::project_error(
+                        ProjectErrorCode::MissingAsset,
+                        "analysis native definition absent",
+                    )
+                    .into()
+                })
+                .and_then(|resident| {
+                    spiling_analysis::run::execute(
+                        &resident.definition,
+                        &capture,
+                        &mut analysis_operator,
+                        &cancel,
+                    )
+                    .map(|product| Product::AnalysisCompleted(Arc::new(product)))
+                    .map_err(|message| super::analysis::mechanical_error(message, &cancel).into())
+                }),
             Work::StorageMaintenance {
                 storage,
                 action,

@@ -93,6 +93,7 @@ impl NativeHost {
                             runtime.validate_image_admission(command)
                                 .and_then(|()| match command {
                                     Control::Project(command) => runtime.validate_appearance_admission(command)
+                                        .and_then(|()|runtime.validate_analysis_admission(command))
                                         .and_then(|()| runtime.validate_optical_admission(command)),
                                     _ => Ok(()),
                                 })
@@ -198,6 +199,7 @@ impl NativeHost {
                     ..
                 }
                 | spiling_contracts::project::ProjectCommand::CompareAppearance { .. }
+                | spiling_contracts::project::ProjectCommand::RunAnalysis { .. }
                 | spiling_contracts::project::ProjectCommand::GetAppearanceReport {
                     ..
                 }
@@ -427,6 +429,35 @@ fn publish_terminal(
         };
         jobs.native_finish(name, Ok(result), vec![(artifact, report.bytes.as_slice())])?;
         runtime.release_optical_publication(id);
+        return Ok(true);
+    }
+    if let geometry::JobResult::AnalysisCompleted {
+        project_id,
+        captured_revision,
+        input_hash,
+    } = &private
+    {
+        let report = runtime
+            .analysis_publication(id)
+            .ok_or_else(|| Status::internal("ACK analysis fields missing"))?;
+        if &report.summary.input_hash != input_hash
+            || report.summary.captured_revision != *captured_revision
+        {
+            return Err(Status::data_loss("ACK analysis input mismatch"));
+        }
+        let artifact = jobs.describe_native_artifact(
+            &report.bytes,
+            spiling_contracts::analysis::mechanics::ANALYSIS_FIELDS_MIME,
+            spiling_contracts::analysis::mechanics::MAX_MECHANICAL_FIELD_BYTES as u64,
+        )?;
+        let result = spiling_contracts::geometry::JobResult::AnalysisCompleted {
+            project_id: project_id.clone(),
+            captured_revision: *captured_revision,
+            input_hash: input_hash.clone(),
+            resource: view(&artifact)?,
+        };
+        jobs.native_finish(name, Ok(result), vec![(artifact, report.bytes.as_slice())])?;
+        runtime.release_analysis_publication(id);
         return Ok(true);
     }
     if let geometry::JobResult::AppearanceCompared {
@@ -765,9 +796,10 @@ fn public_result(
         geometry::JobResult::AppearancePaletteImported { info, palette } => {
             Public::AppearancePaletteImported { info, palette }
         }
-        geometry::JobResult::AppearanceCompared { .. } => {
+        geometry::JobResult::AppearanceCompared { .. }
+        | geometry::JobResult::AnalysisCompleted { .. } => {
             return Err(Status::internal(
-                "appearance report requires ACK-bound blob publication",
+                "numerical/appearance report requires ACK-bound blob publication",
             ));
         }
         geometry::JobResult::SurfaceImageImported {

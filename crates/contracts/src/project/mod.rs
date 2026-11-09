@@ -437,6 +437,12 @@ pub enum ProjectCommand {
         session_id: SessionId,
         base_revision: ProjectRevision,
     },
+    RunAnalysis {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        case_id: crate::analysis::AnalysisCaseId,
+        settings: Arc<crate::analysis::mechanics::AnalysisRunSettings>,
+    },
     AcceptAppearanceReport {
         session_id: SessionId,
         base_revision: ProjectRevision,

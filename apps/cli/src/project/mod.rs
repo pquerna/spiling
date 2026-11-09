@@ -864,6 +864,8 @@ pub fn parse(
                 !matches!(
                     operation,
                     Operation::PrepareLayout(_)
+                        | Operation::Analysis(analysis::Action::Run(..))
+                        | Operation::Analysis(analysis::Action::Return(..))
                         | Operation::Plate(plates::Action::Select(_))
                         | Operation::LibraryLocation(_)
                         | Operation::CheckInteriorDefault
@@ -1338,8 +1340,16 @@ async fn execute(
         let mut storage_maintenance = None;
         match operation {
             Operation::Analysis(action) => {
-                label = "analysis_edit";
-                analysis::execute(client, &session, action).await?;
+                let result = analysis::execute(client, &session, action).await?;
+                label = if result.is_some() {
+                    "analysis_equilibrium"
+                } else {
+                    "analysis_edit"
+                };
+                if let Some(result) = result {
+                    history
+                        .push(serde_json::json!({"step":"analysis_equilibrium","result":result}));
+                }
             }
             Operation::EvaluateAlternative(_)
             | Operation::EvaluateOption(_)

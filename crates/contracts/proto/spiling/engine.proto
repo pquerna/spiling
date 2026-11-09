@@ -12,6 +12,7 @@ import "spiling/native_common.proto";
 import "spiling/native_geometry.proto";
 import "spiling/native_project.proto";
 import "spiling/native_manufacturing.proto";
+import "spiling/native_analysis.proto";
 
 // Engine and clients ship together. No cross-version negotiation or shims.
 service Engine {
@@ -156,6 +157,7 @@ message NativeOperationResult {
     StockMatchedResult stock_matched = 16;
     ManufacturingAlternativeEvaluation manufacturing_alternative_evaluated = 17;
     LayoutProposal layout_prepared = 18;
+    AnalysisCompletedResult analysis_completed = 19;
   }
 }
 

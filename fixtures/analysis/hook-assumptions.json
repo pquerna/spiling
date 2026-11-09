@@ -1,0 +1,242 @@
+{
+  "recipe": {
+    "id": "planned-hook",
+    "revision": "1",
+    "material_id": "assumed-polymer",
+    "material_revision": "1",
+    "filament_diameter_mm": 1.75,
+    "layer_height_mm": 0.25,
+    "layer_height_policy": "protected_maximum",
+    "native_shape_error_mm": 0.001,
+    "bead_width_mm": 0.5,
+    "sparse_infill": {
+      "kind": "fine"
+    },
+    "perimeter_count": 6,
+    "infill_fraction": 0.3,
+    "top_skin_thickness_mm": 1,
+    "bottom_skin_thickness_mm": 1,
+    "print_speed_mm_s": 30,
+    "travel_speed_mm_s": 100,
+    "flow_multiplier": 1,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 0,
+      "bridge_speed_factor": 0.5,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 255,
+      "max_bridge_span_mm": 5,
+      "retraction": {
+        "kind": "disabled"
+      }
+    },
+    "supports": {
+      "kind": "disabled"
+    },
+    "seam_policy": {
+      "kind": "nearest"
+    },
+    "rectilinear_axis": "alternating_xy",
+    "top_skin_axis": "alternating_xy"
+  },
+  "laws": {
+    "name": "Explicit orthotropic planned-hook hypothesis; uncalibrated effective core at 30%",
+    "justification": "Exploratory planned-model hypothesis, not a measurement or RVE fit. All three orthotropic tensors use engineering Voigt order in global print axes; wall/skin are assumed homogenized printed regions. The effective core tensor is assumed only for the explicitly captured 30% fine alternating-XY recipe. Density/pattern changes require another explicitly justified compatible assumption, never E*density scaling. Interfaces are ideal tied continuum hypotheses, not fine-road attachment or weld-quality evidence.",
+    "wall_mpa": [
+      [
+        2100,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        1800,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        1200,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        500,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        600,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        700
+      ]
+    ],
+    "skin_mpa": [
+      [
+        2000,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        1900,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        1200,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        500,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        600,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        700
+      ]
+    ],
+    "effective_core_mpa": [
+      [
+        360,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        280,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        180,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        55,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        65,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        85
+      ]
+    ],
+    "compatible_recipe": {
+      "id": "planned-hook",
+      "revision": "1",
+      "material_id": "assumed-polymer",
+      "material_revision": "1",
+      "filament_diameter_mm": 1.75,
+      "layer_height_mm": 0.25,
+      "layer_height_policy": "protected_maximum",
+      "native_shape_error_mm": 0.001,
+      "bead_width_mm": 0.5,
+      "sparse_infill": {
+        "kind": "fine"
+      },
+      "perimeter_count": 6,
+      "infill_fraction": 0.3,
+      "top_skin_thickness_mm": 1,
+      "bottom_skin_thickness_mm": 1,
+      "print_speed_mm_s": 30,
+      "travel_speed_mm_s": 100,
+      "flow_multiplier": 1,
+      "process": {
+        "first_layer_speed_factor": 1,
+        "first_layer_flow_factor": 1,
+        "fan_first_layers": 0,
+        "fan_after_first_layers": 0,
+        "bridge_speed_factor": 0.5,
+        "bridge_flow_factor": 1,
+        "bridge_fan_pwm": 255,
+        "max_bridge_span_mm": 5,
+        "retraction": {
+          "kind": "disabled"
+        }
+      },
+      "supports": {
+        "kind": "disabled"
+      },
+      "seam_policy": {
+        "kind": "nearest"
+      },
+      "rectilinear_axis": "alternating_xy",
+      "top_skin_axis": "alternating_xy"
+    }
+  },
+  "maximum_span_mm": 12,
+  "maximum_seconds": 60
+}

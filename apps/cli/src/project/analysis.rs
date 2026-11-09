@@ -5,6 +5,8 @@ use super::*;
 use spiling_contracts::analysis::*;
 
 pub(super) enum Action {
+    Return(String),
+    Run(String, Arc<mechanics::AnalysisRunSettings>),
     Case(String, OccurrenceId, AnalysisMode),
     Load(String, AnalysisFaceLoad),
     Fix(String, FaceId),
@@ -16,6 +18,13 @@ pub(super) fn parse(
     args: &mut impl Iterator<Item = OsString>,
 ) -> Result<Action, Error> {
     Ok(match flag {
+        "--analysis-return" => Action::Return(text(args, "retained analysis operation name")?),
+        "--analysis-run" => {
+            let name = text(args, "saved analysis case name")?;
+            let settings: mechanics::AnalysisRunSettings = appearance_json(args, flag)?;
+            settings.validate()?;
+            Action::Run(name, Arc::new(settings))
+        }
         "--analysis-case" => {
             let name = text(args, "analysis case name")?;
             let occurrence = OccurrenceId::new(text(args, "analysis occurrence")?.parse()?)?;
@@ -71,8 +80,45 @@ pub(super) async fn execute(
     client: &mut EngineClient,
     session: &SessionId,
     action: Action,
-) -> Result<(), Error> {
+) -> Result<Option<serde_json::Value>, Error> {
     let captured = info(client).await?;
+    if let Action::Return(name) = action {
+        let operation = client.native_operation(&name).await?;
+        if !operation.done || operation.status != JobStatus::Completed {
+            return Err("retained analysis operation is not a completed success".into());
+        }
+        return Ok(Some(
+            inspect_result(
+                client,
+                &captured,
+                name,
+                operation.result.ok_or("retained operation has no result")?,
+            )
+            .await?,
+        ));
+    }
+    if let Action::Run(name, settings) = action {
+        let record = captured
+            .analysis
+            .cases
+            .iter()
+            .find(|record| record.case.layout_id == captured.layout_id && record.case.name == name)
+            .ok_or("saved analysis case is absent from the selected plate")?;
+        let response = client
+            .project(ProjectCommand::RunAnalysis {
+                session_id: session.clone(),
+                base_revision: captured.revision,
+                case_id: record.case.id.clone(),
+                settings,
+            })
+            .await?;
+        let ProjectResponse::OperationAccepted { operation } = response else {
+            return Err("analysis did not return an operation".into());
+        };
+        let name = operation.name.clone();
+        let result = geometry::wait_operation(client, session, operation).await?;
+        return Ok(Some(inspect_result(client, &captured, name, result).await?));
+    }
     let edit = match action {
         Action::Edit(edit) => edit,
         Action::Case(name, occurrence_id, mode) => {
@@ -154,5 +200,34 @@ pub(super) async fn execute(
             edit,
         })
         .await?;
-    complete(client, response).await
+    complete(client, response).await?;
+    Ok(None)
+}
+
+async fn inspect_result(
+    client: &EngineClient,
+    captured: &ProjectInfo,
+    name: String,
+    result: JobResult,
+) -> Result<serde_json::Value, Error> {
+    let JobResult::AnalysisCompleted {
+        project_id,
+        input_hash,
+        captured_revision,
+        resource,
+    } = result
+    else {
+        return Err("operation did not return analysis fields".into());
+    };
+    if project_id != captured.project_id {
+        return Err("retained analysis result belongs to another project".into());
+    }
+    let bytes = client
+        .fetch_analysis_fields(&input_hash, captured_revision, &resource)
+        .await?;
+    let fields = fields::AnalysisFields::decode(&bytes)?;
+    let samples=(0..fields.element_count.min(16)).map(|index|{let field=fields.element(index).unwrap();let region=["wall","skin","assumed_effective_core"][field.role as usize];serde_json::json!({"element":index,"center_mm":field.center_mm,"region":region,"centroid_macro_stress_mpa":field.stress_mpa,"energy_n_mm":field.energy_n_mm,"regional_energy_concentration":field.concentration})}).collect::<Vec<_>>();
+    Ok(
+        serde_json::json!({"operation":name,"resource":resource,"capture_matches_project_revision":captured.revision==captured_revision,"summary":fields.summary,"field_samples":samples,"scope":"assumed-law planned tied macro continuum; not resolved roads, discretization/calibration/strength qualification or a shipped Basic release; only a retained engine store (--store in CLI) retains this artifact after exit; not a portable project result attachment"}),
+    )
 }

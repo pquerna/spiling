@@ -67,7 +67,12 @@ impl TryFrom<ManufacturingOptionInfo> for rpc::ManufacturingOptionInfo {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Bounded typed native request values stay inline without a per-call heap allocation"
+)]
 pub enum ProjectCall {
+    RunAnalysis(rpc::RunAnalysisRequest),
     MatchStock(rpc::MatchStockRequest),
     StorageMaintenance(rpc::StorageMaintenanceRequest),
     ApplyOpticalConstruction(rpc::ApplyOpticalConstructionRequest),
@@ -404,6 +409,20 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
                     base_revision: base_revision.0,
                 },
             ));
+        }
+        ProjectCommand::RunAnalysis {
+            session_id,
+            base_revision,
+            case_id,
+            settings,
+        } => {
+            return Ok(ProjectCall::RunAnalysis(rpc::RunAnalysisRequest {
+                parent: format!("sessions/{}", session_id.as_str()),
+                request_id: id.into(),
+                base_revision: base_revision.0,
+                case_id: case_id.as_str().into(),
+                settings: Some((*settings).clone().try_into()?),
+            }));
         }
         ProjectCommand::GetAppearanceReport {
             session_id,

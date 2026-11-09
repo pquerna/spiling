@@ -3,6 +3,8 @@
 // Licensed under the Open Software License version 3.0
 syntax = "proto3";
 package spiling.engine;
+import "spiling/native_common.proto";
+import "spiling/native_hardware.proto";
 
 enum AnalysisMode { ANALYSIS_MODE_UNSPECIFIED = 0; ANALYSIS_MODE_BASIC = 1; ANALYSIS_MODE_ENHANCED = 2; }
 message AnalysisFaceLoad { string face_id = 1; repeated double force_n = 2; repeated double moment_n_mm = 3; }
@@ -24,3 +26,7 @@ message AnalysisEdit {
  oneof edit { AnalysisCase put = 1; string remove = 2; }
 }
 message EditAnalysisRequest { uint32 base_revision = 1; AnalysisEdit edit = 2; }
+message AssumedPrintedLaws { string name = 1; repeated double wall_mpa = 2; repeated double skin_mpa = 3; repeated double effective_core_mpa = 4; PlanarPrintRecipe compatible_recipe = 5; string justification = 6; }
+message AnalysisRunSettings { PlanarPrintRecipe recipe = 1; AssumedPrintedLaws laws = 2; double maximum_span_mm = 3; uint32 maximum_seconds = 4; }
+message RunAnalysisRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; string case_id = 4; AnalysisRunSettings settings = 5; }
+message AnalysisCompletedResult { string project_id = 1; uint32 captured_revision = 2; string input_hash = 3; Artifact resource = 4; }
