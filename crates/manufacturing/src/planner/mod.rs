@@ -919,7 +919,7 @@ fn admit_schedule<'model>(
         native_coverage.retained_bytes(),
         schedule.capacity() * std::mem::size_of::<LayerElevation>(),
     ])?;
-    let web_roof_z = if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof {}) {
+    let web_roof_z = if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. }) {
         let first = sections.first().ok_or_else(|| {
             error(
                 ManufacturingErrorCode::UnsupportedGeometry,
@@ -938,32 +938,42 @@ fn admit_schedule<'model>(
         }
         let occurrence = &input.occurrences[0];
         let definition = &input.definitions[&occurrence.definition_id];
-        if definition.faces().len() != 6
-            || definition.faces().iter().any(|face| {
-                face.geometry.family != spiling_contracts::geometry::SurfaceFamily::Plane
-            })
-        {
+        let face = definition.faces().first().ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "web + roof lacks native carrier metadata",
+            )
+        })?;
+        let bounds = admission.native_bounds[&occurrence.occurrence_id];
+        // Eligibility uses all analytic carriers and the exact pose; equal
+        // sampled sections alone never authorize a curved/sloped source.
+        let mut cap_z = [f64::INFINITY, f64::NEG_INFINITY];
+        for carrier in definition.faces() {
+            if let Some(spiling_contracts::geometry::AnalyticSurfaceDescription::Plane {
+                origin_mm,
+                normal,
+            }) = &carrier.geometry.analytic
+                && normal[0] == 0.0
+                && normal[1] == 0.0
+                && normal[2] != 0.0
+            {
+                cap_z[0] = cap_z[0].min(origin_mm[2]);
+                cap_z[1] = cap_z[1].max(origin_mm[2]);
+            }
+        }
+        if !cap_z.iter().all(|z| z.is_finite()) || cap_z[0] >= cap_z[1] {
             return Err(error(
                 ManufacturingErrorCode::UnsupportedGeometry,
-                "web + roof currently requires one rectangular native part without holes",
+                "web + roof requires finite separated native extrusion caps",
             ));
         }
-        let wall = definition.faces().iter().find(|face| matches!(
-            &face.geometry.analytic,
-            Some(spiling_contracts::geometry::AnalyticSurfaceDescription::Plane { normal, .. })
-                if normal[2] == 0.0
-        )).ok_or_else(|| error(ManufacturingErrorCode::UnsupportedGeometry,
-            "web + roof requires a certified full-height native wall"))?;
-        let certificate = definition
-            .vertical_wall_face_with_work(&wall.face_id, admission.geometry_work, cancel)
-            .map_err(|failure| native_error(failure, "web + roof full-height native wall"))?;
         surface::admit_extrusion(
             input,
             occurrence,
-            admission.native_bounds[&occurrence.occurrence_id],
-            &wall.face_id,
-            certificate.min_z_mm,
-            certificate.max_z_mm,
+            bounds,
+            &face.face_id,
+            cap_z[0],
+            cap_z[1],
             cancel,
         )
         .map_err(|mut failure| {
@@ -1543,7 +1553,7 @@ fn admit_schedule<'model>(
                 resolution_allocated_bytes,
                 &templates,
             )?;
-            if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof {}) {
+            if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. }) {
                 // Roof branches depend on physical height, even when native D
                 // and its wall/classification templates remain unchanged.
                 templates[axis_slot] = None;
@@ -3192,7 +3202,36 @@ fn goal_layer_schedule(
         ),
         LayerHeightPolicy::ProtectedMaximum => (0.0, nominal),
     };
-    layer_schedule_with_bounds(bed, top, nominal, minimum, maximum, events)
+    let schedule = layer_schedule_with_bounds(bed, top, nominal, minimum, maximum, events)?;
+    let command_admitted = |layer: &LayerElevation| -> Result<bool, ManufacturingError> {
+        Ok(
+            intent.admits_deposition(intent.recipe.bead_width_mm, layer.z - layer.lower_z)
+                && intent.admits_deposition(
+                    intent.recipe.bead_width_mm,
+                    project_xyz6_coordinate_mm(layer.z)?
+                        - project_xyz6_coordinate_mm(layer.lower_z)?,
+                ),
+        )
+    };
+    for layer in &schedule {
+        if !command_admitted(layer)? {
+            // A protected nominal cap tolerates only reporting roundoff. The
+            // true interval and XYZ6 command still obey the captured physical
+            // envelope. Rebalance between the same protected events using the
+            // existing neighboring-allocation check; never widen either limit.
+            return layer_schedule_with_bounds(
+                bed,
+                top,
+                nominal,
+                limits.min_bead_height_mm,
+                maximum
+                    .min(limits.max_bead_height_mm)
+                    .min(intent.recipe.bead_width_mm),
+                events,
+            );
+        }
+    }
+    Ok(schedule)
 }
 
 #[cfg(test)]
@@ -3475,6 +3514,7 @@ fn physical_neighbor(
 
 fn empty_coverage(_fraction: f64) -> PlanarRegionCoverage {
     PlanarRegionCoverage {
+        web_roof_domains: Vec::new(),
         skin_bridge_domains: Vec::new(),
         process_diaphragms: Vec::new(),
         diaphragm_area_mm2: 0.0,

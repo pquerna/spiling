@@ -4,6 +4,7 @@
 //! Layer-native retained construction, not a load solver or removable support.
 //! Continuous orthogonal webs use one physical lattice. Roof corbels grow from
 //! those webs at 1 mm rise per 0.5 mm run; opposing tips merge once.
+//! Every component/hole chord is rooted independently, without wall-root credit.
 use super::*;
 use spiling_contracts::manufacturing::program_coordinates::MIN_DEPOSITION_COMMAND_MM;
 
@@ -17,6 +18,12 @@ struct Lattice {
 }
 impl Lattice {
     fn new(min: f64, max: f64, pitch: f64) -> Result<Self, ManufacturingError> {
+        if !pitch.is_finite() || pitch <= 0.0 || !min.is_finite() || !max.is_finite() || min >= max
+        {
+            return Err(unsupported(
+                "web + roof lattice has unconditioned bounds or pitch",
+            ));
+        }
         let count = ((max - min) / pitch).ceil().max(1.0);
         if !count.is_finite() || count > MAX_DEPOSITION_SEGMENTS as f64 {
             return Err(resource("web + roof lattice exceeds the command budget"));
@@ -41,25 +48,85 @@ impl Lattice {
     }
 }
 
-fn rectangle(polygon: &Polygon<f64>) -> Result<geo::Rect<f64>, ManufacturingError> {
-    let bounds = polygon
-        .bounding_rect()
-        .ok_or_else(|| unsupported("web + roof has no interior bounds"))?;
-    if !polygon.interiors().is_empty()
-        || bounds.width() <= 0.0
-        || bounds.height() <= 0.0
-        || polygon.exterior().lines().any(|edge| {
-            !((edge.start.x == edge.end.x
-                && [bounds.min().x, bounds.max().x].contains(&edge.start.x))
-                || (edge.start.y == edge.end.y
-                    && [bounds.min().y, bounds.max().y].contains(&edge.start.y)))
-        })
-    {
-        return Err(unsupported(
-            "web + roof currently requires a rectangular interior without holes",
-        ));
+fn charge(work: &mut usize, amount: usize, cancel: &AtomicBool) -> Result<(), ManufacturingError> {
+    check_cancel(cancel)?;
+    *work = work
+        .checked_add(amount)
+        .filter(|n| *n <= 128_000_000)
+        .ok_or_else(|| resource("web + roof clipping work budget exceeded"))?;
+    Ok(())
+}
+
+/// Seed long clipped roof chords that the regular lattice misses. Seeds are
+/// full-height webs, chosen before any roof growth; no wall/void is a root.
+fn seed_webs(
+    polygon: &Polygon<f64>,
+    lattices: [Lattice; 2],
+    layer: &HatchLayer<'_>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<[Vec<f64>; 2], ManufacturingError> {
+    if lattices[0].count.saturating_add(lattices[1].count) > MAX_DEPOSITION_SEGMENTS as usize {
+        return Err(resource("web + roof base lattice budget exceeded"));
     }
-    Ok(bounds)
+    let mut roots = lattices.map(|l| {
+        (0..l.count)
+            .map(|i| l.first + i as f64 * l.pitch)
+            .collect::<Vec<_>>()
+    });
+    let edges = std::iter::once(polygon.exterior())
+        .chain(polygon.interiors())
+        .map(|r| r.0.len() - 1)
+        .sum::<usize>();
+    let mut hits = Vec::new();
+    for fixed in 0..2 {
+        let l = lattices[fixed];
+        let axis = if fixed == 0 {
+            HatchAxis::Y
+        } else {
+            HatchAxis::X
+        };
+        for gap in 0..=l.count {
+            let a = l.root(gap);
+            let b = l.root(gap + 1);
+            let divisions = ((b - a) / layer.recipe.web_roof_spacing_mm())
+                .ceil()
+                .max(1.);
+            if !divisions.is_finite() || divisions > MAX_DEPOSITION_SEGMENTS as f64 {
+                return Err(resource("web + roof seed contact budget exceeded"));
+            }
+            for contact in 1..divisions as usize {
+                charge(work, edges, cancel)?;
+                let c = a + (b - a) * contact as f64 / divisions;
+                hits.clear();
+                row_intersections(polygon, c, axis, &mut hits, cancel)?;
+                for chord in hits.as_chunks::<2>().0 {
+                    charge(work, roots[1 - fixed].len(), cancel)?;
+                    if chord[1] - chord[0] > layer.recipe.web_roof_spacing_mm()
+                        && !roots[1 - fixed]
+                            .iter()
+                            .any(|&v| chord[0] <= v && v <= chord[1])
+                    {
+                        let seed = (chord[0] + chord[1]) * 0.5;
+                        if roots[1 - fixed]
+                            .iter()
+                            .any(|v| (seed - v).abs() < layer.width_mm)
+                        {
+                            return Err(unsupported(
+                                "web + roof local root would crowd an existing web; revise base density or roof spacing",
+                            ));
+                        }
+                        if roots[0].len() + roots[1].len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                            return Err(resource("web + roof local seed budget exceeded"));
+                        }
+                        roots[1 - fixed].push(seed);
+                        roots[1 - fixed].sort_unstable_by(f64::total_cmp);
+                    }
+                }
+            }
+        }
+    }
+    Ok(roots)
 }
 
 pub(super) fn hatch(
@@ -70,118 +137,128 @@ pub(super) fn hatch(
     segments: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    if fill.0.is_empty() {
-        return Ok(());
-    }
-    if fill.0.len() != 1 {
-        return Err(unsupported(
-            "web + roof currently requires one connected rectangular interior",
-        ));
-    }
     let roof = layer
         .roof_z_mm
         .ok_or_else(|| unsupported("web + roof lacks its physical roof horizon"))?;
-    let polygon = &fill.0[0];
-    let bounds = rectangle(polygon)?;
-    // Freeze pitch at the captured nominal interval: refined physical heights
-    // change bead area, never move a continuous web sideways.
     let nominal = layer.recipe.layer_height_mm;
-    let spacing = layer.width_mm - nominal + std::f64::consts::PI * nominal / 4.0;
-    let pitch = spacing * 2.0 / fraction;
-    let lattices = [
-        Lattice::new(bounds.min().x, bounds.max().x, pitch)?,
-        Lattice::new(bounds.min().y, bounds.max().y, pitch)?,
-    ];
+    let pitch = 2.0 * (layer.width_mm - nominal + std::f64::consts::PI * nominal / 4.0) / fraction;
+    let mut work = 0usize;
     let mut proposals = 0usize;
-    for (axis, fixed) in [(HatchAxis::X, 1), (HatchAxis::Y, 0)] {
-        let active = HatchLayer { axis, ..*layer };
-        let lattice = lattices[fixed];
-        let rows = HatchRows {
-            count: lattice.count,
-            start: lattice.first,
-            spacing: lattice.pitch,
-            edges: polygon.exterior().0.len().saturating_sub(1),
-        };
-        hatch_polygon(
-            polygon,
-            DepositionKind::SparseFill,
-            &rows,
-            &active,
-            paths,
-            segments,
-            cancel,
-        )?;
-        let along = lattices[1 - fixed];
-        // Leave room for nominal bead/command effects; actual skin spans are
-        // independently checked against the unchanged captured bridge limit.
-        let target_gap = layer.recipe.process.max_bridge_span_mm * 0.75;
-        for gap in 0..=lattice.count {
-            check_cancel(cancel)?;
-            let a = lattice.root(gap);
-            let b = lattice.root(gap + 1);
-            let divisions = ((b - a) / target_gap).ceil().max(1.0);
-            if !divisions.is_finite() || divisions > MAX_DEPOSITION_SEGMENTS as f64 {
-                return Err(resource("web + roof roof-contact budget exceeded"));
+    let mut hits = Vec::new();
+    let mut roots = Vec::new();
+    for polygon in &fill.0 {
+        check_cancel(cancel)?;
+        let bounds = polygon
+            .bounding_rect()
+            .ok_or_else(|| unsupported("web + roof has no interior bounds"))?;
+        let lattices = [
+            Lattice::new(bounds.min().x, bounds.max().x, pitch)?,
+            Lattice::new(bounds.min().y, bounds.max().y, pitch)?,
+        ];
+        let web_roots = seed_webs(polygon, lattices, layer, &mut work, cancel)?;
+        let edges = std::iter::once(polygon.exterior())
+            .chain(polygon.interiors())
+            .map(|ring| ring.0.len().saturating_sub(1))
+            .sum::<usize>();
+        for (axis, fixed) in [(HatchAxis::X, 1), (HatchAxis::Y, 0)] {
+            let active = HatchLayer { axis, ..*layer };
+            let lattice = lattices[fixed];
+            for &coordinate in &web_roots[fixed] {
+                charge(&mut work, edges, cancel)?;
+                hits.clear();
+                row_intersections(polygon, coordinate, axis, &mut hits, cancel)?;
+                append_hatch_row(
+                    &hits,
+                    coordinate,
+                    DepositionKind::SparseFill,
+                    &active,
+                    false,
+                    paths,
+                    segments,
+                )?;
             }
-            if divisions <= 1.0 {
-                continue;
-            }
-            for root in 0..=along.count {
-                check_cancel(cancel)?;
-                proposals += 1;
-                if proposals > MAX_DEPOSITION_SEGMENTS as usize {
-                    return Err(resource("web + roof proposal work budget exceeded"));
-                }
-                let start = along.root(root);
-                let stop = along.root(root + 1);
-                let from_right = root == 0;
-                let from_left = root == along.count;
-                // Boundary chambers grow outward from an actual continuous
-                // web, not inward from a nominal fill boundary. That boundary
-                // is not an earlier deposited wall centerline certificate.
-                let reach = (stop - start) * if from_right || from_left { 1.0 } else { 0.5 };
-                let run = (reach - 0.5 * (roof - layer.z).max(0.0)).max(0.0);
-                // A branch is an optional construction proposal until it has a
-                // real command-length segment. Its first deposition and every
-                // later extension still need earlier-layer actual support.
-                if run < MIN_DEPOSITION_COMMAND_MM {
-                    continue;
-                }
-                let additional = (divisions as usize - 1)
-                    .checked_mul(if run >= reach || from_right || from_left {
-                        1
-                    } else {
-                        2
-                    })
-                    .ok_or_else(|| resource("web + roof branch count overflow"))?;
-                if additional > MAX_DEPOSITION_SEGMENTS as usize - *segments {
-                    return Err(resource("web + roof branches exceed the command budget"));
+            for gap in 0..=lattice.count {
+                charge(&mut work, 1, cancel)?;
+                let a = lattice.root(gap);
+                let b = lattice.root(gap + 1);
+                let divisions = ((b - a) / layer.recipe.web_roof_spacing_mm())
+                    .ceil()
+                    .max(1.0);
+                if !divisions.is_finite() || divisions > MAX_DEPOSITION_SEGMENTS as f64 {
+                    return Err(resource("web + roof roof-contact budget exceeded"));
                 }
                 for contact in 1..divisions as usize {
-                    check_cancel(cancel)?;
+                    charge(&mut work, edges, cancel)?;
                     let coordinate = a + (b - a) * contact as f64 / divisions;
-                    let hits = if run >= reach {
-                        [start, stop, stop, stop]
-                    } else if from_right {
-                        [stop - run, stop, stop, stop]
-                    } else if from_left {
-                        [start, start + run, stop, stop]
-                    } else {
-                        [start, start + run, stop - run, stop]
-                    };
-                    append_hatch_row(
-                        if run >= reach || from_right || from_left {
-                            &hits[..2]
-                        } else {
-                            &hits
-                        },
-                        coordinate,
-                        DepositionKind::SparseFill,
-                        &active,
-                        (gap + root + contact) % 2 == 1,
-                        paths,
-                        segments,
-                    )?;
+                    if web_roots[fixed].contains(&coordinate) {
+                        continue;
+                    }
+                    hits.clear();
+                    row_intersections(polygon, coordinate, axis, &mut hits, cancel)?;
+                    for chord in hits.as_chunks::<2>().0 {
+                        charge(&mut work, web_roots[1 - fixed].len(), cancel)?;
+                        roots.clear();
+                        roots.extend(
+                            web_roots[1 - fixed]
+                                .iter()
+                                .copied()
+                                .filter(|v| *v >= chord[0] && *v <= chord[1]),
+                        );
+                        // A clipped chamber may have no perpendicular web.
+                        // It cannot invent a wall root. Ordinary independent
+                        // skin support must still qualify its real short span.
+                        let mut pending: Option<[f64; 2]> = None;
+                        for (index, &root) in roots.iter().enumerate() {
+                            proposals += 1;
+                            if proposals > MAX_DEPOSITION_SEGMENTS as usize {
+                                return Err(resource("web + roof proposal budget exceeded"));
+                            }
+                            charge(&mut work, 1, cancel)?;
+                            let left = if index == 0 {
+                                chord[0]
+                            } else {
+                                (roots[index - 1] + root) * 0.5
+                            };
+                            let right = if index + 1 == roots.len() {
+                                chord[1]
+                            } else {
+                                (root + roots[index + 1]) * 0.5
+                            };
+                            let retreat = 0.5 * (roof - layer.z).max(0.0);
+                            let start = root - (root - left - retreat).max(0.0);
+                            let stop = root + (right - root - retreat).max(0.0);
+                            if stop - start < MIN_DEPOSITION_COMMAND_MM {
+                                continue;
+                            }
+                            if let Some(previous) = &mut pending {
+                                if start <= previous[1] {
+                                    previous[1] = previous[1].max(stop);
+                                    continue;
+                                }
+                                append_hatch_row(
+                                    previous,
+                                    coordinate,
+                                    DepositionKind::SparseFill,
+                                    &active,
+                                    contact % 2 == 1,
+                                    paths,
+                                    segments,
+                                )?;
+                            }
+                            pending = Some([start, stop]);
+                        }
+                        if let Some(interval) = pending {
+                            append_hatch_row(
+                                &interval,
+                                coordinate,
+                                DepositionKind::SparseFill,
+                                &active,
+                                contact % 2 == 1,
+                                paths,
+                                segments,
+                            )?;
+                        }
+                    }
                 }
             }
         }
@@ -194,7 +271,7 @@ mod tests {
     use super::*;
     fn paths(z: f64, height: f64) -> Vec<DepositionPath> {
         let mut recipe = super::super::super::tests::recipe(0.08);
-        recipe.sparse_infill = SparseInfillPolicy::WebRoof {};
+        recipe.sparse_infill = SparseInfillPolicy::web_roof();
         recipe.layer_height_mm = 0.2;
         recipe.bead_width_mm = 0.45;
         recipe.process.max_bridge_span_mm = 4.0;
@@ -277,7 +354,7 @@ mod tests {
     #[test]
     fn roof_contacts_and_cancellation_are_bounded_before_large_growth() {
         let mut recipe = super::super::super::tests::recipe(0.08);
-        recipe.sparse_infill = SparseInfillPolicy::WebRoof {};
+        recipe.sparse_infill = SparseInfillPolicy::web_roof();
         recipe.process.max_bridge_span_mm = 1e-12;
         let layer = HatchLayer {
             roof_z_mm: Some(24.0),
@@ -312,5 +389,96 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, ManufacturingErrorCode::Cancelled);
+    }
+    #[test]
+    fn clipped_holes_concavity_and_disconnected_rooms_keep_roads_inside_each_component() {
+        use geo::{Line, LineString, Relate};
+        let outer = geo::Rect::new([0., 0.], [24., 24.])
+            .to_polygon()
+            .exterior()
+            .clone();
+        let holed = Polygon::new(
+            outer,
+            vec![
+                geo::Rect::new([8., 8.], [16., 16.])
+                    .to_polygon()
+                    .exterior()
+                    .clone(),
+            ],
+        );
+        let concave = Polygon::new(
+            LineString::from(vec![
+                (30., 0.),
+                (54., 0.),
+                (54., 8.),
+                (38., 8.),
+                (38., 24.),
+                (30., 24.),
+                (30., 0.),
+            ]),
+            vec![],
+        );
+        let fill = MultiPolygon(vec![holed, concave]);
+        for fraction in [0.03, 0.08, 0.16, 0.35] {
+            let mut recipe = super::super::super::tests::recipe(fraction);
+            recipe.sparse_infill = SparseInfillPolicy::web_roof();
+            recipe.layer_height_mm = 0.2;
+            recipe.bead_width_mm = 0.45;
+            recipe.process.max_bridge_span_mm = 4.;
+            for z in [1., 20., 23., 24.] {
+                let layer = HatchLayer {
+                    roof_z_mm: Some(24.),
+                    width_mm: 0.45,
+                    z,
+                    lower_z: z - 0.2,
+                    height: 0.2,
+                    axis: HatchAxis::X,
+                    top_axis: HatchAxis::X,
+                    recipe: &recipe,
+                };
+                let mut paths = Vec::new();
+                hatch(
+                    &fill,
+                    fraction,
+                    &layer,
+                    &mut paths,
+                    &mut 0,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+                assert!(!paths.is_empty());
+                for path in &paths {
+                    let a = path.points_mm[0];
+                    let b = path.points_mm[1];
+                    assert!(
+                        fill.relate(&Line::new([a[0], a[1]], [b[0], b[1]]))
+                            .is_covers(),
+                        "{a:?} to {b:?}"
+                    );
+                }
+                for (index, a) in paths.iter().enumerate() {
+                    for b in &paths[index + 1..] {
+                        for fixed in 0..2 {
+                            if a.points_mm[0][fixed] == a.points_mm[1][fixed]
+                                && b.points_mm[0][fixed] == b.points_mm[1][fixed]
+                                && a.points_mm[0][fixed] == b.points_mm[0][fixed]
+                            {
+                                let along = 1 - fixed;
+                                let lo = |p: &DepositionPath| {
+                                    p.points_mm[0][along].min(p.points_mm[1][along])
+                                };
+                                let hi = |p: &DepositionPath| {
+                                    p.points_mm[0][along].max(p.points_mm[1][along])
+                                };
+                                assert!(
+                                    lo(a).max(lo(b)) >= hi(a).min(hi(b)),
+                                    "duplicate collinear dose"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

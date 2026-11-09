@@ -325,7 +325,7 @@ pub(super) fn admit<'a, 'work>(
     }
     if matches!(
         input.intent.recipe.sparse_infill,
-        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
     ) && (!matches!(input.intent.recipe.supports, SupportPolicy::Disabled)
         || input
             .process_document

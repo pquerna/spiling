@@ -797,7 +797,7 @@ export type SeamPolicy = { "kind": "nearest" } | { "kind": "preferred_build_dire
 
 export type RectilinearAxisPolicy = "x" | "y" | "alternating_xy" | "alternating_yx";
 
-export type SparseInfillPolicy = { "kind": "fine" } | { "kind": "grid" } | { "kind": "web_roof", } | { "kind": "combine_eligible", max_height_mm: number, };
+export type SparseInfillPolicy = { "kind": "fine" } | { "kind": "grid" } | { "kind": "web_roof", roof_spacing_mm: number | null, } | { "kind": "combine_eligible", max_height_mm: number, };
 
 export type ProcessPolicy = { first_layer_speed_factor: number, first_layer_flow_factor: number, fan_first_layers: number, fan_after_first_layers: number, bridge_speed_factor: number, bridge_flow_factor: number, bridge_fan_pwm: number, max_bridge_span_mm: number, retraction: RetractionPolicy, };
 
@@ -897,7 +897,9 @@ export type SparseBandDisposition = { "kind": "combined" } | { "kind": "retained
 
 export type SparseBandVeto = "process_height" | "mandatory_neighborhood" | "changing_domain" | "missing_lower_anchor" | "unsupported_landing" | "flow_limit" | "interface_bond" | "nominal_dose";
 
-export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, process_diaphragms: Array<ProcessDiaphragmCoverage>, diaphragm_area_mm2: number, skin_bridge_domains: Array<SkinBridgeDomain>, };
+export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, process_diaphragms: Array<ProcessDiaphragmCoverage>, diaphragm_area_mm2: number, skin_bridge_domains: Array<SkinBridgeDomain>, web_roof_domains: Array<WebRoofDomain>, };
+
+export type WebRoofDomain = { region_index: number, extent: Array<DiaphragmPolygonMm>, };
 
 export type PrintLayer = { index: number, z_mm: number, lower_z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage,
 /**

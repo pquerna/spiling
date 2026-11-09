@@ -489,6 +489,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
         * recipe.flow_multiplier;
     let filament = volume / (std::f64::consts::PI * (recipe.filament_diameter_mm / 2.0).powi(2));
     let region_coverage = PlanarRegionCoverage {
+        web_roof_domains: Vec::new(),
         skin_bridge_domains: Vec::new(),
         process_diaphragms: Vec::new(),
         diaphragm_area_mm2: 0.0,

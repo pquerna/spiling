@@ -35,7 +35,7 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
     let infill_label = match intent.recipe.sparse_infill {
         SparseInfillPolicy::Fine => "Rectilinear",
         SparseInfillPolicy::Grid => "Grid",
-        SparseInfillPolicy::WebRoof {} => "Web + roof",
+        SparseInfillPolicy::WebRoof { .. } => "Web + roof",
         SparseInfillPolicy::CombineEligible { .. } => "Rectilinear · combined",
     };
     egui::CollapsingHeader::new(format!("Infill · {infill_label}"))
@@ -43,7 +43,7 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
         .show(ui, |ui| {
             let mut pattern = match intent.recipe.sparse_infill {
                 SparseInfillPolicy::Grid => 1,
-                SparseInfillPolicy::WebRoof {} => 2,
+                SparseInfillPolicy::WebRoof { .. } => 2,
                 _ => 0,
             };
             let original = pattern;
@@ -54,16 +54,32 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
                     ui.selectable_value(&mut pattern, 1, "Grid")
                         .on_hover_text("Two perpendicular line families in every fine interval. Single tool; supports, process regions and finishes are currently excluded.");
                     ui.selectable_value(&mut pattern, 2, "Web + roof")
-                        .on_hover_text("Continuous chamber webs with retained roof branches. Base density sets web spacing; roof branches add material. One upright rectangular part, single tool, no holes, finishes, process modifiers or breakaway supports. Strength is unqualified.");
+                        .on_hover_text("Continuous chamber webs with retained roof branches. Base density sets web spacing; roof branches add material. One upright analytic extrusion, including qualified holes and curves. Single tool; no finishes, process modifiers or breakaway supports. Strength is unqualified.");
                 });
             if pattern != original {
+                if pattern == 2 && !(0.0 < intent.recipe.infill_fraction && intent.recipe.infill_fraction < 1.0) {
+                    intent.recipe.infill_fraction = 0.16;
+                }
                 intent.recipe.sparse_infill = match pattern {
                     1 => SparseInfillPolicy::Grid,
-                    2 => SparseInfillPolicy::WebRoof {},
+                    2 => SparseInfillPolicy::web_roof(),
                     _ => SparseInfillPolicy::Fine,
                 };
             }
             if pattern == 2 {
+                let automatic_spacing = intent.recipe.automatic_web_roof_spacing_mm();
+                if let SparseInfillPolicy::WebRoof { roof_spacing_mm } = &mut intent.recipe.sparse_infill {
+                    let mut automatic = roof_spacing_mm.is_none();
+                    if ui.checkbox(&mut automatic, "Automatic roof spacing")
+                        .on_hover_text("Uses 75% of the captured bridge-span limit. A tighter override adds roof contacts and material; actual support is verified independently.")
+                        .changed() {
+                        *roof_spacing_mm = if automatic { None } else { Some(automatic_spacing) };
+                    }
+                    let mut resolved = roof_spacing_mm.unwrap_or(automatic_spacing);
+                    if ui.add_enabled_ui(!automatic, |ui| ui::number(ui, "Roof spacing (mm)", &mut resolved, 0.1)).inner.changed() {
+                        *roof_spacing_mm = Some(resolved);
+                    }
+                }
                 ui.weak("Retained branches · strength unqualified");
             }
             if pattern == 0 {
@@ -135,7 +151,7 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
                 (
                     if matches!(
                         intent.recipe.sparse_infill,
-                        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+                        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
                     ) {
                         "Solid / bottom hatch"
                     } else {

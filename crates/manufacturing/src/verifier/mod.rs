@@ -945,7 +945,7 @@ pub(crate) fn verify_actual(
                 if deposition_kind == DepositionKind::SparseFill
                     && matches!(
                         recipe.sparse_infill,
-                        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+                        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
                     )
                 {
                     fixed_axis = if from[0] == position[0] {

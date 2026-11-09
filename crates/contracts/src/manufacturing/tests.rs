@@ -1180,6 +1180,7 @@ fn inputs() -> (ProjectId, Vec<StoredDefinition>, Vec<OccurrenceRecord>) {
 }
 fn coverage() -> PlanarRegionCoverage {
     PlanarRegionCoverage {
+        web_roof_domains: Vec::new(),
         skin_bridge_domains: Vec::new(),
         process_diaphragms: Vec::new(),
         diaphragm_area_mm2: 0.0,
@@ -4571,7 +4572,7 @@ fn mixed_tool_fine_schedule_uses_primary_profile_and_every_waste_interval() {
 #[test]
 fn web_roof_requires_sparse_single_tool_object_material() {
     let mut value = intent();
-    value.recipe.sparse_infill = SparseInfillPolicy::WebRoof {};
+    value.recipe.sparse_infill = SparseInfillPolicy::web_roof();
     value.recipe.infill_fraction = 0.08;
     value.validate().unwrap();
     for fraction in [0.0, 1.0, -0.1, f64::NAN, f64::INFINITY] {
@@ -4596,10 +4597,108 @@ fn web_roof_requires_sparse_single_tool_object_material() {
         "../../../../fixtures/manufacturing/fixed-dual.intent.json"
     ))
     .unwrap();
-    dual.recipe.sparse_infill = SparseInfillPolicy::WebRoof {};
+    dual.recipe.sparse_infill = SparseInfillPolicy::web_roof();
     dual.recipe.infill_fraction = 0.08;
     assert!(dual.validate().unwrap_err().message.contains("single-tool"));
     assert!(
         serde_json::from_str::<SparseInfillPolicy>(r#"{"kind":"web_roof","unknown":1}"#).is_err()
     );
+}
+
+#[test]
+fn web_roof_explicit_spacing_obeys_captured_process_and_strict_null_auto() {
+    let mut value = intent();
+    value.recipe.infill_fraction = 0.12;
+    value.recipe.sparse_infill = SparseInfillPolicy::web_roof();
+    value.validate().unwrap();
+    assert_eq!(
+        value.recipe.web_roof_spacing_mm(),
+        value.recipe.process.max_bridge_span_mm * 0.75
+    );
+    for spacing in [
+        0.0,
+        -1.0,
+        f64::NAN,
+        f64::INFINITY,
+        value.recipe.bead_width_mm * 0.5,
+        value.recipe.process.max_bridge_span_mm,
+    ] {
+        value.recipe.sparse_infill = SparseInfillPolicy::WebRoof {
+            roof_spacing_mm: Some(spacing),
+        };
+        assert!(value.validate().is_err(), "invalid spacing {spacing}");
+    }
+    value.recipe.sparse_infill = SparseInfillPolicy::WebRoof {
+        roof_spacing_mm: Some(value.recipe.bead_width_mm),
+    };
+    value.validate().unwrap();
+    assert!(serde_json::from_str::<SparseInfillPolicy>(r#"{"kind":"web_roof"}"#).is_err());
+    assert!(
+        serde_json::from_str::<SparseInfillPolicy>(
+            r#"{"kind":"web_roof","roof_spacing_mm":null,"unknown":1}"#
+        )
+        .is_err()
+    );
+    assert_eq!(
+        serde_json::from_str::<SparseInfillPolicy>(r#"{"kind":"web_roof","roof_spacing_mm":null}"#)
+            .unwrap(),
+        SparseInfillPolicy::web_roof()
+    );
+}
+
+#[test]
+fn web_roof_domains_are_required_closed_finite_bounded_and_uniquely_owned() {
+    let domain = WebRoofDomain {
+        region_index: 0,
+        extent: vec![DiaphragmPolygonMm {
+            outer: vec![[0., 0.], [10., 0.], [10., 5.], [0., 5.], [0., 0.]],
+            holes: vec![],
+        }],
+    };
+    domain.validate().unwrap();
+    for attack in 0..5 {
+        let mut malformed = domain.clone();
+        match attack {
+            0 => malformed.extent.clear(),
+            1 => {
+                malformed.extent[0].outer.pop();
+            }
+            2 => malformed.extent[0].outer[1][0] = f64::NAN,
+            3 => malformed.extent[0]
+                .outer
+                .resize(MAX_DEPOSITION_SEGMENTS as usize + 1, [0.; 2]),
+            _ => malformed.extent[0]
+                .holes
+                .resize(MAX_PROCESS_REGIONS + 1, vec![]),
+        }
+        assert!(malformed.validate().is_err(), "attack {attack}");
+    }
+    let mut value = intent();
+    value.recipe.sparse_infill = SparseInfillPolicy::web_roof();
+    value.recipe.infill_fraction = 0.2;
+    let mut covered = coverage();
+    covered.wall_area_mm2 = 0.0;
+    covered.sparse_interior_area_mm2 = 50.0;
+    covered.intentional_void_area_mm2 = 40.0;
+    covered.process_regions = vec![ProcessRegionCoverage {
+        functional_solid_zone: None,
+        material_domain: None,
+        area_mm2: 50.0,
+        fraction: 0.2,
+        contributions: vec![],
+    }];
+    assert!(covered.validate(&value.recipe).is_err());
+    covered.web_roof_domains.push(domain.clone());
+    covered.validate(&value.recipe).unwrap();
+    covered.web_roof_domains.push(domain);
+    assert!(covered.validate(&value.recipe).is_err());
+    covered.web_roof_domains.pop();
+    covered.web_roof_domains[0].region_index = 1;
+    assert!(covered.validate(&value.recipe).is_err());
+    covered.web_roof_domains[0].region_index = 0;
+    value.recipe.sparse_infill = SparseInfillPolicy::Fine;
+    assert!(covered.validate(&value.recipe).is_err());
+    let mut encoded = serde_json::to_value(coverage()).unwrap();
+    encoded.as_object_mut().unwrap().remove("web_roof_domains");
+    assert!(serde_json::from_value::<PlanarRegionCoverage>(encoded).is_err());
 }

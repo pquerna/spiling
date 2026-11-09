@@ -294,6 +294,7 @@ impl ClassifiedRegions {
             })?,
         )?;
         let coverage = PlanarRegionCoverage {
+            web_roof_domains: Vec::new(),
             skin_bridge_domains: Vec::new(),
             process_diaphragms: Vec::new(),
             diaphragm_area_mm2: 0.0,
@@ -352,6 +353,37 @@ impl ClassifiedRegions {
             coverage,
             applied_operations: Vec::new(),
         };
+        if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. }) {
+            let encoded = result
+                .interiors
+                .iter()
+                .map(|i| encoded_domain_bytes(&i.domain))
+                .sum::<usize>();
+            admit_scratch(
+                result.retained_points().saturating_mul(2),
+                byte_sum(result.retained_bytes(), encoded)?,
+            )?;
+            for (region_index, interior) in result.interiors.iter().enumerate() {
+                if interior.coverage.fraction > 0.0 && interior.coverage.fraction < 1.0 {
+                    result.coverage.web_roof_domains.push(WebRoofDomain {
+                        region_index: region_index as u16,
+                        extent: interior
+                            .domain
+                            .0
+                            .iter()
+                            .map(|polygon| DiaphragmPolygonMm {
+                                outer: polygon.exterior().0.iter().map(|p| [p.x, p.y]).collect(),
+                                holes: polygon
+                                    .interiors()
+                                    .iter()
+                                    .map(|ring| ring.0.iter().map(|p| [p.x, p.y]).collect())
+                                    .collect(),
+                            })
+                            .collect(),
+                    });
+                }
+            }
+        }
         admit_scratch(result.retained_points(), result.retained_bytes())?;
         Ok(result)
     }
@@ -930,7 +962,7 @@ impl ClassifiedRegions {
         // interval. A single-family phase proposal cannot guide this pattern.
         if matches!(
             layer.recipe.sparse_infill,
-            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
         ) {
             return Ok(region::OrdinaryHatchPhase::Centered);
         }
@@ -1342,7 +1374,7 @@ impl ClassifiedRegions {
     ) -> Result<Vec<DepositionPath>, ManufacturingError> {
         if matches!(
             layer.recipe.sparse_infill,
-            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
         ) && self.interiors.iter().any(|interior| {
             interior.coverage.fraction > 0.0
                 && interior.coverage.fraction < 1.0
@@ -1350,7 +1382,10 @@ impl ClassifiedRegions {
         }) {
             return Err(error(
                 ManufacturingErrorCode::UnsupportedGeometry,
-                if matches!(layer.recipe.sparse_infill, SparseInfillPolicy::WebRoof {}) {
+                if matches!(
+                    layer.recipe.sparse_infill,
+                    SparseInfillPolicy::WebRoof { .. }
+                ) {
                     "web + roof requires direct lower anchors; sparse bridge recovery is not implemented"
                 } else {
                     "grid infill requires direct lower anchors; sparse bridge recovery is not implemented"
@@ -3207,7 +3242,10 @@ impl ClassifiedRegions {
                 )
             })) {
                 if kind == DepositionKind::SparseFill
-                    && matches!(layer.recipe.sparse_infill, SparseInfillPolicy::WebRoof {})
+                    && matches!(
+                        layer.recipe.sparse_infill,
+                        SparseInfillPolicy::WebRoof { .. }
+                    )
                 {
                     // Corbel endpoints are physical-height construction, not
                     // missing portions of an ordinary full-domain hatch row.

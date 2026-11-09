@@ -54,7 +54,7 @@ message SparseInfillPolicy {
 }
 message FineSparseInfill {}
 message GridSparseInfill {}
-message WebRoofSparseInfill {}
+message WebRoofSparseInfill { optional double roof_spacing_mm = 1; }
 message PreferredBuildDirectionSeam {
   // Finite normalized unit vector in build/machine XY, not source or camera XY.
   double x = 1;

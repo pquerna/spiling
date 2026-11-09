@@ -24,20 +24,22 @@ pub(super) fn verify_two_axis_sparse(
 ) -> Result<(), ManufacturingError> {
     if !matches!(
         recipe.sparse_infill,
-        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
     ) {
         return Ok(());
     }
-    if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof {}) {
+    let web_roof = matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. });
+    if web_roof {
         super::web_roof::verify(plan, recipe, work, cancel)?;
     }
     for (index, layer) in plan.layers.iter().enumerate() {
         let mut families = [0u8; MAX_PROCESS_REGIONS];
-        for path in layer
-            .paths
-            .iter()
-            .filter(|path| path.kind == DepositionKind::SparseFill)
-        {
+        for path in layer.paths.iter().filter(|path| {
+            path.kind == DepositionKind::SparseFill
+                || web_roof
+                    && path.kind == DepositionKind::Bridge
+                    && matches!(path.owner, Some(DepositionOwner::Regional { .. }))
+        }) {
             cancelled(cancel)?;
             charge(work)?;
             let Some(DepositionOwner::Regional { region_index }) = path.owner else {
@@ -77,6 +79,20 @@ pub(super) fn verify_two_axis_sparse(
             let ends = [a, b];
             let length = (b[0] - a[0]).hypot(b[1] - a[1]);
             let width = constant_width(path)?;
+            if path.kind == DepositionKind::Bridge {
+                // Role conversion is only accepted for the exact required
+                // construction road and a real direct-ended earlier gap.
+                verify_bridge_lower(
+                    plan, index, ends, width, recipe, true, work, anchors, cancel,
+                )
+                .map_err(|e| {
+                    ManufacturingError::new(
+                        e.code,
+                        format!("web + roof required road: {}", e.message),
+                    )
+                })?;
+                continue;
+            }
             for gap in anchors.gaps_edges(
                 AnchorCandidate {
                     endpoints_mm: ends,

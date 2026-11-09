@@ -30,6 +30,7 @@ G1 X2 Y6 Z2 E6 F600
 
 fn coverage() -> PlanarRegionCoverage {
     PlanarRegionCoverage {
+        web_roof_domains: Vec::new(),
         skin_bridge_domains: Vec::new(),
         process_diaphragms: Vec::new(),
         diaphragm_area_mm2: 0.0,

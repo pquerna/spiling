@@ -16,6 +16,7 @@ if (manifests.length === 0) {
     "fixtures/geometry/manifest.json",
     "fixtures/manufacturing/native/manifest.json",
     "fixtures/manufacturing/bridges/manifest.json",
+    "fixtures/manufacturing/web-roof/manifest.json",
     "fixtures/geometry/retained-sources/manifest.json",
     "fixtures/geometry/certificates/source-provenance.json",
   );

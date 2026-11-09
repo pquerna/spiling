@@ -1821,3 +1821,31 @@ fn startup_anchor_probe_keeps_original_physical_pair_after_splits() {
     cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(scope.end(&schedule, &recipe, &mut work, &cancel).is_err());
 }
+
+#[test]
+fn protected_maximum_rebalances_true_and_command_intervals_at_the_process_ceiling() {
+    let mut intent: ManufacturingIntent = serde_json::from_str(include_str!(
+        "../../../../fixtures/manufacturing/web-roof.intent.json"
+    ))
+    .unwrap();
+    intent.recipe.layer_height_mm = 0.3;
+    intent.recipe.bead_width_mm = 0.6;
+    for bed in [-20.0, 0.0, 40.0] {
+        for events in [vec![], vec![bed + 4.1, bed + 8.0]] {
+            let schedule = goal_layer_schedule(&intent, bed, bed + 12.0, &events).unwrap();
+            assert_eq!(schedule[0].lower_z, bed);
+            assert_eq!(schedule.last().unwrap().z, bed + 12.0);
+            for event in events {
+                assert!(schedule.iter().any(|layer| layer.z == event));
+            }
+            for layer in schedule {
+                assert!(intent.admits_deposition(0.6, layer.z - layer.lower_z));
+                assert!(intent.admits_deposition(
+                    0.6,
+                    project_xyz6_coordinate_mm(layer.z).unwrap()
+                        - project_xyz6_coordinate_mm(layer.lower_z).unwrap()
+                ));
+            }
+        }
+    }
+}

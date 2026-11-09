@@ -1091,7 +1091,9 @@ impl TryFrom<rpc::SparseInfillPolicy> for SparseInfillPolicy {
             match required(value.policy, "sparse infill policy selection")? {
                 Policy::Fine(_) => Self::Fine,
                 Policy::Grid(_) => Self::Grid,
-                Policy::WebRoof(_) => Self::WebRoof {},
+                Policy::WebRoof(policy) => Self::WebRoof {
+                    roof_spacing_mm: policy.roof_spacing_mm,
+                },
                 Policy::CombineEligible(policy) => Self::CombineEligible {
                     max_height_mm: policy.max_height_mm,
                 },
@@ -1109,7 +1111,9 @@ impl TryFrom<SparseInfillPolicy> for rpc::SparseInfillPolicy {
             policy: Some(match value {
                 SparseInfillPolicy::Fine => Policy::Fine(rpc::FineSparseInfill {}),
                 SparseInfillPolicy::Grid => Policy::Grid(rpc::GridSparseInfill {}),
-                SparseInfillPolicy::WebRoof {} => Policy::WebRoof(rpc::WebRoofSparseInfill {}),
+                SparseInfillPolicy::WebRoof { roof_spacing_mm } => {
+                    Policy::WebRoof(rpc::WebRoofSparseInfill { roof_spacing_mm })
+                }
                 SparseInfillPolicy::CombineEligible { max_height_mm } => {
                     Policy::CombineEligible(rpc::CombineEligibleSparseInfill { max_height_mm })
                 }
@@ -1817,12 +1821,15 @@ mod tests {
         for policy in [
             SparseInfillPolicy::Fine,
             SparseInfillPolicy::Grid,
-            SparseInfillPolicy::WebRoof {},
+            SparseInfillPolicy::web_roof(),
+            SparseInfillPolicy::WebRoof {
+                roof_spacing_mm: Some(1.5),
+            },
             SparseInfillPolicy::CombineEligible { max_height_mm: 0.3 },
         ] {
             let mut value = intent();
             value.recipe.sparse_infill = policy;
-            if matches!(policy, SparseInfillPolicy::WebRoof {}) {
+            if matches!(policy, SparseInfillPolicy::WebRoof { .. }) {
                 value.recipe.infill_fraction = 0.1;
             }
             let encoded = rpc::ManufacturingIntent::try_from(value.clone()).unwrap();

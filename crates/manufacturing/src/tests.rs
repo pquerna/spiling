@@ -3206,7 +3206,7 @@ fn native_web_roof_keeps_continuous_rooms_grows_roof_and_freshly_replays() {
     let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0)]);
     let mut requested = intent();
     requested.recipe.infill_fraction = 0.08;
-    requested.recipe.sparse_infill = SparseInfillPolicy::WebRoof {};
+    requested.recipe.sparse_infill = SparseInfillPolicy::web_roof();
     requested.recipe.layer_height_mm = 0.2;
     requested.recipe.bead_width_mm = 0.45;
     requested.recipe.perimeter_count = 2;
@@ -3312,24 +3312,173 @@ fn native_web_roof_keeps_continuous_rooms_grows_roof_and_freshly_replays() {
         serde_json::from_slice(&serde_json::to_vec(&bundle).unwrap()).unwrap();
     assert_eq!(
         decoded.provenance.intent.recipe.sparse_infill,
-        SparseInfillPolicy::WebRoof {}
+        SparseInfillPolicy::web_roof()
     );
 }
 
 #[test]
-fn native_web_roof_refuses_holes_and_multiple_parts_without_a_fill_fallback() {
+fn native_web_roof_refuses_multiple_parts_without_a_fill_fallback() {
     let mut requested = intent();
     requested.recipe.infill_fraction = 0.08;
-    requested.recipe.sparse_infill = SparseInfillPolicy::WebRoof {};
+    requested.recipe.sparse_infill = SparseInfillPolicy::web_roof();
     requested.recipe.layer_height_mm = 0.2;
     requested.recipe.bead_width_mm = 0.45;
     requested.recipe.process.max_bridge_span_mm = 2.0;
-    for scene in [
-        Scene::new(HOLE, &[pose(30.0, 40.0, 0.0)]),
-        Scene::new(BOX, &[pose(30.0, 40.0, 0.0), pose(60.0, 40.0, 0.0)]),
+    let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0), pose(60.0, 40.0, 0.0)]);
+    let error = scene.compile(&requested).unwrap_err();
+    assert_eq!(error.code, ManufacturingErrorCode::UnsupportedGeometry);
+    assert!(error.message.contains("web + roof"), "{}", error.message);
+}
+
+#[test]
+fn native_web_roof_curved_and_holed_domains_freshly_replay() {
+    for (label, source) in [("cylinder", CYLINDER), ("through-hole", HOLE)] {
+        let scene = Scene::new(source, &[pose(40.0, 40.0, 0.0)]);
+        let mut requested = intent();
+        requested.recipe.infill_fraction = 0.12;
+        requested.recipe.sparse_infill = SparseInfillPolicy::WebRoof {
+            roof_spacing_mm: Some(1.5),
+        };
+        requested.recipe.layer_height_mm = 0.2;
+        requested.recipe.bead_width_mm = 0.45;
+        requested.recipe.perimeter_count = 2;
+        requested.recipe.process.max_bridge_span_mm = 4.0;
+        let bundle = scene
+            .compile(&requested)
+            .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+        assert!(bundle.verification.verified, "{label}");
+        assert!(
+            bundle
+                .plan
+                .layers
+                .iter()
+                .any(|l| !l.region_coverage.web_roof_domains.is_empty()),
+            "{label}"
+        );
+        verify_bundle(&bundle, &AtomicBool::new(false)).unwrap();
+        let restored: ManufacturingBundle =
+            serde_json::from_slice(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+        verify_bundle(&restored, &AtomicBool::new(false)).unwrap();
+        if label == "through-hole" {
+            let index = bundle
+                .plan
+                .layers
+                .iter()
+                .position(|l| !l.region_coverage.web_roof_domains.is_empty())
+                .unwrap();
+            for attack in 0..4 {
+                let mut altered = bundle.plan.clone();
+                let layer = &mut altered.layers[index];
+                match attack {
+                    0 => {
+                        layer.region_coverage.web_roof_domains.clear();
+                    }
+                    1 => {
+                        let hole =
+                            &mut layer.region_coverage.web_roof_domains[0].extent[0].holes[0];
+                        for point in hole {
+                            point[0] += 0.25;
+                        }
+                    }
+                    2 => {
+                        let road = layer
+                            .paths
+                            .iter()
+                            .find(|p| p.kind == DepositionKind::SparseFill)
+                            .unwrap()
+                            .clone();
+                        layer.paths.push(road);
+                    }
+                    _ => {
+                        layer
+                            .paths
+                            .iter_mut()
+                            .find(|p| p.kind == DepositionKind::SparseFill)
+                            .unwrap()
+                            .kind = DepositionKind::Bridge;
+                    }
+                }
+                let error = if attack == 0 {
+                    altered.validate(&requested).unwrap_err()
+                } else {
+                    assert_reemitted_interface_refuses(altered, &requested)
+                };
+                assert!(error.message.contains("web + roof"), "{error:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn native_web_roof_retains_local_annular_roots_and_genuine_concave_web_bridges() {
+    let input = include_bytes!("../../../fixtures/manufacturing/web-roof.intent.json");
+    for (label, source, fraction) in [
+        (
+            "annulus",
+            include_bytes!("../../../fixtures/manufacturing/web-roof/annulus.step").as_slice(),
+            0.08,
+        ),
+        (
+            "concave",
+            include_bytes!("../../../fixtures/manufacturing/web-roof/u-shape.step").as_slice(),
+            0.16,
+        ),
     ] {
-        let error = scene.compile(&requested).unwrap_err();
-        assert_eq!(error.code, ManufacturingErrorCode::UnsupportedGeometry);
-        assert!(error.message.contains("web + roof"), "{}", error.message);
+        let scene = Scene::new(source, &[pose(30., 30., 0.)]);
+        let mut requested = decode_intent(input).unwrap();
+        requested.recipe.infill_fraction = fraction;
+        let bundle = scene
+            .compile(&requested)
+            .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+        assert!(
+            verify_bundle(&bundle, &AtomicBool::new(false))
+                .unwrap()
+                .verified
+        );
+        if label == "concave" {
+            let mut missing_bridge = bundle.plan.clone();
+            let layer = missing_bridge
+                .layers
+                .iter_mut()
+                .find(|l| {
+                    !l.region_coverage.web_roof_domains.is_empty()
+                        && l.paths.iter().any(|p| {
+                            p.kind == DepositionKind::Bridge
+                                && matches!(p.owner, Some(DepositionOwner::Regional { .. }))
+                        })
+                })
+                .expect("concave web has a genuine earlier-layer gap");
+            let road = layer
+                .paths
+                .iter()
+                .position(|p| {
+                    p.kind == DepositionKind::Bridge
+                        && matches!(p.owner, Some(DepositionOwner::Regional { .. }))
+                })
+                .unwrap();
+            layer.paths.remove(road);
+            assert!(
+                assert_reemitted_interface_refuses(missing_bridge, &requested)
+                    .message
+                    .contains("web + roof")
+            );
+        }
+        let mut incomplete = bundle.plan.clone();
+        let layer = incomplete
+            .layers
+            .iter_mut()
+            .find(|l| !l.region_coverage.web_roof_domains.is_empty())
+            .unwrap();
+        let road = layer
+            .paths
+            .iter()
+            .position(|p| p.kind == DepositionKind::SparseFill)
+            .unwrap();
+        layer.paths.remove(road);
+        assert!(
+            assert_reemitted_interface_refuses(incomplete, &requested)
+                .message
+                .contains("web + roof")
+        );
     }
 }

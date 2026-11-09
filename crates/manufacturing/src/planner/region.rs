@@ -828,7 +828,10 @@ pub(super) fn hatch_with_phase(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     if kind == DepositionKind::SparseFill
-        && matches!(layer.recipe.sparse_infill, SparseInfillPolicy::WebRoof {})
+        && matches!(
+            layer.recipe.sparse_infill,
+            SparseInfillPolicy::WebRoof { .. }
+        )
     {
         if common_phase.is_some() || phase != OrdinaryHatchPhase::Centered {
             return Err(unsupported("web + roof requires its fixed chamber lattice"));

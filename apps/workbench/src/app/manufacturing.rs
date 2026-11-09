@@ -926,7 +926,10 @@ pub(super) fn settings_fields(
     }
     ui::percent(
         ui,
-        if matches!(intent.recipe.sparse_infill, SparseInfillPolicy::WebRoof {}) {
+        if matches!(
+            intent.recipe.sparse_infill,
+            SparseInfillPolicy::WebRoof { .. }
+        ) {
             "Base webs (%)"
         } else {
             "Infill (%)"

@@ -37,7 +37,9 @@ pub use process::*;
 mod resolution;
 pub use resolution::*;
 mod diaphragm;
+mod web_roof;
 pub use diaphragm::*;
+pub use web_roof::*;
 mod bands;
 mod skin_fit_decode;
 
@@ -959,13 +961,27 @@ pub enum SparseInfillPolicy {
     Grid,
     /// Continuous chamber webs plus retained roof corbels. Density controls
     /// nominal web spacing; roof construction adds separately counted material.
-    WebRoof {},
+    WebRoof {
+        #[serde(deserialize_with = "required_option")]
+        roof_spacing_mm: Option<f64>,
+    },
     CombineEligible {
         max_height_mm: f64,
     },
 }
 impl SparseInfillPolicy {
+    pub fn web_roof() -> Self {
+        Self::WebRoof {
+            roof_spacing_mm: None,
+        }
+    }
     pub fn validate(&self) -> Result<(), ManufacturingError> {
+        if let Self::WebRoof {
+            roof_spacing_mm: Some(spacing),
+        } = self
+        {
+            positive(&[*spacing])?;
+        }
         if let Self::CombineEligible { max_height_mm } = self {
             positive(&[*max_height_mm])?;
         }
@@ -1000,6 +1016,19 @@ pub struct PlanarPrintRecipe {
     pub top_skin_axis: RectilinearAxisPolicy,
 }
 impl PlanarPrintRecipe {
+    /// Captured process-derived automatic roof contact spacing, or an explicit
+    /// tighter override. This does not establish actual bridge support.
+    pub fn automatic_web_roof_spacing_mm(&self) -> f64 {
+        self.process.max_bridge_span_mm * 0.75
+    }
+    pub fn web_roof_spacing_mm(&self) -> f64 {
+        match self.sparse_infill {
+            SparseInfillPolicy::WebRoof {
+                roof_spacing_mm: Some(spacing),
+            } => spacing,
+            _ => self.automatic_web_roof_spacing_mm(),
+        }
+    }
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         label(&self.id)?;
         label(&self.revision)?;
@@ -1009,6 +1038,14 @@ impl PlanarPrintRecipe {
         self.supports.validate()?;
         self.seam_policy.validate()?;
         self.sparse_infill.validate()?;
+        if matches!(self.sparse_infill, SparseInfillPolicy::WebRoof { .. })
+            && (self.web_roof_spacing_mm() < self.bead_width_mm
+                || self.web_roof_spacing_mm() > self.automatic_web_roof_spacing_mm())
+        {
+            return Err(invalid(
+                "roof spacing must fit the bead width and 75% of the captured bridge span",
+            ));
+        }
         positive(&[
             self.filament_diameter_mm,
             self.layer_height_mm,
@@ -1078,7 +1115,7 @@ impl ManufacturingIntent {
         self.printer.validate()?;
         if matches!(
             self.recipe.sparse_infill,
-            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
         ) && !matches!(self.recipe.supports, SupportPolicy::Disabled)
         {
             return Err(invalid(
@@ -1086,8 +1123,10 @@ impl ManufacturingIntent {
             ));
         }
         self.recipe.validate()?;
-        if matches!(self.recipe.sparse_infill, SparseInfillPolicy::WebRoof {})
-            && !(0.0 < self.recipe.infill_fraction && self.recipe.infill_fraction < 1.0)
+        if matches!(
+            self.recipe.sparse_infill,
+            SparseInfillPolicy::WebRoof { .. }
+        ) && !(0.0 < self.recipe.infill_fraction && self.recipe.infill_fraction < 1.0)
         {
             return Err(invalid(
                 "web + roof requires a base web fraction strictly between zero and one",
@@ -1105,7 +1144,7 @@ impl ManufacturingIntent {
         if let JobWorkflow::FixedDualMarlin { job } = &p.workflow {
             if matches!(
                 r.sparse_infill,
-                SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+                SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
             ) {
                 return Err(invalid(
                     "two-axis infill currently requires a single-tool workflow",
@@ -2103,9 +2142,47 @@ pub struct PlanarRegionCoverage {
     pub diaphragm_area_mm2: f64,
     #[serde(deserialize_with = "diaphragm::skin_bridge_domains")]
     pub skin_bridge_domains: Vec<SkinBridgeDomain>,
+    #[serde(deserialize_with = "web_roof::domains")]
+    pub web_roof_domains: Vec<WebRoofDomain>,
 }
 impl PlanarRegionCoverage {
     pub fn validate(&self, recipe: &PlanarPrintRecipe) -> Result<(), ManufacturingError> {
+        if self.web_roof_domains.len() > MAX_PROCESS_REGIONS
+            || (!matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. })
+                && !self.web_roof_domains.is_empty())
+        {
+            return Err(invalid("web + roof classified domain ownership is invalid"));
+        }
+        for (index, domain) in self.web_roof_domains.iter().enumerate() {
+            domain.validate()?;
+            if usize::from(domain.region_index) >= self.process_regions.len()
+                || self.web_roof_domains[..index]
+                    .iter()
+                    .any(|other| other.region_index == domain.region_index)
+                || self
+                    .process_regions
+                    .get(usize::from(domain.region_index))
+                    .is_none_or(|r| r.fraction <= 0.0 || r.fraction >= 1.0 || r.area_mm2 <= 0.0)
+            {
+                return Err(invalid(
+                    "web + roof classified domain has missing or repeated owner",
+                ));
+            }
+        }
+        if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. }) {
+            for (index, region) in self.process_regions.iter().enumerate() {
+                if region.fraction > 0.0
+                    && region.fraction < 1.0
+                    && region.area_mm2 > 0.0
+                    && !self
+                        .web_roof_domains
+                        .iter()
+                        .any(|d| usize::from(d.region_index) == index)
+                {
+                    return Err(invalid("web + roof lacks a classified sparse domain"));
+                }
+            }
+        }
         if self.skin_bridge_domains.len() > MAX_PROCESS_REGIONS {
             return Err(resource("mixed skin bridge domain limit exceeded"));
         }
@@ -2567,6 +2644,25 @@ impl NormalizedPrintPlan {
         let intent = execution.as_ref();
         if self.schema_version != MANUFACTURING_SCHEMA_VERSION {
             return Err(invalid("unsupported plan schema"));
+        }
+        let mut web_domain_bytes = 0usize;
+        for layer in &self.layers {
+            web_domain_bytes = web_domain_bytes
+                .checked_add(
+                    layer.region_coverage.web_roof_domains.capacity()
+                        * std::mem::size_of::<WebRoofDomain>(),
+                )
+                .ok_or_else(|| resource("web + roof retained domain overflow"))?;
+            for domain in &layer.region_coverage.web_roof_domains {
+                web_domain_bytes = web_domain_bytes
+                    .checked_add(domain.allocated_bytes())
+                    .ok_or_else(|| resource("web + roof retained domain overflow"))?;
+            }
+            if web_domain_bytes > MAX_MANUFACTURING_BUNDLE_BYTES as usize {
+                return Err(resource(
+                    "web + roof retained domains exceed the bundle allowance",
+                ));
+            }
         }
         self.native_geometry.validate()?;
         construction::validate_material_domains(self, intent)?;
@@ -3293,7 +3389,7 @@ impl NormalizedPrintPlan {
                 if path.kind == DepositionKind::SparseFill
                     && matches!(
                         intent.recipe.sparse_infill,
-                        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+                        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
                     )
                 {
                     if path.points_mm.len() != 2
@@ -3430,7 +3526,7 @@ impl ManufacturingProvenance {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         if matches!(
             self.intent.recipe.sparse_infill,
-            SparseInfillPolicy::WebRoof {}
+            SparseInfillPolicy::WebRoof { .. }
         ) && self.occurrences.len() != 1
         {
             return Err(invalid(
@@ -3439,7 +3535,7 @@ impl ManufacturingProvenance {
         }
         if matches!(
             self.intent.recipe.sparse_infill,
-            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
         ) && (self
             .process_document
             .layers

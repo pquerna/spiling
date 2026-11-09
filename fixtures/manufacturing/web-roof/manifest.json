@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "exporter": {
+    "bindings": "cadquery-ocp",
+    "version": "7.9.3.1",
+    "schema": "AP214IS",
+    "unit": "millimetre"
+  },
+  "generator": "tools/infill-lab/web_roof_campaign.py --output NEW --generate-only; fixed 2026-01-01 STEP header",
+  "dimensions": {
+    "annulus": {
+      "outer_radius_mm": 12,
+      "inner_radius_mm": 5,
+      "height_mm": 12
+    },
+    "u-shape": {
+      "outer_xy_mm": [
+        28,
+        28
+      ],
+      "inner_slot_mm": [
+        [
+          10,
+          10
+        ],
+        [
+          18,
+          28
+        ]
+      ],
+      "height_mm": 12
+    }
+  },
+  "fixtures": [
+    {
+      "path": "annulus.step",
+      "byte_count": 9235,
+      "sha256": "30fd0df61363058a8489af49e38ac9ad6b4e5fa099312d8ed2d699702cbca3c3"
+    },
+    {
+      "path": "u-shape.step",
+      "byte_count": 29016,
+      "sha256": "09aa6181186d02aa66b80fc33545e11d2bed151205544851a6846a053f494a65"
+    }
+  ]
+}

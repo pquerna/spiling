@@ -4310,7 +4310,8 @@ mod actual_deposition_tests {
                 lower_z_mm: lower,
                 height_mm: height,
                 section_z_mm: lower + height * 0.5,
-                region_coverage: PlanarRegionCoverage { skin_bridge_domains: Vec::new(), process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: object_area,
+                region_coverage: PlanarRegionCoverage {
+            web_roof_domains: Vec::new(), skin_bridge_domains: Vec::new(), process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: object_area,
                 source_section_area_mm2: object_area,
                 surface_added_area_mm2: 0.0,
                 separator_area_mm2: 0.0,

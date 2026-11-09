@@ -38,7 +38,7 @@ pub struct ProcessDiaphragmCoverage {
     #[serde(deserialize_with = "diaphragm_extent")]
     pub extent: Vec<DiaphragmPolygonMm>,
 }
-fn diaphragm_extent<'de, D: serde::Deserializer<'de>>(
+pub(super) fn diaphragm_extent<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Vec<DiaphragmPolygonMm>, D::Error> {
     bounded_vec::<D, _, MAX_PROCESS_REGIONS>(d)

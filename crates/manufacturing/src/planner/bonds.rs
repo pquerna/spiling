@@ -65,6 +65,12 @@ pub(super) fn skin_command_fit_points(domains: &Vec<SkinCommandFitDomain>) -> us
 
 pub(super) fn coverage_bytes(coverage: &PlanarRegionCoverage) -> usize {
     interface_bytes(&coverage.process_interfaces)
+        + coverage.web_roof_domains.capacity() * std::mem::size_of::<WebRoofDomain>()
+        + coverage
+            .web_roof_domains
+            .iter()
+            .map(WebRoofDomain::allocated_bytes)
+            .sum::<usize>()
         + coverage.process_diaphragms.capacity() * std::mem::size_of::<ProcessDiaphragmCoverage>()
         + coverage
             .process_diaphragms
