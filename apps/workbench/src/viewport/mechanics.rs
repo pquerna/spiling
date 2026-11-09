@@ -8,6 +8,8 @@ use spiling_contracts::analysis::AnalysisCase;
 
 #[derive(Clone)]
 pub struct Input {
+    pub editing: Option<FaceId>,
+    pub contacts: Vec<Arc<spiling_contracts::analysis::load::AnalysisFacePreparation>>,
     pub capture: Option<Arc<MechanicsCapture>>,
     pub case: AnalysisCase,
     pub selected: Option<FaceId>,
@@ -148,10 +150,50 @@ impl Input {
                     .map(|restraint| (&restraint.face_id, None)),
             );
         for (index, (face, load)) in patches.enumerate() {
+            if load.is_some() && self.editing.as_ref() == Some(face) {
+                continue;
+            }
             let Some((target, edges)) = &annotations.patches[index] else {
                 continue;
             };
-            let Some(point) = project(target.center()) else {
+            let mut load_center = target.center();
+            let disk = load.is_some_and(|load| {
+                matches!(
+                    load.footprint,
+                    spiling_contracts::analysis::load::ForceFootprint::Disk { .. }
+                )
+            });
+            if let Some(load) = load
+                && disk
+            {
+                if let Some(face) = self
+                    .contacts
+                    .iter()
+                    .find(|prepared| &prepared.reference.face_id == face)
+                    && let Ok((_, center)) = face.contact(&load.footprint)
+                {
+                    load_center = rotation * DVec3::from_array(center)
+                        + DVec3::from_array(occurrence.pose.translation_mm);
+                } else if let Some(capture) = &self.capture
+                    && capture.summary.case.case == self.case
+                    && let Some((center, samples)) = capture.display.contacts.get(index)
+                {
+                    load_center =
+                        rotation * *center + DVec3::from_array(occurrence.pose.translation_mm);
+                    for sample in samples {
+                        if let Some(position) = project(
+                            rotation * *sample + DVec3::from_array(occurrence.pose.translation_mm),
+                        ) {
+                            painter.circle_filled(
+                                position,
+                                1.2,
+                                ui.visuals().selection.stroke.color,
+                            );
+                        }
+                    }
+                }
+            }
+            let Some(point) = project(load_center) else {
                 continue;
             };
             let color = match (load.is_some(), ui.visuals().dark_mode) {
@@ -160,7 +202,7 @@ impl Input {
                 (true, false) => egui::Color32::from_rgb(153, 74, 0),
                 (false, false) => egui::Color32::from_rgb(0, 107, 78),
             };
-            for [start, end] in edges {
+            for [start, end] in edges.iter().filter(|_| !disk) {
                 if let (Some(start), Some(end)) = (project(*start), project(*end)) {
                     painter.line_segment([start, end], egui::Stroke::new(2.0, color));
                 }
@@ -173,7 +215,7 @@ impl Input {
                 .length()
                 .max(5.0);
                 if let Some(direction) = force.try_normalize()
-                    && let Some(tail) = project(target.center() - rotation * direction * size * 0.8)
+                    && let Some(tail) = project(load_center - rotation * direction * size * 0.8)
                 {
                     painter.arrow(tail, point - tail, egui::Stroke::new(3.0, color));
                 }

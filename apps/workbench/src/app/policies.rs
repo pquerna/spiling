@@ -68,7 +68,7 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
             }
             if pattern == 2 {
                 let automatic_spacing = intent.recipe.automatic_web_roof_spacing_mm();
-                if let SparseInfillPolicy::WebRoof { roof_spacing_mm } = &mut intent.recipe.sparse_infill {
+                if let SparseInfillPolicy::WebRoof { roof_spacing_mm, .. } = &mut intent.recipe.sparse_infill {
                     let mut automatic = roof_spacing_mm.is_none();
                     if ui.checkbox(&mut automatic, "Automatic roof spacing")
                         .on_hover_text("Uses 75% of the captured bridge-span limit. A tighter override adds roof contacts and material; actual support is verified independently.")

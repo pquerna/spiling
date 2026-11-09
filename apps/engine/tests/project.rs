@@ -19,6 +19,261 @@ use support::{copy_project, manifest, write_manifest};
 const ENGINE: &str = env!("CARGO_BIN_EXE_spiling-engine");
 
 #[test]
+fn force_tool_native_disk_changes_rhs_and_survives_portable_source_absent_return() {
+    std::thread::Builder::new()
+        .name("native-force-tool".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(Box::pin(force_tool_check()));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+async fn force_tool_check() {
+    use spiling_contracts::analysis::{
+        fields::AnalysisFields, load::ForceFootprint, mechanics::*, *,
+    };
+    let workspace = Workspace::new();
+    let source = workspace.source("analysis-hook.step");
+    let path = workspace.path("contact.spil");
+    let mut client = EngineClient::spawn(ENGINE).await.unwrap();
+    let scene = import(&mut client, &source, RigidPoseMm::IDENTITY).await;
+    let (definitions, occurrences) = records(&mut client).await;
+    let native = spiling_geometry::from_step_file(&source).unwrap();
+    let prism = spiling_analysis::native::capture(
+        &native,
+        occurrences[0].occurrence_id,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    let edge_at = |axis: usize, value: f64| {
+        prism
+            .edges()
+            .iter()
+            .find(|edge| {
+                edge.ends
+                    .iter()
+                    .all(|point| (point[axis] - value).abs() < 1e-7)
+            })
+            .unwrap()
+            .face
+            .clone()
+    };
+    let reference = FaceRef {
+        session_id: scene.session_id.clone(),
+        scene_revision: scene.revision,
+        occurrence_id: occurrences[0].occurrence_id,
+        definition_id: definitions[0].definition_id.clone(),
+        face_id: edge_at(1, 24.0),
+    };
+    let before = info(&mut client).await;
+    let ProjectResponse::OperationAccepted { operation } = client
+        .project(ProjectCommand::PrepareAnalysisFace {
+            session_id: scene.session_id.clone(),
+            base_revision: before.revision,
+            reference: reference.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("native preparation operation expected");
+    };
+    let prepared_job = wait_job(&mut client, operation.name).await;
+    assert_eq!(
+        prepared_job.status,
+        JobStatus::Completed,
+        "{prepared_job:?}"
+    );
+    let Some(JobResult::AnalysisFacePrepared { preparation }) = prepared_job.result else {
+        panic!("prepared contact expected");
+    };
+    assert_eq!(info(&mut client).await.revision, before.revision);
+    assert!((preparation.area_mm2 - 48.0).abs() < 1e-9);
+    assert!(
+        preparation
+            .centroid_mm
+            .into_iter()
+            .zip([36.0, 24.0, 3.0])
+            .all(|(actual, expected)| (actual - expected).abs() < 1e-9)
+    );
+    let mut case = AnalysisCase {
+        id: Default::default(),
+        name: "contact-tool".into(),
+        layout_id: before.layout_id,
+        occurrence_id: reference.occurrence_id,
+        definition_id: reference.definition_id.clone(),
+        source_hash: preparation.source_hash.clone(),
+        mode: AnalysisMode::Basic,
+        loads: vec![
+            preparation
+                .load_on(
+                    ForceFootprint::Disk {
+                        center_mm: preparation.centroid_mm,
+                        diameter_mm: 2.0,
+                    },
+                    [0.0, -10.0, 0.0],
+                    [0.0; 3],
+                )
+                .unwrap(),
+        ],
+        restraints: vec![AnalysisFaceRestraint {
+            face_id: edge_at(0, 0.0),
+            fixed_translation: [true; 3],
+        }],
+    };
+    let settings: AnalysisRunSettings = serde_json::from_slice(include_bytes!(
+        "../../../fixtures/analysis/hook-assumptions.json"
+    ))
+    .unwrap();
+    let mut operator = None;
+    let mut prior_rhs = None;
+    let mut last = None;
+    for (index, (diameter, center_mm)) in [
+        (2.0, preparation.centroid_mm),
+        (8.0, preparation.centroid_mm),
+        (2.0, preparation.origin_mm),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        case.loads[0] = preparation
+            .load_on(
+                ForceFootprint::Disk {
+                    center_mm,
+                    diameter_mm: diameter,
+                },
+                [0.0, -10.0, 0.0],
+                [0.0; 3],
+            )
+            .unwrap();
+        let base = info(&mut client).await.revision;
+        client
+            .project(ProjectCommand::EditAnalysis {
+                session_id: scene.session_id.clone(),
+                base_revision: base,
+                edit: AnalysisEdit::Put { case: case.clone() },
+            })
+            .await
+            .unwrap();
+        let base = info(&mut client).await.revision;
+        let ProjectResponse::OperationAccepted { operation } = client
+            .project(ProjectCommand::RunAnalysis {
+                session_id: scene.session_id.clone(),
+                base_revision: base,
+                case_id: case.id.clone(),
+                settings: std::sync::Arc::new(settings.clone()),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("run operation expected");
+        };
+        let result = wait_job(&mut client, operation.name).await;
+        assert_eq!(result.status, JobStatus::Completed, "{result:?}");
+        let Some(JobResult::AnalysisCompleted {
+            resource,
+            input_hash,
+            captured_revision,
+            ..
+        }) = result.result
+        else {
+            panic!("fields expected");
+        };
+        let bytes = client
+            .fetch_analysis_fields(&input_hash, captured_revision, &resource)
+            .await
+            .unwrap();
+        let fields = AnalysisFields::decode(&bytes).unwrap();
+        assert_eq!(fields.summary.costs.operator_reused, index > 0);
+        if let Some(hash) = &operator {
+            assert_eq!(hash, &fields.summary.operator_hash);
+        }
+        operator = Some(fields.summary.operator_hash.clone());
+        let area: f64 = (0..fields.patch_count)
+            .map(|index| fields.patch(index).unwrap().area_mm2)
+            .sum();
+        assert!((area - preparation.contact(&case.loads[0].footprint).unwrap().0).abs() < 1e-8);
+        let rhs = (0..fields.node_count)
+            .map(|index| fields.node(index).unwrap().applied_force_n)
+            .collect::<Vec<_>>();
+        if let Some(prior) = &prior_rhs {
+            assert_ne!(prior, &rhs);
+        }
+        prior_rhs = Some(rhs);
+        assert!(fields.summary.assessment.patch_force_error_n < 1e-9);
+        assert!(fields.summary.assessment.patch_moment_error_n_mm < 1e-8);
+        last = Some((input_hash, bytes));
+    }
+    let base = info(&mut client).await.revision;
+    let mut invalid = case.clone();
+    invalid.loads[0].footprint = ForceFootprint::Disk {
+        center_mm: [36.0, 23.0, 3.0],
+        diameter_mm: 2.0,
+    };
+    assert!(
+        client
+            .project(ProjectCommand::EditAnalysis {
+                session_id: scene.session_id.clone(),
+                base_revision: base,
+                edit: AnalysisEdit::Put { case: invalid }
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(info(&mut client).await.revision, base);
+    let (input_hash, bytes) = last.unwrap();
+    client
+        .project(ProjectCommand::AttachAnalysisResult {
+            session_id: scene.session_id.clone(),
+            base_revision: base,
+            input_hash,
+        })
+        .await
+        .unwrap();
+    save(&mut client, Some(&path)).await;
+    client.shutdown().await.unwrap();
+    client.wait_exit().await.unwrap();
+    std::fs::remove_file(source).unwrap();
+    let copy = workspace.path("contact-copy.spil");
+    std::fs::copy(&path, &copy).unwrap();
+    let mut fresh = EngineClient::spawn(ENGINE).await.unwrap();
+    open(&mut fresh, &copy, false, false, true).await;
+    let saved = info(&mut fresh).await;
+    assert_eq!(saved.analysis.cases[0].case.loads, case.loads);
+    let ProjectResponse::OperationAccepted { operation } = fresh
+        .project(ProjectCommand::GetAnalysisResult {
+            session_id: fresh.hello().session_id.clone(),
+            base_revision: saved.revision,
+            case_id: case.id,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("saved return expected");
+    };
+    let result = wait_job(&mut fresh, operation.name).await;
+    assert_eq!(result.status, JobStatus::Completed, "{result:?}");
+    let Some(JobResult::AnalysisResultPrepared {
+        record, resource, ..
+    }) = result.result
+    else {
+        panic!("retained fields expected");
+    };
+    let returned = fresh
+        .fetch_analysis_fields(&record.input_hash, record.captured_revision, &resource)
+        .await
+        .unwrap();
+    assert_eq!(returned, bytes);
+    fresh.shutdown().await.unwrap();
+    fresh.wait_exit().await.unwrap();
+}
+
+#[test]
 fn whole_hook_native_closed_slab_admission() {
     let source = spiling_geometry::from_step_file(fixture("analysis-hook.step")).unwrap();
     let model = spiling_analysis::native::capture(
@@ -58,6 +313,7 @@ fn whole_hook_native_closed_slab_admission() {
         source_hash: source.provenance().source_hash.clone(),
         mode: spiling_contracts::analysis::AnalysisMode::Basic,
         loads: vec![spiling_contracts::analysis::AnalysisFaceLoad {
+            footprint: spiling_contracts::analysis::load::ForceFootprint::WholeFace {},
             face_id: edge_at(1, 24.0),
             force_n: [0.0, -10.0, 0.0],
             moment_n_mm: [30.0, 0.0, -360.0],
@@ -167,6 +423,7 @@ async fn whole_hook_service_check() {
         source_hash: definitions[0].provenance.source_hash.clone(),
         mode: AnalysisMode::Basic,
         loads: vec![AnalysisFaceLoad {
+            footprint: spiling_contracts::analysis::load::ForceFootprint::WholeFace {},
             face_id: edge_at(1, 24.0),
             force_n: [0.0, -10.0, 0.0],
             moment_n_mm: [30.0, 0.0, -360.0],
@@ -868,6 +1125,7 @@ async fn analysis_cases_check_native_patches_and_survive_history_source_absent_r
         source_hash: definitions[0].provenance.source_hash.clone(),
         mode: AnalysisMode::Basic,
         loads: vec![AnalysisFaceLoad {
+            footprint: spiling_contracts::analysis::load::ForceFootprint::WholeFace {},
             face_id: native_faces[0].face_id.clone(),
             force_n: [0.0, -12.0, 0.0],
             moment_n_mm: [15.0, 0.0, 0.0],

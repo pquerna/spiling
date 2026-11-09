@@ -12,6 +12,7 @@ pub(super) enum Action {
     Run(String, Arc<mechanics::AnalysisRunSettings>),
     Case(String, OccurrenceId, AnalysisMode),
     Load(String, AnalysisFaceLoad),
+    Contact(String, FaceId, [f64; 3], f64, [f64; 3]),
     Fix(String, FaceId),
     Edit(AnalysisEdit),
 }
@@ -21,6 +22,29 @@ pub(super) fn parse(
     args: &mut impl Iterator<Item = OsString>,
 ) -> Result<Action, Error> {
     Ok(match flag {
+        "--analysis-contact" => {
+            let name = text(args, "analysis case name")?;
+            let face = FaceId::parse(text(args, "native contact face")?)?;
+            let mut values = [0.0_f64; 7];
+            for value in &mut values {
+                *value = text(args, "source center XYZ mm, diameter mm, force XYZ N")?.parse()?;
+                if !value.is_finite() {
+                    return Err("contact values must be finite".into());
+                }
+            }
+            load::ForceFootprint::Disk {
+                center_mm: [values[0], values[1], values[2]],
+                diameter_mm: values[3],
+            }
+            .validate()?;
+            Action::Contact(
+                name,
+                face,
+                [values[0], values[1], values[2]],
+                values[3],
+                [values[4], values[5], values[6]],
+            )
+        }
         "--analysis-saved" => Action::Saved(text(args, "saved analysis case name")?),
         "--analysis-attach" => {
             Action::Attach(SourceHash::parse(text(args, "analysis input hash")?)?)
@@ -65,6 +89,7 @@ pub(super) fn parse(
                 name,
                 AnalysisFaceLoad {
                     face_id,
+                    footprint: spiling_contracts::analysis::load::ForceFootprint::WholeFace {},
                     force_n: [components[0], components[1], components[2]],
                     moment_n_mm: [components[3], components[4], components[5]],
                 },
@@ -93,6 +118,58 @@ pub(super) async fn execute(
     action: Action,
 ) -> Result<Option<serde_json::Value>, Error> {
     let captured = info(client).await?;
+    let action = if let Action::Contact(name, face_id, center_mm, diameter_mm, force_n) = action {
+        let case = &captured
+            .analysis
+            .cases
+            .iter()
+            .find(|record| record.case.layout_id == captured.layout_id && record.case.name == name)
+            .ok_or("analysis case is absent from selected plate")?
+            .case;
+        let GeometryResponse::Scene { summary } = client
+            .geometry(GeometryCommand::GetScene {
+                session_id: session.clone(),
+            })
+            .await?
+        else {
+            return Err("native scene expected".into());
+        };
+        let reference = FaceRef {
+            session_id: session.clone(),
+            scene_revision: summary.revision,
+            occurrence_id: case.occurrence_id,
+            definition_id: case.definition_id.clone(),
+            face_id,
+        };
+        let ProjectResponse::OperationAccepted { operation } = client
+            .project(ProjectCommand::PrepareAnalysisFace {
+                session_id: session.clone(),
+                base_revision: captured.revision,
+                reference,
+            })
+            .await?
+        else {
+            return Err("native contact preparation expected".into());
+        };
+        let JobResult::AnalysisFacePrepared { preparation } =
+            geometry::wait_operation(client, session, operation).await?
+        else {
+            return Err("native prepared contact expected".into());
+        };
+        Action::Load(
+            name,
+            preparation.load_on(
+                load::ForceFootprint::Disk {
+                    center_mm,
+                    diameter_mm,
+                },
+                force_n,
+                [0.0; 3],
+            )?,
+        )
+    } else {
+        action
+    };
     if let Action::Attach(input_hash) = action {
         let response = client
             .project(ProjectCommand::AttachAnalysisResult {

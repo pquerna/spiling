@@ -49,6 +49,55 @@ fn beam() -> native::NativePrism {
         native_sample_hash: [0; 32],
     }
 }
+
+#[test]
+fn finite_disk_changes_loaded_area_not_total_force_and_reuses_original_operator() {
+    use spiling_contracts::analysis::load::ForceFootprint;
+    let settings = settings();
+    let mut case = case();
+    let cancel = AtomicBool::new(false);
+    let budget = Budget::new(&cancel, 60);
+    let operator = prepare(&beam(), &settings, RigidPoseMm::IDENTITY, &case, &budget).unwrap();
+    case.loads[0].force_n = [0.0, -10.0, 0.0];
+    case.loads[0].moment_n_mm = [10.0, 0.0, -200.0];
+    let mut prior_loads = None;
+    for diameter in [0.4, 1.5, 10.0] {
+        case.loads[0].footprint = ForceFootprint::Disk {
+            center_mm: [20.0, 2.0, 1.0],
+            diameter_mm: diameter,
+        };
+        let result = solve(&operator, &case, &settings, &budget).unwrap();
+        let area: f64 = result.patches.iter().map(|sample| sample.area_mm2).sum();
+        if diameter < 2.0 {
+            assert!(
+                (area / (std::f64::consts::PI * diameter * diameter * 0.25) - 1.0).abs() < 1e-10
+            );
+        } else {
+            assert!((area - 8.0).abs() < 1e-10);
+        }
+        for sample in &result.patches {
+            assert!((sample.point_mm[0] - 20.0).abs() < 1e-10);
+            assert!((sample.point_mm[1] - 2.0).hypot(sample.point_mm[2] - 1.0) <= diameter * 0.5);
+            assert!((sample.traction_mpa[1] + 10.0 / area).abs() < 1e-8);
+        }
+        assert!(result.assessment.patch_force_error_n < 1e-10);
+        assert!(result.assessment.patch_moment_error_n_mm < 1e-8);
+        if let Some(prior) = &prior_loads {
+            assert_ne!(prior, &result.applied_force_n);
+        }
+        prior_loads = Some(result.applied_force_n);
+    }
+    case.loads[0].footprint = ForceFootprint::Disk {
+        center_mm: [19.0, 2.0, 1.0],
+        diameter_mm: 1.0,
+    };
+    assert!(
+        solve(&operator, &case, &settings, &budget)
+            .err()
+            .unwrap()
+            .contains("contact center")
+    );
+}
 fn case() -> AnalysisCase {
     AnalysisCase {
         id: AnalysisCaseId::new(),
@@ -59,6 +108,7 @@ fn case() -> AnalysisCase {
         source_hash: SourceHash::from_digest(&[1; 32]),
         mode: AnalysisMode::Basic,
         loads: vec![AnalysisFaceLoad {
+            footprint: spiling_contracts::analysis::load::ForceFootprint::WholeFace {},
             face_id: FaceId::from_step_entity(2).unwrap(),
             force_n: [0.0; 3],
             moment_n_mm: [0.0, 0.0, 10.0],
@@ -227,6 +277,7 @@ fn solved_pure_bending_and_source_origin_wrench() {
         assert!((moment[axis] - case.loads[0].moment_n_mm[axis]).abs() < 1e-9);
     }
     case.loads.push(AnalysisFaceLoad {
+        footprint: spiling_contracts::analysis::load::ForceFootprint::WholeFace {},
         face_id: FaceId::from_step_entity(3).unwrap(),
         force_n: case.loads[0].force_n.map(|value| -value),
         moment_n_mm: case.loads[0].moment_n_mm.map(|value| -value),

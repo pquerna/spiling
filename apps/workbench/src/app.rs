@@ -436,7 +436,9 @@ impl Workbench {
             && !ctx.text_edit_focused()
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
-            if self.mechanics.evidence_open {
+            if self.cancel_force_tool() {
+                ctx.request_repaint();
+            } else if self.mechanics.evidence_open {
                 self.mechanics.evidence_open = false;
             } else if self.show_gallery {
                 self.show_gallery = false;
@@ -1062,6 +1064,7 @@ impl eframe::App for Workbench {
                     }
                     let mut picked = None;
                     let mechanics = self.mechanics_view();
+                    let mut force_canvas = self.force_canvas();
                     let inspection = self
                         .interface_overlay(self.state.display.clone().as_ref(), review.as_ref());
                     ui.horizontal_top(|ui| {
@@ -1077,6 +1080,7 @@ impl eframe::App for Workbench {
                                 picked = self.viewport.show(
                                     ui,
                                     crate::viewport::Input {
+                                        force: force_canvas.as_mut(),
                                         mechanics: mechanics.clone(),
                                         inspection: inspection.clone(),
                                         project_id: self
@@ -1143,7 +1147,11 @@ impl eframe::App for Workbench {
                         self.analysis.view.offset_mm = analysis.offset_mm;
                     }
                     if let Some(reference) = picked {
+                        self.select_force_face(&reference);
                         self.select_face(reference);
+                    }
+                    if let Some(event) = force_canvas.and_then(|canvas| canvas.event) {
+                        self.force_event(event);
                     }
                 });
         }

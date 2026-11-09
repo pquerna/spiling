@@ -6,6 +6,101 @@ use super::{request_id, session_parent};
 use crate::analysis::mechanics::*;
 use crate::{analysis::*, geometry::*, project::*, rpc};
 
+impl TryFrom<rpc::ForceFootprint> for load::ForceFootprint {
+    type Error = String;
+    fn try_from(value: rpc::ForceFootprint) -> Result<Self, String> {
+        let footprint = match required(value.kind, "force footprint kind")? {
+            rpc::force_footprint::Kind::WholeFace(true) => Self::WholeFace {},
+            rpc::force_footprint::Kind::Disk(disk) => Self::Disk {
+                center_mm: required(disk.center_mm, "contact center")?.try_into()?,
+                diameter_mm: disk.diameter_mm,
+            },
+            _ => return Err("whole-face selector must be explicit true".into()),
+        };
+        footprint.validate().map_err(|error| error.to_string())?;
+        Ok(footprint)
+    }
+}
+impl TryFrom<load::ForceFootprint> for rpc::ForceFootprint {
+    type Error = String;
+    fn try_from(value: load::ForceFootprint) -> Result<Self, String> {
+        value.validate().map_err(|error| error.to_string())?;
+        Ok(Self {
+            kind: Some(match value {
+                load::ForceFootprint::WholeFace {} => rpc::force_footprint::Kind::WholeFace(true),
+                load::ForceFootprint::Disk {
+                    center_mm,
+                    diameter_mm,
+                } => rpc::force_footprint::Kind::Disk(rpc::ForceDisk {
+                    center_mm: Some(center_mm.try_into()?),
+                    diameter_mm,
+                }),
+            }),
+        })
+    }
+}
+
+impl TryFrom<rpc::PrepareAnalysisFaceRequest> for ProjectCommand {
+    type Error = String;
+    fn try_from(value: rpc::PrepareAnalysisFaceRequest) -> Result<Self, String> {
+        super::request_id(&value.request_id)?;
+        let session_id = super::session_parent(&value.parent)?;
+        let reference: crate::geometry::FaceRef =
+            required(value.reference, "analysis face reference")?.try_into()?;
+        if session_id != reference.session_id {
+            return Err("analysis face session mismatch".into());
+        }
+        Ok(Self::PrepareAnalysisFace {
+            session_id,
+            base_revision: ProjectRevision(value.base_revision),
+            reference,
+        })
+    }
+}
+
+impl TryFrom<rpc::AnalysisFacePreparation> for crate::analysis::load::AnalysisFacePreparation {
+    type Error = String;
+    fn try_from(value: rpc::AnalysisFacePreparation) -> Result<Self, String> {
+        let prepared = Self {
+            project_id: ProjectId::parse(value.project_id).map_err(|error| error.to_string())?,
+            project_revision: ProjectRevision(value.project_revision),
+            reference: required(value.reference, "prepared analysis face")?.try_into()?,
+            source_hash: SourceHash::parse(value.source_hash).map_err(|error| error.to_string())?,
+            pose: required(value.pose, "prepared face pose")?.try_into()?,
+            area_mm2: value.area_mm2,
+            centroid_mm: required(value.centroid_mm, "native face centroid")?.try_into()?,
+            outward_normal: required(value.outward_normal, "native face normal")?.try_into()?,
+            origin_mm: required(value.origin_mm, "native face origin")?.try_into()?,
+            horizontal_direction: required(value.horizontal_direction, "native face horizontal")?
+                .try_into()?,
+            width_mm: value.width_mm,
+            height_mm: value.height_mm,
+        };
+        prepared.validate().map_err(|error| error.to_string())?;
+        Ok(prepared)
+    }
+}
+impl TryFrom<crate::analysis::load::AnalysisFacePreparation> for rpc::AnalysisFacePreparation {
+    type Error = String;
+    fn try_from(value: crate::analysis::load::AnalysisFacePreparation) -> Result<Self, String> {
+        value.validate().map_err(|error| error.to_string())?;
+        Ok(Self {
+            project_id: value.project_id.as_str().into(),
+            project_revision: value.project_revision.0,
+            reference: Some(value.reference.try_into()?),
+            source_hash: value.source_hash.as_str().into(),
+            pose: Some(value.pose.try_into()?),
+            area_mm2: value.area_mm2,
+            centroid_mm: Some(value.centroid_mm.try_into()?),
+            outward_normal: Some(value.outward_normal.try_into()?),
+            origin_mm: Some(value.origin_mm.try_into()?),
+            horizontal_direction: Some(value.horizontal_direction.try_into()?),
+            width_mm: value.width_mm,
+            height_mm: value.height_mm,
+        })
+    }
+}
+
 impl TryFrom<rpc::GetAnalysisResultRequest> for ProjectCommand {
     type Error = String;
     fn try_from(value: rpc::GetAnalysisResultRequest) -> Result<Self, String> {
@@ -140,6 +235,7 @@ impl TryFrom<rpc::AnalysisCase> for AnalysisCase {
                 .map(|load| {
                     Ok(AnalysisFaceLoad {
                         face_id: FaceId::parse(load.face_id).map_err(|error| error.to_string())?,
+                        footprint: required(load.footprint, "force footprint")?.try_into()?,
                         force_n: load
                             .force_n
                             .try_into()
@@ -188,12 +284,15 @@ impl TryFrom<AnalysisCase> for rpc::AnalysisCase {
             loads: value
                 .loads
                 .into_iter()
-                .map(|load| rpc::AnalysisFaceLoad {
-                    face_id: load.face_id.as_str().into(),
-                    force_n: load.force_n.to_vec(),
-                    moment_n_mm: load.moment_n_mm.to_vec(),
+                .map(|load| {
+                    Ok(rpc::AnalysisFaceLoad {
+                        face_id: load.face_id.as_str().into(),
+                        footprint: Some(load.footprint.try_into()?),
+                        force_n: load.force_n.to_vec(),
+                        moment_n_mm: load.moment_n_mm.to_vec(),
+                    })
                 })
-                .collect(),
+                .collect::<Result<_, String>>()?,
             restraints: value
                 .restraints
                 .into_iter()

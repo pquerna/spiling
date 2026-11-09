@@ -236,9 +236,12 @@ def voxelize(roads, *, dx=0.1125, dz=0.2, phase=(0.0, 0.0), max_cells=2_000_000)
     return mesh_from_voxels(occupied, grids)
 
 
-def footprint_slabs(roads):
+def footprint_slabs(roads, *, cap_segments=32):
     import shapely
     from shapely.geometry import LineString
+
+    if type(cap_segments) is not int or cap_segments not in (4, 8, 16, 32):
+        raise ValueError("explicit nested capsule resolution must be 4, 8, 16 or 32")
 
     width = min(r["width"] for r in roads)
     if not math.isfinite(width) or width <= 0:
@@ -272,7 +275,7 @@ def footprint_slabs(roads):
         )
         if signature not in cache:
             polygons = [
-                LineString(pair).buffer(w / 2, quad_segs=32) for pair, w in signature
+                LineString(pair).buffer(w / 2, quad_segs=cap_segments) for pair, w in signature
             ]
             cache[signature] = shapely.union_all(polygons, grid_size=1e-9)
         domains.append(cache[signature])
@@ -407,14 +410,15 @@ def mesh_from_prisms(xy, triangles, z, occupied):
 
 
 def prism_mesh(
-    roads, *, max_xy=4.0, max_z=1.0, divisions=1, window=None, max_cells=2_000_000
+    roads, *, max_xy=4.0, max_z=1.0, divisions=1, window=None, max_cells=2_000_000,
+    cap_segments=32,
 ):
     """GEOS constrained planar arrangement, extruded over actual physical slabs."""
     import shapely
 
     if not roads or max_xy <= 0 or max_z <= 0 or divisions not in (1, 2, 4, 8):
         raise ValueError("invalid conforming prism request")
-    _, levels, domains, unique = footprint_slabs(roads)
+    _, levels, domains, unique = footprint_slabs(roads, cap_segments=cap_segments)
     if window is not None:
         window = np.asarray(window, dtype=float)
         if (
@@ -518,6 +522,8 @@ def prism_mesh(
         "planar_triangles": len(tri),
         "nominal_footprint_volume_mm3": nominal,
         "retained_volume_fraction": mesh.volume / nominal,
+        "capsule_quarter_segments": cap_segments,
+        "maximum_cap_sagitta_mm": max(r["width"] for r in roads) * 0.5 * (1-math.cos(math.pi/(4*cap_segments))),
     }
 
 

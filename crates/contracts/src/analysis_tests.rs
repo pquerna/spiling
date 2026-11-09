@@ -14,6 +14,7 @@ fn case() -> AnalysisCase {
         source_hash: SourceHash::from_digest(&[42; 32]),
         mode: AnalysisMode::Basic,
         loads: vec![AnalysisFaceLoad {
+            footprint: crate::analysis::load::ForceFootprint::WholeFace {},
             face_id: FaceId::from_step_entity(10).unwrap(),
             force_n: [0.0, -12.0, 0.0],
             moment_n_mm: [20.0, 0.0, 0.0],

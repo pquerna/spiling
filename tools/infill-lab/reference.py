@@ -36,6 +36,14 @@ WEDGE_EDGES = ((0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3), (0, 3), (1, 4), (
 
 def element_mesh(mesh, element):
     """Elevate existing edges by node identity, never weld coincident components."""
+    if mesh.cell_kind == "tet" and element == "C3D10":
+        cells = mesh.cells.T.copy()
+        points = mesh.points.T
+        determinant = np.linalg.det(points[cells[:, 1:]] - points[cells[:, :1]])
+        if np.any(~np.isfinite(determinant)) or np.any(determinant <= 0):
+            raise ValueError("positive finite affine tetrahedra required")
+        edges = ((0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3))
+        return elevated_edges(points, cells, edges)
     if mesh.cell_kind == "wedge" and element in ("C3D6", "C3D15", "C3D10"):
         cells = mesh.cells.T.copy()
         p = mesh.points.T
@@ -76,12 +84,7 @@ def element_mesh(mesh, element):
             reverse = determinants < 0
             cells[reverse] = cells[reverse][:, [0, 2, 1, 3]]
             edges = ((0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3))
-        pairs = np.sort(np.stack([cells[:, edge] for edge in edges], axis=1), axis=2)
-        unique, inverse = np.unique(pairs.reshape(-1, 2), axis=0, return_inverse=True)
-        mids = p[unique].mean(axis=1)
-        return np.vstack([p, mids]), np.hstack(
-            [cells, len(p) + inverse.reshape(-1, len(edges))]
-        )
+        return elevated_edges(p, cells, edges)
     if mesh.cell_kind == "hex" and element == "C3D8I":
         from skfem import ElementHex1
 
@@ -101,6 +104,15 @@ def element_mesh(mesh, element):
         ]
         return mesh.points.T.copy(), mesh.cells[order].T.copy()
     raise ValueError("element does not match preserved mesh geometry")
+
+
+def elevated_edges(points, cells, edges):
+    pairs = np.sort(np.stack([cells[:, edge] for edge in edges], axis=1), axis=2)
+    unique, inverse = np.unique(pairs.reshape(-1, 2), axis=0, return_inverse=True)
+    mids = points[unique].mean(axis=1)
+    return np.vstack([points, mids]), np.hstack(
+        [cells, len(points) + inverse.reshape(-1, len(edges))]
+    )
 
 
 def beam_mesh(nx, ny=1, nz=1, *, element="C3D15", size=(8.0, 0.45, 0.2)):
@@ -148,6 +160,17 @@ def fixture(points, case, bounds, material):
             for axis, value in enumerate(values):
                 conditions[(int(node), axis)] = value
         return conditions, [], kappa
+    if case in {"cantilever_x_y", "cantilever_x_z", "cantilever_z_x", "cantilever_z_y"}:
+        a = "xyz".index(case.split("_")[1])
+        t = "xyz".index(case.split("_")[2])
+        left = at(a, lo[a])
+        right = at(a, hi[a])
+        if len(left) == 0 or len(right) == 0:
+            raise ValueError("reference cantilever does not span both end patches")
+        delta = 0.001 * (hi[t] - lo[t])
+        conditions.update({(int(n), component): 0. for n in left for component in range(3)})
+        conditions.update({(int(n), t): -delta for n in right})
+        return conditions, [(int(n), t) for n in right], delta
     if case not in ("compression_x", "compression_y", "compression_z"):
         raise ValueError("unknown independent reference fixture")
     axis = "xyz".index(case[-1])

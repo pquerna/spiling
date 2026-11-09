@@ -98,6 +98,7 @@ pub struct CompileRequest {
     reason = "One bounded worker slot retains the captured save snapshot inline without per-job boxing"
 )]
 pub enum Work {
+    PrepareAnalysisFace(super::analysis::FaceRequest),
     RunAnalysis(spiling_analysis::run::RunCapture),
     GetAnalysisResult(Arc<spiling_core::AnalysisResultAsset>),
     StorageMaintenance {
@@ -227,6 +228,7 @@ pub struct Imported {
     reason = "The single native worker returns bounded products without extra heap indirection"
 )]
 pub enum Product {
+    AnalysisFacePrepared(spiling_contracts::analysis::load::AnalysisFacePreparation),
     AnalysisCompleted(Arc<spiling_analysis::run::RunProduct>),
     StorageMaintained(super::storage::MaintenanceProduct),
     OpticalConstruction(spiling_core::OpticalConstructionCandidate),
@@ -368,6 +370,13 @@ fn run(
         let report = |stage: String| *progress.lock() = Some((job, stage));
         let mut display_work = GeometryWorkBudget::query();
         let result = match work {
+            Work::PrepareAnalysisFace(request) => definitions
+                .get(&request.reference.definition_id)
+                .ok_or_else(|| JobError::from(super::unknown()))
+                .and_then(|resident| {
+                    super::analysis::prepare_face(&resident.definition, request, &cancel)
+                })
+                .map(Product::AnalysisFacePrepared),
             Work::GetAnalysisResult(asset) => Ok(Product::AnalysisCompleted(Arc::new(
                 spiling_analysis::run::RunProduct {
                     summary: asset.summary.clone(),
@@ -1060,7 +1069,7 @@ fn open(
         {
             validate_provenance(&resident.definition, source)?;
             validate_surface_targets(&resident.definition, &loaded.manifest.surface_overlays)?;
-            validate_analysis_targets(&resident.definition, &loaded)?;
+            validate_analysis_targets(&resident.definition, &loaded, cancel)?;
             imports.push(imported(
                 &resident.definition,
                 source.clone(),
@@ -1072,7 +1081,7 @@ fn open(
             let definition = capacity.admit(source.bytes.as_slice(), cancel)?;
             validate_provenance(&definition, source)?;
             validate_surface_targets(&definition, &loaded.manifest.surface_overlays)?;
-            validate_analysis_targets(&definition, &loaded)?;
+            validate_analysis_targets(&definition, &loaded, cancel)?;
             drop(native);
             let tessellation = crate::performance::span("open_tessellate");
             let display = capacity.display(&definition, cancel, work, progress)?;
@@ -1103,6 +1112,7 @@ fn open(
 fn validate_analysis_targets(
     definition: &Definition,
     loaded: &storage::LoadedProject,
+    cancel: &AtomicBool,
 ) -> Result<(), ProjectError> {
     for record in loaded.manifest.analysis.cases.iter().chain(
         loaded
@@ -1122,6 +1132,11 @@ fn validate_analysis_targets(
                 ProjectErrorCode::InvalidProject,
                 "stored analysis patch is absent from the authoritative native source face table",
             ));
+        }
+        if &record.case.definition_id == definition.id() {
+            for load in &record.case.loads {
+                super::analysis::validate_contact(definition, load, cancel)?;
+            }
         }
     }
     Ok(())

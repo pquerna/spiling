@@ -86,6 +86,7 @@ pub struct ProcessEditReceipt {
 }
 #[derive(Debug, Clone)]
 pub struct Snapshot {
+    pub analysis_faces: Vec<Arc<spiling_contracts::analysis::load::AnalysisFacePreparation>>,
     pub analysis_model: Option<Arc<spiling_contracts::analysis::mechanics::AnalysisRunSettings>>,
     pub mechanics_previous: Option<Arc<crate::assets::MechanicsCapture>>,
     pub mechanics: Option<Arc<crate::assets::MechanicsCapture>>,
@@ -126,6 +127,7 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            analysis_faces: Vec::new(),
             analysis_model: None,
             mechanics_previous: None,
             mechanics: None,
@@ -1304,6 +1306,16 @@ impl Actor {
         m.resource = resource;
         self.state.project = Some(Arc::new(project));
         self.state.scene = Some(scene);
+        self.state.analysis_faces.retain(|face| {
+            self.state
+                .project
+                .as_ref()
+                .is_some_and(|project| project.project_id == face.project_id)
+                && self.state.scene.as_ref().is_some_and(|scene| {
+                    scene.session_id == face.reference.session_id
+                        && scene.revision == face.reference.scene_revision
+                })
+        });
         self.state.layout_overview = Some(Arc::new(overview));
         self.schedule_display();
         self.restore_mechanics();
@@ -1957,6 +1969,7 @@ impl Actor {
         match (&pending.receipt, &operation.result) {
             (Receipt::Open(route), Some(JobResult::Scene { summary })) if completed => {
                 self.state.analysis_model = None;
+                self.state.analysis_faces.clear();
                 self.mechanics_restore_key = None;
                 self.state.mechanics = None;
                 self.state.mechanics_previous = None;
@@ -2036,6 +2049,30 @@ impl Actor {
                     | JobResult::OpticalConstructionApplied { .. },
                 ),
             ) if completed => {}
+            (Receipt::Project, Some(JobResult::AnalysisFacePrepared { preparation }))
+                if completed =>
+            {
+                self.refresh_after_failure().await;
+                if self.state.project.as_ref().is_some_and(|project| {
+                    project.project_id == preparation.project_id
+                        && project.revision == preparation.project_revision
+                }) && self.state.scene.as_ref().is_some_and(|scene| {
+                    scene.session_id == preparation.reference.session_id
+                        && scene.revision == preparation.reference.scene_revision
+                }) {
+                    self.state
+                        .analysis_faces
+                        .retain(|face| face.reference != preparation.reference);
+                    if self.state.analysis_faces.len()
+                        >= spiling_contracts::analysis::MAX_ANALYSIS_PATCHES * 2
+                    {
+                        self.state.analysis_faces.remove(0);
+                    }
+                    self.state
+                        .analysis_faces
+                        .push(Arc::new(preparation.clone()));
+                }
+            }
             (
                 Receipt::Project,
                 Some(JobResult::AnalysisResultPrepared {

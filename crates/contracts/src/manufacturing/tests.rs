@@ -4625,25 +4625,96 @@ fn web_roof_explicit_spacing_obeys_captured_process_and_strict_null_auto() {
     ] {
         value.recipe.sparse_infill = SparseInfillPolicy::WebRoof {
             roof_spacing_mm: Some(spacing),
+            architecture: None,
         };
         assert!(value.validate().is_err(), "invalid spacing {spacing}");
     }
     value.recipe.sparse_infill = SparseInfillPolicy::WebRoof {
         roof_spacing_mm: Some(value.recipe.bead_width_mm),
+        architecture: None,
     };
     value.validate().unwrap();
     assert!(serde_json::from_str::<SparseInfillPolicy>(r#"{"kind":"web_roof"}"#).is_err());
     assert!(
         serde_json::from_str::<SparseInfillPolicy>(
-            r#"{"kind":"web_roof","roof_spacing_mm":null,"unknown":1}"#
+            r#"{"kind":"web_roof","roof_spacing_mm":null,"architecture":null,"unknown":1}"#
         )
         .is_err()
     );
     assert_eq!(
-        serde_json::from_str::<SparseInfillPolicy>(r#"{"kind":"web_roof","roof_spacing_mm":null}"#)
-            .unwrap(),
+        serde_json::from_str::<SparseInfillPolicy>(
+            r#"{"kind":"web_roof","roof_spacing_mm":null,"architecture":null}"#
+        )
+        .unwrap(),
         SparseInfillPolicy::web_roof()
     );
+}
+
+#[test]
+fn web_architecture_is_strict_and_rejects_unprintable_caps_and_invalid_piers() {
+    let mut value = intent();
+    value.recipe.infill_fraction = 0.12;
+    let opening = WebOpening {
+        bottom_z_mm: 2.,
+        height_mm: 10.,
+        width_mm: 4.,
+        cap_height_mm: 4.,
+        pier_width_mm: 1.8,
+    };
+    let arch = WebArchitecture {
+        opening: Some(opening),
+        pier_rib_depth_mm: Some(0.9),
+    };
+    value.recipe.bead_width_mm = 0.45;
+    value.recipe.sparse_infill = SparseInfillPolicy::WebRoof {
+        roof_spacing_mm: None,
+        architecture: Some(arch),
+    };
+    value.validate().unwrap();
+    let bytes = serde_json::to_vec(&value).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<ManufacturingIntent>(&bytes).unwrap(),
+        value
+    );
+    for bad in [
+        WebOpening {
+            cap_height_mm: 3.9,
+            ..opening
+        },
+        WebOpening {
+            bottom_z_mm: f64::NAN,
+            ..opening
+        },
+        WebOpening {
+            pier_width_mm: 0.4,
+            ..opening
+        },
+        WebOpening {
+            height_mm: 2.,
+            ..opening
+        },
+    ] {
+        let mut invalid = value.clone();
+        invalid.recipe.sparse_infill = SparseInfillPolicy::WebRoof {
+            roof_spacing_mm: None,
+            architecture: Some(WebArchitecture {
+                opening: Some(bad),
+                ..arch
+            }),
+        };
+        assert!(invalid.validate().is_err());
+    }
+    for json in [
+        r#"{"kind":"web_roof","roof_spacing_mm":null}"#,
+        r#"{"opening":null}"#,
+        r#"{"opening":null,"pier_rib_depth_mm":null}"#,
+    ] {
+        if json.contains("kind") {
+            assert!(serde_json::from_str::<SparseInfillPolicy>(json).is_err());
+        } else if let Ok(a) = serde_json::from_str::<WebArchitecture>(json) {
+            assert!(a.validate().is_err());
+        }
+    }
 }
 
 #[test]

@@ -54,6 +54,7 @@ pub struct Surface {
 
 #[derive(Debug)]
 pub struct Display {
+    pub contacts: Vec<(DVec3, Vec<DVec3>)>,
     pub surfaces: Vec<Surface>,
     pub values: Vec<[f64; 4]>,
     pub ranges: [[f64; 2]; 4],
@@ -134,7 +135,37 @@ impl Display {
                 DVec3::from_array(fields.node(node as usize).unwrap().position_mm)
             })?;
         }
+        let mut contacts = vec![(DVec3::ZERO, Vec::new()); fields.summary.case.case.loads.len()];
+        let mut areas = vec![0.0; contacts.len()];
+        let mut counts = vec![0_usize; contacts.len()];
+        for index in 0..fields.patch_count {
+            counts[fields
+                .patch(index)
+                .ok_or("Missing contact sample")?
+                .patch_index as usize] += 1;
+        }
+        let mut seen = vec![0_usize; contacts.len()];
+        for index in 0..fields.patch_count {
+            let sample = fields.patch(index).ok_or("Missing contact sample")?;
+            let contact = &mut contacts[sample.patch_index as usize];
+            let point = DVec3::from_array(sample.point_mm);
+            contact.0 += point * sample.area_mm2;
+            if seen[sample.patch_index as usize]
+                .is_multiple_of(counts[sample.patch_index as usize].div_ceil(128))
+            {
+                contact.1.push(point);
+            }
+            seen[sample.patch_index as usize] += 1;
+            areas[sample.patch_index as usize] += sample.area_mm2;
+        }
+        for (contact, area) in contacts.iter_mut().zip(areas) {
+            if area <= 0.0 {
+                return Err("Mechanical contact has no retained area".into());
+            }
+            contact.0 /= area;
+        }
         Ok(Self {
+            contacts,
             surfaces: faces.into_values().flatten().collect(),
             values,
             ranges,
@@ -271,6 +302,7 @@ mod tests {
         };
         let faces = MAX_MECHANICAL_ELEMENTS * 6;
         let capture = MAX_MECHANICAL_FIELD_BYTES
+            + spiling_contracts::analysis::MAX_ANALYSIS_PATCHES * 128 * size_of::<DVec3>()
             + faces * size_of::<Surface>()
             + MAX_MECHANICAL_ELEMENTS * size_of::<[f64; 4]>();
         let renderer = faces * 24 * size_of::<Vertex>() * 3;
@@ -306,6 +338,7 @@ mod tests {
             .unwrap();
         }
         Display {
+            contacts: vec![],
             surfaces: faces.into_values().flatten().collect(),
             values: vec![[1.0; 4], [2.0; 4]],
             ranges: [[1.0, 2.0]; 4],

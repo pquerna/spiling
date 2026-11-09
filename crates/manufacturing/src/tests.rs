@@ -3393,6 +3393,113 @@ fn native_web_roof_keeps_continuous_rooms_grows_roof_and_freshly_replays() {
 }
 
 #[test]
+fn native_web_roof_architecture_ablations_keep_complete_construction_and_reject_damage() {
+    let scene = Scene::new(BOX, &[pose(30., 40., 0.)]);
+    let mut requested = intent();
+    requested.recipe.infill_fraction = 0.35;
+    requested.recipe.layer_height_mm = 0.2;
+    requested.recipe.bead_width_mm = 0.45;
+    requested.recipe.perimeter_count = 2;
+    requested.recipe.process.max_bridge_span_mm = 2.;
+    let opening = WebOpening {
+        bottom_z_mm: 1.,
+        height_mm: 0.6,
+        width_mm: 0.45,
+        cap_height_mm: 0.5,
+        pier_width_mm: 0.9,
+    };
+    let mut volumes = Vec::new();
+    for (windows, ribs) in [(false, false), (true, false), (false, true), (true, true)] {
+        requested.recipe.sparse_infill = SparseInfillPolicy::WebRoof {
+            roof_spacing_mm: None,
+            architecture: if windows || ribs {
+                Some(WebArchitecture {
+                    opening: windows.then_some(opening),
+                    pier_rib_depth_mm: ribs.then_some(0.45),
+                })
+            } else {
+                None
+            },
+        };
+        let bundle = scene
+            .compile(&requested)
+            .unwrap_or_else(|e| panic!("windows={windows} ribs={ribs}: {e}"));
+        assert!(bundle.verification.verified);
+        volumes.push(
+            bundle
+                .plan
+                .layers
+                .iter()
+                .map(|l| l.region_coverage.nominal_deposition_volume_mm3)
+                .sum::<f64>(),
+        );
+        let bytes = serde_json::to_vec(&bundle).unwrap();
+        let restored: ManufacturingBundle = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            inspect_bundle(
+                &restored,
+                &SourceHash::from_bytes(&bytes),
+                VerificationOutput::ReportOnly,
+                &AtomicBool::new(false)
+            )
+            .unwrap()
+            .report
+            .verified
+        );
+        if ribs {
+            let mut missing = bundle.plan.clone();
+            let layer = missing
+                .layers
+                .iter_mut()
+                .find(|l| l.paths.iter().any(|p| p.kind == DepositionKind::SparseFill))
+                .unwrap();
+            let index = layer
+                .paths
+                .iter()
+                .position(|p| {
+                    p.kind == DepositionKind::SparseFill
+                        && (p.points_mm[1][0] - p.points_mm[0][0])
+                            .hypot(p.points_mm[1][1] - p.points_mm[0][1])
+                            < 1.
+                })
+                .unwrap();
+            layer.paths.remove(index);
+            assert_reemitted_interface_refuses(missing, &requested);
+        }
+        if windows {
+            for (bottom, height) in [(0., 0.6), (1., 6.)] {
+                let mut bad = requested.clone();
+                bad.recipe.sparse_infill = SparseInfillPolicy::WebRoof {
+                    roof_spacing_mm: None,
+                    architecture: Some(WebArchitecture {
+                        opening: Some(WebOpening {
+                            bottom_z_mm: bottom,
+                            height_mm: height,
+                            ..opening
+                        }),
+                        pier_rib_depth_mm: None,
+                    }),
+                };
+                let e = scene.compile(&bad).unwrap_err();
+                assert!(
+                    e.message.contains("landing") || e.message.contains("roof-root corridor"),
+                    "{e}"
+                );
+            }
+        }
+    }
+    assert!(
+        volumes[1] < volumes[0],
+        "openings must remove actual complete-object dose"
+    );
+    assert!(
+        volumes[2] > volumes[0],
+        "ribs are charged, not free stiffness"
+    );
+    assert!(volumes[3] < volumes[2]);
+}
+
+#[test]
 fn native_web_roof_refuses_multiple_parts_without_a_fill_fallback() {
     let mut requested = intent();
     requested.recipe.infill_fraction = 0.08;
@@ -3414,6 +3521,7 @@ fn native_web_roof_curved_and_holed_domains_freshly_replay() {
         requested.recipe.infill_fraction = 0.12;
         requested.recipe.sparse_infill = SparseInfillPolicy::WebRoof {
             roof_spacing_mm: Some(1.5),
+            architecture: None,
         };
         requested.recipe.layer_height_mm = 0.2;
         requested.recipe.bead_width_mm = 0.45;

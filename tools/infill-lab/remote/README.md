@@ -209,3 +209,35 @@ collector names the baseline/candidate explicitly and keeps an uncompleted
 run's deadline/OOM and cleanup receipt instead of treating it as zero or a
 successful subset. Degree coarsening is a numerical acceleration, not effective
 material homogenization or a change in the nominal deposition geometry.
+
+## Retained-boundary volume remeshing
+
+`launch.py build --tetgen-base sha256:EXACT_SCIENTIFIC_BASE --context CONTEXT`
+builds the optional external TetGen research executable inside Docker. The
+recipe pins libigl/tetgen commit `e05aca7df74e3f531bc35733ed87d36d437266c5`
+(TetGen 1.6) and checks its source archive SHA-256. Compiler and build-package
+inventories, original license and source archive remain under
+`/opt/spiling-eval/tetgen/`. Assertions and robust predicates remain enabled;
+fast-math and floating-point contraction are disabled. TetGen is separately
+licensed AGPL-3.0-or-later, not linked into or included in the Spiling runtime.
+The resulting immutable image ID, not a repeat build's tag, identifies a cohort.
+
+Use `cathedral.py pack --mesh-method tetgen` and dispatch through **`--backend
+vault`** with an explicit single BLAS thread for comparison. The adapter first
+constructs the ordinary admitted prism mesh, then exports its closed oriented
+boundary. `-pQMYJ` requests a PLC tetrahedralization, quiet output, no facet/vertex
+merging, surface preservation and retention of original input node IDs.
+Independent checks require exact original coordinates and oriented boundary
+triangles, opposite orientations on paired internal faces, positive finite
+cells, unchanged volume and face-component count. Boundary subdivisions or
+rounding changes refuse; no tolerance-based hole closing or centroid admission
+is substituted. Only full-face neighbors share displacement nodes.
+
+Raw tetrahedra elevate through the existing C3D10/TetP2 edge-node identity path.
+The quadratic material, integration and fixture/energy/reaction checks remain
+unchanged; a different mesh remains a different discretization. Compare against
+retained prism controls and paired refinements, keeping small unresolved gains
+provisional. Limits on source cells, boundary faces, external process time,
+output counts/bytes and container resources remain independent. No host OS
+installation, network service, GPU requirement or default product change is
+introduced.

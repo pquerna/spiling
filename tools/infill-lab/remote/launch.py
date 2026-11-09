@@ -24,6 +24,7 @@ CONTEXT = (
     "Dockerfile",
     "Dockerfile.reference",
     "Dockerfile.quadratic",
+    "Dockerfile.tetgen",
     "requirements.in",
     "requirements.lock",
     "build-requirements.in",
@@ -40,6 +41,7 @@ CONTEXT = (
     "quadratic_preconditioner.py",
     "quadratic_fields.py",
     "vault_mechanics.py",
+    "tetgen_mesh.py",
 )
 
 
@@ -104,8 +106,9 @@ def build(args, root):
     context = args.context.resolve()
     tag = image_tag(context)
     quadratic_base = getattr(args, "quadratic_base", None)
-    base = quadratic_base or getattr(args, "reference_base", None)
-    if quadratic_base and getattr(args, "reference_base", None):
+    tetgen_base = getattr(args,"tetgen_base",None)
+    base = tetgen_base or quadratic_base or getattr(args, "reference_base", None)
+    if sum(bool(v) for v in (tetgen_base,quadratic_base,getattr(args,"reference_base",None))) > 1:
         raise ValueError("select one research image recipe")
     if base is not None:
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", base):
@@ -126,7 +129,7 @@ def build(args, root):
             "--file",
             str(
                 context
-                / ("Dockerfile.quadratic" if quadratic_base else "Dockerfile.reference")
+                / ("Dockerfile.tetgen" if tetgen_base else "Dockerfile.quadratic" if quadratic_base else "Dockerfile.reference")
             ),
             "--build-arg",
             "BASE=" + base_tag,
@@ -340,6 +343,7 @@ def main():
         "--reference-base",
         help="exact existing evaluator image ID for isolated CalculiX layer",
     )
+    b.add_argument("--tetgen-base",help="exact scientific base image for external volume-meshing research")
     r = sub.add_parser("run")
     r.add_argument("--input", type=Path, required=True)
     r.add_argument("--run-id", required=True)

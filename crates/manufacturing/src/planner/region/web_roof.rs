@@ -7,6 +7,7 @@
 //! Every component/hole chord is rooted independently, without wall-root credit.
 use super::*;
 use spiling_contracts::manufacturing::program_coordinates::MIN_DEPOSITION_COMMAND_MM;
+mod architecture;
 
 #[derive(Clone, Copy)]
 struct Lattice {
@@ -137,6 +138,7 @@ pub(super) fn hatch(
     segments: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    let first_path = paths.len();
     let roof = layer
         .roof_z_mm
         .ok_or_else(|| unsupported("web + roof lacks its physical roof horizon"))?;
@@ -156,6 +158,13 @@ pub(super) fn hatch(
             Lattice::new(bounds.min().y, bounds.max().y, pitch)?,
         ];
         let web_roots = seed_webs(polygon, lattices, layer, &mut work, cancel)?;
+        let architecture = match layer.recipe.sparse_infill {
+            SparseInfillPolicy::WebRoof { architecture, .. } => architecture,
+            _ => None,
+        };
+        if let Some(a) = architecture {
+            architecture::admit(a, &web_roots, &lattices, roof, layer)?;
+        }
         let edges = std::iter::once(polygon.exterior())
             .chain(polygon.interiors())
             .map(|ring| ring.0.len().saturating_sub(1))
@@ -167,6 +176,16 @@ pub(super) fn hatch(
                 charge(&mut work, edges, cancel)?;
                 hits.clear();
                 row_intersections(polygon, coordinate, axis, &mut hits, cancel)?;
+                if let Some(opening) = architecture.and_then(|a| a.opening) {
+                    hits = architecture::perforate(
+                        &hits,
+                        &web_roots[1 - fixed],
+                        opening,
+                        layer.z,
+                        &mut work,
+                        cancel,
+                    )?;
+                }
                 append_hatch_row(
                     &hits,
                     coordinate,
@@ -262,6 +281,20 @@ pub(super) fn hatch(
                 }
             }
         }
+        if let Some(depth) = architecture.and_then(|a| a.pier_rib_depth_mm) {
+            architecture::ribs(
+                polygon, &web_roots, depth, layer, paths, segments, &mut work, cancel,
+            )?;
+        }
+    }
+    if matches!(
+        layer.recipe.sparse_infill,
+        SparseInfillPolicy::WebRoof {
+            architecture: Some(_),
+            ..
+        }
+    ) {
+        architecture::merge(paths, first_path, layer, segments, cancel)?;
     }
     Ok(())
 }

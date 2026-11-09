@@ -323,6 +323,16 @@ pub fn native_operation_view(
                     return Err("analysis capture/output mismatch".into());
                 }
             }
+            JobResult::AnalysisFacePrepared { preparation } => {
+                preparation.validate().map_err(|error| error.to_string())?;
+                if preparation.project_revision.0 != meta.captured_project_revision
+                    || preparation.reference.scene_revision.0 != meta.captured_scene_revision
+                    || preparation.reference.session_id.as_str() != meta.session_id
+                    || !meta.outputs.is_empty()
+                {
+                    return Err("native face preparation capture/output mismatch".into());
+                }
+            }
             JobResult::ProjectStorageMaintained { stats, .. } => {
                 stats.validate().map_err(|error| error.to_string())?;
                 if !meta.outputs.is_empty() {
@@ -607,6 +617,9 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
                 }
                 Self::AppearancePaletteImported { info, palette }
             }
+            R::AnalysisFacePrepared(value) => Self::AnalysisFacePrepared {
+                preparation: value.try_into()?,
+            },
             R::AnalysisResultPrepared(value) => {
                 let resource = artifact_to_view(
                     required(value.resource, "saved analysis fields")?,
@@ -829,6 +842,9 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
                     info: Some(info.try_into()?),
                     palette: Some(palette.try_into()?),
                 })
+            }
+            JobResult::AnalysisFacePrepared { preparation } => {
+                R::AnalysisFacePrepared(preparation.try_into()?)
             }
             JobResult::AnalysisResultPrepared {
                 project_id,

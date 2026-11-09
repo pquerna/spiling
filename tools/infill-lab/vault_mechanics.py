@@ -19,7 +19,7 @@ from geometry import connected_meshes, prism_mesh
 from model import Candidate, Material, file_hash
 from quadratic import JUDGE as QUADRATIC_JUDGE, prepare, solve_body
 
-JUDGE = (*QUADRATIC_JUDGE, "vault_mechanics.py")
+JUDGE = (*QUADRATIC_JUDGE, "vault_mechanics.py", "tetgen_mesh.py")
 
 
 def load(folder):
@@ -29,7 +29,7 @@ def load(folder):
     here = Path(__file__).resolve().parent
     if (
         spec["schema"] != 1
-        or spec["kind"] != "vault_roof_patch"
+        or spec["kind"] not in {"vault_roof_patch", "cathedral_web_bay"}
         or spec["judge"] != {p: file_hash(here / p) for p in JUDGE}
     ):
         raise ValueError("unknown or changed roof-patch judge")
@@ -89,6 +89,54 @@ def patch_response(data, scenario):
     return dict(stiffness_n_mm=responses, components=records, mesh=info)
 
 
+def web_response(data, scenario, *, workdir=None):
+    """Finite cut web, including its complete window and two real piers.
+
+    Reuse each component's unchanged assembly across the explicit fixture set.
+    This is a local mechanism study, not roof capacity or whole-part strength.
+    """
+    from coupon import interior_roads
+
+    bounds = np.asarray(scenario["bounds"], dtype=float)
+    cases = scenario["cases"]
+    if cases != ["compression_x", "compression_z", "cantilever_z_y"]:
+        raise ValueError("unknown web-bay fixture inventory")
+    material = Material(**scenario["material"])
+    mesh, info = prism_mesh(interior_roads(data), window=bounds, **scenario["refinement"])
+    method = scenario.get("mesh_method", "prisms")
+    if method == "tetgen":
+        import tempfile
+        from tetgen_mesh import remesh
+
+        def converted(destination):
+            return remesh(mesh,interior_roads(data),bounds,destination,
+                          cap_segments=scenario["refinement"].get("cap_segments",32))
+
+        if workdir is None:
+            with tempfile.TemporaryDirectory() as temporary:
+                mesh, converted_info = converted(Path(temporary)/"mesh")
+        else:
+            mesh, converted_info = converted(Path(workdir)/"mesh")
+        info = dict(source=info,**converted_info)
+    elif method != "prisms":
+        raise ValueError("unknown explicit web-bay volume mesh method")
+    responses = dict.fromkeys(cases, 0.)
+    records = []
+    for part in connected_meshes(mesh):
+        admitted = [c for c in cases if np.allclose(part.bounds[:, 0 if c == "compression_x" else 2],
+                        bounds[:, 0 if c == "compression_x" else 2], rtol=0, atol=1e-8)]
+        if not admitted:
+            continue
+        body = prepare(part, material)
+        for case in admitted:
+            result = solve_body(body, case, bounds, solver=scenario["solver"])
+            responses[case] += result["stiffness_n_mm"]
+            records.append(result)
+        del body
+    return dict(stiffness_n_mm=responses, components=records, mesh=info,
+                nonspanning_cases=[c for c in cases if not any(r["case"] == c for r in records)])
+
+
 def evaluate(folder, output):
     spec, data = load(folder)
     began = time.monotonic()
@@ -102,10 +150,13 @@ def evaluate(folder, output):
         scenario=spec["scenario"],
         volume_mm3=data["report"]["deposited_volume_mm3"],
         motion_s=data["motion_seconds_lower_bound"],
-        scope="local_roof_patch_nominal_elasticity_not_whole_part_strength",
+        scope=("finite_web_bay_nominal_elasticity_not_whole_part_strength" if spec["kind"] == "cathedral_web_bay"
+               else "local_roof_patch_nominal_elasticity_not_whole_part_strength"),
     )
     try:
-        row.update(patch_response(data, spec["scenario"]), status="ok")
+        response = (web_response(data, spec["scenario"],workdir=output)
+                    if spec["kind"] == "cathedral_web_bay" else patch_response(data,spec["scenario"]))
+        row.update(response,status="ok")
     except Exception as error:
         row.update(status="failed", error_type=type(error).__name__, error=str(error))
     row.update(

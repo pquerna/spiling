@@ -79,6 +79,7 @@ def context(destination):
                 "quadratic_preconditioner.py",
                 "quadratic_fields.py",
                 "vault_mechanics.py",
+                "tetgen_mesh.py",
             }
             else HERE / "remote" / name
         )

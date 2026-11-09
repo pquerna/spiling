@@ -262,6 +262,31 @@ fn full_native_hook_equilibrium_and_retained_result_return_through_cli() {
             .output()
             .unwrap(),
     );
+    let contact = report(
+        retained("edit")
+            .args([
+                "--analysis-contact",
+                "Whole hook",
+                find(1, 24.0),
+                "36",
+                "24",
+                "3",
+                "2",
+                "0",
+                "-10",
+                "0",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        contact["project"]["revision"].as_u64().unwrap()
+            > edited["project"]["revision"].as_u64().unwrap()
+    );
+    let load = &contact["project"]["analysis"]["cases"][0]["case"]["loads"][0];
+    assert_eq!(load["footprint"]["kind"], "disk");
+    assert_eq!(load["footprint"]["diameter_mm"], 2.0);
+    let edited = contact;
     std::fs::remove_file(source).unwrap();
     let assumptions = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/analysis/hook-assumptions.json");
