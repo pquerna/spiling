@@ -13,17 +13,23 @@ use crate::planner::support::{
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
-/// Run after the actual-byte/path bijection. Grid's second direction must not
-/// borrow an authored ordinary axis or the current layer as lower support.
-pub(super) fn verify_grid(
+/// Run after the actual-byte/path bijection. Explicit two-axis sparse patterns
+/// cannot borrow an ordinary axis or the current layer as lower support.
+pub(super) fn verify_two_axis_sparse(
     plan: &NormalizedPrintPlan,
     recipe: &PlanarPrintRecipe,
     work: &mut usize,
     anchors: &mut AnchorWorkspace,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    if !matches!(recipe.sparse_infill, SparseInfillPolicy::Grid) {
+    if !matches!(
+        recipe.sparse_infill,
+        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+    ) {
         return Ok(());
+    }
+    if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof {}) {
+        super::web_roof::verify(plan, recipe, work, cancel)?;
     }
     for (index, layer) in plan.layers.iter().enumerate() {
         let mut families = [0u8; MAX_PROCESS_REGIONS];
@@ -35,10 +41,14 @@ pub(super) fn verify_grid(
             cancelled(cancel)?;
             charge(work)?;
             let Some(DepositionOwner::Regional { region_index }) = path.owner else {
-                return Err(failed("grid row lacks its classified interior owner"));
+                return Err(failed(
+                    "two-axis sparse row lacks its classified interior owner",
+                ));
             };
             if path.points_mm.len() != 2 || path.physical_z_mm != [layer.lower_z_mm, layer.z_mm] {
-                return Err(failed("grid row changed its fine physical interval"));
+                return Err(failed(
+                    "two-axis sparse row changed its fine physical interval",
+                ));
             }
             let a = project_xyz6_point_mm(path.points_mm[0])?;
             let b = project_xyz6_point_mm(path.points_mm[1])?;
@@ -47,20 +57,22 @@ pub(super) fn verify_grid(
             } else if a[1] == b[1] && a[0] != b[0] {
                 2
             } else {
-                return Err(failed("grid row is not a positive build-X/Y segment"));
+                return Err(failed(
+                    "two-axis sparse row is not a positive build-X/Y segment",
+                ));
             };
             let slot = families
                 .get_mut(usize::from(region_index))
-                .ok_or_else(|| failed("grid row owner exceeds the region budget"))?;
+                .ok_or_else(|| failed("two-axis sparse row owner exceeds the region budget"))?;
             *slot |= family;
             let Some(previous) = index.checked_sub(1).map(|i| &plan.layers[i]) else {
                 if layer.lower_z_mm != 0.0 {
-                    return Err(failed("grid first interval is not bed rooted"));
+                    return Err(failed("two-axis sparse first interval is not bed rooted"));
                 }
                 continue;
             };
             if previous.z_mm != layer.lower_z_mm {
-                return Err(failed("grid row crosses a lower physical gap"));
+                return Err(failed("two-axis sparse row crosses a lower physical gap"));
             }
             let ends = [a, b];
             let length = (b[0] - a[0]).hypot(b[1] - a[1]);
@@ -83,7 +95,9 @@ pub(super) fn verify_grid(
                     ),
                     GapKind::Supported
                 ) {
-                    return Err(failed("actual grid row lacks direct earlier-layer anchors"));
+                    return Err(failed(
+                        "actual two-axis sparse row lacks direct earlier-layer anchors",
+                    ));
                 }
             }
         }
@@ -94,7 +108,9 @@ pub(super) fn verify_grid(
                 && region.fraction < 1.0
                 && families[region_index] != 3
             {
-                return Err(failed("grid interior is missing an orthogonal line family"));
+                return Err(failed(
+                    "two-axis sparse interior is missing an orthogonal line family",
+                ));
             }
         }
     }
@@ -787,7 +803,7 @@ pub(super) fn verify_earlier_fine_paths(
     }
     Ok(())
 }
-fn charge(work: &mut usize) -> Result<(), ManufacturingError> {
+pub(super) fn charge(work: &mut usize) -> Result<(), ManufacturingError> {
     *work = work
         .checked_add(1)
         .filter(|n| *n <= 128_000_000)

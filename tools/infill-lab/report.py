@@ -25,7 +25,9 @@ def label(row):
     ]
     cadence = " · combined" if c.get("combine_height") else ""
     family = (
-        "Grid"
+        "Web + roof"
+        if c.get("pattern") == "web_roof"
+        else "Grid"
         if c.get("pattern") == "grid"
         else ("Rectilinear" if c["family"] == "uniform" else c["family"].title())
     )
@@ -63,7 +65,9 @@ def build(campaign: Path, output: Path):
             "s"
             if c.get("combine_height")
             else (
-                "^"
+                "P"
+                if c.get("pattern") == "web_roof"
+                else "^"
                 if c.get("pattern") == "grid"
                 else "D"
                 if c["family"] != "uniform"
@@ -98,6 +102,7 @@ def build(campaign: Path, output: Path):
             for marker, name in [
                 ("o", "Rectilinear"),
                 ("^", "Grid"),
+                ("P", "Web + roof"),
                 ("s", "Combined"),
                 ("D", "Regional"),
             ]

@@ -589,3 +589,11 @@ def test_source_relative_crop_keys_do_not_split_by_origin_roundoff():
     assert key("cube32", 0.1) == key("column48", 0.1)
     assert key("cube32", -0.1) == key("column48", -0.1)
     assert key("cube32", 0.1) != key("column48", 0.100001)
+
+
+def test_web_roof_is_a_production_pattern_with_no_research_only_patch_family():
+    candidate = Candidate(pattern="web_roof", fraction=0.1)
+    assert candidate.data()["pattern"] == "web_roof"
+    for changes in ({"family": "crown"}, {"combine_height": 0.3}, {"fraction": 1.0}):
+        with pytest.raises(ValueError):
+            Candidate(pattern="web_roof", **changes)

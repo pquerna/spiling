@@ -15,6 +15,7 @@ from sweep import aggregate, geometric_score, frontier
 
 COLORS = {
     "Alternating XY": "#dc9c36",
+    "Web + roof": "#d86d20",
     "Grid": "#1aa69f",
     "Aligned X": "#8a83da",
     "Separator X": "#db6688",
@@ -31,6 +32,8 @@ def family(c):
         return "Crown"
     if c["fraction"] == 1:
         return "Solid"
+    if c["pattern"] == "web_roof":
+        return "Web + roof"
     if c["pattern"] == "grid":
         return "Grid"
     return "Aligned X" if c["axis"] == "x" else "Alternating XY"

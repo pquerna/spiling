@@ -300,6 +300,8 @@ def read_rows(root):
 def family(c):
     if c["fraction"] == 1:
         return "Solid"
+    if c["pattern"] == "web_roof":
+        return "Web + roof"
     if c["pattern"] == "grid":
         return "Grid"
     return "Aligned X" if c["axis"] == "x" else "Alternating XY"
@@ -321,7 +323,8 @@ def build(root, output):
     )
     fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
     colors = {
-        "Grid": "#007c91",
+        "Web + roof": "#d86d20",
+    "Grid": "#007c91",
         "Alternating XY": "#c47a22",
         "Aligned X": "#8651b0",
         "Solid": "#4e5868",
@@ -399,8 +402,8 @@ def chart_html(data):
     return """<!doctype html><html><head><meta charset="utf-8"><style>
 body{margin:0;font:14px var(--font-sans,system-ui);color:var(--foreground,#26323b)}h3{font-size:17px;margin:0 0 8px}p{font-size:12px;color:var(--muted-foreground,#617080)}svg{width:100%;height:380px;display:block}text{fill:currentColor;font-size:11px}button,select{font:inherit;padding:5px}#details{font-size:13px;line-height:1.6;min-height:100px}circle{cursor:pointer}circle:hover{r:7}.legend{display:flex;flex-wrap:wrap;gap:16px}i{display:inline-block;width:10px;height:10px;margin-right:5px}table{border-collapse:collapse;width:100%;font-size:12px}td,th{text-align:left;padding:4px;border-bottom:1px solid var(--border,#ccd5db)}
 </style></head><body><h3>Larger-interior infill tradeoffs</h3><p>Actual verified deposition · assumed weak-Z PLA elasticity · no physical strength qualification</p><div class="legend" id="legend"></div><p>X axis: <select id="xaxis"><option value="overall">Overall stiffness</option><option value="z">Z compression stiffness</option><option value="worst">Weakest retained response</option></select> · Y axis: <select id="axis"><option value="material_ratio">Object material / solid</option><option value="time_ratio">Motion time lower bound / solid</option></select> · Best direction ↘</p><svg viewBox="0 0 700 380" id="chart" role="img" aria-label="Normalized infill material versus simulated stiffness"></svg><div id="details">Select a point to inspect its weakest load, actual costs and source/replay identities.</div><p id="limits"></p><script>
-const data=PAYLOAD,colors={'Grid':'var(--chart-1,#007c91)','Alternating XY':'var(--chart-2,#c47a22)','Aligned X':'var(--chart-3,#8651b0)','Solid':'var(--muted-foreground,#4e5868)'};
-function family(c){return c.fraction===1?'Solid':c.pattern==='grid'?'Grid':c.axis==='x'?'Aligned X':'Alternating XY'}
+const data=PAYLOAD,colors={'Web + roof':'var(--chart-4,#d86d20)','Grid':'var(--chart-1,#007c91)','Alternating XY':'var(--chart-2,#c47a22)','Aligned X':'var(--chart-3,#8651b0)','Solid':'var(--muted-foreground,#4e5868)'};
+function family(c){return c.fraction===1?'Solid':c.pattern==='web_roof'?'Web + roof':c.pattern==='grid'?'Grid':c.axis==='x'?'Aligned X':'Alternating XY'}
 const fmt=x=>(100*x).toFixed(1)+'%';document.getElementById('legend').innerHTML=Object.entries(colors).map(([n,c])=>'<span><i style="background:'+c+'"></i>'+n+'</span>').join('');
 function draw(){const svg=document.getElementById('chart'),axis=document.getElementById('axis').value,mode=document.getElementById('xaxis').value,score=r=>mode==='z'?r.tests.find(t=>t.case==='compression_z').ratio:mode==='worst'?r.worst_ratio:r.score;svg.replaceChildren();const ns='http://www.w3.org/2000/svg',xmax=Math.max(1.05,...data.points.map(r=>score(r)*1.08)),ymax=Math.max(1.05,...data.points.map(r=>r[axis]*1.08)),X=v=>65+570*v/xmax,Y=v=>325-280*v/ymax;
 function el(n,a,t){const e=document.createElementNS(ns,n);Object.entries(a).forEach(([k,v])=>e.setAttribute(k,v));if(t)e.textContent=t;svg.appendChild(e);return e}

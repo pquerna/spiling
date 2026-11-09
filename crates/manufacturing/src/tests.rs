@@ -3200,3 +3200,136 @@ fn native_grid_infill_emits_both_half_density_families_and_replays() {
         .is_err()
     );
 }
+
+#[test]
+fn native_web_roof_keeps_continuous_rooms_grows_roof_and_freshly_replays() {
+    let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0)]);
+    let mut requested = intent();
+    requested.recipe.infill_fraction = 0.08;
+    requested.recipe.sparse_infill = SparseInfillPolicy::WebRoof {};
+    requested.recipe.layer_height_mm = 0.2;
+    requested.recipe.bead_width_mm = 0.45;
+    requested.recipe.perimeter_count = 2;
+    requested.recipe.process.max_bridge_span_mm = 2.0;
+    let bundle = scene.compile(&requested).unwrap();
+    assert!(bundle.verification.verified);
+    assert!(bundle.plan.sparse_bands.is_empty());
+    let sparse: Vec<_> = bundle
+        .plan
+        .layers
+        .iter()
+        .filter(|layer| {
+            layer
+                .paths
+                .iter()
+                .any(|path| path.kind == DepositionKind::SparseFill)
+        })
+        .collect();
+    assert!(sparse.len() > 5);
+    let sparse_length = |layer: &PrintLayer| {
+        layer
+            .paths
+            .iter()
+            .filter(|p| p.kind == DepositionKind::SparseFill)
+            .flat_map(|p| p.checked_edges().unwrap())
+            .map(|edge| {
+                let a = edge.points_mm[0];
+                let b = edge.points_mm[1];
+                (b[0] - a[0]).hypot(b[1] - a[1])
+            })
+            .sum::<f64>()
+    };
+    assert!(
+        sparse
+            .iter()
+            .any(|layer| sparse_length(layer) > sparse_length(sparse[0]) + 0.01),
+        "roof growth must increase real road length; merging may reduce road count"
+    );
+    let mut solid_intent = requested.clone();
+    solid_intent.recipe.sparse_infill = SparseInfillPolicy::Fine;
+    solid_intent.recipe.infill_fraction = 1.0;
+    let solid = scene.compile(&solid_intent).unwrap();
+    let dose = |b: &ManufacturingBundle| {
+        b.plan
+            .layers
+            .iter()
+            .map(|layer| layer.region_coverage.nominal_deposition_volume_mm3)
+            .sum::<f64>()
+    };
+    assert!(
+        dose(&bundle) < dose(&solid),
+        "the pattern must retain actual interior voids"
+    );
+    let motion = actual_motion(&bundle);
+    assert!(motion.iter().any(|(kind, _, _)| *kind == 5));
+    let inspection = inspect_bundle(
+        &bundle,
+        &SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap()),
+        VerificationOutput::ReportOnly,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(inspection.report.verified);
+    // The roof horizon belongs to the configured bed frame, including a
+    // negative bed: absolute Z=0 is not manufacturing authority.
+    let shifted_scene = Scene::new(BOX, &[pose(30.0, 40.0, -10.0)]);
+    let mut shifted_intent = requested.clone();
+    shifted_intent.printer.build_envelope.min[2] = -10.0;
+    let shifted = shifted_scene.compile(&shifted_intent).unwrap();
+    assert!(shifted.verification.verified);
+    assert!((dose(&shifted) - dose(&bundle)).abs() < 1e-6);
+    // Re-emitting edited paths with reconciled dose cannot bless an incomplete
+    // construction. Test both an early continuous web and a later roof branch.
+    for (target, web) in [
+        (sparse[0].index, true),
+        (sparse.last().unwrap().index, false),
+    ] {
+        let mut missing = bundle.plan.clone();
+        let layer = &mut missing.layers[target as usize];
+        let length = |p: &DepositionPath| {
+            (p.points_mm[1][0] - p.points_mm[0][0]).hypot(p.points_mm[1][1] - p.points_mm[0][1])
+        };
+        let index = layer
+            .paths
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.kind == DepositionKind::SparseFill)
+            .max_by(|(_, a), (_, b)| {
+                if web {
+                    length(a).total_cmp(&length(b))
+                } else {
+                    length(b).total_cmp(&length(a))
+                }
+            })
+            .unwrap()
+            .0;
+        layer.paths.remove(index);
+        let error = assert_reemitted_interface_refuses(missing, &requested);
+        assert!(error.message.contains("web + roof"), "{}", error.message);
+    }
+    // Captured bytes retain the selected pattern through strict serialization.
+    let decoded: ManufacturingBundle =
+        serde_json::from_slice(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+    assert_eq!(
+        decoded.provenance.intent.recipe.sparse_infill,
+        SparseInfillPolicy::WebRoof {}
+    );
+}
+
+#[test]
+fn native_web_roof_refuses_holes_and_multiple_parts_without_a_fill_fallback() {
+    let mut requested = intent();
+    requested.recipe.infill_fraction = 0.08;
+    requested.recipe.sparse_infill = SparseInfillPolicy::WebRoof {};
+    requested.recipe.layer_height_mm = 0.2;
+    requested.recipe.bead_width_mm = 0.45;
+    requested.recipe.process.max_bridge_span_mm = 2.0;
+    for scene in [
+        Scene::new(HOLE, &[pose(30.0, 40.0, 0.0)]),
+        Scene::new(BOX, &[pose(30.0, 40.0, 0.0), pose(60.0, 40.0, 0.0)]),
+    ] {
+        let error = scene.compile(&requested).unwrap_err();
+        assert_eq!(error.code, ManufacturingErrorCode::UnsupportedGeometry);
+        assert!(error.message.contains("web + roof"), "{}", error.message);
+    }
+}

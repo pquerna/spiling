@@ -957,6 +957,9 @@ pub enum SparseInfillPolicy {
     /// Two orthogonal fine-cadence line families, each at half the requested
     /// nominal fraction. Walls, skins and solid regions retain their own axes.
     Grid,
+    /// Continuous chamber webs plus retained roof corbels. Density controls
+    /// nominal web spacing; roof construction adds separately counted material.
+    WebRoof {},
     CombineEligible {
         max_height_mm: f64,
     },
@@ -1073,12 +1076,23 @@ impl ManufacturingIntent {
     }
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         self.printer.validate()?;
-        if matches!(self.recipe.sparse_infill, SparseInfillPolicy::Grid)
-            && !matches!(self.recipe.supports, SupportPolicy::Disabled)
+        if matches!(
+            self.recipe.sparse_infill,
+            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+        ) && !matches!(self.recipe.supports, SupportPolicy::Disabled)
         {
-            return Err(invalid("grid infill currently requires disabled supports"));
+            return Err(invalid(
+                "two-axis infill currently requires disabled supports",
+            ));
         }
         self.recipe.validate()?;
+        if matches!(self.recipe.sparse_infill, SparseInfillPolicy::WebRoof {})
+            && !(0.0 < self.recipe.infill_fraction && self.recipe.infill_fraction < 1.0)
+        {
+            return Err(invalid(
+                "web + roof requires a base web fraction strictly between zero and one",
+            ));
+        }
         if let Some(hardware) = &self.hardware {
             hardware.validate_intent(self).map_err(|e| invalid(&e))?;
         }
@@ -1089,9 +1103,12 @@ impl ManufacturingIntent {
         let r = &self.recipe;
         r.process.validate_printer(p)?;
         if let JobWorkflow::FixedDualMarlin { job } = &p.workflow {
-            if matches!(r.sparse_infill, SparseInfillPolicy::Grid) {
+            if matches!(
+                r.sparse_infill,
+                SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+            ) {
                 return Err(invalid(
-                    "grid infill currently requires a single-tool workflow",
+                    "two-axis infill currently requires a single-tool workflow",
                 ));
             }
             for tool in &job.tools {
@@ -3274,13 +3291,16 @@ impl NormalizedPrintPlan {
                     )
                 });
                 if path.kind == DepositionKind::SparseFill
-                    && matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Grid)
+                    && matches!(
+                        intent.recipe.sparse_infill,
+                        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+                    )
                 {
                     if path.points_mm.len() != 2
                         || path.physical_z_mm != [layer.lower_z_mm, layer.z_mm]
                     {
                         return Err(invalid(
-                            "grid sparse paths require one straight fine-interval row",
+                            "two-axis sparse paths require one straight fine-interval row",
                         ));
                     }
                     let a = program_coordinates::project_xyz6_point_mm(path.points_mm[0])?;
@@ -3290,7 +3310,7 @@ impl NormalizedPrintPlan {
                     } else if a[1] == b[1] {
                         Some(1)
                     } else {
-                        return Err(invalid("grid sparse row must follow build X or Y"));
+                        return Err(invalid("two-axis sparse row must follow build X or Y"));
                     };
                 }
                 let mut previous_fixed_coordinate = None;
@@ -3408,20 +3428,31 @@ pub struct ManufacturingProvenance {
 }
 impl ManufacturingProvenance {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
-        if matches!(self.intent.recipe.sparse_infill, SparseInfillPolicy::Grid)
-            && (self
-                .process_document
-                .layers
-                .iter()
-                .any(|layer| layer.enabled && !layer.operations.is_empty())
-                || self
-                    .surface_overlays
-                    .layers
-                    .iter()
-                    .any(|layer| layer.enabled))
+        if matches!(
+            self.intent.recipe.sparse_infill,
+            SparseInfillPolicy::WebRoof {}
+        ) && self.occurrences.len() != 1
         {
             return Err(invalid(
-                "grid infill currently excludes enabled process and finish layers",
+                "web + roof provenance requires exactly one occurrence",
+            ));
+        }
+        if matches!(
+            self.intent.recipe.sparse_infill,
+            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+        ) && (self
+            .process_document
+            .layers
+            .iter()
+            .any(|layer| layer.enabled && !layer.operations.is_empty())
+            || self
+                .surface_overlays
+                .layers
+                .iter()
+                .any(|layer| layer.enabled))
+        {
+            return Err(invalid(
+                "two-axis infill currently excludes enabled process and finish layers",
             ));
         }
         if self.surface_images.capacity() > crate::surface::MAX_SURFACE_IMAGES {

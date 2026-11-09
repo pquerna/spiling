@@ -1091,6 +1091,7 @@ impl TryFrom<rpc::SparseInfillPolicy> for SparseInfillPolicy {
             match required(value.policy, "sparse infill policy selection")? {
                 Policy::Fine(_) => Self::Fine,
                 Policy::Grid(_) => Self::Grid,
+                Policy::WebRoof(_) => Self::WebRoof {},
                 Policy::CombineEligible(policy) => Self::CombineEligible {
                     max_height_mm: policy.max_height_mm,
                 },
@@ -1108,6 +1109,7 @@ impl TryFrom<SparseInfillPolicy> for rpc::SparseInfillPolicy {
             policy: Some(match value {
                 SparseInfillPolicy::Fine => Policy::Fine(rpc::FineSparseInfill {}),
                 SparseInfillPolicy::Grid => Policy::Grid(rpc::GridSparseInfill {}),
+                SparseInfillPolicy::WebRoof {} => Policy::WebRoof(rpc::WebRoofSparseInfill {}),
                 SparseInfillPolicy::CombineEligible { max_height_mm } => {
                     Policy::CombineEligible(rpc::CombineEligibleSparseInfill { max_height_mm })
                 }
@@ -1775,7 +1777,7 @@ mod tests {
         for policy in [
             None,
             Some(rpc::SparseInfillPolicy { policy: None }),
-            Some(rpc::SparseInfillPolicy::decode([0x22, 0x00].as_slice()).unwrap()),
+            Some(rpc::SparseInfillPolicy::decode([0x7a, 0x00].as_slice()).unwrap()),
         ] {
             let mut missing = wire.clone();
             missing.recipe.as_mut().unwrap().sparse_infill = policy;
@@ -1815,10 +1817,14 @@ mod tests {
         for policy in [
             SparseInfillPolicy::Fine,
             SparseInfillPolicy::Grid,
+            SparseInfillPolicy::WebRoof {},
             SparseInfillPolicy::CombineEligible { max_height_mm: 0.3 },
         ] {
             let mut value = intent();
             value.recipe.sparse_infill = policy;
+            if matches!(policy, SparseInfillPolicy::WebRoof {}) {
+                value.recipe.infill_fraction = 0.1;
+            }
             let encoded = rpc::ManufacturingIntent::try_from(value.clone()).unwrap();
             assert_eq!(ManufacturingIntent::try_from(encoded).unwrap(), value);
         }

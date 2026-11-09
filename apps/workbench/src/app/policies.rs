@@ -35,23 +35,38 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
     let infill_label = match intent.recipe.sparse_infill {
         SparseInfillPolicy::Fine => "Rectilinear",
         SparseInfillPolicy::Grid => "Grid",
+        SparseInfillPolicy::WebRoof {} => "Web + roof",
         SparseInfillPolicy::CombineEligible { .. } => "Rectilinear · combined",
     };
     egui::CollapsingHeader::new(format!("Infill · {infill_label}"))
         .id_salt("infill-bands")
         .show(ui, |ui| {
-            let mut grid = matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Grid);
+            let mut pattern = match intent.recipe.sparse_infill {
+                SparseInfillPolicy::Grid => 1,
+                SparseInfillPolicy::WebRoof {} => 2,
+                _ => 0,
+            };
+            let original = pattern;
             egui::ComboBox::from_id_salt("infill-pattern")
-                .selected_text(if grid { "Grid" } else { "Rectilinear" })
+                .selected_text(["Rectilinear", "Grid", "Web + roof"][pattern])
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut grid, false, "Rectilinear");
-                    ui.selectable_value(&mut grid, true, "Grid")
+                    ui.selectable_value(&mut pattern, 0, "Rectilinear");
+                    ui.selectable_value(&mut pattern, 1, "Grid")
                         .on_hover_text("Two perpendicular line families in every fine interval. Single tool; supports, process regions and finishes are currently excluded.");
+                    ui.selectable_value(&mut pattern, 2, "Web + roof")
+                        .on_hover_text("Continuous chamber webs with retained roof branches. Base density sets web spacing; roof branches add material. One upright rectangular part, single tool, no holes, finishes, process modifiers or breakaway supports. Strength is unqualified.");
                 });
-            if grid != matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Grid) {
-                intent.recipe.sparse_infill = if grid { SparseInfillPolicy::Grid } else { SparseInfillPolicy::Fine };
+            if pattern != original {
+                intent.recipe.sparse_infill = match pattern {
+                    1 => SparseInfillPolicy::Grid,
+                    2 => SparseInfillPolicy::WebRoof {},
+                    _ => SparseInfillPolicy::Fine,
+                };
             }
-            if !grid {
+            if pattern == 2 {
+                ui.weak("Retained branches · strength unqualified");
+            }
+            if pattern == 0 {
                 let mut combine = matches!(intent.recipe.sparse_infill, SparseInfillPolicy::CombineEligible { .. });
                 if ui.checkbox(&mut combine, "Combine sparse bands").changed() {
                     intent.recipe.sparse_infill = if combine {
@@ -62,7 +77,7 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
                     ui::number(ui, "Maximum height (mm)", max_height_mm, 0.01);
                 }
             } else if !matches!(intent.recipe.supports, SupportPolicy::Disabled) {
-                ui.colored_label(ui.visuals().warn_fg_color, "Grid requires supports off");
+                ui.colored_label(ui.visuals().warn_fg_color, "Requires supports off");
             }
         });
     ui.add_enabled_ui(intent.material_profile.is_none(), |ui| {
@@ -118,7 +133,10 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
         .show(ui, |ui| {
             for (label, value) in [
                 (
-                    if matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Grid) {
+                    if matches!(
+                        intent.recipe.sparse_infill,
+                        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof {}
+                    ) {
                         "Solid / bottom hatch"
                     } else {
                         "Interior hatch"

@@ -32,6 +32,14 @@ spiling-cli project inspect grid.spil --verify --manufacturing-out grid-returned
 
 Fresh replay rejects a self-consistent plan/program missing an orthogonal family. Supports, enabled process/finish layers and fixed-dual routes remain explicit Grid refusals. [The offline research lab](infill-lab.md) compares actual emitted constructions and solid controls without granting mechanical authority.
 
+## Retained chamber webs and roof branches
+
+**Web + roof** is an available single-tool software construction for one upright native constant-section part with a rectangular, hole-free classified interior. Its [construction contract](../protocol/manufacturing.md#web-and-roof-infill) owns lattice, physical-height growth, actual-anchor and scope rules. The [typed reference input](../../fixtures/manufacturing/web-roof.intent.ts) has an inert JSON companion. Base density controls nominal webs; added roof roads count toward the actual dose and modeled work. Strength and physical printing remain unqualified.
+
+With coherent engine/CLI binaries, run `node --experimental-strip-types tools/smoke-web-roof.mjs` under the [native resource bounds](development.md#resources-and-test-inputs). It compiles and freshly replays the actual complete Marlin program, removes external source/intent copies, reopens the saved project, compares all four export files, independently observes both directions and growing roof-road lengths from SPLR, and compares actual deposited volume with a same-part solid control. Evidence stays in ignored `.cache/web-roof-*` output. Set `CARGO_TARGET_DIR` for the producer being tested.
+
+The manufacturing `web_roof` tests additionally exercise continuous webs, merged corbels, unchanged XY under refined physical heights, a shifted negative bed frame, missing actual roads despite reconciled re-emission, and hole/multiple-part refusals. Contract/wire tests retain strict policy and scope admission. Rectilinear/Grid and their existing gates remain separate. No mechanical ranking or stronger-infill claim follows from these software checks.
+
 ## Preferred layer-height review
 
 The [goal contract](../protocol/manufacturing.md#construction-goals-and-protected-layer-heights)

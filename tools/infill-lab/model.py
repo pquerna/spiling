@@ -42,10 +42,12 @@ class Candidate:
     pattern: str = "rectilinear"
 
     def __post_init__(self):
-        if self.pattern not in {"rectilinear", "grid"}:
+        if self.pattern not in {"rectilinear", "grid", "web_roof"}:
             raise ValueError("unknown production infill pattern")
-        if self.pattern == "grid" and (self.family != "uniform" or self.combine_height):
-            raise ValueError("grid study requires uniform fine-cadence input")
+        if self.pattern in {"grid", "web_roof"} and (self.family != "uniform" or self.combine_height):
+            raise ValueError("two-axis study requires uniform fine-cadence input")
+        if self.pattern == "web_roof" and self.fraction == 1:
+            raise ValueError("web + roof requires sparse base webs")
         if self.family not in {"uniform", "crown", "flanges", "separator"}:
             raise ValueError("unknown construction family")
         if self.axis not in {"x", "y", "alternating_xy", "alternating_yx"}:

@@ -137,7 +137,7 @@ class Native:
             sparse_infill=(
                 {"kind": "combine_eligible", "max_height_mm": candidate.combine_height}
                 if candidate.combine_height
-                else {"kind": "grid" if candidate.pattern == "grid" else "fine"}
+                else {"kind": {"grid": "grid", "web_roof": "web_roof", "rectilinear": "fine"}[candidate.pattern]}
             ),
         )
         # Preserve walls/skins/process from the captured public base recipe.

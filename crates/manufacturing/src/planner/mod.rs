@@ -919,6 +919,71 @@ fn admit_schedule<'model>(
         native_coverage.retained_bytes(),
         schedule.capacity() * std::mem::size_of::<LayerElevation>(),
     ])?;
+    let web_roof_z = if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof {}) {
+        let first = sections.first().ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "web + roof requires an upright constant-section part",
+            )
+        })?;
+        if input.occurrences.len() != 1
+            || sections
+                .iter()
+                .any(|span| span.material.as_ref() != first.material.as_ref())
+        {
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "web + roof currently requires one upright constant-section part",
+            ));
+        }
+        let occurrence = &input.occurrences[0];
+        let definition = &input.definitions[&occurrence.definition_id];
+        if definition.faces().len() != 6
+            || definition.faces().iter().any(|face| {
+                face.geometry.family != spiling_contracts::geometry::SurfaceFamily::Plane
+            })
+        {
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "web + roof currently requires one rectangular native part without holes",
+            ));
+        }
+        let wall = definition.faces().iter().find(|face| matches!(
+            &face.geometry.analytic,
+            Some(spiling_contracts::geometry::AnalyticSurfaceDescription::Plane { normal, .. })
+                if normal[2] == 0.0
+        )).ok_or_else(|| error(ManufacturingErrorCode::UnsupportedGeometry,
+            "web + roof requires a certified full-height native wall"))?;
+        let certificate = definition
+            .vertical_wall_face_with_work(&wall.face_id, admission.geometry_work, cancel)
+            .map_err(|failure| native_error(failure, "web + roof full-height native wall"))?;
+        surface::admit_extrusion(
+            input,
+            occurrence,
+            admission.native_bounds[&occurrence.occurrence_id],
+            &wall.face_id,
+            certificate.min_z_mm,
+            certificate.max_z_mm,
+            cancel,
+        )
+        .map_err(|mut failure| {
+            failure.message = format!("web + roof: {}", failure.message);
+            failure
+        })?;
+        // The source's actual carrier/pose eligibility and every native slab
+        // remain separate. In particular, an endpoint collar is not reclassified
+        // as invariant merely because its rectangular footprint matches.
+        // Complete the crown one nominal interval before the physical top-skin
+        // horizon. Refinement may add intervals; it cannot defer this target.
+        Some(
+            (schedule.last().expect("nonempty schedule").z
+                - recipe.top_skin_thickness_mm
+                - recipe.layer_height_mm)
+                .max(input.intent.printer.build_envelope.min[2]),
+        )
+    } else {
+        None
+    };
     let mut construction = joins::capture_or_color(
         input,
         &sections,
@@ -1421,6 +1486,7 @@ fn admit_schedule<'model>(
                 &templates,
             )?;
             let hatch_layer = region::HatchLayer {
+                roof_z_mm: web_roof_z,
                 width_mm: recipe.bead_width_mm,
                 z,
                 lower_z: elevation.lower_z,
@@ -1477,6 +1543,11 @@ fn admit_schedule<'model>(
                 resolution_allocated_bytes,
                 &templates,
             )?;
+            if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof {}) {
+                // Roof branches depend on physical height, even when native D
+                // and its wall/classification templates remain unchanged.
+                templates[axis_slot] = None;
+            }
             if templates[axis_slot].is_none() {
                 let mut template_segments = segments;
                 let classified = classified
@@ -1488,6 +1559,7 @@ fn admit_schedule<'model>(
                     axis,
                     top_axis,
                     recipe,
+                    web_roof_z,
                     phase,
                     classified_owned_bytes,
                     &sections[current].process_domains,
@@ -1876,6 +1948,7 @@ fn admit_schedule<'model>(
                     )?;
                     let classified_bytes = classified.retained_bytes();
                     let hatch_layer = region::HatchLayer {
+                        roof_z_mm: web_roof_z,
                         width_mm: recipe.bead_width_mm,
                         z: elevation.z,
                         lower_z: elevation.lower_z,
@@ -1941,6 +2014,7 @@ fn admit_schedule<'model>(
                             axis,
                             region::HatchAxis::for_policy(recipe.top_skin_axis, index as u32),
                             recipe,
+                            web_roof_z,
                             phase_by_layer[index],
                             classified_bytes,
                             &sections[current].process_domains,

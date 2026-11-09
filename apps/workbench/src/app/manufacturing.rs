@@ -924,7 +924,15 @@ pub(super) fn settings_fields(
     ] {
         ui::number(ui, label, value, 0.01);
     }
-    ui::percent(ui, "Infill (%)", &mut intent.recipe.infill_fraction);
+    ui::percent(
+        ui,
+        if matches!(intent.recipe.sparse_infill, SparseInfillPolicy::WebRoof {}) {
+            "Base webs (%)"
+        } else {
+            "Infill (%)"
+        },
+        &mut intent.recipe.infill_fraction,
+    );
     ui.add_enabled_ui(intent.material_profile.is_none(), |ui| {
         ui::number(
             ui,

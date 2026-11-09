@@ -747,6 +747,8 @@ impl HatchAxis {
 }
 
 pub(super) struct HatchLayer<'a> {
+    /// Last physical web interval needed before the first mandatory roof skin.
+    pub roof_z_mm: Option<f64>,
     /// Actual proposed hatch width, independent of wall/skin recipe defaults.
     pub width_mm: f64,
     pub z: f64,
@@ -783,6 +785,8 @@ impl OrdinaryHatchPhase {
         }
     }
 }
+
+mod web_roof;
 
 // Fill endpoints belong to the eroded interior boundary, half a bead from
 // the final wall center. No wall-extension strokes or duplicate outlines.
@@ -823,6 +827,14 @@ pub(super) fn hatch_with_phase(
     segments: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    if kind == DepositionKind::SparseFill
+        && matches!(layer.recipe.sparse_infill, SparseInfillPolicy::WebRoof {})
+    {
+        if common_phase.is_some() || phase != OrdinaryHatchPhase::Centered {
+            return Err(unsupported("web + roof requires its fixed chamber lattice"));
+        }
+        return web_roof::hatch(fill, fraction, layer, paths, segments, cancel);
+    }
     if kind == DepositionKind::SparseFill
         && matches!(layer.recipe.sparse_infill, SparseInfillPolicy::Grid)
     {
@@ -1473,6 +1485,7 @@ fn optional_support_rows_omit_uncommandable_proposals_but_preserve_required_skin
     let recipe = super::tests::recipe(1.0);
     for axis in [HatchAxis::X, HatchAxis::Y] {
         let layer = HatchLayer {
+            roof_z_mm: None,
             width_mm: recipe.bead_width_mm,
             z: recipe.layer_height_mm,
             lower_z: 0.0,
@@ -1533,6 +1546,7 @@ fn ordinary_quarter_hatch_preserves_each_polygon_cadence_and_authored_origins() 
     let recipe = super::tests::recipe(0.5);
     let cancel = AtomicBool::new(false);
     let layer = HatchLayer {
+        roof_z_mm: None,
         width_mm: recipe.bead_width_mm,
         z: recipe.layer_height_mm,
         lower_z: 0.0,
@@ -1701,6 +1715,7 @@ fn zero_fraction_has_no_rows_for_centered_alternate_or_transported_phases() {
     );
     for axis in [HatchAxis::X, HatchAxis::Y] {
         let layer = HatchLayer {
+            roof_z_mm: None,
             width_mm: recipe.bead_width_mm,
             z: 0.2,
             lower_z: 0.0,

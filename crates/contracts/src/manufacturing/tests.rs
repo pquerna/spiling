@@ -4567,3 +4567,39 @@ fn mixed_tool_fine_schedule_uses_primary_profile_and_every_waste_interval() {
         "thin waste must not be silently skipped or widened"
     );
 }
+
+#[test]
+fn web_roof_requires_sparse_single_tool_object_material() {
+    let mut value = intent();
+    value.recipe.sparse_infill = SparseInfillPolicy::WebRoof {};
+    value.recipe.infill_fraction = 0.08;
+    value.validate().unwrap();
+    for fraction in [0.0, 1.0, -0.1, f64::NAN, f64::INFINITY] {
+        let mut bad = value.clone();
+        bad.recipe.infill_fraction = fraction;
+        assert!(bad.validate().is_err());
+    }
+    let mut bad = value.clone();
+    bad.recipe.supports = SupportPolicy::Breakaway {
+        density: 0.2,
+        xy_clearance_mm: 0.5,
+        z_gap_mm: 0.2,
+        interface_thickness_mm: 0.4,
+    };
+    assert!(
+        bad.validate()
+            .unwrap_err()
+            .message
+            .contains("disabled supports")
+    );
+    let mut dual: ManufacturingIntent = serde_json::from_str(include_str!(
+        "../../../../fixtures/manufacturing/fixed-dual.intent.json"
+    ))
+    .unwrap();
+    dual.recipe.sparse_infill = SparseInfillPolicy::WebRoof {};
+    dual.recipe.infill_fraction = 0.08;
+    assert!(dual.validate().unwrap_err().message.contains("single-tool"));
+    assert!(
+        serde_json::from_str::<SparseInfillPolicy>(r#"{"kind":"web_roof","unknown":1}"#).is_err()
+    );
+}
