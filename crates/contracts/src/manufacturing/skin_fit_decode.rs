@@ -590,7 +590,7 @@ mod tests {
         let allowance = MAX_MANUFACTURING_BUNDLE_BYTES as usize;
         let encoded = serde_json::to_string(&[domain(), domain()]).unwrap();
         let mut budget = SegmentBudget::new();
-        assert_eq!(budget.remaining_skin_fit_bytes, 16 * 1024 * 1024);
+        assert_eq!(budget.remaining_skin_fit_bytes, allowance);
         let decoded = domains(
             &mut budget,
             &mut serde_json::Deserializer::from_str(&encoded),

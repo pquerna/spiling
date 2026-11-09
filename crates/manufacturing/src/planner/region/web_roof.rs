@@ -8,6 +8,7 @@
 use super::*;
 use spiling_contracts::manufacturing::program_coordinates::MIN_DEPOSITION_COMMAND_MM;
 mod architecture;
+mod joints;
 
 #[derive(Clone, Copy)]
 struct Lattice {
@@ -285,17 +286,13 @@ pub(super) fn hatch(
             architecture::ribs(
                 polygon, &web_roots, depth, layer, paths, segments, &mut work, cancel,
             )?;
+        } else if architecture.is_none() {
+            joints::append(
+                polygon, &web_roots, &lattices, layer, paths, segments, &mut work, cancel,
+            )?;
         }
     }
-    if matches!(
-        layer.recipe.sparse_infill,
-        SparseInfillPolicy::WebRoof {
-            architecture: Some(_),
-            ..
-        }
-    ) {
-        architecture::merge(paths, first_path, layer, segments, cancel)?;
-    }
+    architecture::merge(paths, first_path, layer, segments, &mut work, cancel)?;
     Ok(())
 }
 

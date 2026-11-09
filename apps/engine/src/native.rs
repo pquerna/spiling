@@ -615,7 +615,7 @@ fn publish_terminal(
         let descriptor = jobs.describe_native_artifact(
             asset.bytes.as_slice(),
             "application/x-spiling-manufacturing-bundle",
-            16 * 1024 * 1024,
+            spiling_contracts::manufacturing::MAX_MANUFACTURING_BUNDLE_BYTES as u64,
         )?;
         if descriptor.sha256 != asset.record.hash.as_str()
             || descriptor.size_bytes != u64::from(asset.record.byte_count)

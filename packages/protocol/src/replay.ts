@@ -10,7 +10,8 @@ import {
   REPLAY_RECORD_BYTES,
   MAX_PRINT_LAYERS,
   MAX_DEPOSITION_SEGMENTS,
-  MAX_MANUFACTURING_BUNDLE_BYTES,
+  MAX_TRAVEL_SEGMENTS,
+  MAX_MANUFACTURING_PROGRAM_BYTES,
   MAX_MANUFACTURING_LABEL_BYTES,
   MAX_PROCESS_REGIONS,
 } from "./generated.ts";
@@ -124,7 +125,7 @@ export async function decodeReplayDisplay(
     fail("invalid verifier version");
   uint(info.event_count, "event count", fail, 2, MAX_REPLAY_EVENTS);
   uint(info.deposition_count, "deposition count", fail, 1, MAX_DEPOSITION_SEGMENTS);
-  uint(info.travel_count, "travel count", fail, 1, MAX_DEPOSITION_SEGMENTS);
+  uint(info.travel_count, "travel count", fail, 1, MAX_TRAVEL_SEGMENTS);
   uint(info.layer_count, "layer count", fail, 1, MAX_PRINT_LAYERS);
   uint(info.lifecycle_count, "lifecycle count", fail, 0, 4);
   uint(info.process_count, "process count", fail, 0, MAX_DEPOSITION_SEGMENTS);
@@ -237,7 +238,7 @@ export async function decodeReplayDisplay(
       (kind === 14 ? f !== 0 : f <= 0)
     )
       fail("invalid extrusion or feed");
-    uint(line, "source line", fail, 1, MAX_MANUFACTURING_BUNDLE_BYTES);
+    uint(line, "source line", fail, 1, MAX_MANUFACTURING_PROGRAM_BYTES);
     if (line <= lastLine) fail("source line sequence is not increasing");
     const associated =
       (kind >= 1 && kind <= 5) || (kind >= 8 && kind <= 10) || kind === 13 || kind === 15;

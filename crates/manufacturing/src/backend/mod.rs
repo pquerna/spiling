@@ -199,7 +199,7 @@ pub fn emit(
                     } else {
                         travels += 1;
                     }
-                    if deposits > MAX_DEPOSITION_SEGMENTS || travels > MAX_DEPOSITION_SEGMENTS {
+                    if deposits > MAX_DEPOSITION_SEGMENTS || travels > MAX_TRAVEL_SEGMENTS {
                         return Err(error(
                             ManufacturingErrorCode::ResourceLimit,
                             "actual model/waste or travel segment budget exceeded",
@@ -347,7 +347,7 @@ pub fn emit(
         }
         crate::routing::check_motion(last, lift, active_tool, built_top, intent, job)?;
         crate::routing::check_motion(lift, park, active_tool, built_top, intent, job)?;
-        if travels > MAX_DEPOSITION_SEGMENTS - 2 || process_events >= 100_000 {
+        if travels > MAX_TRAVEL_SEGMENTS - 2 || process_events >= 100_000 {
             return Err(error(
                 ManufacturingErrorCode::ResourceLimit,
                 "final routed lifecycle budget exceeded",
@@ -375,7 +375,7 @@ fn writable_position(
 struct BoundedProgram(String);
 impl Write for BoundedProgram {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        if s.len() > MAX_MANUFACTURING_BUNDLE_BYTES as usize - self.0.len() {
+        if s.len() > MAX_MANUFACTURING_PROGRAM_BYTES as usize - self.0.len() {
             return Err(fmt::Error);
         }
         self.0.push_str(s);

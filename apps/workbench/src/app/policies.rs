@@ -35,7 +35,11 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
     let infill_label = match intent.recipe.sparse_infill {
         SparseInfillPolicy::Fine => "Rectilinear",
         SparseInfillPolicy::Grid => "Grid",
-        SparseInfillPolicy::WebRoof { .. } => "Vault",
+        SparseInfillPolicy::WebRoof {
+            architecture: Some(_),
+            ..
+        } => "Cathedral · study",
+        SparseInfillPolicy::WebRoof { .. } => "Cathedral",
         SparseInfillPolicy::CombineEligible { .. } => "Rectilinear · combined",
     };
     egui::CollapsingHeader::new(format!("Infill · {infill_label}"))
@@ -48,13 +52,13 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
             };
             let original = pattern;
             egui::ComboBox::from_id_salt("infill-pattern")
-                .selected_text(["Rectilinear", "Grid", "Vault"][pattern])
+                .selected_text(["Rectilinear", "Grid", "Cathedral"][pattern])
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut pattern, 0, "Rectilinear");
                     ui.selectable_value(&mut pattern, 1, "Grid")
                         .on_hover_text("Two perpendicular line families in every fine interval. Single tool; supports, process regions and finishes are currently excluded.");
-                    ui.selectable_value(&mut pattern, 2, "Vault")
-                        .on_hover_text("Continuous chamber webs with retained roof branches. Base density sets web spacing; roof branches add material. One upright analytic extrusion, including qualified holes and curves. Single tool; no finishes, process modifiers or breakaway supports. Strength is unqualified.");
+                    ui.selectable_value(&mut pattern, 2, "Cathedral")
+                        .on_hover_text("Continuous chamber webs with automatic joint ribs and retained roof branches. Base density sets web spacing; joints and roof branches add material. One upright analytic extrusion, including qualified holes and curves. Single tool; no finishes, process modifiers or breakaway supports. Strength is unqualified.");
                 });
             if pattern != original {
                 if pattern == 2 && !(0.0 < intent.recipe.infill_fraction && intent.recipe.infill_fraction < 1.0) {
@@ -68,7 +72,15 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
             }
             if pattern == 2 {
                 let automatic_spacing = intent.recipe.automatic_web_roof_spacing_mm();
-                if let SparseInfillPolicy::WebRoof { roof_spacing_mm, .. } = &mut intent.recipe.sparse_infill {
+                if let SparseInfillPolicy::WebRoof { roof_spacing_mm, architecture } = &mut intent.recipe.sparse_infill {
+                    if architecture.is_some() {
+                        ui.horizontal(|ui| {
+                            ui.label("Study architecture").on_hover_text("An explicit research construction replaces the automatic joint policy. Its complete parameters remain in the declaration.");
+                            if ui.small_button("Reset").on_hover_text("Restore automatic Cathedral construction; keep density and roof spacing.").clicked() {
+                                *architecture = None;
+                            }
+                        });
+                    }
                     let mut automatic = roof_spacing_mm.is_none();
                     if ui.checkbox(&mut automatic, "Automatic roof spacing")
                         .on_hover_text("Uses 75% of the captured bridge-span limit. A tighter override adds roof contacts and material; actual support is verified independently.")
@@ -80,7 +92,6 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
                         *roof_spacing_mm = Some(resolved);
                     }
                 }
-                ui.weak("Retained branches · strength unqualified");
             }
             if pattern == 0 {
                 let mut combine = matches!(intent.recipe.sparse_infill, SparseInfillPolicy::CombineEligible { .. });

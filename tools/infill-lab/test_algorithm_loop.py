@@ -70,47 +70,6 @@ def test_floating_reinforcement_does_not_gain_nominal_support(baseline):
         admit(baseline, rows)
 
 
-def test_prepare_preserves_trial_name_and_archives_the_only_editable_file(
-    tmp_path, monkeypatch, baseline
-):
-    import algorithm_loop as loop
-
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "algorithm_judge.py").write_text("frozen judge")
-    (source / "roof_algorithm_judge.py").write_text("frozen roof judge")
-    (source / "interior_algorithm.py").write_text(
-        'def generate(context): return context["sparse"]\n'
-    )
-    root = tmp_path / "cohort"
-    (root / "trials").mkdir(parents=True)
-    (root / ".auto").mkdir()
-    loop.write(root / "baseline.json", baseline)
-    loop.write(
-        root / "freeze.json",
-        dict(
-            judge={
-                name: loop.sha(source / name)
-                for name in ("algorithm_judge.py", "roof_algorithm_judge.py")
-            }
-        ),
-    )
-    monkeypatch.setattr(loop, "HERE", source)
-
-    def generated(*args, **kwargs):
-        folder = root / "trials" / "control"
-        loop.write(folder / "sparse.json", context(baseline)["sparse"])
-
-    monkeypatch.setattr(loop.subprocess, "run", generated)
-    assert loop.prepare(root, "control", None, "identity")["status"] == "admitted"
-    case = __import__("json").loads((root / "trials/control/case.json").read_text())
-    assert case["name"] == "control"
-    assert case["algorithm_sha256"] == loop.sha(source / "interior_algorithm.py")
-    (source / "roof_algorithm_judge.py").write_text("changed")
-    with pytest.raises(ValueError, match="judge source edited"):
-        loop.prepare(root, "changed", None, "invalid judge")
-
-
 @pytest.mark.parametrize("name", ["../escape", "/absolute", "has space", "a.b", ""])
 def test_trial_names_cannot_escape_archive(name):
     from algorithm_loop import valid_name
@@ -147,44 +106,101 @@ def test_frontier_keeps_small_gains_and_never_scores_failed_or_clipped_results()
     assert "geometric_mean_stiffness_ratio" not in rows[4]
 
 
-def test_failed_generation_remains_a_named_source_snapshot(
-    tmp_path, monkeypatch, baseline
-):
+@pytest.fixture
+def rust_cohort(tmp_path, monkeypatch):
     import algorithm_loop as loop
-    import subprocess, json
+    import subprocess
 
-    root = tmp_path / "cohort"
-    (root / "trials").mkdir(parents=True)
-    (root / ".auto").mkdir()
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "algorithm_judge.py").write_text("judge")
-    (source / "interior_algorithm.py").write_text('raise RuntimeError("experiment")\n')
-    loop.write(
-        root / "freeze.json",
-        dict(judge={"algorithm_judge.py": loop.sha(source / "algorithm_judge.py")}),
+    repo = tmp_path / "source"
+    repo.mkdir()
+    for name in loop.EDITABLE:
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// native generator\n")
+    (repo / "verifier.rs").write_text("// independent verifier\n")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "frozen",
+        ],
+        cwd=repo,
+        check=True,
     )
-    loop.write(root / "baseline.json", baseline)
-    monkeypatch.setattr(loop, "HERE", source)
+    monkeypatch.setattr(loop, "REPO", repo)
+    original = subprocess.check_output
 
-    def failed(*args, **kwargs):
-        raise subprocess.CalledProcessError(1, ["candidate"])
+    def output(args, **kwargs):
+        return (
+            "rustc frozen test compiler\n"
+            if args[0] == "rustc"
+            else original(args, **kwargs)
+        )
 
-    monkeypatch.setattr(loop.subprocess, "run", failed)
-    receipt = loop.prepare(root, "broken", None, "intentional generation failure")
-    assert receipt["phase"] == "generation" and receipt["status"] == "failed"
-    assert (root / "trials/broken/algorithm.py").read_text() == (
-        source / "interior_algorithm.py"
-    ).read_text()
-    assert json.loads((root / ".auto/log.jsonl").read_text())["name"] == "broken"
+    monkeypatch.setattr(loop.subprocess, "check_output", output)
+    candidates = tmp_path / "panel.jsonl"
+    candidates.write_text('{"pattern":"web_roof","fraction":0.05}\n')
+    root = tmp_path / "cohort"
+    loop.freeze(root, candidates, ["cube48"])
+    return loop, repo, root
 
 
-def test_dispatch_reserves_full_simultaneous_memory_and_cpu():
-    from algorithm_loop import capacity
+def test_rust_trials_snapshot_edits_and_refuse_changed_independent_verifier(
+    rust_cohort,
+):
+    loop, repo, root = rust_cohort
+    control = loop.prepare(root, "control", None, "Native control")
+    path = repo / loop.EDITABLE[0]
+    path.write_text("// changed Rust construction\n")
+    child = loop.prepare(root, "child", "control", "Change native geometry")
+    assert child["parent"] == "control"
+    assert child["rust_sources"] != control["rust_sources"]
+    assert (
+        root / "trials/child/source" / loop.EDITABLE[0]
+    ).read_text() == path.read_text()
+    (repo / "verifier.rs").write_text("// weakened independent verifier\n")
+    with pytest.raises(ValueError, match="outside Rust generator"):
+        loop.prepare(root, "invalid", "child", "Cannot change the judge")
+    assert not (root / "trials/invalid").exists()
 
-    gib = 1024**3
-    assert capacity(120 * gib, 20) == 2
-    assert capacity(64 * gib, 20) == 1
-    assert capacity(32 * gib, 20) == 0
-    assert capacity(120 * gib, 3) == 1
-    assert capacity(120 * gib, 2) == 0
+
+def test_failed_rust_build_keeps_source_and_never_claims_native_replay(
+    rust_cohort, monkeypatch
+):
+    import lab, native, json
+
+    loop, repo, root = rust_cohort
+    loop.prepare(root, "broken", None, "Intentional compile failure")
+    monkeypatch.setattr(lab, "bounded", lambda: None)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("Rust compiler rejected candidate")
+
+    monkeypatch.setattr(native, "run", fail)
+    result = loop.run(root, "broken")
+    assert result["status"] == "failed" and not result["native_replayed"]
+    assert "Rust compiler" in result["error"]
+    assert (root / "trials/broken/source" / loop.EDITABLE[0]).exists()
+    assert len((root / "events.jsonl").read_text().splitlines()) == 2
+    with pytest.raises(ValueError, match="already evaluated"):
+        loop.run(root, "broken")
+    assert json.loads((root / "trials/broken/result.json").read_text()) == result
+
+
+def test_python_generation_edits_and_unknown_parents_are_not_admitted(rust_cohort):
+    loop, repo, root = rust_cohort
+    with pytest.raises(ValueError, match="parent trial"):
+        loop.prepare(root, "lost", "unknown", "Unknown lineage")
+    (repo / "python_geometry.py").write_text("# alternate generator\n")
+    with pytest.raises(ValueError, match="outside Rust generator"):
+        loop.prepare(root, "python", None, "Cannot replace Rust generation")
+    with pytest.raises(ValueError, match="committed baseline"):
+        loop.freeze(root.parent / "dirty-freeze", root / "candidates.jsonl", ["cube48"])
+    assert not (root.parent / "dirty-freeze").exists()

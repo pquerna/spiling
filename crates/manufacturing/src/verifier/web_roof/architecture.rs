@@ -120,6 +120,13 @@ pub(super) fn consume(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    charge_many(
+        work,
+        expected
+            .len()
+            .saturating_mul(1 + expected.len().max(1).ilog2() as usize),
+        cancel,
+    )?;
     expected.sort_unstable_by(|a, b| {
         a.0.cmp(&b.0)
             .then(a.1.total_cmp(&b.1))

@@ -2586,6 +2586,18 @@ fn native_failure_categories_preserve_specific_serialized_diagnostics() {
 }
 
 #[test]
+fn bundle_headroom_does_not_expand_the_actual_program_limit() {
+    let mut value = bundle();
+    value.program = ";".repeat(MAX_MANUFACTURING_PROGRAM_BYTES as usize);
+    value.validate().unwrap();
+    value.program.push(';');
+    assert_eq!(
+        value.validate().unwrap_err().code,
+        ManufacturingErrorCode::ResourceLimit,
+    );
+}
+
+#[test]
 fn resource_and_utf8_error_boundaries_are_enforced() {
     let text = "界".repeat(MAX_MANUFACTURING_ERROR_BYTES);
     let bounded = ManufacturingError::new(ManufacturingErrorCode::Io, &text);

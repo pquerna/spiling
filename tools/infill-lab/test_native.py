@@ -3,13 +3,15 @@
 """A fresh saved-project inspection must not depend on trial input copies."""
 
 import json
+import pytest
 from pathlib import Path
 
 from model import Candidate
 from native import Native
 
 
-def test_compile_removes_only_owned_inputs_before_saved_return_and_export(tmp_path,monkeypatch):
+@pytest.mark.parametrize("tamper", [None, "program.gcode", "plan.json", "provenance.json", "verification.json"])
+def test_compile_removes_only_owned_inputs_before_saved_return_and_export(tmp_path,monkeypatch,tamper):
     import native
 
     source=tmp_path/'original.step';source.write_bytes(b'original source remains owned by caller')
@@ -35,13 +37,19 @@ def test_compile_removes_only_owned_inputs_before_saved_return_and_export(tmp_pa
             assert not (folder/'intent.json').exists()
             assert source.exists() and intent.exists()
         export=Path(command[command.index('--manufacturing-out')+1]);export.mkdir()
-        (export/'program.gcode').write_bytes(b'same emitted program')
+        for name in ("program.gcode", "plan.json", "provenance.json", "verification.json"):
+            (export/name).write_bytes(b'changed' if operation == 'inspect' and name == tamper else name.encode())
         (export/'manifest.json').write_text('{}')
         return b'{}',0.
 
     monkeypatch.setattr(native,'run',run)
+    if tamper:
+        with pytest.raises(RuntimeError, match=f"fresh export differs: {tamper}"):
+            Native(binaries,intent).compile(source,(48,48,48),Candidate(),folder)
+        return
     result=Native(binaries,intent).compile(source,(48,48,48),Candidate(),folder)
     assert seen==['create','edit','inspect']
     assert result['source_independent_reopen']
     assert result['fresh_export_manifest_sha256']
+    assert len(result['fresh_export_sha256']) == 4
     assert source.read_bytes()==b'original source remains owned by caller'

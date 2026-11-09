@@ -34,7 +34,7 @@ impl ReplaySink {
         let (mut travels, mut process) = match intent.recipe.process.retraction {
             RetractionPolicy::Disabled => (paths, 0),
             RetractionPolicy::Enabled { z_hop_mm, .. } => (
-                (paths * if z_hop_mm > 0.0 { 3 } else { 1 }).min(100_000),
+                (paths * if z_hop_mm > 0.0 { 3 } else { 1 }).min(MAX_TRAVEL_SEGMENTS as usize),
                 (paths * 2).min(100_000),
             ),
         };
@@ -55,14 +55,17 @@ impl ReplaySink {
             .and_then(|n| n.checked_add(lifecycle))
             .and_then(|n| n.checked_add(epochs))
             .ok_or_else(|| super::failed("replay event count overflow"))?;
+        // The policy gives an upper bound, not the actual retraction count.
+        // A long plan can fit when most entries do not retract. Reserve once
+        // up to the byte ceiling; reject only actual events exceeding it.
+        let events = events.min(MAX_REPLAY_EVENTS as usize);
         let bytes = events
             .checked_mul(REPLAY_RECORD_BYTES)
             .and_then(|n| n.checked_add(REPLAY_HEADER_BYTES))
             .ok_or_else(|| super::failed("replay byte count overflow"))?;
-        if events > MAX_REPLAY_EVENTS as usize
-            || bytes > MAX_REPLAY_DISPLAY_BYTES as usize
+        if bytes > MAX_REPLAY_DISPLAY_BYTES as usize
             || deposition > MAX_DEPOSITION_SEGMENTS as usize
-            || travels > MAX_DEPOSITION_SEGMENTS as usize
+            || travels > MAX_TRAVEL_SEGMENTS as usize
             || process > MAX_DEPOSITION_SEGMENTS as usize
             || epochs > MAX_TOOL_SELECTIONS as usize
         {
@@ -143,6 +146,8 @@ impl ReplaySink {
             4
         } else if kind == 14 {
             MAX_TOOL_SELECTIONS
+        } else if kind == 0 {
+            MAX_TRAVEL_SEGMENTS
         } else {
             100_000
         };

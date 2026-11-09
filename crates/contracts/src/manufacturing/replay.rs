@@ -6,9 +6,12 @@ use super::*;
 use crate::ArtifactView;
 
 pub const MAX_REPLAY_DISPLAY_BYTES: u32 = 32 * 1024 * 1024;
-pub const MAX_REPLAY_EVENTS: u32 = 300_004;
 pub const REPLAY_HEADER_BYTES: usize = 96;
 pub const REPLAY_RECORD_BYTES: usize = 80;
+/// All event categories share the existing byte budget; hops do not need a
+/// second allocation or an independent arbitrary aggregate-count ceiling.
+pub const MAX_REPLAY_EVENTS: u32 =
+    (MAX_REPLAY_DISPLAY_BYTES - REPLAY_HEADER_BYTES as u32) / REPLAY_RECORD_BYTES as u32;
 pub const REPLAY_SCHEMA_VERSION: u32 = 6;
 pub const REPLAY_MEDIA_TYPE: &str = "application/x-spiling-replay-motion";
 
@@ -134,7 +137,7 @@ impl ReplayDisplayInfo {
             || self.deposition_count == 0
             || self.deposition_count > MAX_DEPOSITION_SEGMENTS
             || self.travel_count == 0
-            || self.travel_count > MAX_DEPOSITION_SEGMENTS
+            || self.travel_count > MAX_TRAVEL_SEGMENTS
             || if self.tool_epoch_count == 0 {
                 self.waste_count != 0 || !matches!(self.lifecycle_count, 0 | 4)
             } else {
@@ -328,7 +331,7 @@ pub fn validate_replay_display(
             || !feed.is_finite()
             || if kind == 14 { feed != 0.0 } else { feed <= 0.0 }
             || line <= previous_line
-            || line > MAX_MANUFACTURING_BUNDLE_BYTES
+            || line > MAX_MANUFACTURING_PROGRAM_BYTES
             || (!(6..8).contains(&kind) && next_layer >= info.layer_count)
             || kind > 15
             || flags

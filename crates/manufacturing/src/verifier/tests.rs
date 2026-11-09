@@ -926,7 +926,7 @@ fn cancellation_and_parser_resources_are_bounded() {
             .code,
         ManufacturingErrorCode::ResourceLimit
     );
-    let oversized = ";".repeat(MAX_MANUFACTURING_BUNDLE_BYTES as usize + 1);
+    let oversized = ";".repeat(MAX_MANUFACTURING_PROGRAM_BYTES as usize + 1);
     assert_eq!(
         verify(&oversized, &plan, &intent, &AtomicBool::new(false))
             .unwrap_err()
@@ -970,6 +970,88 @@ fn packed_sink_admits_two_hundred_thousand_actual_events_once() {
     let excess_path = plan.layers[0].paths[0].clone();
     plan.layers[0].paths.push(excess_path);
     assert!(ReplaySink::new(&plan, &intent).is_err());
+}
+
+#[test]
+fn hop_expansion_over_one_hundred_thousand_travels_keeps_exact_replay() {
+    let (mut intent, mut plan) = fixture();
+    intent.recipe.process.retraction = RetractionPolicy::Enabled {
+        distance_mm: 0.5,
+        speed_mm_s: 10.0,
+        minimum_travel_mm: 1.0,
+        z_hop_mm: 1.0,
+    };
+    plan.layers.truncate(1);
+    plan.layers[0].paths = vec![
+        DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::SolidFill,
+            owner: None,
+            width: WidthProfile::Constant { width_mm: 1.0 },
+            physical_z_mm: [0.0, 1.0],
+            points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
+        };
+        40_000
+    ];
+    refresh_volumes(&intent, &mut plan);
+    let cancel = AtomicBool::new(false);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let report_only = verify(&program, &plan, &intent, &cancel).unwrap();
+    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
+    assert_eq!(report, report_only);
+    assert_eq!(report.deposition_segments, 40_000);
+    assert_eq!(report.travel_segments, 119_998);
+    assert_eq!(report.retraction_count, 39_999);
+    report.validate().unwrap();
+    let (bytes, bounds) = sink.finish().unwrap();
+    assert_eq!(
+        bytes.len(),
+        REPLAY_HEADER_BYTES + REPLAY_RECORD_BYTES * 239_996
+    );
+    validate_replay_display(
+        &bytes,
+        &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),
+    )
+    .unwrap();
+}
+
+#[test]
+fn worst_case_hop_estimate_does_not_refuse_a_small_actual_stream() {
+    let (mut intent, mut plan) = fixture();
+    intent.recipe.process.retraction = RetractionPolicy::Enabled {
+        distance_mm: 0.5,
+        speed_mm_s: 10.0,
+        // Actual entries are four millimetres, so no retraction is needed.
+        minimum_travel_mm: 10.0,
+        z_hop_mm: 1.0,
+    };
+    plan.layers.truncate(1);
+    plan.layers[0].paths = vec![
+        DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::SolidFill,
+            owner: None,
+            width: WidthProfile::Constant { width_mm: 1.0 },
+            physical_z_mm: [0.0, 1.0],
+            points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
+        };
+        MAX_DEPOSITION_SEGMENTS as usize
+    ];
+    refresh_volumes(&intent, &mut plan);
+    let cancel = AtomicBool::new(false);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
+    assert_eq!(report.travel_segments, MAX_DEPOSITION_SEGMENTS);
+    assert_eq!(report.retraction_count, 0);
+    let (bytes, bounds) = sink.finish().unwrap();
+    assert!(bytes.capacity() <= MAX_REPLAY_DISPLAY_BYTES as usize);
+    validate_replay_display(
+        &bytes,
+        &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),
+    )
+    .unwrap();
 }
 
 fn complete_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {

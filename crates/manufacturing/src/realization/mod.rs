@@ -379,7 +379,7 @@ pub(crate) fn stream(
                                 "routed travel count overflow",
                             )
                         })?;
-                        if travels > MAX_DEPOSITION_SEGMENTS {
+                        if travels > MAX_TRAVEL_SEGMENTS {
                             return Err(error(
                                 ManufacturingErrorCode::ResourceLimit,
                                 "routed travel budget exceeded",
@@ -401,7 +401,7 @@ pub(crate) fn stream(
                     // The route above owns the lifted entry; body retraction is
                     // explicitly disabled and feeder debt belongs to selections.
                 } else if !retract {
-                    if travels == MAX_DEPOSITION_SEGMENTS {
+                    if travels == MAX_TRAVEL_SEGMENTS {
                         return Err(error(
                             ManufacturingErrorCode::ResourceLimit,
                             "realized travel budget exceeded",
@@ -450,7 +450,7 @@ pub(crate) fn stream(
                         [Some(target), None, None]
                     };
                     for p in targets.into_iter().flatten() {
-                        if travels == MAX_DEPOSITION_SEGMENTS {
+                        if travels == MAX_TRAVEL_SEGMENTS {
                             return Err(error(
                                 ManufacturingErrorCode::ResourceLimit,
                                 "realized travel budget exceeded",

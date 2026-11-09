@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Spiling contributors
 # SPDX-License-Identifier: OSL-3.0
-"""Render verified actual Vault infill roads, not proposed geometry or strength.
+"""Render verified actual Cathedral infill roads, not proposed geometry or strength.
 
 Tooling-only numpy/matplotlib in an isolated prefix. Run after the construction
 campaign; keep the original roads, producer receipt and result next to each plot.
@@ -38,7 +38,9 @@ def render(folder):
     receipt = json.loads((folder / "return.stdout.json").read_text())
     recipe = receipt["manufacturing"]["intent"]["recipe"]
     if recipe["sparse_infill"]["kind"] != "web_roof":
-        raise ValueError("Vault infill report does not render ordinary-pattern controls")
+        raise ValueError(
+            "Cathedral infill report does not render ordinary-pattern controls"
+        )
     if not replay["report"]["verified"] or result["status"] != "accepted":
         raise ValueError("fresh verified replay and accepted journey required")
     roads = replay["roads"]
@@ -60,7 +62,7 @@ def render(folder):
     fig = plt.figure(figsize=(13, 8), layout="constrained")
     grid = fig.add_gridspec(2, 3)
     for column, index, label in [
-        (0, 0, "Continuous webs"),
+        (0, 0, "Webs and joints"),
         (1, len(zs) // 2, "Roof growth"),
         (2, -1, "Roof contacts"),
     ]:
@@ -152,9 +154,11 @@ def render(folder):
     ]
     ax.text(0, 0.98, "\n".join(details), va="top", linespacing=1.7)
     title = result["case"].replace("-", " ").title()
-    fig.suptitle(f"Vault infill · {title}", fontsize=20, weight="bold", ha="left", x=0.02)
+    fig.suptitle(
+        f"Cathedral infill · {title}", fontsize=20, weight="bold", ha="left", x=0.02
+    )
     fig.supxlabel(
-        "Blue: continuous webs and local roots    Gold: retained roof growth    Gray: walls and skins",
+        "Blue: unchanged first-sparse-layer roads    Gold: other interior roads    Gray: walls and skins",
         fontsize=11,
     )
     output = folder / "actual-web-roof.png"

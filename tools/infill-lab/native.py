@@ -254,9 +254,12 @@ class Native:
             output=folder / "inspect",
         )
         receipt.write_bytes(out)
-        fresh_program = file_hash(folder / "fresh-bundle/program.gcode")
-        if fresh_program != file_hash(folder / "bundle/program.gcode"):
-            raise RuntimeError("source-absent fresh export differs from compiled program")
+        exports = ("program.gcode", "plan.json", "provenance.json", "verification.json")
+        fresh_exports = {name: file_hash(folder / "fresh-bundle" / name) for name in exports}
+        for name, digest in fresh_exports.items():
+            if digest != file_hash(folder / "bundle" / name):
+                raise RuntimeError(f"source-absent fresh export differs: {name}")
+        fresh_program = fresh_exports["program.gcode"]
         run(
             [
                 "node",
@@ -278,6 +281,7 @@ class Native:
             source_independent_reopen=True,
             fresh_export_manifest_sha256=file_hash(folder / "fresh-bundle/manifest.json"),
             fresh_export_program_sha256=fresh_program,
+            fresh_export_sha256=fresh_exports,
             bin_sha256={
                 x.name: file_hash(x)
                 for x in [self.bin_dir / "spiling-cli", self.bin_dir / "spiling-engine"]

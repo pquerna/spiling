@@ -15,7 +15,7 @@ from vault_mechanics import web_response
 def test_architecture_lineage_roundtrips_without_changing_old_candidate_identity():
     proposed = list(seeds())
     assert [p["name"] for p in proposed] == [
-        "flat",
+        "automatic",
         "windows",
         "pier_ribs",
         "windows_and_ribs",
@@ -25,7 +25,7 @@ def test_architecture_lineage_roundtrips_without_changing_old_candidate_identity
         c = Candidate(**p["candidate"])
         assert Candidate(**json.loads(json.dumps(c.data()))).data() == c.data()
         a = c.sparse_policy()["architecture"]
-        assert (a is None) == (p["name"] == "flat")
+        assert (a is None) == (p["name"] == "automatic")
     assert "web_opening" not in Candidate().data()
     assert "pier_rib_depth_mm" not in Candidate().data()
     with pytest.raises(ValueError, match="Vault"):
@@ -45,6 +45,18 @@ def test_actual_control_freezes_a_complete_window_and_two_pier_crop():
     assert bounds[0][0] < 24 < 40 < bounds[1][0]
     assert bounds[0][2] < 2 < 12 < bounds[1][2]
     assert bounds[0][1] < 40 < bounds[1][1]
+    # Automatic native joints are short roads, not extra chamber boundaries.
+    roads.append(
+        dict(
+            start=[24.45, 38.65, 1.0],
+            end=[24.45, 41.35, 1.0],
+            width=0.45,
+            upper=1.0,
+            kind=5,
+            owner=0,
+        )
+    )
+    assert fixture(dict(roads=roads)) == bounds
     wider = fixture(dict(roads=roads), half_width=2.25)
     assert wider[0][1] == 37.75 and wider[1][1] == 42.25
     with pytest.raises(ValueError, match="adjacent bays"):
@@ -249,7 +261,7 @@ def test_pack_refuses_to_optimize_a_flange_clipped_by_the_fixture(
             roads.append(dict(start=a, end=b, kind=5, owner=0, width=0.45, upper=1.0))
     rows = []
     for name, candidate in (
-        ("flat", next(seeds())["candidate"]),
+        ("automatic", next(seeds())["candidate"]),
         (
             "rib",
             Candidate(pattern="web_roof", fraction=0.05, pier_rib_depth_mm=1.35).data(),

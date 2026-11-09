@@ -146,11 +146,11 @@ def render(capture, archive_path, output):
         if data["report"]["deposited_volume_mm3"] != row["volume_mm3"]:
             raise ValueError("gallery dose differs")
         loaded[row["capture_id"]] = data
-    flat = next(r for r in rows if r["name"] == "flat")
+    flat = next(r for r in rows if r["name"] == "automatic")
     bounds = archive["cohort"]["bounds"]
     y = (bounds[0][1]+bounds[1][1])/2
     # Keep full numerical/cost results, but select a readable six-construction
-    # gallery by declared response/material extremes, always retaining flat.
+    # gallery by declared response/material extremes, always retaining the automatic control.
     gallery = [flat]
     scored = [r for r in rows if r.get("geometric_mean_ratio") is not None]
     order = [*sorted(scored,key=lambda r:r["volume_mm3"]),
@@ -242,8 +242,8 @@ def render(capture, archive_path, output):
     ax.axhline(1,color="#aaa",linewidth=.7)
     ax.axvline(1,color="#aaa",linewidth=.7)
     ax.legend(loc="upper left",fontsize=9)
-    ax.set(xlabel="Geometric mean of three local stiffness ratios / flat",
-           ylabel="Complete-object deposited material / flat",
+    ax.set(xlabel="Geometric mean of three local stiffness ratios / automatic",
+           ylabel="Complete-object deposited material / automatic",
            title="Finite web-bay screening · higher response, lower material")
     if not scored:
         ax.text(.5,.5,"No complete numerical score",transform=ax.transAxes,ha="center")
@@ -253,8 +253,8 @@ def render(capture, archive_path, output):
     table = "".join(f"<tr><td title='{html.escape(r['name'])}'>{html.escape(label(r))}</td><td>{r['volume_mm3']:.2f}</td><td>{r['motion_s']:.2f}</td><td>{html.escape(r['status'])}</td><td>{html.escape(str(r.get('response_ratios',r.get('error',''))))}</td></tr>" for r in rows)
     page = f"""<!doctype html><html><meta charset="utf-8"><title>Cathedral experiment</title>
 <style>body{{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 20px;color:#203040}}svg{{max-width:100%;height:auto}}table{{border-collapse:collapse;width:100%;font-size:13px}}td,th{{padding:10px;text-align:left;border-bottom:1px solid #ccd5df}}p{{max-width:80ch}}</style>
-<h1>Cathedral: windows and pier ribs</h1><p>{len(rows)} actual native constructions; selected galleries retain flat and measured material/response extremes. Costs cover the complete object; numerical responses cover one finite cut web bay under assumed weak-Z elasticity. No global infill frontier, buckling or physical strength qualification. Motion is a decoded-feed lower bound.</p>
-{(output/'comparison.svg').read_text()}<table><tr><th>Construction</th><th>Material (mm³)</th><th>Motion bound (s)</th><th>Numerics</th><th>Per-fixture ratios / flat</th></tr>{table}</table>
+<h1>Cathedral: windows and pier ribs</h1><p>{len(rows)} actual native constructions; selected galleries retain the automatic control and measured material/response extremes. Costs cover the complete object; numerical responses cover one finite cut web bay under assumed weak-Z elasticity. No global infill frontier, buckling or physical strength qualification. Motion is a decoded-feed lower bound.</p>
+{(output/'comparison.svg').read_text()}<table><tr><th>Construction</th><th>Material (mm³)</th><th>Motion bound (s)</th><th>Numerics</th><th>Per-fixture ratios / automatic</th></tr>{table}</table>
 {(output/'sections.svg').read_text()}<img style="max-width:100%" src="bays.png" alt="Transparent nominal stroke prisms for each actual web bay"><img style="max-width:100%" src="whole-sections.png" alt="Actual full-height sections showing webs, windows and roof construction"><p>Sections and transparent bays come from complete fresh actual-program replay. The opening and roof-root retention are constructed and checked by the engine, not by this renderer.</p></html>"""
     (output/"index.html").write_text(page)
 

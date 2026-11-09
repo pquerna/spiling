@@ -51,10 +51,19 @@ mod routing;
 pub use routing::*;
 
 pub const MANUFACTURING_SCHEMA_VERSION: u32 = 11;
-pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 16 * 1024 * 1024;
+/// Exact serialized bundle, including plan, provenance and actual program.
+/// A result may use half the retained/staged allowance, leaving room for
+/// replacement without dropping the active result or its history first.
+pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 32 * 1024 * 1024;
+/// Program bytes are independently bounded; a larger bundle is not permission
+/// to emit more machine commands.
+pub const MAX_MANUFACTURING_PROGRAM_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PRINT_LAYERS: u32 = 4096;
 pub const MAX_DEPOSITION_SEGMENTS: u32 = 100_000;
+/// An admitted path may require lift, XY travel and landing. Fixed-dual waste
+/// entries have the same bound and share the deposition inventory.
+pub const MAX_TRAVEL_SEGMENTS: u32 = 3 * MAX_DEPOSITION_SEGMENTS;
 pub const MAX_MACHINE_COMPONENTS: u32 = 64;
 pub const MAX_PROFILE_JSON_BYTES: u32 = 32_768;
 pub const MAX_MANUFACTURING_ERROR_BYTES: usize = 2048;
@@ -160,7 +169,13 @@ fn json_bytes<T: Serialize>(value: &T, limit: usize) -> Result<usize, Manufactur
                 .bytes
                 .checked_add(bytes.len())
                 .filter(|n| *n <= self.limit)
-                .ok_or_else(|| std::io::Error::other("JSON byte limit exceeded"))?;
+                .ok_or_else(|| {
+                    std::io::Error::other(format!(
+                        "JSON byte limit exceeded: limit={} observed_at_least={}",
+                        self.limit,
+                        self.bytes.saturating_add(bytes.len()),
+                    ))
+                })?;
             self.bytes = count;
             Ok(bytes.len())
         }
@@ -959,8 +974,8 @@ pub enum SparseInfillPolicy {
     /// Two orthogonal fine-cadence line families, each at half the requested
     /// nominal fraction. Walls, skins and solid regions retain their own axes.
     Grid,
-    /// Continuous chamber webs plus retained roof corbels. Density controls
-    /// nominal web spacing; roof construction adds separately counted material.
+    /// Cathedral: continuous chamber webs, automatic joints and retained roof
+    /// corbels. Density controls nominal web spacing; construction adds material.
     WebRoof {
         #[serde(deserialize_with = "required_option")]
         roof_spacing_mm: Option<f64>,
@@ -3758,7 +3773,7 @@ impl VerificationReport {
             .and_then(|n| n.checked_add(waste_segments))
             .is_none_or(|n| n > MAX_DEPOSITION_SEGMENTS)
             || self.retraction_count > 50_000
-            || self.travel_segments > MAX_DEPOSITION_SEGMENTS
+            || self.travel_segments > MAX_TRAVEL_SEGMENTS
         {
             return Err(resource("verification segment limit exceeded"));
         }
@@ -4297,7 +4312,8 @@ impl ManufacturingBundle {
                 ));
             }
         }
-        if self.program.is_empty() || self.program.len() > MAX_MANUFACTURING_BUNDLE_BYTES as usize {
+        if self.program.is_empty() || self.program.len() > MAX_MANUFACTURING_PROGRAM_BYTES as usize
+        {
             return Err(resource("manufacturing program size is invalid"));
         }
         let mut object_count = 0usize;

@@ -595,6 +595,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             u64::from(MAX_MANUFACTURING_BUNDLE_BYTES),
         ),
         (
+            "MAX_MANUFACTURING_PROGRAM_BYTES",
+            u64::from(MAX_MANUFACTURING_PROGRAM_BYTES),
+        ),
+        (
             "MAX_MANUFACTURING_RETAINED_BYTES",
             MAX_MANUFACTURING_RETAINED_BYTES,
         ),
@@ -604,6 +608,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "MAX_DEPOSITION_SEGMENTS",
             u64::from(MAX_DEPOSITION_SEGMENTS),
         ),
+        ("MAX_TRAVEL_SEGMENTS", u64::from(MAX_TRAVEL_SEGMENTS)),
         ("MAX_MACHINE_COMPONENTS", u64::from(MAX_MACHINE_COMPONENTS)),
         ("MAX_PROFILE_JSON_BYTES", u64::from(MAX_PROFILE_JSON_BYTES)),
         (

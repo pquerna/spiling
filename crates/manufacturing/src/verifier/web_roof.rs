@@ -9,6 +9,7 @@ use super::{cancelled, failed, project_xyz6_point_mm};
 use spiling_contracts::manufacturing::*;
 use std::{collections::BTreeSet, sync::atomic::AtomicBool};
 mod architecture;
+mod joints;
 
 type Road = [u64; 4];
 fn key(a: [f64; 3], b: [f64; 3]) -> Result<Road, ManufacturingError> {
@@ -249,33 +250,15 @@ pub(super) fn verify(
                     recipe,
                 )?;
                 let mut expected = Vec::new();
-                let mut require = |fixed: usize,
-                                   coordinate: f64,
-                                   start: f64,
-                                   stop: f64,
-                                   work: &mut usize| {
-                    charge(work, cancel)?;
-                    if a.is_none() {
-                        let mut lo = [0., 0., layer.z_mm];
-                        let mut hi = lo;
-                        lo[fixed] = coordinate;
-                        hi[fixed] = coordinate;
-                        lo[1 - fixed] = start;
-                        hi[1 - fixed] = stop;
-                        if !roads.remove(&(region_index as u16, key(lo, hi)?)) {
-                            return Err(failed(format!(
-                                "web + roof missing a required web/roof road at layer {}: {:?} to {:?}",
-                                layer.index, lo, hi
-                            )));
+                let mut require =
+                    |fixed: usize, coordinate: f64, start: f64, stop: f64, work: &mut usize| {
+                        charge(work, cancel)?;
+                        if expected.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                            return Err(failed("web architecture expected-road budget exceeded"));
                         }
-                        return Ok(());
-                    }
-                    if expected.len() >= MAX_DEPOSITION_SEGMENTS as usize {
-                        return Err(failed("web architecture expected-road budget exceeded"));
-                    }
-                    expected.push((fixed, coordinate, start, stop));
-                    Ok(())
-                };
+                        expected.push((fixed, coordinate, start, stop));
+                        Ok(())
+                    };
                 for fixed in 0..2 {
                     for &c in &web_coordinates[fixed] {
                         crossing_intervals(polygon, fixed, c, &mut hits, work, cancel)?;
@@ -374,6 +357,17 @@ pub(super) fn verify(
                         polygon,
                         &web_coordinates,
                         depth,
+                        recipe.bead_width_mm,
+                        &mut expected,
+                        work,
+                        cancel,
+                    )?;
+                } else if a.is_none() {
+                    joints::reconstruct(
+                        polygon,
+                        &web_coordinates,
+                        min,
+                        max,
                         recipe.bead_width_mm,
                         &mut expected,
                         work,

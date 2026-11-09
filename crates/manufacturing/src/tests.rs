@@ -3346,6 +3346,52 @@ fn native_web_roof_keeps_continuous_rooms_grows_roof_and_freshly_replays() {
     )
     .unwrap();
     assert!(inspection.report.verified);
+    // Automatic joints require no authored architecture or reinforcement flag.
+    // Mutating both plan and emission with reconciled dose must still fail the
+    // independently reconstructed inventory, not just path/program matching.
+    let first_sparse = bundle
+        .plan
+        .layers
+        .iter()
+        .position(|l| l.paths.iter().any(|p| p.kind == DepositionKind::SparseFill))
+        .unwrap();
+    let joint = bundle.plan.layers[first_sparse]
+        .paths
+        .iter()
+        .position(|p| {
+            p.kind == DepositionKind::SparseFill
+                && p.points_mm.len() == 2
+                && ((p.points_mm[1][0] - p.points_mm[0][0])
+                    .hypot(p.points_mm[1][1] - p.points_mm[0][1])
+                    - 6.0 * requested.recipe.bead_width_mm)
+                    .abs()
+                    < 1e-8
+        })
+        .expect("automatic one-sided joint exists in the sparse interior");
+    for attack in 0..3 {
+        let mut changed = bundle.plan.clone();
+        let paths = &mut changed.layers[first_sparse].paths;
+        match attack {
+            0 => {
+                paths.remove(joint);
+            }
+            1 => {
+                paths.push(paths[joint].clone());
+            }
+            _ => {
+                let p = &mut paths[joint];
+                let fixed = usize::from(p.points_mm[0][0] != p.points_mm[1][0]);
+                for point in &mut p.points_mm {
+                    point[fixed] += 0.01;
+                }
+            }
+        }
+        assert!(
+            assert_reemitted_interface_refuses(changed, &requested)
+                .message
+                .contains("web + roof")
+        );
+    }
     // The roof horizon belongs to the configured bed frame, including a
     // negative bed: absolute Z=0 is not manufacturing authority.
     let shifted_scene = Scene::new(BOX, &[pose(30.0, 40.0, -10.0)]);

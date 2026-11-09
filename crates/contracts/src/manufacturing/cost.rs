@@ -84,7 +84,7 @@ impl JobTimeLedger {
             || self.command_count > 1_000_000
             || self.model_moves > MAX_DEPOSITION_SEGMENTS
             || self.auxiliary_moves > MAX_DEPOSITION_SEGMENTS
-            || self.travel_moves > MAX_DEPOSITION_SEGMENTS + 2
+            || self.travel_moves > MAX_TRAVEL_SEGMENTS + 2
             || self.feeder_moves > 100_000
             || self.selections_per_tool.iter().any(|n| *n > 25_000)
         {

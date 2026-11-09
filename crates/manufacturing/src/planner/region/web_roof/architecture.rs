@@ -133,8 +133,15 @@ pub(super) fn merge(
     first: usize,
     layer: &HatchLayer<'_>,
     segments: &mut usize,
+    work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    let n = paths.len() - first;
+    charge(
+        work,
+        n.saturating_mul(2 + n.max(1).ilog2() as usize),
+        cancel,
+    )?;
     let mut rows = Vec::<(usize, f64, f64, f64)>::with_capacity(paths.len() - first);
     for p in paths.drain(first..) {
         check_cancel(cancel)?;

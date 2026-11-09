@@ -457,7 +457,7 @@ pub(crate) fn verify_actual(
     mut replay: Option<&mut ReplaySink>,
 ) -> Result<VerificationReport, ManufacturingError> {
     cancelled(cancel)?;
-    if program.len() > MAX_MANUFACTURING_BUNDLE_BYTES as usize {
+    if program.len() > MAX_MANUFACTURING_PROGRAM_BYTES as usize {
         return Err(ManufacturingError::new(
             ManufacturingErrorCode::ResourceLimit,
             "emitted program exceeds manufacturing byte limit",
@@ -1120,7 +1120,7 @@ pub(crate) fn verify_actual(
             first_wall_edge = None;
             previous_wall_edge = None;
             travel_segments += 1;
-            if travel_segments > MAX_DEPOSITION_SEGMENTS {
+            if travel_segments > MAX_TRAVEL_SEGMENTS {
                 return Err(failed("travel event budget exceeded"));
             }
         }

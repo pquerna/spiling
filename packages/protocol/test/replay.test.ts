@@ -221,10 +221,10 @@ test("replay rejects zero-distance deposition and unchanged deposition E", async
 test("replay rejects descriptor tampering, hash mismatch and trailing/truncated bodies", async () => {
   for (const mutate of [
     (value: ReplayDisplayDescriptor) => {
-      value.info.event_count = 300005;
+      value.info.event_count = 419430;
     },
     (value: ReplayDisplayDescriptor) => {
-      value.info.travel_count = 100001;
+      value.info.travel_count = 300001;
     },
     (value: ReplayDisplayDescriptor) => {
       value.info.layer_count = 4097;
