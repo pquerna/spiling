@@ -9,6 +9,8 @@ use spiling_contracts::manufacturing::program_coordinates::{
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
+mod row_route;
+
 #[derive(Clone, Copy)]
 pub(crate) enum Event {
     Fan(u8),
@@ -101,6 +103,25 @@ fn wall_seam(
     Ok(seam)
 }
 
+fn canonical_order(a: &DepositionPath, b: &DepositionPath) -> std::cmp::Ordering {
+    rank(a)
+        .cmp(&rank(b))
+        .then_with(|| a.points_mm[0][0].total_cmp(&b.points_mm[0][0]))
+        .then_with(|| a.points_mm[0][1].total_cmp(&b.points_mm[0][1]))
+        .then_with(|| a.points_mm.len().cmp(&b.points_mm.len()))
+        .then_with(|| {
+            a.points_mm
+                .iter()
+                .flatten()
+                .zip(b.points_mm.iter().flatten())
+                .find_map(|(a, b)| {
+                    let c = a.total_cmp(b);
+                    (c != std::cmp::Ordering::Equal).then_some(c)
+                })
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
 /// Canonical geometry traversal is stored in the normalized plan, never hidden
 /// in the emitter. In-place sort/rotation/reversal requires no motion/index vector.
 pub(crate) fn canonicalize(
@@ -124,6 +145,7 @@ pub(crate) fn canonicalize(
     let mut recent_starts = [[[0.0; 2]; 8]; 2];
     let mut recent_counts = [0usize; 2];
     let mut next_start = [0usize; 2];
+    let mut route_work = 0usize;
     for layer in &mut plan.layers {
         check_cancel(cancel)?;
         let mut boundary = layer.paths.len();
@@ -139,29 +161,33 @@ pub(crate) fn canonicalize(
                 }
             }
         }
-        let order = |a: &DepositionPath, b: &DepositionPath| {
-            rank(a)
-                .cmp(&rank(b))
-                .then_with(|| a.points_mm[0][0].total_cmp(&b.points_mm[0][0]))
-                .then_with(|| a.points_mm[0][1].total_cmp(&b.points_mm[0][1]))
-                .then_with(|| a.points_mm.len().cmp(&b.points_mm.len()))
-                .then_with(|| {
-                    a.points_mm
-                        .iter()
-                        .flatten()
-                        .zip(b.points_mm.iter().flatten())
-                        .find_map(|(a, b)| {
-                            let c = a.total_cmp(b);
-                            (c != std::cmp::Ordering::Equal).then_some(c)
-                        })
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        };
         let (zero, one) = layer.paths.split_at_mut(boundary);
-        zero.sort_unstable_by(order);
-        one.sort_unstable_by(order);
+        zero.sort_unstable_by(canonical_order);
+        one.sort_unstable_by(canonical_order);
+        let row_start = if routed.is_none()
+            && matches!(
+                intent.recipe.sparse_infill,
+                SparseInfillPolicy::WebRoof { .. }
+            ) {
+            layer
+                .paths
+                .iter()
+                .position(|p| p.kind == DepositionKind::SparseFill)
+        } else {
+            None
+        };
         let mut previous_tool = None;
-        for path in &mut layer.paths {
+        for path_index in 0..layer.paths.len() {
+            if row_start == Some(path_index) {
+                row_route::improve(
+                    &mut layer.paths[path_index..],
+                    position,
+                    &intent.recipe,
+                    &mut route_work,
+                    cancel,
+                )?;
+            }
+            let path = &mut layer.paths[path_index];
             check_cancel(cancel)?;
             let tool = routed.map_or(Ok(0), |job| job.tool_for_path(path))?;
             if let Some(job) = routed
