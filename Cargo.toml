@@ -39,6 +39,7 @@ spiling-surface-fields = { path = "crates/surface-fields" }
 spiling-appearance = { path = "crates/appearance" }
 png = "=0.18.1"
 geo = "=0.32.0"
+i_overlay = "=4.0.7"
 boostvoronoi = { version = "=0.12.1", default-features = false }
 # Integration source: pquerna/integration-spiling-tracking; keep an exact tested revision.
 solidcore = { version = "=1.0.1", git = "https://github.com/pquerna/solidcore", rev = "a1ce2e536d0e405f2f2338c621fe136590202450" }

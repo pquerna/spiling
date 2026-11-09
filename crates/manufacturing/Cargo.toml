@@ -18,6 +18,7 @@ spiling-surface-fields.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 geo.workspace = true
+i_overlay.workspace = true
 boostvoronoi.workspace = true
 
 [[bench]]

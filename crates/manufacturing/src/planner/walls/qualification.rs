@@ -11,6 +11,8 @@ use geo::{
     Point, unary_union,
 };
 
+mod inputs;
+
 const DISK_SIDES: usize = 64;
 const COMMAND_CAPSULE_VERTICES: usize = DISK_SIDES * 2 + 4;
 const AREA_ROUNDOFF: f64 = 0.0000001;
@@ -1019,7 +1021,7 @@ fn finish_prepared_intersection(
             .ok_or_else(|| resource("wall prepared kernel staging overflow"))?,
     )?;
 
-    let mut result = a.intersection(b);
+    let mut result = inputs::intersection(a, b, scratch, cancel)?;
 
     check_cancel(cancel)?;
     region::check_size(&result)?;

@@ -6881,6 +6881,7 @@ version = "0.1.0"
 dependencies = [
  "boostvoronoi",
  "geo",
+ "i_overlay",
  "serde_json",
  "sha2 0.10.9",
  "spiling-compute",
