@@ -45,6 +45,8 @@ The longer-term vision includes large assemblies, incremental compilation, super
 
 Do not expand the initial product into cloud services, collaboration, a general CAD editor, a plugin marketplace, continuous robot control, or a full structural solver. Do not introduce a parallel browser frontend, embedded webview or alternate application runtime.
 
+Native Analyze persists finite-face FDM cases and provides a bounded CPU FP64 assumed-law wall/skin/effective-core study for native-certified orthogonal prisms. Engine, CLI and native host consume macro stress/displacement/concentration fields; explicit attachment and Save retain portable results that restore without solving. This is not qualified Basic, detailed Enhanced, calibrated strength, GPU execution or packaged-desktop qualification. [Analyze contracts](docs/protocol/analysis.md) own geometry, assumptions, assessment and saved-return boundaries.
+
 ## 2. Canonical local documentation
 
 ### Add local guidance only when it earns its place
@@ -105,6 +107,7 @@ B0 establishes contracts and a shared `crates/engine-client` used by the CLI and
 
 Dependencies flow inward:
 
+- Analysis consumes contracts and the geometry facade, not Core, persistence, manufacturing, UI or a direct kernel API. The engine captures immutable inputs and runs the numerical consumer off the project writer; Core alone attaches retained fields and owns their PTAC closure.
 - Contracts have no desktop runtime, kernel or renderer dependencies.
 - Compute depends on contracts and pinned CubeCL CPU/Vulkan runtimes, not Core, native geometry or the workbench renderer. Machine-local default/FEA policies resolve per engine session; FEA inherits the resolved default unless explicitly overridden. Numeric screening does not replace native material or actual-program verification authority. See [compute policy](docs/protocol/control.md#compute-policy).
 - Core depends on contracts and core-ptac. Core-ptac owns container bytes and publication, with no domain, engine or kernel dependency; Core owns semantic admission. Geometry depends on contracts and SolidCore through its kernel adapter.
