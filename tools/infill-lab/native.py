@@ -134,11 +134,7 @@ class Native:
             rectilinear_axis=candidate.axis,
             supports={"kind": "disabled"},
             layer_height_mm=candidate.layer_height,
-            sparse_infill=(
-                {"kind": "combine_eligible", "max_height_mm": candidate.combine_height}
-                if candidate.combine_height
-                else ({"kind": "web_roof", "roof_spacing_mm": None} if candidate.pattern == "web_roof" else {"kind": {"grid": "grid", "rectilinear": "fine"}[candidate.pattern]})
-            ),
+            sparse_infill=candidate.sparse_policy(),
         )
         # Preserve walls/skins/process from the captured public base recipe.
         intent_file = folder / "intent.json"

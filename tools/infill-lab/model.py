@@ -40,14 +40,26 @@ class Candidate:
     layer_height: float = 0.2
     combine_height: float = 0.0
     pattern: str = "rectilinear"
+    roof_spacing_mm: float | None = None
 
     def __post_init__(self):
         if self.pattern not in {"rectilinear", "grid", "web_roof"}:
             raise ValueError("unknown production infill pattern")
-        if self.pattern in {"grid", "web_roof"} and (self.family != "uniform" or self.combine_height):
+        if self.pattern in {"grid", "web_roof"} and (
+            self.family != "uniform" or self.combine_height
+        ):
             raise ValueError("two-axis study requires uniform fine-cadence input")
         if self.pattern == "web_roof" and self.fraction == 1:
             raise ValueError("web + roof requires sparse base webs")
+        if self.roof_spacing_mm is not None and (
+            self.pattern != "web_roof"
+            or type(self.roof_spacing_mm) not in (int, float)
+            or not math.isfinite(self.roof_spacing_mm)
+            or not 0.45 <= self.roof_spacing_mm <= 7.5
+        ):
+            raise ValueError(
+                "roof spacing outside the captured 0.45–7.5 mm study envelope"
+            )
         if self.family not in {"uniform", "crown", "flanges", "separator"}:
             raise ValueError("unknown construction family")
         if self.axis not in {"x", "y", "alternating_xy", "alternating_yx"}:
@@ -80,12 +92,22 @@ class Candidate:
 
     def data(self):
         data = asdict(self)
+        if self.roof_spacing_mm is None:
+            data.pop("roof_spacing_mm")
         if self.family == "uniform":
             for key in ("cut", "region_fraction", "plate"):
                 data.pop(key)
         elif self.family == "separator":
             data.pop("plate")
         return data
+
+    def sparse_policy(self):
+        """Inert production settings; the engine independently admits the recipe."""
+        if self.combine_height:
+            return {"kind": "combine_eligible", "max_height_mm": self.combine_height}
+        if self.pattern == "web_roof":
+            return {"kind": "web_roof", "roof_spacing_mm": self.roof_spacing_mm}
+        return {"kind": {"grid": "grid", "rectilinear": "fine"}[self.pattern]}
 
     @property
     def identity(self):
