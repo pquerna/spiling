@@ -329,25 +329,18 @@ pub fn prepare(
 fn surface_quadrature(
     mesh: &Mesh,
     facet: &mesh::Facet,
+    footprint: &spiling_contracts::analysis::load::ForceFootprint,
     mut visit: impl FnMut([f64; 3], f64, [f64; 27]),
 ) {
     let hex = &mesh.elements[facet.element];
-    let tangent = (0..3)
-        .filter(|axis| *axis != facet.axis)
-        .collect::<Vec<_>>();
-    for (first, first_weight) in element::GAUSS {
-        for (second, second_weight) in element::GAUSS {
-            let mut local = [0.0; 3];
-            local[facet.axis] = 2.0 * facet.side as f64 - 1.0;
-            local[tangent[0]] = first;
-            local[tangent[1]] = second;
-            let point = std::array::from_fn(|axis| {
-                hex.lower[axis] + 0.5 * (local[axis] + 1.0) * hex.size[axis]
-            });
-            let weight =
-                hex.size[tangent[0]] * hex.size[tangent[1]] * first_weight * second_weight / 4.0;
-            visit(point, weight, element::basis(local, hex.size).0);
-        }
+    let center = std::array::from_fn(|axis| hex.lower[axis] + hex.size[axis] * 0.5);
+    for (point, weight) in spiling_contracts::analysis::load::surface_samples(
+        footprint, center, hex.size, facet.axis, facet.side,
+    ) {
+        let local = std::array::from_fn(|axis| {
+            2.0 * (point[axis] - hex.lower[axis]) / hex.size[axis] - 1.0
+        });
+        visit(point, weight, element::basis(local, hex.size).0);
     }
 }
 fn solve_three(mut matrix: [[f64; 3]; 3], mut rhs: [f64; 3]) -> Result<[f64; 3], String> {
@@ -426,22 +419,46 @@ pub fn solve(
                 "UnmappedLoad: load is not a complete admitted native side-face patch".into(),
             );
         }
+        if let spiling_contracts::analysis::load::ForceFootprint::Disk { center_mm, .. } =
+            load.footprint
+        {
+            let on_face = facets.iter().any(|facet| {
+                let hex = &mesh.elements[facet.element];
+                (center_mm[facet.axis]
+                    - hex.lower[facet.axis]
+                    - facet.side as f64 * hex.size[facet.axis])
+                    .abs()
+                    <= 1e-7
+                    && (0..3).filter(|axis| *axis != facet.axis).all(|axis| {
+                        center_mm[axis] >= hex.lower[axis] - 1e-7
+                            && center_mm[axis] <= hex.lower[axis] + hex.size[axis] + 1e-7
+                    })
+            });
+            if !on_face {
+                return Err(
+                    "UnmappedLoad: contact center is not on the complete native loaded face".into(),
+                );
+            }
+        }
         let mut area = 0.0;
         let mut center = [0.0; 3];
         for facet in &facets {
-            surface_quadrature(mesh, facet, |point, weight, _| {
+            surface_quadrature(mesh, facet, &load.footprint, |point, weight, _| {
                 area += weight;
                 for axis in 0..3 {
                     center[axis] += weight * point[axis];
                 }
             });
         }
+        if area <= 1e-12 || !area.is_finite() {
+            return Err("UnmappedLoad: contact has no finite positive area".into());
+        }
         for value in &mut center {
             *value /= area;
         }
         let mut inertia = [[0.0; 3]; 3];
         for facet in &facets {
-            surface_quadrature(mesh, facet, |point, weight, _| {
+            surface_quadrature(mesh, facet, &load.footprint, |point, weight, _| {
                 let offset: [f64; 3] = std::array::from_fn(|axis| point[axis] - center[axis]);
                 let squared = offset.iter().map(|value| value * value).sum::<f64>();
                 for row in 0..3 {
@@ -457,7 +474,7 @@ pub fn solve(
         let couple = std::array::from_fn(|axis| load.moment_n_mm[axis] - arm[axis]);
         let rotation = solve_three(inertia, couple)?;
         for facet in &facets {
-            surface_quadrature(mesh, facet, |point, weight, shape| {
+            surface_quadrature(mesh, facet, &load.footprint, |point, weight, shape| {
                 let offset = std::array::from_fn(|axis| point[axis] - center[axis]);
                 let rotational = cross(rotation, offset);
                 let traction =

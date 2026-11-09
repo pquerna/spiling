@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use ts_rs::TS;
 
 pub mod fields;
+pub mod load;
 pub mod mechanics;
 
 #[cfg(test)]
@@ -90,6 +91,7 @@ pub enum AnalysisMode {
 #[serde(deny_unknown_fields)]
 pub struct AnalysisFaceLoad {
     pub face_id: FaceId,
+    pub footprint: load::ForceFootprint,
     pub force_n: [f64; 3],
     pub moment_n_mm: [f64; 3],
 }
@@ -135,6 +137,7 @@ impl AnalysisCase {
         }
         let mut load_faces = BTreeSet::new();
         for load in &self.loads {
+            load.footprint.validate()?;
             if !load_faces.insert(&load.face_id)
                 || load
                     .force_n

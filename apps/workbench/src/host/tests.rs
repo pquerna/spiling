@@ -1224,6 +1224,7 @@ fn whole_hook_host_check() {
         source_hash: definition.record.provenance.source_hash.clone(),
         mode: AnalysisMode::Basic,
         loads: vec![AnalysisFaceLoad {
+            footprint: spiling_contracts::analysis::load::ForceFootprint::WholeFace {},
             face_id: load.unwrap(),
             force_n: [0.0, -10.0, 0.0],
             moment_n_mm: [30.0, 0.0, -360.0],
@@ -1285,6 +1286,8 @@ fn whole_hook_host_check() {
             .is_empty()
     );
     let field_input = crate::viewport::mechanics::Input {
+        editing: None,
+        contacts: vec![],
         capture: Some(capture.clone()),
         case: case.clone(),
         selected: None,

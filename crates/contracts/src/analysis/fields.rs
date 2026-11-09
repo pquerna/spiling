@@ -301,7 +301,7 @@ impl<'a> AnalysisFields<'a> {
         let mut patch_force = vec![[0.0; 3]; self.summary.case.case.loads.len()];
         let mut patch_moment = patch_force.clone();
         let mut seen = BTreeSet::new();
-        let mut loaded_faces = BTreeMap::<[u32; 9], (u32, usize)>::new();
+        let mut loaded_faces = BTreeMap::<[u32; 9], (u32, usize, usize)>::new();
         let mut assembled_force = vec![[0.0; 3]; self.node_count];
         for index in 0..self.patch_count {
             let sample = self.patch(index).unwrap();
@@ -327,29 +327,26 @@ impl<'a> AnalysisFields<'a> {
                 ));
             };
             let element = self.element(element).unwrap();
-            let mut expected_area = 1.0;
-            for tangent in (0..3).filter(|&tangent| tangent != axis) {
-                let coordinate = 2.0 * (sample.point_mm[tangent] - element.center_mm[tangent])
-                    / element.size_mm[tangent];
-                let weight = if close(coordinate, 0.0) {
-                    8.0 / 9.0
-                } else if close(coordinate.abs(), (3.0_f64 / 5.0).sqrt()) {
-                    5.0 / 9.0
-                } else {
-                    return Err(fail(
-                        "SPLA patch is not full-order retained face quadrature",
-                    ));
-                };
-                expected_area *= 0.5 * element.size_mm[tangent] * weight;
-            }
-            if !close(sample.area_mm2, expected_area) {
+            let footprint = &self.summary.case.case.loads[sample.patch_index as usize].footprint;
+            let side = usize::from(sample.point_mm[axis] > element.center_mm[axis]);
+            let expected =
+                load::surface_samples(footprint, element.center_mm, element.size_mm, axis, side);
+            let Some((_, expected_area)) = expected.iter().find(|(point, _)| {
+                (0..3).all(|axis| close(point[axis] - sample.point_mm[axis], 0.0))
+            }) else {
+                return Err(fail(
+                    "SPLA patch is not canonical physical-footprint quadrature",
+                ));
+            };
+            if !close(sample.area_mm2, *expected_area) {
                 return Err(fail(
                     "SPLA patch quadrature weight differs from modeled face",
                 ));
             }
-            let entry = loaded_faces
-                .entry(*nodes)
-                .or_insert((sample.patch_index, 0));
+            let entry =
+                loaded_faces
+                    .entry(*nodes)
+                    .or_insert((sample.patch_index, 0, expected.len()));
             if entry.0 != sample.patch_index {
                 return Err(fail("SPLA assigns one modeled face to two source patches"));
             }
@@ -379,8 +376,10 @@ impl<'a> AnalysisFields<'a> {
                 patch_moment[sample.patch_index as usize][axis] += moment[axis];
             }
         }
-        if loaded_faces.values().any(|entry| entry.1 != 9) {
-            return Err(fail("SPLA patch coverage omits complete face quadrature"));
+        if loaded_faces.values().any(|entry| entry.1 != entry.2) {
+            return Err(fail(
+                "SPLA patch coverage omits physical-footprint quadrature",
+            ));
         }
         for (index, assembled) in assembled_force.iter().enumerate() {
             let retained = self.node(index).unwrap().applied_force_n;

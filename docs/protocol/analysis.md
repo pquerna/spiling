@@ -59,16 +59,27 @@ not proof of an existing FE cache.
 
 ## Finite patches, units and frames
 
-The initial patch is one **whole trimmed native source face**, including its
-holes, not a vertex, mesh triangle, point load or untrimmed carrier. Arbitrary
-sub-face patches and manufactured added-surface selection are not admitted by
-this contract. Native face identity does not yet establish the patch's
-discretized area, moments, DOF map, load transfer or restraint rank.
+Loads require an explicit `footprint`: `whole_face` or a `disk` with source-local
+`center_mm` and `diameter_mm`. A disk denotes its intersection with the selected
+native trimmed face, not a point load, heatmap blur, pressure value or untrimmed
+carrier. Its center must lie on that face. The current contact tool admits only
+native-certified complete vertical rectangles; curved faces, cap faces and
+nonrectangular trims refuse without display-mesh fallback. Restraints remain
+whole trimmed native faces. Diameter is finite in 0.01..1,000,000 mm; mechanical
+area, transfer and resource admission still apply. One load per face is retained.
+
+`Projects.PrepareAnalysisFace` is a read-only standard operation binding the
+current project, persistent revision, live FaceRef, source hash, pose, native
+rectangle chart, centroid, area and outward normal. It publishes no artifacts
+and does not mutate a case. A new or changed disk must use a current native
+preparation before EditAnalysis; unchanged saved footprints can be reused.
+Native open independently rechecks current and historical disk centers against
+their authoritative trims, including reused native definitions.
 
 All components use the normalized right-handed **definition-local service
 frame**, with mm and N. Changing a part's print orientation does not rotate the
 authored service load with the printer axes. Each `AnalysisFaceLoad` contains
-`face_id`, three `force_n` components and three `moment_n_mm` components. Moment
+`face_id`, its required footprint, three `force_n` components and three `moment_n_mm` components. Moment
 is the total resultant **about the source origin**, not an additional couple at
 an implicit patch center. Every admitted finite-patch distribution must conserve
 that requested force and moment together. The mechanical consumer uses the
@@ -81,6 +92,27 @@ and nonfinite components are refused.
 be fixed. Loaded faces are unique, restrained faces are unique, and whole-face
 load/restraint overlap refuses. These are authored ideal restraints, not checked
 fixtures, constrained rotational DOFs, stability or reaction-balance receipts.
+
+### Native Apply force tool
+
+Apply force arms one placement. Hover prepares the native face and previews the
+clipped contact; click places the visible force and exits placement. Force (N),
+contact diameter (mm), Whole face, direction and Flip are available in the
+inspector. The selected contact's ring changes diameter, arrow tip changes
+magnitude, offset direction handle rotates (Shift snaps to a part axis), and
+center handle moves the contact within its native face. End-on forces use a
+dot/cross rather than inventing a screen-space direction. Size preserves total
+force; movement/clipping updates the actual centroid and source-origin lever
+arm. Additional couples are separate advanced inputs. Plate axes convert once
+to the persisted service frame.
+
+Canvas and inspector share the case draft. A drag previews intent without a
+solve and commits once on release when starting from a clean saved case;
+pre-existing unapplied changes remain behind explicit Apply case. Numeric
+edits remain drafts until Apply/Enter. Escape cancels placement or reverts an
+active gesture without deleting an existing load. Text editing retains its
+own Escape. Last successful fields remain visible but stale until Apply/Run;
+pointer movement does not trigger a solve.
 
 ## Mechanical service and model admission
 
@@ -131,8 +163,11 @@ requires six independent restrained rigid modes. The original sparse stiffness
 is factored without regularization by the exact-pinned CPU numerical library.
 There is no hidden reduced integration or artificial pinning.
 
-For each admitted full side-face patch, 3×3 facet quadrature integrates area,
-centroid and rotational inertia. Affine traction is `F/A + b × (x-centroid)`;
+Whole-face loads use 3×3 facet quadrature. Disk loads use clipped physical
+disk/rectangle quadrature, partitioned at circle/rectangle intersections with
+an angular change of variables and bounded high-order integration. Retained
+sample coordinates/weights are checked against the captured footprint. Area,
+centroid and rotational inertia use the actual clipped contact. Affine traction is `F/A + b × (x-centroid)`;
 the residual couple is `M_source_origin - centroid × F`, not a second lever-arm
 moment. Consistent Q2 nodal loads and retained patch quadrature are independently
 summed for force and **source-origin** moment. Original-coefficient FP64
@@ -160,7 +195,7 @@ on CPU FP64, not CubeCL or a backend-name-only GPU implementation.
 
 Successful Operations return `AnalysisCompleted` with captured project revision,
 input hash and an immutable ByteStream `application/x-spiling-analysis-fields`
-artifact. Producer `assumed-printed-hex27-2`, model scope
+artifact. Producer `assumed-printed-hex27-3`, model scope
 `planned_assumed_tied_macro` and `accuracy_evidence: unqualified` are explicit.
 An explicitly retained local Operations store retains successful fields across
 engine restart (CLI `--store DIRECTORY`; the default CLI store is temporary).
@@ -312,6 +347,10 @@ changing its identity. `--analysis-load` replaces that face's wrench;
 `--analysis-fix` replaces its flags with XYZ fixed. Bounded typed
 `--analysis-edit` JSON supports explicit put/remove and directional restraints.
 All edits refuse in read-only inspection.
+`--analysis-contact NAME FACE CX CY CZ DIAMETER FX FY FZ` prepares the native
+face and assigns a clipped disk, using source-local mm/N and zero additional
+couple. It computes the source-origin moment from the actual clipped centroid;
+it does not infer a force magnitude or use a mesh triangle as contact authority.
 `--analysis-run NAME SETTINGS_JSON_FILE` also permits read-only inspection. It
 prints the actual engine summary, bounded centroid field samples and durable
 operation/artifact identity; it does not calculate mechanics in the CLI.

@@ -76,6 +76,15 @@ impl Workbench {
             })
             .map(|face| face.face_id.clone());
         Some(crate::viewport::mechanics::Input {
+            editing: if self.mechanics.tool.armed {
+                None
+            } else {
+                self.force_canvas()
+                    .and_then(|canvas| canvas.active)
+                    .filter(|contact| glam::DVec3::from_array(contact.load.force_n).length() > 0.0)
+                    .map(|contact| contact.load.face_id)
+            },
+            contacts: self.state.analysis_faces.clone(),
             capture,
             case,
             selected,
@@ -85,12 +94,18 @@ impl Workbench {
     }
 
     pub(in crate::app) fn mechanics_actions(&mut self, ui: &mut egui::Ui) {
+        let apply_requested = std::mem::take(&mut self.mechanics.apply_requested);
         ui.heading("Analyze");
         let ready = self.state.phase == Phase::Running
             && !self.state.busy
             && !self.state.picker_open
             && self.awaiting_serial.is_none()
             && self.state.confirmation.is_none();
+        let direction_error = self
+            .mechanics
+            .controls
+            .values()
+            .find_map(|control| control.error.clone());
         let Some(draft) = &mut self.mechanics.draft else {
             ui.weak("Select a saved case or create one.");
             return;
@@ -107,7 +122,7 @@ impl Workbench {
                 .project
                 .as_ref()
                 .is_some_and(|project| project.layout_id != draft.value.layout_id);
-        if draft.dirty() || draft.submitted.is_some() {
+        if draft.dirty() || draft.submitted.is_some() || direction_error.is_some() {
             let validation = draft.value.validate().err().map(|error| error.to_string());
             let reason = if !ready || draft.submitted.is_some() {
                 Some("Wait for the current operation")
@@ -121,9 +136,9 @@ impl Workbench {
             {
                 Some("Read-only project")
             } else {
-                validation.as_deref()
+                direction_error.as_deref().or(validation.as_deref())
             };
-            if ui::primary(ui, "Apply case", reason) {
+            if ui::primary(ui, "Apply case", reason) || (apply_requested && reason.is_none()) {
                 draft.submitted = Some(self.state.serial);
                 self.queued_project = Some(ProjectCommand::EditAnalysis {
                     session_id: draft.session.clone(),

@@ -263,6 +263,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         spiling_contracts::analysis::AnalysisFaceLoad::decl(&config),
         spiling_contracts::analysis::AnalysisFaceRestraint::decl(&config),
         spiling_contracts::analysis::AnalysisCase::decl(&config),
+        spiling_contracts::analysis::load::AnalysisFacePreparation::decl(&config),
+        spiling_contracts::analysis::load::ForceFootprint::decl(&config),
         spiling_contracts::analysis::AnalysisCaseRecord::decl(&config),
         spiling_contracts::analysis::AnalysisDocument::decl(&config),
         spiling_contracts::analysis::AnalysisResultRecord::decl(&config),

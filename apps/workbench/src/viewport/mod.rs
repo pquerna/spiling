@@ -4,6 +4,7 @@
 
 mod beads;
 mod focus;
+pub mod force;
 pub mod mechanics;
 pub mod overview;
 pub mod plate;
@@ -85,6 +86,7 @@ struct Resources {
 }
 
 pub struct Input<'a> {
+    pub force: Option<&'a mut force::Canvas>,
     pub mechanics: Option<mechanics::Input>,
     pub inspection: Option<Arc<crate::inspection::Area>>,
     pub project_id: Option<spiling_contracts::project::ProjectId>,
@@ -118,6 +120,7 @@ impl CameraState {
     }
 }
 pub struct Viewport {
+    force_interaction: force::Interaction,
     mechanics_annotations: mechanics::Annotations,
     yaw: f64,
     pitch: f64,
@@ -144,6 +147,7 @@ pub struct Viewport {
 impl Default for Viewport {
     fn default() -> Self {
         Self {
+            force_interaction: Default::default(),
             mechanics_annotations: Default::default(),
             yaw: -0.8,
             pitch: 0.7,
@@ -167,6 +171,11 @@ impl Default for Viewport {
             last_selection: None,
             attention: None,
         }
+    }
+}
+impl Viewport {
+    pub fn cancel_force(&mut self) -> Option<force::Event> {
+        self.force_interaction.cancel()
     }
 }
 impl Viewport {
@@ -651,6 +660,7 @@ impl Viewport {
         frame: &eframe::Frame,
     ) -> Option<FaceRef> {
         let Input {
+            mut force,
             mechanics,
             inspection,
             project_id,
@@ -1018,7 +1028,23 @@ impl Viewport {
                 handle = Some((position, r.dragged()));
             }
         }
+        let force_owns_pointer = if let Some(canvas) =
+            force.as_mut().filter(|_| interactive && view.source)
+        {
+            self.force_interaction.show(
+                ui,
+                &force::Projection {
+                    matrix: self.matrix(f64::from(rect.width() / rect.height()), display_radius),
+                    center,
+                    rect,
+                },
+                canvas,
+            )
+        } else {
+            false
+        };
         if response.dragged_by(egui::PointerButton::Primary)
+            && !force_owns_pointer
             && !handle.is_some_and(|(_, dragging)| dragging)
         {
             self.interrupt_focus();
@@ -1050,6 +1076,39 @@ impl Viewport {
         let matrix = self.matrix(f64::from(rect.width() / rect.height()), display_radius);
         if interactive
             && view.source
+            && !force_owns_pointer
+            && let Some(canvas) = force.as_mut().filter(|canvas| canvas.armed)
+            && response.hovered()
+            && let (Some(scene), Some(pointer)) =
+                (&scene, ui.input(|input| input.pointer.hover_pos()))
+        {
+            let horizontal = 2.0 * f64::from((pointer.x - rect.left()) / rect.width()) - 1.0;
+            let vertical = 1.0 - 2.0 * f64::from((pointer.y - rect.top()) / rect.height());
+            let inverse = matrix.inverse();
+            let near = inverse.project_point3(DVec3::new(horizontal, vertical, 0.0));
+            let far = inverse.project_point3(DVec3::new(horizontal, vertical, 1.0));
+            if let Some((reference, seed_mm)) = pick_clipped_hit(
+                scene,
+                center + near,
+                (far - near).normalize(),
+                analysis,
+                plane,
+                scope,
+            ) {
+                canvas.event = Some(force::Event::Point {
+                    reference,
+                    seed_mm,
+                    place: response.clicked(),
+                });
+            } else {
+                canvas.event = Some(force::Event::Leave);
+            }
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        if interactive
+            && view.source
+            && !force_owns_pointer
+            && !force.as_ref().is_some_and(|canvas| canvas.armed)
             && response.clicked()
             && let (Some(scene), Some(pointer)) = (&scene, response.interact_pointer_pos())
         {
@@ -1861,6 +1920,16 @@ pub(crate) fn pick_clipped(
     plane: PlaneMm,
     scope: Option<OccurrenceId>,
 ) -> Option<FaceRef> {
+    pick_clipped_hit(scene, origin, direction, analysis, plane, scope).map(|hit| hit.0)
+}
+fn pick_clipped_hit(
+    scene: &Scene,
+    origin: DVec3,
+    direction: DVec3,
+    analysis: &crate::analysis::SectionView,
+    plane: PlaneMm,
+    scope: Option<OccurrenceId>,
+) -> Option<(FaceRef, [f64; 3])> {
     let mut nearest = f64::INFINITY;
     let mut selected = None;
     if analysis.enabled && analysis.section_only {
@@ -1933,10 +2002,17 @@ pub(crate) fn pick_clipped(
                 }
                 if distance >= 0.0 && distance < nearest {
                     nearest = distance;
-                    selected = scene.reference(
-                        occurrence,
-                        view.face_ordinals.get(triangle).expect("checked face") as usize,
-                    );
+                    selected = scene
+                        .reference(
+                            occurrence,
+                            view.face_ordinals.get(triangle).expect("checked face") as usize,
+                        )
+                        .map(|reference| {
+                            (
+                                reference,
+                                (source_origin + source_direction * distance).to_array(),
+                            )
+                        });
                 }
             }
         }

@@ -17,6 +17,7 @@ fn case(project: &Project) -> AnalysisCase {
         source_hash: source.record.provenance.source_hash.clone(),
         mode: AnalysisMode::Basic,
         loads: vec![AnalysisFaceLoad {
+            footprint: spiling_contracts::analysis::load::ForceFootprint::WholeFace {},
             face_id: FaceId::from_step_entity(10).unwrap(),
             force_n: [0.0, -10.0, 0.0],
             moment_n_mm: [1.0, 2.0, 3.0],

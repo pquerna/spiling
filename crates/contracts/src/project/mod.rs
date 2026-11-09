@@ -442,6 +442,11 @@ pub enum ProjectCommand {
         base_revision: ProjectRevision,
         input_hash: SourceHash,
     },
+    PrepareAnalysisFace {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        reference: FaceRef,
+    },
     GetAnalysisResult {
         session_id: SessionId,
         base_revision: ProjectRevision,

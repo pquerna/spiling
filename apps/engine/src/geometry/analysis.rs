@@ -5,7 +5,108 @@
 use super::*;
 use spiling_contracts::analysis::{mechanics::*, *};
 
+pub(super) struct FaceRequest {
+    pub project_id: ProjectId,
+    pub project_revision: ProjectRevision,
+    pub reference: FaceRef,
+    pub source_hash: SourceHash,
+    pub pose: RigidPoseMm,
+}
+
+pub(super) fn validate_contact(
+    definition: &spiling_geometry::Definition,
+    load: &AnalysisFaceLoad,
+    cancel: &AtomicBool,
+) -> Result<(), ProjectError> {
+    let load::ForceFootprint::Disk { center_mm, .. } = load.footprint else {
+        return Ok(());
+    };
+    let mut work = spiling_geometry::GeometryWorkBudget::query();
+    let face = definition
+        .vertical_rectangular_face_with_work(&load.face_id, &mut work, cancel)
+        .map_err(project_geometry_error)?;
+    let horizontal: f64 = (0..3)
+        .map(|axis| (center_mm[axis] - face.origin_mm[axis]) * face.horizontal_direction[axis])
+        .sum();
+    let plane: f64 = (0..3)
+        .map(|axis| (center_mm[axis] - face.origin_mm[axis]) * face.outward_normal[axis])
+        .sum();
+    if plane.abs() > 1e-7
+        || horizontal < -1e-7
+        || horizontal > face.width_mm + 1e-7
+        || center_mm[2] < face.min_z_mm - 1e-7
+        || center_mm[2] > face.max_z_mm + 1e-7
+    {
+        return Err(project_error(
+            ProjectErrorCode::InvalidProject,
+            "stored contact is outside its authoritative native trimmed face",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn prepare_face(
+    definition: &spiling_geometry::Definition,
+    request: FaceRequest,
+    cancel: &AtomicBool,
+) -> Result<load::AnalysisFacePreparation, JobError> {
+    let mut work = spiling_geometry::GeometryWorkBudget::query();
+    let face = definition.vertical_rectangular_face_with_work(
+        &request.reference.face_id,
+        &mut work,
+        cancel,
+    )?;
+    let height = face.max_z_mm - face.min_z_mm;
+    let mut centroid_mm = std::array::from_fn(|axis| {
+        face.origin_mm[axis] + face.horizontal_direction[axis] * face.width_mm * 0.5
+    });
+    centroid_mm[2] = face.min_z_mm + height * 0.5;
+    let preparation = load::AnalysisFacePreparation {
+        project_id: request.project_id,
+        project_revision: request.project_revision,
+        reference: request.reference,
+        source_hash: request.source_hash,
+        pose: request.pose,
+        area_mm2: face.width_mm * height,
+        centroid_mm,
+        outward_normal: face.outward_normal,
+        origin_mm: face.origin_mm,
+        horizontal_direction: face.horizontal_direction,
+        width_mm: face.width_mm,
+        height_mm: height,
+    };
+    preparation.validate()?;
+    Ok(preparation)
+}
+
 impl Runtime {
+    pub(super) fn prepare_analysis_face(
+        &mut self,
+        session: &SessionId,
+        base: ProjectRevision,
+        reference: FaceRef,
+    ) -> Result<Reply, ProjectError> {
+        self.appearance_base(session, base)?;
+        self.live_surface_target(&reference)?;
+        let snapshot = self.project.snapshot();
+        let occurrence = &snapshot.occurrences[&reference.occurrence_id];
+        let source_hash = self.definitions[&reference.definition_id]
+            .record
+            .provenance
+            .source_hash
+            .clone();
+        let request = FaceRequest {
+            project_id: self.project.info().project_id,
+            project_revision: base,
+            reference,
+            source_hash,
+            pose: occurrence.pose,
+        };
+        self.start(Purpose::PrepareAnalysisFace, 0, move |_, _, _| {
+            Work::PrepareAnalysisFace(request)
+        })
+        .map_err(project_geometry_error)
+    }
     pub(super) fn attach_analysis_result(
         &mut self,
         session: &SessionId,
@@ -142,6 +243,15 @@ impl Runtime {
         &self,
         command: &ProjectCommand,
     ) -> Result<(), ProjectError> {
+        if let ProjectCommand::PrepareAnalysisFace {
+            session_id,
+            base_revision,
+            reference,
+        } = command
+        {
+            self.appearance_base(session_id, *base_revision)?;
+            self.live_surface_target(reference)?;
+        }
         if let ProjectCommand::RunAnalysis {
             session_id,
             base_revision,

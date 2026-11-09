@@ -5,7 +5,7 @@
 use super::*;
 use crate::manufacturing::PlanarPrintRecipe;
 
-pub const ANALYSIS_PRODUCER: &str = "assumed-printed-hex27-2";
+pub const ANALYSIS_PRODUCER: &str = "assumed-printed-hex27-3";
 pub const MAX_MECHANICAL_ELEMENTS: usize = 768;
 pub const MAX_MECHANICAL_DOFS: usize = 16_000;
 pub const MAX_MECHANICAL_FIELD_BYTES: usize = 4 * 1024 * 1024;

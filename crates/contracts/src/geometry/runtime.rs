@@ -136,6 +136,9 @@ impl JobStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobResult {
+    AnalysisFacePrepared {
+        preparation: crate::analysis::load::AnalysisFacePreparation,
+    },
     AnalysisResultPrepared {
         project_id: crate::project::ProjectId,
         read_revision: crate::project::ProjectRevision,

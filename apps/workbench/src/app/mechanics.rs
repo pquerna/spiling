@@ -6,18 +6,15 @@ use spiling_contracts::{
     analysis::*,
     project::{ProjectCommand, ProjectId, ProjectRevision},
 };
+mod load;
 mod results;
-
-fn scale_load(load: &mut AnalysisFaceLoad, factor: f64) {
-    if factor.is_finite() && factor > 0.0 {
-        for value in load.force_n.iter_mut().chain(&mut load.moment_n_mm) {
-            *value *= factor;
-        }
-    }
-}
+mod tool;
 
 #[derive(Default)]
 pub(super) struct MechanicsUi {
+    tool: tool::Tool,
+    apply_requested: bool,
+    controls: std::collections::BTreeMap<FaceId, load::Control>,
     settings_json: String,
     settings_initialized: bool,
     field: usize,
@@ -59,9 +56,13 @@ impl MechanicsUi {
         }
     }
     pub(super) fn has_changes(&self) -> bool {
-        self.draft
-            .as_ref()
-            .is_some_and(|draft| draft.dirty() || draft.submitted.is_some())
+        self.controls
+            .values()
+            .any(|control| control.error.is_some())
+            || self
+                .draft
+                .as_ref()
+                .is_some_and(|draft| draft.dirty() || draft.submitted.is_some())
     }
     pub(super) fn discard(&mut self) {
         let seen_capture = self.seen_capture.take();
@@ -88,6 +89,8 @@ impl Workbench {
         else {
             return;
         };
+        self.mechanics.controls.clear();
+        self.mechanics.tool = Default::default();
         if self.subject_drafts() {
             self.navigation = Some(navigation::Navigation::AnalysisCase(id));
             return;
@@ -121,6 +124,7 @@ impl Workbench {
         }
     }
     pub(super) fn reconcile_mechanics(&mut self) {
+        self.finish_force_placement();
         let adopted = self
             .state
             .mechanics
@@ -204,7 +208,14 @@ impl Workbench {
             draft.submitted = None;
             draft.removing = false;
         }
-        if !draft.dirty() && draft.submitted.is_none() {
+        if !draft.dirty()
+            && draft.submitted.is_none()
+            && !self
+                .mechanics
+                .controls
+                .values()
+                .any(|control| control.error.is_some())
+        {
             if current
                 && let Some(record) = project
                     .analysis
@@ -280,8 +291,21 @@ impl Workbench {
                 self.choose_analysis_case(record.case.id.clone());
             }
         }
-        self.mechanics_results(ui, ready);
+        let has_result = self.state.mechanics.as_ref().is_some_and(|capture| {
+            self.mechanics.draft.as_ref().is_some_and(|draft| {
+                draft.project == capture.project && draft.value.id == capture.summary.case.case.id
+            })
+        });
+        if has_result && (self.mechanics.tool.selected.is_some() || self.mechanics.tool.armed) {
+            ui.collapsing("Result · assumed materials", |ui| {
+                self.mechanics_results(ui, ready)
+            });
+        } else {
+            self.mechanics_results(ui, ready);
+        }
         if can_create && create_case {
+            self.mechanics.controls.clear();
+            self.mechanics.tool = Default::default();
             let (occurrence, definition) = subject.expect("selected native subject");
             let name = (1..=MAX_ANALYSIS_CASES + 1)
                 .map(|index| format!("Load case {index}"))
@@ -321,6 +345,53 @@ impl Workbench {
             ui.add_enabled_ui(
                 ready && !project.read_only && !stale && draft.submitted.is_none(),
                 |ui| {
+                    ui.horizontal(|ui| {
+                        ui.toggle_value(&mut self.mechanics.tool.armed, "Apply force")
+                            .on_hover_text("Click a face to place a force");
+                        if self.mechanics.tool.armed && ui.small_button("Cancel").clicked() {
+                            self.mechanics.tool.armed = false;
+                            self.mechanics.tool.pending = None;
+                        }
+                    });
+                    if self.mechanics.tool.armed {
+                        ui::number(ui, "Force (N)", &mut self.mechanics.tool.magnitude, 0.1);
+                        ui.checkbox(&mut self.mechanics.tool.whole_face, "Whole face");
+                        if !self.mechanics.tool.whole_face {
+                            ui::number(
+                                ui,
+                                "Contact diameter (mm)",
+                                &mut self.mechanics.tool.diameter,
+                                0.1,
+                            );
+                        }
+                        ui.horizontal(|ui| {
+                            const DIRECTIONS: [&str; 8] = [
+                                "Into face",
+                                "Out of face",
+                                "Part X",
+                                "Part Y",
+                                "Part Z",
+                                "Plate X",
+                                "Plate Y",
+                                "Plate Z",
+                            ];
+                            egui::ComboBox::from_id_salt("placement-direction")
+                                .selected_text(DIRECTIONS[self.mechanics.tool.direction])
+                                .show_ui(ui, |ui| {
+                                    for (index, label) in DIRECTIONS.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut self.mechanics.tool.direction,
+                                            index,
+                                            *label,
+                                        );
+                                    }
+                                });
+                            ui.toggle_value(&mut self.mechanics.tool.reversed, "Flip");
+                        });
+                    }
+                    if let Some(error) = &self.mechanics.tool.error {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    }
                     ui::group(ui, "Loads & supports");
                     let patch = self.selected.as_ref().filter(|reference| {
                         reference.session_id == hello.session_id
@@ -332,35 +403,13 @@ impl Workbench {
                             && reference.occurrence_id == draft.value.occurrence_id
                             && reference.definition_id == draft.value.definition_id
                     });
-                    egui::CollapsingHeader::new("Add load or support")
+                    egui::CollapsingHeader::new("Add support")
                         .default_open(
                             draft.value.loads.is_empty() && draft.value.restraints.is_empty(),
                         )
                         .show(ui, |ui| {
                             if patch.is_none() {
-                                ui.weak("Select a face to add a load or support.");
-                            }
-                            let can_load = patch.is_some_and(|reference| {
-                                !draft
-                                    .value
-                                    .restraints
-                                    .iter()
-                                    .any(|restraint| restraint.face_id == reference.face_id)
-                                    && !draft
-                                        .value
-                                        .loads
-                                        .iter()
-                                        .any(|load| load.face_id == reference.face_id)
-                            });
-                            if ui
-                                .add_enabled(can_load, egui::Button::new("Load selected face"))
-                                .clicked()
-                            {
-                                draft.value.loads.push(AnalysisFaceLoad {
-                                    face_id: patch.unwrap().face_id.clone(),
-                                    force_n: [0.0; 3],
-                                    moment_n_mm: [0.0; 3],
-                                });
+                                ui.weak("Select a face to fix it.");
                             }
                             let can_fix = patch.is_some_and(|reference| {
                                 !draft
@@ -393,53 +442,108 @@ impl Workbench {
                     for (index, load) in draft.value.loads.iter_mut().enumerate() {
                         ui.push_id(("load", index), |ui| {
                             ui.horizontal(|ui| {
-                                ui.strong(format!("Load {}", index + 1))
-                                    .on_hover_text(load.face_id.as_str());
+                                if ui
+                                    .selectable_label(
+                                        self.mechanics.tool.selected.as_ref()
+                                            == Some(&load.face_id),
+                                        format!("Force {}", index + 1),
+                                    )
+                                    .on_hover_text(load.face_id.as_str())
+                                    .clicked()
+                                {
+                                    self.mechanics.tool.selected = Some(load.face_id.clone());
+                                    if let Some(scene) = &self.state.scene {
+                                        self.queued_project =
+                                            Some(ProjectCommand::PrepareAnalysisFace {
+                                                session_id: hello.session_id.clone(),
+                                                base_revision: project.revision,
+                                                reference: FaceRef {
+                                                    session_id: hello.session_id.clone(),
+                                                    scene_revision: scene.revision,
+                                                    occurrence_id: draft.value.occurrence_id,
+                                                    definition_id: draft
+                                                        .value
+                                                        .definition_id
+                                                        .clone(),
+                                                    face_id: load.face_id.clone(),
+                                                },
+                                            });
+                                    }
+                                }
                                 if ui.small_button("−").on_hover_text("Remove load").clicked() {
                                     remove_load = Some(index);
                                 }
                             });
-                            let previous = glam::DVec3::from_array(load.force_n).length();
-                            if previous > 0.0 {
-                                let mut magnitude = previous;
-                                if ui::number(ui, "Load magnitude (N)", &mut magnitude, 0.1)
-                                    .changed()
-                                    && magnitude.is_finite()
-                                    && magnitude > 0.0
+                            if self.mechanics.tool.selected.as_ref() != Some(&load.face_id) {
+                                ui.weak(format!(
+                                    "{:.2} N",
+                                    glam::DVec3::from_array(load.force_n).length()
+                                ));
+                                return;
+                            }
+                            let preparation = self.state.analysis_faces.iter().find(|face| {
+                                face.project_id == project.project_id
+                                    && face.source_hash == draft.value.source_hash
+                                    && face.reference.face_id == load.face_id
+                                    && face.reference.definition_id == draft.value.definition_id
+                                    && face.reference.occurrence_id == draft.value.occurrence_id
+                                    && face.reference.session_id == hello.session_id
+                                    && self.state.scene.as_ref().is_some_and(|scene| {
+                                        scene.revision == face.reference.scene_revision
+                                    })
+                            });
+                            if let Some(preparation) = preparation {
+                                self.mechanics.apply_requested |= self
+                                    .mechanics
+                                    .controls
+                                    .entry(load.face_id.clone())
+                                    .or_insert_with(|| load::Control::new(preparation, load))
+                                    .show(ui, preparation, load);
+                            } else {
+                                ui.weak(format!(
+                                    "{:.3} N",
+                                    glam::DVec3::from_array(load.force_n).length()
+                                ));
+                                if ui.button("Direction & force…").clicked()
+                                    && let Some(scene) = &self.state.scene
                                 {
-                                    scale_load(load, magnitude / previous);
+                                    self.queued_project =
+                                        Some(ProjectCommand::PrepareAnalysisFace {
+                                            session_id: hello.session_id.clone(),
+                                            base_revision: project.revision,
+                                            reference: FaceRef {
+                                                session_id: hello.session_id.clone(),
+                                                scene_revision: scene.revision,
+                                                occurrence_id: draft.value.occurrence_id,
+                                                definition_id: draft.value.definition_id.clone(),
+                                                face_id: load.face_id.clone(),
+                                            },
+                                        });
                                 }
                             }
-                            egui::CollapsingHeader::new("Force components · source axes")
-                                .default_open(previous == 0.0)
-                                .show(ui, |ui| {
-                                    for (axis, value) in load.force_n.iter_mut().enumerate() {
-                                        ui::number(
-                                            ui,
-                                            &format!("{} (N)", ["X", "Y", "Z"][axis]),
-                                            value,
-                                            0.1,
-                                        );
-                                    }
-                                });
-                            let moment = glam::DVec3::from_array(load.moment_n_mm).length();
-                            ui.collapsing(
-                                format!("Source-origin moment · {moment:.2} N·mm"),
-                                |ui| {
-                                    for (axis, value) in load.moment_n_mm.iter_mut().enumerate() {
-                                        ui::number(
-                                            ui,
-                                            &format!("{} (N·mm)", ["X", "Y", "Z"][axis]),
-                                            value,
-                                            0.1,
-                                        );
-                                    }
-                                },
-                            );
+                            ui.collapsing("Advanced source wrench", |ui| {
+                                for (axis, value) in load.force_n.iter_mut().enumerate() {
+                                    ui::number(
+                                        ui,
+                                        &format!("{} (N)", ["X", "Y", "Z"][axis]),
+                                        value,
+                                        0.1,
+                                    );
+                                }
+                                for (axis, value) in load.moment_n_mm.iter_mut().enumerate() {
+                                    ui::number(
+                                        ui,
+                                        &format!("Source M{} (N·mm)", ["X", "Y", "Z"][axis]),
+                                        value,
+                                        0.1,
+                                    );
+                                }
+                            });
                         });
                     }
                     if let Some(index) = remove_load {
-                        draft.value.loads.remove(index);
+                        let removed = draft.value.loads.remove(index);
+                        self.mechanics.controls.remove(&removed.face_id);
                     }
                     let mut remove_restraint = None;
                     for (index, restraint) in draft.value.restraints.iter_mut().enumerate() {
@@ -608,6 +712,7 @@ mod tests {
         };
         let draft = ui.draft.as_mut().unwrap();
         draft.value.loads.push(AnalysisFaceLoad {
+            footprint: spiling_contracts::analysis::load::ForceFootprint::WholeFace {},
             face_id: spiling_contracts::geometry::FaceId::from_step_entity(822).unwrap(),
             force_n: [0.0, -10.0, 0.0],
             moment_n_mm: [30.0, 0.0, -360.0],
@@ -616,7 +721,9 @@ mod tests {
         draft.submitted = None;
         assert!(!ui.has_changes());
         let draft = ui.draft.as_mut().unwrap();
-        scale_load(&mut draft.value.loads[0], 2.0);
+        draft.value.loads[0].force_n = draft.value.loads[0].force_n.map(|value| value * 2.0);
+        draft.value.loads[0].moment_n_mm =
+            draft.value.loads[0].moment_n_mm.map(|value| value * 2.0);
         assert_eq!(draft.value.loads[0].force_n, [0.0, -20.0, 0.0]);
         assert_eq!(draft.value.loads[0].moment_n_mm, [60.0, 0.0, -720.0]);
         assert_eq!(

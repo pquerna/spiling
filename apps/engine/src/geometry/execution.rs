@@ -57,6 +57,9 @@ impl JobStatus {
 )]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum JobResult {
+    AnalysisFacePrepared {
+        preparation: spiling_contracts::analysis::load::AnalysisFacePreparation,
+    },
     AnalysisCompleted {
         read_revision: Option<ProjectRevision>,
         project_id: ProjectId,

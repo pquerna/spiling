@@ -117,6 +117,7 @@ impl Artifact {
     }
 }
 enum Purpose {
+    PrepareAnalysisFace,
     GetAnalysisResult,
     RunAnalysis {
         maximum_seconds: u32,
@@ -157,6 +158,7 @@ struct Publication {
     reason = "Single-writer bounded publication values stay inline without extra heap indirection"
 )]
 enum PublicationKind {
+    AnalysisFacePrepared(spiling_contracts::analysis::load::AnalysisFacePreparation),
     AnalysisCompleted(Arc<spiling_analysis::run::RunProduct>),
     Import {
         edit: PreparedEdit,
@@ -222,6 +224,7 @@ struct Active {
 /// The dedicated native dispatcher owns bounded metadata and immutable encoded buffers.
 /// Native values exist exclusively on Worker; publication is a two-phase ACK boundary.
 pub struct Runtime {
+    prepared_analysis_faces: Vec<spiling_contracts::analysis::load::AnalysisFacePreparation>,
     analysis_publication: Option<(JobId, Arc<spiling_analysis::run::RunProduct>)>,
     analysis_candidate: Option<Arc<spiling_analysis::run::RunProduct>>,
     pub session_id: SessionId,
@@ -266,6 +269,7 @@ impl Runtime {
         Self {
             analysis_publication: None,
             analysis_candidate: None,
+            prepared_analysis_faces: Vec::new(),
             session_id: SessionId::new(),
             revision: SceneRevision::ZERO,
             definitions: BTreeMap::new(),
@@ -462,6 +466,7 @@ impl Runtime {
                                 | Purpose::CompareAppearance
                                 | Purpose::RunAnalysis { .. }
                                 | Purpose::GetAnalysisResult
+                                | Purpose::PrepareAnalysisFace
                                 | Purpose::GetAppearanceReport
                                 | Purpose::CompareOptical
                                 | Purpose::MatchStock
@@ -801,6 +806,17 @@ impl Runtime {
                             self.layout_proposal = Some(proposal.clone());
                             Some(JobResult::LayoutPrepared { proposal })
                         }
+                        PublicationKind::AnalysisFacePrepared(preparation) => {
+                            self.prepared_analysis_faces
+                                .retain(|face| face.reference != preparation.reference);
+                            if self.prepared_analysis_faces.len()
+                                >= spiling_contracts::analysis::MAX_ANALYSIS_PATCHES * 2
+                            {
+                                self.prepared_analysis_faces.remove(0);
+                            }
+                            self.prepared_analysis_faces.push(preparation.clone());
+                            Some(JobResult::AnalysisFacePrepared { preparation })
+                        }
                         PublicationKind::BedPosePrepared(preparation) => {
                             Some(JobResult::BedPosePrepared { preparation })
                         }
@@ -866,6 +882,20 @@ impl Runtime {
     }
     fn prepare(&mut self, active: &Active, product: Product) -> Result<Publication, JobError> {
         match (&active.purpose, product) {
+            (Purpose::PrepareAnalysisFace, Product::AnalysisFacePrepared(preparation)) => {
+                preparation.validate()?;
+                if preparation.reference.session_id != self.session_id
+                    || preparation.reference.scene_revision != active.base
+                    || preparation.project_revision != active.project_base
+                    || preparation.project_id != self.project.info().project_id
+                {
+                    return Err(stale().into());
+                }
+                Ok(Publication {
+                    kind: PublicationKind::AnalysisFacePrepared(preparation),
+                    artifact: None,
+                })
+            }
             (
                 Purpose::RunAnalysis { .. } | Purpose::GetAnalysisResult,
                 Product::AnalysisCompleted(report),
@@ -2206,6 +2236,11 @@ impl Runtime {
                 base_revision,
                 input_hash,
             } => self.attach_analysis_result(&session_id, base_revision, &input_hash),
+            ProjectCommand::PrepareAnalysisFace {
+                session_id,
+                base_revision,
+                reference,
+            } => self.prepare_analysis_face(&session_id, base_revision, reference),
             ProjectCommand::GetAnalysisResult {
                 session_id,
                 base_revision,
@@ -2300,6 +2335,29 @@ impl Runtime {
                             definition_id: case.definition_id.clone(),
                             face_id: face_id.clone(),
                         })?;
+                    }
+                    for load in &case.loads {
+                        if matches!(
+                            load.footprint,
+                            spiling_contracts::analysis::load::ForceFootprint::WholeFace {}
+                        ) {
+                            continue;
+                        }
+                        let retained =
+                            self.project.snapshot().analysis.cases.iter().any(|record| {
+                                record.case.definition_id == case.definition_id
+                                    && record.case.source_hash == case.source_hash
+                                    && record.case.loads.iter().any(|old| {
+                                        old.face_id == load.face_id
+                                            && old.footprint == load.footprint
+                                    })
+                            });
+                        if retained {
+                            continue;
+                        }
+                        let prepared = self.prepared_analysis_faces.iter().find(|face| face.project_id == self.project.info().project_id && face.source_hash == case.source_hash && face.reference.session_id == self.session_id && face.reference.scene_revision == self.revision && face.reference.definition_id == case.definition_id && face.reference.occurrence_id == case.occurrence_id && face.reference.face_id == load.face_id)
+                            .ok_or_else(|| project_error(ProjectErrorCode::InvalidProject, "prepare the native analysis face before assigning a new contact footprint"))?;
+                        prepared.contact(&load.footprint)?;
                     }
                 }
                 self.commit_metadata_edit(Edit::Analysis { edit })
@@ -2547,6 +2605,7 @@ impl Runtime {
         let cancel = Arc::new(AtomicBool::new(initially_cancelled));
         let stage = match &purpose {
             Purpose::RunAnalysis { .. } => "solving_assumed_printed_equilibrium",
+            Purpose::PrepareAnalysisFace => "preparing_native_load_face",
             Purpose::GetAnalysisResult => "reading_portable_analysis_fields",
             Purpose::Import { .. } => "importing",
             Purpose::Section => "sectioning",
@@ -2689,6 +2748,7 @@ fn cancelled(purpose: &Purpose) -> JobError {
         | Purpose::GetOpticalReport
         | Purpose::GetSurfaceImage
         | Purpose::GetAnalysisResult
+        | Purpose::PrepareAnalysisFace
         | Purpose::ApplyOpticalConstruction => project_error(
             ProjectErrorCode::Cancelled,
             "project job cancelled before publication",
