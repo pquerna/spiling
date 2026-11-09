@@ -12,6 +12,7 @@ pub mod inspection;
 pub mod launch;
 pub mod layers;
 pub mod manufacture;
+pub mod mechanics;
 mod performance;
 pub mod replay;
 pub mod scene;

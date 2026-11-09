@@ -51,16 +51,32 @@ Properties and Section analysis remain available in all workspaces. Selecting a
 face does not switch workspace. Surface finish is an authoring task within Prepare;
 Color study is a focused page with an explicit return to its invoking task. Plate
 navigation retains workspace/task and compatible inspection state. Background
-completion never activates another workspace. Camera controls remain at the canvas;
-gesture instructions use deliberate help.
+completion never activates another workspace. Fit, Top and Isometric remain at the
+canvas; View groups focus, reveal, projection and animation controls. Gesture
+instructions use deliberate help.
 
-Analyze currently authors source-bound finite-face load/restraint cases, with
-Basic/Enhanced FDM intent, native face selection and one explicit Apply. Save
-writes the ordinary project checkpoint. Unapplied/stale/rejected drafts remain
-distinct from saved cases; source geometry is not a numerical heatmap. The pane
-names missing construction, boundary transfer and mechanical solve/assessment
-instead of presenting authored inputs as a result. [Analysis contracts](../protocol/analysis.md)
-own this boundary and the next consuming whole-part result.
+Analyze separates source-bound case drafts from checked numerical results.
+One pinned primary action applies the draft or runs the saved case; the inspector
+has one scrolling body. Loads/supports are typed source-face edits. Changing a
+load magnitude scales its complete force/source-origin-moment wrench; component
+and moment edits remain explicit. Display-only patch outlines, force arrows and
+fixed-axis markers identify that intent without becoming transfer authority.
+
+Checked results colour exterior FE faces in 3D, with constant cell-centroid
+macro values, a global numeric scale/units and hover sampling. Preserve holes,
+pose/source binding and the 0.001 mm float-projection refusal. No smoothing,
+deformed shape, road maximum or calibrated strength follows from the heatmap.
+Keep a compact assumption/freshness state and useful metrics visible. Residuals,
+model qualifications, provenance and phase costs belong in explicitly opened
+Evidence, not repeated paragraphs. A stale map remains labelled and cannot be
+attached as current. Invalid display preparation retains source inspection with
+a visible reason.
+
+Choose model loads bounded strict compatible recipe/law data for review; ordinary
+use does not require pasting JSON. Raw model data remains advanced input. No
+material is supplied implicitly. Attach then Save retains the checked fields;
+copied-file return restores without solving. [Analysis contracts](../protocol/analysis.md)
+own admission and the remaining Basic/Enhanced numerical and physical gates.
 
 Focus on selection frames a selected source part or face without editing its pose.
 Faces use checked display extents and an area-weighted normal only when it is

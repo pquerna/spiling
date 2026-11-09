@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct MechanicsCapture {
+    pub display: Arc<crate::mechanics::Display>,
     pub project: ProjectId,
     pub revision: ProjectRevision,
     pub summary: spiling_contracts::analysis::mechanics::AnalysisRunSummary,
@@ -31,7 +32,9 @@ pub async fn load_mechanics(
     let bytes = rpc
         .fetch_analysis_fields(&input, captured_revision, &resource)
         .await?;
-    let summary = spiling_contracts::analysis::fields::AnalysisFields::decode(&bytes)?.summary;
+    let fields = spiling_contracts::analysis::fields::AnalysisFields::decode(&bytes)?;
+    let display = Arc::new(crate::mechanics::Display::new(&fields).map_err(ClientError::Protocol)?);
+    let summary = fields.summary;
     if summary.project_id != project {
         return Err(ClientError::Protocol(
             "Mechanical fields belong to another project".into(),
@@ -51,6 +54,7 @@ pub async fn load_mechanics(
         .into());
     }
     Ok(Arc::new(MechanicsCapture {
+        display,
         project,
         revision,
         summary,

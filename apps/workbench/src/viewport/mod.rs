@@ -4,6 +4,7 @@
 
 mod beads;
 mod focus;
+pub mod mechanics;
 pub mod overview;
 pub mod plate;
 mod reveal;
@@ -47,6 +48,7 @@ struct LineVertex {
     color: [f32; 3],
 }
 struct Resources {
+    mechanics: mechanics::Renderer,
     meshes: HashMap<SourceHash, Arc<wgpu::Buffer>>,
     overview: overview::Renderer,
     plate: plate::Renderer,
@@ -83,6 +85,7 @@ struct Resources {
 }
 
 pub struct Input<'a> {
+    pub mechanics: Option<mechanics::Input>,
     pub inspection: Option<Arc<crate::inspection::Area>>,
     pub project_id: Option<spiling_contracts::project::ProjectId>,
     pub plate: Option<plate::Plate>,
@@ -115,6 +118,7 @@ impl CameraState {
     }
 }
 pub struct Viewport {
+    mechanics_annotations: mechanics::Annotations,
     yaw: f64,
     pitch: f64,
     distance: f64,
@@ -140,6 +144,7 @@ pub struct Viewport {
 impl Default for Viewport {
     fn default() -> Self {
         Self {
+            mechanics_annotations: Default::default(),
             yaw: -0.8,
             pitch: 0.7,
             distance: 100.0,
@@ -405,7 +410,10 @@ impl Viewport {
             line_layout.clone(),
             line_pipeline.clone(),
         );
+        let mechanics =
+            mechanics::Renderer::new(device, &line_pipeline_layout, state.target_format);
         state.renderer.write().callback_resources.insert(Resources {
+            mechanics,
             meshes: HashMap::new(),
             overview,
             plate,
@@ -643,6 +651,7 @@ impl Viewport {
         frame: &eframe::Frame,
     ) -> Option<FaceRef> {
         let Input {
+            mechanics,
             inspection,
             project_id,
             plate,
@@ -678,9 +687,22 @@ impl Viewport {
         let mut fit_source = false;
         let mut fit_plate = false;
         ui.horizontal_wrapped(|ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             if ui.button("Fit").clicked() {
                 self.fit();
             }
+            if ui.button("Top").clicked() {
+                self.interrupt_focus();
+                self.pitch = 1.56;
+                self.yaw = -std::f64::consts::FRAC_PI_2;
+            }
+            if ui.button("Isometric").clicked() {
+                self.interrupt_focus();
+                self.orthographic = false;
+                self.yaw = -0.8;
+                self.pitch = 0.7;
+            }
+            ui.menu_button("View…", |ui| {
             if ui
                 .add_enabled(
                     scene
@@ -692,6 +714,7 @@ impl Viewport {
             {
                 self.fit();
                 fit_source = true;
+                ui.close();
             }
             let focus_available = interactive && !layout_preview && view.source
                 && scene.as_ref().is_some_and(|scene| scope.is_some_and(|id| scene.occurrences.iter().any(|item| item.occurrence_id == id)));
@@ -702,9 +725,10 @@ impl Viewport {
                     Ok(target) => { self.focus_on(scene, target); }
                     Err(error) => { self.focus_problem = Some(error); }
                 }
+                ui.close();
             }
             if self.reveal.is_some() {
-                if ui.button("Exit reveal").clicked() { self.close_reveal(ui.input(|input| input.time),ui.style().animation_time>0.0); }
+                if ui.button("Exit reveal").clicked() { self.close_reveal(ui.input(|input| input.time),ui.style().animation_time>0.0); ui.close(); }
             } else if ui.add_enabled(focus_available,egui::Button::new("Reveal selection")).clicked()
                 && let Some(scene) = &scene
             {
@@ -712,6 +736,7 @@ impl Viewport {
                     Ok(target) => { self.reveal_area(scene,target,&[scope.unwrap()]); }
                     Err(error) => { self.focus_problem=Some(error); }
                 }
+                ui.close();
             }
             ui.checkbox(&mut self.dim_context,"Dim surroundings");
             if ui.add_enabled(self.previous_camera.is_some() && self.reveal.is_none(), egui::Button::new("Back to previous view")).clicked()
@@ -719,17 +744,7 @@ impl Viewport {
             {
                 self.pending_focus = None;
                 self.animate_to(previous, ui.input(|input| input.time), ui.style().animation_time > 0.0);
-            }
-            if ui.button("Isometric").clicked() {
-                self.interrupt_focus();
-                self.orthographic = false;
-                self.yaw = -0.8;
-                self.pitch = 0.7;
-            }
-            if ui.button("Top").clicked() {
-                self.interrupt_focus();
-                self.pitch = 1.56;
-                self.yaw = -std::f64::consts::FRAC_PI_2;
+                ui.close();
             }
             if ui.checkbox(&mut self.orthographic, "Orthographic").changed() { self.interrupt_focus(); }
             if ui.checkbox(&mut self.smooth_focus, "Animate focus").changed() && !self.smooth_focus {
@@ -738,8 +753,10 @@ impl Viewport {
             if (analysis.enabled || self.reveal.is_some()) && ui.button("Normal to section").clicked() {
                 let normal=self.reveal.as_ref().map_or_else(||DVec3::from_array(plane.normal) * if analysis.flipped { -1.0 } else { 1.0 },|reveal|reveal.normal);
                 self.normal_to(normal);
+                ui.close();
             }
             crate::ui::help(ui, "viewport-navigation", "Viewport navigation", "Drag to orbit; right-drag to pan; wheel to zoom. Focus the canvas: arrows orbit, Shift+arrows pan, plus/minus zoom, F fits, G focuses selection, Escape stops focus, 1 selects Top and 0 Isometric. Focus uses display bounds and a stable face normal when available; it does not prove visibility or change the part pose. Turn off Animate focus for immediate navigation.");
+            });
         });
         self.apply_focus_area();
         if let Some(reveal) = &mut self.reveal {
@@ -1106,12 +1123,13 @@ impl Viewport {
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
             Callback {
+                mechanics: mechanics.clone(),
                 inspection,
                 plate: plate.clone(),
                 plate_origin: center,
                 dark: ui.visuals().dark_mode,
                 show_height: self.show_height,
-                scene,
+                scene: scene.clone(),
                 section,
                 review,
                 view,
@@ -1161,6 +1179,18 @@ impl Viewport {
                 },
             },
         ));
+        if let (Some(mechanics), Some(scene)) = (&mechanics, &scene) {
+            mechanics.paint_ui(
+                ui,
+                rect,
+                matrix,
+                center,
+                scene,
+                &mut self.mechanics_annotations,
+            );
+        } else {
+            self.mechanics_annotations = Default::default();
+        }
         if let Some((position, dragging)) = handle {
             let painter = ui.painter();
             painter.circle_filled(position, 10.0, ui.visuals().extreme_bg_color);
@@ -1200,7 +1230,10 @@ impl Viewport {
         }
         if let Some(state) = frame.wgpu_render_state()
             && let Some(resources) = state.renderer.read().callback_resources.get::<Resources>()
-            && let Some(error) = &resources.failure
+            && let Some(error) = resources
+                .failure
+                .as_ref()
+                .or(resources.mechanics.error.as_ref())
         {
             hit = None;
             ui.painter().text(
@@ -1215,6 +1248,7 @@ impl Viewport {
     }
 }
 struct Callback {
+    mechanics: Option<mechanics::Input>,
     inspection: Option<Arc<crate::inspection::Area>>,
     plate: Option<plate::Plate>,
     plate_origin: DVec3,
@@ -1283,6 +1317,15 @@ impl egui_wgpu::CallbackTrait for Callback {
                 }
             }
         }
+        r.mechanics.error = r
+            .mechanics
+            .prepare(
+                device,
+                self.mechanics.as_ref(),
+                r.scene.as_deref(),
+                self.plate_origin,
+            )
+            .err();
         let section_changed = match (&r.section, &self.section) {
             (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
             (None, None) => false,
@@ -1390,7 +1433,23 @@ impl egui_wgpu::CallbackTrait for Callback {
             .filter(|_| self.view.source && self.uniform.cut[1] == 0.0)
         {
             pass.set_bind_group(0, &draw.group, &[]);
-            pass.draw(0..draw.indices, 0..draw.instances);
+            if let (Some(target), Some(scene)) = (r.mechanics.occurrence, &r.scene) {
+                for (instance, occurrence) in scene
+                    .occurrences
+                    .iter()
+                    .filter(|occurrence| occurrence.definition_id == draw.definition)
+                    .enumerate()
+                {
+                    if occurrence.occurrence_id != target {
+                        pass.draw(0..draw.indices, instance as u32..instance as u32 + 1);
+                    }
+                }
+            } else {
+                pass.draw(0..draw.indices, 0..draw.instances);
+            }
+        }
+        if self.view.source && self.uniform.cut[1] == 0.0 {
+            r.mechanics.paint(pass, &r.line_group);
         }
         if self.uniform.cut[0] > 0.0 && self.view.source {
             pass.set_stencil_reference(0);

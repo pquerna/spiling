@@ -490,6 +490,18 @@ impl Actor {
     }
     pub(super) async fn file_action(&mut self, action: Action) {
         match action {
+            Action::LoadAnalysisModel(path) => {
+                match tokio::task::spawn_blocking(move || crate::mechanics::read_model(&path)).await
+                {
+                    Ok(Ok(settings)) => {
+                        self.state.analysis_model = Some(Arc::new(settings));
+                        self.state.message =
+                            "Analysis model selected; Run evaluates the applied case".into();
+                    }
+                    Ok(Err(error)) => self.problem(error),
+                    Err(error) => self.problem(error.to_string()),
+                }
+            }
             Action::LoadIntent(path) => {
                 match tokio::task::spawn_blocking(move || manufacture::read_intent(&path)).await {
                     Ok(Ok((intent, label))) => {

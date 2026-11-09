@@ -86,6 +86,7 @@ pub struct ProcessEditReceipt {
 }
 #[derive(Debug, Clone)]
 pub struct Snapshot {
+    pub analysis_model: Option<Arc<spiling_contracts::analysis::mechanics::AnalysisRunSettings>>,
     pub mechanics_previous: Option<Arc<crate::assets::MechanicsCapture>>,
     pub mechanics: Option<Arc<crate::assets::MechanicsCapture>>,
     pub library: Arc<library::State>,
@@ -125,6 +126,7 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            analysis_model: None,
             mechanics_previous: None,
             mechanics: None,
             library: Arc::default(),
@@ -222,6 +224,7 @@ pub enum Command {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Picker {
+    AnalysisModel,
     Library,
     Open,
     OpenReadOnly,
@@ -237,6 +240,7 @@ pub enum Picker {
 impl Picker {
     fn title(self) -> &'static str {
         match self {
+            Self::AnalysisModel => "Choose an explicit assumed-material analysis model",
             Self::Library => "Choose My library (.spil)",
             Self::Open => "Open Spiling project (.spil)",
             Self::OpenReadOnly => "Open Spiling project read-only (.spil)",
@@ -255,6 +259,7 @@ impl Picker {
 /// Paths stay inside host actions. They are never turned into a lossy persistent string.
 #[derive(Debug)]
 enum Action {
+    LoadAnalysisModel(NativePath),
     New,
     Open {
         path: NativePath,
@@ -282,6 +287,7 @@ enum Action {
 impl Action {
     fn label(&self) -> &'static str {
         match self {
+            Self::LoadAnalysisModel(_) => "Load analysis model for review",
             Self::New => "Create a new project",
             Self::Open { .. } => "Open another project",
             Self::Save { .. } => "Save project",
@@ -504,7 +510,8 @@ impl Host {
             Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>,
         > = if matches!(
             picker,
-            Picker::Import
+            Picker::AnalysisModel
+                | Picker::Import
                 | Picker::Intent
                 | Picker::Material
                 | Picker::MaterialCatalog
@@ -514,7 +521,9 @@ impl Host {
             Box::pin(
                 dialog
                     .add_filter(
-                        if picker == Picker::Import {
+                        if picker == Picker::AnalysisModel {
+                            "Analysis model JSON"
+                        } else if picker == Picker::Import {
                             "STEP"
                         } else if picker == Picker::Image {
                             "Height image PNG / PGM"
@@ -598,6 +607,7 @@ impl Drop for Host {
 fn selected_action(picker: Picker, path: &std::path::Path) -> Result<Action, String> {
     let path = NativePath::from_os_str(path.as_os_str()).map_err(|e| e.to_string())?;
     Ok(match picker {
+        Picker::AnalysisModel => Action::LoadAnalysisModel(path),
         Picker::Library => Action::SetLibraryLocation(path),
         Picker::Save => Action::Save { target: Some(path) },
         Picker::Import => Action::Import(path),
@@ -1710,7 +1720,8 @@ impl Actor {
         }
         if matches!(
             action,
-            Action::LoadIntent(_)
+            Action::LoadAnalysisModel(_)
+                | Action::LoadIntent(_)
                 | Action::LoadMaterial(_)
                 | Action::SetLibraryLocation(_)
                 | Action::LoadMaterialCatalog(_)
@@ -1815,6 +1826,7 @@ impl Actor {
             }
             Action::Close
             | Action::Restart
+            | Action::LoadAnalysisModel(_)
             | Action::LoadIntent(_)
             | Action::LoadMaterial(_)
             | Action::SetLibraryLocation(_)
@@ -1944,6 +1956,7 @@ impl Actor {
         let completed = operation.status == JobStatus::Completed;
         match (&pending.receipt, &operation.result) {
             (Receipt::Open(route), Some(JobResult::Scene { summary })) if completed => {
+                self.state.analysis_model = None;
                 self.mechanics_restore_key = None;
                 self.state.mechanics = None;
                 self.state.mechanics_previous = None;

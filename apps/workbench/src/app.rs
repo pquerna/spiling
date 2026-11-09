@@ -360,6 +360,7 @@ impl Workbench {
             Action::LoadIntent => host.choose(frame, ctx, Picker::Intent),
             Action::LoadMaterial => host.choose(frame, ctx, Picker::Material),
             Action::LoadMaterialCatalog => host.choose(frame, ctx, Picker::MaterialCatalog),
+            Action::LoadAnalysisModel => host.choose(frame, ctx, Picker::AnalysisModel),
             Action::Export => host.choose(frame, ctx, Picker::Export),
             Action::Preflight | Action::Compile | Action::Verify => {
                 use spiling_contracts::manufacturing::{ManufacturingCommand, VerificationOutput};
@@ -435,7 +436,9 @@ impl Workbench {
             && !ctx.text_edit_focused()
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
-            if self.show_gallery {
+            if self.mechanics.evidence_open {
+                self.mechanics.evidence_open = false;
+            } else if self.show_gallery {
                 self.show_gallery = false;
                 if let Some(id) = self.surface_focus[3].take() {
                     ctx.memory_mut(|m| m.request_focus(id));
@@ -943,7 +946,10 @@ impl eframe::App for Workbench {
                             return;
                         }
                         if self.work_area.panel == Panel::Mechanics {
-                            self.mechanics_pane(ui);
+                            self.mechanics_actions(ui);
+                            egui::ScrollArea::vertical()
+                                .id_salt("mechanics-inspector")
+                                .show(ui, |ui| self.mechanics_pane(ui));
                             return;
                         }
                         if matches!(
@@ -1055,6 +1061,7 @@ impl eframe::App for Workbench {
                         }
                     }
                     let mut picked = None;
+                    let mechanics = self.mechanics_view();
                     let inspection = self
                         .interface_overlay(self.state.display.clone().as_ref(), review.as_ref());
                     ui.horizontal_top(|ui| {
@@ -1070,6 +1077,7 @@ impl eframe::App for Workbench {
                                 picked = self.viewport.show(
                                     ui,
                                     crate::viewport::Input {
+                                        mechanics: mechanics.clone(),
                                         inspection: inspection.clone(),
                                         project_id: self
                                             .state

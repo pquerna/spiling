@@ -1246,6 +1246,18 @@ fn whole_hook_host_check() {
         ))
         .unwrap(),
     );
+    let before_model = host.snapshot().project.as_ref().unwrap().revision;
+    let model_path = root.path().join("model.json");
+    std::fs::write(&model_path, serde_json::to_vec(settings.as_ref()).unwrap()).unwrap();
+    let loaded_model = send(&host, Action::LoadAnalysisModel(native(&model_path)));
+    assert_eq!(
+        loaded_model.project.as_ref().unwrap().revision,
+        before_model
+    );
+    assert_eq!(
+        loaded_model.analysis_model.as_ref().unwrap().as_ref(),
+        settings.as_ref()
+    );
     project_edit(&host, |session_id, base_revision| {
         ProjectCommand::RunAnalysis {
             session_id,
@@ -1257,6 +1269,43 @@ fn whole_hook_host_check() {
     let first = wait(&host, |state| state.mechanics.is_some());
     let capture = first.mechanics.as_ref().unwrap();
     assert!(capture.summary.maximum_displacement_mm > 0.0);
+    assert_eq!(
+        capture.display.values.len(),
+        capture.summary.elements as usize
+    );
+    assert!(capture.display.surfaces.len() < 6 * capture.summary.elements as usize);
+    assert!(
+        (capture.display.ranges[0][1] - capture.summary.maximum_macro_von_mises_mpa).abs() < 1e-10
+    );
+    assert!(
+        !capture
+            .display
+            .vertices(0, &capture.summary.pose, glam::DVec3::ZERO)
+            .unwrap()
+            .is_empty()
+    );
+    let field_input = crate::viewport::mechanics::Input {
+        capture: Some(capture.clone()),
+        case: case.clone(),
+        selected: None,
+        field: 0,
+        stale: false,
+    };
+    assert!(
+        field_input
+            .surface(first.display.as_ref().unwrap())
+            .is_some()
+    );
+    for changed in 0..4 {
+        let mut invalid = field_input.clone();
+        match changed {
+            0 => invalid.case.layout_id = spiling_contracts::project::PrintLayoutId::new(),
+            1 => invalid.case.occurrence_id = OccurrenceId::new(999).unwrap(),
+            2 => invalid.case.source_hash = SourceHash::from_digest(&[99; 32]),
+            _ => invalid.case.definition_id = DefinitionId::from_source_sha256(&[99; 32]),
+        }
+        assert!(invalid.surface(first.display.as_ref().unwrap()).is_none());
+    }
     assert_eq!(capture.summary.case.case, case);
     assert_eq!(first.phase, Phase::Running);
     host.geometry(GeometryCommand::SetInstancePose {
@@ -1288,6 +1337,11 @@ fn whole_hook_host_check() {
         }
     });
     let compared = wait(&host, |state| state.mechanics_previous.is_some());
+    assert!(
+        field_input
+            .surface(compared.display.as_ref().unwrap())
+            .is_none()
+    );
     assert_eq!(
         compared.mechanics_previous.as_ref().unwrap().bytes,
         capture.bytes
@@ -1382,6 +1436,11 @@ fn whole_hook_host_check() {
     assert!(restored.project.as_ref().unwrap().read_only);
     assert!(!restored.project.as_ref().unwrap().dirty);
     let restored_capture = restored.mechanics.as_ref().unwrap();
+    assert_eq!(restored_capture.display.ranges, capture.display.ranges);
+    assert_eq!(
+        restored_capture.display.surfaces.len(),
+        capture.display.surfaces.len()
+    );
     assert_eq!(restored_capture.bytes, capture.bytes);
     assert_eq!(restored_capture.summary, capture.summary);
     assert_eq!(restored_capture.resource.sha256, capture.resource.sha256);
