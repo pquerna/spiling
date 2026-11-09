@@ -162,6 +162,16 @@ python tools/infill-lab/quadratic_report.py --input NEW_INPUTS \
   --results NEW_RESULTS --output REPORT.json
 ```
 
+Use `quadratic_study.py --field-bins 16` for bounded optional diagnostics on
+actual-road cases. It bins integrated element energy and physical volume by
+explicit element centroids, retains displacement extrema and checks the local
+energy sum against checked global reaction work. It never smooths stress or
+changes the solve. Energy concentration is not a discretization-error estimate.
+`--max-z 0.1` varies thickness resolution while preserving source roads, physical
+slabs, material and fixtures; changed meshes become refinement cases, not
+external-reference parity. Keep planar, thickness and formulation comparisons
+separate, including their original failures and unchanged acceptance threshold.
+
 Reference-parity cases require the original component inventory and selected
 response within 1e-5 (external DAT precision), alongside the stricter existing
 FP64 solve checks. Cases lacking an external response are explicitly refinement

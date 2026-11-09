@@ -276,6 +276,7 @@ def solve(
     prepared: ElasticBody | None = None,
     solver="amg",
     preconditioner_factory=None,
+    capture_solution=None,
 ):
     if preconditioner_factory is not None and solver != "amg":
         raise ValueError("custom preconditioners require the iterative solver")
@@ -516,6 +517,8 @@ def solve(
     )
     if balance > 1e-6:
         raise ValueError(f"reaction imbalance {balance}")
+    if capture_solution is not None:
+        capture_solution(u, energy)
     return {
         "case": case,
         "stiffness_n_mm": reaction / delta,

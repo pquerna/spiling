@@ -38,6 +38,7 @@ CONTEXT = (
     "reference.py",
     "quadratic.py",
     "quadratic_preconditioner.py",
+    "quadratic_fields.py",
 )
 
 

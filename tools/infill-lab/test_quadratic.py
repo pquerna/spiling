@@ -199,3 +199,40 @@ def test_incomplete_quadratic_runs_retain_resource_failure_and_finest_obligation
     beam = next(r for r in report["refinement_checks"] if r["specimen"] == "beam80")
     assert beam["coarse"] == 4 and beam["fine"] == 8
     assert not beam["passed"] and beam["reason"] == "missing_or_failed_required_mesh"
+
+
+def test_optional_field_capture_preserves_solve_and_conserves_independent_energy():
+    material = Material(z_ratio=0.25)
+    body = prepare(beam_mesh(3, ny=2, nz=2), material)
+    ordinary = solve_body(body, "compression_z", body.mesh.bounds, solver="superlu_mmd")
+    captured = solve_body(
+        body, "compression_z", body.mesh.bounds, solver="superlu_mmd", field_bins=4
+    )
+    assert "fields" not in ordinary
+    assert captured["stiffness_n_mm"] == pytest.approx(
+        ordinary["stiffness_n_mm"], rel=1e-12
+    )
+    fields = captured["fields"]
+    energy = np.asarray(fields["energy_n_mm"])
+    volume = np.asarray(fields["volume_mm3"])
+    assert energy.shape == (4, 4, 4)
+    assert energy.sum() == pytest.approx(captured["strain_energy_n_mm"], rel=1e-10)
+    assert volume.sum() == pytest.approx(body.mesh.volume, rel=1e-10)
+    # Uniform uniaxial response has constant energy density despite nonuniform
+    # tetrahedron/bin counts. This checks localization against an analytic law.
+    density = 0.5 * material.young_mpa * material.z_ratio * 0.001**2
+    assert energy == pytest.approx(volume * density, rel=1e-7, abs=1e-15)
+    assert fields["displacement_min_mm"][2] == pytest.approx(-0.0002)
+    for bins in (True, 0, 33, 4.5):
+        with pytest.raises(ValueError, match="field bins"):
+            solve_body(body, "compression_z", body.mesh.bounds, field_bins=bins)
+
+
+def test_field_capture_rejects_inconsistent_energy_and_displacement():
+    from quadratic_fields import energy_fields
+
+    body = prepare(beam_mesh(2))
+    with pytest.raises(ValueError, match="displacement inventory"):
+        energy_fields(body, np.zeros(body.basis.N - 1), 1.0)
+    with pytest.raises(ValueError, match="localized/global energy"):
+        energy_fields(body, np.zeros(body.basis.N), 1.0)

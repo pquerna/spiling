@@ -3,4 +3,4 @@
 # Reuse the exact installed scientific libraries; add no packages or compilers.
 ARG BASE=spiling/reference-base:must-be-selected
 FROM ${BASE}
-COPY evaluate.py model.py geometry.py mechanics.py coupon.py reference.py quadratic.py quadratic_preconditioner.py /opt/spiling-eval/
+COPY evaluate.py model.py geometry.py mechanics.py coupon.py reference.py quadratic.py quadratic_preconditioner.py quadratic_fields.py /opt/spiling-eval/

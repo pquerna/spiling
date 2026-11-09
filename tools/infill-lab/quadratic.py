@@ -28,6 +28,7 @@ from reference import beam_mesh, element_mesh, fixture
 JUDGE = (
     "quadratic.py",
     "quadratic_preconditioner.py",
+    "quadratic_fields.py",
     "reference.py",
     "geometry.py",
     "mechanics.py",
@@ -130,7 +131,13 @@ def prepare(mesh, material=Material(), *, chunk=2048):
     return ElasticBody(lifted, material, dofs, matrix, time.monotonic() - began)
 
 
-def solve_body(body, case, bounds, *, solver="amg"):
+def solve_body(body, case, bounds, *, solver="amg", field_bins=None):
+    if field_bins is not None and (
+        type(field_bins) is not int or not 2 <= field_bins <= 32
+    ):
+        raise ValueError("field bins must be an integer between 2 and 32")
+    if field_bins is not None and case == "pure_bending":
+        raise ValueError("field capture requires a supported fixture solve")
     if case != "pure_bending":
         if solver == "p_amg":
             from quadratic_preconditioner import auxiliary_preconditioner
@@ -138,6 +145,13 @@ def solve_body(body, case, bounds, *, solver="amg"):
             factory = auxiliary_preconditioner(body, kernels(body.material)[1])
         else:
             factory = None
+        fields = {}
+
+        def capture(u, energy):
+            from quadratic_fields import energy_fields
+
+            fields.update(energy_fields(body, u, energy, bins=field_bins))
+
         result = solve(
             body.mesh,
             case,
@@ -146,7 +160,10 @@ def solve_body(body, case, bounds, *, solver="amg"):
             prepared=body,
             solver="amg" if solver == "p_amg" else solver,
             preconditioner_factory=factory,
+            capture_solution=capture if field_bins is not None else None,
         )
+        if field_bins is not None:
+            result["fields"] = fields
         result.update(
             linear_solver=solver,
             model="effective_nominal_footprint_TetP2_elastic_not_strength",
@@ -273,7 +290,11 @@ def evaluate(folder, output):
             )
             results.append(
                 solve_body(
-                    body, scenario["case"], scenario["bounds"], solver=spec["solver"]
+                    body,
+                    scenario["case"],
+                    scenario["bounds"],
+                    solver=spec["solver"],
+                    field_bins=spec.get("field_bins"),
                 )
             )
             del body

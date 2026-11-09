@@ -5,6 +5,7 @@
 from __future__ import annotations
 import argparse
 import json
+import math
 from pathlib import Path
 import shutil
 from campaign import write
@@ -12,7 +13,23 @@ from model import digest, file_hash
 from quadratic import JUDGE
 
 
-def pack(inputs, results, context, output, *, solvers=("amg",), divisions=(1, 2, 4)):
+def pack(
+    inputs,
+    results,
+    context,
+    output,
+    *,
+    solvers=("amg",),
+    divisions=(1, 2, 4),
+    field_bins=None,
+    max_z=None,
+):
+    if field_bins is not None and (
+        type(field_bins) is not int or not 2 <= field_bins <= 32
+    ):
+        raise ValueError("field bins must be an integer between 2 and 32")
+    if max_z is not None and (not math.isfinite(max_z) or max_z <= 0):
+        raise ValueError("positive thickness refinement required")
     output.mkdir(parents=True, exist_ok=False)
     judge = {name: file_hash(context / name) for name in JUDGE}
     manifest = json.loads((inputs / "jobs.json").read_text())
@@ -42,6 +59,11 @@ def pack(inputs, results, context, output, *, solvers=("amg",), divisions=(1, 2,
                     )
                 )
     for job, scenario in selected:
+        if max_z is not None and job["specimen"] != "analytical_beam":
+            scenario = {
+                **scenario,
+                "refinement": {**scenario["refinement"], "max_z": max_z},
+            }
         original = inputs / job["id"]
         target = json.loads((original / "case.json").read_text())
         if digest(target) != job["id"] or target["judge"] != manifest["judge"]:
@@ -91,6 +113,8 @@ def pack(inputs, results, context, output, *, solvers=("amg",), divisions=(1, 2,
                 solver=solver,
                 specimen=job["specimen"],
             )
+            if field_bins is not None and job["specimen"] != "analytical_beam":
+                spec["field_bins"] = field_bins
             ref_text = None
             if ref:
                 ref_text = json.dumps(ref, sort_keys=True) + "\n"
@@ -137,6 +161,8 @@ def main():
     p.add_argument(
         "--divisions", nargs="+", type=int, choices=(1, 2, 4, 8), default=[1, 2, 4]
     )
+    p.add_argument("--field-bins", type=int)
+    p.add_argument("--max-z", type=float)
     a = p.parse_args()
     pack(
         a.inputs,
@@ -145,6 +171,8 @@ def main():
         a.output,
         solvers=a.solvers,
         divisions=a.divisions,
+        field_bins=a.field_bins,
+        max_z=a.max_z,
     )
 
 
