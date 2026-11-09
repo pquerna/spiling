@@ -12,16 +12,74 @@ use spiling_contracts::{
 };
 use spiling_manufacturing::{CompilerInput, compile, inspect_bundle, verify_bundle};
 use std::{
+    alloc::{GlobalAlloc, Layout, System},
     collections::BTreeMap,
     error::Error,
     hint::black_box,
     io::{Read, Write},
     path::Path,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::Instant,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+/// Benchmark-only live/peak heap accounting for the `residency` phase.
+/// Production binaries keep the system allocator without counters.
+struct Counting;
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
+// SAFETY: forwards every request unchanged to `System`; counters only observe sizes.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            grow(layout.size());
+        }
+        ptr
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc_zeroed(layout) };
+        if !ptr.is_null() {
+            grow(layout.size());
+        }
+        ptr
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) };
+        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        let next = unsafe { System.realloc(ptr, layout, size) };
+        if !next.is_null() {
+            if size >= layout.size() {
+                grow(size - layout.size());
+            } else {
+                LIVE.fetch_sub(layout.size() - size, Ordering::Relaxed);
+            }
+        }
+        next
+    }
+}
+fn grow(bytes: usize) {
+    let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
+    PEAK.fetch_max(live, Ordering::Relaxed);
+}
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+/// Run `f`, returning its value and the peak live heap above the entry level.
+fn peak_above<T>(f: impl FnOnce() -> Result<T>) -> Result<(T, usize)> {
+    let base = LIVE.load(Ordering::Relaxed);
+    PEAK.store(base, Ordering::Relaxed);
+    let value = f()?;
+    Ok((value, PEAK.load(Ordering::Relaxed).saturating_sub(base)))
+}
+fn live() -> usize {
+    LIVE.load(Ordering::Relaxed)
+}
 const BORE: &[u8] = include_bytes!("../../../fixtures/geometry/through-hole.step");
 const BOX: &[u8] = include_bytes!("../../../fixtures/geometry/box-mm.step");
 const INTENT: &[u8] =
@@ -182,7 +240,15 @@ fn main() -> Result<()> {
         return Err("parts=1/2/8/32, samples=1..20, warmup=0..5".into());
     }
     if ![
-        "compile", "encode", "parse", "decode", "validate", "verify", "motion", "route",
+        "compile",
+        "encode",
+        "parse",
+        "decode",
+        "validate",
+        "verify",
+        "motion",
+        "route",
+        "residency",
     ]
     .contains(&phase.as_str())
         || !["automatic", "primary"].contains(&policy.as_str())
@@ -191,6 +257,9 @@ fn main() -> Result<()> {
     }
     let file = option("--bundle", "")?;
     let save = option("--write-bundle", "")?;
+    if phase == "residency" {
+        return residency(parts, policy == "primary", &file);
+    }
     if phase == "compile" && !file.is_empty() {
         return Err("compile uses frozen native sources, not --bundle".into());
     }
@@ -304,5 +373,96 @@ fn main() -> Result<()> {
             .open(Path::new(&save))?
             .write_all(&bytes)?;
     }
+    Ok(())
+}
+
+/// Peak and retained heap per resident form of one result, single-threaded.
+/// Compile peak includes planner, emitter and verifier transients together;
+/// retained sizes come from dropping one owned part at a time.
+fn residency(parts: usize, primary: bool, file: &str) -> Result<()> {
+    spiling_compute::configure(ComputeSettings {
+        default_backend: ComputeBackend::parse("cpu")?,
+        fea_backend: None,
+    })?;
+    let cancel = AtomicBool::new(false);
+    let (bundle, compile_peak, setup) = if file.is_empty() {
+        let scene = Scene::new(parts, primary, &cancel)?;
+        let before = live();
+        let (bundle, peak) = peak_above(|| Ok(compile(scene.input(), &cancel)?))?;
+        (bundle, Some(peak), live() - before)
+    } else {
+        let bytes = read_bundle(file)?;
+        (decode_bundle(&bytes)?, None, 0)
+    };
+    let (encoded, encode_peak) = peak_above(|| Ok(serde_json::to_vec(&bundle)?))?;
+    let encoded_hash = SourceHash::from_bytes(&encoded);
+    let (decoded, decode_peak) = peak_above(|| Ok(decode_bundle(&encoded)?))?;
+    let decoded_retained = {
+        let before = live();
+        drop(decoded);
+        before - live()
+    };
+    let (inspection, motion_peak) = peak_above(|| {
+        Ok(inspect_bundle(
+            &bundle,
+            &encoded_hash,
+            VerificationOutput::ReportAndMotion,
+            &cancel,
+        )?)
+    })?;
+    let replay_bytes = inspection.replay.as_ref().map_or(0, |m| m.bytes.len());
+    drop(inspection);
+    let segments = bundle.verification.deposition_segments as usize;
+    let travels = bundle.verification.travel_segments as usize;
+    let program_len = bundle.program.len();
+    let layers = bundle.plan.layers.len();
+    let (points, paths) = bundle
+        .plan
+        .layers
+        .iter()
+        .flat_map(|l| &l.paths)
+        .fold((0usize, 0usize), |(p, n), path| {
+            (p + path.points_mm.len(), n + 1)
+        });
+    let ManufacturingBundle { plan, program, .. } = bundle;
+    let program_retained = {
+        let before = live();
+        drop(program);
+        before - live()
+    };
+    let plan_retained = {
+        let before = live();
+        drop(plan);
+        before - live()
+    };
+    let encoded_len = encoded.len();
+    drop(encoded);
+    let per = |bytes: usize| bytes as f64 / segments.max(1) as f64;
+    println!(
+        "{}",
+        serde_json::json!({
+            "benchmark": "native-manufacturing-residency-v1",
+            "source": if file.is_empty() { format!("parts={parts}") } else { file.to_owned() },
+            "engine_build": spiling_contracts::ENGINE_BUILD_ID,
+            "debug_assertions": cfg!(debug_assertions),
+            "layers": layers, "paths": paths, "points": points,
+            "deposition_segments": segments, "travel_segments": travels,
+            "bytes": {
+                "compile_peak": compile_peak, "compile_retained": setup,
+                "plan_retained": plan_retained, "program_retained": program_retained,
+                "program_len": program_len, "json_bundle": encoded_len,
+                "encode_peak": encode_peak, "decode_peak": decode_peak,
+                "decoded_bundle_retained": decoded_retained,
+                "motion_peak": motion_peak, "replay": replay_bytes,
+            },
+            "bytes_per_deposition_segment": {
+                "compile_peak": compile_peak.map(per), "plan_retained": per(plan_retained),
+                "program_retained": per(program_retained), "json_bundle": per(encoded_len),
+                "encode_peak": per(encode_peak), "decode_peak": per(decode_peak),
+                "motion_peak": per(motion_peak), "replay": per(replay_bytes),
+            },
+            "software_only": true,
+        })
+    );
     Ok(())
 }
