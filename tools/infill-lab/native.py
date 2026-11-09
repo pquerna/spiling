@@ -229,6 +229,10 @@ class Native:
             timeout=self.timeout,
             output=folder / "compile",
         )
+        # Inspection is a new engine, with only the saved PTAC as authority.
+        # Remove this trial's copies before opening, not after scoring/export.
+        owned_source.unlink()
+        intent_file.unlink()
         receipt = folder / "receipt.json"
         out, replay_time = run(
             [
@@ -237,6 +241,10 @@ class Native:
                 "inspect",
                 folder / "project.spil",
                 "--verify",
+                "--manufacturing-out",
+                folder / "fresh-bundle",
+                # Keep ReportAndMotion last: ReportOnly export deliberately
+                # replaces the root receipt's transient display descriptor.
                 "--replay-out",
                 folder / "actual.splr",
                 "--engine",
@@ -246,6 +254,9 @@ class Native:
             output=folder / "inspect",
         )
         receipt.write_bytes(out)
+        fresh_program = file_hash(folder / "fresh-bundle/program.gcode")
+        if fresh_program != file_hash(folder / "bundle/program.gcode"):
+            raise RuntimeError("source-absent fresh export differs from compiled program")
         run(
             [
                 "node",
@@ -264,6 +275,9 @@ class Native:
             size_mm=size,
             compile_wall_s=elapsed + create_time + replay_time,
             process_edits=edits,
+            source_independent_reopen=True,
+            fresh_export_manifest_sha256=file_hash(folder / "fresh-bundle/manifest.json"),
+            fresh_export_program_sha256=fresh_program,
             bin_sha256={
                 x.name: file_hash(x)
                 for x in [self.bin_dir / "spiling-cli", self.bin_dir / "spiling-engine"]
@@ -284,6 +298,8 @@ class Native:
                 "inspect",
                 folder / "project.spil",
                 "--verify",
+                "--manufacturing-out",
+                folder / "returned-bundle",
                 "--replay-out",
                 folder / "returned.splr",
                 "--engine",
@@ -294,4 +310,9 @@ class Native:
         )
         if file_hash(folder / "returned.splr") != old:
             raise RuntimeError("saved fresh replay differs from candidate")
-        return {"source_independent_reopen": True, "replay_sha256": old}
+        program = file_hash(folder / "bundle/program.gcode")
+        if file_hash(folder / "returned-bundle/program.gcode") != program:
+            raise RuntimeError("saved fresh export differs from candidate program")
+        return {"source_independent_reopen": True, "replay_sha256": old,
+                "program_sha256":program,
+                "export_manifest_sha256":file_hash(folder / "returned-bundle/manifest.json")}
