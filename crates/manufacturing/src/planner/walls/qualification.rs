@@ -1394,6 +1394,20 @@ fn qualify_overlap_locations(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     unique(paths, authorized, request, work, cancel)?;
+    if separation::all_certified(paths, permissions, request, work, cancel)? {
+        return Ok(());
+    }
+    qualify_polygon_overlaps(paths, permissions, authorized, request, work, cancel)
+}
+
+fn qualify_polygon_overlaps(
+    paths: &[DepositionPath],
+    permissions: &[Junction],
+    authorized: &MultiPolygon<f64>,
+    request: &WallRequest<'_>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
     // Compare complete continuing paths, never segment 1 with segment 3 of the
     // same harmless subdivision. The exact command scan independently retains
     // nonlocal proper-crossing and retrace obligations under path stitching.
@@ -1897,6 +1911,60 @@ mod tests {
             retained_points: region::point_count(material),
             owned_bytes: 0,
         }
+    }
+
+    #[test]
+    fn early_pair_certificate_avoids_whole_path_overlays_and_keeps_fallback() {
+        let material = MultiPolygon(vec![polygon![
+            (x: -1., y: -1.), (x: 12., y: -1.), (x: 12., y: 6.), (x: -1., y: 6.),
+        ]]);
+        let required = region::RequiredMaterial::from_section(&material);
+        let recipe = super::super::super::tests::recipe(0.25);
+        let limits = DepositionLimits {
+            min_bead_width_mm: 0.3,
+            max_bead_width_mm: 0.75,
+            min_bead_height_mm: 0.000001,
+            max_bead_height_mm: 0.3,
+        };
+        let request = request(&material, &required, &recipe, &limits);
+        let authorized = MultiPolygon(Vec::new());
+        let cancel = AtomicBool::new(false);
+        for noncanonical in [false, true] {
+            let paths = [
+                path(&[[1.0, 1.0], [10.0, 1.0]]),
+                path(&[
+                    [if noncanonical { 1.0_f64.next_up() } else { 1.0 }, 3.0],
+                    [10.0, 3.0],
+                ]),
+            ];
+            let mut old_work = 0;
+            unique(&paths, &authorized, &request, &mut old_work, &cancel).unwrap();
+            qualify_polygon_overlaps(&paths, &[], &authorized, &request, &mut old_work, &cancel)
+                .unwrap();
+            let mut work = 0;
+            qualify_overlap_locations(&paths, &[], &authorized, &request, &mut work, &cancel)
+                .unwrap();
+            if noncanonical {
+                assert!(work > old_work);
+            } else {
+                assert!(work * 10 < old_work, "old={old_work}, new={work}");
+            }
+        }
+        let paths = [
+            path(&[[1.0, 1.0], [10.0, 1.0]]),
+            path(&[[1.0, 1.2], [10.0, 1.2]]),
+        ];
+        let old = qualify_polygon_overlaps(&paths, &[], &authorized, &request, &mut 0, &cancel)
+            .unwrap_err();
+        let new = qualify_overlap_locations(&paths, &[], &authorized, &request, &mut 0, &cancel)
+            .unwrap_err();
+        assert_eq!(new.code, old.code);
+        assert_eq!(new.message, old.message);
+        let retrace = [path(&[[1.0, 1.0], [10.0, 1.0], [1.0, 1.0]])];
+        let failure =
+            qualify_overlap_locations(&retrace, &[], &authorized, &request, &mut 0, &cancel)
+                .unwrap_err();
+        assert!(failure.message.contains("retraced"));
     }
 
     #[test]
