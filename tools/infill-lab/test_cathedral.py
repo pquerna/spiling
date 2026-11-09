@@ -128,3 +128,27 @@ def test_nested_cap_resolution_has_declared_error_and_preserves_default_geometry
     assert info == explicit_info
     with pytest.raises(ValueError,match="resolution"):
         prism_mesh(roads,cap_segments=3)
+
+
+def test_descendants_require_complete_measured_ablations_and_retain_lineage(tmp_path):
+    from cathedral import propose
+    from model import digest
+    rows = [dict(p,status="ok",volume_mm3=1.+n,motion_s=4.-n,
+                 stiffness_n_mm=dict(compression_x=10.+n,compression_z=5.+n,cantilever_z_y=2.+n))
+            for n,p in enumerate(seeds())]
+    history = tmp_path/"history.json"
+    history.write_text(json.dumps(dict(rows=rows)))
+    for n in (1,2):
+        out = tmp_path/str(n)
+        propose(history,out,n)
+        proposals=json.loads((out/"proposals.json").read_text())["proposals"]
+        assert len(proposals)==len(rows)+(7 if n==1 else 6)
+        assert len({digest(p["candidate"]) for p in proposals}) == len(proposals)
+        for p in proposals[len(rows):]:
+            Candidate(**p["candidate"])
+            assert p["hypothesis"]
+            assert p["parent"] in {r["name"] for r in rows} or p["candidate"]["fraction"]==1.
+    rows[-1]["status"]="failed"
+    history.write_text(json.dumps(dict(rows=rows)))
+    with pytest.raises(ValueError,match="four complete"):
+        propose(history,tmp_path/"failed",1)

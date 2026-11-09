@@ -103,6 +103,29 @@ def test_finite_cantilever_agrees_with_slender_beam_and_respects_axis_rotation()
     assert r["stiffness_n_mm"] == pytest.approx(expected, rel=0.015)
 
 
+def test_raw_tetrahedra_elevate_to_the_same_preserved_quadratic_operator():
+    from geometry import AnalysisMesh
+    from reference import element_mesh
+
+    original = beam_mesh(2, ny=2, nz=2)
+    points, cells = element_mesh(original, "C3D10")
+    raw = AnalysisMesh(original.points.copy(), cells[:, :4].T.copy(),
+                       original.volume, len(cells), 1, original.bounds.copy(),
+                       original.spacing, original.grid_shape, "tet")
+    elevated, nodes = element_mesh(raw, "C3D10")
+    assert np.array_equal(elevated, points)
+    assert np.array_equal(nodes, cells)
+    expected = prepare(original, Material(z_ratio=.25))
+    actual = prepare(raw, Material(z_ratio=.25))
+    assert np.array_equal(expected.stiffness.indptr, actual.stiffness.indptr)
+    assert np.array_equal(expected.stiffness.indices, actual.stiffness.indices)
+    assert np.array_equal(expected.stiffness.data, actual.stiffness.data)
+    bad = AnalysisMesh(raw.points, raw.cells[[1,0,2,3]], raw.volume, raw.count,
+                       raw.components, raw.bounds, raw.spacing, raw.grid_shape, "tet")
+    with pytest.raises(ValueError, match="positive"):
+        prepare(bad)
+
+
 @pytest.mark.skipif(
     not os.environ.get("SPILING_CCX"), reason="external solver selected explicitly"
 )

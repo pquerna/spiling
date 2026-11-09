@@ -23,6 +23,20 @@ from cathedral import fixture
 from vault_search import native_rows
 
 
+def label(row):
+    c = row["candidate"]
+    if c["fraction"]==1:
+        return "Solid"
+    opening = c.get("web_opening")
+    depth = c.get("pier_rib_depth_mm")
+    parts = []
+    if opening:
+        parts.append(f"Window {opening[2]:g}×{opening[1]:g}")
+    if depth:
+        parts.append(f"Rib {depth:g}")
+    return " · ".join(parts) or "Flat"
+
+
 def section(roads, y):
     boxes = []
     for r in roads:
@@ -117,14 +131,31 @@ def render(capture, archive_path, output):
     baseline = loaded[flat["capture_id"]]
     bounds = fixture(baseline)
     y = (bounds[0][1]+bounds[1][1])/2
-    fig, axes = plt.subplots(len(rows),2,figsize=(12,3.2*len(rows)),layout="constrained")
-    for pair,row in zip(axes,rows):
+    # Keep full numerical/cost results, but select a readable six-construction
+    # gallery by declared response/material extremes, always retaining flat.
+    gallery = [flat]
+    scored = [r for r in rows if r.get("geometric_mean_ratio") is not None]
+    order = [*sorted(scored,key=lambda r:r["volume_mm3"]),
+             *sorted(scored,key=lambda r:r["geometric_mean_ratio"]/r["volume_mm3"],reverse=True),*rows]
+    if len(rows)<=6:
+        gallery = rows
+    else:
+        extremes = [min(scored,key=lambda r:r["volume_mm3"]),
+                    max(scored,key=lambda r:r["geometric_mean_ratio"]/r["volume_mm3"]),
+                    max(scored,key=lambda r:r["stiffness_n_mm"]["cantilever_z_y"])] if scored else []
+        for row in [*extremes,*order]:
+            if row not in gallery:
+                gallery.append(row)
+            if len(gallery)==6:
+                break
+    fig, axes = plt.subplots(len(gallery),2,figsize=(12,3.2*len(gallery)),layout="constrained")
+    for pair,row in zip(axes,gallery):
         data = loaded[row["capture_id"]]
         ax,top = pair
         draw_shape(ax,section(data["roads"],y))
         ax.set(xlim=(bounds[0][0],bounds[1][0]),ylim=(0,14),aspect="equal",xlabel="X (mm)",ylabel="Z (mm)")
         ratio = row["volume_mm3"]/flat["volume_mm3"]-1
-        ax.set_title(f"{row['name'].replace('_',' ').title()} · {ratio:+.2%} material",loc="left",weight="bold")
+        ax.set_title(f"{label(row)} · {ratio:+.2%} material",loc="left",weight="bold")
         target = min({r["upper"] for r in data["roads"]},key=lambda z:abs(z-3.))
         selected = [r for r in data["roads"] if r["upper"] == target]
         top.add_collection(LineCollection([[r["start"][:2],r["end"][:2]] for r in selected],
@@ -136,19 +167,21 @@ def render(capture, archive_path, output):
     fig.savefig(output/"sections.png",dpi=160)
     fig.savefig(output/"sections.svg")
     plt.close(fig)
-    fig=plt.figure(figsize=(12,8),layout="constrained")
-    for index,row in enumerate(rows):
-        ax=fig.add_subplot(2,2,index+1,projection="3d")
+    height = math.ceil(len(gallery)/2)
+    fig=plt.figure(figsize=(12,4*height),layout="constrained")
+    for index,row in enumerate(gallery):
+        ax=fig.add_subplot(height,2,index+1,projection="3d")
         bay_preview(ax,loaded[row["capture_id"]],bounds)
-        ax.set_title(row["name"].replace('_',' ').title(),loc="left",weight="bold")
+        ax.set_title(label(row),loc="left",weight="bold")
     fig.savefig(output/"bays.png",dpi=160)
     plt.close(fig)
     fig,ax = plt.subplots(figsize=(8,5),layout="constrained")
-    scored = [r for r in rows if r.get("geometric_mean_ratio") is not None]
     for r in scored:
         x,ycost = r["geometric_mean_ratio"],r["volume_mm3"]/flat["volume_mm3"]
         ax.scatter([x],[ycost],s=65)
-        ax.annotate(r["name"].replace('_',' '),(x,ycost),xytext=(7,7),textcoords="offset points")
+        ax.annotate(label(r),(x,ycost),xytext=(7,7),textcoords="offset points")
+    if scored and max(r["geometric_mean_ratio"] for r in scored)>4:
+        ax.set_xscale("log")
     ax.axhline(1,color="#aaa",linewidth=.7)
     ax.axvline(1,color="#aaa",linewidth=.7)
     ax.set(xlabel="Geometric mean of three local stiffness ratios / flat",
@@ -159,10 +192,10 @@ def render(capture, archive_path, output):
     fig.savefig(output/"comparison.png",dpi=160)
     fig.savefig(output/"comparison.svg")
     plt.close(fig)
-    table = "".join(f"<tr><td>{html.escape(r['name'])}</td><td>{r['volume_mm3']:.2f}</td><td>{r['motion_s']:.2f}</td><td>{html.escape(r['status'])}</td><td>{html.escape(str(r.get('response_ratios',r.get('error',''))))}</td></tr>" for r in rows)
+    table = "".join(f"<tr><td title='{html.escape(r['name'])}'>{html.escape(label(r))}</td><td>{r['volume_mm3']:.2f}</td><td>{r['motion_s']:.2f}</td><td>{html.escape(r['status'])}</td><td>{html.escape(str(r.get('response_ratios',r.get('error',''))))}</td></tr>" for r in rows)
     page = f"""<!doctype html><html><meta charset="utf-8"><title>Cathedral experiment</title>
 <style>body{{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 20px;color:#203040}}svg{{max-width:100%;height:auto}}table{{border-collapse:collapse;width:100%;font-size:13px}}td,th{{padding:10px;text-align:left;border-bottom:1px solid #ccd5df}}p{{max-width:80ch}}</style>
-<h1>Cathedral: windows and pier ribs</h1><p>Four actual native constructions. Costs cover the complete object; numerical responses cover one finite cut web bay under assumed weak-Z elasticity. No global infill frontier, buckling or physical strength qualification. Motion is a decoded-feed lower bound.</p>
+<h1>Cathedral: windows and pier ribs</h1><p>{len(rows)} actual native constructions; selected galleries retain flat and measured material/response extremes. Costs cover the complete object; numerical responses cover one finite cut web bay under assumed weak-Z elasticity. No global infill frontier, buckling or physical strength qualification. Motion is a decoded-feed lower bound.</p>
 {(output/'comparison.svg').read_text()}<table><tr><th>Construction</th><th>Material (mm³)</th><th>Motion bound (s)</th><th>Numerics</th><th>Per-fixture ratios / flat</th></tr>{table}</table>
 {(output/'sections.svg').read_text()}<img style="max-width:100%" src="bays.png" alt="Transparent nominal stroke prisms for each actual web bay"><p>Sections and transparent bays come from complete fresh actual-program replay. The opening and roof-root retention are constructed and checked by the engine, not by this renderer.</p></html>"""
     (output/"index.html").write_text(page)

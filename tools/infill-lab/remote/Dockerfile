@@ -21,7 +21,7 @@ RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes -r
     && python -m pip install --no-index --no-deps /wheels/*.whl \
     && python -m pip freeze > /opt/spiling-eval/python-packages.txt \
     && dpkg-query -W > /opt/spiling-eval/os-packages.txt
-COPY evaluate.py model.py geometry.py mechanics.py coupon.py reference.py quadratic.py quadratic_preconditioner.py quadratic_fields.py vault_mechanics.py ./
+COPY evaluate.py model.py geometry.py mechanics.py coupon.py reference.py quadratic.py quadratic_preconditioner.py quadratic_fields.py vault_mechanics.py tetgen_mesh.py ./
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp
 LABEL org.spiling.purpose="offline-interior-evaluator"
 USER 65532:65532

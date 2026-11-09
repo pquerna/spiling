@@ -19,7 +19,7 @@ from geometry import connected_meshes, prism_mesh
 from model import Candidate, Material, file_hash
 from quadratic import JUDGE as QUADRATIC_JUDGE, prepare, solve_body
 
-JUDGE = (*QUADRATIC_JUDGE, "vault_mechanics.py")
+JUDGE = (*QUADRATIC_JUDGE, "vault_mechanics.py", "tetgen_mesh.py")
 
 
 def load(folder):
@@ -89,7 +89,7 @@ def patch_response(data, scenario):
     return dict(stiffness_n_mm=responses, components=records, mesh=info)
 
 
-def web_response(data, scenario):
+def web_response(data, scenario, *, workdir=None):
     """Finite cut web, including its complete window and two real piers.
 
     Reuse each component's unchanged assembly across the explicit fixture set.
@@ -103,6 +103,23 @@ def web_response(data, scenario):
         raise ValueError("unknown web-bay fixture inventory")
     material = Material(**scenario["material"])
     mesh, info = prism_mesh(interior_roads(data), window=bounds, **scenario["refinement"])
+    method = scenario.get("mesh_method", "prisms")
+    if method == "tetgen":
+        import tempfile
+        from tetgen_mesh import remesh
+
+        def converted(destination):
+            return remesh(mesh,interior_roads(data),bounds,destination,
+                          cap_segments=scenario["refinement"].get("cap_segments",32))
+
+        if workdir is None:
+            with tempfile.TemporaryDirectory() as temporary:
+                mesh, converted_info = converted(Path(temporary)/"mesh")
+        else:
+            mesh, converted_info = converted(Path(workdir)/"mesh")
+        info = dict(source=info,**converted_info)
+    elif method != "prisms":
+        raise ValueError("unknown explicit web-bay volume mesh method")
     responses = dict.fromkeys(cases, 0.)
     records = []
     for part in connected_meshes(mesh):
@@ -137,8 +154,9 @@ def evaluate(folder, output):
                else "local_roof_patch_nominal_elasticity_not_whole_part_strength"),
     )
     try:
-        response = web_response if spec["kind"] == "cathedral_web_bay" else patch_response
-        row.update(response(data, spec["scenario"]), status="ok")
+        response = (web_response(data, spec["scenario"],workdir=output)
+                    if spec["kind"] == "cathedral_web_bay" else patch_response(data,spec["scenario"]))
+        row.update(response,status="ok")
     except Exception as error:
         row.update(status="failed", error_type=type(error).__name__, error=str(error))
     row.update(

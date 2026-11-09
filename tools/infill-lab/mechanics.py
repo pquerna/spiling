@@ -258,10 +258,12 @@ def prepare(mesh: AnalysisMesh, material=Material()):
         m = MeshWedge1(mesh.points, mesh.cells, sort_t=False)
         basis = Dofs(m, ElementVector(ElementWedge1()))
         stiffness = assemble_prisms(mesh, material, basis).tobsr(blocksize=(3, 3))
-    else:
+    elif mesh.cell_kind == "hex":
         m = MeshHex(mesh.points, mesh.cells, sort_t=False)
         basis = Dofs(m, ElementVector(ElementHex1()))
         stiffness = assemble_rectilinear(mesh, material, basis).tobsr(blocksize=(3, 3))
+    else:
+        raise ValueError("linear preparation supports hex/wedge; tetrahedra require the quadratic consumer")
     return ElasticBody(mesh, material, basis, stiffness, time.monotonic() - began)
 
 

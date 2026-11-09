@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# The independently licensed external mesher is not a Spiling runtime library.
+ARG BASE=spiling/reference-base:must-be-selected
+FROM ${BASE} AS builder
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends g++ curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN curl --fail --location --silent --show-error \
+    https://codeload.github.com/libigl/tetgen/tar.gz/e05aca7df74e3f531bc35733ed87d36d437266c5 \
+    --output tetgen-source.tar.gz \
+    && echo 'd8c611c76e66685d65a88c6cbf4d2cfe6c73f252dcdde64a4980bc14883bcf90  tetgen-source.tar.gz' | sha256sum --check - \
+    && mkdir source && tar -xzf tetgen-source.tar.gz --strip-components=1 -C source \
+    && mkdir /build && g++ -std=c++11 -O2 -fno-fast-math -ffp-contract=off \
+    -o /build/tetgen source/tetgen.cxx source/predicates.cxx -lm \
+    && g++ --version > /build/compiler.txt && dpkg-query -W > /build/build-packages.txt
+FROM ${BASE}
+USER root
+COPY --from=builder /build/tetgen /usr/local/bin/tetgen
+COPY --from=builder /build/compiler.txt /build/build-packages.txt /src/source/LICENSE /src/tetgen-source.tar.gz /opt/spiling-eval/tetgen/
+COPY evaluate.py model.py geometry.py mechanics.py coupon.py reference.py quadratic.py quadratic_preconditioner.py quadratic_fields.py vault_mechanics.py tetgen_mesh.py /opt/spiling-eval/
+USER 65532:65532
