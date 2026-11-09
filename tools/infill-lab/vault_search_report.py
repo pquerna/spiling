@@ -149,7 +149,9 @@ def style():
 
 def label(r):
     c = r["candidate"]
-    return f"{100 * c['fraction']:g}% / {c.get('roof_spacing_mm', 'Auto')}"
+    spacing = c.get("roof_spacing_mm")
+    roof = f"{spacing:g} mm roof" if spacing is not None else "Auto roof"
+    return f"{100 * c['fraction']:g}% webs · {roof}"
 
 
 def plot(rows, baseline, output):
@@ -182,6 +184,26 @@ def plot(rows, baseline, output):
                 ],
                 linewidths=0.6,
             )
+            # Only connect the fixed ordinary density controls. Different Vault
+            # roof settings are separate constructions, not one interpolated curve.
+            if pattern != "web_roof":
+                ordered = sorted(group, key=lambda r: r["candidate"]["fraction"])
+                ax.plot(
+                    [100 * r["geometric_mean_vs_solid"] for r in ordered],
+                    [100 * r[y] for r in ordered],
+                    color=color,
+                    alpha=0.4,
+                    linewidth=1,
+                )
+                for r in ordered:
+                    ax.annotate(
+                        f"{100 * r['candidate']['fraction']:g}%",
+                        (100 * r["geometric_mean_vs_solid"], 100 * r[y]),
+                        xytext=(4, 4),
+                        textcoords="offset points",
+                        fontsize=7,
+                        color=color,
+                    )
             ax.set(
                 xlabel="Roof + core elastic response / solid · geometric mean (%)",
                 ylabel=ylabel,
