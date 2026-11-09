@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-use super::anchors::AnchorGap;
+use super::anchors::{AnchorGap, NominalAnchorPaths};
 use super::{AnchorCandidate, AnchorWorkspace};
 use crate::check_cancel;
 use crate::planner::OFFSET_TOLERANCE_MM;
@@ -70,6 +70,10 @@ pub(in crate::planner) fn analyze<'a>(
         bridges: Vec::new(),
         failure: None,
     };
+    if paths.is_empty() {
+        return Ok(result);
+    }
+    let prepared = NominalAnchorPaths::new(previous.clone(), contacts.clone(), anchors, cancel)?;
     for (path_index, path) in paths.iter().enumerate() {
         check_cancel(cancel)?;
         let mut has_bridge = false;
@@ -79,20 +83,26 @@ pub(in crate::planner) fn analyze<'a>(
             let length = (b[0] - a[0]).hypot(b[1] - a[1]);
             let mut bridge = false;
             let mut demand = false;
-            for gap in anchors.gaps(
-                AnchorCandidate {
-                    endpoints_mm: [a, b],
-                    bead_width_mm: width_mm,
-                },
-                previous
-                    .clone()
-                    .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
-                contacts
-                    .clone()
-                    .filter(|lower| lower.physical_z_mm[1] <= path.physical_z_mm[0]),
-                work,
-                cancel,
-            )? {
+            let candidate = AnchorCandidate {
+                endpoints_mm: [a, b],
+                bead_width_mm: width_mm,
+            };
+            let gaps = if let Some(prepared) = &prepared {
+                anchors.gaps_nominal(candidate, path.physical_z_mm[0], prepared, work, cancel)?
+            } else {
+                anchors.gaps(
+                    candidate,
+                    previous
+                        .clone()
+                        .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
+                    contacts
+                        .clone()
+                        .filter(|lower| lower.physical_z_mm[1] <= path.physical_z_mm[0]),
+                    work,
+                    cancel,
+                )?
+            };
+            for gap in gaps {
                 let start = gap.start;
                 let end = gap.end;
                 let span = (end - start) * length;

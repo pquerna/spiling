@@ -8,6 +8,8 @@ use spiling_contracts::manufacturing::{
 use std::sync::atomic::AtomicBool;
 
 mod batch;
+mod nominal;
+pub(super) use nominal::NominalAnchorPaths;
 
 pub(super) const MAX_ANCHOR_PAIR_WORK: usize = 128_000_000;
 
