@@ -40,6 +40,10 @@ def test_actual_control_freezes_a_complete_window_and_two_pier_crop():
     assert bounds[0][0] < 24 < 40 < bounds[1][0]
     assert bounds[0][2] < 2 < 12 < bounds[1][2]
     assert bounds[0][1] < 40 < bounds[1][1]
+    wider = fixture(dict(roads=roads),half_width=2.25)
+    assert wider[0][1]==37.75 and wider[1][1]==42.25
+    with pytest.raises(ValueError,match="adjacent bays"):
+        fixture(dict(roads=roads),half_width=4.5)
 
 
 def test_web_fixture_reuses_one_assembly_and_keeps_physical_gates(monkeypatch):
@@ -152,3 +156,40 @@ def test_descendants_require_complete_measured_ablations_and_retain_lineage(tmp_
     history.write_text(json.dumps(dict(rows=rows)))
     with pytest.raises(ValueError,match="four complete"):
         propose(history,tmp_path/"failed",1)
+
+
+def test_pack_refuses_to_optimize_a_flange_clipped_by_the_fixture(tmp_path,monkeypatch):
+    import cathedral
+    from vault_mechanics import JUDGE
+    roads=[]
+    for fixed in (0,1):
+        for v in (28.,44.,60.):
+            a,b=[20.,20.,1.],[68.,68.,1.]
+            a[fixed]=b[fixed]=v
+            roads.append(dict(start=a,end=b,kind=5,owner=0,width=.45,upper=1.))
+    rows=[]
+    for name,candidate in (("flat",next(seeds())["candidate"]),
+                           ("rib",Candidate(pattern="web_roof",fraction=.05,pier_rib_depth_mm=1.35).data())):
+        folder=tmp_path/name;folder.mkdir()
+        (folder/"roads.json").write_text(json.dumps(dict(roads=roads)))
+        rows.append(dict(candidate=candidate,status="ok",source_sha256="source",specimen="cube48",native=name,id=name))
+    monkeypatch.setattr(cathedral,"native_rows",lambda _: (dict(identity=dict(binaries={})),rows))
+    context=tmp_path/"context";context.mkdir()
+    for name in JUDGE:
+        (context/name).write_text("frozen test source")
+    with pytest.raises(ValueError,match="clips a proposed pier flange"):
+        cathedral.pack(tmp_path,context,tmp_path/"narrow",1)
+    cathedral.pack(tmp_path,context,tmp_path/"wide",1,half_width=2.25)
+    cohort=json.loads((tmp_path/"wide/cohort.json").read_text())
+    assert cohort["bounds"][0][1]==41.75 and cohort["bounds"][1][1]==46.25
+
+
+def test_actual_section_includes_diagonal_roads_and_rounded_end_caps():
+    import math
+    from cathedral_report import section
+    road=dict(start=[0.,0.,.2],end=[1.,1.,.2],width=.2,lower=0.,upper=.2)
+    shape=section([road],.5)
+    assert shape.bounds == pytest.approx((.5-math.sqrt(2)*.1,0.,.5+math.sqrt(2)*.1,.2),abs=1e-9)
+    cap=section([road],1.09)
+    assert cap.bounds[2] == pytest.approx(1+math.sqrt(.1**2-.09**2),abs=1e-9)
+    assert section([road],1.11).is_empty

@@ -19,7 +19,6 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
 import shapely
 
-from cathedral import fixture
 from vault_search import native_rows
 
 
@@ -55,7 +54,27 @@ def section(roads, y):
             extension = math.sqrt(radius**2-distance**2)
             lo, hi = a[0]-extension, a[0]+extension
         else:
-            raise ValueError("section requires actual orthogonal roads")
+            # Intersect the swept central rectangle and both endpoint disks.
+            # Their union is the nominal capsule, including diagonal bridges.
+            dx,dy=b[0]-a[0],b[1]-a[1]
+            length=math.hypot(dx,dy)
+            nx,ny=-dy*radius/length,dx*radius/length
+            corners=[(a[0]+nx,a[1]+ny),(b[0]+nx,b[1]+ny),
+                     (b[0]-nx,b[1]-ny),(a[0]-nx,a[1]-ny)]
+            hits=[]
+            for p,q in zip(corners,corners[1:]+corners[:1]):
+                if p[1]!=q[1] and min(p[1],q[1])<=y<=max(p[1],q[1]):
+                    hits.append(p[0]+(q[0]-p[0])*(y-p[1])/(q[1]-p[1]))
+            for p in (a,b):
+                delta=abs(y-p[1])
+                if delta<radius:
+                    extension=math.sqrt(radius**2-delta**2)
+                    hits.extend([p[0]-extension,p[0]+extension])
+            if not hits:
+                continue
+            lo,hi=min(hits),max(hits)
+            if lo==hi:
+                continue
         boxes.append(shapely.box(lo,r["lower"],hi,r["upper"]))
     return shapely.union_all(boxes, grid_size=1e-9)
 
@@ -128,8 +147,7 @@ def render(capture, archive_path, output):
             raise ValueError("gallery dose differs")
         loaded[row["capture_id"]] = data
     flat = next(r for r in rows if r["name"] == "flat")
-    baseline = loaded[flat["capture_id"]]
-    bounds = fixture(baseline)
+    bounds = archive["cohort"]["bounds"]
     y = (bounds[0][1]+bounds[1][1])/2
     # Keep full numerical/cost results, but select a readable six-construction
     # gallery by declared response/material extremes, always retaining flat.
@@ -175,6 +193,17 @@ def render(capture, archive_path, output):
         ax.set_title(label(row),loc="left",weight="bold")
     fig.savefig(output/"bays.png",dpi=160)
     plt.close(fig)
+    fig,axes=plt.subplots(2,3,figsize=(12,8),layout="constrained")
+    for ax,row in zip(axes.flat,gallery):
+        data=loaded[row["capture_id"]]
+        draw_shape(ax,section(data["roads"],y))
+        ax.set(xlim=(20,20+data["size_mm"][0]),ylim=(0,data["size_mm"][2]),
+               aspect="equal",xlabel="X (mm)",ylabel="Z (mm)",title=label(row))
+    for ax in list(axes.flat)[len(gallery):]:
+        ax.set_visible(False)
+    fig.suptitle("Actual full-height sections · retained webs, windows and roof construction")
+    fig.savefig(output/"whole-sections.png",dpi=160)
+    plt.close(fig)
     fig,ax = plt.subplots(figsize=(8,5),layout="constrained")
     for r in scored:
         x,ycost = r["geometric_mean_ratio"],r["volume_mm3"]/flat["volume_mm3"]
@@ -197,7 +226,7 @@ def render(capture, archive_path, output):
 <style>body{{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 20px;color:#203040}}svg{{max-width:100%;height:auto}}table{{border-collapse:collapse;width:100%;font-size:13px}}td,th{{padding:10px;text-align:left;border-bottom:1px solid #ccd5df}}p{{max-width:80ch}}</style>
 <h1>Cathedral: windows and pier ribs</h1><p>{len(rows)} actual native constructions; selected galleries retain flat and measured material/response extremes. Costs cover the complete object; numerical responses cover one finite cut web bay under assumed weak-Z elasticity. No global infill frontier, buckling or physical strength qualification. Motion is a decoded-feed lower bound.</p>
 {(output/'comparison.svg').read_text()}<table><tr><th>Construction</th><th>Material (mm³)</th><th>Motion bound (s)</th><th>Numerics</th><th>Per-fixture ratios / flat</th></tr>{table}</table>
-{(output/'sections.svg').read_text()}<img style="max-width:100%" src="bays.png" alt="Transparent nominal stroke prisms for each actual web bay"><p>Sections and transparent bays come from complete fresh actual-program replay. The opening and roof-root retention are constructed and checked by the engine, not by this renderer.</p></html>"""
+{(output/'sections.svg').read_text()}<img style="max-width:100%" src="bays.png" alt="Transparent nominal stroke prisms for each actual web bay"><img style="max-width:100%" src="whole-sections.png" alt="Actual full-height sections showing webs, windows and roof construction"><p>Sections and transparent bays come from complete fresh actual-program replay. The opening and roof-root retention are constructed and checked by the engine, not by this renderer.</p></html>"""
     (output/"index.html").write_text(page)
 
 

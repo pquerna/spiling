@@ -37,7 +37,7 @@ def seeds():
                                        pier_rib_depth_mm=0.9 if ribs else None).data())
 
 
-def fixture(data):
+def fixture(data, half_width=None):
     # Freeze from the unchanged control's actual first sparse layer. No proposed
     # geometry or candidate-dependent crop; include two intersection piers, the
     # complete 2..12 mm window and real material above and below it.
@@ -55,18 +55,25 @@ def fixture(data):
     x0, x1 = roots[0][:2]
     y = roots[1][len(roots[1]) // 2]
     width = first[0]["width"]
-    return [[x0 - 3*width, y - 3*width, 1.2],
-            [x1 + 3*width, y + 3*width, 14.]]
+    margin = 3*width if half_width is None else half_width
+    if not math.isfinite(margin) or not 3*width <= margin < (x1-x0)/4:
+        raise ValueError("bay margin must retain piers without reaching adjacent bays")
+    return [[x0 - margin, y - margin, 1.2],
+            [x1 + margin, y + margin, 14.]]
 
 
-def pack(capture, context, output, divisions, solver="p_amg", cap_segments=32, mesh_method="prisms", max_xy=2., max_z=0.4):
+def pack(capture, context, output, divisions, solver="p_amg", cap_segments=32, mesh_method="prisms", max_xy=2., max_z=0.4, half_width=None):
     spec, rows = native_rows(capture)
     admitted = [r for r in rows if r["status"] == "ok"]
     controls = [r for r in admitted if r["candidate"] == next(seeds())["candidate"]]
     if len(controls) != 1 or len({(r["specimen"], r["source_sha256"]) for r in admitted}) != 1:
         raise ValueError("one unchanged source and one flat control required")
     control = json.loads((capture / controls[0]["native"] / "roads.json").read_text())
-    bounds = fixture(control)
+    bounds = fixture(control,half_width)
+    width = next(r["width"] for r in control["roads"] if r["kind"]==5)
+    margin = (bounds[1][1]-bounds[0][1])/2
+    if any(r["candidate"].get("pier_rib_depth_mm",0)+width/2 > margin for r in admitted):
+        raise ValueError("fixed bay envelope clips a proposed pier flange; declare a wider cohort")
     judge = {name: file_hash(context / name) for name in JUDGE}
     output.mkdir(parents=True, exist_ok=False)
     jobs = []
@@ -226,8 +233,10 @@ def propose(history, output, round_number):
                 if "pier_rib_depth_mm" not in base:
                     changes.append((dict(base,pier_rib_depth_mm=.45),"reinvest part of opening material in minimum flanges"))
             elif "pier_rib_depth_mm" in base:
-                for depth in (.6,.75,1.05):
-                    changes.append((dict(base,pier_rib_depth_mm=depth),"refine measured flange/material tradeoff"))
+                for delta in (-.15,.15,.3):
+                    depth = round(base["pier_rib_depth_mm"]+delta,3)
+                    if .45 <= depth <= 1.8:
+                        changes.append((dict(base,pier_rib_depth_mm=depth),"refine measured flange/material tradeoff"))
             for data,reason in changes:
                 added += add(data,parent["name"],reason)
                 if added == 6:
@@ -262,6 +271,7 @@ def main():
     q.add_argument("--mesh-method", choices=("prisms","tetgen"), default="prisms")
     q.add_argument("--max-xy", type=float, default=2.)
     q.add_argument("--max-z", type=float, default=.4)
+    q.add_argument("--bay-half-width", type=float,help="fixed complete-flange envelope for the entire cohort")
     q = sub.add_parser("collect")
     for name in ("inputs", "results", "image", "output"):
         q.add_argument("--"+name, type=Path, required=True)
@@ -274,7 +284,7 @@ def main():
     elif a.command == "propose":
         propose(a.history,a.output,a.round)
     elif a.command == "pack":
-        pack(a.capture, a.context, a.output, a.divisions, a.solver, a.cap_segments, a.mesh_method,a.max_xy,a.max_z)
+        pack(a.capture, a.context, a.output, a.divisions, a.solver, a.cap_segments, a.mesh_method,a.max_xy,a.max_z,a.bay_half_width)
     else:
         collect(a.inputs, a.results, a.image, a.output,a.proposals)
 
