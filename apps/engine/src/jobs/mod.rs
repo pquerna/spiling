@@ -4,6 +4,7 @@
 
 //! Durable operation admission, execution ownership and immutable artifact publication.
 use prost::Message;
+mod artifacts;
 mod native;
 pub use native::NativeAdmission;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -17,7 +18,7 @@ use spiling_contracts::{NATIVE_METADATA_TYPE, native_metadata};
 use std::{
     collections::HashMap,
     fs::File,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -158,6 +159,7 @@ impl Inner {
 pub struct Jobs {
     inner: Arc<Mutex<Inner>>,
     worker: Arc<Semaphore>,
+    database_path: PathBuf,
 }
 impl Jobs {
     pub fn open(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
@@ -169,7 +171,8 @@ impl Jobs {
             .truncate(false)
             .open(path.join("owner.lock"))?;
         fs2::FileExt::try_lock_exclusive(&lock)?;
-        let db = Connection::open(path.join("operations.sqlite"))?;
+        let database_path = path.join("operations.sqlite");
+        let db = Connection::open(&database_path)?;
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS operations(name TEXT PRIMARY KEY, parent TEXT NOT NULL,
@@ -203,6 +206,7 @@ impl Jobs {
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
             worker: Arc::new(Semaphore::new(1)),
+            database_path,
         })
     }
     async fn with<T: Send + 'static>(
@@ -608,22 +612,6 @@ impl Jobs {
                     }),
                 name,
             })
-        })
-        .await
-    }
-    pub async fn fragment(
-        &self,
-        name: String,
-        offset: u64,
-        length: usize,
-    ) -> Result<Vec<u8>, Status> {
-        self.with(move |s| {
-            s.db.query_row(
-                "SELECT substr(bytes,?,?) FROM artifacts WHERE name=?",
-                params![(offset + 1) as i64, length as i64, name],
-                |r| r.get(0),
-            )
-            .map_err(internal)
         })
         .await
     }

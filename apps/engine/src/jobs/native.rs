@@ -692,7 +692,16 @@ mod tests {
         assert!(!view.outputs.is_empty());
         for output in native_metadata(&completed).unwrap().outputs {
             let bytes = jobs
-                .fragment(output.name, 0, output.size_bytes as usize)
+                .with(move |inner| {
+                    inner
+                        .db
+                        .query_row(
+                            "SELECT bytes FROM artifacts WHERE name=?",
+                            [&output.name],
+                            |row| row.get::<_, Vec<u8>>(0),
+                        )
+                        .map_err(internal)
+                })
                 .await
                 .unwrap();
             assert_eq!(format!("{:x}", Sha256::digest(&bytes)), output.sha256);

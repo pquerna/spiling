@@ -29,7 +29,7 @@ prost-types.workspace = true
 tokio-stream.workspace = true
 uuid.workspace = true
 sha2.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["blob"] }
 fs2 = "=0.4.3"
 
 [target.'cfg(unix)'.dependencies]

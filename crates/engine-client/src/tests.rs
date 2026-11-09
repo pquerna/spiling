@@ -13,6 +13,7 @@ use spiling_contracts::{geometry::*, manufacturing::*, rpc};
 async fn control_dispatch_futures_keep_large_rpc_frames_out_of_callers() {
     let rpc = super::EngineRpc {
         channel: tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+        bulk_channel: tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
         capability: "0".repeat(64),
     };
     let session_id = SessionId::new();

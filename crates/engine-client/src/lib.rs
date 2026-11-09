@@ -79,6 +79,7 @@ impl ClientError {
 #[derive(Clone)]
 pub struct EngineRpc {
     channel: Channel,
+    bulk_channel: Channel,
     capability: String,
 }
 impl EngineRpc {
@@ -211,7 +212,7 @@ impl EngineRpc {
         request: ReadRequest,
     ) -> Result<tonic::Streaming<ReadResponse>, ClientError> {
         Ok(
-            byte_stream_client::ByteStreamClient::new(self.channel.clone())
+            byte_stream_client::ByteStreamClient::new(self.bulk_channel.clone())
                 .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
                 .read(self.request(request))
                 .await?
@@ -486,12 +487,13 @@ impl EngineClient {
                     "startup child identity invalid".into(),
                 ));
             }
-            let channel = Endpoint::from_shared(startup.endpoint)?
-                .connect_timeout(REQUEST_TIMEOUT)
-                .connect()
-                .await?;
+            let endpoint =
+                Endpoint::from_shared(startup.endpoint)?.connect_timeout(REQUEST_TIMEOUT);
+            let channel = endpoint.connect().await?;
+            let bulk_channel = endpoint.connect().await?;
             let rpc = EngineRpc {
                 channel,
+                bulk_channel,
                 capability,
             };
             let info = rpc.info().await?;

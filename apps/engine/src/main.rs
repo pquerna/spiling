@@ -15,7 +15,7 @@ use native::NativeHost;
 use prost::Message;
 use sha2::{Digest, Sha256};
 use spiling_contracts::{
-    MAX_ARTIFACT_BYTES, MAX_CONTROL_BYTES, StartupInfo, TRANSFER_FRAGMENT_BYTES,
+    MAX_ARTIFACT_BYTES, MAX_CONTROL_BYTES, StartupInfo,
     google::{bytestream::*, longrunning::*},
     manufacturing::{MAX_MANUFACTURING_BUNDLE_BYTES, MAX_REPLAY_DISPLAY_BYTES},
     rpc::*,
@@ -223,34 +223,10 @@ impl byte_stream_server::ByteStream for Service {
         };
         let jobs = self.jobs.clone();
         let (tx, rx) = mpsc::channel(2);
-        tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let mut offset = req.read_offset as u64;
-            while offset < end {
-                if tx.is_closed() {
-                    break;
-                }
-                let count = ((end - offset) as usize).min(TRANSFER_FRAGMENT_BYTES);
-                let bytes = jobs
-                    .fragment(req.resource_name.clone(), offset, count)
-                    .await;
-                match bytes {
-                    Ok(data) => {
-                        let length = data.len() as u64;
-                        if length == 0 {
-                            let _ = tx.send(Err(Status::data_loss("artifact truncated"))).await;
-                            break;
-                        }
-                        if tx.send(Ok(ReadResponse { data })).await.is_err() {
-                            break;
-                        }
-                        offset += length;
-                    }
-                    Err(error) => {
-                        let _ = tx.send(Err(error)).await;
-                        break;
-                    }
-                }
+            if let Err(error) = jobs.stream_artifact(&info, req.read_offset as u64, end, &tx) {
+                let _ = tx.blocking_send(Err(error));
             }
         });
         Ok(Response::new(ReceiverStream::new(rx)))

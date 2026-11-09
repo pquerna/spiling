@@ -21,6 +21,26 @@ identity, selected strategy, actual program hash/counts and available parallelis
 accompany each sample. This is a declared software cohort, not general geometry,
 physical printability or maximum plate-size qualification.
 
+## Short performance loop
+
+Observe the complete operator journey before choosing a kernel: saved return,
+fresh inspection/replay, artifact retrieval/export and automatic compilation
+have different costs. Orient with separate CPU samples, allocation/live-byte
+evidence and logical versus physical I/O; symbol-family shares are not exclusive
+phase timers. Decide on one measured mechanism, then change it without weakening
+admission, cancellation, immutable identity or independent actual replay. Act by
+rerunning the same successful and refusal controls, comparing output bytes and
+resource use, and shipping the independently useful cut before choosing another.
+Keep the remaining opportunity ranking current in its research owner, not as a
+second implementation backlog here.
+
+Artifact-transfer investigations must separate ledger reads from RPC copying.
+The operation ledger uses incremental BLOB reads, independent of project PTAC
+storage; [the control protocol](../protocol/control.md#incremental-artifacts-and-binary-reads)
+owns reader lifetime and backpressure. Compare logical reads against artifact
+size over several sizes/ranges before proposing shared memory or a storage
+schema change. Cached filesystem reads are not physical disk traffic.
+
 ## Reproduce and compare
 
 Run native workloads sequentially with externally enforced memory/task/time

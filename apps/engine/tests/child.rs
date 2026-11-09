@@ -4,7 +4,8 @@
 
 use spiling_contracts::google::bytestream::ReadRequest;
 use spiling_contracts::{
-    google::longrunning::*, metadata, operation_view, rpc::*, synthetic_triangle,
+    TRANSFER_FRAGMENT_BYTES, google::longrunning::*, metadata, operation_view, rpc::*,
+    synthetic_triangle,
 };
 use spiling_engine_client::{ClientError, EngineClient, EngineRpc};
 use std::time::Duration;
@@ -315,6 +316,31 @@ async fn bulk_ranges_checksums_and_control_under_slow_downloads() {
     let fragment = range.message().await.unwrap().unwrap();
     assert_eq!(fragment.data, vec![1; 17]);
     assert!(range.message().await.unwrap().is_none());
+    for (offset, limit, expected_end) in [
+        (
+            TRANSFER_FRAGMENT_BYTES as i64 - 3,
+            32775,
+            TRANSFER_FRAGMENT_BYTES + 32772,
+        ),
+        (262143, i64::MAX, 262144),
+        (262144, 0, 262144),
+    ] {
+        let mut stream = rpc
+            .read_artifact_range(ReadRequest {
+                resource_name: artifact.name.clone(),
+                read_offset: offset,
+                read_limit: limit,
+            })
+            .await
+            .unwrap();
+        let mut received = Vec::new();
+        while let Some(fragment) = stream.message().await.unwrap() {
+            assert!(!fragment.data.is_empty());
+            assert!(fragment.data.len() <= TRANSFER_FRAGMENT_BYTES);
+            received.extend_from_slice(&fragment.data);
+        }
+        assert_eq!(received, bytes[offset as usize..expected_end]);
+    }
     assert_eq!(
         code(
             rpc.read_artifact_range(ReadRequest {
@@ -351,6 +377,87 @@ async fn bulk_ranges_checksums_and_control_under_slow_downloads() {
     assert!(began.elapsed() < Duration::from_secs(1));
     drop(stalled);
     client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn large_downloads_release_capacity_and_do_not_hold_shutdown_open() {
+    tokio::time::timeout(Duration::from_secs(40), exercise_large_downloads())
+        .await
+        .expect("large-download lifecycle deadline");
+}
+
+async fn exercise_large_downloads() {
+    use sha2::{Digest, Sha256};
+
+    let engine = std::env::var_os("SPILING_TEST_ENGINE").unwrap_or_else(|| ENGINE.into());
+    let store = tempfile::tempdir().unwrap();
+    let mut initial = EngineClient::spawn_in(&engine, store.path()).await.unwrap();
+    initial.shutdown().await.unwrap();
+    drop(initial);
+    let bytes = vec![31u8; 16 * 1024 * 1024];
+    let name = format!("artifacts/{:x}", Sha256::digest(&bytes));
+    let database = rusqlite::Connection::open(store.path().join("operations.sqlite")).unwrap();
+    database
+        .execute(
+            "INSERT INTO artifacts VALUES(?,?)",
+            rusqlite::params![name, bytes],
+        )
+        .unwrap();
+    drop(database);
+    let mut client = EngineClient::spawn_in(&engine, store.path()).await.unwrap();
+    let rpc = client.rpc();
+    let read_request = ReadRequest {
+        resource_name: name,
+        read_offset: 0,
+        read_limit: 0,
+    };
+    let mut stalled = Vec::new();
+    for index in 0..8 {
+        stalled.push(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                rpc.read_artifact_range(read_request.clone()),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("download {index} admission deadline"))
+            .unwrap(),
+        );
+    }
+    let refused = tokio::time::timeout(
+        Duration::from_secs(5),
+        rpc.read_artifact_range(read_request.clone()),
+    )
+    .await
+    .expect("ninth-download refusal deadline");
+    assert_eq!(code(refused.err().unwrap()), Code::ResourceExhausted);
+    tokio::time::timeout(Duration::from_secs(5), client.ping())
+        .await
+        .expect("control response during saturated downloads")
+        .unwrap();
+    let pending = rpc.run_diagnostic(request(8, 1000)).await.unwrap();
+    rpc.cancel_operation(&pending.name).await.unwrap();
+    completed(&rpc, &pending.name).await;
+    drop(stalled);
+    let mut tail_request = read_request.clone();
+    tail_request.read_offset = bytes.len() as i64 - 1;
+    let mut tail = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rpc.read_artifact_range(tail_request.clone()).await {
+                Ok(stream) => break stream,
+                Err(error) => {
+                    assert_eq!(code(error), Code::ResourceExhausted);
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(tail.message().await.unwrap().unwrap().data, [31]);
+    assert!(tail.message().await.unwrap().is_none());
+    let unread = rpc.read_artifact_range(read_request).await.unwrap();
+    client.shutdown().await.unwrap();
+    drop(unread);
 }
 
 #[tokio::test]
