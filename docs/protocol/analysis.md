@@ -113,6 +113,12 @@ Ordered CLI equivalents are `--analysis-clamp NAME FACE start|end DIAMETER_MM`,
 `--analysis-unfasten NAME ID`. They prepare native ownership through the same
 typed service before committing the case.
 
+Focused reproduction uses `cargo test --locked -p spiling-analysis --lib` and
+`cargo test --locked -p spiling-engine --test project fastener:: -- --test-threads=1`.
+With `SPILING_TEST_ENGINE` set to the matching built engine, run
+`cargo test --locked -p spiling-cli --test project fastener:: -- --ignored --test-threads=1`
+for ordered authoring and copied-file return through separate CLI processes.
+
 ## Finite patches, units and frames
 
 Loads require an explicit `footprint`: `whole_face` or a `disk` with source-local
@@ -344,8 +350,9 @@ available. Regional energy concentration uses an explicitly reported radius of
 three bead widths and nominal deposited-volume normalization: core envelope
 volume times declared fraction, with corresponding energy density conversion,
 not stiffness scaling. This nominal volume does not witness actual deposition
-or welds. The native pane displays actual computed cell samples on a source-Z
-slice with field name, units and actual min/max scale; it retains a stale last
+or welds. The native viewport displays actual computed cell samples on the
+three-dimensional exterior finite-element faces, with field name, units and
+actual min/max scale; it retains a stale last
 success visibly and compares consecutive compatible construction/orientation
 captures under the same service wrench. Desktop rendering/hardware qualification
 is distinct from headless host/service checks.
