@@ -72,7 +72,19 @@ fn engine() -> PathBuf {
         .expect("set SPILING_TEST_ENGINE")
 }
 fn imported(host: &Host) -> Snapshot {
-    let snapshot = send(host, Action::Import(native(&fixture())));
+    let serial = host.snapshot().serial;
+    host.send(Request::Action(Action::Import(native(&fixture()))))
+        .unwrap();
+    let snapshot = wait(host, |state| {
+        state.serial > serial
+            && !state.busy
+            && !state.picker_open
+            && state.project.as_ref().is_some_and(|project| project.dirty)
+            && state
+                .scene
+                .as_ref()
+                .is_some_and(|scene| scene.occurrence_count == 1)
+    });
     assert!(
         snapshot.project.as_ref().unwrap().dirty,
         "{:?}",
