@@ -118,6 +118,5 @@ pub const ALL_ADVERSARIAL_FIXTURES: &[(&str, &str)] = &[
     ("truncated.step", "invalid_geometry"),
     ("wrong-conversion-dimension.step", "unsupported_units"),
     ("recursive-units.step", "unsupported_units"),
-    ("degrees.step", "unsupported_units"),
     ("duplicate-face-use.step", "invalid_geometry"),
 ];

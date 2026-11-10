@@ -155,7 +155,7 @@ pub fn adversaries(baseline: &str, inch: &str) -> Vec<Adversary> {
         (
             "degrees.step",
             "replace_radian_with_conversion_angle_unit",
-            "unsupported_units",
+            "accepted",
         ),
         (
             "duplicate-face-use.step",

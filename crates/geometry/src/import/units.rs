@@ -7,6 +7,17 @@ use spiling_contracts::geometry::{GeometryError, GeometryErrorCode, SourceUnit};
 use std::{collections::BTreeSet, sync::atomic::AtomicBool};
 use step_p21::ast::{Parameter, Record};
 
+const DEGREE: f64 = std::f64::consts::PI / 180.0;
+
+/// Units of the representation context that owns the imported solid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ContextUnits {
+    pub(super) length: SourceUnit,
+    /// Radians per source plane-angle unit: 1 or exactly pi/180.
+    pub(super) radians_per_angle_unit: f64,
+    pub(super) uncertainty_mm: Option<f64>,
+}
+
 fn units_error() -> GeometryError {
     error(
         GeometryErrorCode::UnsupportedUnits,
@@ -110,22 +121,29 @@ fn unit(
             .iter()
             .find(|r| r.name == "CONVERSION_BASED_UNIT")
             .ok_or_else(units_error)?;
-        if matches!(at(named, 0).map_err(|_| units_error())?, Parameter::Omitted) {
+        // A plane angle's dimensions are zero by definition, so a degree may
+        // leave them derived (`*`); a converted length must state them.
+        if length && matches!(at(named, 0).map_err(|_| units_error())?, Parameter::Omitted) {
             return Err(units_error());
         }
-        if !length
-            || !matches!(at(conversion, 0).map_err(|_| units_error())?, Parameter::String(name) if name.eq_ignore_ascii_case("inch"))
+        let expected = if length { "inch" } else { "degree" };
+        if !matches!(at(conversion, 0).map_err(|_| units_error())?, Parameter::String(name) if name.eq_ignore_ascii_case(expected))
         {
             return Err(units_error());
         }
         let factor_id =
             reference(at(conversion, 1).map_err(|_| units_error())?).map_err(|_| units_error())?;
+        let (factor_entity, factor_measure) = if length {
+            ("LENGTH_MEASURE_WITH_UNIT", "LENGTH_MEASURE")
+        } else {
+            ("PLANE_ANGLE_MEASURE_WITH_UNIT", "PLANE_ANGLE_MEASURE")
+        };
         let factor = entities
-            .record(factor_id, "LENGTH_MEASURE_WITH_UNIT")
+            .record(factor_id, factor_entity)
             .map_err(|_| units_error())?;
         factors.push(measure(
             at(factor, 0).map_err(|_| units_error())?,
-            "LENGTH_MEASURE",
+            factor_measure,
         )?);
         current =
             reference(at(factor, 1).map_err(|_| units_error())?).map_err(|_| units_error())?;
@@ -134,10 +152,22 @@ fn unit(
     for value in factors.into_iter().rev() {
         check_cancel(cancel)?;
         scale *= value;
-        if !length || !scale.is_finite() || (scale - 25.4).abs() > 1e-12 {
+        if !scale.is_finite() {
             return Err(units_error());
         }
-        source = Some(SourceUnit::Inch);
+        if length {
+            if (scale - 25.4).abs() > 1e-12 {
+                return Err(units_error());
+            }
+            source = Some(SourceUnit::Inch);
+        } else {
+            // Exporters write pi/180 to as few as ten significant digits; the
+            // unit is still exactly one degree.
+            if (scale / DEGREE - 1.0).abs() > 1e-8 {
+                return Err(units_error());
+            }
+            scale = DEGREE;
+        }
     }
     Ok((length, scale, source))
 }
@@ -145,7 +175,7 @@ fn context_units(
     entities: &Entities<'_>,
     id: u64,
     cancel: &AtomicBool,
-) -> Result<(SourceUnit, Option<f64>), GeometryError> {
+) -> Result<ContextUnits, GeometryError> {
     let records = entities.records(id).map_err(|_| units_error())?;
     if records.len() > 4
         || records
@@ -165,7 +195,7 @@ fn context_units(
         .record(id, "GLOBAL_UNIT_ASSIGNED_CONTEXT")
         .map_err(|_| units_error())?;
     let mut length = None;
-    let mut radians = false;
+    let mut angle = None;
     for p in list(at(assigned, 0).map_err(|_| units_error())?).map_err(|_| units_error())? {
         check_cancel(cancel)?;
         let uid = reference(p).map_err(|_| units_error())?;
@@ -178,19 +208,17 @@ fn context_units(
         {
             continue;
         }
-        let (is_length, _, source) = unit(entities, uid, cancel)?;
+        let (is_length, scale, source) = unit(entities, uid, cancel)?;
         if is_length {
             if length.replace(source.ok_or_else(units_error)?).is_some() {
                 return Err(units_error());
             }
-        } else if std::mem::replace(&mut radians, true) {
+        } else if angle.replace(scale).is_some() {
             return Err(units_error());
         }
     }
     let length = length.ok_or_else(units_error)?;
-    if !radians {
-        return Err(units_error());
-    }
+    let radians_per_angle_unit = angle.ok_or_else(units_error)?;
     let mut uncertainty = None;
     if let Ok(record) = entities.record(id, "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT") {
         for p in list(at(record, 0).map_err(|_| units_error())?).map_err(|_| units_error())? {
@@ -217,13 +245,17 @@ fn context_units(
             }
         }
     }
-    Ok((length, uncertainty))
+    Ok(ContextUnits {
+        length,
+        radians_per_angle_unit,
+        uncertainty_mm: uncertainty,
+    })
 }
 pub(super) fn resolve(
     entities: &Entities<'_>,
     solid: u64,
     cancel: &AtomicBool,
-) -> Result<(SourceUnit, Option<f64>), GeometryError> {
+) -> Result<ContextUnits, GeometryError> {
     let mut resolved = None;
     for records in entities.0.values() {
         check_cancel(cancel)?;
@@ -271,7 +303,7 @@ pub(super) fn validate_schema(header: &[Record]) -> Result<(), GeometryError> {
         .collect::<Vec<_>>();
     if schemas.len() != 1 {
         return Err(super::unsupported(
-            "one AP203/AP214 FILE_SCHEMA is required",
+            "one AP203/AP214/AP242 FILE_SCHEMA is required",
         ));
     }
     let ps = args(schemas[0])?;
@@ -280,7 +312,9 @@ pub(super) fn validate_schema(header: &[Record]) -> Result<(), GeometryError> {
         .ok_or_else(|| super::invalid("missing FILE_SCHEMA names"))?;
     let names = list(names)?;
     if names.len() != 1 || !matches!(&names[0], Parameter::String(s) if supported_schema(s)) {
-        return Err(super::unsupported("only AP203/AP214 schemas are admitted"));
+        return Err(super::unsupported(
+            "only AP203/AP214/AP242 schemas are admitted",
+        ));
     }
     Ok(())
 }
@@ -290,10 +324,18 @@ fn supported_schema(identifier: &str) -> bool {
         Some((name, qualifier)) => (name.trim(), Some(qualifier)),
         None => (identifier.trim(), None),
     };
+    // The BREP entities read here are common to these application protocols;
+    // anything else a file uses still fails at its own entity.
     let family = if name.eq_ignore_ascii_case("AUTOMOTIVE_DESIGN") {
         214
     } else if name.eq_ignore_ascii_case("CONFIG_CONTROL_DESIGN") {
         203
+    } else if name.eq_ignore_ascii_case(
+        "AP203_CONFIGURATION_CONTROLLED_3D_DESIGN_OF_MECHANICAL_PARTS_AND_ASSEMBLIES_MIM_LF",
+    ) {
+        403
+    } else if name.eq_ignore_ascii_case("AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF") {
+        442
     } else {
         return false;
     };

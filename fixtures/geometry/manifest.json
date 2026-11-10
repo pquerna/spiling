@@ -245,7 +245,7 @@
     {
       "baseline": "box-mm.step",
       "byte_count": 10230,
-      "expected_error": "unsupported_units",
+      "expected": "accepted",
       "mutation": "replace_radian_with_conversion_angle_unit",
       "path": "degrees.step",
       "sha256": "cf7e3cbf139e9891ff04994f6c933743bac8c1216146fd04ec92bd7da6a56c7a"

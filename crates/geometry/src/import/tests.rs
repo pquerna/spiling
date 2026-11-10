@@ -251,6 +251,8 @@ fn qualified_ap_schemas_and_single_part_representation_links_preserve_native_geo
         "AUTOMOTIVE_DESIGN { 1 0 10303 214 3 1 1 }",
         "AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }",
         "CONFIG_CONTROL_DESIGN { 1 0 10303 203 1 1 4 }",
+        "AP203_CONFIGURATION_CONTROLLED_3D_DESIGN_OF_MECHANICAL_PARTS_AND_ASSEMBLIES_MIM_LF",
+        "AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF { 1 0 10303 442 1 1 4 }",
     ] {
         let mut exchange = step_p21::parser::parse(&source).unwrap();
         let schema_record = exchange
@@ -307,6 +309,71 @@ fn qualified_ap_schemas_and_single_part_representation_links_preserve_native_geo
             .unwrap_err()
             .code,
         GeometryErrorCode::UnsupportedGeometry
+    );
+}
+
+#[test]
+fn degree_plane_angle_units_scale_angles_without_changing_geometry() {
+    let source = String::from_utf8(
+        std::fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let cone = |definition: &crate::Definition| {
+        definition
+            .faces()
+            .iter()
+            .find_map(|face| match face.geometry.analytic {
+                Some(spiling_contracts::geometry::AnalyticSurfaceDescription::Cone {
+                    semi_angle_radians,
+                    ..
+                }) => Some(semi_angle_radians),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let radians = from_step_bytes_with_cancel(source.as_bytes(), &cancelled()).unwrap();
+    let semi = 0.165148677415_f64;
+    let radian_unit = "#199 = ( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) );";
+    let cone_surface = "#31 = CONICAL_SURFACE('',#32,6.,0.165148677415);";
+    assert!(source.contains(radian_unit) && source.contains(cone_surface));
+    // Exporters write pi/180 to ten significant digits; both spellings of the
+    // derived dimensions are admitted for a plane angle.
+    for (factor, named) in [("0.0174532925", "*"), ("1.745329251994E-2", "#9001")] {
+        let degrees = source
+            .replace(
+                radian_unit,
+                &format!(
+                    "#9000 = ( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) );\n\
+                     #9001 = DIMENSIONAL_EXPONENTS(0.,0.,0.,0.,0.,0.,0.);\n\
+                     #9002 = PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE({factor}),#9000);\n\
+                     #199 = ( CONVERSION_BASED_UNIT('DEGREE',#9002) NAMED_UNIT({named}) PLANE_ANGLE_UNIT() );"
+                ),
+            )
+            .replace(
+                cone_surface,
+                &format!("#31 = CONICAL_SURFACE('',#32,6.,{:.17});", semi.to_degrees()),
+            );
+        let definition = from_step_bytes_with_cancel(degrees.as_bytes(), &cancelled()).unwrap();
+        assert!((cone(&definition) - cone(&radians)).abs() < 1e-14);
+        assert_eq!(definition.bounds_mm(), radians.bounds_mm());
+        assert_eq!(definition.faces().len(), radians.faces().len());
+    }
+    // A degree that is not one degree is a different unit, not a rounding.
+    let wrong = source.replace(
+        radian_unit,
+        "#9000 = ( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) );\n\
+         #9002 = PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE(0.0175),#9000);\n\
+         #199 = ( CONVERSION_BASED_UNIT('DEGREE',#9002) NAMED_UNIT(*) PLANE_ANGLE_UNIT() );",
+    );
+    assert_eq!(
+        from_step_bytes_with_cancel(wrong.as_bytes(), &cancelled())
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::UnsupportedUnits
     );
 }
 
@@ -1188,7 +1255,7 @@ fn exact_normalization_retains_the_original_periodic_cylinder_seam_without_scrat
     let cancel = cancelled();
     let ast = step_p21::parser::parse(text).unwrap();
     let entities = Entities::new(&ast.data[0], &cancel).unwrap();
-    let mut reader = source::reader(&exchange, 1.0);
+    let mut reader = source::reader(&exchange, 1.0, 1.0);
     let carriers =
         source::face_carriers(&entities, &mut reader, &solid.face_origin, &cancel).unwrap();
     let mut kernel = crate::kernel::make_kernel_context();

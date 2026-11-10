@@ -339,7 +339,6 @@ fn challenge5_adversarial_step_corpus_rejection() {
             GeometryErrorCode::UnsupportedUnits,
         ),
         ("recursive-units.step", GeometryErrorCode::UnsupportedUnits),
-        ("degrees.step", GeometryErrorCode::UnsupportedUnits),
         (
             "duplicate-face-use.step",
             GeometryErrorCode::InvalidGeometry,

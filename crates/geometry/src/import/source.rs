@@ -20,10 +20,14 @@ use crate::kernel::source::{
     OriginalWireSource,
 };
 
-pub(super) fn reader(exchange: &Exchange, length_scale_to_mm: f64) -> Reader<'_> {
+pub(super) fn reader(
+    exchange: &Exchange,
+    length_scale_to_mm: f64,
+    radians_per_angle_unit: f64,
+) -> Reader<'_> {
     let units = Units {
         len: length_scale_to_mm,
-        ..Units::default()
+        ang: radians_per_angle_unit,
     };
     Reader::new(exchange, units)
 }

@@ -2645,11 +2645,11 @@ mod tests {
         let entities = crate::import::ast::Entities::new(&ast.data[0], &cancel).unwrap();
         let roots = entities.named("MANIFOLD_SOLID_BREP", &cancel).unwrap();
         assert_eq!(roots.len(), 1, "{name}: expected 1 solid");
-        let (unit, uncertainty) =
-            crate::import::units::resolve(&entities, roots[0], &cancel).unwrap();
+        let units = crate::import::units::resolve(&entities, roots[0], &cancel).unwrap();
         let mut context = solidcraft_step::units::Context::default();
-        context.units.len = unit.scale_to_mm();
-        context.uncertainty = uncertainty;
+        context.units.len = units.length.scale_to_mm();
+        context.units.ang = units.radians_per_angle_unit;
+        context.uncertainty = units.uncertainty_mm;
         let mut solid = crate::import::closed_spline_decode::read_solid(
             &mut ex,
             roots[0],
@@ -2666,7 +2666,11 @@ mod tests {
         )
         .unwrap();
 
-        let mut reader = crate::import::source::reader(&ex, unit.scale_to_mm());
+        let mut reader = crate::import::source::reader(
+            &ex,
+            units.length.scale_to_mm(),
+            units.radians_per_angle_unit,
+        );
         let carriers = crate::import::source::face_carriers(
             &entities,
             &mut reader,

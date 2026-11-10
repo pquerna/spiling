@@ -113,6 +113,7 @@ fn source_geometry(
     entities: &Entities<'_>,
     face: u64,
     scale: f64,
+    radians_per_angle_unit: f64,
 ) -> Result<(String, String, FaceGeometryInfo), GeometryError> {
     let r = entities
         .records(face)?
@@ -147,7 +148,7 @@ fn source_geometry(
             "CONICAL_SURFACE" => AnalyticSurfaceDescription::Cone {
                 frame,
                 reference_radius_mm: number(at(surface, 2)?)? * scale,
-                semi_angle_radians: number(at(surface, 3)?)?,
+                semi_angle_radians: number(at(surface, 3)?)? * radians_per_angle_unit,
             },
             "SPHERICAL_SURFACE" => AnalyticSurfaceDescription::Sphere {
                 frame,
@@ -313,7 +314,11 @@ pub(crate) fn import_step(
         return Err(unsupported("exactly one MANIFOLD_SOLID_BREP is required"));
     }
     let solid_id = solids[0];
-    let (source_unit, uncertainty_mm) = units::resolve(&entities, solid_id, cancel)?;
+    let units::ContextUnits {
+        length: source_unit,
+        radians_per_angle_unit,
+        uncertainty_mm,
+    } = units::resolve(&entities, solid_id, cancel)?;
     let scale = source_unit.scale_to_mm();
     let root = entities.record(solid_id, "MANIFOLD_SOLID_BREP")?;
     let shell_id = reference(at(root, 1)?)?;
@@ -336,7 +341,7 @@ pub(crate) fn import_step(
         }
         let (resolved, orientation) = resolve_face(&entities, id)?;
         let (source_entity_kind, source_surface_entity_kind, geometry) =
-            source_geometry(&entities, resolved, scale)?;
+            source_geometry(&entities, resolved, scale, radians_per_angle_unit)?;
         faces.push(FaceInfo {
             face_id: FaceId::from_step_entity(id)?,
             surface_face_entity: resolved.to_string(),
@@ -354,6 +359,7 @@ pub(crate) fn import_step(
     // authoritative mm units, rather than building an unscaled BREP first.
     let mut context = solidcraft_step::units::Context::default();
     context.units.len = scale;
+    context.units.ang = radians_per_angle_unit;
     context.uncertainty = uncertainty_mm;
     let solid = closed_spline_decode::read_solid(
         &mut ex,
@@ -374,7 +380,7 @@ pub(crate) fn import_step(
     // untouched; source/native correspondence still requires every source use.
     let mut normalized = solid.brep;
     brep_data_bridge::strip_lamina_spurs(&mut normalized, query_proof_byte_limit, cancel)?;
-    let mut source_reader = source::reader(&ex, scale);
+    let mut source_reader = source::reader(&ex, scale, radians_per_angle_unit);
     let original_carriers =
         source::face_carriers(&entities, &mut source_reader, &solid.face_origin, cancel)?;
     let native_surface_maps = compute_face_surface_maps(&normalized, &original_carriers);

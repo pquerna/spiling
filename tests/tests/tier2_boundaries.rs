@@ -229,9 +229,11 @@ fn test_f06_corner_conflicting_units() {
 
 #[test]
 fn test_f06_corner_degrees_units() {
-    let bytes = fixture_bytes("degrees.step");
-    let err = import_test_step(&bytes).unwrap_err();
-    assert_eq!(err.code, GeometryErrorCode::UnsupportedUnits);
+    // A degree plane-angle unit is a valid declaration of the same box.
+    let degrees = import_test_step(&fixture_bytes("degrees.step")).unwrap();
+    let radians = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
+    assert_eq!(degrees.bounds_mm(), radians.bounds_mm());
+    assert_eq!(degrees.faces().len(), radians.faces().len());
 }
 
 #[test]
@@ -2119,12 +2121,6 @@ fn test_f48_adversary_missing_units() {
 #[test]
 fn test_f48_adversary_conflicting_units() {
     let err = import_test_step(&fixture_bytes("conflicting-units.step")).unwrap_err();
-    assert_eq!(err.code, GeometryErrorCode::UnsupportedUnits);
-}
-
-#[test]
-fn test_f48_adversary_degrees() {
-    let err = import_test_step(&fixture_bytes("degrees.step")).unwrap_err();
     assert_eq!(err.code, GeometryErrorCode::UnsupportedUnits);
 }
 
