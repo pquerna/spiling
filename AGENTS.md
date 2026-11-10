@@ -86,26 +86,26 @@ Use directories to express ownership first. Create a separate crate only for jus
 
 B0 establishes contracts and a shared `crates/engine-client` used by the CLI and shell; that second crate is justified by two consumers. The domain areas below describe ownership as they are introduced, not a requirement to create empty future crates.
 
-| Planned area                                   | Ownership                                                                                   |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `apps/workbench/`                              | Native window, transient forms, asynchronous host and checked wgpu source/replay display    |
-| `apps/engine/`                                 | Sidecar entry point and composition of native services                                      |
-| `apps/cli/`                                    | Client commands using the same protocol and services; no alternate planner                  |
-| `crates/contracts/`                            | IDs, revisions, commands, events, errors, manifest schemas                                  |
-| `crates/engine-client/`                        | Shared protocol client, child-process lifecycle, request deadlines                          |
-| `crates/compute/`                              | CubeCL backend/device policy and bounded exact numeric batches; no geometry authority       |
-| `crates/core/`                                 | Project transactions, undo, persistence/recovery, artifacts, jobs                           |
-| `crates/core-ptac/`                            | Closed SQLite container, checked immutable objects, filesystem admission and publication    |
-| `crates/chunks/`                               | Domain-free compressed immutable byte frames for large derived outputs                      |
-| `crates/geometry/`                             | Kernel adapter, import, tessellation, sections, capability contract                         |
-| `crates/surface-fields/`                       | Bounded image normalization and shared source-frame scalar-grid evaluation                  |
-| `crates/appearance/`                           | D65 colorimetry, bounded palette matching and optical reference construction studies        |
-| `crates/manufacturing/`                        | Planning, operations/resources, backend, packaging, emitted-program verification            |
+| Planned area                                   | Ownership                                                                                     |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `apps/workbench/`                              | Native window, transient forms, asynchronous host and checked wgpu source/replay display      |
+| `apps/engine/`                                 | Sidecar entry point and composition of native services                                        |
+| `apps/cli/`                                    | Client commands using the same protocol and services; no alternate planner                    |
+| `crates/contracts/`                            | IDs, revisions, commands, events, errors, manifest schemas                                    |
+| `crates/engine-client/`                        | Shared protocol client, child-process lifecycle, request deadlines                            |
+| `crates/compute/`                              | CubeCL backend/device policy and bounded exact numeric batches; no geometry authority         |
+| `crates/core/`                                 | Project transactions, undo, persistence/recovery, artifacts, jobs                             |
+| `crates/core-ptac/`                            | Closed SQLite container, checked immutable objects, filesystem admission and publication      |
+| `crates/chunks/`                               | Domain-free compressed immutable byte frames for large derived outputs                        |
+| `crates/geometry/`                             | Kernel adapter, import, tessellation, sections, capability contract                           |
+| `crates/surface-fields/`                       | Bounded image normalization and shared source-frame scalar-grid evaluation                    |
+| `crates/appearance/`                           | D65 colorimetry, bounded palette matching and optical reference construction studies          |
+| `crates/manufacturing/`                        | Planning, operations/resources, backend, packaging, emitted-program verification              |
 | `crates/deposition-routing/`                   | Shared deposition scheduling on contracts/compute; manufacturing adapter and offline research |
-| `packages/protocol/`                           | Generated TypeScript contracts and binary decoder; no UI dependencies                       |
-| `fixtures/`, `bench/`                          | Redistributable correctness corpus and reproducible workloads                               |
-| `docs/adr/`, `docs/protocol/`, `docs/quality/` | Decisions, wire specifications, support and evidence                                        |
-| `tools/`                                       | Bootstrap, generation, and release tooling                                                  |
+| `packages/protocol/`                           | Generated TypeScript contracts and binary decoder; no UI dependencies                         |
+| `fixtures/`, `bench/`                          | Redistributable correctness corpus and reproducible workloads                                 |
+| `docs/adr/`, `docs/protocol/`, `docs/quality/` | Decisions, wire specifications, support and evidence                                          |
+| `tools/`                                       | Bootstrap, generation, and release tooling                                                    |
 
 Dependencies flow inward:
 
