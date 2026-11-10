@@ -142,6 +142,34 @@ Marlin-class firmware that declares arc support, off by default for Klipper.
 - Some existing tests assert proof refusals as expected behaviour. They are
   rewritten to assert the guarantees above, or removed.
 
+## Tolerant mode as delivered
+
+Step 1 is a job-wide mode, not yet per face. When the exact native path
+refuses for a geometric reason or exhausts its proof work, and the job uses no
+finish, generated support or fixed-dual routing, the planner reslices the whole
+job within tolerance:
+
+- Sections come from the BREP's own watertight tessellation at half the
+  profile tolerance, chained by mesh edge identity, joined within `τ`, then
+  simplified within the remaining profile budget. Each segment keeps its face.
+- Feature heights are flat faces and part extremes, merged within `ε_z`; a
+  height within `ε_z` of the bed is bed contact.
+- Walls are classic constant-width perimeters, the section offset inward to
+  each bead centreline, with one thinner wall at the narrowest admitted width
+  where a section is thinner than a bead. The exact variable-width wall
+  planner remains the exact path's.
+- The plan carries `PreflightEvidence::Tolerant` and claims no native
+  certificate. Fresh independent replay is unchanged.
+
+Two outcomes apply in both modes. With supports disabled, an unanchored stroke
+prints, as other slicers do, and its span is reported on the layer as
+`unsupported_overhang_mm`. A fill, skin or bridge row shorter than one minimum
+command is omitted, since it holds less material than the profile tolerance.
+
+Constant-section Cathedral (`web_roof`) infill still needs one upright
+constant-section part, so it refuses every corpus part; generalizing it is
+separate work.
+
 ## Delivery and measure
 
 Each step lands on `main` with the corpus result. The measure is corpus parts
@@ -149,7 +177,7 @@ reaching source-absent verified export, compared with PrusaSlicer's 25 and with
 material, time and travel counts on the same parts.
 
 1. Tolerance policy and height merging (`ε_z`, `τ`), with tolerant section
-   chaining.
+   chaining. Delivered as the job-wide tolerant mode above.
 2. Tolerant seam and edge correspondence within `τ`; per-face fallback.
 3. Import packaging: single-solid assembly wrappers, multi-body parts, AP242,
    assemblies as plate occurrences.

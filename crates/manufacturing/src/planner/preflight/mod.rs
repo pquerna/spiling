@@ -7,6 +7,7 @@ use spiling_contracts::geometry::{
     AabbMm, GeometryErrorCode, MAX_DEFINITIONS, MAX_OCCURRENCES, OccurrenceId, OccurrenceRecord,
 };
 use spiling_contracts::manufacturing::*;
+use spiling_geometry::tolerant::{TolerantModel, TolerantPolicy};
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 
@@ -21,6 +22,9 @@ pub(super) struct Admission<'work> {
     pub surface_fields: BTreeMap<OccurrenceId, Vec<surface::PreparedFinish>>,
     pub report: PreflightReport,
     pub geometry_work: &'work mut spiling_geometry::GeometryWorkBudget,
+    /// ADR012 tolerant mode: each occurrence's tessellation placed in world
+    /// coordinates. None runs the exact native path.
+    pub tolerant: Option<BTreeMap<OccurrenceId, std::sync::Arc<TolerantModel>>>,
 }
 
 impl Admission<'_> {
@@ -269,7 +273,21 @@ pub(super) fn admit<'a, 'work>(
     cancel: &AtomicBool,
     geometry_work: &'work mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<(Admission<'work>, super::PreparedSources<'a>), ManufacturingError> {
+    admit_with(input, cancel, geometry_work, false)
+}
+
+/// Preflight in exact or ADR012 tolerant mode. Tolerant mode takes bounds and
+/// material extents from each occurrence's placed tessellation instead of
+/// exact native analysis; every other check is unchanged.
+pub(super) fn admit_with<'a, 'work>(
+    input: &'a CompilerInput<'_>,
+    cancel: &AtomicBool,
+    geometry_work: &'work mut spiling_geometry::GeometryWorkBudget,
+    tolerant: bool,
+) -> Result<(Admission<'work>, super::PreparedSources<'a>), ManufacturingError> {
     check_cancel(cancel)?;
+    let mut tolerant_models: BTreeMap<spiling_contracts::geometry::DefinitionId, TolerantModel> =
+        BTreeMap::new();
     let mut result = Admission {
         bounds: None,
         horizontal_events: Vec::new(),
@@ -279,6 +297,7 @@ pub(super) fn admit<'a, 'work>(
         material_domains: BTreeMap::new(),
         surface_fields: BTreeMap::new(),
         geometry_work,
+        tolerant: tolerant.then(BTreeMap::new),
         report: PreflightReport {
             input_revision: input.revision,
             disposition: PreflightDisposition::Admitted,
@@ -538,101 +557,153 @@ pub(super) fn admit<'a, 'work>(
                 );
             }
         }
-        if !geometry_sources.contains_key(&occurrence.definition_id) {
-            let source = match spiling_geometry::prepare_solid(
-                definition,
-                remaining_prepared,
-                result.geometry_work,
-                cancel,
-            ) {
-                Ok(source) => source,
-                Err(e)
-                    if matches!(
-                        e.code,
-                        GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
-                    ) =>
-                {
-                    return Err(super::native_error(
-                        e,
-                        "native material geometry preparation",
-                    ));
+        let mut placed = if let Some(models) = result.tolerant.as_mut() {
+            if !tolerant_models.contains_key(&occurrence.definition_id) {
+                match TolerantModel::build(definition, TolerantPolicy::default(), cancel) {
+                    Ok(model) if model.failed_faces == 0 => {
+                        tolerant_models.insert(occurrence.definition_id.clone(), model);
+                    }
+                    Ok(model) => {
+                        add(
+                            "native_unsupported_geometry",
+                            format!(
+                                "{} source faces could not be tessellated within the profile tolerance",
+                                model.failed_faces
+                            ),
+                            Some(occurrence.occurrence_id),
+                            None,
+                        );
+                        continue 'occurrences;
+                    }
+                    Err(e) if e.code == GeometryErrorCode::Cancelled => {
+                        return Err(super::native_error(e, "tolerant tessellation"));
+                    }
+                    Err(e) => {
+                        add(
+                            native_check_code(e.code),
+                            e.to_string(),
+                            Some(occurrence.occurrence_id),
+                            None,
+                        );
+                        continue 'occurrences;
+                    }
                 }
-                Err(e) => {
-                    add(
-                        native_check_code(e.code),
-                        e.to_string(),
-                        Some(occurrence.occurrence_id),
-                        None,
-                    );
-                    continue 'occurrences;
-                }
+            }
+            let model = tolerant_models[&occurrence.definition_id].placed(&occurrence.pose);
+            let margin = model.policy().profile_mm;
+            let (min, max) = model.bounds();
+            // Tessellation vertices lie on the surface; chords can cut inside
+            // curved walls by at most the profile tolerance laterally. Z stays
+            // at the vertex extremes so bed contact remains exactly at the bed.
+            let placed = AabbMm {
+                min: [min[0] - margin, min[1] - margin, min[2]],
+                max: [max[0] + margin, max[1] + margin, max[2]],
             };
-            remaining_prepared = remaining_prepared
-                .checked_sub(source.retained_bytes())
-                .ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "aggregate native material geometry capacity exceeded",
-                    )
-                })?;
-            geometry_sources.insert(occurrence.definition_id.clone(), source);
-        }
-        let query_bytes = super::geometry_query_limit(&geometry_sources)?;
-        let mut placed = AabbMm {
-            min: [0.0; 3],
-            max: [0.0; 3],
-        };
-        for axis in 0..3 {
-            let direction = std::array::from_fn(|a| if a == axis { 1.0 } else { 0.0 });
-            let extent = match geometry_sources[&occurrence.definition_id].placed_material_bounds(
-                occurrence.pose,
-                direction,
-                spiling_geometry::BoundsPolicy {
-                    maximum_endpoint_uncertainty_mm: LAYER_QUANTIZATION_MM,
-                },
-                query_bytes,
-                result.geometry_work,
-                cancel,
-            ) {
-                Ok(extent) => {
-                    if extent.definition_id() != &occurrence.definition_id
-                        || !extent.is_compatible_with_definition(definition)
-                        || extent.placed_pose() != occurrence.pose
-                        || extent.world_direction() != direction
+            result.material_domains.insert(
+                occurrence.occurrence_id,
+                [[min[2], min[2]], [max[2], max[2]]],
+            );
+            models.insert(occurrence.occurrence_id, std::sync::Arc::new(model));
+            placed
+        } else {
+            if !geometry_sources.contains_key(&occurrence.definition_id) {
+                let source = match spiling_geometry::prepare_solid(
+                    definition,
+                    remaining_prepared,
+                    result.geometry_work,
+                    cancel,
+                ) {
+                    Ok(source) => source,
+                    Err(e)
+                        if matches!(
+                            e.code,
+                            GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
+                        ) =>
                     {
-                        return Err(error(
-                            ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                            "material support lost its native producer/source/pose/query binding",
+                        return Err(super::native_error(
+                            e,
+                            "native material geometry preparation",
                         ));
                     }
-                    extent.bounds()
-                }
-                Err(e)
-                    if matches!(
-                        e.code,
-                        GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
-                    ) =>
-                {
-                    return Err(super::native_error(e, "material projected bounds"));
-                }
-                Err(e) => {
-                    add(
-                        native_check_code(e.code),
-                        e.to_string(),
-                        Some(occurrence.occurrence_id),
-                        None,
-                    );
-                    continue 'occurrences;
-                }
-            };
-            placed.min[axis] = extent.minimum[0];
-            placed.max[axis] = extent.maximum[1];
-            if axis == 2 {
-                result
-                    .material_domains
-                    .insert(occurrence.occurrence_id, [extent.minimum, extent.maximum]);
+                    Err(e) => {
+                        add(
+                            native_check_code(e.code),
+                            e.to_string(),
+                            Some(occurrence.occurrence_id),
+                            None,
+                        );
+                        continue 'occurrences;
+                    }
+                };
+                remaining_prepared = remaining_prepared
+                    .checked_sub(source.retained_bytes())
+                    .ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "aggregate native material geometry capacity exceeded",
+                        )
+                    })?;
+                geometry_sources.insert(occurrence.definition_id.clone(), source);
             }
-        }
+            let query_bytes = super::geometry_query_limit(&geometry_sources)?;
+            let mut placed = AabbMm {
+                min: [0.0; 3],
+                max: [0.0; 3],
+            };
+            for axis in 0..3 {
+                let direction = std::array::from_fn(|a| if a == axis { 1.0 } else { 0.0 });
+                let extent = match geometry_sources[&occurrence.definition_id]
+                    .placed_material_bounds(
+                        occurrence.pose,
+                        direction,
+                        spiling_geometry::BoundsPolicy {
+                            maximum_endpoint_uncertainty_mm: LAYER_QUANTIZATION_MM,
+                        },
+                        query_bytes,
+                        result.geometry_work,
+                        cancel,
+                    ) {
+                    Ok(extent) => {
+                        if extent.definition_id() != &occurrence.definition_id
+                            || !extent.is_compatible_with_definition(definition)
+                            || extent.placed_pose() != occurrence.pose
+                            || extent.world_direction() != direction
+                        {
+                            return Err(error(
+                                ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                                "material support lost its native producer/source/pose/query binding",
+                            ));
+                        }
+                        extent.bounds()
+                    }
+                    Err(e)
+                        if matches!(
+                            e.code,
+                            GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
+                        ) =>
+                    {
+                        return Err(super::native_error(e, "material projected bounds"));
+                    }
+                    Err(e) => {
+                        add(
+                            native_check_code(e.code),
+                            e.to_string(),
+                            Some(occurrence.occurrence_id),
+                            None,
+                        );
+                        continue 'occurrences;
+                    }
+                };
+                placed.min[axis] = extent.minimum[0];
+                placed.max[axis] = extent.maximum[1];
+                if axis == 2 {
+                    result
+                        .material_domains
+                        .insert(occurrence.occurrence_id, [extent.minimum, extent.maximum]);
+                }
+            }
+            placed
+        };
         result
             .native_bounds
             .insert(occurrence.occurrence_id, placed);
@@ -868,6 +939,54 @@ pub(super) fn resolve_native_events(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let bed = input.intent.printer.build_envelope.min[2];
+    if let Some(models) = &admission.tolerant {
+        // ADR012 feature-first heights: horizontal faces and extents of each
+        // placed tessellation, merged within the height tolerance. The bed is
+        // the first boundary; nothing here is a native event band.
+        let mut heights = Vec::new();
+        let mut combined: Option<AabbMm> = None;
+        for occurrence in input.occurrences {
+            check_cancel(cancel)?;
+            let model = &models[&occurrence.occurrence_id];
+            heights.extend(model.feature_heights(FEATURE_HEIGHT_TOLERANCE_MM));
+            let bounds = admission.native_bounds[&occurrence.occurrence_id];
+            let placed = admission
+                .surface_fields
+                .get(&occurrence.occurrence_id)
+                .map_or(bounds, |fields| surface::expanded(bounds, fields));
+            match &mut combined {
+                Some(all) => {
+                    all.include(placed.min)
+                        .and_then(|_| all.include(placed.max))
+                        .map_err(|e| {
+                            error(ManufacturingErrorCode::InvalidSpecification, e.to_string())
+                        })?;
+                }
+                None => combined = Some(placed),
+            }
+        }
+        heights.sort_by(f64::total_cmp);
+        for z in heights {
+            let z = if (z - bed).abs() <= FEATURE_HEIGHT_TOLERANCE_MM {
+                bed
+            } else {
+                z
+            };
+            if z < bed {
+                continue;
+            }
+            if admission
+                .horizontal_events
+                .last()
+                .is_none_or(|last| z - last > FEATURE_HEIGHT_TOLERANCE_MM)
+            {
+                admission.horizontal_events.push(z);
+            }
+        }
+        admission.bounds = combined;
+        *proposal_work = proposal_work.saturating_add(admission.horizontal_events.len());
+        return Ok(());
+    }
     let policy = spiling_geometry::AnalysisPolicy {
         maximum_height_uncertainty_mm: LAYER_QUANTIZATION_MM,
         maximum_shape_error_mm: input.intent.recipe.native_shape_error_mm,

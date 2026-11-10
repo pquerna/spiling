@@ -929,10 +929,11 @@ impl ClassifiedRegions {
                 }
             }
             let Some((existing, pending, fitted)) = chosen else {
-                // Nonproof is not a new refusal before the existing demanded
-                // Bridge constructor has had its independent opportunity.
-                // Realization still refuses every unresolved short command.
-
+                // No regional owner can lengthen this row to a printable
+                // command. It holds less than a minimum command of skin, far
+                // below the profile tolerance, so omit it as other slicers do
+                // rather than refuse the part.
+                paths[index].points_mm.clear();
                 continue;
             };
             let domain_index = if let Some(index) = existing {

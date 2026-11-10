@@ -870,31 +870,36 @@ pub(super) fn realize(
             }
             if let Some(failure) = admission.failure.take() {
                 if matches!(recipe.supports, SupportPolicy::Disabled) {
-                    let failure =
-                        admission_error(index, layer.z_mm, &layer.paths, &failure, recipe);
-                    return if tentative && index > 0 {
-                        Ok(SupportAdmission::RefineUnreachableLayer { index, failure })
-                    } else {
-                        Err(failure)
-                    };
+                    if tentative && index > 0 {
+                        let failure =
+                            admission_error(index, layer.z_mm, &layer.paths, &failure, recipe);
+                        return Ok(SupportAdmission::RefineUnreachableLayer { index, failure });
+                    }
+                    // Supports are off: print the overhang as PrusaSlicer
+                    // does and report it, rather than refuse the part.
+                    layer.region_coverage.unsupported_overhang_mm = layer
+                        .region_coverage
+                        .unsupported_overhang_mm
+                        .max(failure.span);
+                } else {
+                    let live = native_owned_bytes
+                        + layer_payload_bytes(
+                            prior
+                                .iter()
+                                .chain(std::iter::once(&*layer))
+                                .chain(following.iter()),
+                        )
+                        + vec_bytes(&joined_layers)
+                        + vec_bytes(&demands)
+                        + vec_bytes(&original_bridge_roles)
+                        + anchors.retained_bytes()
+                        + vec_bytes(&admission.bridges);
+                    reserve_owned(&mut demands, 1, live)?;
+                    demands.push(Demand {
+                        target: index,
+                        failure,
+                    });
                 }
-                let live = native_owned_bytes
-                    + layer_payload_bytes(
-                        prior
-                            .iter()
-                            .chain(std::iter::once(&*layer))
-                            .chain(following.iter()),
-                    )
-                    + vec_bytes(&joined_layers)
-                    + vec_bytes(&demands)
-                    + vec_bytes(&original_bridge_roles)
-                    + anchors.retained_bytes()
-                    + vec_bytes(&admission.bridges);
-                reserve_owned(&mut demands, 1, live)?;
-                demands.push(Demand {
-                    target: index,
-                    failure,
-                });
             }
             let live = native_owned_bytes
                 + layer_payload_bytes(

@@ -4407,6 +4407,18 @@ pub struct CompletedNativeUnionProofSet {
     achieved_shape_error_mm: f64,
 }
 impl CompletedNativeUnionProofSet {
+    /// ADR012 tolerant slicing: no native union proof was taken. It carries
+    /// the sliced height interval and no sources, slabs or binding.
+    pub fn tolerant(world_height_interval_mm: [f64; 2]) -> Self {
+        Self {
+            world_height_interval_mm,
+            sources: Vec::new(),
+            binding_sha256: [0; 32],
+            slab_count: 0,
+            endpoint_count: 0,
+            achieved_shape_error_mm: 0.0,
+        }
+    }
     pub fn world_height_interval_mm(&self) -> [f64; 2] {
         self.world_height_interval_mm
     }

@@ -2905,10 +2905,15 @@ fn unsupported_thin_support_envelope_and_invalid_profiles_are_errors() {
         scene.compile(&data).err().unwrap().code,
         ManufacturingErrorCode::UnsupportedGeometry
     );
+    // Supports off: the cantilever is printed and its overhang reported.
     let elevated = Scene::new(BOX, &[pose(0.0, 0.0, 0.0), pose(10.0, 0.0, 8.0)]);
-    assert_eq!(
-        elevated.compile(&intent()).err().unwrap().code,
-        ManufacturingErrorCode::UnsupportedGeometry
+    let cantilever = elevated.compile(&intent()).unwrap();
+    assert!(
+        cantilever
+            .plan
+            .layers
+            .iter()
+            .any(|layer| layer.region_coverage.unsupported_overhang_mm > 0.0)
     );
     data = intent();
     data.recipe.layer_height_mm = 0.3;

@@ -839,13 +839,18 @@ the source, reopen read-only, freshly verify and export. PrusaSlicer slices the
 same STEP with matched settings as the printability reference. Results record
 the refusing stage and code, wall time and sampled engine peak RSS per part.
 
-Current support (planner 75): none of the 30 parts compile; PrusaSlicer slices 25. Seventeen refuse at import (single-solid assembly wrappers, multi-body
-parts, multi-part assemblies, AP242 or long AP203 schema names); the rest
-refuse at exact native certification (chart correspondence, indeterminate
-slabs, near-coincident layer events). Re-exporting the import-refused solids
-individually through OCCT does not change the outcome: those 18 solids also
-refuse at certification while PrusaSlicer slices 17. Import packaging is not
-the binding limit for ordinary parts; exact certification is.
+Current support (planner 77): 12 of the 30 parts compile and complete the
+source-absent reopen, fresh verify and export; PrusaSlicer slices 25. All 12
+take the ADR012 tolerant path, because exact certification still refuses
+every corpus part. Their deposition segment counts fall within roughly 0.65-1.45x
+PrusaSlicer's `G1` line counts at matched settings. Of the 13 parts that
+import, one (`25`) refuses on a section thinner than any admitted bead, and
+PrusaSlicer also fails on it. Seventeen still refuse at import (single-solid
+assembly wrappers, multi-body parts, multi-part assemblies, AP242 or long AP203
+schema names); import packaging is now the binding limit.
+`SPILING_CORPUS_INFILL=cathedral` runs the same parts with `web_roof` infill;
+it refuses all of them, because Cathedral needs one upright constant-section
+part.
 
 ## Minimal user flows
 

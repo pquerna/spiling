@@ -131,6 +131,7 @@ enum PreflightEvidence {
   PREFLIGHT_UNSUPPORTED = 3;
   PREFLIGHT_INDETERMINATE = 4;
   PREFLIGHT_FAILED = 5;
+  PREFLIGHT_TOLERANT = 6;
 }
 message PreflightCheck {
   string code = 1;

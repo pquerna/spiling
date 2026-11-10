@@ -550,9 +550,11 @@ pub fn native_operation_view(
                 if summary.unique_mesh_bytes == 0
                     && meta.outputs.iter().any(|output| {
                         output.media_type != "application/x-spiling-manufacturing-bundle"
+                            && output.media_type
+                                != crate::manufacturing::MANUFACTURING_PROGRAM_MEDIA_TYPE
                     })
                 {
-                    return Err("geometry-only scene may publish saved manufacturing bundles, not display artifacts".into());
+                    return Err("geometry-only scene may publish saved manufacturing bundles and programs, not display artifacts".into());
                 }
             }
             JobResult::ManufacturingCompiled { resource, .. }
