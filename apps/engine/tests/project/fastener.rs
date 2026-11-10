@@ -367,6 +367,9 @@ async fn fastener_service_check() {
             case.fasteners[0].attachment = attachment;
             put(&mut client, &case).await;
             assert_eq!(info(&mut client).await.analysis.cases[0].case, case);
+            let operation = run(&mut client, &case).await;
+            let bytes = fields(&mut client, &operation).await;
+            check_reactions(&bytes, &case);
         }
     }
     for diameter in [12.0, 19.6, 20.0] {
