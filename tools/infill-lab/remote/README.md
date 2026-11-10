@@ -227,11 +227,15 @@ vault`** with an explicit single BLAS thread for comparison. The adapter first
 constructs the ordinary admitted prism mesh, then exports its closed oriented
 boundary. `-pQMYJ` requests a PLC tetrahedralization, quiet output, no facet/vertex
 merging, surface preservation and retention of original input node IDs.
-Independent checks require exact original coordinates and oriented boundary
-triangles, opposite orientations on paired internal faces, positive finite
-cells, unchanged volume and face-component count. Boundary subdivisions or
-rounding changes refuse; no tolerance-based hole closing or centroid admission
-is substituted. Only full-face neighbors share displacement nodes.
+Independent checks require exact original coordinates/IDs and the oriented
+material boundary, opposite orientations on paired internal faces, positive
+finite cells, unchanged volume and face-component count. Identical triangles
+take the fast path. A changed triangulation must preserve exact coplanar surface
+chains: binary64 coordinates become exact rational plane keys, and every
+oriented boundary edge cancels by node identity. Interior planar subdivisions
+and diagonal flips can pass; moving a surface, changing an edge segmentation or
+rounding coordinates refuses. No epsilon, hole closing or centroid surrogate
+is used. Only full-face neighbors share displacement nodes.
 
 Raw tetrahedra elevate through the existing C3D10/TetP2 edge-node identity path.
 The quadratic material, integration and fixture/energy/reaction checks remain

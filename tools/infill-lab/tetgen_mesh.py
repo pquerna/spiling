@@ -11,6 +11,9 @@ identical positive-area faces. No footprint re-rounding or geometric dilation.
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
+from fractions import Fraction
+import math
 from pathlib import Path
 import shutil
 import subprocess
@@ -63,21 +66,59 @@ def boundary_inventory(cells):
     return oriented[count[inverse]==1]
 
 
-def conserve_boundary(source_points, source_boundary, points, cells):
-    """Conserve an accepted solid as an oriented positive-cell chain.
+def exact_plane(points):
+    """Canonical homogeneous plane of binary64 coordinates, with no epsilon."""
+    a, b, c = [[Fraction(float(v)) for v in p] for p in points]
+    u, v = [b[i]-a[i] for i in range(3)], [c[i]-a[i] for i in range(3)]
+    normal = [u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]]
+    if not any(normal):
+        raise ValueError("degenerate oriented source boundary")
+    coefficients = [*normal, -sum(normal[i]*a[i] for i in range(3))]
+    denominator = math.lcm(*(v.denominator for v in coefficients))
+    integers = [v.numerator*(denominator//v.denominator) for v in coefficients]
+    divisor = math.gcd(*integers)
+    sign = 1 if next(v for v in integers[:3] if v) > 0 else -1
+    return tuple(sign*v//divisor for v in integers)
 
-    An identical oriented boundary and cancelling internal faces preserve the
-    source winding/multiplicity, unlike volume or centroid tests alone. This
-    consumes the source mesh's material admission; it is not a CAD proof.
+
+def conserve_boundary(source_points, source_boundary, points, cells):
+    """Conserve the source's oriented surface chain, not its diagonal choices.
+
+    Cancelling internal cell faces and an identical oriented material boundary
+    preserve source winding/multiplicity. Changed boundary triangles may only
+    retessellate exact planes with the same oriented edge chains. A compact
+    planar 2-chain with zero boundary is zero, so this preserves the surface
+    itself, including orientation and multiplicity. Point/edge identities and
+    original coordinates remain strict; no tolerance or coordinate welding.
+    This consumes the admitted affine mesh, never a CAD proof.
     """
     if len(points)<len(source_points) or not np.array_equal(points[:len(source_points)],source_points):
         raise ValueError("remeshing changed original boundary coordinates or IDs")
     def inventory(faces):
+        if not np.issubdtype(faces.dtype, np.integer):
+            raise ValueError("invalid oriented source boundary indices")
         # Rotate each oriented cycle to its minimum ID; never reverse it.
         cycles = np.take_along_axis(faces,(np.argmin(faces,axis=1)[:,None]+np.arange(3))%3,axis=1)
-        return cycles[np.lexsort(cycles[:,::-1].T)]
-    if not np.array_equal(inventory(source_boundary),inventory(boundary_inventory(cells))):
+        return np.ascontiguousarray(cycles[np.lexsort(cycles[:,::-1].T)], dtype=np.int64)
+    before, after = inventory(source_boundary), inventory(boundary_inventory(cells))
+    if np.array_equal(before, after):
+        return "identical_oriented_triangles"
+    # Exact common faces cancel before the more expensive rational predicate.
+    # Facet/cell limits and the external container budget bound this work.
+    dtype = np.dtype((np.void, before.dtype.itemsize*3))
+    old_keys, new_keys = before.view(dtype).ravel(), after.view(dtype).ravel()
+    changed = ((before[~np.isin(old_keys,new_keys)], 1),
+               (after[~np.isin(new_keys,old_keys)], -1))
+    edges = Counter()
+    for faces, direction in changed:
+        for face in faces:
+            plane = exact_plane(points[face])
+            for a, b in zip(face, np.roll(face,-1)):
+                a, b = int(a), int(b)
+                edges[(plane,min(a,b),max(a,b))] += direction*(1 if a < b else -1)
+    if any(edges.values()):
         raise ValueError("remeshing changed oriented source boundary")
+    return "exact_oriented_planar_chains"
 
 
 def face_mesh(points, cells, *, expected_volume=None):
@@ -215,13 +256,14 @@ def remesh(mesh, roads, bounds, workdir, *, cap_segments=32, seconds=90, max_cel
         raise ValueError("nonintegral TetGen node index")
     vertices,cells = vertices[:,1:],elements[:,1:].astype(int)-1
     cells,_ = oriented_cells(vertices,cells)
-    conserve_boundary(points,boundary,vertices,cells)
+    conservation = conserve_boundary(points,boundary,vertices,cells)
     result = face_mesh(vertices,cells,expected_volume=mesh.volume)
     if result.components != mesh.components:
         raise ValueError("remeshing changed face-connected component count")
     return result,dict(method="retained_boundary_tetgen",source_prisms=mesh.count,
                        source_tets=len(elevated),boundary_faces=len(boundary),tets=result.count,
                        oriented_boundary_preserved=True,internal_faces_cancel=True,
+                       boundary_conservation=conservation,
                        switches="-pQMYJ",volume_mm3=result.volume,components=result.components,
                        executable_sha256=hashlib.sha256(Path(executable).read_bytes()).hexdigest(),
                        wall_s=time.monotonic()-started)
