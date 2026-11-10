@@ -118,7 +118,23 @@ fn check_reactions(bytes: &[u8], case: &AnalysisCase) {
     assert!(fields.summary.maximum_displacement_mm > 0.0);
     let response = &fields.summary.fastener_responses[0];
     assert_eq!(response.fastener_id, case.fasteners[0].id);
-    assert!((response.area_mm2 / (std::f64::consts::PI * 7.0) - 1.0).abs() < 1e-9);
+    let fastener = &case.fasteners[0];
+    let expected_area = match fastener.attachment {
+        FastenerAttachment::Clamp {
+            washer_diameter_mm, ..
+        } => {
+            std::f64::consts::PI
+                * (0.25 * washer_diameter_mm * washer_diameter_mm
+                    - fastener.hole.radius_mm * fastener.hole.radius_mm)
+        }
+        FastenerAttachment::BondedEngagement { engagement_mm, .. } => {
+            std::f64::consts::TAU * fastener.hole.radius_mm * engagement_mm
+        }
+        FastenerAttachment::Pin { .. } => {
+            std::f64::consts::TAU * fastener.hole.radius_mm * fastener.hole.depth_mm
+        }
+    };
+    assert!((response.area_mm2 / expected_area - 1.0).abs() < 1e-9);
     let mut force = [0.0; 3];
     let mut moment = [0.0; 3];
     let mut area = 0.0;
