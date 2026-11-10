@@ -61,3 +61,38 @@ Numerical jobs consume inert hashed deposition in exact existing Docker images; 
 The superseded Python source-edit campaign is retained in its immutable archive and published Git history. `algorithm_report.py` and its historical judges can reproduce that frozen report; their derived rows are not native verification evidence and cannot supply future generation. There is no current Python candidate mutator.
 
 Promotion requires the reviewed Rust implementation, appropriate producer identity, independent emitted-program replay, source-absent saved return/export, complete costs and held-out native geometry. Attractive coupon results alone do not justify a production default or strength claim. Production authoring remains typed Rust/protobuf; JSON here is inert experiment interchange and archived output.
+
+## Reinforcement benchmark
+
+`reinforcement_study.py` compares two complete native capture panels without
+editing their roads. Both retain the same original source and base recipe;
+density may differ explicitly for a material-budget alternative. Historical
+controls retain their original producer and return-evidence fields. Candidate
+binaries, full-object deposition and decoded motion bounds remain in the report.
+
+```sh
+python tools/infill-lab/reinforcement_study.py pack \
+  --control CONTROL_CAPTURE --candidate CANDIDATE_CAPTURE \
+  --context FROZEN_CONTEXT --output PAIRED_INPUTS
+# Dispatch through campaign.py with --backend reference in the matching image.
+python tools/infill-lab/reinforcement_study.py collect \
+  --inputs PAIRED_INPUTS --results PAIRED_RESULTS --image IMAGE_JSON \
+  --output REPORT_JSON
+```
+
+The default fixed bay contains two complete piers and flange tips. The candidate
+capture defines one shared physical crop for both constructions; `--shift-mm`
+creates a separately reported phase check and refuses a clipped flange envelope.
+Two explicit maximum-edge levels exercise X/Z compression and transverse bending.
+For a constant-section actual crop, the free axial extrusion solution supplies an
+additional analytical check. Changing sections receive no analytical substitute.
+
+The collector keeps missing/failed finest results unknown, checks exact
+input/scenario/image/cleanup and physical residual/work/volume obligations, and
+requires each directional refinement to pass. Its numerical gate does **not**
+establish independent-formulation qualification or whole-part strength; ratios
+remain provisional. `--backend quadratic` packs the same physical fixtures for
+in-process parity; `--element C3D15 --mesh-method prisms` supplies a distinct
+quadratic reference formulation. Keep those panels separate and compare the
+matched responses explicitly before a policy decision. No minimum useful-gain
+threshold applies.
