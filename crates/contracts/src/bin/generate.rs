@@ -398,6 +398,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SparseBandDisposition::decl(&config),
         SparseBandVeto::decl(&config),
         PlanarRegionCoverage::decl(&config),
+        WebRoofCeiling::decl(&config),
         WebRoofDomain::decl(&config),
         PrintLayer::decl(&config),
         SkinCoverageScope::decl(&config),

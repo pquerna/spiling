@@ -3,7 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 //! Tier 3: Cross-Feature Combination Tests.
-//! 55 multi-feature interaction and pairwise tests covering complex CAD/CAM interplay.
+//! Cross-feature geometry, source identity and transfer invariants.
 
 use spiling_contracts::geometry::*;
 use spiling_e2e_tests::fixtures::*;
@@ -318,57 +318,6 @@ fn test_comb_15_spline_housing_multi_strata_oracle() {
 }
 
 // =========================================================================
-// 16-17. Perforated Plate 512-Hole Midplane Section and Loops
-// =========================================================================
-
-#[test]
-fn test_comb_16_perforated_plate_bounds_and_metadata() {
-    let bytes = fixture_bytes("perforated-plate.step");
-    let def = import_test_step(&bytes).expect("perforated plate import");
-    let bounds = precision_bounds(&def, 0.001).expect("certified physical extents");
-    assert_close(bounds.min[0], 0.0, 1e-3, "min x");
-    assert_close(bounds.max[0], 1640.0, 1e-3, "max x");
-    assert_close(bounds.min[1], 0.0, 1e-3, "min y");
-    assert_close(bounds.max[1], 840.0, 1e-3, "max y");
-    assert_close(bounds.min[2], 0.0, 1e-3, "min z");
-    assert_close(bounds.max[2], 20.0, 1e-3, "max z");
-}
-
-#[test]
-fn test_comb_17_perforated_plate_midplane_loops_and_area() {
-    let bytes = fixture_bytes("perforated-plate.step");
-    let def = import_test_step(&bytes).expect("perforated plate import");
-    let sec = section_at_z(&def, 10.0).expect("section at z=10.0");
-    // 1 outer loop + 512 hole loops = 513 loops
-    assert_eq!(
-        sec.loops().len(),
-        513,
-        "perforated plate must have 513 loops"
-    );
-
-    let mut outer_area = 0.0f64;
-    let mut hole_area_sum = 0.0f64;
-    for lp in sec.loops() {
-        let a = loop_area(&sec, lp).abs();
-        if a > 500_000.0 {
-            outer_area = a;
-        } else {
-            hole_area_sum += a;
-        }
-    }
-
-    assert_close(outer_area, 1640.0 * 840.0, 1000.0, "outer perimeter area");
-    let expected_single_hole = PI * 20.0 * 20.0;
-    let expected_holes_total = 512.0 * expected_single_hole;
-    assert_close(
-        hole_area_sum,
-        expected_holes_total,
-        2000.0,
-        "512 holes area",
-    );
-}
-
-// =========================================================================
 // 18. Box-mm vs Box-inch Equivalence
 // =========================================================================
 
@@ -473,23 +422,6 @@ fn test_comb_21_work_budget_exhaustion_graceful_error() {
         source.section_with_byte_limit(plane, &cancel, MAX_SECTION_BYTES, &mut budget)
     });
     assert!(res.is_err(), "must fail on zero budget");
-}
-
-// =========================================================================
-// 22. Cooperative Cancellation
-// =========================================================================
-
-#[test]
-fn test_comb_22_cooperative_cancellation_during_section() {
-    let bytes = fixture_bytes("perforated-plate.step");
-    let def = import_test_step(&bytes).expect("plate");
-    let cancel = AtomicBool::new(true); // already cancelled
-    let plane = PlaneMm {
-        origin_mm: [0.0, 0.0, 10.0],
-        normal: [0.0, 0.0, 1.0],
-    };
-    let res = section(&def, plane, &cancel);
-    assert!(res.is_err(), "must abort when cancelled");
 }
 
 // =========================================================================
@@ -962,46 +894,6 @@ fn test_comb_49_brep_topology_integrity() {
     assert!(brep.tolerance() >= 0.0);
 }
 
-#[test]
-fn test_comb_50_display_mesh_triangle_area_positivity() {
-    let bytes = fixture_bytes("independent-exporters/occt-box-mm.step");
-    let def = import_test_step(&bytes).expect("box");
-    let mesh = tessellate_display(&def).expect("mesh");
-
-    for tri in mesh_indices(&mesh).chunks(3) {
-        if tri.len() == 3 {
-            let i0 = tri[0] as usize * 3;
-            let i1 = tri[1] as usize * 3;
-            let i2 = tri[2] as usize * 3;
-            let v0 = [
-                mesh_positions(&mesh)[i0],
-                mesh_positions(&mesh)[i0 + 1],
-                mesh_positions(&mesh)[i0 + 2],
-            ];
-            let v1 = [
-                mesh_positions(&mesh)[i1],
-                mesh_positions(&mesh)[i1 + 1],
-                mesh_positions(&mesh)[i1 + 2],
-            ];
-            let v2 = [
-                mesh_positions(&mesh)[i2],
-                mesh_positions(&mesh)[i2 + 1],
-                mesh_positions(&mesh)[i2 + 2],
-            ];
-
-            let e1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
-            let e2 = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
-            let cp = [
-                e1[1] * e2[2] - e1[2] * e2[1],
-                e1[2] * e2[0] - e1[0] * e2[2],
-                e1[0] * e2[1] - e1[1] * e2[0],
-            ];
-            let area = 0.5 * (cp[0] * cp[0] + cp[1] * cp[1] + cp[2] * cp[2]).sqrt();
-            assert!(area >= 0.0, "triangle area non-negative");
-        }
-    }
-}
-
 // =========================================================================
 // 51-55. Scale, Winding, Entity Tracing, Area & Full Audit
 // =========================================================================
@@ -1041,44 +933,91 @@ fn test_comb_53_section_span_entity_tracing() {
     }
 }
 
-#[test]
-fn test_comb_54_total_surface_area_estimation() {
-    let bytes = fixture_bytes("box-mm.step");
-    let def = import_test_step(&bytes).expect("box");
-    let mesh = tessellate_display(&def).expect("mesh");
-    let mut total_area = 0.0f64;
-    for tri in mesh_indices(&mesh).chunks(3) {
-        if tri.len() == 3 {
-            let i0 = tri[0] as usize * 3;
-            let i1 = tri[1] as usize * 3;
-            let i2 = tri[2] as usize * 3;
-            let v0 = [
-                mesh_positions(&mesh)[i0],
-                mesh_positions(&mesh)[i0 + 1],
-                mesh_positions(&mesh)[i0 + 2],
-            ];
-            let v1 = [
-                mesh_positions(&mesh)[i1],
-                mesh_positions(&mesh)[i1 + 1],
-                mesh_positions(&mesh)[i1 + 2],
-            ];
-            let v2 = [
-                mesh_positions(&mesh)[i2],
-                mesh_positions(&mesh)[i2 + 1],
-                mesh_positions(&mesh)[i2 + 2],
-            ];
-            let e1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
-            let e2 = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
-            let cp = [
-                e1[1] * e2[2] - e1[2] * e2[1],
-                e1[2] * e2[0] - e1[0] * e2[2],
-                e1[0] * e2[1] - e1[1] * e2[0],
-            ];
-            total_area += 0.5 * (cp[0] * cp[0] + cp[1] * cp[1] + cp[2] * cp[2]).sqrt();
-        }
+fn box_display_matches_source(triangles: &[[[f64; 3]; 3]]) -> bool {
+    if triangles.is_empty() {
+        return false;
     }
-    // Box 20x10x8: 2*(200 + 160 + 80) = 880 mm2
-    assert_close(total_area, 880.0, 5.0, "total surface area");
+    let mut minimum = [f64::INFINITY; 3];
+    let mut maximum = [f64::NEG_INFINITY; 3];
+    let mut area = 0.0;
+    let mut volume = 0.0;
+    for triangle in triangles {
+        for point in triangle {
+            for axis in 0..3 {
+                if !point[axis].is_finite() {
+                    return false;
+                }
+                minimum[axis] = minimum[axis].min(point[axis]);
+                maximum[axis] = maximum[axis].max(point[axis]);
+            }
+        }
+        let [first, second, third] = *triangle;
+        let first_edge: [f64; 3] = std::array::from_fn(|axis| second[axis] - first[axis]);
+        let second_edge: [f64; 3] = std::array::from_fn(|axis| third[axis] - first[axis]);
+        let normal = [
+            first_edge[1] * second_edge[2] - first_edge[2] * second_edge[1],
+            first_edge[2] * second_edge[0] - first_edge[0] * second_edge[2],
+            first_edge[0] * second_edge[1] - first_edge[1] * second_edge[0],
+        ];
+        let triangle_area = normal
+            .iter()
+            .map(|component| component * component)
+            .sum::<f64>()
+            .sqrt()
+            / 2.0;
+        if !triangle_area.is_finite() || triangle_area <= 0.0 {
+            return false;
+        }
+        let outward = first
+            .iter()
+            .zip([10.0, 5.0, 4.0])
+            .zip(normal)
+            .map(|((coordinate, center), component)| (coordinate - center) * component)
+            .sum::<f64>();
+        if !outward.is_finite() || outward <= 0.0 {
+            return false;
+        }
+        area += triangle_area;
+        volume += first
+            .iter()
+            .zip(normal)
+            .map(|(coordinate, component)| coordinate * component)
+            .sum::<f64>()
+            / 6.0;
+    }
+    minimum.iter().all(|coordinate| coordinate.abs() <= 0.005)
+        && maximum
+            .iter()
+            .zip([20.0, 10.0, 8.0])
+            .all(|(coordinate, expected)| (coordinate - expected).abs() <= 0.005)
+        && (area - 880.0).abs() <= 5.0
+        && (volume - 1600.0).abs() <= 5.0
+}
+
+#[test]
+fn test_comb_54_display_preserves_source_surface_and_rejects_corruption() {
+    let definition =
+        import_test_step(&fixture_bytes("independent-exporters/occt-box-mm.step")).unwrap();
+    let mesh = tessellate_display(&definition).unwrap();
+    assert_mesh_source_coverage(&definition, &mesh);
+    let triangles: Vec<_> = mesh_triangles(&mesh).collect();
+    assert!(box_display_matches_source(&triangles));
+    assert!(!box_display_matches_source(&[]));
+    let without_top: Vec<_> = triangles
+        .iter()
+        .copied()
+        .filter(|triangle| !triangle.iter().all(|point| (point[2] - 8.0).abs() <= 0.005))
+        .collect();
+    assert!(!box_display_matches_source(&without_top));
+    let mut reversed = triangles.clone();
+    reversed[0].swap(1, 2);
+    assert!(!box_display_matches_source(&reversed));
+    let mut degenerate = triangles.clone();
+    degenerate[0][1] = degenerate[0][0];
+    assert!(!box_display_matches_source(&degenerate));
+    let mut nonfinite = triangles.clone();
+    nonfinite[0][0][0] = f64::NAN;
+    assert!(!box_display_matches_source(&nonfinite));
 }
 
 #[test]

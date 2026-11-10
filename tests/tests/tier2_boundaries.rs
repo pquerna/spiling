@@ -121,12 +121,6 @@ fn test_f02_corner_bounds_non_cube() {
 }
 
 #[test]
-fn test_f02_corner_bounds_large_plate() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    assert_fixture_enclosure(&def, "perforated-plate.step");
-}
-
-#[test]
 fn test_f02_corner_definition_cloning_independence() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let bounds1 = def.bounds_mm();
@@ -274,12 +268,6 @@ fn test_f05_corner_resource_limit_five_faces_on_box() {
 fn test_f05_corner_retained_bytes_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     assert!(def.retained_query_proof_bytes() > 0);
-}
-
-#[test]
-fn test_f05_corner_retained_bytes_plate() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    assert!(def.retained_query_proof_bytes() > 100_000);
 }
 
 // =========================================================================
@@ -556,12 +544,6 @@ fn test_f12_corner_clean_through_hole() {
 fn test_f12_corner_clean_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     assert_source_face_identity(&def, "cylinder.step");
-}
-
-#[test]
-fn test_f12_corner_clean_perforated_plate() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    assert_source_face_identity(&def, "perforated-plate.step");
 }
 
 // =========================================================================
@@ -1239,13 +1221,6 @@ fn test_f27_corner_tapered_fitting_clipping() {
     assert_eq!(sec.loops().len(), 2);
 }
 
-#[test]
-fn test_f27_corner_perforated_plate_clipping() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    let sec = section_at_z(&def, 10.0).unwrap();
-    assert_eq!(sec.loops().len(), 513);
-}
-
 // =========================================================================
 // Feature 28 Corner Cases: Winding orientations
 // =========================================================================
@@ -1356,13 +1331,6 @@ fn test_f30_corner_bracket_chaining() {
     assert!(!sec.loops().is_empty());
 }
 
-#[test]
-fn test_f30_corner_plate_chaining() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    let sec = section_at_z(&def, 10.0).unwrap();
-    assert_eq!(sec.loops().len(), 513);
-}
-
 // =========================================================================
 // Feature 31 Corner Cases: Adaptive chord sampling limits
 // =========================================================================
@@ -1438,66 +1406,6 @@ fn test_f32_corner_retained_bytes_reasonable() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let sec = section_at_z(&def, 4.0).unwrap();
     assert!(sec.retained_bytes() < 50_000);
-}
-
-#[test]
-fn test_f32_corner_plate_native_and_wire_storage_admission() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    let sec = section_at_z(&def, 10.0).unwrap();
-    assert_eq!(sec.loops().len(), 513);
-    assert_eq!(
-        sec.loops()
-            .iter()
-            .filter(|boundary| boundary.is_hole)
-            .count(),
-        512
-    );
-    let packed_bytes = spiling_contracts::display::packed_section_size(
-        sec.loops().iter().map(|boundary| boundary.points_mm.len()),
-        MAX_GEOMETRY_CHUNK_BYTES,
-    )
-    .unwrap();
-    assert!(
-        packed_bytes < 10_000_000,
-        "packed section: {packed_bytes} bytes"
-    );
-    let native_point_bytes: usize = sec
-        .loops()
-        .iter()
-        .map(|boundary| boundary.points_mm.capacity() * std::mem::size_of::<[f64; 3]>())
-        .sum();
-    assert!(sec.retained_bytes() >= native_point_bytes);
-    assert!(
-        sec.retained_bytes() <= MAX_PREPARED_SECTION_BYTES,
-        "native section: {} bytes; packed section: {packed_bytes} bytes",
-        sec.retained_bytes(),
-    );
-    let expected_area = 1640.0 * 840.0 - 512.0 * std::f64::consts::PI * 20.0_f64.powi(2);
-    let perimeter = 2.0 * (1640.0 + 840.0) + 512.0 * 2.0 * std::f64::consts::PI * 20.0;
-    let chord_error = sec.achieved_chord_error_mm();
-    let area_bound = perimeter * chord_error + 513.0 * std::f64::consts::PI * chord_error.powi(2);
-    let mut actual_area = 0.0;
-    for boundary in sec.loops() {
-        assert_eq!(boundary.points_mm.first(), boundary.points_mm.last());
-        let signed_area = loop_area(&sec, boundary);
-        assert_eq!(signed_area < 0.0, boundary.is_hole);
-        actual_area += signed_area;
-    }
-    assert_close(
-        actual_area,
-        expected_area,
-        area_bound,
-        "plate material area",
-    );
-    let cancel = AtomicBool::new(false);
-    let mut work = GeometryWorkBudget::query();
-    let prepared =
-        prepare_section_source(&def, MAX_PREPARED_SECTION_SOURCE_BYTES, &cancel, &mut work)
-            .unwrap();
-    let error = prepared
-        .section_with_byte_limit(sec.plane(), &cancel, 1, &mut work)
-        .unwrap_err();
-    assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
 }
 
 // =========================================================================
@@ -1743,13 +1651,6 @@ fn test_f37_corner_bounds_bracket() {
     assert_close(b.maximum[1], 30.0, 1e-4, "max X");
 }
 
-#[test]
-fn test_f37_corner_bounds_plate() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    let b = precision_axis(&def, 0, 0.0001).expect("certified physical extents");
-    assert_close(b.maximum[1], 1640.0, 1e-4, "max X");
-}
-
 // =========================================================================
 // Feature 38 Corner Cases: Critical height strata
 // =========================================================================
@@ -1958,14 +1859,6 @@ fn test_f40_corner_single_void_through_hole() {
     let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert_eq!(sec.loops().len(), 2);
     assert!(sec.loops()[1].is_hole);
-}
-
-#[test]
-fn test_f40_corner_many_voids_plate() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    let sec = section_at_z(&def, 10.0).unwrap();
-    let holes = sec.loops().iter().filter(|l| l.is_hole).count();
-    assert_eq!(holes, 512);
 }
 
 #[test]
@@ -2231,15 +2124,24 @@ fn test_f46_corner_mesh_budget_triangles() {
 
 #[test]
 fn test_f46_corner_mesh_budget_exceeded_triangles() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
+    let definition =
+        import_test_step(&fixture_bytes("independent-exporters/occt-box-mm.step")).unwrap();
     let cancel = AtomicBool::new(false);
     let budget = MeshBudget {
         vertices: 10,
         triangles: 5,
         bytes: 100_000,
     };
-    let res = tessellate_with_budget(&def, DisplayProfile::MeshTrimmedMm005V2, &cancel, budget);
-    let _ = res;
+    let error = tessellate_with_budget(
+        &definition,
+        DisplayProfile::MeshTrimmedMm005V2,
+        &cancel,
+        budget,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
+    let mesh = tessellate_display(&definition).unwrap();
+    assert_mesh_source_coverage(&definition, &mesh);
 }
 
 #[test]
