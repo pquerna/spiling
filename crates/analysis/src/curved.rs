@@ -12,6 +12,34 @@ use std::{
     f64::consts::{PI, TAU},
 };
 
+fn partition_point(start: f64, end: f64, step: usize, count: usize) -> f64 {
+    if step == 0 {
+        start
+    } else if step == count {
+        end
+    } else {
+        start + (end - start) * step as f64 / count as f64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn radial_interfaces_keep_exact_canonical_endpoints() {
+        assert_ne!(1.6 + (7.2 - 1.6), 7.2);
+        for count in [1, 2, 3, 7, 11] {
+            assert_eq!(partition_point(1.6, 7.2, 0, count), 1.6);
+            assert_eq!(partition_point(1.6, 7.2, count, count), 7.2);
+            assert_eq!(
+                partition_point(1.6, 7.2, count, count),
+                partition_point(7.2, 8.0, 0, count)
+            );
+        }
+    }
+}
+
 pub(crate) fn build(
     plate: &spiling_geometry::BoredPlate,
     settings: &AnalysisRunSettings,
@@ -131,23 +159,30 @@ pub(crate) fn build(
                     let outside = radial_hit(angle, bounds);
                     if radial < inner_wall_cells {
                         [
-                            plate.radius_mm() + wall * radial as f64 / inner_wall_cells as f64,
-                            plate.radius_mm()
-                                + wall * (radial + 1) as f64 / inner_wall_cells as f64,
+                            partition_point(
+                                plate.radius_mm(),
+                                inner_wall,
+                                radial,
+                                inner_wall_cells,
+                            ),
+                            partition_point(
+                                plate.radius_mm(),
+                                inner_wall,
+                                radial + 1,
+                                inner_wall_cells,
+                            ),
                         ]
                     } else if radial < inner_wall_cells + core_cells {
                         let index = radial - inner_wall_cells;
                         [
-                            inner_wall + (inside - inner_wall) * index as f64 / core_cells as f64,
-                            inner_wall
-                                + (inside - inner_wall) * (index + 1) as f64 / core_cells as f64,
+                            partition_point(inner_wall, inside, index, core_cells),
+                            partition_point(inner_wall, inside, index + 1, core_cells),
                         ]
                     } else {
                         let index = radial - inner_wall_cells - core_cells;
                         [
-                            inside + (outside - inside) * index as f64 / outer_wall_cells as f64,
-                            inside
-                                + (outside - inside) * (index + 1) as f64 / outer_wall_cells as f64,
+                            partition_point(inside, outside, index, outer_wall_cells),
+                            partition_point(inside, outside, index + 1, outer_wall_cells),
                         ]
                     }
                 };

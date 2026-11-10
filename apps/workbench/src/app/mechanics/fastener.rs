@@ -32,15 +32,16 @@ impl Tool {
         Ok(id)
     }
     pub fn reset_selection(&mut self) {
-        let requested = std::mem::take(&mut self.requested);
-        *self = Self {
-            requested,
-            ..Default::default()
-        };
+        *self = Self::default();
+    }
+    fn set_armed(&mut self, armed: bool) {
+        self.cancel();
+        self.armed = armed;
     }
     pub fn cancel(&mut self) {
         self.armed = false;
         self.pending = None;
+        self.requested.clear();
         self.preview = None;
         self.error = None;
     }
@@ -398,9 +399,9 @@ impl Workbench {
                 .toggle_value(&mut self.mechanics.fastener.armed, "Attach fastener")
                 .changed()
             {
-                self.mechanics.fastener.pending = None;
-                self.mechanics.fastener.preview = None;
-                self.mechanics.fastener.error = None;
+                self.mechanics
+                    .fastener
+                    .set_armed(self.mechanics.fastener.armed);
                 if self.mechanics.fastener.armed {
                     self.mechanics.tool.armed = false;
                     self.mechanics.tool.pending = None;
@@ -729,8 +730,27 @@ mod tests {
         };
         tool.cancel();
         assert!(!tool.armed && tool.preview.is_none() && tool.pending.is_none());
-        assert_eq!(tool.requested.len(), 1); // Escape cannot trigger another native request.
+        assert!(tool.requested.is_empty());
         assert_eq!(draft.value, saved);
+    }
+    #[test]
+    fn fastener_rearming_retries_cancelled_or_failed_preparation() {
+        let reference = crate::viewport::fastener::test_preparation().reference;
+        let mut tool = Tool {
+            armed: true,
+            pending: Some(reference.clone()),
+            requested: vec![reference.clone()],
+            error: Some("Preparation cancelled".into()),
+            ..Default::default()
+        };
+        tool.set_armed(false);
+        tool.set_armed(true);
+        assert!(tool.armed);
+        assert!(!tool.requested.contains(&reference));
+        assert!(tool.pending.is_none() && tool.error.is_none());
+        tool.requested.push(reference);
+        tool.reset_selection();
+        assert!(tool.requested.is_empty());
     }
     #[test]
     fn fastener_controls_work_in_both_themes_at_ordinary_and_narrow_widths() {

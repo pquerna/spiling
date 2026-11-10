@@ -575,6 +575,32 @@ fn attachment_facets(
         .collect()
 }
 
+#[test]
+fn curved_native_partition_remains_conforming_across_recipe_widths() {
+    let cancel = AtomicBool::new(false);
+    let (prism, case, mut settings) = attachment_native_plate(&cancel);
+    settings.recipe.perimeter_count = 2;
+    for width in [0.4, 0.45, 0.57] {
+        settings.recipe.bead_width_mm = width;
+        let operator = prepare(
+            &prism,
+            &settings,
+            RigidPoseMm::IDENTITY,
+            &case,
+            &Budget::new(&cancel, 60),
+        )
+        .unwrap();
+        assert!(!operator.mesh.elements.is_empty());
+        assert!(
+            operator
+                .mesh
+                .facets
+                .iter()
+                .all(|facet| { facet.face.is_some() || (facet.axis == 1 && facet.side == 0) })
+        );
+    }
+}
+
 // Independently reconstruct Ku from original element matrices, reactions from
 // retained physical samples, and generalized motions from the shared contract.
 // This deliberately does not use the augmented factor or its inverse columns.
