@@ -659,6 +659,49 @@ async function main() {
       await run("cargo", ["build", "--locked", "-p", "spiling-engine", "-p", "spiling-cli"]);
       await run("node", ["tools/compare-slicers.mjs", ...process.argv.slice(3)]);
       break;
+    case "test:geometry-stress":
+      await runTestSuites([
+        [
+          "oversized geometry integration",
+          () =>
+            run(
+              "cargo",
+              [
+                "test",
+                "--locked",
+                "-p",
+                "spiling-e2e-tests",
+                "--test",
+                "geometry_stress",
+                "--",
+                "--ignored",
+                "--test-threads=1",
+              ],
+              { env: testEnvironment },
+            ),
+        ],
+        [
+          "oversized native support",
+          () =>
+            run(
+              "cargo",
+              [
+                "test",
+                "--locked",
+                "-p",
+                "spiling-geometry",
+                "--lib",
+                "analysis::bounds::tests::native_plate_support_does_not_require_exact_authoring_chart_closure",
+                "--",
+                "--exact",
+                "--ignored",
+                "--test-threads=1",
+              ],
+              { env: testEnvironment },
+            ),
+        ],
+      ]);
+      break;
     case "test:hardware":
       await contracts(true);
       await stageEngine();

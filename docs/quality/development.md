@@ -35,6 +35,7 @@ build is required. A suitable Vulkan driver must be installed separately.
 | `pnpm build`, `pnpm build:native` | Build engine, workbench and CLI together                                                 |
 | `pnpm gallery:native`             | Production controls/themes without an engine                                             |
 | `pnpm test:native`                | Host checks and sequential actual-child operator regressions                             |
+| `pnpm test:geometry-stress`       | Explicit oversized-plate integration and native-support diagnostics                      |
 | `pnpm contracts --check`          | Reject Rust-derived TypeScript and packed-golden drift                                   |
 | `pnpm materials:sync`             | Refresh pinned external reference catalogs after complete admission                      |
 | `pnpm materials:check`            | Check catalog integrity offline; see [catalog maintenance](material-catalogs.md)         |
@@ -56,6 +57,22 @@ are summarized together and keep the overall command unsuccessful; later suites
 still run. A failed prerequisite build or an operator interruption stops the run.
 Keep the complete output when handing a failing gate to its owning module.
 `pnpm test:native` separately exercises the actual-child host regressions.
+
+Select checks by the product failure or supporting invariant they detect, an
+independent expectation and distinct coverage. Default geometry tests retain
+ordinary source/hole identity, material sections, finite source-bound display,
+typed budget refusal and cancellation with source reuse. Do not prescribe mesh
+triangle counts or optimizer order where the contract permits alternatives.
+Wire formats, immutable hashes and same-producer determinism remain exact.
+
+`pnpm test:geometry-stress` separately runs the unchanged 1640 × 840 × 20 mm,
+512-hole source through consolidated source/bounds/material/void/storage checks
+and its native-support diagnostic. It replaces repeated oversized queries in
+the ordinary tiered suite, not required ordinary-part positives. Keep external
+memory/task/deadline limits for this expensive cohort. A timeout or failure stays
+unresolved; neither moving stress coverage nor selected passing tests establishes
+a green workspace. Run focused checks while editing, affected real consumers at
+integration and complete default commands on a coherent candidate.
 
 Build the matching engine and workbench before real-surface acceptance. Do not
 replace binaries while their window/engine is live. Reuse one disk-backed target

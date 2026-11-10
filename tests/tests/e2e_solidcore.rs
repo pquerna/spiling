@@ -97,17 +97,3 @@ fn test_e2e_query_work_and_mesh_byte_governors_pipeline() {
         "must stay within allocated budget"
     );
 }
-
-#[test]
-fn test_e2e_cooperative_cancellation_pipeline() {
-    let bytes = fixture_bytes("perforated-plate.step");
-    let def = import_test_step(&bytes).expect("plate import");
-
-    let cancel = AtomicBool::new(true);
-    let plane = PlaneMm {
-        origin_mm: [0.0, 0.0, 10.0],
-        normal: [0.0, 0.0, 1.0],
-    };
-    let res = section(&def, plane, &cancel);
-    assert!(res.is_err(), "must halt on cooperative cancellation");
-}

@@ -549,12 +549,6 @@ fn test_f12_through_hole_source_identity() {
 }
 
 #[test]
-fn test_f12_pure_import_perforated_plate() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    assert_source_face_identity(&def, "perforated-plate.step");
-}
-
-#[test]
 fn test_f12_inch_box_source_identity() {
     let def = import_test_step(&fixture_bytes("box-inch.step")).unwrap();
     assert_source_face_identity(&def, "box-inch.step");
@@ -1259,13 +1253,6 @@ fn test_f27_trimmed_uv_rounded_housing() {
     assert_eq!(sec.loops().len(), 2);
 }
 
-#[test]
-fn test_f27_trimmed_uv_perforated_plate() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    let sec = section_at_z(&def, 10.0).unwrap();
-    assert_eq!(sec.loops().len(), 513);
-}
-
 // =========================================================================
 // Feature 28: Plane section orientation convention
 // =========================================================================
@@ -1392,13 +1379,6 @@ fn test_f30_ribbed_bracket_chains_loops() {
     .unwrap();
     let sec = section_at_z(&def, 4.0).unwrap();
     assert!(!sec.loops().is_empty());
-}
-
-#[test]
-fn test_f30_perforated_plate_chains_all_loops() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    let sec = section_at_z(&def, 10.0).unwrap();
-    assert_eq!(sec.loops().len(), 513);
 }
 
 // =========================================================================
@@ -1750,15 +1730,6 @@ fn test_f37_bounds_through_hole() {
     assert_close(b.max[2], 8.0, 1e-6, "max Z");
 }
 
-#[test]
-fn test_f37_bounds_perforated_plate() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    let b = precision_bounds(&def, 0.0001).expect("certified physical extents");
-    assert_close(b.max[0], 1640.0, 1e-4, "plate X");
-    assert_close(b.max[1], 840.0, 1e-4, "plate Y");
-    assert_close(b.max[2], 20.0, 1e-4, "plate Z");
-}
-
 // =========================================================================
 // Feature 38: Critical height stratum classification
 // =========================================================================
@@ -1985,14 +1956,6 @@ fn test_f40_through_hole_void_presence() {
     let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert_eq!(sec.loops().len(), 2);
     assert!(sec.loops()[1].is_hole);
-}
-
-#[test]
-fn test_f40_perforated_plate_void_count() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    let sec = section_at_z(&def, 10.0).unwrap();
-    let hole_count = sec.loops().iter().filter(|l| l.is_hole).count();
-    assert_eq!(hole_count, 512);
 }
 
 #[test]
@@ -2520,10 +2483,4 @@ fn test_f50_box_inch_regression() {
         1e-6,
         "box inch regression",
     );
-}
-
-#[test]
-fn test_f50_perforated_plate_regression() {
-    let def = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
-    assert_source_face_identity(&def, "perforated-plate.step");
 }

@@ -24,6 +24,7 @@
     "build:native": "node tools/run.mjs build:native",
     "gallery:native": "node tools/run.mjs gallery:native",
     "test:native": "node tools/run.mjs test:native",
+    "test:geometry-stress": "node tools/run.mjs test:geometry-stress",
     "compare:slicers": "node tools/run.mjs compare:slicers",
     "test:hardware": "node tools/run.mjs test:hardware",
     "materials:sync": "node tools/run.mjs materials:sync",

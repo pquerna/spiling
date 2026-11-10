@@ -192,18 +192,6 @@ fn test_geometry_07_thin_wall_machining_ribbed_bracket() {
 }
 
 // =========================================================================
-// Scenario 8: High-Speed Drilling Perforated Plate
-// =========================================================================
-
-#[test]
-fn test_geometry_08_perforated_plate_material_section_hole_count() {
-    let bytes = fixture_bytes("perforated-plate.step");
-    let def = import_test_step(&bytes).expect("perforated plate");
-    let sec = section_at_z(&def, 10.0).expect("midplane");
-    assert_eq!(sec.loops().len(), 513, "512 holes + 1 perimeter");
-}
-
-// =========================================================================
 // Scenario 9: Imperial Stock & Metric Tooling
 // =========================================================================
 
@@ -416,33 +404,50 @@ fn test_geometry_21_workpiece_mass_and_stock_removal_ratio() {
 // =========================================================================
 
 #[test]
-fn test_geometry_22_cancellation_during_long_toolpath_slicing() {
-    let bytes = fixture_bytes("perforated-plate.step");
-    let def = import_test_step(&bytes).expect("plate");
+fn test_geometry_22_cancellation_preserves_reusable_source() {
+    let definition = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
+    let original_hash = definition.provenance().source_hash.clone();
     let cancel = AtomicBool::new(false);
-
-    // First slice succeeds
-    let s1 = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 5.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
+    let plane = PlaneMm {
+        origin_mm: [0.0, 0.0, 4.0],
+        normal: [0.0, 0.0, 1.0],
+    };
+    let before = section(&definition, plane, &cancel).unwrap();
+    assert_eq!(
+        before
+            .loops()
+            .iter()
+            .filter(|boundary| boundary.is_hole)
+            .count(),
+        1
     );
-    assert!(s1.is_ok());
-
-    // Operator cancels
     cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-    let s2 = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 10.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        &cancel,
+    let error = section(&definition, plane, &cancel).unwrap_err();
+    assert_eq!(error.code, GeometryErrorCode::Cancelled);
+    cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+    let after = section(&definition, plane, &cancel).unwrap();
+    assert_eq!(
+        after
+            .loops()
+            .iter()
+            .filter(|boundary| boundary.is_hole)
+            .count(),
+        1
     );
-    assert!(s2.is_err(), "must abort after cancellation");
+    let material_area = |section: &NativeSection| {
+        section
+            .loops()
+            .iter()
+            .map(|boundary| loop_area(section, boundary))
+            .sum::<f64>()
+    };
+    assert_close(
+        material_area(&after),
+        material_area(&before),
+        0.000001,
+        "material after cancellation",
+    );
+    assert_eq!(definition.provenance().source_hash, original_hash);
 }
 
 // =========================================================================
