@@ -141,6 +141,8 @@ pub enum PreflightEvidence {
     Unsupported,
     Indeterminate,
     Failed,
+    /// ADR012: admitted within the recorded tolerance policy, not exactly certified.
+    Tolerant,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -185,7 +187,7 @@ impl PreflightReport {
                 PreflightEvidence::NotEvaluated | PreflightEvidence::Indeterminate => {
                     expected = PreflightDisposition::Unresolved;
                 }
-                PreflightEvidence::Certified => {}
+                PreflightEvidence::Certified | PreflightEvidence::Tolerant => {}
             }
         }
         if self.disposition != expected {

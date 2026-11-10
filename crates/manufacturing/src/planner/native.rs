@@ -87,6 +87,36 @@ pub(super) struct NativeSpan {
     pub finished_bytes: usize,
 }
 
+impl NativeSpan {
+    /// A one-layer ADR012 tolerant span: no invariance, inner prism or finish.
+    #[expect(clippy::too_many_arguments)]
+    pub(super) fn tolerant(
+        end: u32,
+        material: Arc<MultiPolygon<f64>>,
+        contributions: Vec<(OccurrenceId, Arc<MultiPolygon<f64>>, usize)>,
+        contribution_bytes: usize,
+        occupied: Arc<super::ContinuousOccupied>,
+        source_area_mm2: f64,
+        point_count: usize,
+        material_bytes: usize,
+    ) -> Self {
+        Self {
+            end,
+            invariant: false,
+            inner_material: None,
+            material,
+            finished: Vec::new(),
+            contributions,
+            contribution_bytes,
+            occupied,
+            source_area_mm2,
+            point_count,
+            material_bytes,
+            finished_bytes: 0,
+        }
+    }
+}
+
 pub(super) struct CompletedCoverage {
     pub slab_count: u32,
     pub achieved_shape_error_mm: f64,
@@ -675,6 +705,25 @@ impl NativeStageState {
                     .capacity()
                     .saturating_mul(std::mem::size_of::<ReadyStage>()),
             )
+    }
+
+    /// ADR012 tolerant coverage: sections were sampled, not proved, so no
+    /// native ledger is finalized and no native counts are claimed.
+    pub fn finalize_tolerant(self, world_height_interval_mm: [f64; 2]) -> CompletedCoverage {
+        CompletedCoverage {
+            slab_count: 0,
+            achieved_shape_error_mm: 0.0,
+            source_features: NativeFeatureCoverageSummary {
+                disjoint_source_layer_count: 0,
+                invariant_source_union_layer_count: 0,
+                native_interface_complex_layer_count: 0,
+                owned_critical_slab_count: 0,
+            },
+            protected_voids: self.protected_voids,
+            material_proof: spiling_geometry::CompletedNativeUnionProofSet::tolerant(
+                world_height_interval_mm,
+            ),
+        }
     }
 
     pub fn finalize(
@@ -4361,6 +4410,7 @@ mod actual_deposition_tests {
                 nominal_deposition_volume_mm3: object_area * volume,
                 support_area_mm2: support_area,
                 support_nominal_deposition_volume_mm3: support_area * volume,
+                unsupported_overhang_mm: 0.0,
                 process_regions: if object_area > 0.0 {
                     vec![ProcessRegionCoverage {
                         functional_solid_zone: None,
@@ -4736,6 +4786,7 @@ mod capture_proposal_tests {
         work: &mut spiling_geometry::GeometryWorkBudget,
     ) -> preflight::Admission<'_> {
         preflight::Admission {
+            tolerant: None,
             bounds: None,
             horizontal_events: Vec::new(),
             native_bounds: BTreeMap::new(),

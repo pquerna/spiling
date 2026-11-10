@@ -332,6 +332,7 @@ impl ClassifiedRegions {
             },
             support_area_mm2: 0.0,
             support_nominal_deposition_volume_mm3: 0.0,
+            unsupported_overhang_mm: 0.0,
         };
         let mut result = Self {
             layout,
@@ -1344,10 +1345,22 @@ impl ClassifiedRegions {
             byte_sum(classified_owned_bytes, bridge_bytes)?,
         )?;
         if !proof.supported {
-            return Err(error(
-                ManufacturingErrorCode::UnsupportedGeometry,
-                "minimum skin construction lacks fresh actual whole-candidate anchors",
-            ));
+            // The lengthened rows would print over nothing. Omit those
+            // sub-minimum rows instead; the rest of the candidate is the
+            // unfitted one whose anchors were already admitted.
+            let fitted: Vec<[[f64; 3]; 2]> = candidate
+                .skin_command_fits
+                .iter()
+                .flat_map(|domain| domain.fits.iter().map(|fit| fit.fitted_mm))
+                .collect();
+            candidate.paths.retain(|path| {
+                !(path.points_mm.len() == 2
+                    && fitted
+                        .iter()
+                        .any(|f| f[0] == path.points_mm[0] && f[1] == path.points_mm[1]))
+            });
+            *skin_command_fits = Vec::new();
+            return Ok(candidate.paths);
         }
         *skin_command_fits = candidate.skin_command_fits;
         Ok(candidate.paths)

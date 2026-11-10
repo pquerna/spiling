@@ -5,7 +5,10 @@
 //! Read-only, revision-captured material support queries. Core still owns Apply.
 use super::{check_cancel, error};
 use spiling_contracts::{geometry::*, project::ProjectRevision};
-use spiling_geometry::{BoundsPolicy, Definition, GeometryWorkBudget};
+use spiling_geometry::{
+    BoundsPolicy, Definition, GeometryWorkBudget,
+    tolerant::{TolerantModel, TolerantPolicy},
+};
 use std::sync::atomic::AtomicBool;
 
 pub(super) struct Request {
@@ -39,6 +42,79 @@ pub(super) fn prepare(
             "invalid native contact request",
         ));
     }
+    let [
+        minimum_lower_mm,
+        minimum_upper_mm,
+        maximum_lower_mm,
+        maximum_upper_mm,
+    ] = match exact_brackets(definition, &request, cancel) {
+        Ok(brackets) => brackets,
+        Err(exact) if tolerant_retry(&exact) => tolerant_brackets(definition, &request, cancel)
+            .map_err(|tolerant| {
+                error(
+                    tolerant.code,
+                    format!(
+                        "{} (exact native bounds also refused: {})",
+                        tolerant.message, exact.message
+                    ),
+                )
+            })?,
+        Err(exact) => return Err(exact),
+    };
+    // Use the same directed arithmetic as the checked proposal contract.
+    // A blanket reserve based on unrelated XY/envelope magnitudes invents a
+    // positive material birth above the bed even when contact is exact.
+    let contact_delta = rounded_sum_interval(request.envelope_mm.min[2], -minimum_lower_mm[2])[1];
+    let mut pose = request.pose;
+    pose.translation_mm[2] = rounded_sum_interval(request.pose.translation_mm[2], contact_delta)[1];
+    if request.center_xy {
+        for axis in 0..2 {
+            let target = request.envelope_mm.min[axis]
+                + (request.envelope_mm.max[axis] - request.envelope_mm.min[axis]) * 0.5;
+            let center =
+                minimum_lower_mm[axis] + (maximum_upper_mm[axis] - minimum_lower_mm[axis]) * 0.5;
+            pose.translation_mm[axis] = request.pose.translation_mm[axis] + (target - center);
+        }
+    }
+    pose.validate()?;
+    let delta_z = rounded_sum_interval(pose.translation_mm[2], -request.pose.translation_mm[2]);
+    let maximum_contact_gap_mm = rounded_sum_interval(
+        rounded_sum_interval(minimum_upper_mm[2], delta_z[1])[1],
+        -request.envelope_mm.min[2],
+    )[1];
+    let result = BedPosePreparation {
+        session_id: request.session_id,
+        scene_revision: request.scene_revision,
+        project_revision: request.project_revision,
+        occurrence_id: request.occurrence_id,
+        definition_id: request.definition_id,
+        original_pose: request.pose,
+        pose,
+        envelope_mm: request.envelope_mm,
+        minimum_lower_mm,
+        minimum_upper_mm,
+        maximum_lower_mm,
+        maximum_upper_mm,
+        center_xy: request.center_xy,
+        contact_tolerance_mm: request.contact_tolerance_mm,
+        maximum_contact_gap_mm,
+    };
+    result.validate().map_err(|_| {
+        error(
+            GeometryErrorCode::InvalidPose,
+            "prepared native pose cannot fit the declared envelope and contact tolerance",
+        )
+    })?;
+    check_cancel(cancel)?;
+    Ok(result)
+}
+
+/// Exact native placement brackets: minimum lower/upper and maximum lower/upper.
+fn exact_brackets(
+    definition: &Definition,
+    request: &Request,
+    cancel: &AtomicBool,
+) -> Result<[[f64; 3]; 4], GeometryError> {
     let mut work = GeometryWorkBudget::query();
     let source = spiling_geometry::prepare_solid(
         definition,
@@ -120,50 +196,48 @@ pub(super) fn prepare(
         maximum_lower_mm[axis] = maximum[0];
         maximum_upper_mm[axis] = maximum[1];
     }
-    // Use the same directed arithmetic as the checked proposal contract.
-    // A blanket reserve based on unrelated XY/envelope magnitudes invents a
-    // positive material birth above the bed even when contact is exact.
-    let contact_delta = rounded_sum_interval(request.envelope_mm.min[2], -minimum_lower_mm[2])[1];
-    let mut pose = request.pose;
-    pose.translation_mm[2] = rounded_sum_interval(request.pose.translation_mm[2], contact_delta)[1];
-    if request.center_xy {
-        for axis in 0..2 {
-            let target = request.envelope_mm.min[axis]
-                + (request.envelope_mm.max[axis] - request.envelope_mm.min[axis]) * 0.5;
-            let center =
-                minimum_lower_mm[axis] + (maximum_upper_mm[axis] - minimum_lower_mm[axis]) * 0.5;
-            pose.translation_mm[axis] = request.pose.translation_mm[axis] + (target - center);
-        }
-    }
-    pose.validate()?;
-    let delta_z = rounded_sum_interval(pose.translation_mm[2], -request.pose.translation_mm[2]);
-    let maximum_contact_gap_mm = rounded_sum_interval(
-        rounded_sum_interval(minimum_upper_mm[2], delta_z[1])[1],
-        -request.envelope_mm.min[2],
-    )[1];
-    let result = BedPosePreparation {
-        session_id: request.session_id,
-        scene_revision: request.scene_revision,
-        project_revision: request.project_revision,
-        occurrence_id: request.occurrence_id,
-        definition_id: request.definition_id,
-        original_pose: request.pose,
-        pose,
-        envelope_mm: request.envelope_mm,
+    Ok([
         minimum_lower_mm,
         minimum_upper_mm,
         maximum_lower_mm,
         maximum_upper_mm,
-        center_xy: request.center_xy,
-        contact_tolerance_mm: request.contact_tolerance_mm,
-        maximum_contact_gap_mm,
-    };
-    result.validate().map_err(|_| {
-        error(
-            GeometryErrorCode::InvalidPose,
-            "prepared native pose cannot fit the declared envelope and contact tolerance",
-        )
-    })?;
+    ])
+}
+
+/// Exact bounds that refused for a geometric reason, not cancellation or a
+/// bad request, fall back to ADR012 tolerant bounds.
+fn tolerant_retry(error: &GeometryError) -> bool {
+    !matches!(
+        error.code,
+        GeometryErrorCode::Cancelled
+            | GeometryErrorCode::InvalidPose
+            | GeometryErrorCode::StaleRevision
+            | GeometryErrorCode::UnknownHandle
+            | GeometryErrorCode::Busy
+            | GeometryErrorCode::SourceIo
+            | GeometryErrorCode::SourceChanged
+    )
+}
+
+/// ADR012 tolerant placement brackets from the placed tessellation. Its
+/// vertices lie on the surface, so its extremes bracket the solid's within the
+/// profile tolerance.
+fn tolerant_brackets(
+    definition: &Definition,
+    request: &Request,
+    cancel: &AtomicBool,
+) -> Result<[[f64; 3]; 4], GeometryError> {
+    let model = TolerantModel::build(definition, TolerantPolicy::default(), cancel)?;
+    if model.failed_faces > 0 {
+        return Err(error(
+            GeometryErrorCode::UnsupportedGeometry,
+            format!(
+                "{} source faces could not be tessellated",
+                model.failed_faces
+            ),
+        ));
+    }
+    let (minimum, maximum) = model.placed(&request.pose).bounds();
     check_cancel(cancel)?;
-    Ok(result)
+    Ok([minimum, minimum, maximum, maximum])
 }

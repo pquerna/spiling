@@ -833,7 +833,7 @@ export type PreflightSeverity = "error" | "warning" | "info";
 
 export type PreflightDisposition = "admitted" | "refused" | "unresolved";
 
-export type PreflightEvidence = "not_evaluated" | "certified" | "unsupported" | "indeterminate" | "failed";
+export type PreflightEvidence = "not_evaluated" | "certified" | "unsupported" | "indeterminate" | "failed" | "tolerant";
 
 export type PreflightCheck = { code: string, severity: PreflightSeverity, evidence: PreflightEvidence, required: boolean, message: string, occurrence_id: OccurrenceId | null, face_id: FaceId | null, };
 
@@ -921,7 +921,13 @@ export type SparseBandDisposition = { "kind": "combined" } | { "kind": "retained
 
 export type SparseBandVeto = "process_height" | "mandatory_neighborhood" | "changing_domain" | "missing_lower_anchor" | "unsupported_landing" | "flow_limit" | "interface_bond" | "nominal_dose";
 
-export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, process_diaphragms: Array<ProcessDiaphragmCoverage>, diaphragm_area_mm2: number, skin_bridge_domains: Array<SkinBridgeDomain>, web_roof_domains: Array<WebRoofDomain>, };
+export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number,
+/**
+ * With supports disabled, the unanchored span of the first stroke found
+ * printing over nothing on this layer, as PrusaSlicer prints overhangs
+ * without support. Zero when every stroke is anchored.
+ */
+unsupported_overhang_mm: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, process_diaphragms: Array<ProcessDiaphragmCoverage>, diaphragm_area_mm2: number, skin_bridge_domains: Array<SkinBridgeDomain>, web_roof_domains: Array<WebRoofDomain>, };
 
 export type WebRoofDomain = { region_index: number, extent: Array<DiaphragmPolygonMm>, };
 

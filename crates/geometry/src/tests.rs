@@ -951,3 +951,77 @@ fn bored_plate_refuses_inconsistent_source_identity_coefficients_and_material_se
         GeometryErrorCode::KernelFailure
     );
 }
+
+/// ADR012: tolerant sections agree with certified exact sections wherever the
+/// exact path still succeeds, in loop structure and in area within the profile
+/// tolerance along the boundary.
+#[test]
+fn tolerant_sections_agree_with_certified_exact_sections() {
+    use crate::tolerant::{TolerantModel, TolerantPolicy};
+    let cancel = AtomicBool::new(false);
+    let mut compared = 0;
+    for name in [
+        "box-mm.step",
+        "cylinder.step",
+        "through-hole.step",
+        "independent-exporters/occt-box-mm.step",
+        "independent-exporters/occt-cylinder-mm.step",
+        "independent-exporters/occt-through-hole-mm.step",
+        "independent-exporters/occt-narrow-pocket-mm.step",
+        "independent-exporters/occt-rounded-housing-mm.step",
+        "independent-exporters/occt-ribbed-bracket-mm.step",
+        "independent-exporters/occt-tapered-fitting-mm.step",
+    ] {
+        let definition = load(name);
+        let model = TolerantModel::build(&definition, TolerantPolicy::default(), &cancel).unwrap();
+        assert_eq!(model.failed_faces, 0, "{name}");
+        let bounds = definition.bounds_mm();
+        for fraction in [0.23, 0.5, 0.77] {
+            let z = bounds.min[2] + (bounds.max[2] - bounds.min[2]) * fraction;
+            let Ok(exact) = section(
+                &definition,
+                PlaneMm {
+                    origin_mm: [0.0, 0.0, z],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                &cancel,
+            ) else {
+                continue;
+            };
+            let tolerant = model.section(z).unwrap();
+            let exact_holes = exact.loops.iter().filter(|l| l.is_hole).count();
+            let tolerant_holes = tolerant.loops.iter().filter(|l| l.area < 0.0).count();
+            assert_eq!(tolerant.loops.len(), exact.loops.len(), "{name} at {z}");
+            assert_eq!(tolerant_holes, exact_holes, "{name} at {z}");
+            let exact_area: f64 = exact
+                .loops
+                .iter()
+                .map(|l| area(&exact, l).abs() * if l.is_hole { -1.0 } else { 1.0 })
+                .sum();
+            let tolerant_area: f64 = tolerant.loops.iter().map(|l| l.area).sum();
+            let perimeter: f64 = tolerant
+                .loops
+                .iter()
+                .map(|l| {
+                    (0..l.points.len())
+                        .map(|i| {
+                            let (a, b) = (l.points[i], l.points[(i + 1) % l.points.len()]);
+                            (b[0] - a[0]).hypot(b[1] - a[1])
+                        })
+                        .sum::<f64>()
+                })
+                .sum();
+            let bound = TolerantPolicy::default().profile_mm * perimeter + 1e-6;
+            assert!(
+                (tolerant_area - exact_area).abs() <= bound,
+                "{name} at {z}: tolerant {tolerant_area} exact {exact_area} bound {bound}"
+            );
+            assert_eq!(tolerant.joined_gaps, 0, "{name} at {z}");
+            compared += 1;
+        }
+    }
+    assert!(
+        compared >= 15,
+        "only {compared} certified sections to compare"
+    );
+}

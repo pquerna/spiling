@@ -169,6 +169,7 @@ pub(super) fn wall_plan<'a>(
             lower_z: 0.0,
             upper_z: recipe.layer_height_mm,
             retained_points,
+            classic: false,
         },
         &mut 0,
         cancel,

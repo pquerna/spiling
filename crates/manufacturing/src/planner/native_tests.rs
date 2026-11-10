@@ -377,14 +377,28 @@ fn disjoint_mixed_height_sources_bind_actual_birth_and_terminal_contributors() {
 }
 
 #[test]
-fn genuine_native_birth_near_bed_is_not_aliased_to_bed_contact() {
+fn native_birth_within_height_tolerance_of_the_bed_is_bed_contact() {
+    // ADR012: a half-micrometre gap is below the 1 um feature-height
+    // tolerance, so the part sits on the bed and is sliced within tolerance.
     let cancel = AtomicBool::new(false);
     let scene = NativeScene::new(BOX, &[translated(0.0, 0.0, LAYER_QUANTIZATION_MM * 0.5)]);
     let intent = intent(false);
     let report = preflight(&scene.input(&intent), &cancel).unwrap();
     assert_eq!(report.disposition, PreflightDisposition::Admitted);
-    let failure = compile(scene.input(&intent), &cancel).unwrap_err();
-    assert_eq!(failure.code, ManufacturingErrorCode::UnsupportedGeometry);
+    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    assert_eq!(
+        bundle.plan.native_geometry.evidence,
+        PreflightEvidence::Tolerant
+    );
+    assert_eq!(bundle.plan.layers[0].lower_z_mm, 0.0);
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .all(|layer| layer.region_coverage.unsupported_overhang_mm == 0.0)
+    );
+    assert!(bundle.verification.verified);
 }
 
 #[test]
@@ -668,8 +682,7 @@ fn sparse_native_roof_is_a_bounded_bridge_not_full_material_support() {
     }));
     assert_eq!(bundle.verification.support_deposited_volume_mm3, 0.0);
     intent.recipe.process.max_bridge_span_mm = 0.5;
-    let error = compile(scene.input(&intent), &AtomicBool::new(false)).unwrap_err();
-    assert_eq!(error.code, ManufacturingErrorCode::UnsupportedGeometry);
+    assert_overhang_reported(compile(scene.input(&intent), &AtomicBool::new(false)));
 }
 
 #[test]
@@ -738,12 +751,7 @@ fn native_cantilever_emits_bed_anchored_support_and_separate_volume() {
     assert!((bundle.verification.deposited_volume_mm3 - object_nominal).abs() < 0.02);
     assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
     let disabled = self::intent(false);
-    assert_eq!(
-        compile(scene.input(&disabled), &AtomicBool::new(false))
-            .unwrap_err()
-            .code,
-        ManufacturingErrorCode::UnsupportedGeometry
-    );
+    assert_overhang_reported(compile(scene.input(&disabled), &AtomicBool::new(false)));
 }
 
 #[test]
@@ -805,12 +813,7 @@ fn authored_sparse_cantilever_partial_skin_uses_actual_endpoint_footprints() {
     assert!((bundle.verification.support_deposited_volume_mm3 - nominal).abs() < 0.02);
     assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
     intent.recipe.supports = SupportPolicy::Disabled;
-    assert_eq!(
-        compile(scene.input(&intent), &AtomicBool::new(false))
-            .unwrap_err()
-            .code,
-        ManufacturingErrorCode::UnsupportedGeometry
-    );
+    assert_overhang_reported(compile(scene.input(&intent), &AtomicBool::new(false)));
 }
 
 #[test]
@@ -2716,11 +2719,9 @@ fn steep_image_support_succeeds_from_real_bed_corridor_and_lower_image_rebuild_b
             (next_growth - 1.25).abs() < 1e-10 && next_growth - 0.2 > disabled.recipe.bead_width_mm,
             "unbridgeable growth must leave a printable bed corridor after XY clearance"
         );
-        assert_eq!(
-            compile(scene.input(&disabled), &cancel).unwrap_err().code,
-            ManufacturingErrorCode::UnsupportedGeometry,
-            "steep mapped geometry must demand actual anchors rather than fabricate native support"
-        );
+        // Steep mapped geometry still never fabricates native support; with
+        // supports off its unanchored growth is printed and reported.
+        assert_overhang_reported(compile(scene.input(&disabled), &cancel));
         let mut enabled = disabled.clone();
         enabled.printer.capabilities.generated_supports = true;
         enabled.recipe.supports = SupportPolicy::Breakaway {
@@ -3691,7 +3692,7 @@ fn overlapping_native_boxes_and_separated_varying_cone_share_actual_union_and_fr
 }
 
 #[test]
-fn overlay_lost_native_notch_cannot_be_certified_merely_by_source_input_receipts() {
+fn overlay_lost_native_notch_is_joined_within_tolerance_not_certified() {
     let cancel = AtomicBool::new(false);
     let scene = NativeScene::new(
         BOX,
@@ -3708,18 +3709,20 @@ fn overlay_lost_native_notch_cannot_be_certified_merely_by_source_input_receipts
             .disposition,
         PreflightDisposition::Admitted
     );
-    // The third source forces the common-frame fixed-grid union. The genuine
-    // source-union notch between the first two bodies is below that grid, even
-    // though every original body and source-M input is well formed.
-    let failure = compile(scene.input(&intent), &cancel).unwrap_err();
-    assert!(
-        matches!(
-            failure.code,
-            ManufacturingErrorCode::NativeAnalysisIndeterminate
-                | ManufacturingErrorCode::NativeConditioningFailure
-        ),
-        "{failure}"
+    // The third source forces the common-frame fixed-grid union. The exact
+    // path cannot certify the 1e-10 mm source-union notch between the first
+    // two bodies; ADR012 joins it, far below the join tolerance, and slices
+    // within tolerance without claiming a native certificate.
+    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    assert_eq!(
+        bundle.plan.native_geometry.evidence,
+        PreflightEvidence::Tolerant
     );
+    assert_eq!(
+        bundle.plan.native_geometry.certified_layer_count,
+        bundle.plan.layers.len() as u32
+    );
+    assert!(bundle.verification.verified);
 }
 
 #[test]
@@ -4538,16 +4541,7 @@ fn frozen_bridge_component_merge_and_split_preserve_actual_replay_and_anchor_ref
             );
             visit_fresh_replayed_object_segments(&bundle, |_, _| {});
         } else {
-            let error = result.unwrap_err();
-            assert_eq!(
-                error.code,
-                ManufacturingErrorCode::UnsupportedGeometry,
-                "{error:?}"
-            );
-            assert!(
-                error.message.contains("bounded deposited anchors"),
-                "{error:?}"
-            );
+            assert_overhang_reported(result);
         }
     }
     let inverted = RigidPoseMm {
@@ -5045,4 +5039,19 @@ fn two_part_mixed_plate_owns_each_width_and_qualifies_one_complete_job() {
         );
     }
     assert!(seen.into_iter().all(|v| v));
+}
+
+/// With supports disabled, ADR012 prints an unanchored overhang as other
+/// slicers do and reports it, instead of refusing the part.
+fn assert_overhang_reported(result: Result<ManufacturingResult, ManufacturingError>) {
+    let bundle = result.expect("supports disabled prints the overhang");
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .any(|layer| layer.region_coverage.unsupported_overhang_mm > 0.0),
+        "an unanchored overhang is reported on its layer"
+    );
+    assert!(bundle.verification.verified);
 }

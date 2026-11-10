@@ -16,6 +16,7 @@ mod partition;
 mod preflight;
 mod region;
 mod startup;
+mod tolerant;
 use startup::StartupWall;
 pub(crate) mod support;
 mod surface;
@@ -80,12 +81,125 @@ fn remaining_geometry_units(
 // envelope. Actual physical Z remains on each materialized layer and skin key.
 type WallCacheKey = (usize, Option<usize>, [u64; 3], Option<usize>);
 
+/// Plan with exact native certification, falling back to ADR012 tolerant
+/// sections when the exact path refuses on geometry grounds. Cancellation,
+/// resource limits and invalid specifications are never retried.
 pub(crate) fn plan(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
-    let (mut admission, geometry_sources) = preflight::admit(input, cancel, geometry_work)?;
+    match plan_with(input, cancel, geometry_work, false) {
+        // A job whose features tolerant mode cannot take keeps the exact
+        // refusal, which says more than "not available within tolerance".
+        Err(exact) if geometry_refusal(&exact) && tolerant_supported(input).is_ok() => {
+            plan_with(input, cancel, geometry_work, true).map_err(|tolerant| {
+                if tolerant.code == ManufacturingErrorCode::Cancelled {
+                    return tolerant;
+                }
+                error(
+                    tolerant.code,
+                    format!(
+                        "{} (exact native path also refused: {})",
+                        tolerant.message, exact.message
+                    ),
+                )
+            })
+        }
+        other => other,
+    }
+}
+
+/// A fill, skin or bridge row whose emitted XYZ6 chord is shorter than the
+/// minimum command deposits less than the profile tolerance; omit it, as other
+/// slicers drop such fragments, rather than refuse the part. Walls are kept.
+fn drop_unprintable_rows(layers: &mut [PrintLayer]) -> Result<(), ManufacturingError> {
+    use spiling_contracts::manufacturing::program_coordinates::{
+        MIN_DEPOSITION_COMMAND_MM, project_xyz6_point_mm,
+    };
+    for layer in layers {
+        let mut failure = None;
+        layer.paths.retain(|path| {
+            if path.points_mm.len() != 2
+                || matches!(
+                    path.kind,
+                    DepositionKind::Perimeter | DepositionKind::SeparatorWall
+                )
+            {
+                return true;
+            }
+            match (
+                project_xyz6_point_mm(path.points_mm[0]),
+                project_xyz6_point_mm(path.points_mm[1]),
+            ) {
+                (Ok(a), Ok(b)) => (b[0] - a[0]).hypot(b[1] - a[1]) >= MIN_DEPOSITION_COMMAND_MM,
+                (Err(e), _) | (_, Err(e)) => {
+                    failure.get_or_insert(e);
+                    true
+                }
+            }
+        });
+        if let Some(e) = failure {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+fn geometry_refusal(error: &ManufacturingError) -> bool {
+    matches!(
+        error.code,
+        ManufacturingErrorCode::UnsupportedGeometry
+            | ManufacturingErrorCode::NativeAnalysisIndeterminate
+            | ManufacturingErrorCode::NativeConditioningFailure
+            | ManufacturingErrorCode::NativeShapeErrorExceeded
+            | ManufacturingErrorCode::NativeSingularGeometry
+            | ManufacturingErrorCode::NativeKernelFailure
+            // Exact proofs can exhaust their work before any output exists.
+            | ManufacturingErrorCode::ResourceLimit
+    )
+}
+
+/// Features that still consume native captures refuse in tolerant mode
+/// rather than being silently dropped.
+fn tolerant_supported(input: &CompilerInput<'_>) -> Result<(), ManufacturingError> {
+    let refuse = |what: &str| {
+        Err(error(
+            ManufacturingErrorCode::UnsupportedCapability,
+            format!("{what} is not yet available for parts sliced within tolerance (ADR012)"),
+        ))
+    };
+    if input
+        .surface_overlays
+        .layers
+        .iter()
+        .any(|layer| layer.enabled)
+    {
+        return refuse("a surface finish");
+    }
+    if !matches!(input.intent.recipe.supports, SupportPolicy::Disabled) {
+        return refuse("generated support");
+    }
+    if matches!(
+        &input.intent.printer.workflow,
+        JobWorkflow::FixedDualMarlin { .. }
+    ) {
+        return refuse("fixed-dual routing");
+    }
+    Ok(())
+}
+
+fn plan_with(
+    input: &CompilerInput<'_>,
+    cancel: &AtomicBool,
+    geometry_work: &mut spiling_geometry::GeometryWorkBudget,
+    tolerant: bool,
+) -> Result<NormalizedPrintPlan, ManufacturingError> {
+    if tolerant {
+        tolerant_supported(input)?;
+    }
+    let (mut admission, geometry_sources) =
+        preflight::admit_with(input, cancel, geometry_work, tolerant)?;
 
     match admission.report.disposition {
         PreflightDisposition::Admitted => {}
@@ -521,24 +635,35 @@ fn admit_schedule<'model>(
                     .saturating_add(occurrences.capacity().saturating_mul(std::mem::size_of::<
                         &spiling_contracts::geometry::OccurrenceRecord,
                     >()));
-            let captured = native::collect_span(
-                &native::NativeSourceInputs {
-                    input,
-                    occurrences: &occurrences,
-                    sources: prepared_sources,
-                },
-                admission,
-                schedule,
-                &native::NativeSpanRequest {
+            let captured = if let Some(models) = &admission.tolerant {
+                tolerant::collect_span(
+                    &occurrences,
+                    models,
+                    &admission.native_bounds,
+                    &schedule[index as usize],
                     index,
-                    retained_points,
-                    retained_output_bytes,
-                },
-                &mut native_stage,
-                surface_work,
-                pool,
-                cancel,
-            )?;
+                    cancel,
+                )?
+            } else {
+                native::collect_span(
+                    &native::NativeSourceInputs {
+                        input,
+                        occurrences: &occurrences,
+                        sources: prepared_sources,
+                    },
+                    admission,
+                    schedule,
+                    &native::NativeSpanRequest {
+                        index,
+                        retained_points,
+                        retained_output_bytes,
+                    },
+                    &mut native_stage,
+                    surface_work,
+                    pool,
+                    cancel,
+                )?
+            };
             count = schedule.partition_point(|layer| layer.z <= terminal_z) as u32;
             sample = schedule[index as usize].sample;
             native_slab_start = index;
@@ -882,6 +1007,10 @@ fn admit_schedule<'model>(
         ScheduleNativeAuthority::Tentative {
             stage: native_stage,
         }
+    } else if admission.tolerant.is_some() {
+        let bottom = admission.bounds.map_or(0.0, |b| b.min[2]);
+        let top = schedule.last().map_or(bottom, |layer| layer.z);
+        ScheduleNativeAuthority::Complete(native_stage.finalize_tolerant([bottom, top]))
     } else {
         ScheduleNativeAuthority::Complete(native_stage.finalize(admission.geometry_work, cancel)?)
     };
@@ -1261,6 +1390,7 @@ fn admit_schedule<'model>(
                             upper_z: z,
                             retained_points: retained_wall_points,
                             owned_bytes: wall_owned_bytes,
+                            classic: admission.tolerant.is_some(),
                         },
                         neighborhoods.work_mut(),
                         cancel,
@@ -2434,6 +2564,7 @@ fn admit_schedule<'model>(
             cancel,
         )?;
         construction.attribute(&mut layers, neighborhoods.work_mut(), cancel)?;
+        drop_unprintable_rows(&mut layers)?;
         support::object_volumes(&mut layers, input.intent)?;
         for layer in &mut layers {
             bonds::refresh_witness_kinds(layer)?;
@@ -2493,18 +2624,42 @@ fn admit_schedule<'model>(
                         })
                 })
                 .collect(),
-            native_geometry: NativeGeometryCoverageSummary {
-                requested_shape_error_mm: recipe.native_shape_error_mm,
-                achieved_shape_error_mm: native_coverage.achieved_shape_error_mm,
-                height_analysis_count: input.occurrences.len() as u32,
-                slab_count: native_coverage.slab_count,
-                certified_layer_count: count,
-                event_count: admission.native_event_bands.len() as u32,
-                geometry_work: admission.geometry_work.consumed(),
-                evidence: PreflightEvidence::Certified,
-                skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
-                support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
-                source_feature_coverage: native_coverage.source_features,
+            native_geometry: if admission.tolerant.is_some() {
+                // ADR012: one sampled tolerant section per layer and occurrence.
+                NativeGeometryCoverageSummary {
+                    requested_shape_error_mm: recipe.native_shape_error_mm,
+                    achieved_shape_error_mm: spiling_geometry::tolerant::TolerantPolicy::default()
+                        .profile_mm
+                        .min(recipe.native_shape_error_mm),
+                    height_analysis_count: input.occurrences.len() as u32,
+                    slab_count: count * input.occurrences.len() as u32,
+                    certified_layer_count: count,
+                    event_count: admission.horizontal_events.len() as u32,
+                    geometry_work: admission.geometry_work.consumed().max(1),
+                    evidence: PreflightEvidence::Tolerant,
+                    skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
+                    support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
+                    source_feature_coverage: NativeFeatureCoverageSummary {
+                        disjoint_source_layer_count: count,
+                        invariant_source_union_layer_count: 0,
+                        native_interface_complex_layer_count: 0,
+                        owned_critical_slab_count: 0,
+                    },
+                }
+            } else {
+                NativeGeometryCoverageSummary {
+                    requested_shape_error_mm: recipe.native_shape_error_mm,
+                    achieved_shape_error_mm: native_coverage.achieved_shape_error_mm,
+                    height_analysis_count: input.occurrences.len() as u32,
+                    slab_count: native_coverage.slab_count,
+                    certified_layer_count: count,
+                    event_count: admission.native_event_bands.len() as u32,
+                    geometry_work: admission.geometry_work.consumed(),
+                    evidence: PreflightEvidence::Certified,
+                    skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
+                    support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
+                    source_feature_coverage: native_coverage.source_features,
+                }
             },
             layers,
             surface_resolution,
@@ -3335,6 +3490,8 @@ fn layer_schedule_with_bounds(
     maximum: f64,
     events: &[f64],
 ) -> Result<Vec<LayerElevation>, ManufacturingError> {
+    // Exact native events keep arithmetic identity; ADR012 tolerant events
+    // arrive already merged within the feature-height tolerance.
     let identity_roundoff = 4.0 * f64::EPSILON * bed.abs().max(top.abs()).max(1.0);
     let identical =
         |a: f64, b: f64| (a - b).abs() <= 4.0 * f64::EPSILON * a.abs().max(b.abs()).max(1.0);
@@ -3485,8 +3642,8 @@ fn layer_schedule_with_bounds(
             } else {
                 interval_height
             };
-            // Genuine close mandatory events retain the native degeneracy
-            // refusal; they are never merged to repair an unresolved slab.
+            // Events closer than the feature tolerance were merged above, so a
+            // layer this thin can only come from arithmetic, not geometry.
             if height <= 2.0 * spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM {
                 return Err(error(
                     ManufacturingErrorCode::UnsupportedGeometry,
@@ -3617,6 +3774,7 @@ fn empty_coverage(_fraction: f64) -> PlanarRegionCoverage {
         process_regions: Vec::new(),
         support_area_mm2: 0.0,
         support_nominal_deposition_volume_mm3: 0.0,
+        unsupported_overhang_mm: 0.0,
     }
 }
 

@@ -635,6 +635,9 @@ impl TryFrom<rpc::PreflightReport> for PreflightReport {
                                 Ok(rpc::PreflightEvidence::PreflightIndeterminate) => {
                                     PreflightEvidence::Indeterminate
                                 }
+                                Ok(rpc::PreflightEvidence::PreflightTolerant) => {
+                                    PreflightEvidence::Tolerant
+                                }
                                 Ok(rpc::PreflightEvidence::PreflightFailed) => {
                                     PreflightEvidence::Failed
                                 }
@@ -700,6 +703,7 @@ impl TryFrom<PreflightReport> for rpc::PreflightReport {
                         PreflightEvidence::Indeterminate => {
                             rpc::PreflightEvidence::PreflightIndeterminate
                         }
+                        PreflightEvidence::Tolerant => rpc::PreflightEvidence::PreflightTolerant,
                         PreflightEvidence::Failed => rpc::PreflightEvidence::PreflightFailed,
                     } as i32,
                     required: Some(check.required),
@@ -1439,7 +1443,10 @@ impl TryFrom<rpc::NativeGeometryCoverageSummary> for NativeGeometryCoverageSumma
                 geometry_work: value.geometry_work,
                 evidence: match rpc::PreflightEvidence::try_from(value.evidence) {
                     Ok(rpc::PreflightEvidence::PreflightCertified) => PreflightEvidence::Certified,
-                    _ => return Err("native geometry coverage must be certified".into()),
+                    Ok(rpc::PreflightEvidence::PreflightTolerant) => PreflightEvidence::Tolerant,
+                    _ => {
+                        return Err("native geometry coverage must be certified or tolerant".into());
+                    }
                 },
                 source_feature_coverage: required(
                     value.source_feature_coverage,
@@ -1477,7 +1484,10 @@ impl TryFrom<NativeGeometryCoverageSummary> for rpc::NativeGeometryCoverageSumma
             certified_layer_count: value.certified_layer_count,
             event_count: value.event_count,
             geometry_work: value.geometry_work,
-            evidence: rpc::PreflightEvidence::PreflightCertified as i32,
+            evidence: match value.evidence {
+                PreflightEvidence::Tolerant => rpc::PreflightEvidence::PreflightTolerant,
+                _ => rpc::PreflightEvidence::PreflightCertified,
+            } as i32,
             source_feature_coverage: Some(value.source_feature_coverage.try_into()?),
             skin_coverage: match value.skin_coverage {
                 SkinCoverageScope::ScheduledMaterialDistance => {

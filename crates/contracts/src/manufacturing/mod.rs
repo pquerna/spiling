@@ -65,6 +65,9 @@ pub const MAX_MANUFACTURING_PROGRAM_BYTES: u32 = 512 * 1024 * 1024;
 /// bundles and programs and in raw coordinates for planner retention.
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PRINT_LAYERS: u32 = 4096;
+/// ADR012 height tolerance: feature heights closer than this are one layer
+/// boundary. Far below any printable layer, far above CAD export noise.
+pub const FEATURE_HEIGHT_TOLERANCE_MM: f64 = 0.001;
 /// Job-wide deposition total, a checked count rather than an allocation.
 pub const MAX_DEPOSITION_SEGMENTS: u32 = 2_000_000;
 /// An admitted path may require lift, XY travel and landing. Fixed-dual waste
@@ -2188,6 +2191,10 @@ pub struct PlanarRegionCoverage {
     pub nominal_deposition_volume_mm3: f64,
     pub support_area_mm2: f64,
     pub support_nominal_deposition_volume_mm3: f64,
+    /// With supports disabled, the unanchored span of the first stroke found
+    /// printing over nothing on this layer, as PrusaSlicer prints overhangs
+    /// without support. Zero when every stroke is anchored.
+    pub unsupported_overhang_mm: f64,
     #[serde(deserialize_with = "process_regions")]
     pub process_regions: Vec<ProcessRegionCoverage>,
     #[serde(deserialize_with = "process_interfaces")]
@@ -2384,6 +2391,7 @@ impl PlanarRegionCoverage {
             self.nominal_deposition_volume_mm3,
             self.support_area_mm2,
             self.support_nominal_deposition_volume_mm3,
+            self.unsupported_overhang_mm,
         ];
         let partition = self.wall_area_mm2
             + self.bottom_skin_area_mm2
@@ -2407,6 +2415,8 @@ impl PlanarRegionCoverage {
                     || self.protected_hole_area_mm2 != 0.0
                     || self.intentional_void_area_mm2 != 0.0))
             || (self.support_area_mm2 == 0.0) != (self.support_nominal_deposition_volume_mm3 == 0.0)
+            || (!matches!(recipe.supports, SupportPolicy::Disabled)
+                && self.unsupported_overhang_mm != 0.0)
             || (matches!(recipe.supports, SupportPolicy::Disabled)
                 && (self.support_area_mm2 != 0.0
                     || self.support_nominal_deposition_volume_mm3 != 0.0))
@@ -2534,7 +2544,10 @@ impl NativeGeometryCoverageSummary {
             || self.slab_count > MAX_PRINT_LAYERS * MAX_OCCURRENCES
             || self.event_count > 4096
             || self.geometry_work == 0
-            || self.evidence != PreflightEvidence::Certified
+            || !matches!(
+                self.evidence,
+                PreflightEvidence::Certified | PreflightEvidence::Tolerant
+            )
             || self.slab_count < self.height_analysis_count
             || u64::from(self.slab_count)
                 > u64::from(self.height_analysis_count) * u64::from(self.certified_layer_count)

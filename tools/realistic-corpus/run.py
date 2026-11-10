@@ -13,11 +13,12 @@ Writes one JSON record per part to results.ndjson. Standard library only.
 import json, os, re, shutil, subprocess, sys, time, hashlib
 
 ROOT = os.path.abspath(sys.argv[1])
-R = sys.argv[2]  # directory holding spiling-cli and spiling-engine
-INTENT_SRC = sys.argv[3]
+R = os.path.abspath(sys.argv[2])  # directory holding spiling-cli and spiling-engine
+INTENT_SRC = os.path.abspath(sys.argv[3])
 OUT = os.path.join(ROOT, sys.argv[4] if len(sys.argv) > 4 else "results.ndjson")
 ONLY = sys.argv[5:] if len(sys.argv) > 5 else None
 TIMEOUT = 900
+CATHEDRAL = os.environ.get("SPILING_CORPUS_INFILL") == "cathedral"
 WORK = os.path.join(ROOT, "work")
 
 
@@ -26,6 +27,10 @@ def intent_file():
     d["recipe"]["infill_fraction"] = 0.15
     d["recipe"]["layer_height_mm"] = 0.2
     d["printer"]["workflow"]["job"]["park_position_mm"][2] = 210
+    # PrusaSlicer's default: no generated supports.
+    d["recipe"]["supports"] = {"kind": "disabled"}
+    if CATHEDRAL:
+        d["recipe"]["sparse_infill"] = {"kind": "web_roof", "roof_spacing_mm": None, "architecture": None}
     path = os.path.join(WORK, "intent.json")
     json.dump(d, open(path, "w"))
     return path

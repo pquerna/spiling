@@ -154,6 +154,8 @@ pub(super) struct WallRequest<'a> {
     /// TOTAL already-live caller allocations in the planner byte budget.
     /// Semantic retained points are not implicitly converted to bytes.
     pub(super) owned_bytes: usize,
+    /// ADR012 tolerant layer: classic constant-width perimeters.
+    pub(super) classic: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -269,6 +271,9 @@ pub(super) fn plan_section_walls(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<WallPlan, ManufacturingError> {
+    if request.classic {
+        return plan_classic_walls(request, work, cancel);
+    }
     plan_section_walls_against(request, false, work, cancel)
 }
 
@@ -502,6 +507,143 @@ fn plan_section_walls_against<'a>(
         })
         .sum();
 
+    Ok(WallPlan {
+        paths,
+        fill,
+        correspondence,
+        retained_points,
+        retained_bytes,
+        section_area_mm2,
+        wall_area_mm2,
+        protected_hole_area_mm2,
+    })
+}
+
+/// ADR012 tolerant walls: classic constant-width perimeters, each the section
+/// offset inward to its bead centreline, like a mesh slicer's classic
+/// perimeter generator. Sections here are sampled within the profile
+/// tolerance, so no source-joint or corner proof applies; the emitted program
+/// is still replayed independently.
+pub(super) fn plan_classic_walls(
+    request: WallRequest<'_>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<WallPlan, ManufacturingError> {
+    check_cancel(cancel)?;
+    request.limits.validate()?;
+    if request.material.0.is_empty() {
+        return Err(unsupported("wall construction requires material"));
+    }
+    let width = source_width_mm(&request)?;
+    let mut offset = |distance: f64| {
+        region::offset_admitted(
+            request.material,
+            distance,
+            |scratch, scratch_bytes, overlay| {
+                if request
+                    .retained_points
+                    .checked_add(scratch)
+                    .is_none_or(|n| n > MAX_RETAINED_GEOMETRY_UNITS)
+                {
+                    return Err(resource("classic wall offset staging exceeded"));
+                }
+                admit_stage(&request, scratch_bytes)?;
+                if let Some((a, b)) = overlay {
+                    boolean::budget_accumulated(a, b, work, cancel)?;
+                }
+                Ok(())
+            },
+            cancel,
+        )
+    };
+    let minimum = program_coordinates::MIN_DEPOSITION_COMMAND_MM;
+    let mut paths = Vec::new();
+    let mut correspondence = Vec::new();
+    let narrowest = admitted_width_range(&request)?[0];
+    for ordinal in 0..request.recipe.perimeter_count as usize {
+        let mut centre = offset(-(ordinal as f64 + 0.5) * width)?;
+        let mut bead = width;
+        if centre.0.is_empty() && ordinal == 0 && narrowest < width {
+            // A section thinner than one bead still gets one thin wall at the
+            // narrowest admitted width, as a classic slicer's thin walls do.
+            centre = offset(-0.5 * narrowest)?;
+            bead = narrowest;
+        }
+        if centre.0.is_empty() {
+            break;
+        }
+        for polygon in &centre.0 {
+            for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+                check_cancel(cancel)?;
+                // Keep commands at least the program's minimum length; the
+                // ring stays closed on its first point.
+                let mut points: Vec<[f64; 3]> = Vec::with_capacity(ring.0.len());
+                for c in &ring.0 {
+                    let p = [c.x, c.y, request.upper_z];
+                    if points
+                        .last()
+                        .is_none_or(|q: &[f64; 3]| (p[0] - q[0]).hypot(p[1] - q[1]) >= minimum)
+                    {
+                        points.push(p);
+                    }
+                }
+                while points.len() > 2 {
+                    let (first, last) = (points[0], points[points.len() - 1]);
+                    if (first[0] - last[0]).hypot(first[1] - last[1]) >= minimum {
+                        break;
+                    }
+                    points.pop();
+                }
+                if points.len() < 3 {
+                    continue;
+                }
+                points.push(points[0]);
+                let path_index = paths.len();
+                correspondence.extend((0..points.len() - 1).map(|edge_index| {
+                    BoundaryCorrespondence {
+                        path_index,
+                        edge_index,
+                        supports: [0, 0],
+                        facing_boundary: None,
+                        ordinal,
+                    }
+                }));
+                paths.push(DepositionPath {
+                    material_domain: None,
+                    kind: DepositionKind::Perimeter,
+                    owner: Some(DepositionOwner::Wall),
+                    width: WidthProfile::Constant { width_mm: bead },
+                    physical_z_mm: [request.lower_z, request.upper_z],
+                    points_mm: points,
+                });
+            }
+        }
+    }
+    let mut fill = offset(-(request.recipe.perimeter_count as f64) * width)?;
+    let retained_bytes = std::mem::size_of::<WallPlan>()
+        .checked_add(path_bytes(&paths))
+        .and_then(|b| {
+            b.checked_add(correspondence.capacity() * std::mem::size_of::<BoundaryCorrespondence>())
+        })
+        .and_then(|b| b.checked_add(super::native::material_bytes(&mut fill)))
+        .ok_or_else(|| resource("retained wall byte inventory overflow"))?;
+    let retained_points =
+        paths.iter().map(|p| p.points_mm.len()).sum::<usize>() + region::point_count(&fill);
+    if retained_points
+        .checked_add(request.retained_points)
+        .is_none_or(|n| n > MAX_RETAINED_GEOMETRY_UNITS)
+    {
+        return Err(resource("retained wall construction limit exceeded"));
+    }
+    let section_area_mm2 = request.material.unsigned_area();
+    let wall_area_mm2 = (section_area_mm2 - fill.unsigned_area()).max(0.0);
+    let protected_hole_area_mm2 = request
+        .material
+        .0
+        .iter()
+        .flat_map(Polygon::interiors)
+        .map(|ring| Polygon::new(ring.clone(), Vec::new()).unsigned_area())
+        .sum();
     Ok(WallPlan {
         paths,
         fill,

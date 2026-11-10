@@ -12,6 +12,7 @@ mod kernel;
 pub mod parametric;
 mod section;
 mod tessellation;
+pub mod tolerant;
 
 pub use tessellation::{DisplayProgress, DisplayStage};
 
