@@ -582,6 +582,7 @@ fn curved_native_partition_remains_conforming_across_recipe_widths() {
     settings.recipe.perimeter_count = 2;
     for width in [0.4, 0.45, 0.57] {
         settings.recipe.bead_width_mm = width;
+        settings.laws.compatible_recipe = settings.recipe.clone();
         let operator = prepare(
             &prism,
             &settings,
