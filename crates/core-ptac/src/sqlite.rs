@@ -221,6 +221,24 @@ impl Capture<'_> {
         }
         read_object(&self.database.connection, object, budget, cancel)
     }
+    /// Stream one selected member's verified raw chunks in order. Each chunk is
+    /// checked against its own identity before `consume`; the whole-object
+    /// digest and coverage are checked last, so a consumer must discard its
+    /// output if this returns an error.
+    pub fn stream_object(
+        &self,
+        object: ObjectId,
+        budget: usize,
+        cancel: &AtomicBool,
+        mut consume: impl FnMut(&[u8]) -> std::io::Result<()>,
+    ) -> Result<()> {
+        if !self.members.iter().any(|member| member.object == object) {
+            return Err(invalid("object is not a selected snapshot member"));
+        }
+        stream_object(&self.database.connection, object, budget, cancel, |raw| {
+            consume(raw).map_err(Error::Io)
+        })
+    }
     pub fn verify_all(&self, cancel: &AtomicBool) -> Result<()> {
         for object in self
             .members
@@ -1176,12 +1194,11 @@ impl Staged {
         let mut offset = 0u64;
         for (id, bytes) in &candidate.objects {
             let mut mapping = Vec::new();
-            for raw in bytes.chunks(CHUNK_BYTES) {
-                cancelled(cancel)?;
+            bytes.for_each_chunk(cancel, |raw| {
                 let id = hash(raw);
                 mapping.push(id);
                 if staged.chunks.contains_key(&id) {
-                    continue;
+                    return Ok(());
                 }
                 let encoded = chunks::encode(raw)?;
                 if offset + encoded.data.len() as u64 > MAX_SCRATCH_BYTES {
@@ -1198,7 +1215,8 @@ impl Staged {
                     },
                 );
                 offset += encoded.data.len() as u64;
-            }
+                Ok(())
+            })?;
             staged.objects.insert(*id, mapping);
         }
         Ok(staged)
@@ -1239,6 +1257,7 @@ fn insert(
     }
     for (id, mapping) in &staged.objects {
         let bytes = candidate.objects[id];
+        let length = bytes.len()?;
         if connection
             .query_row(
                 "SELECT 1 FROM objects WHERE object_id=?1",
@@ -1248,18 +1267,22 @@ fn insert(
             .optional()?
             .is_some()
         {
-            let mut offset = 0;
-            stream_object(connection, *id, bytes.len(), cancel, |raw| {
-                if bytes.get(offset..offset + raw.len()) != Some(raw) {
+            let mut incoming = bytes.reader();
+            let mut expected = vec![0u8; CHUNK_BYTES];
+            stream_object(connection, *id, length, cancel, |raw| {
+                let expected = &mut expected[..raw.len()];
+                incoming
+                    .read_exact(expected)
+                    .map_err(|_| invalid("existing object disagrees with incoming bytes"))?;
+                if expected != raw {
                     return Err(invalid("existing object disagrees with incoming bytes"));
                 }
-                offset += raw.len();
                 Ok(())
             })?;
         } else {
             connection.execute(
                 "INSERT INTO objects VALUES(?1,?2,?3)",
-                params![&id.as_bytes()[..], bytes.len() as i64, mapping.len() as i64],
+                params![&id.as_bytes()[..], length as i64, mapping.len() as i64],
             )?;
             for (ordinal, chunk) in mapping.iter().enumerate() {
                 connection.execute(

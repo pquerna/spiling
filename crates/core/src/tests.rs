@@ -72,7 +72,7 @@ pub(crate) fn imported() -> Project {
     project.commit(edit).unwrap();
     project
 }
-fn edit(project: &mut Project, value: Edit) {
+pub(crate) fn edit(project: &mut Project, value: Edit) {
     let prepared = project.prepare(value).unwrap();
     project.commit(prepared).unwrap();
 }

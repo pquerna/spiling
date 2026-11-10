@@ -140,7 +140,98 @@ pub struct Member {
 #[derive(Clone, Copy, Debug)]
 pub struct ObjectInput<'a> {
     pub role: ObjectRole,
-    pub bytes: &'a [u8],
+    pub bytes: ObjectBytes<'a>,
+}
+
+/// Exact raw object content: borrowed bytes, or sealed frames read one chunk
+/// at a time so large objects are never materialized for publication.
+#[derive(Clone, Copy, Debug)]
+pub enum ObjectBytes<'a> {
+    Slice(&'a [u8]),
+    Chunks(&'a spiling_chunks::ChunkSource),
+}
+impl<'a> From<&'a [u8]> for ObjectBytes<'a> {
+    fn from(bytes: &'a [u8]) -> Self {
+        Self::Slice(bytes)
+    }
+}
+impl<'a, const N: usize> From<&'a [u8; N]> for ObjectBytes<'a> {
+    fn from(bytes: &'a [u8; N]) -> Self {
+        Self::Slice(bytes)
+    }
+}
+impl<'a> From<&'a Vec<u8>> for ObjectBytes<'a> {
+    fn from(bytes: &'a Vec<u8>) -> Self {
+        Self::Slice(bytes)
+    }
+}
+impl<'a> From<&'a spiling_chunks::ChunkSource> for ObjectBytes<'a> {
+    fn from(source: &'a spiling_chunks::ChunkSource) -> Self {
+        Self::Chunks(source)
+    }
+}
+impl<'a> ObjectBytes<'a> {
+    pub fn len(&self) -> Result<usize> {
+        match self {
+            Self::Slice(bytes) => Ok(bytes.len()),
+            Self::Chunks(source) => {
+                usize::try_from(source.len()).map_err(|_| limit("object exceeds address space"))
+            }
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Slice(bytes) => bytes.is_empty(),
+            Self::Chunks(source) => source.is_empty(),
+        }
+    }
+    /// Frames record the SHA-256 of their raw content as they are written.
+    pub(crate) fn id(&self) -> ObjectId {
+        match self {
+            Self::Slice(bytes) => ObjectId::of(bytes),
+            Self::Chunks(source) => ObjectId(*source.digest()),
+        }
+    }
+    pub(crate) fn reader(&self) -> Box<dyn std::io::Read + 'a> {
+        match *self {
+            Self::Slice(bytes) => Box::new(bytes),
+            Self::Chunks(source) => Box::new(source.reader()),
+        }
+    }
+    /// Visit raw content in container chunk order with one reusable buffer.
+    pub(crate) fn for_each_chunk(
+        &self,
+        cancel: &AtomicBool,
+        mut visit: impl FnMut(&[u8]) -> Result<()>,
+    ) -> Result<()> {
+        if let Self::Slice(bytes) = self {
+            for raw in bytes.chunks(CHUNK_BYTES) {
+                cancelled(cancel)?;
+                visit(raw)?;
+            }
+            return Ok(());
+        }
+        let mut reader = self.reader();
+        let mut buffer = vec![0u8; CHUNK_BYTES];
+        loop {
+            cancelled(cancel)?;
+            let mut filled = 0;
+            while filled < CHUNK_BYTES {
+                let read = reader.read(&mut buffer[filled..])?;
+                if read == 0 {
+                    break;
+                }
+                filled += read;
+            }
+            if filled == 0 {
+                return Ok(());
+            }
+            visit(&buffer[..filled])?;
+            if filled < CHUNK_BYTES {
+                return Ok(());
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -188,7 +279,7 @@ pub enum SaveStage {
 pub(crate) struct Candidate<'a> {
     pub root: ObjectId,
     pub members: Vec<Member>,
-    pub objects: BTreeMap<ObjectId, &'a [u8]>,
+    pub objects: BTreeMap<ObjectId, ObjectBytes<'a>>,
     pub id: SnapshotId,
     pub guard: &'a [u8],
 }
@@ -205,11 +296,11 @@ impl<'a> Candidate<'a> {
             return Err(limit("snapshot membership"));
         }
         let root = ObjectId::of(input.root);
-        let mut objects = BTreeMap::from([(root, input.root)]);
+        let mut objects = BTreeMap::from([(root, ObjectBytes::Slice(input.root))]);
         let mut members = Vec::with_capacity(input.objects.len());
         for input_object in input.objects {
-            validate_object_length(input_object.bytes.len())?;
-            let object = ObjectId::of(input_object.bytes);
+            validate_object_length(input_object.bytes.len()?)?;
+            let object = input_object.bytes.id();
             objects.insert(object, input_object.bytes);
             members.push(Member {
                 role: input_object.role,
@@ -222,7 +313,9 @@ impl<'a> Candidate<'a> {
         }
         let total = objects
             .values()
-            .try_fold(0u64, |total, bytes| total.checked_add(bytes.len() as u64))
+            .try_fold(0u64, |total, bytes| {
+                total.checked_add(bytes.len().ok()? as u64)
+            })
             .ok_or_else(|| limit("snapshot byte arithmetic"))?;
         if total > MAX_SNAPSHOT_BYTES {
             return Err(limit("snapshot raw bytes"));

@@ -77,9 +77,9 @@ fn larger_objects_roots_and_memberships_survive_reopen_publication_and_compactio
         .map(|role| ObjectInput {
             role: ObjectRole::new(role).unwrap(),
             bytes: if role == 1 {
-                &bytes
+                (&bytes).into()
             } else {
-                b"shared small asset"
+                b"shared small asset".into()
             },
         })
         .collect();
@@ -170,7 +170,7 @@ fn bounded_storage_workload_measurements() {
             .enumerate()
             .map(|(index, bytes)| ObjectInput {
                 role: ObjectRole::new(index as u16 + 1).unwrap(),
-                bytes,
+                bytes: bytes.into(),
             })
             .collect();
         let candidate = |root| SnapshotInput {
@@ -298,7 +298,7 @@ fn checked_in_sqlite_golden_is_inspected_without_the_creator() {
                 root: b"PTAC golden root\n",
                 objects: &[ObjectInput {
                     role: ObjectRole::new(1).unwrap(),
-                    bytes: b"independent exact asset bytes\n",
+                    bytes: b"independent exact asset bytes\n".into(),
                 }],
                 guard: b"PTAC golden guard\n",
             },
@@ -528,7 +528,7 @@ fn real_create_publish_capture_and_previous() {
     let bytes = vec![42; CHUNK_BYTES + 1];
     let objects = [ObjectInput {
         role: ObjectRole::new(1).unwrap(),
-        bytes: &bytes,
+        bytes: (&bytes).into(),
     }];
     let first = Container::create_new(
         &path,
@@ -662,4 +662,100 @@ fn document_profiles_refuse_cross_open_and_survive_publication_and_compaction() 
             .unwrap();
         compact.container.check(&cancel).unwrap();
     }
+}
+
+#[test]
+fn chunked_objects_publish_and_stream_without_whole_object_buffers() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("chunked.spil");
+    let cancel = AtomicBool::new(false);
+    // Three full chunks plus a tail, mixing compressible and incompressible frames.
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let bytes: Vec<u8> = (0..3 * CHUNK_BYTES + 17)
+        .map(|i| {
+            if i < CHUNK_BYTES {
+                b"G1 X1.000000 Y2.000000\n"[i % 23]
+            } else {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            }
+        })
+        .collect();
+    let source = spiling_chunks::ChunkSource::from_slice(&bytes, u64::MAX).unwrap();
+    let id = ObjectId::of(&bytes);
+    let objects = [ObjectInput {
+        role: ObjectRole::new(1).unwrap(),
+        bytes: (&source).into(),
+    }];
+    let first = Container::create_new(
+        &path,
+        SnapshotInput {
+            root: b"first",
+            objects: &objects,
+            guard: b"guard",
+        },
+        &cancel,
+        |_| true,
+    )
+    .unwrap();
+    let capture = first
+        .container
+        .capture(Selection::Current, &cancel)
+        .unwrap();
+    // Chunked input has the same identity as the equal byte slice.
+    assert_eq!(capture.members[0].object, id);
+    let mut streamed = Vec::new();
+    let mut pieces = 0;
+    capture
+        .stream_object(id, bytes.len(), &cancel, |raw| {
+            assert!(raw.len() <= CHUNK_BYTES);
+            pieces += 1;
+            streamed.extend_from_slice(raw);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!((pieces, streamed == bytes), (4, true));
+    assert!(matches!(
+        capture.stream_object(ObjectId::of(b"absent"), 16, &cancel, |_| Ok(())),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        capture.stream_object(id, bytes.len() - 1, &cancel, |_| Ok(())),
+        Err(Error::ResourceLimit(_))
+    ));
+    let base = capture.heads;
+    drop(capture);
+    // Republishing existing content compares it chunk by chunk, both as frames
+    // and as an equal slice.
+    let slice = [ObjectInput {
+        role: ObjectRole::new(2).unwrap(),
+        bytes: (&bytes).into(),
+    }];
+    let both = [objects[0], slice[0]];
+    first
+        .container
+        .publish(
+            base,
+            Selection::Current,
+            SnapshotInput {
+                root: b"second",
+                objects: &both,
+                guard: b"later",
+            },
+            &cancel,
+            |_| true,
+        )
+        .unwrap();
+    let capture = first
+        .container
+        .capture(Selection::Current, &cancel)
+        .unwrap();
+    assert_eq!(
+        capture.read_object(id, bytes.len(), &cancel).unwrap(),
+        bytes
+    );
+    drop(capture);
+    first.container.check(&cancel).unwrap();
 }

@@ -398,15 +398,41 @@ fn manufacturing_fresh_reopen_ignores_deleted_original_and_readonly_rejects_edit
     );
 }
 #[test]
+fn multi_frame_program_saves_and_reopens_as_frames_with_exact_bytes() {
+    let sandbox = Sandbox::new();
+    let mut project = crate::tests::manufactured();
+    // Four full frames plus a tail, incompressible so frames are stored raw.
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let program: Vec<u8> = (0..4 * spiling_chunks::FRAME_BYTES + 31)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect();
+    let bundle = crate::tests::manufacturing_bundle(&project);
+    let asset = crate::tests::bundle_asset_with(&bundle, &program);
+    crate::tests::edit(&mut project, crate::Edit::PublishManufacturing { asset });
+    save_project(&mut project, Some(sandbox.target()));
+    let saved = project.snapshot().manufacturing_artifact.clone().unwrap();
+    drop(project);
+    let loaded = open(&sandbox.target(), true, false, &flag()).unwrap();
+    let reopened = loaded.layouts[0].manufacturing_artifact.clone().unwrap();
+    assert_eq!(reopened.record, saved.record);
+    assert_eq!(reopened.program, saved.program);
+    assert_eq!(reopened.program.to_vec().unwrap(), program);
+    assert!(reopened.program.retained_bytes() >= program.len());
+}
+#[test]
 fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
     let sandbox = Sandbox::new();
     let mut project = crate::tests::manufactured();
     save_project(&mut project, Some(sandbox.target()));
     let before = project.info();
     let asset = project.snapshot().manufacturing_artifact.clone().unwrap();
-    // Opening reads the bundle, then the raw program, and retains its frames.
-    let program_raw = asset.program.len() as usize;
-    let count = asset.bytes.len() + program_raw.max(asset.program.retained_bytes());
+    // Opening retains the bundle bytes and streams the program into frames.
+    let count = asset.bytes.len() + asset.program.retained_bytes();
     assert_eq!(
         open_reusing(
             &sandbox.target(),

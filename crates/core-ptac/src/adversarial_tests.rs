@@ -63,7 +63,7 @@ fn snapshot<'a>(
 fn object(bytes: &[u8]) -> ObjectInput<'_> {
     ObjectInput {
         role: ObjectRole::new(1).unwrap(),
-        bytes,
+        bytes: bytes.into(),
     }
 }
 
@@ -479,7 +479,7 @@ fn input_boundary_limits_and_duplicate_roles_are_not_compatibility_defaults() {
     let members: Vec<_> = (1..=MAX_MEMBERS + 1)
         .map(|role| ObjectInput {
             role: ObjectRole::new(role as u16).unwrap(),
-            bytes: OLD_ASSET,
+            bytes: OLD_ASSET.into(),
         })
         .collect();
     assert!(matches!(
@@ -1367,11 +1367,11 @@ fn independent_golden_snapshot_preimage_and_sqlite_profile_are_stable() {
     let objects = [
         ObjectInput {
             role: ObjectRole::new(19).unwrap(),
-            bytes: b"golden object two",
+            bytes: b"golden object two".into(),
         },
         ObjectInput {
             role: ObjectRole::new(7).unwrap(),
-            bytes: b"golden object one",
+            bytes: b"golden object one".into(),
         },
     ];
     let initial = Container::create_new(
@@ -1658,7 +1658,7 @@ fn mutation_fuzz_snapshot_preimages_and_row_mappings_are_bounded() {
             .rev()
             .map(|(index, bytes)| ObjectInput {
                 role: ObjectRole::new(index as u16 + 1).unwrap(),
-                bytes,
+                bytes: bytes.into(),
             })
             .collect();
         let candidate = Candidate::checked(snapshot(&root, &inputs, OLD_GUARD)).unwrap();

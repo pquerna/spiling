@@ -488,29 +488,12 @@ fn load_assets(
                     cancel,
                 )?;
                 remaining_manufacturing -= bytes.capacity();
-                let raw_program = read_asset(
+                let program = read_chunked(
                     capture,
-                    &record.program.hash,
-                    remaining_manufacturing.min(MAX_MANUFACTURING_PROGRAM_BYTES as usize),
-                    Some(usize::try_from(record.program.byte_count).map_err(|_| {
-                        error(
-                            ProjectErrorCode::ResourceLimit,
-                            "manufacturing program exceeds address space",
-                        )
-                    })?),
+                    object_id(&record.program.hash),
+                    Some(record.program.byte_count),
                     cancel,
                 )?;
-                let program = spiling_chunks::ChunkSource::from_slice(
-                    &raw_program,
-                    u64::from(MAX_MANUFACTURING_PROGRAM_BYTES),
-                )
-                .map_err(|_| {
-                    error(
-                        ProjectErrorCode::ResourceLimit,
-                        "manufacturing program exceeds byte budget",
-                    )
-                })?;
-                drop(raw_program);
                 remaining_manufacturing = remaining_manufacturing
                     .checked_sub(program.retained_bytes())
                     .ok_or_else(|| {
@@ -689,21 +672,78 @@ fn validate_other_root(
 
 /// Raw object bytes for every member. Programs are materialized from their
 /// compressed frames for the duration of a save or reconciliation.
-fn snapshot_objects(snapshot: &Snapshot) -> Result<BTreeMap<Member, Arc<Vec<u8>>>, ProjectError> {
+/// Exact object content retained in memory: whole bytes, or a program's frames.
+#[derive(Clone)]
+enum StoredBytes {
+    Bytes(Arc<Vec<u8>>),
+    Chunks(spiling_chunks::ChunkSource),
+}
+impl From<Arc<Vec<u8>>> for StoredBytes {
+    fn from(bytes: Arc<Vec<u8>>) -> Self {
+        Self::Bytes(bytes)
+    }
+}
+impl StoredBytes {
+    fn input(&self) -> spiling_core_ptac::ObjectBytes<'_> {
+        match self {
+            Self::Bytes(bytes) => bytes.as_slice().into(),
+            Self::Chunks(source) => source.into(),
+        }
+    }
+}
+
+/// Stream a stored program into compressed frames without a raw buffer.
+/// Each chunk is verified as it arrives; a failed object digest discards the frames.
+fn read_chunked(
+    capture: &Capture<'_>,
+    id: ObjectId,
+    exact: Option<u64>,
+    cancel: &AtomicBool,
+) -> Result<spiling_chunks::ChunkSource, ProjectError> {
+    cancelled(cancel)?;
+    let limit = MAX_MANUFACTURING_PROGRAM_BYTES as usize;
+    if exact.is_some_and(|size| {
+        capture
+            .object_length(id)
+            .is_ok_and(|actual| actual as u64 != size)
+    }) {
+        return Err(error(
+            ProjectErrorCode::CorruptAsset,
+            "asset length differs from project metadata",
+        ));
+    }
+    let mut writer = spiling_chunks::ChunkWriter::new(limit as u64);
+    capture
+        .stream_object(id, limit, cancel, |raw| {
+            std::io::Write::write_all(&mut writer, raw)
+        })
+        .map_err(ptac_error)?;
+    writer.finish().map_err(|_| {
+        error(
+            ProjectErrorCode::ResourceLimit,
+            "manufacturing program exceeds byte budget",
+        )
+    })
+}
+
+fn snapshot_objects(snapshot: &Snapshot) -> Result<BTreeMap<Member, StoredBytes>, ProjectError> {
     let mut objects = BTreeMap::new();
     for asset in snapshot.analysis_results.values() {
-        objects.insert(member(ANALYSIS, &asset.record.hash), asset.bytes.clone());
+        objects.insert(
+            member(ANALYSIS, &asset.record.hash),
+            asset.bytes.clone().into(),
+        );
     }
     if let Some(asset) = &snapshot.materials {
         objects.insert(
             member(MATERIALS, &asset.record().hash),
-            asset.bytes().clone(),
+            asset.bytes().clone().into(),
         );
     }
     for asset in snapshot.sources.values() {
         objects.insert(
             member(SOURCE, &asset.record.provenance.source_hash),
-            asset.bytes.clone(),
+            asset.bytes.clone().into(),
         );
     }
     for asset in snapshot
@@ -713,44 +753,38 @@ fn snapshot_objects(snapshot: &Snapshot) -> Result<BTreeMap<Member, Arc<Vec<u8>>
     {
         objects.insert(
             member(MANUFACTURING, &asset.record.hash),
-            asset.bytes.clone(),
+            asset.bytes.clone().into(),
         );
-        let program = asset.program.to_vec().map_err(|_| {
-            error(
-                ProjectErrorCode::ResourceLimit,
-                "manufacturing program could not be materialized for storage",
-            )
-        })?;
         objects.insert(
             member(PROGRAM, &asset.record.program.hash),
-            Arc::new(program),
+            StoredBytes::Chunks(asset.program.clone()),
         );
     }
     for asset in snapshot.surface_images.values() {
         objects.insert(
             member(IMAGE, &asset.record().image_hash),
-            asset.bytes().clone(),
+            asset.bytes().clone().into(),
         );
     }
     for asset in snapshot.appearance_palettes.values() {
         objects.insert(
             member(PALETTE_ORIGINAL, &asset.record().original_hash),
-            asset.original().clone(),
+            asset.original().clone().into(),
         );
         objects.insert(
             member(PALETTE_CANONICAL, &asset.record().canonical_hash),
-            asset.canonical().clone(),
+            asset.canonical().clone().into(),
         );
     }
     Ok(objects)
 }
 
-fn inputs(objects: &BTreeMap<Member, Arc<Vec<u8>>>) -> Vec<ObjectInput<'_>> {
+fn inputs(objects: &BTreeMap<Member, StoredBytes>) -> Vec<ObjectInput<'_>> {
     objects
         .iter()
         .map(|(member, bytes)| ObjectInput {
             role: member.role,
-            bytes: bytes.as_slice(),
+            bytes: bytes.input(),
         })
         .collect()
 }
@@ -924,6 +958,18 @@ pub fn save(
             for member in &capture.members {
                 let bytes = if let Some(bytes) = available.get(member) {
                     bytes.clone()
+                } else if member.role.get() == PROGRAM {
+                    let program = read_chunked(&capture, member.object, None, cancel)?;
+                    budgets.manufacturing_bytes = budgets
+                        .manufacturing_bytes
+                        .checked_sub(program.retained_bytes())
+                        .ok_or_else(|| {
+                            error(
+                                ProjectErrorCode::ResourceLimit,
+                                "Save As retained asset budget exceeded",
+                            )
+                        })?;
+                    StoredBytes::Chunks(program)
                 } else {
                     let budget = match member.role.get() {
                         SOURCE => &mut budgets.source_bytes,
@@ -943,7 +989,7 @@ pub fn save(
                             "Save As retained asset budget exceeded",
                         )
                     })?;
-                    Arc::new(bytes)
+                    StoredBytes::Bytes(Arc::new(bytes))
                 };
                 previous_objects.insert(*member, bytes);
             }

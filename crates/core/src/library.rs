@@ -545,7 +545,7 @@ impl LibraryStore {
         .map_err(|e| invalid(e.to_string()))?;
         let objects = [ObjectInput {
             role: ObjectRole::new(MATERIALS_ROLE).map_err(ptac)?,
-            bytes: &materials,
+            bytes: (&materials).into(),
         }];
         let input = SnapshotInput {
             root: &root,
