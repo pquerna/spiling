@@ -576,54 +576,92 @@ fn test_comb_26_oblique_planar_section_box_mm() {
 }
 
 #[test]
-fn test_comb_27_coplanar_boundary_face_slicing() {
-    let bytes = fixture_bytes("box-mm.step");
-    let def = import_test_step(&bytes).expect("box");
-    // Plane coincident with bottom face z=0.0
-    let res_bot = section_at_z(&def, 0.0);
-    assert!(res_bot.is_ok(), "bottom face slice");
-    // Plane coincident with top face z=8.0
-    let res_top = section_at_z(&def, 8.0);
-    assert!(res_top.is_ok(), "top face slice");
+fn test_comb_27_coplanar_boundary_face_incidence() {
+    let definition = import_test_step(&fixture_bytes("box-mm.step")).expect("box");
+    for height in [0.0, 8.0] {
+        let error = section_at_z(&definition, height).expect_err("unresolved coplanar incidence");
+        assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate);
+    }
+    for height in [0.01, 7.99] {
+        let section = section_at_z(&definition, height).expect("regular near-cap material");
+        assert_eq!(section.loops().len(), 1);
+        assert_close(
+            loop_area(&section, &section.loops()[0]).abs(),
+            200.0,
+            60.0 * SECTION_SAMPLING_TOLERANCE_MM + PI * SECTION_SAMPLING_TOLERANCE_MM.powi(2),
+            "independent near-cap box area",
+        );
+    }
+    let enclosure = definition.bounds_mm();
+    for height in [enclosure.min[2] - 0.01, enclosure.max[2] + 0.01] {
+        let section = section_at_z(&definition, height).expect("proved outside cut");
+        assert!(section.loops().is_empty());
+    }
 }
 
 #[test]
-fn test_comb_28_coplanar_side_face_slicing() {
-    let bytes = fixture_bytes("box-mm.step");
-    let def = import_test_step(&bytes).expect("box");
-    let res_x0 = section(
-        &def,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 0.0],
-            normal: [1.0, 0.0, 0.0],
-        },
-        &AtomicBool::new(false),
-    );
-    assert!(res_x0.is_ok());
-    let res_x20 = section(
-        &def,
-        PlaneMm {
-            origin_mm: [20.0, 0.0, 0.0],
-            normal: [1.0, 0.0, 0.0],
-        },
-        &AtomicBool::new(false),
-    );
-    assert!(res_x20.is_ok());
+fn test_comb_28_coplanar_side_face_incidence() {
+    let definition = import_test_step(&fixture_bytes("box-mm.step")).expect("box");
+    let cut = |position| {
+        section(
+            &definition,
+            PlaneMm {
+                origin_mm: [position, 0.0, 0.0],
+                normal: [1.0, 0.0, 0.0],
+            },
+            &AtomicBool::new(false),
+        )
+    };
+    for position in [0.0, 20.0] {
+        let error = cut(position).expect_err("unresolved coplanar incidence");
+        assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate);
+    }
+    for position in [0.01, 19.99] {
+        let section = cut(position).expect("regular near-side material");
+        assert_eq!(section.loops().len(), 1);
+        assert_close(
+            loop_area(&section, &section.loops()[0]).abs(),
+            80.0,
+            36.0 * SECTION_SAMPLING_TOLERANCE_MM + PI * SECTION_SAMPLING_TOLERANCE_MM.powi(2),
+            "independent near-side box area",
+        );
+    }
+    let enclosure = definition.bounds_mm();
+    for position in [enclosure.min[0] - 0.01, enclosure.max[0] + 0.01] {
+        assert!(
+            cut(position)
+                .expect("proved outside cut")
+                .loops()
+                .is_empty()
+        );
+    }
 }
 
 #[test]
-fn test_comb_29_tangent_plane_slicing_cylinder() {
-    let bytes = fixture_bytes("cylinder.step");
-    let def = import_test_step(&bytes).expect("cyl");
-    let res = section(
-        &def,
-        PlaneMm {
-            origin_mm: [5.0, 0.0, 0.0],
-            normal: [1.0, 0.0, 0.0],
-        },
-        &AtomicBool::new(false),
+fn test_comb_29_tangent_plane_cylinder_incidence() {
+    let definition = import_test_step(&fixture_bytes("cylinder.step")).expect("cylinder");
+    let cut = |position| {
+        section(
+            &definition,
+            PlaneMm {
+                origin_mm: [position, 0.0, 0.0],
+                normal: [1.0, 0.0, 0.0],
+            },
+            &AtomicBool::new(false),
+        )
+    };
+    let error = cut(5.0).expect_err("unresolved tangent incidence");
+    assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate);
+    let section = cut(4.0).expect("regular interior cylinder cut");
+    assert_eq!(section.loops().len(), 1);
+    assert_close(
+        loop_area(&section, &section.loops()[0]).abs(),
+        48.0,
+        28.0 * SECTION_SAMPLING_TOLERANCE_MM + PI * SECTION_SAMPLING_TOLERANCE_MM.powi(2),
+        "independent chord-width times cylinder height",
     );
-    assert!(res.is_ok(), "tangent plane slice must not crash");
+    let outside = definition.bounds_mm().max[0] + 0.01;
+    assert!(cut(outside).expect("proved outside cut").loops().is_empty());
 }
 
 // =========================================================================

@@ -33,6 +33,7 @@ fixtures/manufacturing/solid-fill.intent.json
 vendor/
 # Frozen source/profile inputs and generator-owned goldens retain exact bytes.
 # Rust generators, trusted intent authors and fixture verifiers own their checks.
+fixtures/analysis/hook-assumptions.json
 crates/appearance/tests/fixtures/prusa-v7-synthetic.json
 fixtures/appearance/optical-layer-cycle.json
 fixtures/appearance/palette.json
@@ -44,12 +45,17 @@ fixtures/manufacturing/bridges/manifest.json
 fixtures/manufacturing/complete-sparse.intent.json
 fixtures/manufacturing/fixed-dual-cycle.intent.json
 fixtures/manufacturing/fixed-dual.intent.json
+fixtures/manufacturing/fixed-dual-profiles.intent.json
+fixtures/manufacturing/fixed-dual-shared-material.intent.json
+fixtures/manufacturing/grid.intent.json
 fixtures/manufacturing/housing-h1-combined.intent.json
 fixtures/manufacturing/housing-h1-fine.intent.json
 fixtures/manufacturing/housing-ordinary.intent.json
 fixtures/manufacturing/housing-two-zone.intent.json
 fixtures/manufacturing/material-profile-a.json
 fixtures/manufacturing/material-profile-b.json
+fixtures/manufacturing/mixed-width-combined.intent.json
+fixtures/manufacturing/mixed-width-interior.intent.json
 fixtures/manufacturing/native/manifest.json
 fixtures/manufacturing/native/tilted-cap-offset.points.json
 fixtures/manufacturing/native/tilted-cylinder-complete.intent.json
@@ -59,6 +65,8 @@ fixtures/manufacturing/software-fixed-dual.configuration.json
 fixtures/manufacturing/surface-color-box.intent.json
 fixtures/manufacturing/surface-color-regional.intent.json
 fixtures/manufacturing/surface-color-window.intent.json
+fixtures/manufacturing/web-roof.intent.json
+fixtures/manufacturing/web-roof/manifest.json
 fixtures/protocol/replay-fixed-dual.json
 fixtures/protocol/replay-sparse.json
 fixtures/protocol/replay-waste-only.json

@@ -23,7 +23,8 @@ const intent = JSON.parse(
 );
 const selectionCase = process.env.SPILING_INTERIOR_CASE ?? "automatic";
 assert.ok(["automatic", "slow-bulk", "no-timing"].includes(selectionCase));
-if (selectionCase === "slow-bulk") intent.printer.workflow.job.tools[1].material_profile.selection.overrides.print_speed_mm_s = 1;
+if (selectionCase === "slow-bulk")
+  intent.printer.workflow.job.tools[1].material_profile.selection.overrides.print_speed_mm_s = 1;
 if (selectionCase === "no-timing") intent.printer.workflow.job.timing_model = null;
 const source = join(output, "owned-box.step"),
   project = join(output, "Shared material.spil");
@@ -129,8 +130,18 @@ const selection = plan.interior_selection;
 const primaryOnly = selectionCase !== "automatic";
 if (singlePart) {
   assert.ok(selection);
-  assert.equal(selection.selected, primaryOnly ? "primary" : intentName === "mixed-width-combined" ? "grouped" : "synchronized");
-  assert.equal(selection.reason, primaryOnly ? selectionCase === "no-timing" ? "no_timing_model" : "objective_not_met" : "improved_modeled_work");
+  assert.equal(
+    selection.selected,
+    primaryOnly ? "primary" : intentName === "mixed-width-combined" ? "grouped" : "synchronized",
+  );
+  assert.equal(
+    selection.reason,
+    primaryOnly
+      ? selectionCase === "no-timing"
+        ? "no_timing_model"
+        : "objective_not_met"
+      : "improved_modeled_work",
+  );
   assert.equal(selection.candidates.length, 3);
   evidence.interior_selection = selection;
 }
@@ -155,8 +166,11 @@ for (let i = 0; i < decoded.eventCount; i++) {
   if (singlePart) {
     assert.ok(association);
     if (interior) {
-      assert.equal(association.beadWidthMm, primaryOnly ? intent.recipe.bead_width_mm : job.assignments[0].interior.bead_width_mm);
-      if (association.physicalZMm[1]-association.physicalZMm[0] > 0.21) coarseEvents++;
+      assert.equal(
+        association.beadWidthMm,
+        primaryOnly ? intent.recipe.bead_width_mm : job.assignments[0].interior.bead_width_mm,
+      );
+      if (association.physicalZMm[1] - association.physicalZMm[0] > 0.21) coarseEvents++;
     }
     // Independent analytic fixture observer: actual XYZ6 full beads retain the
     // original20x20 source and radius3 bore, under the existing0.005 mm policy.
@@ -225,11 +239,27 @@ if (job.timing_model) {
   assert.ok(time, "fresh replay must consume the captured timing model");
   assert.deepEqual(time.model, job.timing_model);
   assert.equal(time.model_moves, verification.deposition_segments);
-  assert.equal(time.auxiliary_moves, verification.routing.tools.reduce((sum, t) => sum + t.waste_deposition_segments, 0));
-  assert.equal(time.travel_moves, verification.travel_segments + verification.lifecycle_motion_count);
+  assert.equal(
+    time.auxiliary_moves,
+    verification.routing.tools.reduce((sum, t) => sum + t.waste_deposition_segments, 0),
+  );
+  assert.equal(
+    time.travel_moves,
+    verification.travel_segments + verification.lifecycle_motion_count,
+  );
   assert.equal(time.feeder_moves, 2 * verification.retraction_count - 2);
-  assert.deepEqual(time.selections_per_tool, [verification.routing.selection_count / 2, verification.routing.selection_count / 2]);
-  for (const key of ["model_deposition_seconds", "auxiliary_deposition_seconds", "travel_seconds", "feeder_seconds", "activation_seconds", "command_overhead_seconds"])
+  assert.deepEqual(time.selections_per_tool, [
+    verification.routing.selection_count / 2,
+    verification.routing.selection_count / 2,
+  ]);
+  for (const key of [
+    "model_deposition_seconds",
+    "auxiliary_deposition_seconds",
+    "travel_seconds",
+    "feeder_seconds",
+    "activation_seconds",
+    "command_overhead_seconds",
+  ])
     assert.ok(Number.isFinite(time[key]) && time[key] > 0, `complete modeled work term ${key}`);
   evidence.job_time = time;
 }

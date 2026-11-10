@@ -288,6 +288,26 @@ save, close/reap, delete only the owned external STEP copy, reopen read-only in 
 fresh engine, then freshly Verify/replay/export again. Compare program bytes and
 captured identities. This is software workflow evidence, never machine readiness.
 
+The composite host regression includes an explicitly applied material profile,
+a consumed sparse-density revision, stale-edit and occupied-export refusals,
+Undo/Redo, source/profile deletion, fresh read-only return and a separate CLI
+export. It compares exact program bytes and typed plan, verification and
+provenance across all three exports. Retain its final project for actual-window
+inspection with:
+
+```sh
+SPILING_TEST_ENGINE="${CARGO_TARGET_DIR:-$PWD/target}/debug/spiling-engine" \
+SPILING_NATIVE_EVIDENCE_ROOT="$PWD/.cache/native-return" \
+cargo test --locked -p spiling-workbench --lib \
+  host::tests::manufacturing_review_export_stale_edit_and_source_independent_reopen \
+  -- --exact --ignored --test-threads=1
+```
+
+Build the matching CLI beside the engine first and choose a fresh evidence
+directory for each run. The retained `demo1-return.spil`
+is self-contained; opening it does not establish the separate actual-window
+authoring, native-picker or hardware-input acceptance.
+
 For native material acceptance, open an admitted mechanical job with a matching
 explicit single-tool intent. Use **Browse material catalog…** and the parented picker,
 search/page through declarations and inspect a compatible entry's proposed changes
@@ -308,6 +328,10 @@ artifact provenance and can precede compilation's project publication revision.
 A current capture binds the observed project revision separately. Display memory
 accounts active/staged source, section and motion together; prior replay GPU charge
 is conservatively retained until the engine session ends.
+This display allowance counts source, section and projected motion buffers,
+not the maximum serialized manufacturing-bundle size. Checked CPU-only bundles
+retain their separate decoding limits and bounded Current/comparison ownership;
+raising a file limit must not consume the viewport's buffer allowance.
 
 The `inspection` Cargo feature enables upstream development inspection tooling;
 it is off by default and must stay off in distributions. It is not a second

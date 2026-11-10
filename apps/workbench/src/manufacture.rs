@@ -146,12 +146,7 @@ impl State {
             .flatten()
             .filter_map(|review| review.display.as_ref())
             .map(|display| (display, display.owned_bytes));
-        let bundles = reviews
-            .iter()
-            .flatten()
-            .map(|review| (&review.bundle, MAX_MANUFACTURING_BUNDLE_BYTES as usize));
-        self.retired_display_bytes
-            .max(unique_bytes(displays) + unique_bytes(bundles))
+        self.retired_display_bytes.max(unique_bytes(displays))
     }
     pub fn invalidate(&mut self) {
         // Conservatively retain the prior GPU charge until this engine session ends.

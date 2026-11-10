@@ -37,14 +37,30 @@ export default {
       kind: "fixed_dual_marlin",
       job: {
         ...job,
-        timing_model: { id: "software-rest-to-rest", revision: "1", linear_acceleration_mm_s2: 1000, filament_acceleration_mm_s2: 500, tool_activation_seconds: [0.5, 0.5], command_overhead_seconds: 0.0002 },
-        interior_goal: { minimum_modeled_saving_seconds: 1, max_extra_model_fraction: 0.05, max_extra_waste_mm3: 0 },
+        timing_model: {
+          id: "software-rest-to-rest",
+          revision: "1",
+          linear_acceleration_mm_s2: 1000,
+          filament_acceleration_mm_s2: 500,
+          tool_activation_seconds: [0.5, 0.5],
+          command_overhead_seconds: 0.0002,
+        },
+        interior_goal: {
+          minimum_modeled_saving_seconds: 1,
+          max_extra_model_fraction: 0.05,
+          max_extra_waste_mm3: 0,
+        },
         tools: [job.tools[0], tool],
         assignments: [
           {
             ...job.assignments[0],
             work_envelope_mm: { min: [19, 19, -1], max: [41, 41, 9] },
-            interior: { tool_id: tool.id, bead_width_mm: 0.6, policy_context: null, policy_override: null },
+            interior: {
+              tool_id: tool.id,
+              bead_width_mm: 0.6,
+              policy_context: null,
+              policy_override: null,
+            },
           },
         ],
       },

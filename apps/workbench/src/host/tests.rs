@@ -875,6 +875,36 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
         "{:?}",
         s.problems
     );
+    let profile_path = root.path().join("material-profile.json");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/manufacturing/material-profile-a.json"),
+        &profile_path,
+    )
+    .unwrap();
+    let loaded = send(&host, Action::LoadMaterial(native(&profile_path)));
+    let selection = loaded
+        .manufacturing
+        .loaded_material
+        .as_ref()
+        .unwrap()
+        .selection
+        .clone();
+    let s = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::ApplyMaterialProfile {
+            tool_id: None,
+            layout_id: layout_id(&host),
+            session_id,
+            base_revision,
+            selection: selection.clone(),
+        }
+    });
+    assert!(s.problems.is_empty(), "{:?}", s.problems);
+    let intent = s.manufacturing.intent.as_ref().unwrap().clone();
+    assert_eq!(
+        intent.material_profile.as_ref().unwrap().selection,
+        selection
+    );
     let d = s.display.as_ref().unwrap();
     let o = &d.occurrences[0];
     let scene = s.scene.as_ref().unwrap();
@@ -960,6 +990,7 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
     fn inspect(host: &Host) -> Snapshot {
         let s = host.snapshot();
         let serial = s.serial;
+        let problem_count = s.problems.len();
         host.manufacturing(ManufacturingCommand::Inspect {
             layout_id: layout_id(host),
             session_id: s.hello.as_ref().unwrap().session_id.clone(),
@@ -967,12 +998,19 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
             output: VerificationOutput::ReportAndMotion,
         })
         .unwrap();
-        wait(host, |s| {
+        let completed = wait(host, |s| {
             s.serial > serial
                 && !s.busy
                 && !s.manufacturing.loading
-                && s.manufacturing.review.is_some()
-        })
+                && (s.manufacturing.review.is_some()
+                    || (!s.active_operation && s.problems.len() > problem_count))
+        });
+        assert!(
+            completed.manufacturing.review.is_some(),
+            "{:?}",
+            completed.problems
+        );
+        completed
     }
     let s = inspect(&host);
     let r = s.manufacturing.review.as_ref().unwrap();
@@ -1066,20 +1104,120 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
     let destination = root.path().join("output");
     let s = send(&host, Action::Export(native(&destination)));
     assert!(s.manufacturing.last_export.is_some(), "{:?}", s.problems);
+    let initial_volume = s
+        .manufacturing
+        .review
+        .as_ref()
+        .unwrap()
+        .capture
+        .report
+        .deposited_volume_mm3;
     let program = std::fs::read(destination.join("program.gcode")).unwrap();
-    send(&host, Action::Export(native(&destination)));
+    let original_files = [
+        "plan.json",
+        "program.gcode",
+        "verification.json",
+        "provenance.json",
+    ]
+    .map(|name| (name, std::fs::read(destination.join(name)).unwrap()));
+    let refused = send(&host, Action::Export(native(&destination)));
+    assert!(refused.problems.len() > s.problems.len());
     assert_eq!(
-        std::fs::read(destination.join("program.gcode")).unwrap(),
-        program
+        refused.project.as_ref().unwrap().revision,
+        s.project.as_ref().unwrap().revision
     );
+    for (name, bytes) in original_files {
+        assert_eq!(std::fs::read(destination.join(name)).unwrap(), bytes);
+    }
+    let before_edit = host.snapshot();
+    let revised = project_edit(&host, |session_id, base_revision| {
+        ProjectCommand::EditProcess {
+            session_id,
+            base_revision,
+            edit: ProcessEdit::SetSparseFraction {
+                scope: SurfaceScope::Occurrence {
+                    occurrence_id: o.occurrence_id,
+                    expected_definition_id: o.definition_id.clone(),
+                },
+                fraction: 0.45,
+            },
+        }
+    });
+    assert!(revised.manufacturing.capture.is_none());
+    assert!(revised.manufacturing.review.is_none());
     let serial = host.snapshot().serial;
     host.command(Command::Undo).unwrap();
     let s = idle_after(&host, serial);
     assert!(s.manufacturing.capture.is_none());
+    assert_eq!(
+        s.project.as_ref().unwrap().process_document,
+        before_edit.project.as_ref().unwrap().process_document
+    );
     let serial = s.serial;
     host.command(Command::Redo).unwrap();
-    idle_after(&host, serial);
-    let project = root.path().join("saved");
+    let s = idle_after(&host, serial);
+    assert_eq!(
+        s.project.as_ref().unwrap().process_document,
+        revised.project.as_ref().unwrap().process_document
+    );
+    let checked = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::Preflight {
+            layout_id: layout_id(&host),
+            session_id,
+            base_revision,
+        }
+    });
+    assert_eq!(
+        checked
+            .manufacturing
+            .preflight
+            .as_ref()
+            .unwrap()
+            .disposition,
+        PreflightDisposition::Admitted
+    );
+    let compiled = manufacture_control(&host, |session_id, base_revision| {
+        ManufacturingCommand::Compile {
+            layout_id: layout_id(&host),
+            session_id,
+            base_revision,
+        }
+    });
+    assert!(
+        compiled.manufacturing.artifact.is_some(),
+        "{:?}",
+        compiled.problems
+    );
+    let s = inspect(&host);
+    let revised_review = s.manufacturing.review.as_ref().unwrap();
+    assert!(
+        revised_review.motion.is_some(),
+        "{:?}",
+        revised_review.display_note
+    );
+    assert!(
+        revised_review.display.is_some(),
+        "{:?}",
+        revised_review.display_note
+    );
+    assert!(
+        s.manufacturing
+            .review
+            .as_ref()
+            .unwrap()
+            .capture
+            .report
+            .deposited_volume_mm3
+            > initial_volume
+    );
+    let destination = root.path().join("revised-output");
+    let s = send(&host, Action::Export(native(&destination)));
+    assert!(s.manufacturing.last_export.is_some(), "{:?}", s.problems);
+    let revised_program = std::fs::read(destination.join("program.gcode")).unwrap();
+    assert_ne!(revised_program, program);
+    let program = revised_program;
+    retain_project(&host, root.path(), "demo1-return");
+    let project = root.path().join("saved.spil");
     let s = send(
         &host,
         Action::Save {
@@ -1091,6 +1229,7 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
     send(&host, Action::Close);
     drop(host);
     std::fs::remove_file(source).unwrap();
+    std::fs::remove_file(profile_path).unwrap();
     let host = Host::new(
         Config {
             engine: engine(),
@@ -1110,6 +1249,11 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
     );
     assert_eq!(s.project.as_ref().unwrap().project_id, project_id);
     assert!(s.project.as_ref().unwrap().read_only);
+    assert_eq!(s.manufacturing.intent.as_ref(), Some(&intent));
+    assert_eq!(
+        s.project.as_ref().unwrap().process_document,
+        revised.project.as_ref().unwrap().process_document
+    );
     let s = inspect(&host);
     assert!(
         s.manufacturing
@@ -1130,6 +1274,59 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
         program
     );
     assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
+    drop(host);
+    let cli = engine().with_file_name(format!("spiling-cli{}", std::env::consts::EXE_SUFFIX));
+    let cli_output = root.path().join("cli-output");
+    let output = std::process::Command::new(cli)
+        .arg("--engine")
+        .arg(engine())
+        .args(["project", "inspect"])
+        .arg(&project)
+        .args(["--verify", "--manufacturing-out"])
+        .arg(&cli_output)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fn export_provenance(
+        bytes: &[u8],
+    ) -> (ManufacturingProvenance, ManufacturingInspectionProvenance) {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        let inspection = value
+            .as_object_mut()
+            .unwrap()
+            .remove("inspection")
+            .expect("fresh export inspection");
+        let captured: ManufacturingProvenance = serde_json::from_value(value).unwrap();
+        let inspection: ManufacturingInspectionProvenance =
+            serde_json::from_value(inspection).unwrap();
+        captured.validate().unwrap();
+        inspection.validate().unwrap();
+        (captured, inspection)
+    }
+    for directory in [root.path().join("reopened-output"), cli_output] {
+        assert_eq!(
+            std::fs::read(directory.join("program.gcode")).unwrap(),
+            program
+        );
+        let read = |name: &str| std::fs::read(directory.join(name)).unwrap();
+        let original = |name: &str| std::fs::read(destination.join(name)).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<NormalizedPrintPlan>(&read("plan.json")).unwrap(),
+            serde_json::from_slice::<NormalizedPrintPlan>(&original("plan.json")).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_slice::<VerificationReport>(&read("verification.json")).unwrap(),
+            serde_json::from_slice::<VerificationReport>(&original("verification.json")).unwrap()
+        );
+        assert_eq!(
+            export_provenance(&read("provenance.json")),
+            export_provenance(&original("provenance.json"))
+        );
+    }
 }
 
 fn project_edit(

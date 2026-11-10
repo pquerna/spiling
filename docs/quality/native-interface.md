@@ -150,16 +150,16 @@ geometric authority. View also exposes opposite normal, screen roll and Previous
 Small canvases omit the cube but retain all named actions. Cube input is separate
 from source picking and load/fastener placement.
 
-| Input | Action |
-| --- | --- |
-| Unclaimed primary drag; middle drag; Alt/Option+primary drag | Orbit |
-| Secondary drag; Shift+middle; Alt/Option+Shift+primary drag | Pan |
-| Mouse wheel; native pinch | Zoom, with one global reverse-zoom preference |
-| Trackpad preference | Two-finger scroll pans; pinch zooms; Option/Alt drag orbits |
-| Canvas 0–6 | Isometric, Top, Bottom, Front, Back, Left, Right |
-| Canvas F / G / P | Fit / Focus selection / Toggle projection |
-| Canvas N / Shift+N | Normal to section or selection / Opposite normal |
-| Canvas arrows / Shift+arrows / plus-or-equal and minus | Orbit / Pan / Zoom |
+| Input                                                        | Action                                                      |
+| ------------------------------------------------------------ | ----------------------------------------------------------- |
+| Unclaimed primary drag; middle drag; Alt/Option+primary drag | Orbit                                                       |
+| Secondary drag; Shift+middle; Alt/Option+Shift+primary drag  | Pan                                                         |
+| Mouse wheel; native pinch                                    | Zoom, with one global reverse-zoom preference               |
+| Trackpad preference                                          | Two-finger scroll pans; pinch zooms; Option/Alt drag orbits |
+| Canvas 0–6                                                   | Isometric, Top, Bottom, Front, Back, Left, Right            |
+| Canvas F / G / P                                             | Fit / Focus selection / Toggle projection                   |
+| Canvas N / Shift+N                                           | Normal to section or selection / Opposite normal            |
+| Canvas arrows / Shift+arrows / plus-or-equal and minus       | Orbit / Pan / Zoom                                          |
 
 Active primary handles own their edit until release. Navigation captures its
 button and mode at pointer-down; changing modifiers, leaving the canvas or

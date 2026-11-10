@@ -38,14 +38,14 @@ Keep three contracts separate:
 Default envelopes bound resource admission while allowing valid work to finish;
 responsiveness remains a separate obligation:
 
-| Envelope | Default |
-| --- | --- |
-| one interactive query or explicit section | monitored work; no unit ceiling |
-| one complete compile | monitored work; no unit ceiling |
-| prepared-section pool | `MAX_PREPARED_SECTION_BYTES` = 512 MiB live |
-| import query proof | `MAX_QUERY_PROOF_BYTES` = 256 MiB live |
-| directional owner/query scratch | `MAX_DIRECTIONAL_SCRATCH_BYTES` = 256 MiB live |
-| one display candidate proof | `DISPLAY_PROOF_BYTES` = 256 MiB live |
+| Envelope                                  | Default                                        |
+| ----------------------------------------- | ---------------------------------------------- |
+| one interactive query or explicit section | monitored work; no unit ceiling                |
+| one complete compile                      | monitored work; no unit ceiling                |
+| prepared-section pool                     | `MAX_PREPARED_SECTION_BYTES` = 512 MiB live    |
+| import query proof                        | `MAX_QUERY_PROOF_BYTES` = 256 MiB live         |
+| directional owner/query scratch           | `MAX_DIRECTIONAL_SCRATCH_BYTES` = 256 MiB live |
+| one display candidate proof               | `DISPLAY_PROOF_BYTES` = 256 MiB live           |
 
 Work is cumulative per operation and charged through one guard; a retry, cache
 reuse, layer or API boundary does not reset it. Byte limits are live bounds for

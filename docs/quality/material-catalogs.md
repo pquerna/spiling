@@ -35,7 +35,6 @@ Keep HueForge and OpenPrintTag catalogs separate. A row is identified by its cat
 
 Retain both original MIT notices beside the raw data. [NOTICE.md](../../NOTICE.md) and [licensing](../license.md) distinguish these imports from the separately pinned Prusa v7 math port. Release provenance validates the snapshots, records each catalog as a separate source component and copies both notices and the complete manifest. The tracked public source archive includes the data and engine binaries embed the admitted snapshots.
 
-
 ## Native acquisition checks
 
 Use Prepare → Material → Choose filament → Choose from My library, or Project
