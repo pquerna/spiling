@@ -537,3 +537,20 @@ fn read_only_camera_animation_survives_reconciliation_without_source_picking() {
     viewport.advance_focus(1.0);
     assert!((viewport.rotation * DVec3::Z + DVec3::Z).length() < 1e-12);
 }
+
+#[test]
+fn section_look_normal_shares_snap_history_and_animation_policy() {
+    let mut button = Viewport::default();
+    let mut keyboard = Viewport {
+        normal: Some(DVec3::Z),
+        ..Default::default()
+    };
+    button.normal_to(DVec3::Z, 0.0, false);
+    keyboard.navigate(ViewAction::Normal, 0.0, false);
+    assert_eq!(button.camera(), keyboard.camera());
+    assert_eq!(button.previous_camera, keyboard.previous_camera);
+    button.normal_to(-DVec3::Z, 1.0, true);
+    assert!(button.motion.is_some());
+    button.advance_focus(2.0);
+    assert!((button.rotation * DVec3::Z + DVec3::Z).length() < 1e-12);
+}

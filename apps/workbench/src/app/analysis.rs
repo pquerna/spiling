@@ -262,6 +262,8 @@ impl Workbench {
                         } else {
                             1.0
                         },
+                    ui.input(|input| input.time),
+                    ui.style().animation_time > 0.0,
                 );
             }
         });

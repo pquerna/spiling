@@ -506,13 +506,12 @@ impl Viewport {
         self.camera_restored = false;
         self.fit = true;
     }
-    pub fn normal_to(&mut self, normal: DVec3) {
+    pub fn normal_to(&mut self, normal: DVec3, now: f64, animations_enabled: bool) {
         let Some(n) = normal.try_normalize() else {
             return;
         };
-        self.interrupt_focus();
-        self.rotation = navigation::orientation(n);
-        self.orthographic = true;
+        self.normal = Some(n);
+        self.navigate(ViewAction::Normal, now, animations_enabled);
     }
     pub fn focus_on(&mut self, scene: &Scene, target: crate::scene::FocusTarget) -> bool {
         if !target.valid() {
