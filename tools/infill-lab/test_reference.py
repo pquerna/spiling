@@ -280,3 +280,14 @@ def test_element_report_refuses_hidden_result_thread_profile_change(tmp_path, fi
     path.write_text(json.dumps(launch))
     with pytest.raises(ValueError, match="thread profiles"):
         collect(inputs, outputs)
+
+
+def test_cantilever_component_admission_uses_span_axis_not_deflection_axis():
+    from reference import spanning_components
+    mesh = beam_mesh(2)
+    # The specimen spans X, but the datum Y envelope contains empty margins.
+    bounds = [[0., -1., -.1], [8., 1., .1]]
+    assert spanning_components(mesh, "cantilever_x_y", bounds) == [mesh]
+    assert spanning_components(mesh, "compression_y", bounds) == []
+    with pytest.raises(ValueError, match="fixture"):
+        spanning_components(mesh, "unknown", bounds)

@@ -99,6 +99,15 @@ projected-bead reservations; `verify` performs fresh report-only inspection;
 Setup and untimed guards still appear in whole-process profiles and CPU totals.
 Errors abort the run. Repeated results must retain the same program hash.
 
+`--phase residency` reports heap bytes instead of time, from a counting
+allocator compiled only into the benchmark binary. It runs once on the CPU
+backend: peak live bytes above entry for compile, JSON encode, decode and
+motion replay, then the retained size of the plan and program by dropping
+each owned part. Values are also divided by deposition segments. It accepts
+`--parts` or `--bundle` and ignores sample options. Compile peak covers planner,
+emitter and verifier together; it is single-process heap, not RSS, GPU or
+native kernel memory outside the Rust allocator.
+
 After a change, rerun the same commands/profile/envelope to new paths, then:
 
 ```sh

@@ -19,12 +19,13 @@ import time
 
 import numpy as np
 
-from geometry import connected_meshes, prism_mesh, mesh_from_prisms, mesh_from_voxels
+from geometry import connected_meshes, volume_mesh, mesh_from_prisms, mesh_from_voxels
 from mechanics import elastic_tensor
 from model import Material, file_hash
 
 JUDGE = (
     "reference.py",
+    "tetgen_mesh.py",
     "geometry.py",
     "mechanics.py",
     "model.py",
@@ -138,6 +139,23 @@ def beam_mesh(nx, ny=1, nz=1, *, element="C3D15", size=(8.0, 0.45, 0.2)):
     return mesh_from_prisms(
         xy, np.asarray(triangles), z, np.ones((len(triangles), nz), bool)
     )
+
+
+def spanning_components(mesh, case, bounds):
+    """Require material across the prescribed load-axis datums, not deflection."""
+    if case in {"compression_x", "compression_y", "compression_z"}:
+        axis = "xyz".index(case[-1])
+    elif case in {"cantilever_x_y", "cantilever_x_z", "cantilever_z_x", "cantilever_z_y"}:
+        axis = "xyz".index(case[-3])
+    else:
+        raise ValueError("unknown finite-body fixture")
+    return [
+        p
+        for p in connected_meshes(mesh)
+        if np.allclose(
+            p.bounds[:, axis], np.asarray(bounds)[:, axis], rtol=0, atol=1e-8
+        )
+    ]
 
 
 def fixture(points, case, bounds, material):
@@ -400,21 +418,8 @@ def evaluate(folder, output):
                     raise ValueError("analytical beam datums differ from geometry")
                 parts = [mesh]
             else:
-                mesh, info = prism_mesh(
-                    roads, window=scenario["bounds"], **scenario["refinement"]
-                )
-                parts = [
-                    part
-                    for part in connected_meshes(mesh)
-                    if np.allclose(
-                        part.bounds[:, "xyz".index(scenario["case"][-1])],
-                        np.asarray(scenario["bounds"])[
-                            :, "xyz".index(scenario["case"][-1])
-                        ],
-                        rtol=0,
-                        atol=1e-8,
-                    )
-                ]
+                mesh, info = volume_mesh(roads, scenario, workdir=output / f"volume-{i}")
+                parts = spanning_components(mesh, scenario["case"], scenario["bounds"])
                 row["mesh"] = info
             results = [
                 solve_reference(
