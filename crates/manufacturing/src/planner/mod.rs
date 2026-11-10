@@ -2173,7 +2173,7 @@ fn admit_schedule<'model>(
                     )?;
                     let classified_bytes = classified.retained_bytes();
                     let hatch_layer = region::HatchLayer {
-                        roof: web_roof.as_ref().map(|field| field.roof(index as usize)),
+                        roof: web_roof.as_ref().map(|field| field.roof(index)),
                         width_mm: recipe.bead_width_mm,
                         z: elevation.z,
                         lower_z: elevation.lower_z,
@@ -2239,7 +2239,7 @@ fn admit_schedule<'model>(
                             axis,
                             region::HatchAxis::for_policy(recipe.top_skin_axis, index as u32),
                             recipe,
-                            web_roof.as_ref().map(|field| field.roof(index as usize)),
+                            web_roof.as_ref().map(|field| field.roof(index)),
                             phase_by_layer[index],
                             classified_bytes,
                             &sections[current].process_domains,

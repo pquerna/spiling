@@ -101,10 +101,11 @@ pub(super) fn field(
     // The sparse interior starts inside the walls; anchor the lattice there
     // when the part is wide enough.
     let inset = f64::from(recipe.perimeter_count) * recipe.bead_width_mm;
-    for axis in 0..2 {
-        if frame[1][axis] - frame[0][axis] > 2.0 * inset + recipe.bead_width_mm {
-            frame[0][axis] += inset;
-            frame[1][axis] -= inset;
+    let [minimum, maximum] = &mut frame;
+    for (lower, upper) in minimum.iter_mut().zip(maximum.iter_mut()) {
+        if *upper - *lower > 2.0 * inset + recipe.bead_width_mm {
+            *lower += inset;
+            *upper -= inset;
         }
     }
     if frame.iter().flatten().any(|v| !v.is_finite())
@@ -120,7 +121,8 @@ pub(super) fn field(
         / recipe.infill_fraction.max(0.01);
     let horizon = 2.0 * (pitch + recipe.web_roof_spacing_mm()) + nominal;
 
-    let mut layers = vec![Arc::new(Vec::new()); materials.len()];
+    let empty_layer = Arc::new(Vec::new());
+    let mut layers = vec![empty_layer; materials.len()];
     let mut carried: Arc<Vec<Ceiling>> = Arc::new(Vec::new());
     for k in (0..materials.len()).rev() {
         check_cancel(cancel)?;

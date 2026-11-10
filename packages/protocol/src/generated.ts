@@ -929,6 +929,8 @@ export type PlanarRegionCoverage = { section_area_mm2: number, source_section_ar
  */
 unsupported_overhang_mm: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, process_diaphragms: Array<ProcessDiaphragmCoverage>, diaphragm_area_mm2: number, skin_bridge_domains: Array<SkinBridgeDomain>, web_roof_domains: Array<WebRoofDomain>, };
 
+export type WebRoofCeiling = { roof_z_mm: number, extent: Array<DiaphragmPolygonMm>, };
+
 export type WebRoofDomain = { region_index: number, extent: Array<DiaphragmPolygonMm>,
 /**
  * Part-level XY bounds `[min, max]` that anchor the web lattice on every
