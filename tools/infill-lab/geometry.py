@@ -12,6 +12,10 @@ Neither continuum volume is equated to commanded extrusion dose.
 from __future__ import annotations
 from dataclasses import dataclass
 import math
+import json
+from pathlib import Path
+import resource
+import sys
 import numpy as np
 from scipy import sparse
 from scipy.sparse.csgraph import connected_components
@@ -443,6 +447,17 @@ def prism_mesh(
         unique = list({id(d): d for d in domains}.values())
     linework = shapely.union_all([d.boundary for d in unique], grid_size=1e-9)
     faces = shapely.get_parts(shapely.polygonize(shapely.get_parts(linework)))
+    # Polygonization includes enclosed empty rooms. Prove whole-face material
+    # ownership before triangulation/refinement; refining air wastes work and
+    # can exhaust the planar budget without improving a deposited element.
+    whole = shapely.union_all(unique, grid_size=1e-9)
+    outside = shapely.area(shapely.difference(faces, whole, grid_size=1e-9))
+    inside = shapely.area(shapely.intersection(faces, whole, grid_size=1e-9))
+    if np.any((outside > 0) & (inside > 0)):
+        raise ValueError("arrangement face straddles material union")
+    faces = faces[(inside > 0) & (outside == 0)]
+    if not len(faces):
+        raise ValueError("coupon has no positive material faces")
     triangles, face_ids = shapely.get_parts(
         shapely.constrained_delaunay_triangles(faces), return_index=True
     )
@@ -460,7 +475,6 @@ def prism_mesh(
     edges, counts = np.unique(np.sort(edges, axis=1), axis=0, return_counts=True)
     if counts.max() > 2:
         raise ValueError("nonmanifold planar triangulation")
-    whole = shapely.union_all(unique, grid_size=1e-9)
     free_edges = shapely.linestrings(xy[edges[counts == 1]])
     # Overlay intersections are represented on the declared 1e-9 mm grid.
     # This check admits only outer-boundary roundoff, never a material tie.
@@ -566,3 +580,62 @@ def connected_meshes(mesh):
             )
         )
     return out
+
+
+def volume_mesh(roads, scenario, *, workdir=None):
+    """Conserved source volume shared by reference and candidate evaluators."""
+    method = scenario.get("mesh_method", "prisms")
+    if method not in {"prisms", "tetgen"}:
+        raise ValueError("unknown explicit volume mesh method")
+    bounds = np.asarray(scenario["bounds"], dtype=float)
+    mesh, info = prism_mesh(roads, window=bounds, **scenario["refinement"])
+    print(
+        json.dumps(
+            dict(
+                stage="source_volume_mesh",
+                cells=mesh.count,
+                points=mesh.points.shape[1],
+                components=mesh.components,
+                peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+            )
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+    if method == "tetgen":
+        import tempfile
+        from tetgen_mesh import remesh
+
+        def converted(destination):
+            return remesh(
+                mesh,
+                roads,
+                bounds,
+                destination,
+                cap_segments=scenario["refinement"].get("cap_segments", 32),
+                max_source_prisms=scenario.get("max_source_prisms", 250_000),
+            )
+
+        if workdir is None:
+            with tempfile.TemporaryDirectory() as temporary:
+                mesh, converted_info = converted(Path(temporary) / "mesh")
+        else:
+            mesh, converted_info = converted(Path(workdir) / "mesh")
+        info = dict(source=info, **converted_info)
+    elif method != "prisms":
+        raise ValueError("unknown explicit web-bay volume mesh method")
+    print(
+        json.dumps(
+            dict(
+                stage="selected_volume_mesh",
+                cells=mesh.count,
+                points=mesh.points.shape[1],
+                components=mesh.components,
+                method=method,
+                peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+            )
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+    return mesh, info

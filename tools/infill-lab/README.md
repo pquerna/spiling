@@ -40,6 +40,22 @@ Report directional elastic stiffness alongside any geometric mean, complete-obje
 
 Resource limits protect the host; they are not infill design objectives. Choose external reservations from current machine headroom and measured trials. When a candidate hits an internal count limit, check its expansion and actual program/replay bytes before changing the construction. Keep the failure, fix incorrect accounting separately, and freeze a new cohort after a limit or judge change. Do not reward a design for avoiding an artificially small budget or report a resource refusal as poor structural performance.
 
+Numerical qualification belongs to the exact geometry, material law, fixture and
+mesh family being compared. Simple analytical controls and a small algebraic
+residual cannot substitute for response refinement on actual deposition. Keep
+every directional response; a geometric mean must not conceal a lost load path.
+Independent-solver agreement and mesh convergence answer different questions.
+An under-resolved control cannot rank candidates even when two solvers agree.
+
+Reference and in-process quadratic studies share the same explicit volume-mesh
+adapter (`geometry.volume_mesh`): `prisms`, or `tetgen` with retained boundary,
+volume and full-face connectivity checks. Selecting TetGen requires its separately
+pinned executable in the frozen image; absence refuses without fallback. The
+finite-body fixture admits components along the span axis, including when a
+cantilever's deflection axis differs. Planar refinement excludes independently
+classified empty room faces before spending its triangle budget; it does not
+discard deposited material or change contact rules.
+
 Numerical jobs consume inert hashed deposition in exact existing Docker images; they execute no candidate code and install no host packages or services. Retain external CPU/RAM/task/time bounds and combined live reservations. Native builds/captures remain sequential and independently bounded.
 
 The superseded Python source-edit campaign is retained in its immutable archive and published Git history. `algorithm_report.py` and its historical judges can reproduce that frozen report; their derived rows are not native verification evidence and cannot supply future generation. There is no current Python candidate mutator.

@@ -16,11 +16,11 @@ import time
 
 import numpy as np
 
-from geometry import connected_meshes, prism_mesh
+from geometry import connected_meshes, volume_mesh
 from model import Candidate, Material, file_hash
 from quadratic import JUDGE as QUADRATIC_JUDGE, prepare, solve_body
 
-JUDGE = (*QUADRATIC_JUDGE, "vault_mechanics.py", "tetgen_mesh.py")
+JUDGE = (*QUADRATIC_JUDGE, "vault_mechanics.py")
 
 
 def load(folder):
@@ -49,62 +49,6 @@ def load(folder):
     costs(data)  # All deposited object roles must reconcile with replay dose.
     return spec, data
 
-
-def volume_mesh(roads, scenario, *, workdir=None):
-    """One explicit volume method for both full roof and interior-only bays."""
-    bounds = np.asarray(scenario["bounds"], dtype=float)
-    mesh, info = prism_mesh(roads, window=bounds, **scenario["refinement"])
-    print(
-        json.dumps(
-            dict(
-                stage="source_volume_mesh",
-                cells=mesh.count,
-                points=mesh.points.shape[1],
-                components=mesh.components,
-                peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
-            )
-        ),
-        file=sys.stderr,
-        flush=True,
-    )
-    method = scenario.get("mesh_method", "prisms")
-    if method == "tetgen":
-        import tempfile
-        from tetgen_mesh import remesh
-
-        def converted(destination):
-            return remesh(
-                mesh,
-                roads,
-                bounds,
-                destination,
-                cap_segments=scenario["refinement"].get("cap_segments", 32),
-                max_source_prisms=scenario.get("max_source_prisms", 250_000),
-            )
-
-        if workdir is None:
-            with tempfile.TemporaryDirectory() as temporary:
-                mesh, converted_info = converted(Path(temporary) / "mesh")
-        else:
-            mesh, converted_info = converted(Path(workdir) / "mesh")
-        info = dict(source=info, **converted_info)
-    elif method != "prisms":
-        raise ValueError("unknown explicit web-bay volume mesh method")
-    print(
-        json.dumps(
-            dict(
-                stage="selected_volume_mesh",
-                cells=mesh.count,
-                points=mesh.points.shape[1],
-                components=mesh.components,
-                method=method,
-                peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
-            )
-        ),
-        file=sys.stderr,
-        flush=True,
-    )
-    return mesh, info
 
 
 def patch_response(data, scenario, *, workdir=None):

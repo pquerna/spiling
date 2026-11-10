@@ -20,13 +20,14 @@ from scipy.sparse.linalg import spsolve
 from skfem import ElementTetP2
 from skfem.quadrature import get_quadrature_tet
 
-from geometry import AnalysisMesh, connected_meshes, prism_mesh
+from geometry import AnalysisMesh, connected_meshes, volume_mesh
 from mechanics import ElasticBody, elastic_tensor, solve
 from model import Material, file_hash
-from reference import beam_mesh, element_mesh, fixture
+from reference import beam_mesh, element_mesh, fixture, spanning_components
 
 JUDGE = (
     "quadratic.py",
+    "tetgen_mesh.py",
     "quadratic_preconditioner.py",
     "quadratic_fields.py",
     "reference.py",
@@ -256,22 +257,10 @@ def evaluate(folder, output):
                 raise ValueError("unknown native source/replay scope")
             from coupon import interior_roads
 
-            mesh, info = prism_mesh(
-                interior_roads(data),
-                window=scenario["bounds"],
-                **scenario["refinement"],
+            mesh, info = volume_mesh(
+                interior_roads(data), scenario, workdir=output / "volume-0"
             )
-            axis = "xyz".index(scenario["case"][-1])
-            parts = [
-                p
-                for p in connected_meshes(mesh)
-                if np.allclose(
-                    p.bounds[:, axis],
-                    np.asarray(scenario["bounds"])[:, axis],
-                    rtol=0,
-                    atol=1e-8,
-                )
-            ]
+            parts = spanning_components(mesh, scenario["case"], scenario["bounds"])
             row["mesh"] = info
         else:
             raise ValueError("unknown quadratic source")

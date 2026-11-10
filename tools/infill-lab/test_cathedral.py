@@ -311,7 +311,7 @@ def test_actual_section_includes_diagonal_roads_and_rounded_end_caps():
 
 
 def test_roof_and_web_use_the_same_explicit_volume_adapter(monkeypatch):
-    import vault_mechanics as v
+    import geometry as v
 
     roads = [
         dict(
@@ -336,10 +336,13 @@ def test_roof_and_web_use_the_same_explicit_volume_adapter(monkeypatch):
     )
     monkeypatch.setattr(v, "connected_meshes", lambda mesh: ())
 
-    def rejected(*args, **kwargs):
-        raise AssertionError("unknown method must refuse before numerical assembly")
+    import reference
+    import quadratic
+    import vault_mechanics
 
-    monkeypatch.setattr(v, "prepare", rejected)
+    assert reference.volume_mesh is v.volume_mesh
+    assert quadratic.volume_mesh is v.volume_mesh
+    assert vault_mechanics.volume_mesh is v.volume_mesh
     scenario = dict(
         bounds=[[21.0, 21.0, 0.0], [22.0, 22.0, 1.0]],
         refinement={},
@@ -359,3 +362,22 @@ def test_roof_and_web_use_the_same_explicit_volume_adapter(monkeypatch):
     mesh, info = v.volume_mesh(roads, dict(scenario, mesh_method="tetgen"))
     assert mesh is reduced and info["boundary_conserved"]
     assert calls[0][0] is marker and calls[0][1] is roads
+
+
+def test_prism_refinement_never_spends_its_budget_inside_empty_rooms(monkeypatch):
+    import geometry as g
+    import numpy as np
+    import shapely
+    roads = [dict(start=[-1., y, .2], end=[11., y, .2], width=1., lower=0., upper=.2) for y in [0.,10.]]
+    roads += [dict(start=[x,-1.,.2], end=[x,11.,.2], width=1., lower=0., upper=.2) for x in [0.,10.]]
+    original = g.refine_triangles
+    areas = []
+    def checked(points, triangles, *args, **kwargs):
+        areas.append(float(shapely.area(shapely.polygons(points[triangles])).sum()))
+        return original(points, triangles, *args, **kwargs)
+    monkeypatch.setattr(g, "refine_triangles", checked)
+    mesh, info = g.prism_mesh(roads, window=[[0.,0.,0.],[10.,10.,.2]], max_xy=.5)
+    assert areas and areas[0] == pytest.approx(19.)
+    assert mesh.volume == pytest.approx(19*.2)
+    assert mesh.components == 1
+    assert info['retained_volume_fraction'] == pytest.approx(1.)
