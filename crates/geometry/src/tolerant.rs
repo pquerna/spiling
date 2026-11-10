@@ -288,7 +288,7 @@ impl TolerantModel {
             [pa[0] + t * (pb[0] - pa[0]), pa[1] + t * (pb[1] - pa[1])]
         };
         let key = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
-        let mut segments: Vec<((u32, u32), (u32, u32), u32)> = Vec::new();
+        let mut segments = Vec::new();
         let mut points: HashMap<(u32, u32), [f64; 2]> = HashMap::new();
         for &index in &self.buckets[offset as usize] {
             let [a, b, c] = self.triangles[index as usize];
