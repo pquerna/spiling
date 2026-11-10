@@ -78,6 +78,14 @@ pub(crate) fn collapsed_row_position(
     if v != natural.v_min() && v != natural.v_max() {
         return Ok(None);
     }
+    let row = if v == knots[1][degrees[1]] && knots[1][..=degrees[1]].iter().all(|&knot| knot == v)
+    {
+        0
+    } else if v == knots[1][counts[1]] && knots[1][counts[1]..].iter().all(|&knot| knot == v) {
+        counts[1] - 1
+    } else {
+        return Ok(None);
+    };
     nurbs_eval::validate_knots(
         knots[0],
         degrees[0],
@@ -87,14 +95,6 @@ pub(crate) fn collapsed_row_position(
         cancel,
     )?;
     nurbs_eval::validate_knots(knots[1], degrees[1], counts[1], [v, v], work, cancel)?;
-    let row = if v == knots[1][degrees[1]] && knots[1][..=degrees[1]].iter().all(|&knot| knot == v)
-    {
-        0
-    } else if v == knots[1][counts[1]] && knots[1][counts[1]..].iter().all(|&knot| knot == v) {
-        counts[1] - 1
-    } else {
-        return Ok(None);
-    };
     let at = |column| -> Result<[f64; 4], GeometryError> {
         let point = native
             .cpt(column, row)

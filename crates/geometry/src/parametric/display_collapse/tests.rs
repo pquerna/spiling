@@ -271,19 +271,16 @@ fn collapsed_control_row_without_clamped_endpoint_is_not_authority() {
         .unwrap(),
     );
     let v = source.natural_uv_domain_if_built().v_min();
-    assert!(matches!(
+    assert!(
         collapsed_row_position(
             &source,
             v,
             &mut GeometryWorkBudget::query(),
             &AtomicBool::new(false),
-        ),
-        Ok(None)
-            | Err(GeometryError {
-                code: GeometryErrorCode::ConditioningFailure,
-                ..
-            })
-    ));
+        )
+        .unwrap()
+        .is_none()
+    );
 }
 
 #[test]
