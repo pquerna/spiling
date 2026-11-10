@@ -210,7 +210,139 @@ pub(super) fn consume(
             r.3 = r.3.max(expected[i].3);
             i += 1;
         }
-        require(r, roads)?;
+        let mut cursor = r.2;
+        while cursor < r.3 {
+            let mut next: Option<[f64; 2]> = None;
+            for domain in &layer.skin_command_fits {
+                charge(work, cancel)?;
+                if domain.region_index != owner {
+                    continue;
+                }
+                for fit in &domain.fits {
+                    charge(work, cancel)?;
+                    let ends = fit.fitted_mm;
+                    let projected = [
+                        project_xyz6_point_mm(ends[0])?,
+                        project_xyz6_point_mm(ends[1])?,
+                    ];
+                    let row = program_coordinates::project_xyz6_coordinate_mm(r.1)?;
+                    let z = program_coordinates::project_xyz6_coordinate_mm(layer.z_mm)?;
+                    if projected
+                        .iter()
+                        .any(|point| point[r.0] != row || point[2] != z)
+                    {
+                        continue;
+                    }
+                    let cut = [
+                        ends[0][1 - r.0].min(ends[1][1 - r.0]).max(cursor),
+                        ends[0][1 - r.0].max(ends[1][1 - r.0]).min(r.3),
+                    ];
+                    if cut[0] < cut[1] && next.is_none_or(|previous| cut[0] < previous[0]) {
+                        next = Some(cut);
+                    }
+                }
+            }
+            let Some(cut) = next else {
+                require((r.0, r.1, cursor, r.3), roads)?;
+                break;
+            };
+            if cursor < cut[0] {
+                require((r.0, r.1, cursor, cut[0]), roads)?;
+            }
+            cursor = cut[1];
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod skin_reservation_tests {
+    use super::*;
+
+    #[test]
+    fn fitted_skin_replaces_only_its_exact_collinear_owned_road_interval() {
+        let mut layer = PrintLayer {
+            index: 0,
+            lower_z_mm: 0.0,
+            z_mm: 0.2,
+            height_mm: 0.2,
+            section_z_mm: 0.1,
+            paths: Vec::new(),
+            skin_command_fits: Vec::new(),
+            region_coverage: PlanarRegionCoverage {
+                web_roof_domains: Vec::new(),
+                skin_bridge_domains: Vec::new(),
+                process_diaphragms: Vec::new(),
+                diaphragm_area_mm2: 0.0,
+                section_area_mm2: 0.0,
+                source_section_area_mm2: 0.0,
+                surface_added_area_mm2: 0.0,
+                separator_area_mm2: 0.0,
+                process_interfaces: Vec::new(),
+                wall_area_mm2: 0.0,
+                bottom_skin_area_mm2: 0.0,
+                top_skin_area_mm2: 0.0,
+                solid_interior_area_mm2: 0.0,
+                sparse_interior_area_mm2: 0.0,
+                intentional_void_area_mm2: 0.0,
+                protected_hole_area_mm2: 0.0,
+                nominal_deposition_volume_mm3: 0.0,
+                process_regions: Vec::new(),
+                support_area_mm2: 0.0,
+                support_nominal_deposition_volume_mm3: 0.0,
+                unsupported_overhang_mm: 0.0,
+            },
+        };
+        let region = ProcessRegionCoverage {
+            functional_solid_zone: None,
+            material_domain: None,
+            area_mm2: 1.0,
+            fraction: 0.08,
+            contributions: Vec::new(),
+        };
+        layer.skin_command_fits.push(SkinCommandFitDomain {
+            region_index: 0,
+            region,
+            skin: ProcessSkinKind::TopSkin,
+            regional: Vec::new(),
+            mandatory: Vec::new(),
+            source_owner: Vec::new(),
+            fits: vec![SkinCommandFit {
+                required_mm: [[1.0, 0.99, 0.2], [1.0, 1.0, 0.2]],
+                fitted_mm: [[1.0, 0.99, 0.2], [1.0, 1.010003, 0.2]],
+            }],
+        });
+        let remaining = key([1.0, 1.010003, 0.2], [1.0, 8.0, 0.2]).unwrap();
+        let run = |layer: &PrintLayer, actual: BTreeSet<_>| {
+            let mut actual = actual;
+            let result = consume(
+                &mut [(0, 1.0, 1.0, 8.0)],
+                &mut actual,
+                0,
+                layer,
+                &mut 0,
+                &AtomicBool::new(false),
+            );
+            result.map(|()| actual)
+        };
+        assert!(
+            run(&layer, BTreeSet::from([(0, remaining)]))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(run(&layer, BTreeSet::new()).is_err());
+        assert!(
+            run(
+                &layer,
+                BTreeSet::from([(0, key([1.0, 1.04, 0.2], [1.0, 8.0, 0.2]).unwrap())])
+            )
+            .is_err()
+        );
+        layer.skin_command_fits[0].region_index = 1;
+        assert!(run(&layer, BTreeSet::from([(0, remaining)])).is_err());
+        layer.skin_command_fits[0].region_index = 0;
+        layer.skin_command_fits[0].fits[0].fitted_mm[0][0] = 1.1;
+        layer.skin_command_fits[0].fits[0].fitted_mm[1][0] = 1.1;
+        assert!(run(&layer, BTreeSet::from([(0, remaining)])).is_err());
+    }
 }

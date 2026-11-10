@@ -12,6 +12,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 pub(super) use super::walls::WallPlan;
 mod skin_commands;
+pub(super) use skin_commands::reserve_skin_fits;
 
 /// Immutable ownership between realized D sections and deposition generation.
 /// Wall centers are separate from the disjoint interior ownership domains. Holes

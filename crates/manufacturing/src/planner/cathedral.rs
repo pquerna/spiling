@@ -120,6 +120,12 @@ impl Field {
             layer.paths.retain(|path| !retained_road(path));
             layer.paths.append(&mut replacement);
             *segments = staged_segments;
+            super::classification::reserve_skin_fits(
+                layer,
+                segments,
+                outside.saturating_add(super::bonds::path_bytes(&layer.paths)),
+                cancel,
+            )?;
             super::remaining_geometry_units(
                 0,
                 owned_bytes

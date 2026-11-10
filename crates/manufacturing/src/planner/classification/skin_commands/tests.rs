@@ -91,6 +91,40 @@ fn minimum_skin_keeps_complete_requirement_and_extends_only_toward_ordinary_mate
     });
     domain.validate().unwrap();
 }
+
+#[test]
+fn regenerated_sparse_roads_reserve_existing_fitted_skin_once() {
+    let mut paths = paths();
+    let fitted = [[2.0, 1.5, 0.4], [2.020003, 1.5, 0.4]];
+    let mut capture = domain();
+    capture.fits.push(SkinCommandFit {
+        required_mm: [paths[0].points_mm[0], paths[0].points_mm[1]],
+        fitted_mm: fitted,
+    });
+    paths[0].points_mm.copy_from_slice(&fitted);
+    let mut sparse = paths[0].clone();
+    sparse.kind = DepositionKind::SparseFill;
+    sparse.owner = Some(DepositionOwner::Regional { region_index: 0 });
+    sparse.points_mm = vec![[2.01, 1.5, 0.4], [8.0, 1.5, 0.4]];
+    paths.push(sparse);
+    let mut layer = PrintLayer {
+        index: 0,
+        lower_z_mm: 0.0,
+        z_mm: 0.4,
+        height_mm: 0.4,
+        section_z_mm: 0.2,
+        paths,
+        skin_command_fits: vec![capture],
+        region_coverage: crate::planner::empty_coverage(0.08),
+    };
+    let mut segments = 2;
+    for _ in 0..2 {
+        reserve_skin_fits(&mut layer, &mut segments, 0, &AtomicBool::new(false)).unwrap();
+        assert_eq!(layer.paths[0].points_mm, fitted);
+        assert_eq!(layer.paths[1].points_mm, [fitted[1], [8.0, 1.5, 0.4]]);
+        assert_eq!(segments, 2);
+    }
+}
 #[test]
 fn collapsed_xyz6_skin_proposal_keeps_raw_requirement_and_gets_real_command_length() {
     for skin in [ProcessSkinKind::BottomSkin, ProcessSkinKind::TopSkin] {

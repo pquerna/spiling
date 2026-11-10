@@ -698,9 +698,12 @@ pub(super) fn verify(
                             if actual_interval[0].max(other_interval[0])
                                 < actual_interval[1].min(other_interval[1])
                             {
-                                return Err(failed(
-                                    "skin fit duplicates positive collinear commanded extrusion",
-                                ));
+                                return Err(failed(format!(
+                                    "skin fit duplicates positive collinear commanded extrusion: layer {index}, path {path_index} {:?} {actual:?}, other {other_index} {:?} {:?}",
+                                    path.kind,
+                                    other.kind,
+                                    [a, b]
+                                )));
                             }
                         }
                     }

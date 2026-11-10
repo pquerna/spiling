@@ -796,6 +796,53 @@ fn reserve_regional_material(
     Ok(())
 }
 
+pub(in crate::planner) fn reserve_skin_fits(
+    layer: &mut PrintLayer,
+    segments: &mut usize,
+    retained_bytes: usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    let mut budget = Budget {
+        bytes: retained_bytes,
+    };
+    let mut work = 0;
+    for domain in &layer.skin_command_fits {
+        for fit in &domain.fits {
+            check_cancel(cancel)?;
+            budget.charge(0, layer.paths.len(), &mut work, &mut |units, bytes, _| {
+                super::super::remaining_geometry_units(units, bytes).map(|_| ())
+            })?;
+            let index = layer
+                .paths
+                .iter()
+                .position(|path| {
+                    path.owner == Some(DepositionOwner::MandatorySkin { skin: domain.skin })
+                        && (path.points_mm.as_slice() == fit.fitted_mm
+                            || path.points_mm.as_slice() == [fit.fitted_mm[1], fit.fitted_mm[0]])
+                })
+                .ok_or_else(|| refused("regenerated infill lost its fitted skin owner"))?;
+            let along = usize::from(fit.fitted_mm[0][0] == fit.fitted_mm[1][0]);
+            reserve_regional_material(
+                &mut layer.paths,
+                index,
+                domain.region_index,
+                fit.fitted_mm,
+                along,
+                segments,
+                &mut budget,
+                0,
+                &mut work,
+                &mut |units, bytes, _| {
+                    super::super::remaining_geometry_units(units, bytes).map(|_| ())
+                },
+                cancel,
+            )?;
+        }
+    }
+    layer.paths.retain(|path| !path.points_mm.is_empty());
+    Ok(())
+}
+
 impl ClassifiedRegions {
     pub(super) fn fit_skin_commands(
         &self,
