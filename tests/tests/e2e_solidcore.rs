@@ -26,9 +26,39 @@ fn test_e2e_occt_reference_corpus_integrity() {
         assert!(b.max[2] >= b.min[2], "valid z bounds for {fixture_path}");
 
         // 2. Midplane section must succeed
-        let sec = section_midplane(&def, fixture_path)
-            .unwrap_or_else(|e| panic!("failed midplane section on {fixture_path}: {e:?}"));
-        assert!(!sec.loops().is_empty(), "midplane loops for {fixture_path}");
+        if matches!(
+            fixture_path,
+            "independent-exporters/occt-rounded-housing-mm.step"
+                | "independent-exporters/occt-spline-housing-mm.step"
+        ) {
+            assert_source_face_identity(&def, fixture_path);
+            let prepared =
+                prepare_tolerant_product_sections(&def).expect("prepared housing sections");
+            let bounds = fixture_physical_bounds(fixture_path);
+            let sec = prepared
+                .section((bounds.min[2] + bounds.max[2]) * 0.5)
+                .expect("housing product midplane");
+            assert_tolerant_product_section(&sec);
+            assert_eq!(sec.loops.len(), 2, "{fixture_path}");
+            assert_eq!(
+                sec.loops
+                    .iter()
+                    .filter(|boundary| boundary.area < 0.0)
+                    .count(),
+                1,
+                "{fixture_path}"
+            );
+            assert_close(
+                sec.loops.iter().map(tolerant_loop_area).sum(),
+                400.2920,
+                0.5,
+                "housing midplane material area",
+            );
+        } else {
+            let sec = section_midplane(&def, fixture_path)
+                .unwrap_or_else(|e| panic!("failed midplane section on {fixture_path}: {e:?}"));
+            assert!(!sec.loops().is_empty(), "midplane loops for {fixture_path}");
+        }
 
         // 3. Tessellation must produce valid mesh
         let mesh = tessellate_display(&def)

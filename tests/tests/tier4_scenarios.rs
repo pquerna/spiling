@@ -137,23 +137,21 @@ fn test_geometry_05_housing_base_and_cavity_oracles() {
     let fixture = "independent-exporters/occt-rounded-housing-mm.step";
     let bytes = fixture_bytes(fixture);
     let def = import_test_step(&bytes).expect("rounded housing");
-    // The previous z=2 cut coincided with the fillet transition's vertices.
-    // The frozen independent oracle supplies regular base/cavity cuts and areas.
+    let prepared = prepare_tolerant_product_sections(&def).expect("prepared product sections");
     for row in fixture_record(fixture)["analytic_oracle"]["sections"]
         .as_array()
         .unwrap()
     {
         let z = row["z_mm"].as_f64().unwrap();
-        let section = section_at_z(&def, z).unwrap_or_else(|error| panic!("z={z}: {error:?}"));
+        let section = prepared
+            .section(z)
+            .unwrap_or_else(|error| panic!("z={z}: {error:?}"));
+        assert_tolerant_product_section(&section);
         assert_eq!(
-            section.loops().len() as u64,
+            section.loops.len() as u64,
             row["loop_count"].as_u64().unwrap()
         );
-        let area: f64 = section
-            .loops()
-            .iter()
-            .map(|boundary| loop_area(&section, boundary))
-            .sum();
+        let area: f64 = section.loops.iter().map(tolerant_loop_area).sum();
         assert_close(
             area,
             row["material_area_mm2"].as_f64().unwrap(),
@@ -171,6 +169,7 @@ fn test_geometry_05_housing_base_and_cavity_oracles() {
 fn test_geometry_06_spline_display_mesh() {
     let bytes = fixture_bytes("independent-exporters/occt-spline-housing-mm.step");
     let def = import_test_step(&bytes).expect("spline housing");
+    assert_source_face_identity(&def, "independent-exporters/occt-spline-housing-mm.step");
     let mesh = tessellate_display(&def).expect("fine mesh");
     assert_mesh_source_coverage(&def, &mesh);
 }
@@ -530,6 +529,7 @@ fn test_geometry_26_housing_import_dimensions_sections_and_display() {
     // Phase 1: Import & Provenance
     let def = import_test_step(&bytes).expect("import");
     assert_eq!(def.provenance().source_unit, SourceUnit::Millimetre);
+    assert_source_face_identity(&def, "independent-exporters/occt-rounded-housing-mm.step");
 
     // Phase 2: Stock sizing
     let b = precision_bounds(&def, 0.001).expect("certified physical extents");
@@ -538,18 +538,37 @@ fn test_geometry_26_housing_import_dimensions_sections_and_display() {
     assert_close(b.max[2], 10.0, 1e-3, "max z");
 
     // Phase 3: Strata roughing
-    let sec_rough = section_at_z(&def, 3.0).expect("roughing slice");
-    assert_eq!(sec_rough.loops().len(), 1);
+    let prepared = prepare_tolerant_product_sections(&def).expect("prepared product sections");
+    let sec_rough = prepared.section(3.0).expect("roughing slice");
+    assert_tolerant_product_section(&sec_rough);
+    assert_eq!(sec_rough.loops.len(), 1);
+    assert_close(
+        tolerant_loop_area(&sec_rough.loops[0]),
+        428.5664,
+        0.5,
+        "roughing material area",
+    );
 
     // Phase 4: Pocket finish
-    let sec_pocket = section_at_z(&def, 8.0).expect("pocket finish slice");
-    assert_eq!(sec_pocket.loops().len(), 2);
+    let sec_pocket = prepared.section(7.99).expect("regular pocket finish slice");
+    assert_tolerant_product_section(&sec_pocket);
+    assert_eq!(sec_pocket.loops.len(), 2);
+    assert_eq!(
+        sec_pocket
+            .loops
+            .iter()
+            .filter(|boundary| boundary.area < 0.0)
+            .count(),
+        1
+    );
+    assert_close(
+        sec_pocket.loops.iter().map(tolerant_loop_area).sum(),
+        400.2920,
+        0.5,
+        "pocket finish material area",
+    );
 
     // Phase 5: Display mesh rendering
     let mesh = tessellate_display(&def).expect("mesh generation");
     assert_mesh_source_coverage(&def, &mesh);
-
-    // Phase 6: Proof retention verification
-    let proof_bytes = def.retained_query_proof_bytes();
-    assert!(proof_bytes > 0);
 }

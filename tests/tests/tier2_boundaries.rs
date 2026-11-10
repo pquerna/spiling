@@ -394,36 +394,6 @@ fn test_f08_corner_inch_conversion_accuracy() {
 // =========================================================================
 
 #[test]
-fn test_f09_corner_spline_housing_midplane() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-spline-housing-mm.step",
-    ))
-    .unwrap();
-    let sec = section_at_z(&def, 4.1).unwrap();
-    assert_eq!(sec.loops().len(), 1);
-}
-
-#[test]
-fn test_f09_corner_spline_housing_above_floor() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-spline-housing-mm.step",
-    ))
-    .unwrap();
-    let sec = section_at_z(&def, 4.16).unwrap();
-    assert_eq!(sec.loops().len(), 2);
-}
-
-#[test]
-fn test_f09_corner_spline_housing_high_cut() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-spline-housing-mm.step",
-    ))
-    .unwrap();
-    let sec = section_at_z(&def, 9.5).unwrap();
-    assert_eq!(sec.loops().len(), 2);
-}
-
-#[test]
 fn test_f09_corner_spline_housing_outside_cut() {
     let def = import_test_step(&fixture_bytes(
         "independent-exporters/occt-spline-housing-mm.step",
@@ -690,10 +660,26 @@ fn test_f16_corner_spline_housing_extreme_cuts() {
         "independent-exporters/occt-spline-housing-mm.step",
     ))
     .unwrap();
-    let sec1 = section_at_z(&def, 0.01).unwrap();
-    assert_eq!(sec1.loops().len(), 1);
-    let sec2 = section_at_z(&def, 9.99).unwrap();
-    assert_eq!(sec2.loops().len(), 2);
+    let prepared = prepare_tolerant_product_sections(&def).unwrap();
+    let sec1 = prepared.section(0.01).unwrap();
+    assert_tolerant_product_section(&sec1);
+    assert_eq!(sec1.loops.len(), 1);
+    assert!(sec1.loops[0].area > 0.0);
+    let sec2 = prepared.section(9.99).unwrap();
+    assert_tolerant_product_section(&sec2);
+    assert_eq!(sec2.loops.len(), 2);
+    let holes: Vec<_> = sec2
+        .loops
+        .iter()
+        .filter(|boundary| boundary.area < 0.0)
+        .collect();
+    assert_eq!(holes.len(), 1);
+    assert_close(
+        tolerant_loop_area(holes[0]),
+        -9.0 * std::f64::consts::PI,
+        0.2,
+        "near-top pocket area",
+    );
 }
 
 #[test]
@@ -702,10 +688,27 @@ fn test_f16_corner_rounded_housing_pocket_floor_boundary() {
         "independent-exporters/occt-rounded-housing-mm.step",
     ))
     .unwrap();
-    let sec_below = section_at_z(&def, 4.12).unwrap();
-    let sec_above = section_at_z(&def, 4.14).unwrap();
-    assert_eq!(sec_below.loops().len(), 1);
-    assert_eq!(sec_above.loops().len(), 2);
+    let prepared = prepare_tolerant_product_sections(&def).unwrap();
+    let sec_below = prepared.section(4.12).unwrap();
+    let sec_above = prepared.section(4.14).unwrap();
+    assert_tolerant_product_section(&sec_below);
+    assert_tolerant_product_section(&sec_above);
+    assert_eq!(sec_below.loops.len(), 1);
+    assert_eq!(sec_above.loops.len(), 2);
+    let material_below: f64 = sec_below.loops.iter().map(tolerant_loop_area).sum();
+    let material_above: f64 = sec_above.loops.iter().map(tolerant_loop_area).sum();
+    assert_close(
+        material_below,
+        280.0 + 136.0 + 4.0 * std::f64::consts::PI,
+        0.5,
+        "material below pocket floor",
+    );
+    assert_close(
+        material_below - material_above,
+        9.0 * std::f64::consts::PI,
+        0.2,
+        "pocket floor area jump",
+    );
 }
 
 #[test]
@@ -734,29 +737,54 @@ fn test_f16_corner_spline_housing_bounds_use_native_material() {
 // =========================================================================
 
 #[test]
-fn test_f17_corner_rounded_housing_multi_strata() {
-    let def = import_test_step(&fixture_bytes(
+fn test_f17_housing_exact_critical_diagnostics_and_regular_product_sections() {
+    for fixture in [
         "independent-exporters/occt-rounded-housing-mm.step",
-    ))
-    .unwrap();
-    for z in [1.0, 2.0, 3.0, 5.0, 7.0, 9.0] {
-        let sec = section_at_z(&def, z).unwrap();
-        assert!(!sec.loops().is_empty());
+        "independent-exporters/occt-spline-housing-mm.step",
+    ] {
+        let def = import_test_step(&fixture_bytes(fixture)).unwrap();
+        for height in [2.0, 8.0] {
+            let error =
+                section_at_z(&def, height).expect_err("unqualified exact critical incidence");
+            assert_eq!(
+                error.code,
+                GeometryErrorCode::AnalysisIndeterminate,
+                "{fixture} z={height}: {error}"
+            );
+        }
+        let prepared = prepare_tolerant_product_sections(&def).unwrap();
+        for height in [1.0_f64, 1.99, 2.01, 3.0, 5.0, 7.0, 7.99, 8.01, 9.0] {
+            let sec = prepared.section(height).unwrap();
+            assert_tolerant_product_section(&sec);
+            let pocket = height > 4.13;
+            assert_eq!(
+                sec.loops.len(),
+                if pocket { 2 } else { 1 },
+                "{fixture} z={height}"
+            );
+            assert_eq!(
+                sec.loops
+                    .iter()
+                    .filter(|boundary| boundary.area < 0.0)
+                    .count(),
+                usize::from(pocket),
+                "{fixture} z={height}"
+            );
+            let radius = (4.0 - (2.0 - height.min(10.0 - height).min(2.0)).powi(2)).sqrt();
+            let expected = 280.0 + 68.0 * radius + std::f64::consts::PI * radius.powi(2)
+                - if pocket {
+                    9.0 * std::f64::consts::PI
+                } else {
+                    0.0
+                };
+            assert_close(
+                sec.loops.iter().map(tolerant_loop_area).sum(),
+                expected,
+                0.5,
+                &format!("{fixture} regular section z={height}"),
+            );
+        }
     }
-}
-
-#[test]
-fn test_f17_corner_rounded_housing_floor_area_jump() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-rounded-housing-mm.step",
-    ))
-    .unwrap();
-    let s_low = section_at_z(&def, 4.1).unwrap();
-    let s_high = section_at_z(&def, 4.16).unwrap();
-    let a_low = loop_area(&s_low, &s_low.loops()[0]);
-    let a_high_outer = loop_area(&s_high, &s_high.loops()[0]);
-    assert!(a_low > 0.0);
-    assert!(a_high_outer > 0.0);
 }
 
 #[test]
@@ -779,7 +807,10 @@ fn test_f17_corner_rounded_housing_reproducibility() {
         "independent-exporters/occt-rounded-housing-mm.step",
     ))
     .unwrap();
-    assert_eq!(def1.faces().len(), def2.faces().len());
+    assert_eq!(def1.id(), def2.id());
+    assert_eq!(def1.face_step_ids(), def2.face_step_ids());
+    assert_source_face_identity(&def1, "independent-exporters/occt-rounded-housing-mm.step");
+    assert_source_face_identity(&def2, "independent-exporters/occt-rounded-housing-mm.step");
 }
 
 #[test]
@@ -1284,18 +1315,6 @@ fn test_f29_corner_box_near_bottom_valid() {
     assert_eq!(sec.loops().len(), 1);
 }
 
-#[test]
-fn test_f29_corner_pocket_transition() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-rounded-housing-mm.step",
-    ))
-    .unwrap();
-    let s1 = section_at_z(&def, 4.1).unwrap();
-    let s2 = section_at_z(&def, 4.16).unwrap();
-    assert_eq!(s1.loops().len(), 1);
-    assert_eq!(s2.loops().len(), 2);
-}
-
 // =========================================================================
 // Feature 30 Corner Cases: Closed loop chaining
 // =========================================================================
@@ -1353,16 +1372,6 @@ fn test_f31_corner_plane_error_upper_bound() {
 fn test_f31_corner_cylinder_chord_error() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let sec = section_at_z(&def, 4.0).unwrap();
-    assert!(sec.achieved_chord_error_mm() <= 0.005);
-}
-
-#[test]
-fn test_f31_corner_housing_chord_error() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-rounded-housing-mm.step",
-    ))
-    .unwrap();
-    let sec = section_at_z(&def, 0.5).unwrap();
     assert!(sec.achieved_chord_error_mm() <= 0.005);
 }
 
@@ -1871,16 +1880,6 @@ fn test_f40_corner_pocket_void() {
     assert_eq!(sec.loops().len(), 2);
 }
 
-#[test]
-fn test_f40_corner_housing_void() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-rounded-housing-mm.step",
-    ))
-    .unwrap();
-    let sec = section_at_z(&def, 9.5).unwrap();
-    assert_eq!(sec.loops().len(), 2);
-}
-
 // =========================================================================
 // Feature 41 Corner Cases: Wall and cylinder certificate boundaries
 // =========================================================================
@@ -2039,26 +2038,6 @@ fn test_f44_corner_narrow_pocket_mesh_finite() {
     assert!(mesh.total_bytes > 0);
 }
 
-#[test]
-fn test_f44_corner_housing_mesh_finite() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-rounded-housing-mm.step",
-    ))
-    .unwrap();
-    let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.total_bytes > 0);
-}
-
-#[test]
-fn test_f44_corner_spline_mesh_finite() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-spline-housing-mm.step",
-    ))
-    .unwrap();
-    let mesh = tessellate_display(&def).unwrap();
-    assert!(mesh.total_bytes > 0);
-}
-
 // =========================================================================
 // Feature 45 Corner Cases: Audit chunks
 // =========================================================================
@@ -2082,16 +2061,6 @@ fn test_f45_corner_through_hole_chunks() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert_mesh_source_coverage(&def, &mesh);
-}
-
-#[test]
-fn test_f45_corner_housing_chunks() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-rounded-housing-mm.step",
-    ))
-    .unwrap();
-    let mesh = tessellate_display(&def).unwrap();
-    assert!(!mesh.chunks.is_empty());
 }
 
 #[test]

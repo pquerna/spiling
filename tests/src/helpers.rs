@@ -32,6 +32,53 @@ pub fn section_at_z(def: &Definition, z_mm: f64) -> Result<NativeSection, Geomet
     )
 }
 
+pub fn prepare_tolerant_product_sections(
+    def: &Definition,
+) -> Result<spiling_geometry::tolerant::TolerantModel, GeometryError> {
+    let prepared = spiling_geometry::tolerant::TolerantModel::build(
+        def,
+        spiling_geometry::tolerant::TolerantPolicy::default(),
+        &AtomicBool::new(false),
+    )?;
+    assert_eq!(
+        prepared.failed_faces, 0,
+        "product sections must not omit source faces"
+    );
+    Ok(prepared)
+}
+
+pub fn tolerant_loop_area(boundary: &spiling_geometry::tolerant::TolerantLoop) -> f64 {
+    boundary
+        .points
+        .iter()
+        .zip(boundary.points.iter().cycle().skip(1))
+        .map(|(start, end)| start[0] * end[1] - end[0] * start[1])
+        .sum::<f64>()
+        * 0.5
+}
+
+pub fn assert_tolerant_product_section(section: &spiling_geometry::tolerant::TolerantSection) {
+    let policy = spiling_geometry::tolerant::TolerantPolicy::default();
+    assert!(
+        section.max_gap_mm.is_finite() && (0.0..=policy.join_mm).contains(&section.max_gap_mm),
+        "section joins exceed product tolerance: {section:?}"
+    );
+    assert_eq!(
+        section.dropped_slivers, 0,
+        "housing sections must retain all loops"
+    );
+    for boundary in &section.loops {
+        assert!(boundary.points.len() >= 3);
+        assert_eq!(boundary.points.len(), boundary.faces.len());
+        assert_close(
+            boundary.area,
+            tolerant_loop_area(boundary),
+            1e-9,
+            "reported section area agrees with coordinates",
+        );
+    }
+}
+
 pub fn section_midplane(def: &Definition, fixture: &str) -> Result<NativeSection, GeometryError> {
     assert_eq!(
         def.provenance().source_hash.as_str(),

@@ -240,56 +240,50 @@ fn test_comb_10_ribbed_bracket_t_junction_section() {
 // 11-14. Rounded Housing Pocket Floor Transitions
 // =========================================================================
 
-#[test]
-fn test_comb_11_rounded_housing_section_z0_5() {
-    let bytes = fixture_bytes("independent-exporters/occt-rounded-housing-mm.step");
-    let def = import_test_step(&bytes).expect("rounded housing import");
-    let sec = section_at_z(&def, 0.5).expect("section at z=0.5");
-    assert_eq!(sec.loops().len(), 1, "loop count at z=0.5");
-    let area = loop_area(&sec, &sec.loops()[0]).abs();
-    assert_close(area, 375.4533, 1.0, "rounded housing z=0.5 area");
+fn assert_housing_product_sections(fixture: &str, area_tolerance: f64) {
+    let def = import_test_step(&fixture_bytes(fixture)).expect("housing import");
+    assert_source_face_identity(&def, fixture);
+    let prepared = prepare_tolerant_product_sections(&def).expect("prepared product sections");
+    for row in fixture_record(fixture)["analytic_oracle"]["sections"]
+        .as_array()
+        .unwrap()
+    {
+        let height = row["z_mm"].as_f64().unwrap();
+        let sec = prepared
+            .section(height)
+            .unwrap_or_else(|error| panic!("{fixture} z={height}: {error}"));
+        assert_tolerant_product_section(&sec);
+        let loop_count = row["loop_count"].as_u64().unwrap() as usize;
+        assert_eq!(sec.loops.len(), loop_count, "{fixture} z={height}");
+        assert_eq!(
+            sec.loops
+                .iter()
+                .filter(|boundary| boundary.area > 0.0)
+                .count(),
+            1,
+            "{fixture} z={height} outer boundary"
+        );
+        assert_eq!(
+            sec.loops
+                .iter()
+                .filter(|boundary| boundary.area < 0.0)
+                .count(),
+            loop_count - 1,
+            "{fixture} z={height} holes"
+        );
+        let material_area = sec.loops.iter().map(tolerant_loop_area).sum();
+        assert_close(
+            material_area,
+            row["material_area_mm2"].as_f64().unwrap(),
+            area_tolerance,
+            &format!("{fixture} z={height} material area"),
+        );
+    }
 }
 
 #[test]
-fn test_comb_12_rounded_housing_section_z4_1() {
-    let bytes = fixture_bytes("independent-exporters/occt-rounded-housing-mm.step");
-    let def = import_test_step(&bytes).expect("rounded housing import");
-    let sec = section_at_z(&def, 4.1).expect("section at z=4.1");
-    assert_eq!(sec.loops().len(), 1, "loop count at z=4.1");
-    let area = loop_area(&sec, &sec.loops()[0]).abs();
-    assert_close(area, 428.5664, 1.0, "rounded housing z=4.1 area");
-}
-
-#[test]
-fn test_comb_13_rounded_housing_section_z4_16() {
-    let bytes = fixture_bytes("independent-exporters/occt-rounded-housing-mm.step");
-    let def = import_test_step(&bytes).expect("rounded housing import");
-    let sec = section_at_z(&def, 4.16).expect("section at z=4.16");
-    assert_eq!(sec.loops().len(), 2, "loop count at z=4.16");
-    let mut areas: Vec<f64> = sec
-        .loops()
-        .iter()
-        .map(|lp| loop_area(&sec, lp).abs())
-        .collect();
-    areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
-    let net_area = areas[0] - areas[1];
-    assert_close(net_area, 400.2920, 1.0, "rounded housing z=4.16 net area");
-}
-
-#[test]
-fn test_comb_14_rounded_housing_section_z9_5() {
-    let bytes = fixture_bytes("independent-exporters/occt-rounded-housing-mm.step");
-    let def = import_test_step(&bytes).expect("rounded housing import");
-    let sec = section_at_z(&def, 9.5).expect("section at z=9.5");
-    assert_eq!(sec.loops().len(), 2, "loop count at z=9.5");
-    let mut areas: Vec<f64> = sec
-        .loops()
-        .iter()
-        .map(|lp| loop_area(&sec, lp).abs())
-        .collect();
-    areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
-    let net_area = areas[0] - areas[1];
-    assert_close(net_area, 347.1790, 1.0, "rounded housing z=9.5 net area");
+fn test_comb_11_rounded_housing_multi_strata_oracle() {
+    assert_housing_product_sections("independent-exporters/occt-rounded-housing-mm.step", 1.0);
 }
 
 // =========================================================================
@@ -298,23 +292,7 @@ fn test_comb_14_rounded_housing_section_z9_5() {
 
 #[test]
 fn test_comb_15_spline_housing_multi_strata_oracle() {
-    let bytes = fixture_bytes("independent-exporters/occt-spline-housing-mm.step");
-    let def = import_test_step(&bytes).expect("spline housing import");
-    let sec0 = section_at_z(&def, 0.5).expect("section at z=0.5");
-    assert_eq!(sec0.loops().len(), 1);
-    let area0 = loop_area(&sec0, &sec0.loops()[0]).abs();
-    assert_close(area0, 375.4533, 1.5, "spline housing z=0.5 area");
-
-    let sec1 = section_at_z(&def, 9.5).expect("section at z=9.5");
-    assert_eq!(sec1.loops().len(), 2);
-    let mut areas: Vec<f64> = sec1
-        .loops()
-        .iter()
-        .map(|lp| loop_area(&sec1, lp).abs())
-        .collect();
-    areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
-    let net_area1 = areas[0] - areas[1];
-    assert_close(net_area1, 347.1790, 1.5, "spline housing z=9.5 net area");
+    assert_housing_product_sections("independent-exporters/occt-spline-housing-mm.step", 1.5);
 }
 
 // =========================================================================
