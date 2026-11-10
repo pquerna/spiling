@@ -591,11 +591,7 @@ fn publish_terminal(
         let replay = runtime
             .replay_publication(id)
             .ok_or_else(|| Status::internal("ACK candidate replay missing"))?;
-        let bundle_descriptor = jobs.describe_native_artifact(
-            &asset.bytes,
-            "application/x-spiling-manufacturing-bundle",
-            spiling_contracts::manufacturing::MAX_MANUFACTURING_BUNDLE_BYTES as u64,
-        )?;
+        let bundle_descriptor = jobs.describe_bundle_artifact(&asset.record, &asset.bundle)?;
         let replay_descriptor = jobs.describe_native_artifact(
             &replay.bytes,
             "application/x-spiling-replay-motion",
@@ -617,7 +613,7 @@ fn publish_terminal(
                 },
             ),
             vec![
-                (bundle_descriptor, asset.bytes.as_slice().into()),
+                (bundle_descriptor, (&asset.bundle).into()),
                 (program_descriptor, (&asset.program).into()),
                 (replay_descriptor, replay.bytes.as_slice().into()),
             ],
@@ -635,20 +631,9 @@ fn publish_terminal(
     }
     let assets = runtime.layout_manufacturing_assets();
     for asset in &assets {
-        let descriptor = jobs.describe_native_artifact(
-            asset.bytes.as_slice(),
-            "application/x-spiling-manufacturing-bundle",
-            spiling_contracts::manufacturing::MAX_MANUFACTURING_BUNDLE_BYTES as u64,
-        )?;
-        if descriptor.sha256 != asset.record.hash.as_str()
-            || descriptor.size_bytes != u64::from(asset.record.byte_count)
-        {
-            return Err(Status::data_loss(
-                "manufacturing immutable descriptor mismatch",
-            ));
-        }
+        let descriptor = jobs.describe_bundle_artifact(&asset.record, &asset.bundle)?;
         resources.insert(descriptor.sha256.clone(), descriptor.clone());
-        outputs.push((descriptor, asset.bytes.as_slice().into()));
+        outputs.push((descriptor, (&asset.bundle).into()));
         // Layouts with distinct bundles can emit identical programs; publish one.
         let program = jobs.describe_program_artifact(&asset.record.program)?;
         if !outputs.iter().any(|(a, _)| a.name == program.name) {

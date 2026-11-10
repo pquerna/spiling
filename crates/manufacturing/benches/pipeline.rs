@@ -421,6 +421,12 @@ fn residency(parts: usize, primary: bool, file: &str) -> Result<()> {
     let (encoded, encode_peak) = peak_above(|| Ok(serde_json::to_vec(&bundle.bundle)?))?;
     let encoded_hash = SourceHash::from_bytes(&encoded);
     let (decoded, decode_peak) = peak_above(|| Ok(decode_bundle(&encoded)?))?;
+    let frames = ChunkSource::from_slice(&encoded, u64::MAX)?;
+    let started = Instant::now();
+    let (framed, frames_decode_peak) =
+        peak_above(|| Ok(decode_bundle_from(frames.len(), || frames.reader())?))?;
+    let frames_decode_us = started.elapsed().as_micros();
+    drop(framed);
     let decoded_retained = {
         let before = live();
         drop(decoded);
@@ -479,6 +485,7 @@ fn residency(parts: usize, primary: bool, file: &str) -> Result<()> {
                 "plan_retained": plan_retained, "program_retained": program_retained,
                 "program_len": program_len, "json_bundle": encoded_len,
                 "encode_peak": encode_peak, "decode_peak": decode_peak,
+                "bundle_frames": frames.retained_bytes(), "frames_decode_peak": frames_decode_peak,
                 "decoded_bundle_retained": decoded_retained,
                 "motion_peak": motion_peak, "replay": replay_bytes,
             },
@@ -486,8 +493,10 @@ fn residency(parts: usize, primary: bool, file: &str) -> Result<()> {
                 "compile_peak": compile_peak.map(per), "plan_retained": per(plan_retained),
                 "program_retained": per(program_retained), "json_bundle": per(encoded_len),
                 "encode_peak": per(encode_peak), "decode_peak": per(decode_peak),
+                "bundle_frames": per(frames.retained_bytes()), "frames_decode_peak": per(frames_decode_peak),
                 "motion_peak": per(motion_peak), "replay": per(replay_bytes),
             },
+            "frames_decode_us": frames_decode_us,
             "software_only": true,
         })
     );

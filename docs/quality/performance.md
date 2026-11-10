@@ -104,7 +104,9 @@ Errors abort the run. Repeated results must retain the same program hash.
 allocator compiled only into the benchmark binary. It runs once on the CPU
 backend: peak live bytes above entry for compile, JSON encode, decode and
 motion replay, then the retained size of the plan and of the program's
-compressed frames by dropping each owned part. `program_len` is the raw length. Values are also divided by deposition segments. It accepts
+compressed frames by dropping each owned part. `program_len` is the raw length.
+`bundle_frames` is the retained framed bundle; `frames_decode_peak` and
+`frames_decode_us` measure decoding it from frames, as Core and clients do. Values are also divided by deposition segments. It accepts
 `--parts` or `--bundle` and ignores sample options. Compile peak covers planner,
 emitter and verifier together; it is single-process heap, not RSS, GPU or
 native kernel memory outside the Rust allocator.

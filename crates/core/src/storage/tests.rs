@@ -364,15 +364,13 @@ fn manufacturing_fresh_reopen_ignores_deleted_original_and_readonly_rejects_edit
             .manufacturing_artifact
             .as_ref()
             .unwrap()
-            .bytes
-            .as_slice(),
+            .bundle,
         capture
             .snapshot
             .manufacturing_artifact
             .as_ref()
             .unwrap()
-            .bytes
-            .as_slice()
+            .bundle
     );
     assert_eq!(
         reopened
@@ -431,8 +429,8 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
     save_project(&mut project, Some(sandbox.target()));
     let before = project.info();
     let asset = project.snapshot().manufacturing_artifact.clone().unwrap();
-    // Opening retains the bundle bytes and streams the program into frames.
-    let count = asset.bytes.len() + asset.program.retained_bytes();
+    // Opening streams the bundle and the program into retained frames.
+    let count = asset.bundle.retained_bytes() + asset.program.retained_bytes();
     assert_eq!(
         open_reusing(
             &sandbox.target(),
@@ -473,9 +471,9 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
             .manufacturing_artifact
             .as_ref()
             .unwrap()
-            .bytes
+            .bundle
             .len(),
-        asset.bytes.len()
+        asset.bundle.len()
     );
 }
 #[test]
@@ -811,9 +809,8 @@ fn appearance_original_source_deletion_reopen_and_readonly_preserve_artifact() {
             .manufacturing_artifact
             .as_ref()
             .unwrap()
-            .bytes
-            .as_slice(),
-        artifact.bytes.as_slice()
+            .bundle,
+        artifact.bundle
     );
     assert_eq!(
         readonly
@@ -924,9 +921,8 @@ fn optical_reports_reconstruct_source_independently_readonly_with_exact_bytes_an
             .manufacturing_artifact
             .as_ref()
             .unwrap()
-            .bytes
-            .as_slice(),
-        manufactured.bytes.as_slice()
+            .bundle,
+        manufactured.bundle
     );
     assert_eq!(
         readonly

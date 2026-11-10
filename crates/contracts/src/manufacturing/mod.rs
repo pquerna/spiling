@@ -4444,15 +4444,41 @@ pub fn decode_bundle(bytes: &[u8]) -> Result<ManufacturingBundle, ManufacturingE
     struct BundleVersion {
         schema_version: u32,
     }
-    let version: BundleVersion = serde_json::from_slice(bytes).map_err(|e| {
+    let corrupt = |e: serde_json::Error| {
         ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, e.to_string())
-    })?;
+    };
+    let version: BundleVersion = serde_json::from_slice(bytes).map_err(corrupt)?;
     if version.schema_version != MANUFACTURING_SCHEMA_VERSION {
         return Err(invalid("unsupported manufacturing bundle schema"));
     }
-    let bundle: ManufacturingBundle = serde_json::from_slice(bytes).map_err(|e| {
+    let bundle: ManufacturingBundle = serde_json::from_slice(bytes).map_err(corrupt)?;
+    bundle.validate()?;
+    Ok(bundle)
+}
+/// Decode a bundle of `len` bytes from fresh sequential readers of the same
+/// content, without a raw buffer. The schema version is checked in a first pass
+/// so a different schema refuses before the strict typed parse.
+pub fn decode_bundle_from<R: std::io::Read>(
+    len: u64,
+    mut open: impl FnMut() -> R,
+) -> Result<ManufacturingBundle, ManufacturingError> {
+    if len == 0 || len > u64::from(MAX_MANUFACTURING_BUNDLE_BYTES) {
+        return Err(resource("bundle byte limit exceeded"));
+    }
+    #[derive(Deserialize)]
+    struct BundleVersion {
+        schema_version: u32,
+    }
+    let corrupt = |e: serde_json::Error| {
         ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, e.to_string())
-    })?;
+    };
+    let version: BundleVersion =
+        serde_json::from_reader(std::io::BufReader::new(open())).map_err(corrupt)?;
+    if version.schema_version != MANUFACTURING_SCHEMA_VERSION {
+        return Err(invalid("unsupported manufacturing bundle schema"));
+    }
+    let bundle: ManufacturingBundle =
+        serde_json::from_reader(std::io::BufReader::new(open())).map_err(corrupt)?;
     bundle.validate()?;
     Ok(bundle)
 }

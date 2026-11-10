@@ -17,7 +17,8 @@ use spiling_contracts::{
     manufacturing::{
         MAX_MANUFACTURING_BUNDLE_BYTES, MAX_REPLAY_DISPLAY_BYTES, ManufacturingArtifactRecord,
         ManufacturingBundle, ManufacturingCommand, ManufacturingError, ManufacturingErrorCode,
-        ManufacturingResponse, ReplayDisplayDescriptor, decode_bundle, validate_replay_display,
+        ManufacturingResponse, ReplayDisplayDescriptor, decode_bundle_from,
+        validate_replay_display,
     },
     native::{self, GeometryCall, ManufacturingCall, NativeOperationView, ProjectCall},
     project::{ProjectCommand, ProjectResponse, ProjectRevision},
@@ -968,20 +969,41 @@ impl EngineRpc {
                 "manufacturing descriptor does not match artifact record",
             ));
         }
-        let bytes = self
-            .read_bounded_artifact(
-                &descriptor.name,
-                size,
-                &descriptor.sha256,
-                u64::from(MAX_MANUFACTURING_BUNDLE_BYTES),
-            )
+        let frames = self.read_frames(&descriptor.name, size).await?;
+        decode_manufacturing_frames(&frames, record)
+    }
+
+    /// Stream one artifact into compressed frames, refusing any length but `size`.
+    async fn read_frames(
+        &self,
+        name: &str,
+        size: u64,
+    ) -> Result<spiling_chunks::ChunkSource, ClientError> {
+        let mut stream = self
+            .read_artifact_range(spiling_contracts::google::bytestream::ReadRequest {
+                resource_name: name.to_owned(),
+                read_offset: 0,
+                read_limit: 0,
+            })
             .await
             .map_err(|error| match error {
-                ClientError::Protocol(message) => corrupt_manufacturing(&message),
                 ClientError::Rpc(status) => rpc_error(status),
                 error => error,
             })?;
-        decode_manufacturing_artifact(&bytes, record)
+        let mut writer = spiling_chunks::ChunkWriter::new(size);
+        while let Some(fragment) = stream.message().await? {
+            if fragment.data.is_empty() || fragment.data.len() > 1024 * 1024 {
+                return Err(corrupt_manufacturing("artifact fragment range invalid"));
+            }
+            std::io::Write::write_all(&mut writer, &fragment.data)
+                .map_err(|_| corrupt_manufacturing("artifact exceeds its recorded length"))?;
+        }
+        if writer.len() != size {
+            return Err(corrupt_manufacturing("artifact size/checksum mismatch"));
+        }
+        writer
+            .finish()
+            .map_err(|_| corrupt_manufacturing("artifact frames could not be sealed"))
     }
 
     /// Retrieve the exact emitted program named by an artifact record, held as
@@ -992,28 +1014,12 @@ impl EngineRpc {
     ) -> Result<spiling_chunks::ChunkSource, ClientError> {
         record.validate()?;
         let program = &record.program;
-        let mut stream = self
-            .read_artifact_range(spiling_contracts::google::bytestream::ReadRequest {
-                resource_name: format!("artifacts/{}", program.hash.as_str()),
-                read_offset: 0,
-                read_limit: 0,
-            })
-            .await
-            .map_err(|error| match error {
-                ClientError::Rpc(status) => rpc_error(status),
-                error => error,
-            })?;
-        let mut writer = spiling_chunks::ChunkWriter::new(program.byte_count);
-        while let Some(fragment) = stream.message().await? {
-            if fragment.data.is_empty() || fragment.data.len() > 1024 * 1024 {
-                return Err(corrupt_manufacturing("program fragment range invalid"));
-            }
-            std::io::Write::write_all(&mut writer, &fragment.data)
-                .map_err(|_| corrupt_manufacturing("program exceeds its recorded length"))?;
-        }
-        let source = writer
-            .finish()
-            .map_err(|_| corrupt_manufacturing("program frames could not be sealed"))?;
+        let source = self
+            .read_frames(
+                &format!("artifacts/{}", program.hash.as_str()),
+                program.byte_count,
+            )
+            .await?;
         if !program.matches(source.len(), source.digest()) {
             return Err(corrupt_manufacturing(
                 "manufacturing program size or hash mismatch",
@@ -1072,16 +1078,28 @@ impl EngineRpc {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn decode_manufacturing_artifact(
     bytes: &[u8],
     record: &ManufacturingArtifactRecord,
 ) -> Result<ManufacturingBundle, ClientError> {
-    if bytes.len() != record.byte_count as usize || !record.hash.matches_bytes(bytes) {
+    let frames = spiling_chunks::ChunkSource::from_slice(bytes, u64::MAX)
+        .map_err(|_| corrupt_manufacturing("manufacturing bundle size or hash mismatch"))?;
+    decode_manufacturing_frames(&frames, record)
+}
+/// Check exact bundle identity, then decode it from its frames.
+pub(crate) fn decode_manufacturing_frames(
+    frames: &spiling_chunks::ChunkSource,
+    record: &ManufacturingArtifactRecord,
+) -> Result<ManufacturingBundle, ClientError> {
+    if frames.len() != u64::from(record.byte_count)
+        || SourceHash::from_digest(frames.digest()) != record.hash
+    {
         return Err(corrupt_manufacturing(
             "manufacturing bundle size or hash mismatch",
         ));
     }
-    let bundle = decode_bundle(bytes)?;
+    let bundle = decode_bundle_from(frames.len(), || frames.reader())?;
     bundle.validate_record(record)?;
     Ok(bundle)
 }

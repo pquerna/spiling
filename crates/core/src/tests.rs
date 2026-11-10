@@ -679,7 +679,7 @@ pub(crate) fn bundle_asset_with(
     bytes.shrink_to_fit();
     let digest: [u8; 32] = Sha256::digest(&bytes).into();
     Arc::new(
-        ManufacturingAsset::new(
+        ManufacturingAsset::from_bytes(
             ManufacturingArtifactRecord {
                 hash: SourceHash::from_digest(&digest),
                 input_hash: bundle.provenance.input_hash.clone(),
@@ -687,7 +687,7 @@ pub(crate) fn bundle_asset_with(
                 summary: bundle.summary(),
                 program: bundle.program.clone(),
             },
-            bytes,
+            &bytes,
             fixture_program(program),
         )
         .unwrap(),
@@ -714,7 +714,7 @@ fn exact_floating_totals_admit_durable_bundles_but_reject_changed_records() {
     let mut changed = asset.record.clone();
     changed.summary.deposited_volume_mm3 = f64::from_bits(volume.to_bits() + 1);
     assert_eq!(
-        ManufacturingAsset::new(changed, asset.bytes.as_ref().clone(), asset.program.clone())
+        ManufacturingAsset::new(changed, asset.bundle.clone(), asset.program.clone())
             .unwrap_err()
             .code,
         ProjectErrorCode::CorruptAsset,
@@ -897,7 +897,7 @@ fn manufacturing_vec_hash_count_summary_and_strict_schema_are_validated() {
     let mut wrong = asset.record.clone();
     wrong.summary.layers += 1;
     assert_eq!(
-        ManufacturingAsset::new(wrong, asset.bytes.as_ref().clone(), asset.program.clone())
+        ManufacturingAsset::new(wrong, asset.bundle.clone(), asset.program.clone())
             .unwrap_err()
             .code,
         ProjectErrorCode::CorruptAsset
@@ -905,15 +905,15 @@ fn manufacturing_vec_hash_count_summary_and_strict_schema_are_validated() {
     let mut wrong = asset.record.clone();
     wrong.byte_count -= 1;
     assert_eq!(
-        ManufacturingAsset::new(wrong, asset.bytes.as_ref().clone(), asset.program.clone())
+        ManufacturingAsset::new(wrong, asset.bundle.clone(), asset.program.clone())
             .unwrap_err()
             .code,
         ProjectErrorCode::CorruptAsset
     );
-    let mut bytes = asset.bytes.as_ref().clone();
+    let mut bytes = asset.bundle.to_vec().unwrap();
     bytes[0] = b'[';
     assert_eq!(
-        ManufacturingAsset::new(asset.record.clone(), bytes, asset.program.clone())
+        ManufacturingAsset::from_bytes(asset.record.clone(), &bytes, asset.program.clone())
             .unwrap_err()
             .code,
         ProjectErrorCode::CorruptAsset
@@ -922,7 +922,7 @@ fn manufacturing_vec_hash_count_summary_and_strict_schema_are_validated() {
     assert_eq!(
         ManufacturingAsset::new(
             asset.record.clone(),
-            asset.bytes.as_ref().clone(),
+            asset.bundle.clone(),
             fixture_program(b"G28\n"),
         )
         .unwrap_err()
@@ -936,7 +936,7 @@ fn manufacturing_vec_hash_count_summary_and_strict_schema_are_validated() {
     record.hash = SourceHash::from_digest(&Sha256::digest(&bytes).into());
     record.byte_count = bytes.len() as u32;
     assert_eq!(
-        ManufacturingAsset::new(record, bytes, asset.program.clone())
+        ManufacturingAsset::from_bytes(record, &bytes, asset.program.clone())
             .unwrap_err()
             .code,
         ProjectErrorCode::CorruptAsset
@@ -1700,9 +1700,13 @@ fn bundle_image_content_is_complete_even_for_disabled_layers_and_old_formats_fai
             program: bundle.program.clone(),
         };
         assert_eq!(
-            ManufacturingAsset::new(record, bytes, fixture_program(FIXTURE_PROGRAM.as_bytes()))
-                .unwrap_err()
-                .code,
+            ManufacturingAsset::from_bytes(
+                record,
+                &bytes,
+                fixture_program(FIXTURE_PROGRAM.as_bytes())
+            )
+            .unwrap_err()
+            .code,
             ProjectErrorCode::CorruptAsset
         );
     };
@@ -2655,13 +2659,8 @@ fn appearance_transactions_preserve_manufacturing_and_restore_exact_history() {
             artifact.record.input_hash
         );
         assert_eq!(
-            state
-                .manufacturing_artifact
-                .as_ref()
-                .unwrap()
-                .bytes
-                .as_slice(),
-            artifact.bytes.as_slice()
+            state.manufacturing_artifact.as_ref().unwrap().bundle,
+            artifact.bundle
         );
         assert_eq!(state.occurrences, before.occurrences);
     }

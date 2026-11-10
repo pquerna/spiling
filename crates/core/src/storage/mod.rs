@@ -480,17 +480,25 @@ fn load_assets(
                 }
                 asset.clone()
             } else {
-                let bytes = read_asset(
+                let bundle = read_chunked(
                     capture,
-                    &record.hash,
-                    remaining_manufacturing.min(MAX_MANUFACTURING_BUNDLE_BYTES as usize),
-                    Some(record.byte_count as usize),
+                    object_id(&record.hash),
+                    MAX_MANUFACTURING_BUNDLE_BYTES as usize,
+                    Some(u64::from(record.byte_count)),
                     cancel,
                 )?;
-                remaining_manufacturing -= bytes.capacity();
+                remaining_manufacturing = remaining_manufacturing
+                    .checked_sub(bundle.retained_bytes())
+                    .ok_or_else(|| {
+                        error(
+                            ProjectErrorCode::ResourceLimit,
+                            "retained manufacturing budget exceeded",
+                        )
+                    })?;
                 let program = read_chunked(
                     capture,
                     object_id(&record.program.hash),
+                    MAX_MANUFACTURING_PROGRAM_BYTES as usize,
                     Some(record.program.byte_count),
                     cancel,
                 )?;
@@ -502,7 +510,7 @@ fn load_assets(
                             "retained manufacturing budget exceeded",
                         )
                     })?;
-                let asset = Arc::new(ManufacturingAsset::new(record.clone(), bytes, program)?);
+                let asset = Arc::new(ManufacturingAsset::new(record.clone(), bundle, program)?);
                 loaded_manufacturing.insert(record.hash.clone(), asset.clone());
                 asset
             };
@@ -697,11 +705,11 @@ impl StoredBytes {
 fn read_chunked(
     capture: &Capture<'_>,
     id: ObjectId,
+    limit: usize,
     exact: Option<u64>,
     cancel: &AtomicBool,
 ) -> Result<spiling_chunks::ChunkSource, ProjectError> {
     cancelled(cancel)?;
-    let limit = MAX_MANUFACTURING_PROGRAM_BYTES as usize;
     if exact.is_some_and(|size| {
         capture
             .object_length(id)
@@ -721,7 +729,7 @@ fn read_chunked(
     writer.finish().map_err(|_| {
         error(
             ProjectErrorCode::ResourceLimit,
-            "manufacturing program exceeds byte budget",
+            "manufacturing object exceeds byte budget",
         )
     })
 }
@@ -753,7 +761,7 @@ fn snapshot_objects(snapshot: &Snapshot) -> Result<BTreeMap<Member, StoredBytes>
     {
         objects.insert(
             member(MANUFACTURING, &asset.record.hash),
-            asset.bytes.clone().into(),
+            StoredBytes::Chunks(asset.bundle.clone()),
         );
         objects.insert(
             member(PROGRAM, &asset.record.program.hash),
@@ -814,10 +822,7 @@ pub(crate) fn remaining_budgets(project: &Project) -> Result<LoadBudgets, Projec
             .iter()
             .filter_map(|l| l.manufacturing_artifact.as_ref())
         {
-            manufacturing.insert(
-                Arc::as_ptr(&asset.bytes).cast::<()>(),
-                asset.bytes.capacity(),
-            );
+            manufacturing.insert(asset.bundle.ptr(), asset.bundle.retained_bytes());
             manufacturing.insert(asset.program.ptr(), asset.program.retained_bytes());
         }
     }
@@ -958,8 +963,13 @@ pub fn save(
             for member in &capture.members {
                 let bytes = if let Some(bytes) = available.get(member) {
                     bytes.clone()
-                } else if member.role.get() == PROGRAM {
-                    let program = read_chunked(&capture, member.object, None, cancel)?;
+                } else if matches!(member.role.get(), PROGRAM | MANUFACTURING) {
+                    let limit = if member.role.get() == PROGRAM {
+                        MAX_MANUFACTURING_PROGRAM_BYTES as usize
+                    } else {
+                        MAX_MANUFACTURING_BUNDLE_BYTES as usize
+                    };
+                    let program = read_chunked(&capture, member.object, limit, None, cancel)?;
                     budgets.manufacturing_bytes = budgets
                         .manufacturing_bytes
                         .checked_sub(program.retained_bytes())

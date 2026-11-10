@@ -429,6 +429,25 @@ impl Jobs {
             tx.commit().map_err(internal)?; s.notify(&op); Ok(())
         })
     }
+    /// Descriptor for an admitted bundle, checked against its frame identity.
+    pub(crate) fn describe_bundle_artifact(
+        &self,
+        record: &spiling_contracts::manufacturing::ManufacturingArtifactRecord,
+        bundle: &spiling_chunks::ChunkSource,
+    ) -> Result<Artifact, Status> {
+        let hash = spiling_contracts::geometry::SourceHash::from_digest(bundle.digest());
+        if hash != record.hash || bundle.len() != u64::from(record.byte_count) {
+            return Err(Status::data_loss(
+                "manufacturing immutable descriptor mismatch",
+            ));
+        }
+        Ok(Artifact {
+            name: format!("artifacts/{}", hash.as_str()),
+            size_bytes: bundle.len(),
+            sha256: hash.as_str().into(),
+            media_type: "application/x-spiling-manufacturing-bundle".into(),
+        })
+    }
     /// Descriptor for exact program bytes already bound by their record.
     pub(crate) fn describe_program_artifact(
         &self,

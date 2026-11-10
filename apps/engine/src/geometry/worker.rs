@@ -558,7 +558,7 @@ fn run(
                     };
                     let interior_policy = interior_opportunity
                         .map(|opportunity| {
-                            let bundle = decode_bundle(asset.bytes.as_slice())?;
+                            let bundle = asset.decode()?;
                             let selection =
                                 bundle.plan.interior_selection.as_deref().ok_or_else(|| {
                                     ManufacturingError::new(
@@ -581,10 +581,12 @@ fn run(
                         record: asset.record.clone(),
                         report: inspection.report,
                         provenance: inspection.provenance,
-                        resource: descriptor(
-                            &asset.bytes,
-                            "application/x-spiling-manufacturing-bundle",
-                        ),
+                        resource: spiling_contracts::ArtifactView {
+                            name: format!("artifacts/{}", asset.record.hash.as_str()),
+                            size_bytes: asset.record.byte_count.to_string(),
+                            sha256: asset.record.hash.as_str().into(),
+                            media_type: "application/x-spiling-manufacturing-bundle".into(),
+                        },
                         replay_display: ReplayDisplayDescriptor {
                             info: replay.info.clone(),
                             resource: descriptor(
@@ -1347,7 +1349,7 @@ fn inspect_asset(
     output: VerificationOutput,
     cancel: &AtomicBool,
 ) -> Result<spiling_manufacturing::ManufacturingInspection, JobError> {
-    let bundle = decode_bundle(asset.bytes.as_slice()).map_err(JobError::from)?;
+    let bundle = asset.decode().map_err(JobError::from)?;
     let result = spiling_manufacturing::ManufacturingResult::new(bundle, asset.program.clone())
         .map_err(JobError::from)?;
     let mut inspection =
@@ -1402,36 +1404,6 @@ fn check_alternative_receipt_budget(encoded_bytes: usize) -> Result<(), Manufact
         ));
     }
     Ok(())
-}
-
-struct BundleWriter {
-    bytes: Vec<u8>,
-    limit: usize,
-}
-impl std::io::Write for BundleWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let length = self
-            .bytes
-            .len()
-            .checked_add(bytes.len())
-            .filter(|length| *length <= self.limit)
-            .ok_or_else(|| {
-                std::io::Error::other("manufacturing bundle exceeds remaining budget")
-            })?;
-        if length > self.bytes.capacity() {
-            let capacity = length
-                .max(self.bytes.capacity().saturating_mul(2))
-                .min(self.limit);
-            self.bytes
-                .try_reserve_exact(capacity - self.bytes.len())
-                .map_err(std::io::Error::other)?;
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 fn preflight(
@@ -1516,16 +1488,19 @@ fn compile(
             },
             cancel,
         )?;
-    let mut writer = BundleWriter {
-        bytes: Vec::new(),
-        limit: byte_budget.min(MAX_MANUFACTURING_BUNDLE_BYTES) as usize,
-    };
-    serde_json::to_writer(&mut writer, &bundle).map_err(|_| {
+    // Encode straight into compressed frames; no whole JSON buffer exists.
+    let exceeded = || {
         ManufacturingError::new(
             ManufacturingErrorCode::ResourceLimit,
             "encoded manufacturing bundle exceeds remaining retained/staged budget",
         )
-    })?;
+    };
+    let mut writer = spiling_chunks::ChunkWriter::new(u64::from(MAX_MANUFACTURING_BUNDLE_BYTES));
+    serde_json::to_writer(&mut writer, &bundle).map_err(|_| exceeded())?;
+    let encoded = writer.finish().map_err(|_| exceeded())?;
+    if (encoded.retained_bytes() + program.retained_bytes()) as u64 > u64::from(byte_budget) {
+        return Err(exceeded().into());
+    }
     if cancel.load(Ordering::Acquire) {
         return Err(ManufacturingError::new(
             ManufacturingErrorCode::Cancelled,
@@ -1533,16 +1508,15 @@ fn compile(
         )
         .into());
     }
-    let hash = SourceHash::from_bytes(&writer.bytes);
     let record = ManufacturingArtifactRecord {
-        hash,
+        hash: SourceHash::from_digest(encoded.digest()),
         input_hash: bundle.provenance.input_hash.clone(),
-        byte_count: writer.bytes.len() as u32,
+        byte_count: encoded.len() as u32,
         summary: bundle.summary(),
         program: bundle.program.clone(),
     };
     drop(bundle);
-    ManufacturingAsset::new(record, writer.bytes, program)
+    ManufacturingAsset::new(record, encoded, program)
         .map(Arc::new)
         .map_err(super::manufacturing::project_error)
         .map_err(JobError::from)
@@ -1559,25 +1533,6 @@ mod image_import_tests {
         let error = check_alternative_receipt_budget(maximum + 1).unwrap_err();
         assert_eq!(error.code, ManufacturingErrorCode::ResourceLimit);
         assert!(check_alternative_receipt_budget(usize::MAX).is_err());
-    }
-
-    #[test]
-    fn manufacturing_bundle_writer_never_exceeds_captured_headroom() {
-        use std::io::Write;
-        let mut writer = BundleWriter {
-            bytes: Vec::new(),
-            limit: 4,
-        };
-        writer.write_all(b"head").unwrap();
-        assert!(writer.write_all(b"room").is_err());
-        assert_eq!(writer.bytes, b"head");
-        assert!(writer.bytes.capacity() <= writer.limit);
-        let mut exhausted = BundleWriter {
-            bytes: Vec::new(),
-            limit: 0,
-        };
-        assert!(exhausted.write_all(b"x").is_err());
-        assert!(exhausted.bytes.is_empty());
     }
 
     #[test]

@@ -175,51 +175,69 @@ impl SourceAsset {
     }
 }
 /// Immutable exact JSON bundle bytes plus the exact emitted program they describe.
-/// Persisted verification is metadata, not replay proof. The program is held as
-/// compressed frames and stored as its own raw project object.
+/// Persisted verification is metadata, not replay proof. The exact bundle
+/// JSON and the program are both held as compressed frames and stored as
+/// their own raw project objects.
 #[derive(Debug, Clone)]
 pub struct ManufacturingAsset {
     pub record: ManufacturingArtifactRecord,
-    pub bytes: Arc<Vec<u8>>,
+    pub bundle: spiling_chunks::ChunkSource,
     pub program: spiling_chunks::ChunkSource,
 }
 impl ManufacturingAsset {
     pub fn new(
         record: ManufacturingArtifactRecord,
-        bytes: Vec<u8>,
+        bundle: spiling_chunks::ChunkSource,
         program: spiling_chunks::ChunkSource,
     ) -> Result<Self, ProjectError> {
         let asset = Self {
             record,
-            bytes: Arc::new(bytes),
+            bundle,
             program,
         };
         asset.validate()?;
         Ok(asset)
     }
-    /// Heap retained by this asset's bundle bytes and compressed program.
+    /// Frame bundle bytes; for callers holding a whole encoded bundle.
+    pub fn from_bytes(
+        record: ManufacturingArtifactRecord,
+        bundle: &[u8],
+        program: spiling_chunks::ChunkSource,
+    ) -> Result<Self, ProjectError> {
+        let bundle = spiling_chunks::ChunkSource::from_slice(
+            bundle,
+            u64::from(MAX_MANUFACTURING_BUNDLE_BYTES),
+        )
+        .map_err(|_| {
+            error(
+                ProjectErrorCode::ResourceLimit,
+                "manufacturing bundle exceeds byte budget",
+            )
+        })?;
+        Self::new(record, bundle, program)
+    }
+    /// Decode the exact bundle document from its frames.
+    pub fn decode(&self) -> Result<ManufacturingBundle, ManufacturingError> {
+        decode_bundle_from(self.bundle.len(), || self.bundle.reader())
+    }
+    /// Heap retained by this asset's compressed bundle and program frames.
     pub fn retained_bytes(&self) -> usize {
-        self.bytes.capacity() + self.program.retained_bytes()
+        self.bundle.retained_bytes() + self.program.retained_bytes()
     }
     /// Same immutable identity and exact content.
     pub(crate) fn same_content(&self, other: &Self) -> bool {
-        self.record == other.record
-            && self.program == other.program
-            && (Arc::ptr_eq(&self.bytes, &other.bytes)
-                || self.bytes.as_slice() == other.bytes.as_slice())
+        self.record == other.record && self.bundle == other.bundle && self.program == other.program
     }
     pub(crate) fn validate(&self) -> Result<ManufacturingBundle, ProjectError> {
-        if self.bytes.is_empty() || self.bytes.capacity() > MAX_MANUFACTURING_BUNDLE_BYTES as usize
-        {
+        if self.bundle.is_empty() || self.bundle.len() > u64::from(MAX_MANUFACTURING_BUNDLE_BYTES) {
             return Err(error(
                 ProjectErrorCode::ResourceLimit,
                 "manufacturing bundle exceeds byte budget",
             ));
         }
         self.record.validate().map_err(manufacturing_error)?;
-        let digest: [u8; 32] = Sha256::digest(self.bytes.as_slice()).into();
-        if SourceHash::from_digest(&digest) != self.record.hash
-            || self.bytes.len() != self.record.byte_count as usize
+        if SourceHash::from_digest(self.bundle.digest()) != self.record.hash
+            || self.bundle.len() != u64::from(self.record.byte_count)
         {
             return Err(error(
                 ProjectErrorCode::CorruptAsset,
@@ -236,7 +254,7 @@ impl ManufacturingAsset {
                 "manufacturing program hash or byte count mismatch",
             ));
         }
-        let bundle = decode_bundle(self.bytes.as_slice()).map_err(manufacturing_error)?;
+        let bundle = self.decode().map_err(manufacturing_error)?;
         if bundle.provenance.input_hash != self.record.input_hash
             || bundle.summary() != self.record.summary
             || bundle.program != self.record.program
