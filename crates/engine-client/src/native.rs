@@ -984,6 +984,44 @@ impl EngineRpc {
         decode_manufacturing_artifact(&bytes, record)
     }
 
+    /// Retrieve the exact emitted program named by an artifact record, held as
+    /// compressed frames. The engine publishes it as `artifacts/{sha256}`.
+    pub async fn fetch_manufacturing_program(
+        &self,
+        record: &ManufacturingArtifactRecord,
+    ) -> Result<spiling_chunks::ChunkSource, ClientError> {
+        record.validate()?;
+        let program = &record.program;
+        let mut stream = self
+            .read_artifact_range(spiling_contracts::google::bytestream::ReadRequest {
+                resource_name: format!("artifacts/{}", program.hash.as_str()),
+                read_offset: 0,
+                read_limit: 0,
+            })
+            .await
+            .map_err(|error| match error {
+                ClientError::Rpc(status) => rpc_error(status),
+                error => error,
+            })?;
+        let mut writer = spiling_chunks::ChunkWriter::new(program.byte_count);
+        while let Some(fragment) = stream.message().await? {
+            if fragment.data.is_empty() || fragment.data.len() > 1024 * 1024 {
+                return Err(corrupt_manufacturing("program fragment range invalid"));
+            }
+            std::io::Write::write_all(&mut writer, &fragment.data)
+                .map_err(|_| corrupt_manufacturing("program exceeds its recorded length"))?;
+        }
+        let source = writer
+            .finish()
+            .map_err(|_| corrupt_manufacturing("program frames could not be sealed"))?;
+        if !program.matches(source.len(), source.digest()) {
+            return Err(corrupt_manufacturing(
+                "manufacturing program size or hash mismatch",
+            ));
+        }
+        Ok(source)
+    }
+
     /// Retrieve canonical image bytes only from the checked immutable descriptor.
     pub async fn fetch_surface_image(
         &self,
@@ -1127,6 +1165,12 @@ impl EngineClient {
         self.rpc
             .fetch_manufacturing_bundle(record, descriptor)
             .await
+    }
+    pub async fn fetch_manufacturing_program(
+        &self,
+        record: &ManufacturingArtifactRecord,
+    ) -> Result<spiling_chunks::ChunkSource, ClientError> {
+        self.rpc.fetch_manufacturing_program(record).await
     }
     pub async fn fetch_surface_image(
         &self,

@@ -980,9 +980,19 @@ export type SurfaceResolutionTotals = { evaluated_witnesses: number, resolved: n
 
 export type ManufacturingSummary = { layer_height: LayerHeightAssessment, layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, software_only: boolean, surface_resolution: SurfaceResolutionTotals, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, routing: FixedDualVerification | null, };
 
-export type ManufacturingBundle = { schema_version: number, provenance: ManufacturingProvenance, plan: NormalizedPrintPlan, program: string, verification: VerificationReport, };
+export type ProgramDescriptor = { hash: SourceHash,
+/**
+ * Exact raw length; bounded far below 2^53, so JSON numbers stay exact.
+ */
+byte_count: number, };
 
-export type ManufacturingArtifactRecord = { hash: SourceHash, input_hash: SourceHash, byte_count: number, summary: ManufacturingSummary, };
+export type ManufacturingBundle = { schema_version: number, provenance: ManufacturingProvenance, plan: NormalizedPrintPlan,
+/**
+ * The program bytes travel separately; consumers pair them by this identity.
+ */
+program: ProgramDescriptor, verification: VerificationReport, };
+
+export type ManufacturingArtifactRecord = { hash: SourceHash, input_hash: SourceHash, byte_count: number, summary: ManufacturingSummary, program: ProgramDescriptor, };
 
 export type ManufacturingCommand = { "op": "get", layout_id: PrintLayoutId, session_id: SessionId, } | { "op": "set_intent", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, intent: ManufacturingIntent, } | { "op": "edit_interior_policy", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, edit: InteriorToolPolicyEdit, } | { "op": "review_materials", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, request: MaterialReviewRequest, } | { "op": "apply_material_profile", tool_id: string | null, layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, selection: MaterialProfileSelection, } | { "op": "compile", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, } | { "op": "evaluate_interior_policy", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, opportunity: InteriorPolicyOpportunity, } | { "op": "evaluate_alternative", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, expected_context_hash: SourceHash, intent: ManufacturingIntent, } | { "op": "preflight", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, } | { "op": "inspect", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, output: VerificationOutput, };
 

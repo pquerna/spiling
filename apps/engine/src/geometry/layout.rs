@@ -535,7 +535,7 @@ fn prepare_single(
         candidates_examined: work,
         manufacturing_attempts,
         limited_by,
-        verification: bundle.verification,
+        verification: bundle.bundle.verification,
     };
     proposal.validate()?;
     Ok(proposal)

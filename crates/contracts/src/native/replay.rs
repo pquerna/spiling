@@ -246,6 +246,10 @@ mod tests {
             hash: descriptor.info.bundle_hash.clone(),
             input_hash: descriptor.info.input_hash.clone(),
             byte_count: 10,
+            program: crate::manufacturing::ProgramDescriptor {
+                hash: SourceHash::from_bytes(b"program"),
+                byte_count: 7,
+            },
             summary: ManufacturingSummary {
                 layer_height: crate::manufacturing::LayerHeightAssessment {
                     policy: crate::manufacturing::LayerHeightPolicy::ProtectedMaximum,

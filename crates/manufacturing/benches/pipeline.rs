@@ -10,7 +10,9 @@ use spiling_contracts::{
     project::{ProjectId, ProjectRevision, StoredDefinition},
     surface::SurfaceOverlays,
 };
-use spiling_manufacturing::{CompilerInput, compile, inspect_bundle, verify_bundle};
+use spiling_manufacturing::{
+    ChunkSource, CompilerInput, ManufacturingResult, compile, inspect_bundle, verify_bundle,
+};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     collections::BTreeMap,
@@ -191,6 +193,17 @@ impl Scene {
     }
 }
 
+/// A captured result is the bundle document at `path` plus its raw program at
+/// `path.program`, written together by `--write-bundle`.
+fn read_result(path: &str) -> Result<ManufacturingResult> {
+    let bundle = decode_bundle(&read_bundle(path)?)?;
+    let mut program = Vec::new();
+    std::fs::File::open(format!("{path}.program"))?
+        .take(u64::from(MAX_MANUFACTURING_PROGRAM_BYTES) + 1)
+        .read_to_end(&mut program)?;
+    let program = ChunkSource::from_slice(&program, u64::from(MAX_MANUFACTURING_PROGRAM_BYTES))?;
+    Ok(ManufacturingResult::new(bundle, program)?)
+}
 fn read_bundle(path: &str) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
@@ -279,17 +292,19 @@ fn main() -> Result<()> {
     };
     let setup_us = setup.elapsed().as_micros();
     let mut prepared = if !file.is_empty() {
-        Some(decode_bundle(&read_bundle(&file)?)?)
+        Some(read_result(&file)?)
     } else if phase != "compile" {
         Some(compile(scene.as_ref().unwrap().input(), &cancel)?)
     } else {
         None
     };
-    let encoded = prepared.as_ref().map(serde_json::to_vec).transpose()?;
-    let encoded_hash = encoded.as_deref().map(SourceHash::from_bytes);
-    let mut expected = prepared
+    let encoded = prepared
         .as_ref()
-        .map(|b| SourceHash::from_bytes(b.program.as_bytes()));
+        .map(|r| serde_json::to_vec(&r.bundle))
+        .transpose()?;
+    let program = prepared.as_ref().map(|r| r.program.clone());
+    let encoded_hash = encoded.as_deref().map(SourceHash::from_bytes);
+    let mut expected = prepared.as_ref().map(|b| b.bundle.program.hash.clone());
     for sample in 0..warmup + samples {
         if matches!(phase.as_str(), "compile" | "parse" | "decode") {
             drop(prepared.take());
@@ -301,15 +316,19 @@ fn main() -> Result<()> {
                 result = Some(compile(scene.as_ref().unwrap().input(), &cancel)?);
             }
             "encode" => {
-                black_box(serde_json::to_vec(prepared.as_ref().unwrap())?);
+                black_box(serde_json::to_vec(&prepared.as_ref().unwrap().bundle)?);
             }
             "parse" => {
-                result = Some(serde_json::from_slice::<ManufacturingBundle>(
-                    encoded.as_ref().unwrap(),
+                result = Some(ManufacturingResult::new(
+                    serde_json::from_slice::<ManufacturingBundle>(encoded.as_ref().unwrap())?,
+                    program.clone().unwrap(),
                 )?);
             }
             "decode" => {
-                result = Some(decode_bundle(encoded.as_ref().unwrap())?);
+                result = Some(ManufacturingResult::new(
+                    decode_bundle(encoded.as_ref().unwrap())?,
+                    program.clone().unwrap(),
+                )?);
             }
             "validate" => {
                 black_box(prepared.as_ref().unwrap()).validate()?;
@@ -350,7 +369,7 @@ fn main() -> Result<()> {
             prepared = Some(bundle);
         }
         let b = prepared.as_ref().unwrap();
-        let program_hash = SourceHash::from_bytes(b.program.as_bytes());
+        let program_hash = b.bundle.program.hash.clone();
         if expected.as_ref().is_some_and(|h| h != &program_hash) {
             return Err("repeated output changed; timing is not acceptance".into());
         }
@@ -363,15 +382,21 @@ fn main() -> Result<()> {
         }
     }
     if !save.is_empty() {
-        let bytes = serde_json::to_vec(prepared.as_ref().unwrap())?;
+        let result = prepared.as_ref().unwrap();
+        let bytes = serde_json::to_vec(&result.bundle)?;
         if bytes.len() > MAX_MANUFACTURING_BUNDLE_BYTES as usize {
             return Err("encoded result exceeds production byte limit".into());
         }
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(Path::new(&save))?
-            .write_all(&bytes)?;
+        let create = |path: &str| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(Path::new(path))
+        };
+        create(&save)?.write_all(&bytes)?;
+        result
+            .program
+            .write_to(&mut create(&format!("{save}.program"))?)?;
     }
     Ok(())
 }
@@ -391,10 +416,9 @@ fn residency(parts: usize, primary: bool, file: &str) -> Result<()> {
         let (bundle, peak) = peak_above(|| Ok(compile(scene.input(), &cancel)?))?;
         (bundle, Some(peak), live() - before)
     } else {
-        let bytes = read_bundle(file)?;
-        (decode_bundle(&bytes)?, None, 0)
+        (read_result(file)?, None, 0)
     };
-    let (encoded, encode_peak) = peak_above(|| Ok(serde_json::to_vec(&bundle)?))?;
+    let (encoded, encode_peak) = peak_above(|| Ok(serde_json::to_vec(&bundle.bundle)?))?;
     let encoded_hash = SourceHash::from_bytes(&encoded);
     let (decoded, decode_peak) = peak_above(|| Ok(decode_bundle(&encoded)?))?;
     let decoded_retained = {
@@ -414,7 +438,7 @@ fn residency(parts: usize, primary: bool, file: &str) -> Result<()> {
     drop(inspection);
     let segments = bundle.verification.deposition_segments as usize;
     let travels = bundle.verification.travel_segments as usize;
-    let program_len = bundle.program.len();
+    let program_len = bundle.program.len() as usize;
     let layers = bundle.plan.layers.len();
     let (points, paths) = bundle
         .plan
@@ -424,7 +448,10 @@ fn residency(parts: usize, primary: bool, file: &str) -> Result<()> {
         .fold((0usize, 0usize), |(p, n), path| {
             (p + path.points_mm.len(), n + 1)
         });
-    let ManufacturingBundle { plan, program, .. } = bundle;
+    let ManufacturingResult {
+        bundle: ManufacturingBundle { plan, .. },
+        program,
+    } = bundle;
     let program_retained = {
         let before = live();
         drop(program);

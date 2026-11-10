@@ -419,6 +419,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SurfaceResolution::decl(&config),
         SurfaceResolutionTotals::decl(&config),
         ManufacturingSummary::decl(&config),
+        ProgramDescriptor::decl(&config),
         ManufacturingBundle::decl(&config),
         ManufacturingArtifactRecord::decl(&config),
         ManufacturingCommand::decl(&config),

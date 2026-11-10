@@ -122,6 +122,16 @@ async fn fetch_bundle(
     };
     client.fetch_manufacturing_bundle(record, &resource).await
 }
+/// The exact emitted program, fetched as its own artifact.
+async fn fetch_program(
+    client: &EngineClient,
+    record: &ManufacturingArtifactRecord,
+) -> spiling_engine_client::ChunkSource {
+    client.fetch_manufacturing_program(record).await.unwrap()
+}
+async fn fetch_program_text(client: &EngineClient, record: &ManufacturingArtifactRecord) -> String {
+    String::from_utf8(fetch_program(client, record).await.to_vec().unwrap()).unwrap()
+}
 async fn wait(client: &mut EngineClient, job_id: String) -> NativeOperationView {
     let start = Instant::now();
     loop {
@@ -264,8 +274,13 @@ async fn alternatives_preserve_current_replay_and_survive_named_option_reopen() 
     assert!(!replay.is_empty());
     assert_ne!(candidate_bundle.program, baseline_bundle.program);
     assert_eq!(candidate_bundle.provenance.intent, candidate);
+    let candidate_result = spiling_manufacturing::ManufacturingResult::new(
+        candidate_bundle.clone(),
+        fetch_program(&client, &evaluation.record).await,
+    )
+    .unwrap();
     let fresh = spiling_manufacturing::inspect_bundle(
-        &candidate_bundle,
+        &candidate_result,
         &evaluation.record.hash,
         VerificationOutput::ReportOnly,
         &std::sync::atomic::AtomicBool::new(false),
@@ -867,15 +882,20 @@ async fn distributed_seams_change_actual_closed_wall_starts_and_survive_fresh_re
     assert_eq!(fresh_report, report);
     assert_eq!(fresh_provenance, provenance);
     let destination = work.0.join("fresh-export");
+    let program = fetch_program(&reader, &record).await;
     let mut output = OutputDirectory::create(&destination).unwrap();
     output
-        .write_manufacturing_bundle(&bundle, &fresh_report, &fresh_provenance)
+        .write_manufacturing_bundle(&bundle, &program, &fresh_report, &fresh_provenance)
         .unwrap();
     output.commit();
     drop(output);
     assert_eq!(
         std::fs::read(destination.join("program.gcode")).unwrap(),
-        bundle.program.as_bytes()
+        program.to_vec().unwrap()
+    );
+    assert_eq!(
+        SourceHash::from_bytes(&std::fs::read(destination.join("program.gcode")).unwrap()),
+        bundle.program.hash
     );
     assert_eq!(status(&mut reader).await, before);
     reader.shutdown().await.unwrap();
@@ -1456,35 +1476,50 @@ async fn reopen_rejects_hash_corruption_and_hashed_program_tampering_without_rep
     set_intent(&mut client, intent()).await;
     let record = compile(&mut client).await;
     let mut bundle = fetch_bundle(&mut client, &record).await.unwrap();
+    let program_text = fetch_program_text(&client, &record).await;
     save(&mut client, &checkpoint).await;
     client.shutdown().await.unwrap();
     let intact = work.0.join("intact.spil");
     support::copy_project(&checkpoint, &intact);
-    support::corrupt_object(&checkpoint, &record.hash);
     let mut reader = spawn().await;
     let before = scene(&mut reader).await;
-    let corrupt = open(&mut reader, &checkpoint, true).await;
-    assert_eq!(corrupt.status, JobStatus::Failed, "{corrupt:?}");
-    assert!(
-        matches!(&corrupt.error, Some(JobError::Project { error })
-        if error.code == ProjectErrorCode::InvalidProject),
-        "{corrupt:?}"
-    );
-    assert_eq!(scene(&mut reader).await, before);
-    reader.ping().await.unwrap();
+    // Both the bundle object and the separate program object are hash-checked.
+    for corrupted in [&record.hash, &record.program.hash] {
+        std::fs::remove_file(&checkpoint).unwrap();
+        support::copy_project(&intact, &checkpoint);
+        support::corrupt_object(&checkpoint, corrupted);
+        let corrupt = open(&mut reader, &checkpoint, true).await;
+        assert_eq!(corrupt.status, JobStatus::Failed, "{corrupt:?}");
+        assert!(
+            matches!(&corrupt.error, Some(JobError::Project { error })
+            if error.code == ProjectErrorCode::InvalidProject),
+            "{corrupt:?}"
+        );
+        assert_eq!(scene(&mut reader).await, before);
+        reader.ping().await.unwrap();
+    }
     std::fs::remove_file(&checkpoint).unwrap();
     support::copy_project(&intact, &checkpoint);
-    bundle.program = bundle.program.replacen("G1 ", "G0 ", 1);
+    // Consistently re-hashed tampering passes storage checks; fresh replay refuses it.
+    let program = program_text.replacen("G1 ", "G0 ", 1).into_bytes();
+    bundle.program = ProgramDescriptor {
+        hash: SourceHash::from_bytes(&program),
+        byte_count: program.len() as u64,
+    };
     let bytes = serde_json::to_vec(&bundle).unwrap();
     let hash = SourceHash::from_bytes(&bytes);
     let mut manifest = support::manifest(&checkpoint);
     let artifact = manifest.layouts[0].manufacturing_artifact.as_mut().unwrap();
     artifact.hash = hash;
     artifact.byte_count = bytes.len() as u32;
+    artifact.program = bundle.program.clone();
     support::write_root(
         &checkpoint,
         &serde_json::to_vec(&manifest).unwrap(),
-        &[(record.hash.clone(), bytes)],
+        &[
+            (record.hash.clone(), bytes),
+            (record.program.hash.clone(), program),
+        ],
     );
     let tampered = open(&mut reader, &checkpoint, true).await;
     assert_eq!(tampered.status, JobStatus::Failed, "{tampered:?}");
@@ -1742,10 +1777,8 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
     );
     assert_eq!(provenance.input_hash, record.input_hash);
     assert_eq!(provenance.input_revision, bundle.provenance.input_revision);
-    assert_eq!(
-        display.info.program_hash,
-        SourceHash::from_bytes(bundle.program.as_bytes())
-    );
+    assert_eq!(display.info.program_hash, bundle.program.hash);
+    let program_text = fetch_program_text(&reader, &record).await;
     assert!(completed.outputs.iter().any(|out| out == &display.resource));
     assert!(completed.outputs.iter().any(|out| out == resource));
     let bytes = reader.fetch_replay_display(&record, display).await.unwrap();
@@ -1782,11 +1815,7 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
         .0
     {
         let source_line = u32::from_le_bytes(event[40..44].try_into().unwrap());
-        let actual_line = bundle
-            .program
-            .lines()
-            .nth(source_line as usize - 1)
-            .unwrap();
+        let actual_line = program_text.lines().nth(source_line as usize - 1).unwrap();
         assert!(actual_line.starts_with("G0 ") || actual_line.starts_with("G1 "));
         for (axis, offset) in [('X', 0), ('Y', 8), ('Z', 16), ('E', 24), ('F', 32)] {
             if let Some(value) = actual_line
@@ -2399,15 +2428,14 @@ async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fr
         assert!(report.verified);
         assert_eq!(provenance.input_hash, record.input_hash);
         assert_eq!(provenance.process_document, authored.process_document);
-        assert_eq!(
-            display.info.program_hash,
-            SourceHash::from_bytes(bundle.program.as_bytes())
-        );
+        assert_eq!(display.info.program_hash, bundle.program.hash);
         let motion = client
             .fetch_replay_display(&record, &display)
             .await
             .unwrap();
-        let mut program_lines = bundle.program.lines();
+        let program = fetch_program(&client, &record).await;
+        let program_text = String::from_utf8(program.to_vec().unwrap()).unwrap();
+        let mut program_lines = program_text.lines();
         let mut previous_line = 0;
         let mut actual_separators = 0;
         for event in motion[REPLAY_HEADER_BYTES..]
@@ -2446,7 +2474,7 @@ async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fr
         let destination = work.0.join(phase);
         let mut output = OutputDirectory::create(&destination).unwrap();
         output
-            .write_manufacturing_bundle(&fetched, &report, &provenance)
+            .write_manufacturing_bundle(&fetched, &program, &report, &provenance)
             .unwrap();
         output.write("motion.splr", &motion).unwrap();
         assert_eq!(status(&mut client).await, before);
@@ -2454,7 +2482,7 @@ async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fr
         drop(output);
         assert_eq!(
             std::fs::read(destination.join("program.gcode")).unwrap(),
-            bundle.program.as_bytes()
+            program_text.as_bytes()
         );
         assert_eq!(
             serde_json::from_slice::<VerificationReport>(

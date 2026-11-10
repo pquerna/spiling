@@ -11,6 +11,28 @@ use spiling_contracts::{
 
 const NATIVE_STORAGE_BUDGET: u64 = 256 * 1024 * 1024;
 
+/// Immutable bytes published with a terminal native operation.
+pub(crate) enum ArtifactBytes<'a> {
+    Slice(&'a [u8]),
+    /// Raw content streamed from compressed frames into the stored blob.
+    Chunks(&'a spiling_chunks::ChunkSource),
+}
+impl<'a> From<&'a [u8]> for ArtifactBytes<'a> {
+    fn from(bytes: &'a [u8]) -> Self {
+        Self::Slice(bytes)
+    }
+}
+impl<'a> From<&'a Vec<u8>> for ArtifactBytes<'a> {
+    fn from(bytes: &'a Vec<u8>) -> Self {
+        Self::Slice(bytes)
+    }
+}
+impl<'a> From<&'a spiling_chunks::ChunkSource> for ArtifactBytes<'a> {
+    fn from(source: &'a spiling_chunks::ChunkSource) -> Self {
+        Self::Chunks(source)
+    }
+}
+
 pub struct NativeAdmission {
     pub parent: String,
     pub request_id: String,
@@ -343,7 +365,7 @@ impl Jobs {
         &self,
         name: &str,
         result: Result<spiling_contracts::geometry::JobResult, RpcStatus>,
-        buffers: Vec<(Artifact, &[u8])>,
+        buffers: Vec<(Artifact, ArtifactBytes<'_>)>,
     ) -> Result<(), Status> {
         self.with_sync(|s| {
             let mut op = s.get(name)?;
@@ -382,12 +404,44 @@ impl Jobs {
                     if size > reservation {
                         return Err(Status::resource_exhausted("native publication exceeds its admitted reservation"));
                     }
-                    tx.execute("INSERT INTO artifacts VALUES(?,?)",params![artifact.name,bytes]).map_err(internal)?;
+                    match bytes {
+                        ArtifactBytes::Slice(bytes) => {
+                            tx.execute("INSERT INTO artifacts VALUES(?,?)",params![artifact.name,bytes]).map_err(internal)?;
+                        }
+                        ArtifactBytes::Chunks(source) => {
+                            if source.len() != artifact.size_bytes {
+                                return Err(Status::internal("chunked artifact length differs from its descriptor"));
+                            }
+                            let length = i64::try_from(source.len()).map_err(internal)?;
+                            tx.execute("INSERT INTO artifacts VALUES(?,zeroblob(?))",params![artifact.name,length]).map_err(internal)?;
+                            let row = tx.last_insert_rowid();
+                            let mut blob = tx.blob_open("main","artifacts","bytes",row,false).map_err(internal)?;
+                            let written = source.write_to(&mut blob).map_err(internal)?;
+                            if written != artifact.size_bytes {
+                                return Err(Status::internal("chunked artifact write was incomplete"));
+                            }
+                        }
+                    }
                     tx.execute("INSERT INTO artifact_types VALUES(?,?)",params![artifact.name,artifact.media_type]).map_err(internal)?;
                 }
             }
             tx.execute("UPDATE operations SET operation=?,reserved_bytes=? WHERE name=?",params![op.encode_to_vec(),i64::try_from(size).map_err(internal)?,op.name]).map_err(internal)?;
             tx.commit().map_err(internal)?; s.notify(&op); Ok(())
+        })
+    }
+    /// Descriptor for exact program bytes already bound by their record.
+    pub(crate) fn describe_program_artifact(
+        &self,
+        program: &spiling_contracts::manufacturing::ProgramDescriptor,
+    ) -> Result<Artifact, Status> {
+        program
+            .validate()
+            .map_err(|_| Status::resource_exhausted("native artifact exceeds declared cap"))?;
+        Ok(Artifact {
+            name: format!("artifacts/{}", program.hash.as_str()),
+            size_bytes: program.byte_count,
+            sha256: program.hash.as_str().into(),
+            media_type: spiling_contracts::manufacturing::MANUFACTURING_PROGRAM_MEDIA_TYPE.into(),
         })
     }
     pub(crate) fn describe_native_artifact(

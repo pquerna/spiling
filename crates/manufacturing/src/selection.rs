@@ -3,8 +3,8 @@
 
 //! Bounded complete constructions over one immutable project capture. Retain
 //! three small assessments, never three geometry/program/GPU alternatives.
-use crate::{CompilerInput, check_cancel, compile_exact, error};
-use spiling_contracts::{geometry::SourceHash, manufacturing::*};
+use crate::{CompilerInput, ManufacturingResult, check_cancel, compile_exact, error};
+use spiling_contracts::manufacturing::*;
 use std::sync::{Arc, atomic::AtomicBool};
 
 fn capture<'a>(input: &'a CompilerInput<'_>, intent: &'a ManufacturingIntent) -> CompilerInput<'a> {
@@ -65,7 +65,7 @@ fn assessment(
         outcome: InteriorCandidateOutcome::Qualified {
             work: QualifiedInteriorWork {
                 interior_segments_per_tool: counts,
-                program_hash: SourceHash::from_bytes(bundle.program.as_bytes()),
+                program_hash: bundle.program.hash.clone(),
                 model_volume_mm3: bundle.verification.deposited_volume_mm3,
                 waste_volume_mm3: bundle
                     .verification
@@ -85,7 +85,7 @@ fn assessment(
 pub(super) fn compile(
     input: CompilerInput<'_>,
     cancel: &AtomicBool,
-) -> Result<ManufacturingBundle, ManufacturingError> {
+) -> Result<ManufacturingResult, ManufacturingError> {
     input.intent.validate()?;
     let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow else {
         unreachable!("selection route admitted")
@@ -177,7 +177,7 @@ pub(super) fn compile(
         compile_exact(capture(&input, &intent), cancel, &mut geometry_work)?
     };
     selection
-        .validate_current(&bundle.program, &bundle.verification)
+        .validate_current(&bundle.bundle.program.hash, &bundle.verification)
         .map_err(|failure| {
             error(
                 ManufacturingErrorCode::VerificationFailed,

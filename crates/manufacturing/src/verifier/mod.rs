@@ -3,7 +3,11 @@
 
 //! Software-only replay of actual program bytes, independent of the backend.
 
+use std::io::{BufRead, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use spiling_chunks::ChunkSource;
+use spiling_contracts::geometry::SourceHash;
 
 use spiling_contracts::manufacturing::program_coordinates::{
     project_xyz6_coordinate_mm, project_xyz6_point_mm,
@@ -21,6 +25,51 @@ const XYZ_HALF_STEP: f64 = 0.000_000_5;
 const E_HALF_STEP: f64 = 0.000_000_005;
 const F_HALF_STEP: f64 = 0.000_000_5;
 const MAX_LINE_BYTES: usize = 512;
+
+/// Bounded line reader over the actual program bytes, matching `str::lines`:
+/// lines end at `\n` or `\r\n`, and a final unterminated line is included.
+/// A line longer than [`MAX_LINE_BYTES`] refuses before more of it is read.
+struct ProgramLines<R> {
+    reader: R,
+    buf: Vec<u8>,
+    index: usize,
+}
+impl<R: BufRead> ProgramLines<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            buf: Vec::with_capacity(MAX_LINE_BYTES + 2),
+            index: 0,
+        }
+    }
+    fn next(&mut self) -> Result<Option<(usize, &str)>, ManufacturingError> {
+        self.buf.clear();
+        let read = (&mut self.reader)
+            .take(MAX_LINE_BYTES as u64 + 2)
+            .read_until(b'\n', &mut self.buf)
+            .map_err(|e| failed(format!("program bytes could not be read: {e}")))?;
+        if read == 0 {
+            return Ok(None);
+        }
+        let index = self.index;
+        self.index += 1;
+        if self.buf.last() == Some(&b'\n') {
+            self.buf.pop();
+            if self.buf.last() == Some(&b'\r') {
+                self.buf.pop();
+            }
+        }
+        if self.buf.len() > MAX_LINE_BYTES {
+            return Err(ManufacturingError::new(
+                ManufacturingErrorCode::ResourceLimit,
+                format!("program line {} exceeds byte limit", index + 1),
+            ));
+        }
+        let line = std::str::from_utf8(&self.buf)
+            .map_err(|_| failed(format!("program line {}: invalid UTF-8", index + 1)))?;
+        Ok(Some((index, line)))
+    }
+}
 
 fn failed(message: impl AsRef<str>) -> ManufacturingError {
     ManufacturingError::new(ManufacturingErrorCode::VerificationFailed, message)
@@ -441,7 +490,7 @@ fn inspect_lifecycle(
 /// Replays a bounded actual program against borrowed normalized path semantics.
 /// A successful result is software validation, never machine-ready certification.
 pub fn verify(
-    program: &str,
+    program: &ChunkSource,
     plan: &NormalizedPrintPlan,
     intent: &ManufacturingIntent,
     cancel: &AtomicBool,
@@ -450,14 +499,14 @@ pub fn verify(
 }
 
 pub(crate) fn verify_actual(
-    program: &str,
+    program: &ChunkSource,
     plan: &NormalizedPrintPlan,
     intent: &ManufacturingIntent,
     cancel: &AtomicBool,
     mut replay: Option<&mut ReplaySink>,
 ) -> Result<VerificationReport, ManufacturingError> {
     cancelled(cancel)?;
-    if program.len() > MAX_MANUFACTURING_PROGRAM_BYTES as usize {
+    if program.len() > u64::from(MAX_MANUFACTURING_PROGRAM_BYTES) {
         return Err(ManufacturingError::new(
             ManufacturingErrorCode::ResourceLimit,
             "emitted program exceeds manufacturing byte limit",
@@ -529,14 +578,9 @@ pub(crate) fn verify_actual(
     let mut first_wall_edge = None;
     let mut previous_wall_edge = None;
 
-    for (line_index, line) in program.lines().enumerate() {
+    let mut lines = ProgramLines::new(program.reader());
+    while let Some((line_index, line)) = lines.next()? {
         cancelled(cancel)?;
-        if line.len() > MAX_LINE_BYTES {
-            return Err(ManufacturingError::new(
-                ManufacturingErrorCode::ResourceLimit,
-                format!("program line {} exceeds byte limit", line_index + 1),
-            ));
-        }
         let decoded = decode(line, route.is_some())
             .map_err(|reason| failed(format!("program line {}: {reason}", line_index + 1)))?;
         let Some(decoded) = decoded else { continue };
@@ -1284,7 +1328,7 @@ pub(crate) fn verify_actual(
     };
     report.validate()?;
     if let Some(selection) = &plan.interior_selection {
-        selection.validate_current(program, &report)?;
+        selection.validate_current(&SourceHash::from_digest(program.digest()), &report)?;
     }
     Ok(report)
 }

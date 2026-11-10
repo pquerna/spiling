@@ -63,8 +63,9 @@ systemd-run --user --scope -p MemoryMax=8G -p TasksMax=256 \
 
 The benchmark emits one JSON record per measured sample. The pnpm command
 resolves bundle paths against the repository root; a direct executable uses its
-current working directory. `--write-bundle` creates
-a new file exclusively. Existing files never overwrite. Use a new process with
+current working directory. `--write-bundle PATH` creates
+the bundle document at `PATH` and its raw program at `PATH.program`, each
+exclusively; `--bundle PATH` reads both. Existing files never overwrite. Use a new process with
 one sample to measure first-use compiler state; use multiple samples to observe
 same-process repetition. Neither clears the OS page cache nor proves incremental
 compilation. `--warmup` explicitly excludes initial iterations. `--policy primary`
@@ -102,8 +103,8 @@ Errors abort the run. Repeated results must retain the same program hash.
 `--phase residency` reports heap bytes instead of time, from a counting
 allocator compiled only into the benchmark binary. It runs once on the CPU
 backend: peak live bytes above entry for compile, JSON encode, decode and
-motion replay, then the retained size of the plan and program by dropping
-each owned part. Values are also divided by deposition segments. It accepts
+motion replay, then the retained size of the plan and of the program's
+compressed frames by dropping each owned part. `program_len` is the raw length. Values are also divided by deposition segments. It accepts
 `--parts` or `--bundle` and ignores sample options. Compile peak covers planner,
 emitter and verifier together; it is single-process heap, not RSS, GPU or
 native kernel memory outside the Rust allocator.

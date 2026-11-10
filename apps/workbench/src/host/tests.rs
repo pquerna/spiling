@@ -1749,8 +1749,10 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
     let exported = root.path().join("Current-only");
     let snapshot = send(&host, Action::Export(native(&exported)));
     assert_eq!(
-        std::fs::read_to_string(exported.join("program.gcode")).unwrap(),
-        reference.bundle.program
+        spiling_contracts::geometry::SourceHash::from_bytes(
+            &std::fs::read(exported.join("program.gcode")).unwrap()
+        ),
+        reference.bundle.program.hash
     );
     assert_eq!(snapshot.project, baseline.project);
     let option = ManufacturingOption::new(
@@ -2036,8 +2038,10 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
     let output = root.path().join("Used-Current");
     send(&host, Action::Export(native(&output)));
     assert_ne!(
-        std::fs::read_to_string(output.join("program.gcode")).unwrap(),
-        reference.bundle.program
+        spiling_contracts::geometry::SourceHash::from_bytes(
+            &std::fs::read(output.join("program.gcode")).unwrap()
+        ),
+        reference.bundle.program.hash
     );
     let removed = project_edit(&host, |session_id, base_revision| {
         ProjectCommand::RemoveManufacturingOption {
@@ -4675,8 +4679,10 @@ fn interior_policy_suggestion_is_detached_cancelable_and_exactly_adopted() {
     let output = root.path().join("export");
     send(&host, Action::Export(native(&output)));
     assert_eq!(
-        std::fs::read_to_string(output.join("program.gcode")).unwrap(),
-        candidate.program
+        spiling_contracts::geometry::SourceHash::from_bytes(
+            &std::fs::read(output.join("program.gcode")).unwrap()
+        ),
+        candidate.program.hash
     );
     let saved_path = root.path().join("suggested.spil");
     let saved = send(

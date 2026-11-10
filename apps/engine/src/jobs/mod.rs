@@ -6,6 +6,7 @@
 use prost::Message;
 mod artifacts;
 mod native;
+pub(crate) use native::ArtifactBytes;
 pub use native::NativeAdmission;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};

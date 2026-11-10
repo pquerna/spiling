@@ -1853,7 +1853,10 @@ fn bundle() -> ManufacturingBundle {
             verifier_version: "contract-test-verifier".into(),
         },
         plan,
-        program: "; arbitrary bytes do not imply replay success\n".into(),
+        program: ProgramDescriptor {
+            hash: SourceHash::from_bytes(b"; arbitrary bytes do not imply replay success\n"),
+            byte_count: 46,
+        },
         verification: VerificationReport {
             job_time: None,
             layer_height,
@@ -2481,6 +2484,7 @@ fn bundle_schema_validation_never_confers_replay_trust_and_rejects_tampered_reco
         input_hash: valid.provenance.input_hash.clone(),
         byte_count: bytes.len() as u32,
         summary: valid.summary(),
+        program: valid.program.clone(),
     };
     valid.validate_record(&record).unwrap();
     let mut later_revision = valid.clone();
@@ -2493,6 +2497,12 @@ fn bundle_schema_validation_never_confers_replay_trust_and_rejects_tampered_reco
     record.summary.software_only = false;
     assert!(valid.validate_record(&record).is_err());
     record.summary = valid.summary();
+    record.program.hash = SourceHash::from_bytes(b"other program");
+    assert_eq!(
+        valid.validate_record(&record).unwrap_err().code,
+        ManufacturingErrorCode::CorruptArtifact
+    );
+    record.program = valid.program.clone();
     record.input_hash = SourceHash::from_bytes(b"old inputs");
     assert_eq!(
         valid.validate_record(&record).unwrap_err().code,
@@ -2539,6 +2549,7 @@ fn manifest_artifact_must_reference_current_explicit_intent_and_input_hash() {
                 input_hash: p.input_hash.clone(),
                 byte_count: bytes.len() as u32,
                 summary: bundle.summary(),
+                program: bundle.program.clone(),
             }),
         }],
     };
@@ -2588,9 +2599,14 @@ fn native_failure_categories_preserve_specific_serialized_diagnostics() {
 #[test]
 fn bundle_headroom_does_not_expand_the_actual_program_limit() {
     let mut value = bundle();
-    value.program = ";".repeat(MAX_MANUFACTURING_PROGRAM_BYTES as usize);
+    value.program.byte_count = u64::from(MAX_MANUFACTURING_PROGRAM_BYTES);
     value.validate().unwrap();
-    value.program.push(';');
+    value.program.byte_count += 1;
+    assert_eq!(
+        value.validate().unwrap_err().code,
+        ManufacturingErrorCode::ResourceLimit,
+    );
+    value.program.byte_count = 0;
     assert_eq!(
         value.validate().unwrap_err().code,
         ManufacturingErrorCode::ResourceLimit,

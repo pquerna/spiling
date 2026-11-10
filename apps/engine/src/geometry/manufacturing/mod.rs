@@ -92,7 +92,7 @@ impl Runtime {
         self.project
             .retained_manufacturing_assets()
             .iter()
-            .map(|asset| asset.bytes.capacity() as u64)
+            .map(|asset| asset.retained_bytes() as u64)
             .sum()
     }
     fn manufacturing_session(&self, session: &SessionId) -> Result<(), ManufacturingError> {

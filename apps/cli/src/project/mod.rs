@@ -2691,10 +2691,11 @@ async fn execute(
                     let bundle = client
                         .fetch_manufacturing_bundle(&record, &resource)
                         .await?;
+                    let program = client.fetch_manufacturing_program(&record).await?;
                     manufacturing_output
                         .as_deref_mut()
                         .ok_or("manufacturing export directory was not admitted")?
-                        .write_manufacturing_bundle(&bundle, &report, &provenance)?;
+                        .write_manufacturing_bundle(&bundle, &program, &report, &provenance)?;
                     export_evidence = Some(serde_json::json!({
                         "artifact": record, "verification": report,
                         "software_only": true, "not_machine_ready": true

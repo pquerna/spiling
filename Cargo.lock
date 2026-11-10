@@ -6718,6 +6718,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "spiling-chunks"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+ "zstd",
+]
+
+[[package]]
 name = "spiling-cli"
 version = "0.1.0"
 dependencies = [
@@ -6765,6 +6773,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "spiling-chunks",
  "spiling-contracts",
  "spiling-core-ptac",
  "tempfile",
@@ -6823,6 +6832,7 @@ dependencies = [
  "sha2 0.10.9",
  "spiling-analysis",
  "spiling-appearance",
+ "spiling-chunks",
  "spiling-compute",
  "spiling-contracts",
  "spiling-core",
@@ -6849,6 +6859,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "spiling-chunks",
  "spiling-contracts",
  "tempfile",
  "thiserror 2.0.21",
@@ -6884,6 +6895,7 @@ dependencies = [
  "i_overlay",
  "serde_json",
  "sha2 0.10.9",
+ "spiling-chunks",
  "spiling-compute",
  "spiling-contracts",
  "spiling-geometry",

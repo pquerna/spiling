@@ -300,6 +300,10 @@ pub async fn stage_export(
         .await
         .map_err(|e| e.to_string())?;
     let capture = review.capture.clone();
+    let program = rpc
+        .fetch_manufacturing_program(&capture.record)
+        .await
+        .map_err(|e| e.to_string())?;
     let path = PathBuf::from(path.to_os_string().map_err(|e| e.to_string())?);
     let label = spiling_contracts::geometry::bounded_text(
         &path.file_name().unwrap_or_default().to_string_lossy(),
@@ -310,6 +314,7 @@ pub async fn stage_export(
         output
             .write_manufacturing_bundle(
                 &review.bundle,
+                &program,
                 &review.capture.report,
                 &review.capture.provenance,
             )

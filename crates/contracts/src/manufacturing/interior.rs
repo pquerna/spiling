@@ -215,7 +215,7 @@ impl InteriorSelection {
     }
     pub fn validate_current(
         &self,
-        program: &str,
+        program: &SourceHash,
         report: &VerificationReport,
     ) -> Result<(), ManufacturingError> {
         let InteriorCandidateOutcome::Qualified { work } =
@@ -229,7 +229,7 @@ impl InteriorSelection {
             .routing
             .as_ref()
             .map_or(0.0, |r| r.tools.iter().map(|t| t.waste_volume_mm3).sum());
-        if work.program_hash != SourceHash::from_bytes(program.as_bytes())
+        if work.program_hash != *program
             || work.time != report.job_time
             || work.model_volume_mm3 != report.deposited_volume_mm3
             || work.waste_volume_mm3 != waste

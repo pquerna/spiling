@@ -10,6 +10,27 @@ use spiling_contracts::process::{
 };
 use spiling_contracts::surface::SurfaceScope;
 
+/// Bundle document bytes as persisted beside the program artifact.
+fn encode(result: &ManufacturingResult) -> Vec<u8> {
+    serde_json::to_vec(&result.bundle).unwrap()
+}
+/// Saved-return pairing: a freshly decoded bundle with the retained program.
+fn reload(bytes: &[u8], program: &ChunkSource) -> ManufacturingResult {
+    ManufacturingResult::new(decode_bundle(bytes).unwrap(), program.clone()).unwrap()
+}
+/// Programs in these tests are edited as text.
+fn chunks(program: &str) -> ChunkSource {
+    ChunkSource::from_slice(program.as_bytes(), u64::MAX).unwrap()
+}
+/// Replace a result's program and its descriptor together, so the verifier
+/// itself, not the descriptor binding, judges the edited bytes.
+fn with_program(result: &ManufacturingResult, program: &str) -> ManufacturingResult {
+    let mut edited = result.clone();
+    edited.program = chunks(program);
+    edited.bundle.program = crate::program_descriptor(&edited.program);
+    edited
+}
+
 fn intent() -> ManufacturingIntent {
     ManufacturingIntent {
         hardware: None,
@@ -144,7 +165,7 @@ impl Scene {
     fn compile(
         &self,
         intent: &ManufacturingIntent,
-    ) -> Result<ManufacturingBundle, ManufacturingError> {
+    ) -> Result<ManufacturingResult, ManufacturingError> {
         compile(self.input(intent), &AtomicBool::new(false))
     }
     fn input<'a>(&'a self, intent: &'a ManufacturingIntent) -> CompilerInput<'a> {
@@ -197,8 +218,8 @@ fn preferred_layer_goal_compiles_thicker_output_and_fresh_replay_preserves_the_a
     assert_eq!(assessment.first_differing_layer, Some(0));
     assert_eq!(bundle.plan.layers[0].lower_z_mm, 0.0);
     assert!((bundle.plan.layers.last().unwrap().z_mm - 8.0).abs() < 0.000001);
-    let bytes = serde_json::to_vec(&bundle).unwrap();
-    let saved = decode_bundle(&bytes).unwrap();
+    let bytes = encode(&bundle);
+    let saved = reload(&bytes, &bundle.program);
     let fresh = inspect_bundle(
         &saved,
         &SourceHash::from_bytes(&bytes),
@@ -595,9 +616,9 @@ fn functional_sparse_parent_localized_landings_and_cover_preserve_density() {
                 }
             }
         }
-        let bytes = serde_json::to_vec(&bundle).unwrap();
+        let bytes = encode(&bundle);
         inspect_bundle(
-            &decode_bundle(&bytes).unwrap(),
+            &reload(&bytes, &bundle.program),
             &SourceHash::from_bytes(&bytes),
             VerificationOutput::ReportOnly,
             &AtomicBool::new(false),
@@ -622,7 +643,7 @@ fn functional_region_preserves_five_mm_pure_depth_and_constructs_captive_keys() 
         domain.reference.role,
         MaterialConstructionRole::FunctionalRegion | MaterialConstructionRole::FunctionalBase
     )));
-    let hash = SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap());
+    let hash = SourceHash::from_bytes(&encode(&bundle));
     let fresh = inspect_bundle(
         &bundle,
         &hash,
@@ -631,9 +652,18 @@ fn functional_region_preserves_five_mm_pure_depth_and_constructs_captive_keys() 
     )
     .unwrap();
     assert!(fresh.report.routing.is_some());
-    let wrong_tool = bundle.program.replacen("T0 S1", "T1 S1", 1);
-    assert_ne!(wrong_tool, bundle.program);
-    assert!(verifier::verify(&wrong_tool, &bundle.plan, &intent, &AtomicBool::new(false)).is_err());
+    let text = bundle.program_text().unwrap();
+    let wrong_tool = text.replacen("T0 S1", "T1 S1", 1);
+    assert_ne!(wrong_tool, text);
+    assert!(
+        verifier::verify(
+            &chunks(&wrong_tool),
+            &bundle.plan,
+            &intent,
+            &AtomicBool::new(false)
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -685,9 +715,9 @@ fn functional_localized_patches_preserve_complete_stock_and_replay() {
                 assert!(!(layer.lower_z_mm < stop && stop < layer.z_mm));
             }
         }
-        let bytes = serde_json::to_vec(&bundle).unwrap();
+        let bytes = encode(&bundle);
         inspect_bundle(
-            &decode_bundle(&bytes).unwrap(),
+            &reload(&bytes, &bundle.program),
             &SourceHash::from_bytes(&bytes),
             VerificationOutput::ReportOnly,
             &AtomicBool::new(false),
@@ -754,9 +784,9 @@ fn uniform_mixed_material_parts_and_unused_tools_replay_without_contact_policy()
         let bundle = scene.compile(&requested).unwrap();
         assert!(bundle.plan.functional_material_frame.is_none());
         assert!(bundle.plan.material_domains.is_empty());
-        let bytes = serde_json::to_vec(&bundle).unwrap();
+        let bytes = encode(&bundle);
         let fresh = inspect_bundle(
-            &decode_bundle(&bytes).unwrap(),
+            &reload(&bytes, &bundle.program),
             &SourceHash::from_bytes(&bytes),
             VerificationOutput::ReportOnly,
             &AtomicBool::new(false),
@@ -820,8 +850,8 @@ fn mechanical_capture_replays_distinct_polymers_temperatures_and_filament_diamet
     job.tools[0].nozzle_temperature_c = 220.0;
     let bundle = scene.compile(&intent).unwrap();
     assert_eq!(bundle.provenance.intent, intent);
-    let bytes = serde_json::to_vec(&bundle).unwrap();
-    let decoded = decode_bundle(&bytes).unwrap();
+    let bytes = encode(&bundle);
+    let decoded = reload(&bytes, &bundle.program);
     let fresh = inspect_bundle(
         &decoded,
         &SourceHash::from_bytes(&bytes),
@@ -830,11 +860,18 @@ fn mechanical_capture_replays_distinct_polymers_temperatures_and_filament_diamet
     )
     .unwrap();
     assert!(fresh.report.routing.is_some());
+    let text = decoded.program_text().unwrap();
     for (from, to) in [("M109 T0 R220", "M109 T0 R200"), ("T0 S1", "T1 S1")] {
-        let mutated = decoded.program.replacen(from, to, 1);
-        assert_ne!(mutated, decoded.program);
+        let mutated = text.replacen(from, to, 1);
+        assert_ne!(mutated, text);
         assert!(
-            verifier::verify(&mutated, &decoded.plan, &intent, &AtomicBool::new(false)).is_err()
+            verifier::verify(
+                &chunks(&mutated),
+                &decoded.plan,
+                &intent,
+                &AtomicBool::new(false)
+            )
+            .is_err()
         );
     }
     let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
@@ -882,8 +919,8 @@ fn native_face_color_constructs_owned_skin_backing_core_and_replays_protected_ho
                     .all(|l| l.region_coverage.protected_hole_area_mm2 > 0.0)
             );
         }
-        let saved = serde_json::to_vec(&bundle).unwrap();
-        let restored = decode_bundle(&saved).unwrap();
+        let saved = encode(&bundle);
+        let restored = reload(&saved, &bundle.program);
         assert_eq!(bundle.program, restored.program);
         assert!(
             verify_bundle(&restored, &AtomicBool::new(false))
@@ -1220,9 +1257,9 @@ fn pose(x: f64, y: f64, z: f64) -> RigidPoseMm {
     }
 }
 
-fn actual_motion(bundle: &ManufacturingBundle) -> Vec<(u8, u32, [f64; 3])> {
-    let bytes = serde_json::to_vec(bundle).unwrap();
-    let reopened = decode_bundle(&bytes).unwrap();
+fn actual_motion(bundle: &ManufacturingResult) -> Vec<(u8, u32, [f64; 3])> {
+    let bytes = encode(bundle);
+    let reopened = reload(&bytes, &bundle.program);
     let inspection = inspect_bundle(
         &reopened,
         &SourceHash::from_bytes(&bytes),
@@ -1441,8 +1478,8 @@ fn native_process_noop_intent_preserves_actual_commands_and_hatch_phase() {
     assert!(baseline_motion.iter().any(|event| event.0 == 5));
     // Retain all real commands, including E/feed/lifecycle controls and inline
     // process roles; omit only standalone provenance/header comments.
-    let baseline_commands: Vec<_> = baseline
-        .program
+    let baseline_text = baseline.program_text().unwrap();
+    let baseline_commands: Vec<_> = baseline_text
         .lines()
         .filter(|line| !line.trim_start().starts_with(';'))
         .collect();
@@ -1484,7 +1521,8 @@ fn native_process_noop_intent_preserves_actual_commands_and_hatch_phase() {
         );
         assert_eq!(
             unchanged
-                .program
+                .program_text()
+                .unwrap()
                 .lines()
                 .filter(|line| !line.trim_start().starts_with(';'))
                 .collect::<Vec<_>>(),
@@ -2591,8 +2629,8 @@ fn saved_verification_cannot_authorize_an_incompatible_producer() {
     ] {
         bundle.provenance.planner_version = planner;
         bundle.provenance.kernel.name = kernel;
-        let bytes = serde_json::to_vec(&bundle).unwrap();
-        let decoded = decode_bundle(&bytes).unwrap();
+        let bytes = encode(&bundle);
+        let decoded = reload(&bytes, &bundle.program);
         for output in [
             VerificationOutput::ReportOnly,
             VerificationOutput::ReportAndMotion,
@@ -2694,10 +2732,8 @@ fn native_box_has_pinned_geometry_nominal_volume_and_deterministic_program() {
             < 0.001
     );
     let again = scene.compile(&intent).unwrap();
-    assert_eq!(
-        SourceHash::from_bytes(bundle.program.as_bytes()),
-        SourceHash::from_bytes(again.program.as_bytes())
-    );
+    assert_eq!(bundle.bundle.program, again.bundle.program);
+    assert_eq!(bundle.program, again.program);
     assert_eq!(bundle.plan.layers, again.plan.layers);
     assert!(
         verify_bundle(&bundle, &AtomicBool::new(false))
@@ -2750,8 +2786,8 @@ fn compilation_preserves_authored_occurrence_order_through_fresh_replay() {
     let bundle = scene.compile(&intent()).unwrap();
     assert_eq!(bundle.provenance.occurrences, scene.occurrences);
     bundle.validate().unwrap();
-    let encoded = serde_json::to_vec(&bundle).unwrap();
-    let reopened = decode_bundle(&encoded).unwrap();
+    let encoded = encode(&bundle);
+    let reopened = reload(&encoded, &bundle.program);
     let inspection = inspect_bundle(
         &reopened,
         &SourceHash::from_bytes(&encoded),
@@ -2916,7 +2952,21 @@ fn unsupported_thin_support_envelope_and_invalid_profiles_are_errors() {
 fn replay_rejects_tampered_program_and_fingerprint_even_with_verified_flag() {
     let scene = Scene::new(BOX, &[RigidPoseMm::IDENTITY]);
     let mut bundle = scene.compile(&intent()).unwrap();
-    bundle.program.push_str("G28\n");
+    let appended = format!("{}G28\n", bundle.program_text().unwrap());
+    // Changed bytes without a matching descriptor refuse before replay.
+    let unbound = {
+        let mut unbound = bundle.clone();
+        unbound.program = chunks(&appended);
+        unbound
+    };
+    assert_eq!(
+        verify_bundle(&unbound, &AtomicBool::new(false))
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::CorruptArtifact
+    );
+    // A consistently described edit is still rejected by independent replay.
+    bundle = with_program(&bundle, &appended);
     assert!(verify_bundle(&bundle, &AtomicBool::new(false)).is_err());
     let mut bundle = scene.compile(&intent()).unwrap();
     bundle.provenance.intent.recipe.material_revision = "changed".into();
@@ -3062,9 +3112,10 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         })
         .sum();
     bundle.program = backend::emit(&bundle.plan, &intent, &cancel).unwrap();
+    bundle.bundle.program = crate::program_descriptor(&bundle.program);
     bundle.verification =
         verifier::verify(&bundle.program, &bundle.plan, &intent, &cancel).unwrap();
-    let bundle_bytes = serde_json::to_vec(&bundle).unwrap();
+    let bundle_bytes = encode(&bundle);
     let hash = SourceHash::from_bytes(&bundle_bytes);
     let inspection =
         inspect_bundle(&bundle, &hash, VerificationOutput::ReportAndMotion, &cancel).unwrap();
@@ -3131,6 +3182,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             input_hash: bundle.provenance.input_hash.clone(),
             byte_count: bundle_bytes.len() as u32,
             summary: bundle.summary(),
+            program: bundle.bundle.program.clone(),
         })
         .unwrap();
     validate_replay_display(&replay.bytes, &descriptor).unwrap();
@@ -3147,8 +3199,10 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             .replay
             .is_none()
     );
-    let mut invalid_bundle = bundle.clone();
-    invalid_bundle.program = invalid_bundle.program.replacen("G1 ", "G0 ", 1);
+    let invalid_bundle = with_program(
+        &bundle,
+        &bundle.program_text().unwrap().replacen("G1 ", "G0 ", 1),
+    );
     assert!(
         inspect_bundle(
             &invalid_bundle,
@@ -3177,7 +3231,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         write!(&mut hex, "{byte:02x}").unwrap();
     }
     let mut fixture = serde_json::json!({ "encoding":"hex", "descriptor":descriptor,
-        "data":hex, "actual_positions":positions, "program":bundle.program });
+        "data":hex, "actual_positions":positions, "program":bundle.program_text().unwrap() });
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/protocol/replay.json"
@@ -3269,7 +3323,7 @@ fn native_grid_infill_emits_both_half_density_families_and_replays() {
     assert!(
         inspect_bundle(
             &wrong,
-            &SourceHash::from_bytes(&serde_json::to_vec(&wrong).unwrap()),
+            &SourceHash::from_bytes(&encode(&wrong)),
             VerificationOutput::ReportOnly,
             &AtomicBool::new(false)
         )
@@ -3340,7 +3394,7 @@ fn native_web_roof_keeps_continuous_rooms_grows_roof_and_freshly_replays() {
     assert!(motion.iter().any(|(kind, _, _)| *kind == 5));
     let inspection = inspect_bundle(
         &bundle,
-        &SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap()),
+        &SourceHash::from_bytes(&encode(&bundle)),
         VerificationOutput::ReportOnly,
         &AtomicBool::new(false),
     )
@@ -3430,8 +3484,7 @@ fn native_web_roof_keeps_continuous_rooms_grows_roof_and_freshly_replays() {
         assert!(error.message.contains("web + roof"), "{}", error.message);
     }
     // Captured bytes retain the selected pattern through strict serialization.
-    let decoded: ManufacturingBundle =
-        serde_json::from_slice(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+    let decoded: ManufacturingBundle = serde_json::from_slice(&encode(&bundle)).unwrap();
     assert_eq!(
         decoded.provenance.intent.recipe.sparse_infill,
         SparseInfillPolicy::web_roof()
@@ -3479,8 +3532,12 @@ fn native_web_roof_architecture_ablations_keep_complete_construction_and_reject_
                 .map(|l| l.region_coverage.nominal_deposition_volume_mm3)
                 .sum::<f64>(),
         );
-        let bytes = serde_json::to_vec(&bundle).unwrap();
-        let restored: ManufacturingBundle = serde_json::from_slice(&bytes).unwrap();
+        let bytes = encode(&bundle);
+        let restored = ManufacturingResult::new(
+            serde_json::from_slice::<ManufacturingBundle>(&bytes).unwrap(),
+            bundle.program.clone(),
+        )
+        .unwrap();
         assert!(
             inspect_bundle(
                 &restored,
@@ -3586,8 +3643,11 @@ fn native_web_roof_curved_and_holed_domains_freshly_replay() {
             "{label}"
         );
         verify_bundle(&bundle, &AtomicBool::new(false)).unwrap();
-        let restored: ManufacturingBundle =
-            serde_json::from_slice(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let restored = ManufacturingResult::new(
+            serde_json::from_slice::<ManufacturingBundle>(&encode(&bundle)).unwrap(),
+            bundle.program.clone(),
+        )
+        .unwrap();
         verify_bundle(&restored, &AtomicBool::new(false)).unwrap();
         if label == "through-hole" {
             let index = bundle

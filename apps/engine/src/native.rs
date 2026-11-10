@@ -5,7 +5,7 @@
 //! One native session dispatcher; durable Jobs owns admission and execution scheduling.
 use crate::{
     geometry::{self, Control, Reply, Runtime},
-    jobs::Jobs,
+    jobs::{ArtifactBytes, Jobs},
 };
 use spiling_contracts::{
     ArtifactView,
@@ -403,7 +403,11 @@ fn publish_terminal(
             record: record.clone(),
             resource: view(&artifact)?,
         };
-        jobs.native_finish(name, Ok(result), vec![(artifact, report.bytes.as_slice())])?;
+        jobs.native_finish(
+            name,
+            Ok(result),
+            vec![(artifact, report.bytes.as_slice().into())],
+        )?;
         runtime.release_stock_publication(id);
         return Ok(true);
     }
@@ -430,7 +434,11 @@ fn publish_terminal(
             record: record.clone(),
             resource: view(&artifact)?,
         };
-        jobs.native_finish(name, Ok(result), vec![(artifact, report.bytes.as_slice())])?;
+        jobs.native_finish(
+            name,
+            Ok(result),
+            vec![(artifact, report.bytes.as_slice().into())],
+        )?;
         runtime.release_optical_publication(id);
         return Ok(true);
     }
@@ -475,7 +483,11 @@ fn publish_terminal(
                 resource: view(&artifact)?,
             }
         };
-        jobs.native_finish(name, Ok(result), vec![(artifact, report.bytes.as_slice())])?;
+        jobs.native_finish(
+            name,
+            Ok(result),
+            vec![(artifact, report.bytes.as_slice().into())],
+        )?;
         runtime.release_analysis_publication(id);
         return Ok(true);
     }
@@ -502,7 +514,11 @@ fn publish_terminal(
             record: record.clone(),
             resource: view(&artifact)?,
         };
-        jobs.native_finish(name, Ok(result), vec![(artifact, report.bytes.as_slice())])?;
+        jobs.native_finish(
+            name,
+            Ok(result),
+            vec![(artifact, report.bytes.as_slice().into())],
+        )?;
         runtime.release_appearance_publication(id);
         return Ok(true);
     }
@@ -537,7 +553,11 @@ fn publish_terminal(
             record: record.clone(),
             resource,
         };
-        jobs.native_finish(name, Ok(result), vec![(artifact, asset.bytes().as_slice())])?;
+        jobs.native_finish(
+            name,
+            Ok(result),
+            vec![(artifact, asset.bytes().as_slice().into())],
+        )?;
         runtime.release_image_publication(id);
         return Ok(true);
     }
@@ -581,6 +601,7 @@ fn publish_terminal(
             "application/x-spiling-replay-motion",
             MAX_REPLAY_DISPLAY_BYTES as u64,
         )?;
+        let program_descriptor = jobs.describe_program_artifact(&asset.record.program)?;
         if view(&bundle_descriptor)? != evaluation.resource
             || view(&replay_descriptor)? != evaluation.replay_display.resource
         {
@@ -596,15 +617,16 @@ fn publish_terminal(
                 },
             ),
             vec![
-                (bundle_descriptor, asset.bytes.as_slice()),
-                (replay_descriptor, replay.bytes.as_slice()),
+                (bundle_descriptor, asset.bytes.as_slice().into()),
+                (program_descriptor, (&asset.program).into()),
+                (replay_descriptor, replay.bytes.as_slice().into()),
             ],
         )?;
         runtime.release_alternative_publication(id);
         return Ok(true);
     }
     // No short edit can interleave between ACK/Core commit and immutable output capture.
-    let mut outputs = Vec::new();
+    let mut outputs: Vec<(Artifact, ArtifactBytes<'_>)> = Vec::new();
     for artifact in runtime.scene_artifacts() {
         publish_geometry(runtime, jobs, artifact, resources, &mut outputs)?;
     }
@@ -626,7 +648,12 @@ fn publish_terminal(
             ));
         }
         resources.insert(descriptor.sha256.clone(), descriptor.clone());
-        outputs.push((descriptor, asset.bytes.as_slice()));
+        outputs.push((descriptor, asset.bytes.as_slice().into()));
+        // Layouts with distinct bundles can emit identical programs; publish one.
+        let program = jobs.describe_program_artifact(&asset.record.program)?;
+        if !outputs.iter().any(|(a, _)| a.name == program.name) {
+            outputs.push((program, (&asset.program).into()));
+        }
     }
     let replay_display = match &private {
         geometry::JobResult::ManufacturingVerified {
@@ -652,7 +679,7 @@ fn publish_terminal(
             descriptor
                 .validate_for_record(record)
                 .map_err(|e| domain_tonic(e.into()))?;
-            outputs.push((artifact, replay.bytes.as_slice()));
+            outputs.push((artifact, replay.bytes.as_slice().into()));
             Some(descriptor)
         }
         _ => None,
@@ -679,7 +706,7 @@ fn publish_geometry<'a>(
     jobs: &Jobs,
     id: ArtifactId,
     resources: &mut BTreeMap<String, Artifact>,
-    outputs: &mut Vec<(Artifact, &'a [u8])>,
+    outputs: &mut Vec<(Artifact, ArtifactBytes<'a>)>,
 ) -> Result<(), Status> {
     for (metadata, bytes) in runtime
         .artifact_chunks(id)
@@ -705,7 +732,7 @@ fn publish_geometry<'a>(
         }
         resources.insert(descriptor.sha256.clone(), descriptor.clone());
         if !outputs.iter().any(|(a, _)| a.name == descriptor.name) {
-            outputs.push((descriptor, bytes));
+            outputs.push((descriptor, bytes.into()));
         }
     }
     Ok(())

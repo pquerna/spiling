@@ -17,7 +17,9 @@ use sha2::{Digest, Sha256};
 use spiling_contracts::{
     MAX_ARTIFACT_BYTES, MAX_CONTROL_BYTES, StartupInfo,
     google::{bytestream::*, longrunning::*},
-    manufacturing::{MAX_MANUFACTURING_BUNDLE_BYTES, MAX_REPLAY_DISPLAY_BYTES},
+    manufacturing::{
+        MAX_MANUFACTURING_BUNDLE_BYTES, MAX_MANUFACTURING_PROGRAM_BYTES, MAX_REPLAY_DISPLAY_BYTES,
+    },
     rpc::*,
 };
 use std::io::{BufRead, Read};
@@ -801,6 +803,7 @@ impl manufacturing_server::Manufacturing for Service {
                         digest,
                         command: Control::Manufacturing(command),
                         reservation: u64::from(MAX_MANUFACTURING_BUNDLE_BYTES)
+                            + u64::from(MAX_MANUFACTURING_PROGRAM_BYTES)
                             + u64::from(MAX_REPLAY_DISPLAY_BYTES),
                     },
                 )
@@ -883,8 +886,15 @@ impl manufacturing_server::Manufacturing for Service {
             spiling_contracts::manufacturing::ManufacturingCommand::Inspect {
                 output: spiling_contracts::manufacturing::VerificationOutput::ReportAndMotion,
                 ..
-            } => u64::from(MAX_MANUFACTURING_BUNDLE_BYTES) + u64::from(MAX_REPLAY_DISPLAY_BYTES),
-            _ => u64::from(MAX_MANUFACTURING_BUNDLE_BYTES),
+            } => {
+                u64::from(MAX_MANUFACTURING_BUNDLE_BYTES)
+                    + u64::from(MAX_MANUFACTURING_PROGRAM_BYTES)
+                    + u64::from(MAX_REPLAY_DISPLAY_BYTES)
+            }
+            _ => {
+                u64::from(MAX_MANUFACTURING_BUNDLE_BYTES)
+                    + u64::from(MAX_MANUFACTURING_PROGRAM_BYTES)
+            }
         };
         let input = jobs::NativeAdmission {
             parent,

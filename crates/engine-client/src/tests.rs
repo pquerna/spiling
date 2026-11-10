@@ -40,6 +40,10 @@ fn manufacturing_record(bytes: &[u8]) -> ManufacturingArtifactRecord {
         hash: spiling_contracts::geometry::SourceHash::from_bytes(bytes),
         input_hash: spiling_contracts::geometry::SourceHash::from_bytes(b"input"),
         byte_count: bytes.len() as u32,
+        program: spiling_contracts::manufacturing::ProgramDescriptor {
+            hash: spiling_contracts::geometry::SourceHash::from_bytes(b"program"),
+            byte_count: 7,
+        },
         summary: spiling_contracts::manufacturing::ManufacturingSummary {
             layer_height: spiling_contracts::manufacturing::LayerHeightAssessment {
                 policy: spiling_contracts::manufacturing::LayerHeightPolicy::ProtectedMaximum,

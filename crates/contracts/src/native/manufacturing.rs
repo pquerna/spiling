@@ -1611,6 +1611,13 @@ impl TryFrom<rpc::ManufacturingArtifactRecord> for ManufacturingArtifactRecord {
                 input_hash: SourceHash::parse(value.input_hash).map_err(|e| e.to_string())?,
                 byte_count: value.byte_count,
                 summary: required(value.summary, "manufacturing summary")?.try_into()?,
+                program: {
+                    let program = required(value.program, "manufacturing program")?;
+                    ProgramDescriptor {
+                        hash: SourceHash::parse(program.hash).map_err(|e| e.to_string())?,
+                        byte_count: program.byte_count,
+                    }
+                },
             },
             Self::validate,
         )
@@ -1625,6 +1632,10 @@ impl TryFrom<ManufacturingArtifactRecord> for rpc::ManufacturingArtifactRecord {
             input_hash: value.input_hash.into(),
             byte_count: value.byte_count,
             summary: Some(value.summary.try_into()?),
+            program: Some(rpc::ProgramDescriptor {
+                hash: value.program.hash.into(),
+                byte_count: value.program.byte_count,
+            }),
         })
     }
 }
@@ -2149,6 +2160,10 @@ mod tests {
             hash: SourceHash::from_bytes(b"bundle"),
             input_hash: SourceHash::from_bytes(b"input"),
             byte_count: 6,
+            program: crate::manufacturing::ProgramDescriptor {
+                hash: SourceHash::from_bytes(b"program"),
+                byte_count: 7,
+            },
             summary: ManufacturingSummary {
                 layer_height: crate::manufacturing::LayerHeightAssessment {
                     policy: crate::manufacturing::LayerHeightPolicy::ProtectedMaximum,

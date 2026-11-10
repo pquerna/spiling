@@ -605,10 +605,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                 region_coverage,
             }],
         },
-        program: format!(
-            "; SOFTWARE VALIDATION ONLY, NOT MACHINE READY\nG21\nG90\nM82\nG92 E0\nG0 X1 Y1 Z0.2 F1200\nG1 X{} Y{} Z0.2 E{filament:.9} F600\n",
-            end[0], end[1]
-        ),
+        program: fixture_program_descriptor(FIXTURE_PROGRAM.as_bytes()),
         // Storage tests exercise schema/integrity, not an independent replay service.
         verification: VerificationReport {
             job_time: None,
@@ -643,7 +640,40 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
         },
     }
 }
+/// Storage tests check integrity, not replay; program content is opaque here.
+pub(crate) const FIXTURE_PROGRAM: &str =
+    "; SOFTWARE VALIDATION ONLY, NOT MACHINE READY\nG21\nG90\nM82\nG92 E0\nG0 X1 Y1 Z0.2 F1200\n";
+fn fixture_program_descriptor(program: &[u8]) -> ProgramDescriptor {
+    ProgramDescriptor {
+        hash: SourceHash::from_bytes(program),
+        byte_count: program.len() as u64,
+    }
+}
+pub(crate) fn fixture_program(program: &[u8]) -> spiling_chunks::ChunkSource {
+    spiling_chunks::ChunkSource::from_slice(program, u64::MAX).unwrap()
+}
+/// Deterministic incompressible bytes, so retention counts their full size.
+fn incompressible(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64 ^ seed;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
+}
 pub(crate) fn bundle_asset(bundle: &ManufacturingBundle) -> Arc<ManufacturingAsset> {
+    bundle_asset_with(bundle, FIXTURE_PROGRAM.as_bytes())
+}
+pub(crate) fn bundle_asset_with(
+    bundle: &ManufacturingBundle,
+    program: &[u8],
+) -> Arc<ManufacturingAsset> {
+    let mut bundle = bundle.clone();
+    bundle.program = fixture_program_descriptor(program);
+    let bundle = &bundle;
     let mut bytes = serde_json::to_vec(bundle).unwrap();
     // Model exact-length file capture, not serde's geometric spare capacity.
     bytes.shrink_to_fit();
@@ -655,8 +685,10 @@ pub(crate) fn bundle_asset(bundle: &ManufacturingBundle) -> Arc<ManufacturingAss
                 input_hash: bundle.provenance.input_hash.clone(),
                 byte_count: bytes.len() as u32,
                 summary: bundle.summary(),
+                program: bundle.program.clone(),
             },
             bytes,
+            fixture_program(program),
         )
         .unwrap(),
     )
@@ -682,7 +714,7 @@ fn exact_floating_totals_admit_durable_bundles_but_reject_changed_records() {
     let mut changed = asset.record.clone();
     changed.summary.deposited_volume_mm3 = f64::from_bits(volume.to_bits() + 1);
     assert_eq!(
-        ManufacturingAsset::new(changed, asset.bytes.as_ref().clone())
+        ManufacturingAsset::new(changed, asset.bytes.as_ref().clone(), asset.program.clone())
             .unwrap_err()
             .code,
         ProjectErrorCode::CorruptAsset,
@@ -865,7 +897,7 @@ fn manufacturing_vec_hash_count_summary_and_strict_schema_are_validated() {
     let mut wrong = asset.record.clone();
     wrong.summary.layers += 1;
     assert_eq!(
-        ManufacturingAsset::new(wrong, asset.bytes.as_ref().clone())
+        ManufacturingAsset::new(wrong, asset.bytes.as_ref().clone(), asset.program.clone())
             .unwrap_err()
             .code,
         ProjectErrorCode::CorruptAsset
@@ -873,7 +905,7 @@ fn manufacturing_vec_hash_count_summary_and_strict_schema_are_validated() {
     let mut wrong = asset.record.clone();
     wrong.byte_count -= 1;
     assert_eq!(
-        ManufacturingAsset::new(wrong, asset.bytes.as_ref().clone())
+        ManufacturingAsset::new(wrong, asset.bytes.as_ref().clone(), asset.program.clone())
             .unwrap_err()
             .code,
         ProjectErrorCode::CorruptAsset
@@ -881,9 +913,20 @@ fn manufacturing_vec_hash_count_summary_and_strict_schema_are_validated() {
     let mut bytes = asset.bytes.as_ref().clone();
     bytes[0] = b'[';
     assert_eq!(
-        ManufacturingAsset::new(asset.record.clone(), bytes)
+        ManufacturingAsset::new(asset.record.clone(), bytes, asset.program.clone())
             .unwrap_err()
             .code,
+        ProjectErrorCode::CorruptAsset
+    );
+    // Program bytes must be exactly the ones the record and bundle name.
+    assert_eq!(
+        ManufacturingAsset::new(
+            asset.record.clone(),
+            asset.bytes.as_ref().clone(),
+            fixture_program(b"G28\n"),
+        )
+        .unwrap_err()
+        .code,
         ProjectErrorCode::CorruptAsset
     );
     let mut object = serde_json::to_value(manufacturing_bundle(&project)).unwrap();
@@ -893,7 +936,9 @@ fn manufacturing_vec_hash_count_summary_and_strict_schema_are_validated() {
     record.hash = SourceHash::from_digest(&Sha256::digest(&bytes).into());
     record.byte_count = bytes.len() as u32;
     assert_eq!(
-        ManufacturingAsset::new(record, bytes).unwrap_err().code,
+        ManufacturingAsset::new(record, bytes, asset.program.clone())
+            .unwrap_err()
+            .code,
         ProjectErrorCode::CorruptAsset
     );
 }
@@ -921,13 +966,10 @@ fn manufacturing_retained_history_budget_is_separate_and_failed_publish_is_atomi
             intent: (manufacturing_intent()).into(),
         },
     );
+    // Retention counts held program frames; incompressible content keeps them full size.
     for index in 0..4 {
-        let mut bundle = manufacturing_bundle(&project);
-        bundle.program.push(';');
-        bundle
-            .program
-            .extend(std::iter::repeat_n('x', 15 * 1024 * 1024));
-        let asset = bundle_asset(&bundle);
+        let bundle = manufacturing_bundle(&project);
+        let asset = bundle_asset_with(&bundle, &incompressible(15 * 1024 * 1024 + 1, index));
         edit(&mut project, Edit::PublishManufacturing { asset });
         edit(
             &mut project,
@@ -944,15 +986,11 @@ fn manufacturing_retained_history_budget_is_separate_and_failed_publish_is_atomi
     assert_eq!(project.retained_manufacturing_assets().len(), 4);
     assert_eq!(project.retained_sources().len(), 1);
     let before = project.info();
-    let mut bundle = manufacturing_bundle(&project);
-    bundle.program.push(';');
-    bundle
-        .program
-        .extend(std::iter::repeat_n('x', 15 * 1024 * 1024));
+    let bundle = manufacturing_bundle(&project);
     assert_eq!(
         project
             .prepare(Edit::PublishManufacturing {
-                asset: bundle_asset(&bundle)
+                asset: bundle_asset_with(&bundle, &incompressible(15 * 1024 * 1024 + 1, 4))
             })
             .unwrap_err()
             .code,
@@ -1659,9 +1697,12 @@ fn bundle_image_content_is_complete_even_for_disabled_layers_and_old_formats_fai
             input_hash: bundle.provenance.input_hash.clone(),
             byte_count: bytes.len() as u32,
             summary: bundle.summary(),
+            program: bundle.program.clone(),
         };
         assert_eq!(
-            ManufacturingAsset::new(record, bytes).unwrap_err().code,
+            ManufacturingAsset::new(record, bytes, fixture_program(FIXTURE_PROGRAM.as_bytes()))
+                .unwrap_err()
+                .code,
             ProjectErrorCode::CorruptAsset
         );
     };

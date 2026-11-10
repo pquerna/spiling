@@ -11,6 +11,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+spiling-chunks.workspace = true
 spiling-contracts.workspace = true
 spiling-compute.workspace = true
 spiling-geometry.workspace = true

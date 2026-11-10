@@ -7,6 +7,7 @@ pub mod export;
 mod library;
 mod native;
 pub use native::NativeOperationWatch;
+pub use spiling_chunks::ChunkSource;
 #[cfg(test)]
 mod tests;
 

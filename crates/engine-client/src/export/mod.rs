@@ -30,7 +30,11 @@ impl OutputDirectory {
             committed: false,
         })
     }
-    pub fn write(&mut self, name: &str, bytes: &[u8]) -> io::Result<()> {
+    pub fn write(&mut self, name: &str, mut bytes: &[u8]) -> io::Result<()> {
+        self.write_from(name, &mut bytes)
+    }
+    /// Create one new file and copy `reader` into it without buffering it whole.
+    pub fn write_from(&mut self, name: &str, reader: &mut dyn io::Read) -> io::Result<()> {
         let mut components = Path::new(name).components();
         if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
             return Err(io::Error::new(
@@ -38,12 +42,14 @@ impl OutputDirectory {
                 "output filename must be a single normal component",
             ));
         }
-        self.owned.write(name, bytes)
+        self.owned.write(name, reader)
     }
     /// Export only a client-validated bundle after fresh engine-side replay.
+    /// `program` must be the exact bytes named by the bundle's descriptor.
     pub fn write_manufacturing_bundle(
         &mut self,
         bundle: &spiling_contracts::manufacturing::ManufacturingBundle,
+        program: &spiling_chunks::ChunkSource,
         verification: &spiling_contracts::manufacturing::VerificationReport,
         inspection: &spiling_contracts::manufacturing::ManufacturingInspectionProvenance,
     ) -> Result<(), ExportError> {
@@ -55,6 +61,11 @@ impl OutputDirectory {
                 &bundle.provenance,
             );
         expected.surface_color = inspection.surface_color.clone();
+        if !bundle.program.matches(program.len(), program.digest()) {
+            return Err(ExportError::InvalidInspection(
+                "program bytes do not match the bundle's program descriptor".into(),
+            ));
+        }
         if &expected != inspection || !verification.verified {
             return Err(ExportError::InvalidInspection(
                 "fresh inspection does not bind captured bundle".into(),
@@ -67,7 +78,7 @@ impl OutputDirectory {
             inspection: &'a spiling_contracts::manufacturing::ManufacturingInspectionProvenance,
         }
         self.write("plan.json", &serde_json::to_vec_pretty(&bundle.plan)?)?;
-        self.write("program.gcode", bundle.program.as_bytes())?;
+        self.write_from("program.gcode", &mut program.reader())?;
         self.write(
             "verification.json",
             &serde_json::to_vec_pretty(verification)?,
@@ -235,7 +246,7 @@ mod platform {
                 files: Vec::new(),
             })
         }
-        pub fn write(&mut self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        pub fn write(&mut self, name: &str, bytes: &mut dyn io::Read) -> io::Result<()> {
             let current = statat(&self.parent, &self.name, AtFlags::SYMLINK_NOFOLLOW)?;
             if !same(&current, &fstat(&self.directory)?) {
                 return Err(io::Error::other("output directory was replaced or moved"));
@@ -252,7 +263,7 @@ mod platform {
                 handle: file,
             });
             let file = &mut self.files.last_mut().unwrap().handle;
-            file.write_all(bytes)?;
+            io::copy(bytes, file)?;
             file.flush()
         }
         pub fn cleanup(&mut self) {
@@ -401,7 +412,7 @@ mod platform {
                 _ancestors: ancestors,
             })
         }
-        pub fn write(&mut self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        pub fn write(&mut self, name: &str, bytes: &mut dyn io::Read) -> io::Result<()> {
             let file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -411,7 +422,7 @@ mod platform {
                 .open(self.path.join(name))?;
             self.files.push(file);
             let file = self.files.last_mut().unwrap();
-            file.write_all(bytes)?;
+            io::copy(bytes, file)?;
             file.flush()
         }
         pub fn cleanup(&mut self) {

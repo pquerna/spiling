@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 use crate::{check_cancel, error};
+use spiling_chunks::{ChunkSource, ChunkWriter};
 use spiling_contracts::manufacturing::program_coordinates::{
     project_xyz6_coordinate_mm, project_xyz6_point_mm,
 };
@@ -15,7 +16,7 @@ pub fn emit(
     plan: &NormalizedPrintPlan,
     intent: &ManufacturingIntent,
     cancel: &AtomicBool,
-) -> Result<String, ManufacturingError> {
+) -> Result<ChunkSource, ManufacturingError> {
     check_cancel(cancel)?;
     intent.validate()?;
     plan.validate(intent)?;
@@ -37,7 +38,7 @@ pub fn emit(
             "backend feed or extrusion cannot be represented at declared precision",
         ));
     }
-    let mut program = BoundedProgram(String::new());
+    let mut program = BoundedProgram(ChunkWriter::new(u64::from(MAX_MANUFACTURING_PROGRAM_BYTES)));
     program.write_str("; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\nG21\nG90\nM82\n").map_err(limit)?;
     if routed.is_none() {
         program.write_str("G92 E0\n").map_err(limit)?;
@@ -357,7 +358,12 @@ pub fn emit(
             retract_feed, lift[0], lift[1], lift[2], park[0], park[1], park[2]).map_err(limit)?;
     }
     check_cancel(cancel)?;
-    Ok(program.0)
+    program.0.finish().map_err(|_| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "emitted program byte limit exceeded",
+        )
+    })
 }
 fn writable_position(
     point: [f64; 3],
@@ -372,14 +378,12 @@ fn writable_position(
     }
     Ok(())
 }
-struct BoundedProgram(String);
+/// Program text compressed frame by frame as it is emitted, refusing output
+/// beyond the program byte limit.
+struct BoundedProgram(ChunkWriter);
 impl Write for BoundedProgram {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        if s.len() > MAX_MANUFACTURING_PROGRAM_BYTES as usize - self.0.len() {
-            return Err(fmt::Error);
-        }
-        self.0.push_str(s);
-        Ok(())
+        std::io::Write::write_all(&mut self.0, s.as_bytes()).map_err(|_| fmt::Error)
     }
 }
 fn limit(_: fmt::Error) -> ManufacturingError {

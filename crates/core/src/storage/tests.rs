@@ -403,13 +403,10 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
     let mut project = crate::tests::manufactured();
     save_project(&mut project, Some(sandbox.target()));
     let before = project.info();
-    let count = project
-        .snapshot()
-        .manufacturing_artifact
-        .as_ref()
-        .unwrap()
-        .bytes
-        .len();
+    let asset = project.snapshot().manufacturing_artifact.clone().unwrap();
+    // Opening reads the bundle, then the raw program, and retains its frames.
+    let program_raw = asset.program.len() as usize;
+    let count = asset.bytes.len() + program_raw.max(asset.program.retained_bytes());
     assert_eq!(
         open_reusing(
             &sandbox.target(),
@@ -452,7 +449,7 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
             .unwrap()
             .bytes
             .len(),
-        count
+        asset.bytes.len()
     );
 }
 #[test]

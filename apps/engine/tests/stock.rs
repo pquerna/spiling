@@ -462,18 +462,17 @@ async fn compile_export(c: &EngineClient, path: &Path) -> String {
         .fetch_manufacturing_bundle(&record, &resource)
         .await
         .unwrap();
+    let program = c.rpc().fetch_manufacturing_program(&record).await.unwrap();
     let mut output = spiling_engine_client::export::OutputDirectory::create(path).unwrap();
     output
-        .write_manufacturing_bundle(&bundle, &report, &provenance)
+        .write_manufacturing_bundle(&bundle, &program, &report, &provenance)
         .unwrap();
     output.commit();
     assert_eq!(std::fs::read_dir(path).unwrap().count(), 4);
-    assert_eq!(
-        std::fs::read_to_string(path.join("program.gcode")).unwrap(),
-        bundle.program
-    );
+    let exported = std::fs::read_to_string(path.join("program.gcode")).unwrap();
+    assert_eq!(exported.as_bytes(), program.to_vec().unwrap());
     assert!(spiling_engine_client::export::OutputDirectory::create(path).is_err());
-    bundle.program
+    exported
 }
 #[tokio::test]
 async fn matched_stock_recipe_reaches_actual_replay_export_and_source_free_recompile() {

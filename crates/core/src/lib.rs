@@ -174,20 +174,39 @@ impl SourceAsset {
         Ok(())
     }
 }
-/// Immutable exact JSON bundle bytes. Persisted verification is metadata, not replay proof.
+/// Immutable exact JSON bundle bytes plus the exact emitted program they describe.
+/// Persisted verification is metadata, not replay proof. The program is held as
+/// compressed frames and stored as its own raw project object.
 #[derive(Debug, Clone)]
 pub struct ManufacturingAsset {
     pub record: ManufacturingArtifactRecord,
     pub bytes: Arc<Vec<u8>>,
+    pub program: spiling_chunks::ChunkSource,
 }
 impl ManufacturingAsset {
-    pub fn new(record: ManufacturingArtifactRecord, bytes: Vec<u8>) -> Result<Self, ProjectError> {
+    pub fn new(
+        record: ManufacturingArtifactRecord,
+        bytes: Vec<u8>,
+        program: spiling_chunks::ChunkSource,
+    ) -> Result<Self, ProjectError> {
         let asset = Self {
             record,
             bytes: Arc::new(bytes),
+            program,
         };
         asset.validate()?;
         Ok(asset)
+    }
+    /// Heap retained by this asset's bundle bytes and compressed program.
+    pub fn retained_bytes(&self) -> usize {
+        self.bytes.capacity() + self.program.retained_bytes()
+    }
+    /// Same immutable identity and exact content.
+    pub(crate) fn same_content(&self, other: &Self) -> bool {
+        self.record == other.record
+            && self.program == other.program
+            && (Arc::ptr_eq(&self.bytes, &other.bytes)
+                || self.bytes.as_slice() == other.bytes.as_slice())
     }
     pub(crate) fn validate(&self) -> Result<ManufacturingBundle, ProjectError> {
         if self.bytes.is_empty() || self.bytes.capacity() > MAX_MANUFACTURING_BUNDLE_BYTES as usize
@@ -207,9 +226,20 @@ impl ManufacturingAsset {
                 "manufacturing hash or byte count mismatch",
             ));
         }
+        if !self
+            .record
+            .program
+            .matches(self.program.len(), self.program.digest())
+        {
+            return Err(error(
+                ProjectErrorCode::CorruptAsset,
+                "manufacturing program hash or byte count mismatch",
+            ));
+        }
         let bundle = decode_bundle(self.bytes.as_slice()).map_err(manufacturing_error)?;
         if bundle.provenance.input_hash != self.record.input_hash
             || bundle.summary() != self.record.summary
+            || bundle.program != self.record.program
         {
             return Err(error(
                 ProjectErrorCode::CorruptAsset,
@@ -1282,9 +1312,7 @@ impl Project {
                     })
                     .find(|old| old.record.hash == asset.record.hash)
                 {
-                    if retained.record != asset.record
-                        || retained.bytes.as_slice() != asset.bytes.as_slice()
-                    {
+                    if !retained.same_content(&asset) {
                         return Err(invalid("conflicting retained manufacturing identity"));
                     }
                     asset = retained.clone();
@@ -2246,7 +2274,7 @@ fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<()
         {
             if let Some(old) = manufacturing.insert(&asset.record.hash, asset)
                 && !Arc::ptr_eq(old, asset)
-                && (old.record != asset.record || old.bytes.as_slice() != asset.bytes.as_slice())
+                && !old.same_content(asset)
             {
                 return Err(invalid("conflicting retained manufacturing identity"));
             }
@@ -2268,7 +2296,7 @@ fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<()
     }
     if manufacturing
         .values()
-        .map(|a| a.bytes.capacity())
+        .map(|a| a.retained_bytes())
         .sum::<usize>()
         > MAX_MANUFACTURING_RETAINED_BYTES as usize
     {

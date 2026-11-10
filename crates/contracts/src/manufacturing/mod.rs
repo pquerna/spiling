@@ -3931,13 +3931,38 @@ impl ManufacturingSummary {
         Ok(())
     }
 }
+/// Media type of the raw emitted program artifact carried beside its bundle.
+pub const MANUFACTURING_PROGRAM_MEDIA_TYPE: &str = "application/x-spiling-manufacturing-program";
+/// Identity of the exact emitted program bytes. The bytes are a separate
+/// immutable artifact; this descriptor binds a bundle and its record to them.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramDescriptor {
+    pub hash: SourceHash,
+    /// Exact raw length; bounded far below 2^53, so JSON numbers stay exact.
+    #[ts(type = "number")]
+    pub byte_count: u64,
+}
+impl ProgramDescriptor {
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        if self.byte_count == 0 || self.byte_count > u64::from(MAX_MANUFACTURING_PROGRAM_BYTES) {
+            return Err(resource("manufacturing program size is invalid"));
+        }
+        Ok(())
+    }
+    /// Check exact raw bytes against this descriptor.
+    pub fn matches(&self, byte_count: u64, digest: &[u8; 32]) -> bool {
+        self.byte_count == byte_count && self.hash == SourceHash::from_digest(digest)
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ManufacturingBundle {
     pub schema_version: u32,
     pub provenance: ManufacturingProvenance,
     pub plan: NormalizedPrintPlan,
-    pub program: String,
+    /// The program bytes travel separately; consumers pair them by this identity.
+    pub program: ProgramDescriptor,
     pub verification: VerificationReport,
 }
 impl ManufacturingBundle {
@@ -4197,7 +4222,7 @@ impl ManufacturingBundle {
         self.verification
             .validate_time_model(&self.provenance.intent.printer.workflow)?;
         if let Some(selection) = &self.plan.interior_selection {
-            selection.validate_current(&self.program, &self.verification)?;
+            selection.validate_current(&self.program.hash, &self.verification)?;
         }
 
         let execution = self.plan.execution_intent(&self.provenance.intent)?;
@@ -4312,10 +4337,7 @@ impl ManufacturingBundle {
                 ));
             }
         }
-        if self.program.is_empty() || self.program.len() > MAX_MANUFACTURING_PROGRAM_BYTES as usize
-        {
-            return Err(resource("manufacturing program size is invalid"));
-        }
+        self.program.validate()?;
         let mut object_count = 0usize;
         let mut support_count = 0usize;
         for path in self.plan.layers.iter().flat_map(|l| &l.paths) {
@@ -4373,7 +4395,10 @@ impl ManufacturingBundle {
         record: &ManufacturingArtifactRecord,
     ) -> Result<(), ManufacturingError> {
         record.validate()?;
-        if self.provenance.input_hash != record.input_hash || self.summary() != record.summary {
+        if self.provenance.input_hash != record.input_hash
+            || self.summary() != record.summary
+            || self.program != record.program
+        {
             return Err(ManufacturingError::new(
                 ManufacturingErrorCode::CorruptArtifact,
                 "artifact record disagrees with bundle",
@@ -4389,12 +4414,14 @@ pub struct ManufacturingArtifactRecord {
     pub input_hash: SourceHash,
     pub byte_count: u32,
     pub summary: ManufacturingSummary,
+    pub program: ProgramDescriptor,
 }
 impl ManufacturingArtifactRecord {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         if self.byte_count == 0 || self.byte_count > MAX_MANUFACTURING_BUNDLE_BYTES {
             return Err(resource("manufacturing artifact size limit exceeded"));
         }
+        self.program.validate()?;
         self.summary.validate()
     }
 }

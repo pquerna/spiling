@@ -44,10 +44,77 @@ pub struct CompilerInput<'a> {
     >,
 }
 
+pub use spiling_chunks::ChunkSource;
+
+/// A bundle paired with the exact emitted program bytes its descriptor names.
+/// The bundle is a serializable document; the program is a separate artifact.
+#[derive(Debug, Clone)]
+pub struct ManufacturingResult {
+    pub bundle: ManufacturingBundle,
+    pub program: ChunkSource,
+}
+impl ManufacturingResult {
+    /// Pair checked program bytes with a bundle, refusing a mismatched descriptor.
+    pub fn new(
+        bundle: ManufacturingBundle,
+        program: ChunkSource,
+    ) -> Result<Self, ManufacturingError> {
+        let result = Self { bundle, program };
+        result.check_program()?;
+        Ok(result)
+    }
+    fn check_program(&self) -> Result<(), ManufacturingError> {
+        self.bundle.program.validate()?;
+        if !self
+            .bundle
+            .program
+            .matches(self.program.len(), self.program.digest())
+        {
+            return Err(error(
+                ManufacturingErrorCode::CorruptArtifact,
+                "program bytes differ from the bundle's program descriptor",
+            ));
+        }
+        Ok(())
+    }
+    /// Materialized program text for small diagnostics and tests.
+    pub fn program_text(&self) -> Result<String, ManufacturingError> {
+        let bytes = self
+            .program
+            .to_vec()
+            .map_err(|e| error(ManufacturingErrorCode::ResourceLimit, e.to_string()))?;
+        String::from_utf8(bytes).map_err(|_| {
+            error(
+                ManufacturingErrorCode::CorruptArtifact,
+                "program bytes are not UTF-8",
+            )
+        })
+    }
+}
+impl std::ops::Deref for ManufacturingResult {
+    type Target = ManufacturingBundle;
+    fn deref(&self) -> &ManufacturingBundle {
+        &self.bundle
+    }
+}
+impl std::ops::DerefMut for ManufacturingResult {
+    fn deref_mut(&mut self) -> &mut ManufacturingBundle {
+        &mut self.bundle
+    }
+}
+
+/// Descriptor naming exact program bytes.
+pub fn program_descriptor(program: &ChunkSource) -> ProgramDescriptor {
+    ProgramDescriptor {
+        hash: spiling_contracts::geometry::SourceHash::from_digest(program.digest()),
+        byte_count: program.len(),
+    }
+}
+
 pub fn compile(
     input: CompilerInput<'_>,
     cancel: &AtomicBool,
-) -> Result<ManufacturingBundle, ManufacturingError> {
+) -> Result<ManufacturingResult, ManufacturingError> {
     if matches!(&input.intent.printer.workflow, JobWorkflow::FixedDualMarlin { job } if job.has_bound_interior())
     {
         return selection::compile(input, cancel);
@@ -60,7 +127,7 @@ fn compile_exact(
     input: CompilerInput<'_>,
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
-) -> Result<ManufacturingBundle, ManufacturingError> {
+) -> Result<ManufacturingResult, ManufacturingError> {
     check_cancel(cancel)?;
     // Shared admission validates intent, native identity and the complete image
     // table before planning or provenance allocation. Do not hash/copy assets or
@@ -112,20 +179,20 @@ fn compile_exact(
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         provenance,
         plan,
-        program,
+        program: program_descriptor(&program),
         verification,
     };
     bundle.validate()?;
     check_cancel(cancel)?;
-    Ok(bundle)
+    Ok(ManufacturingResult { bundle, program })
 }
 
 /// Recompute replay; the persisted report is descriptive, never trusted authority.
 pub fn verify_bundle(
-    bundle: &ManufacturingBundle,
+    result: &ManufacturingResult,
     cancel: &AtomicBool,
 ) -> Result<VerificationReport, ManufacturingError> {
-    inspect_report(bundle, cancel)
+    inspect_report(result, cancel)
 }
 
 pub struct EncodedReplayDisplay {
@@ -141,12 +208,13 @@ pub struct ManufacturingInspection {
 
 /// Fresh independent replay; display output is opt-in and bound to the caller's immutable bundle hash.
 pub fn inspect_bundle(
-    bundle: &ManufacturingBundle,
+    result: &ManufacturingResult,
     bundle_hash: &spiling_contracts::geometry::SourceHash,
     output: VerificationOutput,
     cancel: &AtomicBool,
 ) -> Result<ManufacturingInspection, ManufacturingError> {
-    validate_inspection_bundle(bundle, cancel)?;
+    validate_inspection_bundle(result, cancel)?;
+    let bundle = &result.bundle;
     let mut sink = match output {
         VerificationOutput::ReportOnly => None,
         VerificationOutput::ReportAndMotion => Some(verifier::ReplaySink::new(
@@ -155,7 +223,7 @@ pub fn inspect_bundle(
         )?),
     };
     let report = verifier::verify_actual(
-        &bundle.program,
+        &result.program,
         &bundle.plan,
         &bundle.provenance.intent,
         cancel,
@@ -181,9 +249,7 @@ pub fn inspect_bundle(
             schema_version: REPLAY_SCHEMA_VERSION,
             bundle_hash: bundle_hash.clone(),
             input_hash: bundle.provenance.input_hash.clone(),
-            program_hash: spiling_contracts::geometry::SourceHash::from_bytes(
-                bundle.program.as_bytes(),
-            ),
+            program_hash: bundle.program.hash.clone(),
             verifier_version: VERIFIER_VERSION.into(),
             frame: bundle.provenance.intent.printer.coordinate_frame,
             event_count: report.deposition_segments
@@ -221,24 +287,26 @@ pub fn inspect_bundle(
 }
 
 fn inspect_report(
-    bundle: &ManufacturingBundle,
+    result: &ManufacturingResult,
     cancel: &AtomicBool,
 ) -> Result<VerificationReport, ManufacturingError> {
-    validate_inspection_bundle(bundle, cancel)?;
+    validate_inspection_bundle(result, cancel)?;
     verifier::verify(
-        &bundle.program,
-        &bundle.plan,
-        &bundle.provenance.intent,
+        &result.program,
+        &result.plan,
+        &result.provenance.intent,
         cancel,
     )
 }
 
 fn validate_inspection_bundle(
-    bundle: &ManufacturingBundle,
+    result: &ManufacturingResult,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
+    let bundle = &result.bundle;
     bundle.validate()?;
+    result.check_program()?;
     let p = &bundle.provenance;
     if p.planner_version != PLANNER_VERSION
         || p.emitter_version != EMITTER_VERSION

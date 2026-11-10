@@ -109,6 +109,9 @@ fn native_artifact_limit(media: &str) -> Result<u64, String> {
             Ok(u64::from(MAX_MANUFACTURING_BUNDLE_BYTES))
         }
         "application/x-spiling-replay-motion" => Ok(u64::from(MAX_REPLAY_DISPLAY_BYTES)),
+        crate::manufacturing::MANUFACTURING_PROGRAM_MEDIA_TYPE => Ok(u64::from(
+            crate::manufacturing::MAX_MANUFACTURING_PROGRAM_BYTES,
+        )),
         SURFACE_IMAGE_MEDIA_TYPE => Ok(MAX_SURFACE_IMAGE_BYTES as u64),
         crate::appearance::APPEARANCE_REPORT_MIME => {
             Ok(crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)
@@ -491,9 +494,20 @@ pub fn native_operation_view(
                     Some(&evaluation.replay_display),
                 )?;
                 if evaluation.captured_revision.get() != meta.captured_project_revision
-                    || meta.outputs.len() != 2
+                    || meta.outputs.len() != 3
                 {
                     return Err("alternative captured revision or output count mismatch".into());
+                }
+                // Bundle, its separately published program and the replay display.
+                let program = &evaluation.record.program;
+                if !meta.outputs.iter().any(|output| {
+                    output.name == format!("artifacts/{}", program.hash.as_str())
+                        && output.sha256 == program.hash.as_str()
+                        && output.size_bytes == program.byte_count
+                        && output.media_type
+                            == crate::manufacturing::MANUFACTURING_PROGRAM_MEDIA_TYPE
+                }) {
+                    return Err("alternative program output not published".into());
                 }
                 for resource in [&evaluation.resource, &evaluation.replay_display.resource] {
                     if !meta.outputs.iter().any(|output| {

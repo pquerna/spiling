@@ -1348,9 +1348,12 @@ fn inspect_asset(
     cancel: &AtomicBool,
 ) -> Result<spiling_manufacturing::ManufacturingInspection, JobError> {
     let bundle = decode_bundle(asset.bytes.as_slice()).map_err(JobError::from)?;
+    let result = spiling_manufacturing::ManufacturingResult::new(bundle, asset.program.clone())
+        .map_err(JobError::from)?;
     let mut inspection =
-        spiling_manufacturing::inspect_bundle(&bundle, &asset.record.hash, output, cancel)
+        spiling_manufacturing::inspect_bundle(&result, &asset.record.hash, output, cancel)
             .map_err(JobError::from)?;
+    let bundle = result.bundle;
     if let JobWorkflow::FixedDualMarlin { job } = &inspection.provenance.workflow {
         for face in &mut inspection.provenance.surface_color {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1498,20 +1501,21 @@ fn compile(
                 })
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let bundle = spiling_manufacturing::compile(
-        spiling_manufacturing::CompilerInput {
-            project_id: &project_id,
-            revision,
-            definitions: &definitions,
-            stored_definitions: &stored_definitions,
-            occurrences: &occurrences,
-            intent: &intent,
-            surface_overlays: &surface_overlays,
-            process_document: &process_document,
-            surface_images: &surface_images,
-        },
-        cancel,
-    )?;
+    let spiling_manufacturing::ManufacturingResult { bundle, program } =
+        spiling_manufacturing::compile(
+            spiling_manufacturing::CompilerInput {
+                project_id: &project_id,
+                revision,
+                definitions: &definitions,
+                stored_definitions: &stored_definitions,
+                occurrences: &occurrences,
+                intent: &intent,
+                surface_overlays: &surface_overlays,
+                process_document: &process_document,
+                surface_images: &surface_images,
+            },
+            cancel,
+        )?;
     let mut writer = BundleWriter {
         bytes: Vec::new(),
         limit: byte_budget.min(MAX_MANUFACTURING_BUNDLE_BYTES) as usize,
@@ -1535,9 +1539,10 @@ fn compile(
         input_hash: bundle.provenance.input_hash.clone(),
         byte_count: writer.bytes.len() as u32,
         summary: bundle.summary(),
+        program: bundle.program.clone(),
     };
     drop(bundle);
-    ManufacturingAsset::new(record, writer.bytes)
+    ManufacturingAsset::new(record, writer.bytes, program)
         .map(Arc::new)
         .map_err(super::manufacturing::project_error)
         .map_err(JobError::from)

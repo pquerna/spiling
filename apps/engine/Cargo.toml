@@ -12,6 +12,7 @@ publish = false
 
 [dependencies]
 spiling-analysis = { path = "../../crates/analysis" }
+spiling-chunks.workspace = true
 spiling-contracts.workspace = true
 spiling-compute.workspace = true
 directories = "=6.0.0"

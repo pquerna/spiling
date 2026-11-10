@@ -890,7 +890,11 @@ async fn manufacturing_bundle_survives_save_restart_and_source_removal() {
         .await
         .unwrap();
     assert!(bundle.summary().software_only);
-    assert!(!bundle.program.is_empty());
+    assert!(bundle.program.byte_count > 0);
+    // The program travels as its own artifact, named by its recorded hash.
+    let program = client.fetch_manufacturing_program(&record).await.unwrap();
+    assert!(record.program.matches(program.len(), program.digest()));
+    assert_eq!(bundle.program, record.program);
     let mut wrong_input = record.clone();
     wrong_input.input_hash = SourceHash::from_bytes(b"wrong semantic input");
     assert!(

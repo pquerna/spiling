@@ -1,11 +1,32 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 use super::*;
-use crate::{CompilerInput, compile};
+use crate::{ChunkSource, CompilerInput, ManufacturingResult, compile, decode_bundle};
 use geo::BooleanOps;
 use spiling_contracts::geometry::{AabbMm, DefinitionId, OccurrenceId, OccurrenceRecord, PlaneMm};
 use spiling_contracts::project::{ProjectId, ProjectRevision, StoredDefinition};
 use std::collections::BTreeMap;
+
+/// Bundle document bytes as persisted beside the program artifact.
+fn encode(result: &ManufacturingResult) -> Vec<u8> {
+    serde_json::to_vec(&result.bundle).unwrap()
+}
+/// Saved-return pairing: a freshly decoded bundle with the retained program.
+fn reload(bytes: &[u8], program: &ChunkSource) -> ManufacturingResult {
+    ManufacturingResult::new(decode_bundle(bytes).unwrap(), program.clone()).unwrap()
+}
+/// Programs in these tests are edited as text.
+fn chunks(program: &str) -> ChunkSource {
+    ChunkSource::from_slice(program.as_bytes(), u64::MAX).unwrap()
+}
+/// Replace a result's program and its descriptor together, so the verifier
+/// itself, not the descriptor binding, judges the edited bytes.
+fn with_program(result: &ManufacturingResult, program: &str) -> ManufacturingResult {
+    let mut edited = result.clone();
+    edited.program = chunks(program);
+    edited.bundle.program = crate::program_descriptor(&edited.program);
+    edited
+}
 
 struct NativeScene {
     project: ProjectId,
@@ -176,11 +197,11 @@ fn original_section_polygons(scene: &NativeScene, z: f64) -> MultiPolygon<f64> {
 }
 
 fn visit_fresh_replayed_object_segments(
-    bundle: &ManufacturingBundle,
+    bundle: &ManufacturingResult,
     mut visit: impl FnMut([f64; 3], [f64; 3]),
 ) {
-    let encoded = serde_json::to_vec(bundle).unwrap();
-    let reopened = decode_bundle(&encoded).unwrap();
+    let encoded = encode(bundle);
+    let reopened = reload(&encoded, &bundle.program);
     let hash = spiling_contracts::geometry::SourceHash::from_bytes(&encoded);
     let inspection = crate::inspect_bundle(
         &reopened,
@@ -303,7 +324,7 @@ fn original_box_reuses_certified_slabs_without_fabricating_layer_captures() {
         coverage.certified_layer_count
     );
     assert!(features.owned_critical_slab_count <= coverage.slab_count);
-    let reopened = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+    let reopened = reload(&encode(&bundle), &bundle.program);
     assert_eq!(reopened.plan.native_geometry, *coverage);
     assert!(crate::verify_bundle(&reopened, &cancel).unwrap().verified);
 }
@@ -351,7 +372,7 @@ fn disjoint_mixed_height_sources_bind_actual_birth_and_terminal_contributors() {
         "inactive source caps own real adjacent material through native interface evidence"
     );
     assert!(coverage.source_feature_coverage.owned_critical_slab_count >= 2);
-    let reopened = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+    let reopened = reload(&encode(&bundle), &bundle.program);
     assert!(crate::verify_bundle(&reopened, &cancel).unwrap().verified);
 }
 
@@ -845,8 +866,7 @@ fn fractional_native_contact_preserves_minimum_gap_in_fresh_actual_xyz6_replay()
     *z_gap_mm = 0.2000006;
     let z_gap_mm = *z_gap_mm;
     let bundle = compile(scene.input(&enabled), &cancel).unwrap();
-    let hash =
-        spiling_contracts::geometry::SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap());
+    let hash = spiling_contracts::geometry::SourceHash::from_bytes(&encode(&bundle));
     let inspection =
         crate::inspect_bundle(&bundle, &hash, VerificationOutput::ReportAndMotion, &cancel)
             .unwrap();
@@ -904,8 +924,7 @@ fn native_floating_through_hole_keeps_actual_emitted_capsules_outside_the_unchan
     let enabled = intent(true);
     let bundle = compile(scene.input(&enabled), &cancel).unwrap();
     assert!(bundle.verification.support_deposition_segments > 0);
-    let hash =
-        spiling_contracts::geometry::SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap());
+    let hash = spiling_contracts::geometry::SourceHash::from_bytes(&encode(&bundle));
     let inspection =
         crate::inspect_bundle(&bundle, &hash, VerificationOutput::ReportAndMotion, &cancel)
             .unwrap();
@@ -1503,7 +1522,7 @@ fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accoun
             .sum::<f64>();
         assert!((coverage.nominal_deposition_volume_mm3 - volume).abs() < 1e-7);
     }
-    let bytes = serde_json::to_vec(&finished).unwrap();
+    let bytes = encode(&finished);
     let hash = SourceHash::from_bytes(&bytes);
     let inspection = inspect_bundle(
         &finished,
@@ -1525,16 +1544,15 @@ fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accoun
         })
         .fold(f64::NEG_INFINITY, f64::max);
     assert!((peak - (0.1 - intent.recipe.bead_width_mm / 2.0)).abs() <= 0.006001);
-    let decoded = decode_bundle(&bytes).unwrap();
+    let decoded = reload(&bytes, &finished.program);
     assert_eq!(decoded.plan, finished.plan);
     assert_eq!(
         verify_bundle(&decoded, &cancel).unwrap(),
         finished.verification
     );
+    let text = decoded.program_text().unwrap();
     for field in ['X', 'E'] {
-        let mut mutated = decoded.clone();
-        let line = mutated
-            .program
+        let line = text
             .lines()
             .find(|line| line.starts_with("G1 ") && line.contains(" X"))
             .unwrap();
@@ -1549,7 +1567,7 @@ fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accoun
             })
             .collect::<Vec<_>>()
             .join(" ");
-        mutated.program = mutated.program.replacen(line, &altered, 1);
+        let mutated = with_program(&decoded, &text.replacen(line, &altered, 1));
         assert_eq!(
             verify_bundle(&mutated, &cancel).unwrap_err().code,
             ManufacturingErrorCode::VerificationFailed
@@ -2049,7 +2067,7 @@ fn independent_cylindrical_ribs_change_ordinary_walls_accounting_and_actual_repl
             .sum::<f64>();
         assert!((coverage.nominal_deposition_volume_mm3 - volume).abs() < 1e-7);
     }
-    let hash = SourceHash::from_bytes(&serde_json::to_vec(&finished).unwrap());
+    let hash = SourceHash::from_bytes(&encode(&finished));
     let inspection = inspect_bundle(
         &finished,
         &hash,
@@ -2393,7 +2411,7 @@ fn mapped_images_vary_native_planar_and_cylindrical_walls_fill_skin_and_actual_p
                     && record.face_id == scene.surface_overlays.layers[0].face_id
                     && record.layer_index < bundle.plan.layers.len() as u32)
         );
-        let hash = SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap());
+        let hash = SourceHash::from_bytes(&encode(&bundle));
         let inspected =
             inspect_bundle(&bundle, &hash, VerificationOutput::ReportAndMotion, &cancel).unwrap();
         assert!(inspected.report.verified && inspected.replay.is_some());
@@ -3077,7 +3095,7 @@ fn assert_native_family_compile_and_replay(
     family: spiling_contracts::geometry::SurfaceFamily,
     bed_translation: f64,
     top: f64,
-) -> spiling_contracts::manufacturing::ManufacturingBundle {
+) -> crate::ManufacturingResult {
     use spiling_contracts::geometry::SurfaceFamily;
     let cancel = AtomicBool::new(false);
     let source = native_test_source(name);
@@ -3169,8 +3187,8 @@ fn assert_native_family_compile_and_replay(
                 DepositionKind::BottomSkin | DepositionKind::TopSkin
             ))
     );
-    let encoded = serde_json::to_vec(&bundle).unwrap();
-    let reopened = decode_bundle(&encoded).unwrap();
+    let encoded = encode(&bundle);
+    let reopened = reload(&encoded, &bundle.program);
     let replay = crate::verify_bundle(&reopened, &cancel).unwrap();
     assert!(replay.verified && replay.deposition_segments > 0, "{name}");
     assert!(bundle.plan.layers.iter().all(|layer| {
@@ -3325,7 +3343,7 @@ fn spline_extrusion_bore_keeps_native_holes_through_ordinary_paths_and_reopen_re
             }
         }
     }
-    let reopened = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+    let reopened = reload(&encode(&bundle), &bundle.program);
     assert!(crate::verify_bundle(&reopened, &cancel).unwrap().verified);
     assert_eq!(
         reopened.plan.native_geometry.evidence,
@@ -3391,7 +3409,7 @@ fn independent_mechanical_sources_preserve_native_pocket_events_and_replay() {
                 "{name}"
             );
         }
-        let reopened = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let reopened = reload(&encode(&bundle), &bundle.program);
         assert!(
             crate::verify_bundle(&reopened, &cancel).unwrap().verified,
             "{name}"
@@ -3462,7 +3480,7 @@ fn blind_native_pocket_floor_remains_owned_while_ordinary_material_becomes_a_rin
             "{name}"
         );
         assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
-        let reopened = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let reopened = reload(&encode(&bundle), &bundle.program);
         assert!(
             crate::verify_bundle(&reopened, &cancel).unwrap().verified,
             "{name}"
@@ -3503,7 +3521,7 @@ fn floating_blind_native_pocket_does_not_project_its_closed_floor_down_to_bed() 
         );
         assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
         assert_eq!(bundle.provenance.occurrences, scene.occurrences, "{name}");
-        let reopened = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let reopened = reload(&encode(&bundle), &bundle.program);
         assert!(
             crate::verify_bundle(&reopened, &cancel).unwrap().verified,
             "{name}"
@@ -3535,7 +3553,7 @@ fn non_grid_overlapping_native_material_binds_actual_overlay_and_replays() {
         coverage.certified_layer_count
     );
     assert_eq!(bundle.provenance.occurrences, scene.occurrences);
-    let reopened = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+    let reopened = reload(&encode(&bundle), &bundle.program);
     assert!(crate::verify_bundle(&reopened, &cancel).unwrap().verified);
 }
 
@@ -3619,8 +3637,8 @@ fn overlapping_native_boxes_and_separated_varying_cone_share_actual_union_and_fr
         }
         let exact_cone_volume = std::f64::consts::PI * 8.0 * (25.0 + 15.0 + 9.0) / 3.0;
         assert!((cone_source_volume - exact_cone_volume).abs() <= volume_error);
-        let encoded = serde_json::to_vec(&bundle).unwrap();
-        let reopened = decode_bundle(&encoded).unwrap();
+        let encoded = encode(&bundle);
+        let reopened = reload(&encoded, &bundle.program);
         let hash = spiling_contracts::geometry::SourceHash::from_bytes(&encoded);
         let inspection = crate::inspect_bundle(
             &reopened,
@@ -3719,8 +3737,7 @@ fn previous_planner_identity_cannot_acquire_current_fresh_inspection_authority()
         crate::verify_bundle(&bundle, &cancel).unwrap_err().code,
         ManufacturingErrorCode::UnsupportedCapability
     );
-    let hash =
-        spiling_contracts::geometry::SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap());
+    let hash = spiling_contracts::geometry::SourceHash::from_bytes(&encode(&bundle));
     for output in [
         VerificationOutput::ReportOnly,
         VerificationOutput::ReportAndMotion,
@@ -4383,7 +4400,7 @@ fn hollow_native_box_preserves_walls_skins_void_accounting_and_fresh_replay() {
     let cancel = AtomicBool::new(false);
     let bundle = compile(scene.input(&intent), &cancel).unwrap();
     assert!(bundle.verification.verified);
-    let bundle = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+    let bundle = reload(&encode(&bundle), &bundle.program);
     assert!(crate::verify_bundle(&bundle, &cancel).unwrap().verified);
     assert!(
         bundle
@@ -4440,7 +4457,7 @@ fn material_profile_native_compile_replay_and_thermal_process_mutations() {
     let cancel = AtomicBool::new(false);
     let bundle = compile(scene.input(&resolved), &cancel).unwrap();
     assert!(crate::verify_bundle(&bundle, &cancel).unwrap().verified);
-    let saved = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+    let saved = reload(&encode(&bundle), &bundle.program);
     assert!(crate::verify_bundle(&saved, &cancel).unwrap().verified);
     assert_eq!(resolved.printer.deposition_limits.max_bead_width_mm, 0.75);
     assert!(!resolved.admits_deposition(0.5, 0.2));
@@ -4455,17 +4472,18 @@ fn material_profile_native_compile_replay_and_thermal_process_mutations() {
                 .unwrap()
                 .all(|edge| edge.width_mm <= 0.46))
     );
-    assert!(bundle.program.contains("M109 R210.000000"));
-    assert!(bundle.program.contains("M106 S255"));
+    let text = bundle.program_text().unwrap();
+    assert!(text.contains("M109 R210.000000"));
+    assert!(text.contains("M106 S255"));
     for tampered in [
-        bundle
-            .program
-            .replacen("M109 R210.000000", "M109 R190.000000", 1),
-        bundle.program.replacen("M106 S255", "M106 S128", 1),
-        bundle.program.replacen("F1260.000000", "F2100.000000", 1),
+        text.replacen("M109 R210.000000", "M109 R190.000000", 1),
+        text.replacen("M106 S255", "M106 S128", 1),
+        text.replacen("F1260.000000", "F2100.000000", 1),
     ] {
-        assert_ne!(tampered, bundle.program);
-        assert!(crate::verifier::verify(&tampered, &bundle.plan, &resolved, &cancel).is_err());
+        assert_ne!(tampered, text);
+        assert!(
+            crate::verifier::verify(&chunks(&tampered), &bundle.plan, &resolved, &cancel).is_err()
+        );
     }
 }
 
@@ -4640,8 +4658,8 @@ fn mixed_width_native_bore_keeps_fine_walls_and_rejects_missing_or_doubled_actua
         counts[0] > 0 && counts[0] < counts[1],
         "wider generated interior must use its own pitch"
     );
-    let line = mixed
-        .program
+    let text = mixed.program_text().unwrap();
+    let line = text
         .lines()
         .find(|line| {
             (line.starts_with("G1 X2") || line.starts_with("G1 X3"))
@@ -4649,13 +4667,13 @@ fn mixed_width_native_bore_keeps_fine_walls_and_rejects_missing_or_doubled_actua
                 && line.ends_with("F2280.000000")
         })
         .expect("bulk-tool model move");
-    let missing = mixed.program.replacen(&format!("{line}\n"), "", 1);
-    let duplicate = mixed.program.replacen(line, &format!("{line}\n{line}"), 1);
+    let missing = text.replacen(&format!("{line}\n"), "", 1);
+    let duplicate = text.replacen(line, &format!("{line}\n{line}"), 1);
     for program in [&missing, &duplicate] {
-        assert!(crate::verifier::verify(program, &mixed.plan, &intent, &cancel).is_err());
+        assert!(crate::verifier::verify(&chunks(program), &mixed.plan, &intent, &cancel).is_err());
     }
-    let wrong_tool = mixed.program.replacen("T1 S1", "T0 S1", 1);
-    assert!(crate::verifier::verify(&wrong_tool, &mixed.plan, &intent, &cancel).is_err());
+    let wrong_tool = text.replacen("T1 S1", "T0 S1", 1);
+    assert!(crate::verifier::verify(&chunks(&wrong_tool), &mixed.plan, &intent, &cancel).is_err());
     let mut wrong = mixed.plan.clone();
     let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow else {
         unreachable!()

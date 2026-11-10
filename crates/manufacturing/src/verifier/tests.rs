@@ -8,6 +8,36 @@ use spiling_contracts::manufacturing::{
     PrinterCapabilities, PrinterCoordinateFrame, PrinterSpecification,
 };
 
+/// Programs in these tests are edited as text; the verifier reads chunked bytes.
+fn chunks(program: &str) -> ChunkSource {
+    ChunkSource::from_slice(program.as_bytes(), u64::MAX).unwrap()
+}
+fn verify(
+    program: &str,
+    plan: &NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+    cancel: &AtomicBool,
+) -> Result<VerificationReport, ManufacturingError> {
+    super::verify(&chunks(program), plan, intent, cancel)
+}
+fn verify_actual(
+    program: &str,
+    plan: &NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+    cancel: &AtomicBool,
+    replay: Option<&mut ReplaySink>,
+) -> Result<VerificationReport, ManufacturingError> {
+    super::verify_actual(&chunks(program), plan, intent, cancel, replay)
+}
+fn emit_text(
+    plan: &NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+    cancel: &AtomicBool,
+) -> Result<String, ManufacturingError> {
+    let program = crate::backend::emit(plan, intent, cancel)?;
+    Ok(String::from_utf8(program.to_vec().unwrap()).unwrap())
+}
+
 // This independent numeric golden is not emitter output. A circular bead of
 // diameter 1 and filament of diameter 2 gives E = path length / 4 exactly.
 const GOLDEN: &str = "\
@@ -291,7 +321,7 @@ fn open_immutable_wall_survives_normalization_emission_and_fresh_replay() {
             wall.points_mm.last(),
             "Realization must not invent a closing edge or relabel an open wall Bridge"
         );
-        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        let program = emit_text(&plan, &intent, &cancel).unwrap();
         let mut sink = ReplaySink::new(&plan, &intent).unwrap();
         let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
         assert!(report.verified);
@@ -393,7 +423,7 @@ fn actual_backend_program_is_independently_replayed() {
     }
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let report = verify(&program, &plan, &intent, &cancel).unwrap();
     assert_eq!(report.deposition_segments, 6);
     assert_eq!(report.travel_segments, 3);
@@ -403,7 +433,7 @@ fn actual_backend_program_is_independently_replayed() {
     assert!(report.max_position_error_mm <= 3.0_f64.sqrt() * XYZ_HALF_STEP + 1e-12);
     assert!(report.max_extrusion_error_mm <= 2.0 * E_HALF_STEP + 1e-12);
     report.validate().unwrap();
-    let second_program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let second_program = emit_text(&plan, &intent, &cancel).unwrap();
     assert_eq!(program, second_program);
     assert_eq!(
         serde_json::to_value(&report).unwrap(),
@@ -425,7 +455,7 @@ fn actual_half_step_xyz_cannot_choose_the_other_lattice_neighbor() {
             }
         }
         refresh_volumes(&intent, &mut plan);
-        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        let program = emit_text(&plan, &intent, &cancel).unwrap();
         assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
         let actual = if offset > 0.0 {
             "G0 X0.000001 "
@@ -458,7 +488,7 @@ fn actual_output_refuses_coordinates_without_unique_xyz6_numeric_correspondence(
     }
     refresh_volumes(&intent, &mut plan);
     assert_eq!(
-        crate::backend::emit(&plan, &intent, &AtomicBool::new(false))
+        emit_text(&plan, &intent, &AtomicBool::new(false))
             .unwrap_err()
             .code,
         ManufacturingErrorCode::ProgramCoordinateConditioningFailure
@@ -469,7 +499,7 @@ fn actual_output_refuses_coordinates_without_unique_xyz6_numeric_correspondence(
 fn actual_emitted_motion_rejects_independent_tampering() {
     let (intent, plan) = fixture();
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let first_move = program
         .lines()
         .find(|line| line.starts_with("G1 "))
@@ -761,7 +791,7 @@ fn variable_width_wall_bridge_keeps_rotated_edge_associations_and_bridge_process
             .collect::<Vec<_>>(),
         vec![0.46, 0.47, 0.48, 0.45]
     );
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let report = verify(&program, &plan, &intent, &cancel).unwrap();
     let expected_volume =
         4.0 * (0.265 * 0.2 + std::f64::consts::PI * 0.1_f64.powi(2)) * 4.0 * 1.1 * 0.8;
@@ -873,7 +903,7 @@ fn wall_gradient_uses_actual_e8_widths_and_checks_the_closed_seam() {
     });
     // Both stored interior transitions are below 0.20/mm; only last→first
     // violates it. Emission matching the same bad plan is not independent proof.
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     assert_eq!(
         verify(&program, &plan, &intent, &cancel).unwrap_err().code,
         ManufacturingErrorCode::VerificationFailed
@@ -952,7 +982,7 @@ fn packed_sink_admits_two_hundred_thousand_actual_events_once() {
     ];
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     assert_eq!(report.deposition_segments, 100_000);
@@ -995,7 +1025,7 @@ fn hop_expansion_over_one_hundred_thousand_travels_keeps_exact_replay() {
     ];
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let report_only = verify(&program, &plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
@@ -1040,7 +1070,7 @@ fn worst_case_hop_estimate_does_not_refuse_a_small_actual_stream() {
     ];
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     assert_eq!(report.travel_segments, MAX_DEPOSITION_SEGMENTS);
@@ -1089,7 +1119,7 @@ fn complete_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
 fn complete_job_accounts_priming_separately_and_streams_lifecycle() {
     let (intent, plan) = complete_fixture();
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     assert_eq!(report.filament_length_mm, 6.0);
@@ -1149,7 +1179,7 @@ fn complete_job_accounts_priming_separately_and_streams_lifecycle() {
 fn complete_job_rejects_lifecycle_modal_thermal_barrier_and_extrusion_mutations() {
     let (intent, plan) = complete_fixture();
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     for (from, to) in [
         ("M200 D0", "M200 D1.75"),
         ("M220 S100", "M220 S90"),
@@ -1193,7 +1223,7 @@ fn complete_job_rejects_unsafe_or_incompatible_specifications() {
                 _ => job.firmware_version = "unknown".into(),
             }
         }
-        assert!(crate::backend::emit(&plan, &bad, &AtomicBool::new(false)).is_err());
+        assert!(emit_text(&plan, &bad, &AtomicBool::new(false)).is_err());
     }
     let mut bad = intent;
     bad.printer.capabilities.output_dialect = OutputDialect::CartesianAbsoluteGcodeV1;
@@ -1211,7 +1241,7 @@ fn region_nominal_measurement_mutation_is_not_trusted() {
 fn complete_job_requires_integral_celsius_and_explicit_temperature_units() {
     let (intent, plan) = complete_fixture();
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     for replacement in [
         "",
         "M149 F\n",
@@ -1232,14 +1262,14 @@ fn complete_job_requires_integral_celsius_and_explicit_temperature_units() {
             job.nozzle_temperature_c = temperature;
         }
         assert!(bad.validate().is_err(), "{temperature}");
-        assert!(crate::backend::emit(&plan, &bad, &cancel).is_err());
+        assert!(emit_text(&plan, &bad, &cancel).is_err());
     }
     for temperature in [170.0, 250.0] {
         let mut boundary = intent.clone();
         if let JobWorkflow::CompleteMarlin { job } = &mut boundary.printer.workflow {
             job.nozzle_temperature_c = temperature;
         }
-        let program = crate::backend::emit(&plan, &boundary, &cancel).unwrap();
+        let program = emit_text(&plan, &boundary, &cancel).unwrap();
         verify(&program, &plan, &boundary, &cancel).unwrap();
     }
     let mut bad = intent;
@@ -1265,7 +1295,7 @@ fn priming_excludes_whole_object_xy_even_above_object_and_across_gaps() {
         }
         assert!(bad.validate().is_ok()); // Individually bounded lifecycle data.
         assert!(plan.validate(&bad).is_err()); // Captured object ownership matters.
-        assert!(crate::backend::emit(&plan, &bad, &AtomicBool::new(false)).is_err());
+        assert!(emit_text(&plan, &bad, &AtomicBool::new(false)).is_err());
     }
 }
 
@@ -1283,7 +1313,7 @@ fn priming_exclusion_accounts_for_emitted_rounding_at_boundary() {
         if admissible {
             let mut plan = plan.clone();
             crate::realization::canonicalize(&mut plan, &candidate, &cancel).unwrap();
-            let program = crate::backend::emit(&plan, &candidate, &cancel).unwrap();
+            let program = emit_text(&plan, &candidate, &cancel).unwrap();
             verify(&program, &plan, &candidate, &cancel).unwrap();
             let mutated = program.replace("Y0.499998", "Y0.500000");
             assert!(verify(&mutated, &plan, &candidate, &cancel).is_err());
@@ -1471,7 +1501,7 @@ fn independent_process_golden_separates_support_object_and_stationary_recovery()
         );
     }
     report.validate().unwrap();
-    let emitted = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let emitted = emit_text(&plan, &intent, &cancel).unwrap();
     let actual = verify(&emitted, &plan, &intent, &cancel).unwrap();
     assert_eq!(
         actual.support_deposition_segments,
@@ -1565,7 +1595,7 @@ fn cooling_transition_and_variable_height_properties_use_actual_bytes() {
                 }
             }
             refresh_volumes(&intent, &mut plan);
-            let emitted = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+            let emitted = emit_text(&plan, &intent, &cancel).unwrap();
             assert!(emitted.contains("M106 S173\n"));
             let report = verify(&emitted, &plan, &intent, &cancel).unwrap();
             let expected = plan
@@ -1591,7 +1621,7 @@ fn preferred_seam_rejects_a_matching_policy_ignoring_plan_and_program() {
     assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
 
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
-    let canonical_program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let canonical_program = emit_text(&plan, &intent, &cancel).unwrap();
     assert!(
         verify(&canonical_program, &plan, &intent, &cancel)
             .unwrap()
@@ -1600,7 +1630,7 @@ fn preferred_seam_rejects_a_matching_policy_ignoring_plan_and_program() {
     assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.0, 5.0, 1.0]);
     plan.layers[0].paths[0].rotate_closed(2).unwrap();
     plan.validate(&intent).unwrap();
-    let policy_ignoring_program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let policy_ignoring_program = emit_text(&plan, &intent, &cancel).unwrap();
     assert_ne!(policy_ignoring_program, canonical_program);
     let error = verify(&policy_ignoring_program, &plan, &intent, &cancel).unwrap_err();
     assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
@@ -1646,11 +1676,11 @@ fn preferred_seam_ties_follow_the_previous_actual_contour_endpoint() {
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
     assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.0, 10.0, 1.0]);
     assert_eq!(plan.layers[0].paths[1].points_mm[0], [9.0, 5.0, 1.0]);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
     plan.layers[0].paths[1].rotate_closed(3).unwrap();
     assert_eq!(plan.layers[0].paths[1].points_mm[0], [9.0, 1.0, 1.0]);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let error = verify(&program, &plan, &intent, &cancel).unwrap_err();
     assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
 }
@@ -1684,7 +1714,7 @@ fn preferred_seam_exact_ties_use_projected_coordinates_and_prime_position() {
         crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
         let expected_y = if prime_y == Some(10.0) { 5.0 } else { 1.0 };
         assert_eq!(plan.layers[0].paths[0].points_mm[0][1], expected_y);
-        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        let program = emit_text(&plan, &intent, &cancel).unwrap();
         assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
 
         let other = plan.layers[0].paths[0].points_mm[..4]
@@ -1692,7 +1722,7 @@ fn preferred_seam_exact_ties_use_projected_coordinates_and_prime_position() {
             .position(|p| p[0] > 5.0 && p[1] != expected_y)
             .unwrap();
         plan.layers[0].paths[0].rotate_closed(other).unwrap();
-        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        let program = emit_text(&plan, &intent, &cancel).unwrap();
         let error = verify(&program, &plan, &intent, &cancel).unwrap_err();
         assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
     }
@@ -1713,11 +1743,11 @@ fn preferred_seam_score_has_no_proximity_epsilon_for_wall_bridges() {
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
     assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.000_001, 1.0, 1.0]);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
 
     plan.layers[0].paths[0].rotate_closed(1).unwrap();
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let error = verify(&program, &plan, &intent, &cancel).unwrap_err();
     assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
 
@@ -1725,14 +1755,14 @@ fn preferred_seam_score_has_no_proximity_epsilon_for_wall_bridges() {
     // obligation while retaining its separate feed, flow and cooling policy.
     plan.layers[0].paths[0].kind = DepositionKind::Bridge;
     refresh_volumes(&intent, &mut plan);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     assert_eq!(
         verify(&program, &plan, &intent, &cancel).unwrap_err().code,
         ManufacturingErrorCode::VerificationFailed
     );
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
     assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.000_001, 1.0, 1.0]);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let report = verify(&program, &plan, &intent, &cancel).unwrap();
     assert_eq!(report.deposition_segments, 6);
 }
@@ -1763,14 +1793,11 @@ fn nearest_seam_and_open_direction_are_useful_and_deterministic() {
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
     assert_eq!(plan.layers[0].paths[1].points_mm[0], [2.0, 2.0, 1.0]);
     assert_eq!(plan.layers[0].paths[2].points_mm[0], [2.0, 2.0, 1.0]);
-    let emitted = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let emitted = emit_text(&plan, &intent, &cancel).unwrap();
     assert!(emitted.contains("G0 X2.000000 Y2.000000 Z1.000000"));
     assert!(!emitted.contains("G0 X20.000000 Y2.000000"));
     verify(&emitted, &plan, &intent, &cancel).unwrap();
-    assert_eq!(
-        emitted,
-        crate::backend::emit(&plan, &intent, &cancel).unwrap()
-    );
+    assert_eq!(emitted, emit_text(&plan, &intent, &cancel).unwrap());
 }
 
 fn distributed_square_fixture(layer_count: usize) -> (ManufacturingIntent, NormalizedPrintPlan) {
@@ -1820,17 +1847,14 @@ fn distributed_seams_have_hand_derived_xy_history_and_evict_after_eight_starts()
     for (layer, xy) in plan.layers.iter().zip(expected) {
         assert_eq!(layer.paths[0].points_mm[0], [xy[0], xy[1], layer.z_mm]);
     }
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     assert_eq!(report.deposition_segments, 48);
     assert!(report.verified);
-    assert_eq!(
-        program,
-        crate::backend::emit(&plan, &intent, &cancel).unwrap()
-    );
+    assert_eq!(program, emit_text(&plan, &intent, &cancel).unwrap());
     plan.layers[9].paths[0].rotate_closed(1).unwrap();
-    let mutated = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let mutated = emit_text(&plan, &intent, &cancel).unwrap();
     let error = verify(&mutated, &plan, &intent, &cancel).unwrap_err();
     assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
     assert!(error.message.contains("seam policy"));
@@ -1865,7 +1889,7 @@ fn distributed_empty_history_uses_actual_prime_endpoint_without_recording_it() {
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
     assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.0, 5.0, 1.0]);
     assert_eq!(plan.layers[1].paths[0].points_mm[0], [1.0, 1.0, 2.0]);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
 }
 
@@ -1891,7 +1915,7 @@ fn distributed_seams_share_history_between_walls_within_each_actual_layer() {
     assert_eq!(plan.layers[0].paths[1].points_mm[0], [8.0, 8.0, 1.0]);
     assert_eq!(plan.layers[1].paths[0].points_mm[0], [1.0, 9.0, 2.0]);
     assert_eq!(plan.layers[1].paths[1].points_mm[0], [8.0, 2.0, 2.0]);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
 }
 
@@ -1921,7 +1945,7 @@ fn distributed_seams_ignore_non_wall_and_open_wall_starts() {
         crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
         assert_eq!(plan.layers[0].paths[0].points_mm[0], [1.0, 1.0, 1.0]);
         assert_eq!(plan.layers[1].paths[0].points_mm[0], [5.0, 5.0, 2.0]);
-        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        let program = emit_text(&plan, &intent, &cancel).unwrap();
         assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
     }
 }
@@ -1954,7 +1978,7 @@ fn distributed_seam_ties_use_projected_history_then_previous_actual_position() {
             [1.0, 5.0, 3.0]
         };
         assert_eq!(plan.layers[2].paths[0].points_mm[0], expected);
-        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        let program = emit_text(&plan, &intent, &cancel).unwrap();
         assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
         let alternate = if proximity_wins {
             [1.0, 5.0, 3.0]
@@ -1968,7 +1992,7 @@ fn distributed_seam_ties_use_projected_history_then_previous_actual_position() {
             .position(|point| *point == alternate)
             .unwrap();
         wall.rotate_closed(index).unwrap();
-        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        let program = emit_text(&plan, &intent, &cancel).unwrap();
         assert_eq!(
             verify(&program, &plan, &intent, &cancel).unwrap_err().code,
             ManufacturingErrorCode::VerificationFailed
@@ -1997,7 +2021,7 @@ fn distributed_seams_preserve_directed_edges_widths_and_wall_bridge_dose() {
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
     assert_eq!(plan.layers[1].paths[0], expected);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let report = verify(&program, &plan, &intent, &cancel).unwrap();
     assert_eq!(report.deposition_segments, 8);
     assert!((report.deposited_volume_mm3 - volume).abs() < 2e-8);
@@ -2017,7 +2041,7 @@ fn distributed_seams_reject_matching_rotated_program_and_byte_only_mutations() {
     let (intent, mut plan) = distributed_square_fixture(2);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let altered = program.replacen(
         "G0 X5.000000 Y5.000000 Z2.000000",
         "G0 X1.000000 Y1.000000 Z2.000000",
@@ -2027,7 +2051,7 @@ fn distributed_seams_reject_matching_rotated_program_and_byte_only_mutations() {
     assert!(verify(&altered, &plan, &intent, &cancel).is_err());
     plan.layers[1].paths[0].rotate_closed(2).unwrap();
     plan.validate(&intent).unwrap();
-    let altered = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let altered = emit_text(&plan, &intent, &cancel).unwrap();
     assert_ne!(altered, program);
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let error = verify_actual(&altered, &plan, &intent, &cancel, Some(&mut sink)).unwrap_err();
@@ -2040,7 +2064,7 @@ fn distributed_seams_honor_cancellation_in_realization_and_independent_replay() 
     let (intent, mut plan) = distributed_square_fixture(2);
     let running = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &running).unwrap();
-    let program = crate::backend::emit(&plan, &intent, &running).unwrap();
+    let program = emit_text(&plan, &intent, &running).unwrap();
     let cancelled = AtomicBool::new(true);
     assert_eq!(
         crate::realization::canonicalize(&mut plan, &intent, &cancelled)
@@ -2078,7 +2102,7 @@ fn support_only_layers_are_real_and_not_object_accounting() {
     coverage.wall_area_mm2 = 0.0;
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let report = verify(&program, &plan, &intent, &cancel).unwrap();
     assert_eq!(report.deposition_segments, 1);
     assert_eq!(report.support_deposition_segments, 2);
@@ -2121,7 +2145,7 @@ fn real_contact_gap_admits_larger_than_minimum_but_rejects_insufficient_gap_or_m
     plan.layers.insert(1, gap);
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     let (bytes, _) = sink.finish().unwrap();
@@ -2161,7 +2185,7 @@ fn threshold_and_zero_hop_recovery_preserve_absolute_extrusion_without_extra_xyz
             z_hop_mm: 0.0,
         };
         refresh_volumes(&intent, &mut plan);
-        let emitted = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        let emitted = emit_text(&plan, &intent, &cancel).unwrap();
         let mut sink = ReplaySink::new(&plan, &intent).unwrap();
         let report = verify_actual(&emitted, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
         let (bytes, bounds) = sink.finish().unwrap();
@@ -2197,7 +2221,7 @@ fn complete_prime_to_first_body_can_retract_at_known_stationary_position() {
         z_hop_mm: 0.25,
     };
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     let (bytes, bounds) = sink.finish().unwrap();
@@ -2282,7 +2306,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     });
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     // Independently calculated capsule areas: three fine rows, one double-height row.
@@ -2332,7 +2356,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
         point[1] = 20.0;
     }
     refresh_volumes(&intent, &mut blocked_landing);
-    let unsupported = crate::backend::emit(&blocked_landing, &intent, &cancel).unwrap();
+    let unsupported = emit_text(&blocked_landing, &intent, &cancel).unwrap();
     assert!(verify(&unsupported, &blocked_landing, &intent, &cancel).is_err());
     use std::fmt::Write;
     let mut hex = String::with_capacity(bytes.len() * 2);
@@ -2395,7 +2419,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     regional.layers[2].paths[0].kind = DepositionKind::Bridge;
     let check = |mut candidate: NormalizedPrintPlan| {
         refresh_volumes(&regional_intent, &mut candidate);
-        let bytes = crate::backend::emit(&candidate, &regional_intent, &cancel).unwrap();
+        let bytes = emit_text(&candidate, &regional_intent, &cancel).unwrap();
         verify(&bytes, &candidate, &regional_intent, &cancel)
     };
     assert!(
@@ -2753,7 +2777,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
     let actual_touch = project_xyz6_coordinate_mm(start_y).unwrap();
     assert!(
@@ -2776,7 +2800,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             .unwrap();
         endpoint[1] = start_y + intrusion;
         refresh_volumes(&intent, &mut overlapping);
-        let changed_program = crate::backend::emit(&overlapping, &intent, &cancel).unwrap();
+        let changed_program = emit_text(&overlapping, &intent, &cancel).unwrap();
         let error = verify(&changed_program, &overlapping, &intent, &cancel).unwrap_err();
         assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
         assert!(
@@ -2810,7 +2834,7 @@ fn affected_fine_regional_rows_require_actual_support_or_genuine_bounded_bridge(
         refresh_volumes(intent, &mut plan);
         // Establish actual-byte/path correspondence first. Exercise the
         // affected-landing consumer directly without inventing a Combined band.
-        let program = crate::backend::emit(&plan, intent, &cancel).unwrap();
+        let program = emit_text(&plan, intent, &cancel).unwrap();
         verify(&program, &plan, intent, &cancel).unwrap();
         interfaces::verify_earlier_fine_paths(
             &plan,
@@ -2920,7 +2944,7 @@ fn replay_skin_fit(
 ) -> Result<VerificationReport, ManufacturingError> {
     let cancel = AtomicBool::new(false);
     refresh_volumes(intent, &mut plan);
-    let program = crate::backend::emit(&plan, intent, &cancel)?;
+    let program = emit_text(&plan, intent, &cancel)?;
     verify(&program, &plan, intent, &cancel)
 }
 
@@ -3271,7 +3295,7 @@ fn mixed_skin_projects_original_classified_intervals_without_rehatching_the_roun
     reversed.layers[1].paths[0].reverse();
     replay_skin_fit(&intent, reversed).unwrap();
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let alternate = program.replacen("Y2.000000 ", "Y2.000001 ", 1);
     assert_ne!(alternate, program);
     assert!(
@@ -3398,7 +3422,7 @@ fn same_formulation_keeps_independent_explicit_tool_ownership_in_actual_replay()
     }
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let report = verify(&program, &plan, &intent, &cancel).unwrap();
     let routing = report.routing.unwrap();
     assert!(
@@ -3460,12 +3484,12 @@ fn distributed_fixed_dual_seams_keep_separate_history_across_layers_and_waste() 
             [xy[0] + 100.0, xy[1], layer.z_mm]
         );
     }
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     assert!(report.verified);
     plan.layers[6].paths[1].rotate_closed(1).unwrap();
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let error = verify(&program, &plan, &intent, &cancel).unwrap_err();
     assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
     assert!(error.message.contains("seam policy"));
@@ -3482,7 +3506,7 @@ fn distributed_fixed_dual_seam_ties_use_actual_xyz6_waste_endpoint() {
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
     assert_eq!(plan.layers[0].paths[0].points_mm[0], [25.0, 21.0, 1.0]);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     assert!(program.contains("G1 X80.000000 Y23.000000 Z1.000000"));
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
 }
@@ -3508,7 +3532,7 @@ fn fixed_dual_golden(model_tool: Option<usize>) {
         crate::realization::canonicalize(&mut plan, &intent, &AtomicBool::new(false)).unwrap();
     }
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     report.validate().unwrap();
@@ -3594,7 +3618,7 @@ fn fixed_dual_golden(model_tool: Option<usize>) {
 fn fixed_dual_independent_replay_rejects_tool_offset_epoch_wait_debt_and_waste_mutations() {
     let (intent, plan) = fixed_dual_fixture();
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     for (from, to) in [
         ("T1 S1", "T0 S1"),
         ("T1 S1", "T1"),
@@ -3625,7 +3649,7 @@ fn fixed_dual_independent_replay_rejects_tool_offset_epoch_wait_debt_and_waste_m
         job.tools[1].offset_xy_mm = [2.0, 0.0];
     }
     assert!(
-        crate::backend::emit(&plan, &collision, &cancel).is_err(),
+        emit_text(&plan, &collision, &cancel).is_err(),
         "a coplanar inactive nozzle must not sweep the source's own deposited prefix"
     );
 }
@@ -3634,12 +3658,12 @@ fn fixed_dual_independent_replay_rejects_tool_offset_epoch_wait_debt_and_waste_m
 fn fixed_dual_waste_bead_must_fit_bed_not_only_centerline() {
     let (mut intent, plan) = fixed_dual_fixture();
     let cancel = AtomicBool::new(false);
-    let original = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let original = emit_text(&plan, &intent, &cancel).unwrap();
     if let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow {
         job.tools[0].waste_line_xy_mm = [[60.0, 0.0], [80.0, 0.0]];
     }
     assert!(
-        crate::backend::emit(&plan, &intent, &cancel).is_err(),
+        emit_text(&plan, &intent, &cancel).is_err(),
         "a legal centerline cannot authorize a waste bead extending beyond the bed"
     );
     let changed = original.replace("Y160.000000", "Y0.000000");
@@ -3688,7 +3712,7 @@ fn fixed_dual_cycle_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
 fn physical_cycles_route_same_z_occurrences_independently_in_actual_commands() {
     let (intent, plan) = fixed_dual_cycle_fixture();
     let cancel = AtomicBool::new(false);
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     let (bytes, _) = sink.finish().unwrap();
@@ -3737,7 +3761,7 @@ fn physical_cycles_route_same_z_occurrences_independently_in_actual_commands() {
         verify(&program, &swapped_plan, &swapped, &cancel).is_err(),
         "a valid changed source-phase plan cannot reuse the old material program"
     );
-    let changed = crate::backend::emit(&swapped_plan, &swapped, &cancel)
+    let changed = emit_text(&swapped_plan, &swapped, &cancel)
         .expect("both phase-swapped occurrence groups must remain executable");
     assert_ne!(
         changed, program,
@@ -3756,7 +3780,7 @@ fn physical_cycles_route_same_z_occurrences_independently_in_actual_commands() {
         }
     }
     assert!(
-        crate::backend::emit(&plan, &crossing, &cancel).is_err(),
+        emit_text(&plan, &crossing, &cancel).is_err(),
         "an already captured physical interval may not straddle a recipe slot"
     );
 }
@@ -3830,7 +3854,7 @@ fn per_tool_profiles_drive_actual_feed_flow_cooling_and_reject_swapped_feed() {
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
-    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
     let report = verify(&program, &plan, &intent, &cancel).unwrap();
     assert!(report.verified);
     let line = program

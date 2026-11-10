@@ -11,7 +11,10 @@ use super::{
 use spiling_contracts::{
     appearance::{MAX_PALETTE_BYTES, PreparedPalette},
     geometry::{DefinitionId, SourceHash},
-    manufacturing::{MAX_MANUFACTURING_BUNDLE_BYTES, MAX_MANUFACTURING_RETAINED_BYTES},
+    manufacturing::{
+        MAX_MANUFACTURING_BUNDLE_BYTES, MAX_MANUFACTURING_PROGRAM_BYTES,
+        MAX_MANUFACTURING_RETAINED_BYTES,
+    },
     project::*,
     surface::{MAX_SURFACE_IMAGE_BYTES, MAX_SURFACE_IMAGE_RETAINED_BYTES},
 };
@@ -36,6 +39,7 @@ const PALETTE_ORIGINAL: u16 = 4;
 const PALETTE_CANONICAL: u16 = 5;
 const MATERIALS: u16 = 6;
 const ANALYSIS: u16 = 7;
+const PROGRAM: u16 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveStage {
@@ -318,6 +322,7 @@ fn expected_members(manifest: &ProjectManifest) -> BTreeSet<Member> {
     for layout in &manifest.layouts {
         if let Some(artifact) = &layout.manufacturing_artifact {
             result.insert(member(MANUFACTURING, &artifact.hash));
+            result.insert(member(PROGRAM, &artifact.program.hash));
         }
     }
     for image in &manifest.surface_overlays.images {
@@ -483,7 +488,38 @@ fn load_assets(
                     cancel,
                 )?;
                 remaining_manufacturing -= bytes.capacity();
-                let asset = Arc::new(ManufacturingAsset::new(record.clone(), bytes)?);
+                let raw_program = read_asset(
+                    capture,
+                    &record.program.hash,
+                    remaining_manufacturing.min(MAX_MANUFACTURING_PROGRAM_BYTES as usize),
+                    Some(usize::try_from(record.program.byte_count).map_err(|_| {
+                        error(
+                            ProjectErrorCode::ResourceLimit,
+                            "manufacturing program exceeds address space",
+                        )
+                    })?),
+                    cancel,
+                )?;
+                let program = spiling_chunks::ChunkSource::from_slice(
+                    &raw_program,
+                    u64::from(MAX_MANUFACTURING_PROGRAM_BYTES),
+                )
+                .map_err(|_| {
+                    error(
+                        ProjectErrorCode::ResourceLimit,
+                        "manufacturing program exceeds byte budget",
+                    )
+                })?;
+                drop(raw_program);
+                remaining_manufacturing = remaining_manufacturing
+                    .checked_sub(program.retained_bytes())
+                    .ok_or_else(|| {
+                        error(
+                            ProjectErrorCode::ResourceLimit,
+                            "retained manufacturing budget exceeded",
+                        )
+                    })?;
+                let asset = Arc::new(ManufacturingAsset::new(record.clone(), bytes, program)?);
                 loaded_manufacturing.insert(record.hash.clone(), asset.clone());
                 asset
             };
@@ -651,7 +687,9 @@ fn validate_other_root(
     cancelled(cancel)
 }
 
-fn snapshot_objects(snapshot: &Snapshot) -> BTreeMap<Member, Arc<Vec<u8>>> {
+/// Raw object bytes for every member. Programs are materialized from their
+/// compressed frames for the duration of a save or reconciliation.
+fn snapshot_objects(snapshot: &Snapshot) -> Result<BTreeMap<Member, Arc<Vec<u8>>>, ProjectError> {
     let mut objects = BTreeMap::new();
     for asset in snapshot.analysis_results.values() {
         objects.insert(member(ANALYSIS, &asset.record.hash), asset.bytes.clone());
@@ -677,6 +715,16 @@ fn snapshot_objects(snapshot: &Snapshot) -> BTreeMap<Member, Arc<Vec<u8>>> {
             member(MANUFACTURING, &asset.record.hash),
             asset.bytes.clone(),
         );
+        let program = asset.program.to_vec().map_err(|_| {
+            error(
+                ProjectErrorCode::ResourceLimit,
+                "manufacturing program could not be materialized for storage",
+            )
+        })?;
+        objects.insert(
+            member(PROGRAM, &asset.record.program.hash),
+            Arc::new(program),
+        );
     }
     for asset in snapshot.surface_images.values() {
         objects.insert(
@@ -694,7 +742,7 @@ fn snapshot_objects(snapshot: &Snapshot) -> BTreeMap<Member, Arc<Vec<u8>>> {
             asset.canonical().clone(),
         );
     }
-    objects
+    Ok(objects)
 }
 
 fn inputs(objects: &BTreeMap<Member, Arc<Vec<u8>>>) -> Vec<ObjectInput<'_>> {
@@ -732,7 +780,11 @@ pub(crate) fn remaining_budgets(project: &Project) -> Result<LoadBudgets, Projec
             .iter()
             .filter_map(|l| l.manufacturing_artifact.as_ref())
         {
-            manufacturing.insert(Arc::as_ptr(&asset.bytes), asset.bytes.capacity());
+            manufacturing.insert(
+                Arc::as_ptr(&asset.bytes).cast::<()>(),
+                asset.bytes.capacity(),
+            );
+            manufacturing.insert(asset.program.ptr(), asset.program.retained_bytes());
         }
     }
     Ok(LoadBudgets {
@@ -821,7 +873,7 @@ pub fn save(
         _ => None,
     };
     let mut guard = ProjectRecoveryGuard::from_manifest(&snapshot.manifest);
-    let objects = snapshot_objects(&snapshot.snapshot);
+    let objects = snapshot_objects(&snapshot.snapshot)?;
     if objects.keys().copied().collect::<BTreeSet<_>>() != expected_members(&snapshot.manifest) {
         return Err(invalid("captured assets differ from declared role closure"));
     }
@@ -866,7 +918,7 @@ pub fn save(
         if same.is_none() {
             let mut available = BTreeMap::new();
             for state in &snapshot.retained {
-                available.extend(snapshot_objects(state));
+                available.extend(snapshot_objects(state)?);
             }
             let mut budgets = snapshot.remaining_budgets.clone()?;
             for member in &capture.members {
@@ -875,7 +927,7 @@ pub fn save(
                 } else {
                     let budget = match member.role.get() {
                         SOURCE => &mut budgets.source_bytes,
-                        MANUFACTURING => &mut budgets.manufacturing_bytes,
+                        MANUFACTURING | PROGRAM => &mut budgets.manufacturing_bytes,
                         IMAGE => &mut budgets.image_bytes,
                         MATERIALS => &mut budgets.material_bytes,
                         ANALYSIS => &mut budgets.analysis_bytes,

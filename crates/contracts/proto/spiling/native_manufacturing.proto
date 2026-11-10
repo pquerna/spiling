@@ -258,11 +258,16 @@ message LayerHeightAssessment {
   uint32 differing_layer_count = 8;
   optional uint32 first_differing_layer = 9;
 }
+message ProgramDescriptor {
+  string hash = 1;
+  uint64 byte_count = 2;
+}
 message ManufacturingArtifactRecord {
   string hash = 1;
   string input_hash = 2;
   uint32 byte_count = 3;
   ManufacturingSummary summary = 4;
+  ProgramDescriptor program = 5;
 }
 enum SkinCoverageScope {
   SKIN_COVERAGE_SCOPE_UNSPECIFIED = 0;
