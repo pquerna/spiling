@@ -5,6 +5,13 @@ SPDX-License-Identifier: OSL-3.0
 
 # Shared numeric compute
 
+New numeric consumers should prefer one CubeCL kernel serving CPU/backend
+vectorization and GPU over separately maintained scalar/SIMD implementations.
+Keep domain orchestration and independent verification separate. Evaluate
+complete cold/warm calls and resident-data reuse across workload sizes; batch
+size is one policy input, not a blanket GPU admission gate. Keep kernels
+portable for future Wasm/WebGPU consumers; each target still needs conformance.
+
 `configure(ComputeSettings)` initializes an immutable process session before native
 workers, off the async executor. `status()` lazily initializes default settings for
 direct callers. Failed initialization is retained; changing settings requires a

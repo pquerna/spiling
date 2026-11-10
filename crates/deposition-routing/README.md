@@ -60,3 +60,11 @@ requirements, precedence and timing annotations without calling library checking
 or pricing code. Captured slicer/Cathedral paths are historical routing inputs,
 not current-producer native qualification. See the [lab](../../tools/route-lab/README.md)
 for frozen source-edit cohorts, cached builds and sealed panels.
+
+Local improvement's route caches are linear in the current tool group's size:
+task positions, endpoints and incoming gap costs. A mutation refreshes only its
+affected range and the following gap. Segment lengths evaluated against one
+unchanged order share their insertion-entry prices; the scratch is cleared for
+the next search visit. This reuses the frozen pricing without reducing candidate
+coverage or effort, allocating an all-pairs cost table or retaining group state
+across jobs.
