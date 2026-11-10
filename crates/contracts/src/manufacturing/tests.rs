@@ -1708,6 +1708,52 @@ fn native_geometry_coverage_requires_complete_certified_bounded_policy() {
 }
 
 #[test]
+fn tolerant_coverage_cannot_advertise_native_certificates() {
+    let mut captured = bundle();
+    let coverage = &mut captured.plan.native_geometry;
+    coverage.evidence = PreflightEvidence::Tolerant;
+    coverage.height_analysis_count = 0;
+    coverage.slab_count = 0;
+    coverage.source_feature_coverage = NativeFeatureCoverageSummary {
+        disjoint_source_layer_count: 0,
+        invariant_source_union_layer_count: 0,
+        native_interface_complex_layer_count: 0,
+        owned_critical_slab_count: 0,
+    };
+    captured.validate().unwrap();
+    let returned: ManufacturingBundle =
+        serde_json::from_slice(&serde_json::to_vec(&captured).unwrap()).unwrap();
+    returned.validate().unwrap();
+    for mutation in 0..6 {
+        let mut forged = returned.clone();
+        let coverage = &mut forged.plan.native_geometry;
+        match mutation {
+            0 => coverage.height_analysis_count = 1,
+            1 => coverage.slab_count = 1,
+            2 => coverage.source_feature_coverage.disjoint_source_layer_count = 1,
+            3 => {
+                coverage
+                    .source_feature_coverage
+                    .invariant_source_union_layer_count = 1
+            }
+            4 => {
+                coverage
+                    .source_feature_coverage
+                    .native_interface_complex_layer_count = 1
+            }
+            _ => coverage.source_feature_coverage.owned_critical_slab_count = 1,
+        }
+        assert!(
+            forged.validate().is_err(),
+            "forged native evidence {mutation}"
+        );
+    }
+    let mut mislabeled = returned;
+    mislabeled.plan.native_geometry.evidence = PreflightEvidence::Certified;
+    assert!(mislabeled.validate().is_err());
+}
+
+#[test]
 fn native_coverage_counts_accepted_source_slabs_not_reused_layers() {
     let mut summary = native_geometry();
     summary.height_analysis_count = 2;

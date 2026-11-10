@@ -447,24 +447,76 @@ fn native_nonintegral_top_and_non_grid_shelf_preserve_every_event() {
 
 #[test]
 fn off_grid_native_tunnel_split_merge_and_near_tangency_preserve_replayed_material() {
+    use spiling_geometry::tolerant::{TolerantModel, TolerantPolicy};
+
     let cancel = AtomicBool::new(false);
     let baseline = NativeScene::new(&generated("nonintegral-top"), &[RigidPoseMm::IDENTITY]);
     let changed = NativeScene::new(
         &generated("off-grid-circular-tunnel"),
         &[RigidPoseMm::IDENTITY],
     );
+    let policy = TolerantPolicy::default();
+    let baseline_model = TolerantModel::build(
+        baseline.definitions.values().next().unwrap(),
+        policy,
+        &cancel,
+    )
+    .unwrap();
+    let changed_model = TolerantModel::build(
+        changed.definitions.values().next().unwrap(),
+        policy,
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(baseline_model.failed_faces, 0);
+    assert_eq!(changed_model.failed_faces, 0);
+    let product_section = |model: &TolerantModel, height_mm: f64| {
+        let section = model.section(height_mm).unwrap();
+        assert_eq!(section.dropped_slivers, 0, "Z {height_mm}");
+        assert!(section.max_gap_mm <= policy.join_mm, "Z {height_mm}");
+        MultiPolygon(
+            section
+                .loops
+                .iter()
+                .map(|ring| {
+                    assert!(
+                        ring.area > 0.0,
+                        "the tunnel opens through Y at Z {height_mm}"
+                    );
+                    let points = ring
+                        .points
+                        .iter()
+                        .map(|point| (point[0], point[1]))
+                        .collect::<Vec<_>>();
+                    geo::Polygon::new(geo::LineString::from(points), Vec::new())
+                })
+                .collect(),
+        )
+    };
+    let area_bound = |gap: f64, error: f64| {
+        let (perimeter, components) = if gap > 0.0 {
+            (80.0 - 2.0 * gap, 2.0)
+        } else {
+            (60.0, 1.0)
+        };
+        perimeter * error + components * std::f64::consts::PI * error * error
+    };
     // Both native sources have exactly the same ordinary selected sections.
     // The changed original has a through-Y cylindrical void between them:
     // gap(z) = 2*sqrt(0.24^2 - (z-1.37)^2), with real split/merge at
     // 1.13/1.61. This is neither a component birth nor a static overlapping union.
     for z in [1.0, 2.0] {
-        let a = original_section_polygons(&baseline, z);
-        let b = original_section_polygons(&changed, z);
-        assert!(a.xor(&b).unsigned_area() < 1e-6);
+        let a = product_section(&baseline_model, z);
+        let b = product_section(&changed_model, z);
+        assert_eq!(a.0.len(), 1);
+        assert_eq!(b.0.len(), 1);
+        assert!((a.unsigned_area() - 200.0).abs() <= area_bound(0.0, policy.profile_mm));
+        assert!((b.unsigned_area() - 200.0).abs() <= area_bound(0.0, policy.profile_mm));
+        assert!(a.xor(&b).unsigned_area() <= 2.0 * area_bound(0.0, policy.profile_mm));
     }
-    let middle = original_section_polygons(&changed, 1.37);
+    let middle = product_section(&changed_model, 1.37);
     assert_eq!(middle.0.len(), 2);
-    assert!((middle.unsigned_area() - 195.2).abs() < 1e-5);
+    assert!((middle.unsigned_area() - 195.2).abs() <= area_bound(0.48, policy.profile_mm));
     // Approach each smooth cylindrical tangency from the split side. The
     // smallest true gap is below the manufacturing shape-error budget, but
     // that budget never licenses epsilon-merging the two native components.
@@ -475,17 +527,32 @@ fn off_grid_native_tunnel_split_merge_and_near_tangency_preserve_replayed_materi
             } else {
                 event - delta
             };
-            let section = original_section_polygons(&changed, z);
+            let section = product_section(&changed_model, z);
             let gap = 2.0 * (0.24f64.powi(2) - (z - 1.37).powi(2)).sqrt();
+            assert!(gap > 2.0 * policy.profile_mm);
             assert_eq!(section.0.len(), 2, "event {event}, distance {delta}");
-            assert!((section.unsigned_area() - (200.0 - 10.0 * gap)).abs() < 1e-5);
+            assert!(
+                (section.unsigned_area() - (200.0 - 10.0 * gap)).abs()
+                    <= area_bound(gap, policy.profile_mm),
+                "event {event}, distance {delta}: analytic material exceeds the profile boundary tube"
+            );
+            let mut bounds = section
+                .0
+                .iter()
+                .map(|polygon| geo::BoundingRect::bounding_rect(polygon).unwrap())
+                .collect::<Vec<_>>();
+            bounds.sort_by(|left, right| left.min().x.total_cmp(&right.min().x));
+            assert!(
+                bounds[1].min().x - bounds[0].max().x > 2.0 * policy.profile_mm,
+                "event {event}, distance {delta}: the resolvable native gap must remain open"
+            );
         }
         let outside = if event < 1.37 {
             event - 0.003
         } else {
             event + 0.003
         };
-        assert_eq!(original_section_polygons(&changed, outside).0.len(), 1);
+        assert_eq!(product_section(&changed_model, outside).0.len(), 1);
         let failure = spiling_geometry::section(
             changed.definitions.values().next().unwrap(),
             PlaneMm {
@@ -495,49 +562,56 @@ fn off_grid_native_tunnel_split_merge_and_near_tangency_preserve_replayed_materi
             &cancel,
         )
         .unwrap_err();
-        assert_eq!(failure.code, GeometryErrorCode::DegenerateSection);
+        assert!(matches!(
+            failure.code,
+            GeometryErrorCode::DegenerateSection | GeometryErrorCode::AnalysisIndeterminate
+        ));
     }
 
     let intent = intent(false);
     let unchanged = compile(baseline.input(&intent), &cancel).unwrap();
     let bundle = compile(changed.input(&intent), &cancel).unwrap();
+    assert_eq!(unchanged.provenance.definitions, baseline.stored);
     assert_eq!(bundle.provenance.definitions, changed.stored);
-    assert_eq!(
-        bundle.plan.native_geometry.evidence,
-        PreflightEvidence::Certified
-    );
-    assert!(
-        bundle.plan.native_geometry.achieved_shape_error_mm <= intent.recipe.native_shape_error_mm
-    );
-    assert_eq!(
-        bundle.plan.native_geometry.certified_layer_count,
-        bundle.plan.layers.len() as u32
-    );
-    assert!((bundle.plan.layers.last().unwrap().z_mm - 7.85).abs() < 1e-6);
-    for event in [1.13, 1.61] {
-        assert!(
-            bundle
-                .plan
-                .layers
-                .iter()
-                .any(|layer| (layer.z_mm - event).abs() < 1e-6),
-            "the actual off-grid split/merge must partition the emitted schedule"
+    for result in [&unchanged, &bundle] {
+        assert_eq!(result.provenance.intent, intent);
+        let coverage = &result.plan.native_geometry;
+        let features = &coverage.source_feature_coverage;
+        match coverage.evidence {
+            PreflightEvidence::Certified => assert_eq!(
+                features.disjoint_source_layer_count
+                    + features.invariant_source_union_layer_count
+                    + features.native_interface_complex_layer_count,
+                coverage.certified_layer_count
+            ),
+            PreflightEvidence::Tolerant => {
+                assert_eq!(coverage.height_analysis_count, 0);
+                assert_eq!(coverage.slab_count, 0);
+                assert_eq!(features.disjoint_source_layer_count, 0);
+                assert_eq!(features.invariant_source_union_layer_count, 0);
+                assert_eq!(features.native_interface_complex_layer_count, 0);
+                assert_eq!(features.owned_critical_slab_count, 0);
+                assert_eq!(
+                    coverage.achieved_shape_error_mm,
+                    policy.profile_mm.min(intent.recipe.native_shape_error_mm)
+                );
+            }
+            evidence => panic!("unexpected tunnel material evidence: {evidence:?}"),
+        }
+        assert!(coverage.achieved_shape_error_mm <= intent.recipe.native_shape_error_mm);
+        assert_eq!(
+            coverage.certified_layer_count,
+            result.plan.layers.len() as u32
         );
+        assert!((result.plan.layers.last().unwrap().z_mm - 7.85).abs() < 1e-6);
     }
-    assert_ne!(
-        unchanged
-            .plan
-            .layers
-            .iter()
-            .map(|layer| layer.z_mm)
-            .collect::<Vec<_>>(),
-        bundle
-            .plan
-            .layers
-            .iter()
-            .map(|layer| layer.z_mm)
-            .collect::<Vec<_>>()
-    );
+    let section_error = match bundle.plan.native_geometry.evidence {
+        PreflightEvidence::Certified => {
+            bundle.plan.native_geometry.achieved_shape_error_mm + bundle.plan.sampling_tolerance_mm
+        }
+        PreflightEvidence::Tolerant => policy.profile_mm,
+        evidence => panic!("unexpected tunnel material evidence: {evidence:?}"),
+    };
     let mut split_layers = 0;
     for layer in &bundle.plan.layers {
         let half_gap = if (1.13..1.61).contains(&layer.section_z_mm) {
@@ -548,7 +622,7 @@ fn off_grid_native_tunnel_split_merge_and_near_tangency_preserve_replayed_materi
         };
         assert!(
             (layer.region_coverage.source_section_area_mm2 - (200.0 - 20.0 * half_gap)).abs()
-                < 1e-5
+                <= area_bound(2.0 * half_gap, section_error)
         );
     }
     assert!(
@@ -3098,7 +3172,7 @@ fn new_native_families_use_one_material_planner_and_independent_replay() {
         ),
         ("bspline-box", SurfaceFamily::BSpline, 0.0, 8.0),
     ] {
-        assert_native_family_compile_and_replay(name, family, bed_translation, top);
+        assert_native_family_compile_and_replay(name, family, bed_translation, top, false);
     }
 }
 
@@ -3107,6 +3181,7 @@ fn assert_native_family_compile_and_replay(
     family: spiling_contracts::geometry::SurfaceFamily,
     bed_translation: f64,
     top: f64,
+    supports: bool,
 ) -> crate::ManufacturingResult {
     use spiling_contracts::geometry::SurfaceFamily;
     let cancel = AtomicBool::new(false);
@@ -3120,7 +3195,7 @@ fn assert_native_family_compile_and_replay(
             .any(|face| face.geometry.family == family),
         "{name}"
     );
-    let mut intent = intent(true);
+    let mut intent = intent(supports);
     intent.recipe.layer_height_mm = 0.2;
     intent.recipe.native_shape_error_mm = 0.1;
     let metadata = preflight(&scene.input(&intent), &cancel).unwrap();
@@ -3138,22 +3213,24 @@ fn assert_native_family_compile_and_replay(
     let bundle = compile(scene.input(&intent), &cancel)
         .unwrap_or_else(|failure| panic!("{name}: {failure:?}"));
     assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
+    assert_eq!(bundle.provenance.intent, intent, "{name}");
     assert!(
         (bundle.plan.layers.last().unwrap().z_mm - top).abs() <= 0.000001,
         "{name}"
     );
     let coverage = &bundle.plan.native_geometry;
-    assert_eq!(coverage.evidence, PreflightEvidence::Certified);
+    if supports {
+        assert_eq!(coverage.evidence, PreflightEvidence::Certified, "{name}");
+    } else {
+        assert_eq!(intent.recipe.supports, SupportPolicy::Disabled);
+        assert_eq!(bundle.verification.support_deposition_segments, 0, "{name}");
+    }
     assert_eq!(
         coverage.certified_layer_count,
         bundle.plan.layers.len() as u32
     );
-    assert_eq!(
-        coverage.height_analysis_count,
-        scene.occurrences.len() as u32
-    );
     assert!(coverage.achieved_shape_error_mm <= coverage.requested_shape_error_mm);
-    assert!(coverage.slab_count > 0 && coverage.geometry_work > 0);
+    assert!(coverage.geometry_work > 0);
     assert_eq!(
         coverage.skin_coverage,
         SkinCoverageScope::ScheduledMaterialDistance
@@ -3163,22 +3240,105 @@ fn assert_native_family_compile_and_replay(
         SupportClearanceScope::ContinuousTargetOuterOccupancy
     );
     let features = &coverage.source_feature_coverage;
-    assert_eq!(
-        features.disjoint_source_layer_count
-            + features.invariant_source_union_layer_count
-            + features.native_interface_complex_layer_count,
-        coverage.certified_layer_count,
-        "{name}"
-    );
     assert_eq!(features.invariant_source_union_layer_count, 0, "{name}");
-    if matches!(
-        family,
-        SurfaceFamily::Cone | SurfaceFamily::Sphere | SurfaceFamily::Torus
-    ) {
-        assert!(
-            features.native_interface_complex_layer_count > 0,
-            "{name}: non-product critical cofaces require real native interface evidence"
-        );
+    match coverage.evidence {
+        PreflightEvidence::Certified => {
+            assert_eq!(
+                coverage.height_analysis_count,
+                scene.occurrences.len() as u32
+            );
+            assert!(coverage.slab_count > 0);
+            assert_eq!(
+                features.disjoint_source_layer_count
+                    + features.invariant_source_union_layer_count
+                    + features.native_interface_complex_layer_count,
+                coverage.certified_layer_count,
+                "{name}"
+            );
+            if matches!(
+                family,
+                SurfaceFamily::Cone | SurfaceFamily::Sphere | SurfaceFamily::Torus
+            ) {
+                assert!(
+                    features.native_interface_complex_layer_count > 0,
+                    "{name}: non-product critical cofaces require real native interface evidence"
+                );
+            }
+        }
+        PreflightEvidence::Tolerant => {
+            assert!(
+                !supports,
+                "{name}: tolerant mode cannot supply generated support"
+            );
+            assert_eq!(coverage.height_analysis_count, 0);
+            assert_eq!(coverage.slab_count, 0);
+            assert_eq!(features.disjoint_source_layer_count, 0);
+            assert_eq!(features.native_interface_complex_layer_count, 0);
+            assert_eq!(features.owned_critical_slab_count, 0);
+            assert_eq!(
+                coverage.achieved_shape_error_mm,
+                spiling_geometry::tolerant::TolerantPolicy::default()
+                    .profile_mm
+                    .min(intent.recipe.native_shape_error_mm)
+            );
+        }
+        evidence => panic!("{name}: unexpected material evidence: {evidence:?}"),
+    }
+    if family == SurfaceFamily::Sphere {
+        let surface_error = match coverage.evidence {
+            PreflightEvidence::Certified => {
+                coverage.achieved_shape_error_mm + bundle.plan.sampling_tolerance_mm
+            }
+            PreflightEvidence::Tolerant => {
+                spiling_geometry::tolerant::TolerantPolicy::default().profile_mm
+            }
+            evidence => panic!("{name}: unexpected material evidence: {evidence:?}"),
+        };
+        let area_bound = std::f64::consts::PI * (10.0 * surface_error + surface_error.powi(2));
+        for layer in &bundle.plan.layers {
+            let local_z = layer.section_z_mm - bed_translation;
+            assert!(
+                local_z.abs() < 5.0,
+                "{name}: section must be inside the sphere"
+            );
+            let expected_area = std::f64::consts::PI * (25.0 - local_z.powi(2));
+            assert!(
+                (layer.region_coverage.source_section_area_mm2 - expected_area).abs() <= area_bound,
+                "{name}, layer {}: section must retain the independent radius-5 sphere area",
+                layer.index
+            );
+            let inner_radius = ((5.0 - surface_error).powi(2) - local_z.powi(2))
+                .max(0.0)
+                .sqrt();
+            let outer_radius = ((5.0 + surface_error).powi(2) - local_z.powi(2)).sqrt();
+            let mut extents = [[f64::INFINITY, f64::NEG_INFINITY]; 2];
+            for path in layer.paths.iter().filter(|path| {
+                !matches!(
+                    path.kind,
+                    DepositionKind::Support | DepositionKind::SupportInterface
+                )
+            }) {
+                for edge in path.checked_edges().unwrap() {
+                    for point in edge.points_mm {
+                        for axis in 0..2 {
+                            extents[axis][0] =
+                                extents[axis][0].min(point[axis] - edge.width_mm * 0.5);
+                            extents[axis][1] =
+                                extents[axis][1].max(point[axis] + edge.width_mm * 0.5);
+                        }
+                    }
+                }
+            }
+            let extent_range = (inner_radius - bundle.plan.offset_tolerance_mm)
+                ..=(outer_radius + bundle.plan.offset_tolerance_mm);
+            for [minimum, maximum] in extents {
+                assert!(
+                    extent_range.contains(&(-minimum)) && extent_range.contains(&maximum),
+                    "{name}, layer {} at {local_z}: complete object bead extents [{minimum}, {maximum}] must match {extent_range:?}",
+                    layer.index,
+                );
+            }
+        }
     }
     assert!(
         bundle
@@ -3218,6 +3378,7 @@ fn cone_first_and_last_layers_preserve_closed_material_and_fresh_replay() {
         spiling_contracts::geometry::SurfaceFamily::Cone,
         0.0,
         8.0,
+        true,
     );
     let layers = &bundle.plan.layers;
     assert_eq!(layers.first().unwrap().lower_z_mm, 0.0);

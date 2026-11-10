@@ -2501,9 +2501,9 @@ impl NativeFeatureCoverageSummary {
             .checked_add(self.invariant_source_union_layer_count)
             .and_then(|count| count.checked_add(self.native_interface_complex_layer_count))
             .ok_or_else(|| invalid("source feature layer count overflow"))?;
-        if layers == 0
-            || layers > MAX_PRINT_LAYERS
+        if layers > MAX_PRINT_LAYERS
             || self.owned_critical_slab_count > MAX_PRINT_LAYERS * MAX_OCCURRENCES
+            || (layers == 0 && self.owned_critical_slab_count != 0)
         {
             return Err(invalid("invalid native source feature coverage counts"));
         }
@@ -2536,11 +2536,9 @@ impl NativeGeometryCoverageSummary {
         if !self.achieved_shape_error_mm.is_finite()
             || self.achieved_shape_error_mm < 0.0
             || self.achieved_shape_error_mm > self.requested_shape_error_mm
-            || self.height_analysis_count == 0
             || self.height_analysis_count > MAX_OCCURRENCES
             || self.certified_layer_count == 0
             || self.certified_layer_count > MAX_PRINT_LAYERS
-            || self.slab_count == 0
             || self.slab_count > MAX_PRINT_LAYERS * MAX_OCCURRENCES
             || self.event_count > 4096
             || self.geometry_work == 0
@@ -2548,9 +2546,6 @@ impl NativeGeometryCoverageSummary {
                 self.evidence,
                 PreflightEvidence::Certified | PreflightEvidence::Tolerant
             )
-            || self.slab_count < self.height_analysis_count
-            || u64::from(self.slab_count)
-                > u64::from(self.height_analysis_count) * u64::from(self.certified_layer_count)
         {
             return Err(invalid("invalid native geometry coverage summary"));
         }
@@ -2569,7 +2564,29 @@ impl NativeGeometryCoverageSummary {
                 )
             })
             .ok_or_else(|| invalid("source feature layer count overflow"))?;
-        if feature_layers != self.certified_layer_count
+        let expected_features = match self.evidence {
+            PreflightEvidence::Certified => {
+                if self.height_analysis_count == 0
+                    || self.slab_count < self.height_analysis_count
+                    || u64::from(self.slab_count)
+                        > u64::from(self.height_analysis_count)
+                            * u64::from(self.certified_layer_count)
+                {
+                    return Err(invalid(
+                        "certified geometry requires complete native captures",
+                    ));
+                }
+                self.certified_layer_count
+            }
+            PreflightEvidence::Tolerant => {
+                if self.height_analysis_count != 0 || self.slab_count != 0 {
+                    return Err(invalid("tolerant geometry cannot claim native captures"));
+                }
+                0
+            }
+            _ => return Err(invalid("invalid native geometry evidence")),
+        };
+        if feature_layers != expected_features
             || self.source_feature_coverage.owned_critical_slab_count > self.slab_count
         {
             return Err(invalid(
@@ -4026,9 +4043,13 @@ impl ManufacturingBundle {
         }
         self.provenance.validate()?;
         self.plan.validate(&self.provenance.intent)?;
-        if self.plan.native_geometry.height_analysis_count as usize
-            != self.provenance.occurrences.len()
-        {
+        let expected_native_analyses =
+            if self.plan.native_geometry.evidence == PreflightEvidence::Certified {
+                self.provenance.occurrences.len()
+            } else {
+                0
+            };
+        if self.plan.native_geometry.height_analysis_count as usize != expected_native_analyses {
             return Err(invalid(
                 "native geometry coverage does not bind captured occurrences",
             ));

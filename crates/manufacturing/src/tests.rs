@@ -1889,21 +1889,27 @@ fn housing_horizontal_plate_is_supported_permanent_construction_with_exact_actua
         })
         .collect::<Vec<_>>();
     assert!(!touching.is_empty());
-    assert!(touching.iter().all(|band| matches!(
-        band.disposition,
-        SparseBandDisposition::RetainedFine {
-            reason: SparseBandVeto::ChangingDomain | SparseBandVeto::MandatoryNeighborhood
-        }
-    )));
     assert!(
-        combined
-            .plan
-            .sparse_bands
+        touching
             .iter()
-            .any(|band| band.disposition
-                == SparseBandDisposition::RetainedFine {
-                    reason: SparseBandVeto::MissingLowerAnchor
-                })
+            .all(|band| matches!(band.disposition, SparseBandDisposition::RetainedFine { .. }))
+    );
+    for band in touching {
+        for layer in &combined.plan.layers[band.first_layer as usize..=band.last_layer as usize] {
+            assert!(
+                layer
+                    .paths
+                    .iter()
+                    .filter(|path| path.owner == band.owner)
+                    .all(|path| path.physical_z_mm == [layer.lower_z_mm, layer.z_mm])
+            );
+        }
+    }
+    let returned = reload(&encode(&combined), &combined.program);
+    assert!(
+        verify_bundle(&returned, &AtomicBool::new(false))
+            .unwrap()
+            .verified
     );
     let mut crossing = combined.plan.clone();
     crossing.sparse_bands.push(SparseBandDecision {

@@ -141,10 +141,16 @@ pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
     });
     ui.collapsing("Native geometry evidence",|ui|{
         let n=&summary.native_geometry;let c=&n.source_feature_coverage;
-        ui.label(format!("{:?}: {} occurrence analyses · {} closed slabs · {} certified layers · {} events",n.evidence,n.height_analysis_count,n.slab_count,n.certified_layer_count,n.event_count));
+        if n.evidence == PreflightEvidence::Tolerant {
+            ui.label(format!("Within tolerance · {} sampled layers · {} height events",n.certified_layer_count,n.event_count));
+        } else {
+            ui.label(format!("Certified: {} occurrence analyses · {} closed slabs · {} layers · {} events",n.height_analysis_count,n.slab_count,n.certified_layer_count,n.event_count));
+        }
         ui.label(format!("Requested shape error {:.9} mm; achieved {:.9} mm",n.requested_shape_error_mm,n.achieved_shape_error_mm));
-        ui.label(format!("Disjoint-source layers {}; invariant source-union layers {}; native interface-complex layers {}; original-occurrence critical slabs {}",c.disjoint_source_layer_count,c.invariant_source_union_layer_count,c.native_interface_complex_layer_count,c.owned_critical_slab_count));
-        ui.weak("Per-occurrence certificates do not prove a global union feature bound. Skin coverage uses scheduled material distance; support clearance uses continuous target outer occupancy. Actual strokes alone establish deposition anchors. No swept-tool or physical collision certificate.");
+        if n.evidence == PreflightEvidence::Certified {
+            ui.label(format!("Disjoint-source layers {}; invariant source-union layers {}; native interface-complex layers {}; original-occurrence critical slabs {}",c.disjoint_source_layer_count,c.invariant_source_union_layer_count,c.native_interface_complex_layer_count,c.owned_critical_slab_count));
+        }
+        ui.weak("Sampled geometry is not a native certificate. Actual strokes establish deposition anchors; no swept-tool or physical collision qualification.");
     });
     ui.collapsing("Surface resolution advisories",|ui|{
         let r=&summary.surface_resolution;

@@ -65,6 +65,15 @@ typed budget refusal and cancellation with source reuse. Do not prescribe mesh
 triangle counts or optimizer order where the contract permits alternatives.
 Wire formats, immutable hashes and same-producer determinism remain exact.
 
+Product acceptance exercises the actually eligible geometry route and checks
+material, voids and complete emitted beads against an independent expectation.
+Exact-section diagnostics remain separate from ADR012's tolerant product route;
+do not turn a raw critical-cut refusal into an ordinary slicing failure, or
+claim native certificates from sampled layers. Prepare each native model once
+for related section probes. Preserve distinct topology, source identity,
+serialization and fresh-replay checks rather than repeating nonempty/cache
+assertions or prescribing incidental deposition-role and veto choices.
+
 `pnpm test:geometry-stress` separately runs the unchanged 1640 × 840 × 20 mm,
 512-hole source through consolidated source/bounds/material/void/storage checks
 and its native-support diagnostic. It replaces repeated oversized queries in

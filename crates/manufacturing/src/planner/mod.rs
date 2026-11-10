@@ -2662,14 +2662,13 @@ fn admit_schedule<'model>(
                 })
                 .collect(),
             native_geometry: if admission.tolerant.is_some() {
-                // ADR012: one sampled tolerant section per layer and occurrence.
                 NativeGeometryCoverageSummary {
                     requested_shape_error_mm: recipe.native_shape_error_mm,
                     achieved_shape_error_mm: spiling_geometry::tolerant::TolerantPolicy::default()
                         .profile_mm
                         .min(recipe.native_shape_error_mm),
-                    height_analysis_count: input.occurrences.len() as u32,
-                    slab_count: count * input.occurrences.len() as u32,
+                    height_analysis_count: 0,
+                    slab_count: 0,
                     certified_layer_count: count,
                     event_count: admission.horizontal_events.len() as u32,
                     geometry_work: admission.geometry_work.consumed().max(1),
@@ -2677,7 +2676,7 @@ fn admit_schedule<'model>(
                     skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
                     support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
                     source_feature_coverage: NativeFeatureCoverageSummary {
-                        disjoint_source_layer_count: count,
+                        disjoint_source_layer_count: 0,
                         invariant_source_union_layer_count: 0,
                         native_interface_complex_layer_count: 0,
                         owned_critical_slab_count: 0,
