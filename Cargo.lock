@@ -6907,6 +6907,7 @@ dependencies = [
  "spiling-chunks",
  "spiling-compute",
  "spiling-contracts",
+ "spiling-deposition-routing",
  "spiling-geometry",
  "spiling-surface-fields",
 ]

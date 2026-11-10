@@ -29,8 +29,8 @@ class FrozenJudgeTests(unittest.TestCase):
         self.assertFalse(editable('crates/compute/src/search.rs'))
 
     def test_invalid_incomplete_and_nonfinite_matrix_cannot_score(self):
-        header='case\tsplit\talgorithm\tstatus\ttravel_mm\tstarts\tdeposition_mm\tlongest_chain_mm\twaypoints\tmotion_lower_bound_s\tmachine_time_s\tstarts_bound\ttravel_bound_mm\twork\tplanning_us\n'
-        row='one\tdiscovery\tbaseline\tok\t10\t1\t5\t5\t0\t1\t2\t1\t4\t10\t10\n'
+        header='case\tsplit\talgorithm\tstatus\ttravel_mm\tstarts\tdeposition_mm\tselections\tmotion_lower_bound_s\tmachine_time_s\tstarts_bound\ttravel_bound_mm\twork\tplanning_us\n'
+        row='one\tdiscovery\tbaseline\tok\t10\t1\t5\t0\t1\t2\t1\t4\t10\t10\n'
         with self.assertRaisesRegex(ValueError,'unpaired'):rows(header+row)
         with self.assertRaises(ValueError):rows(header+row+row)
         with self.assertRaisesRegex(ValueError,'finite'):rows(header+row.replace('\t10\t1\t','\tnan\t1\t'))
@@ -79,8 +79,8 @@ class FrozenJudgeTests(unittest.TestCase):
             self.assertEqual((target/r/'src/lib.rs').read_text(),'protected')
 
     def test_failed_complete_census_is_retained_but_never_scored(self):
-        header='case\tsplit\talgorithm\tstatus\ttravel_mm\tstarts\tdeposition_mm\tlongest_chain_mm\twaypoints\tmotion_lower_bound_s\tmachine_time_s\tstarts_bound\ttravel_bound_mm\twork\tplanning_us\n'
-        text=header+'one\tdiscovery\tbaseline\tok\t10\t1\t5\t5\t0\t1\t2\t1\t4\t10\t10\n'+'one\tdiscovery\tcandidate\tno_route\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t10\n'
+        header='case\tsplit\talgorithm\tstatus\ttravel_mm\tstarts\tdeposition_mm\tselections\tmotion_lower_bound_s\tmachine_time_s\tstarts_bound\ttravel_bound_mm\twork\tplanning_us\n'
+        text=header+'one\tdiscovery\tbaseline\tok\t10\t1\t5\t0\t1\t2\t1\t4\t10\t10\n'+'one\tdiscovery\tcandidate\tno_route\t0\t0\t0\t0\t0\t0\t0\t0\t0\t10\n'
         parsed=rows(text,require_valid=False,expected=[('one','discovery')])
         self.assertEqual(len(parsed),2)
         with self.assertRaisesRegex(ValueError,'validity'):grade(parsed)
@@ -99,8 +99,8 @@ class FrozenJudgeTests(unittest.TestCase):
         self.assertEqual(result[-1]['gap_to_bound']['starts_at_bound'],2)
 
     def test_route_below_a_lower_bound_is_a_harness_fault_not_a_score(self):
-        header='case\tsplit\talgorithm\tstatus\ttravel_mm\tstarts\tdeposition_mm\tlongest_chain_mm\twaypoints\tmotion_lower_bound_s\tmachine_time_s\tstarts_bound\ttravel_bound_mm\twork\tplanning_us\n'
-        row='one\tdiscovery\t%s\tok\t10\t1\t5\t5\t0\t1\t2\t%s\t%s\t10\t10\n'
+        header='case\tsplit\talgorithm\tstatus\ttravel_mm\tstarts\tdeposition_mm\tselections\tmotion_lower_bound_s\tmachine_time_s\tstarts_bound\ttravel_bound_mm\twork\tplanning_us\n'
+        row='one\tdiscovery\t%s\tok\t10\t1\t5\t0\t1\t2\t%s\t%s\t10\t10\n'
         rows(header+row%('baseline','1','4')+row%('candidate','1','10'))
         for starts,travel in [('2','4'),('1','11')]:
             with self.assertRaisesRegex(ValueError,'bound'):rows(header+row%('baseline','1','4')+row%('candidate',starts,travel))

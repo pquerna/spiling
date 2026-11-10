@@ -745,7 +745,7 @@ test("native fixed-dual recovery rejects one E8 tick of unpaid or excess debt", 
   }
 });
 
-test("native waste-only epochs retain support, exact feeder debt and zero model work", async () => {
+test("native waste-only groups retain both services while the active tool crosses layers", async () => {
   const native = JSON.parse(
     readFileSync(
       new URL("../../../fixtures/protocol/replay-waste-only.json", import.meta.url),
@@ -768,7 +768,7 @@ test("native waste-only epochs retain support, exact feeder debt and zero model 
     }
   }
   assert.equal(waste, 4);
-  assert.equal(epochs, 4);
+  assert.equal(epochs, 3);
   assert.equal(model, 12);
   const recovery = Array.from({ length: replay.eventCount }, (_, event) => event).find(
     (event) => replay.kind(event) === 12,

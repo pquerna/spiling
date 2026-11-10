@@ -198,6 +198,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         },
     };
     let mut plan = NormalizedPrintPlan {
+        routing_tool_orders: Vec::new(),
         interior_selection: None,
         functional_material_frame: None,
         material_frames: Vec::new(),
@@ -1698,6 +1699,11 @@ fn preferred_seam_exact_ties_use_projected_coordinates_and_prime_position() {
         {
             job.prime_end_mm[1] = y;
         }
+        // Isolate wall entry from path ordering: this test compares prime and
+        // projected-coordinate ties, not a requirement to print walls first.
+        plan.layers[0]
+            .paths
+            .retain(|p| p.owner == Some(DepositionOwner::Wall));
         // Both right vertices project to X5. Raw X must not defeat the exact
         // command-space tie: absent prior motion choose Y1, with high prime
         // choose Y5. A prime just above raw Y3 projects to Y3 and ties at Y1.
@@ -1911,8 +1917,8 @@ fn distributed_seams_share_history_between_walls_within_each_actual_layer() {
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
     assert_eq!(plan.layers[0].paths[0].points_mm[0], [1.0, 1.0, 1.0]);
     assert_eq!(plan.layers[0].paths[1].points_mm[0], [8.0, 8.0, 1.0]);
-    assert_eq!(plan.layers[1].paths[0].points_mm[0], [1.0, 9.0, 2.0]);
-    assert_eq!(plan.layers[1].paths[1].points_mm[0], [8.0, 2.0, 2.0]);
+    assert_eq!(plan.layers[1].paths[0].points_mm[0], [2.0, 8.0, 2.0]);
+    assert_eq!(plan.layers[1].paths[1].points_mm[0], [9.0, 1.0, 2.0]);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
 }
@@ -3401,6 +3407,7 @@ fn fixed_dual_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     refresh_volumes(&intent, &mut plan);
     plan.native_geometry.height_analysis_count = 2;
     plan.native_geometry.slab_count = 4;
+    plan.routing_tool_orders = vec![[0, 1]; plan.layers.len()];
     crate::realization::canonicalize(&mut plan, &intent, &AtomicBool::new(false)).unwrap();
     (intent, plan)
 }
@@ -3463,6 +3470,7 @@ fn distributed_fixed_dual_seams_keep_separate_history_across_layers_and_waste() 
             layer
         })
         .collect();
+    plan.routing_tool_orders = vec![[0, 1]; plan.layers.len()];
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
@@ -3476,11 +3484,20 @@ fn distributed_fixed_dual_seams_keep_separate_history_across_layers_and_waste() 
         [25.0, 25.0],
     ];
     for (layer, xy) in plan.layers.iter().zip(expected) {
-        assert_eq!(layer.paths[0].points_mm[0], [xy[0], xy[1], layer.z_mm]);
-        assert_eq!(
-            layer.paths[1].points_mm[0],
-            [xy[0] + 100.0, xy[1], layer.z_mm]
-        );
+        let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow else {
+            unreachable!()
+        };
+        for tool in 0..2 {
+            let path = layer
+                .paths
+                .iter()
+                .find(|p| job.tool_for_path(p).unwrap() == tool)
+                .unwrap();
+            assert_eq!(
+                path.points_mm[0],
+                [xy[0] + 100.0 * f64::from(tool), xy[1], layer.z_mm]
+            );
+        }
     }
     let program = emit_text(&plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
@@ -3501,6 +3518,10 @@ fn distributed_fixed_dual_seam_ties_use_actual_xyz6_waste_endpoint() {
         unreachable!()
     };
     job.tools[0].waste_line_xy_mm = [[60.0, 23.0], [80.0, 23.000_000_4]];
+    plan.layers[0]
+        .paths
+        .retain(|p| p.owner == Some(DepositionOwner::Wall));
+    refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
     assert_eq!(plan.layers[0].paths[0].points_mm[0], [25.0, 21.0, 1.0]);
@@ -3535,9 +3556,9 @@ fn fixed_dual_golden(model_tool: Option<usize>) {
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     report.validate().unwrap();
     let routing = report.routing.as_ref().unwrap();
-    assert_eq!(routing.selection_count, 4);
+    assert_eq!(routing.selection_count, plan.routing_selection_count());
     assert_eq!(report.deposition_segments, 12);
-    assert_eq!(report.retraction_count, 4);
+    assert_eq!(report.retraction_count, plan.routing_selection_count());
     for tool in &routing.tools {
         let model = model_tool.map_or(6, |active| {
             if usize::from(tool.tool) == active {
@@ -3555,16 +3576,19 @@ fn fixed_dual_golden(model_tool: Option<usize>) {
     let (bytes, bounds) = sink.finish().unwrap();
     let mut descriptor =
         packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report);
-    descriptor.info.tool_epoch_count = 4;
+    descriptor.info.tool_epoch_count = routing.selection_count;
     descriptor.info.waste_count = 4;
     descriptor.info.deposition_count += 4;
     descriptor.info.process_count -= 2; // Both physical feeders remain retracted at shutdown.
-    descriptor.info.event_count += 6;
+    descriptor.info.event_count += routing.selection_count + 4 - 2;
     validate_replay_display(&bytes, &descriptor).unwrap();
     let records = bytes[REPLAY_HEADER_BYTES..]
         .as_chunks::<REPLAY_RECORD_BYTES>()
         .0;
-    assert_eq!(records.iter().filter(|record| record[46] == 14).count(), 4);
+    assert_eq!(
+        records.iter().filter(|record| record[46] == 14).count(),
+        routing.selection_count as usize
+    );
     for record in records.iter().filter(|record| record[46] == 14) {
         assert_eq!(
             record[47], 0,
@@ -3702,6 +3726,7 @@ fn fixed_dual_cycle_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             .paths
             .sort_unstable_by_key(|path| job.tool_for_path(path).unwrap());
     }
+    plan.routing_tool_orders = vec![[0, 1]; plan.layers.len()];
     crate::realization::canonicalize(&mut plan, &intent, &AtomicBool::new(false)).unwrap();
     (intent, plan)
 }
@@ -3754,6 +3779,7 @@ fn physical_cycles_route_same_z_occurrences_independently_in_actual_commands() {
                 .sort_unstable_by_key(|path| job.tool_for_path(path).unwrap());
         }
     }
+    swapped_plan.routing_tool_orders = vec![[0, 1]; swapped_plan.layers.len()];
     crate::realization::canonicalize(&mut swapped_plan, &swapped, &cancel).unwrap();
     assert!(
         verify(&program, &swapped_plan, &swapped, &cancel).is_err(),
@@ -3906,4 +3932,102 @@ fn motion_beyond_display_capacity_is_omitted_without_failing_verification() {
         &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),
     )
     .unwrap();
+}
+
+#[test]
+fn next_generation_scheduler_preserves_deposition_across_input_permutations() {
+    let (intent, mut original) = fixture();
+    original.layers.truncate(1);
+    let mut extra = original.layers[0].paths[1].clone();
+    for point in &mut extra.points_mm {
+        point[1] += 2.;
+    }
+    original.layers[0].paths.push(extra);
+    refresh_volumes(&intent, &mut original);
+    let inventory = |plan: &NormalizedPrintPlan| {
+        let mut edges = Vec::new();
+        for path in &plan.layers[0].paths {
+            for edge in path.checked_edges().unwrap() {
+                let mut endpoints = [
+                    edge.points_mm[0].map(f64::to_bits),
+                    edge.points_mm[1].map(f64::to_bits),
+                ];
+                if path.owner != Some(DepositionOwner::Wall) {
+                    endpoints.sort_unstable();
+                }
+                edges.push(format!(
+                    "{:?}:{:?}:{:?}:{:?}:{:?}",
+                    path.kind,
+                    path.owner,
+                    endpoints,
+                    edge.width_mm.to_bits(),
+                    path.physical_z_mm.map(f64::to_bits)
+                ));
+            }
+        }
+        edges.sort_unstable();
+        edges
+    };
+    let expected = inventory(&original);
+    let cancel = AtomicBool::new(false);
+    for permutation in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        let mut plan = original.clone();
+        plan.layers[0].paths = permutation
+            .map(|i| original.layers[0].paths[i].clone())
+            .into();
+        crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+        assert_eq!(inventory(&plan), expected, "{permutation:?}");
+        let program = emit_text(&plan, &intent, &cancel).unwrap();
+        assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+    }
+}
+
+#[test]
+fn scheduled_free_tool_order_reduces_actual_selections_and_keeps_all_waste() {
+    let (intent, original) = fixed_dual_fixture();
+    let cancel = AtomicBool::new(false);
+    let mut reports = Vec::new();
+    for order in [
+        spiling_deposition_routing::ToolOrder::Fixed,
+        spiling_deposition_routing::ToolOrder::Free,
+    ] {
+        let mut plan = original.clone();
+        crate::realization::canonicalize_with_tool_order(&mut plan, &intent, &cancel, order)
+            .unwrap();
+        let text = emit_text(&plan, &intent, &cancel).unwrap();
+        let report = verify(&text, &plan, &intent, &cancel).unwrap();
+        assert!(report.verified);
+        let routing = report.routing.as_ref().unwrap();
+        for tool in &routing.tools {
+            assert_eq!(tool.waste_deposition_segments, plan.layers.len() as u32);
+            assert_eq!(tool.outstanding_retraction_mm, 0.6);
+        }
+        assert_eq!(routing.selection_count, plan.routing_selection_count());
+        for invalid in [vec![], vec![[0, 0]; plan.layers.len()]] {
+            let mut missing = plan.clone();
+            missing.routing_tool_orders = invalid;
+            assert!(missing.validate(&intent).is_err());
+            assert!(verify(&text, &missing, &intent, &cancel).is_err());
+        }
+        reports.push(report);
+    }
+    let before = reports[0].routing.as_ref().unwrap();
+    let after = reports[1].routing.as_ref().unwrap();
+    assert!(after.selection_count < before.selection_count);
+    assert_eq!(
+        reports[0].deposition_segments,
+        reports[1].deposition_segments
+    );
+    for (a, b) in before.tools.iter().zip(&after.tools) {
+        assert_eq!(a.waste_deposition_segments, b.waste_deposition_segments);
+        assert!((a.model_volume_mm3 - b.model_volume_mm3).abs() < 1e-8);
+        assert!((a.waste_volume_mm3 - b.waste_volume_mm3).abs() < 1e-8);
+    }
 }

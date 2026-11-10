@@ -7,13 +7,16 @@ snapshots, builds, runs and records; it proposes no route and edits no source.
 retained native plan/program pairs into frozen stroke text. It never runs during
 a trial.
 The independent Rust judge, corpus, planner constraints and compiler stay frozen.
-Candidates own the whole route through `solve(Session)`. Both
+Candidates own the scheduling algorithm through `solve(Context)`. Both
 `crates/deposition-routing/src/search.rs` and Rust helper modules under
 `src/search/` may change, including additions/removals. Everything else stays
-frozen. This admits graph construction, CNC pocket/stay-down strategies, robot
-configuration-space portals, Snake-style escape preservation, trail decomposition,
-backtracking, beam search and local repair. Required strokes cannot change; new
-extrusion/scarf/helical construction still needs a separate frozen problem/judge.
+frozen. This admits trail decomposition, dependency-aware construction,
+whole-group local repair and alternative tool sequencing. The production API
+borrows task terminals, physical intervals, entry permissions and prerequisites;
+it returns a checked permutation, tool groups and modeled transition clocks.
+It does not propose new extrusion, machine commands or collision-clear travel.
+New scarf/helical construction and cross-layer production scheduling need their
+own construction and independent actual-program admission.
 This is trusted algorithm code, not a security sandbox.
 
 ```sh
@@ -26,10 +29,13 @@ python3 tools/route-lab/loop.py --root .cache/route-search trial lookahead \
 ```
 
 Use an external memory/CPU/tasks bound around each trial (for example Linux
-`systemd-run --user --scope -p MemoryMax=2G -p TasksMax=128 -p CPUQuota=200%`).
+`systemd-run --user --scope -p MemoryMax=16G -p TasksMax=512 timeout 600`).
 These are small research-fixture bounds, not production workstation limits.
 The command deadline applies to each build/test/run. Cargo uses the frozen pinned
-toolchain, offline dependencies and one build/test worker by default.
+toolchain, offline dependencies and one build/test worker by default. The cohort
+uses the repository's dev profile and its captured package settings for macro
+algorithm comparisons; no release build or release-performance claim is needed.
+The profile and environment overrides are recorded and frozen with the cohort.
 
 `freeze` assembles a small workspace in the cohort: the routing crate, its local
 dependencies `crates/compute` and `crates/contracts`, the repository lockfile
@@ -55,35 +61,26 @@ cohort is frozen; every trial and sealed run must use the same value, and
 receipts record the device the matrix reports. Do not pool cohorts frozen
 with different backends. Local device evidence is not GPU or platform qualification.
 
-The 45-case matrix has four kinds of positive case and one negative:
+The scheduling matrix uses the production API. It retains exact roads, split
+islands, locked paths and nested loops; two seeded junction lattices; fifteen
+captured PrusaSlicer layers/stacks; ten historical native Cathedral web/roof
+captures; and declared rigid-dual/three-tool-changer panels with held-out
+siblings. Fine/coarse two-tool witnesses retain unequal physical intervals and
+roof prerequisites. A contradictory prerequisite cycle must refuse. Former
+head-box/corridor fixtures were specific to the deleted research travel model;
+there is no collision qualification in this cohort.
 
-- **Mechanism fixtures** (17): connected roads, a direction-locked junction/cycle,
-  islands, nested variable-width walls, mixed physical height bands, a tall
-  obstacle, a multi-hop corridor under a ceiling, inside-hole access, incompatible
-  joins, access traps and low-ceiling local lifts, with size/mirror/translation
-  holdouts. They exist to catch missing capability, and have little quality headroom.
-- **Seeded junction lattices** (2): every grid edge is its own stroke, so the
-  fewest uninterrupted starts is a trail-cover problem with a known bound.
-- **Captured slicer layers** (15, `slicer-*`): real PrusaSlicer layers of
-  project-authored shapes: perforated grilles (sparse and top layers), bolted
-  brackets, pin arrays, embossed code plates, fins, a plain block control and two
-  four-layer pin stacks. Walls keep the slicer's direction and seam; fill may
-  reverse. Variable-width walls keep every per-edge width. Stroke order is the
-  slicer's print order, so the frozen input-order control approximates that
-  slicer's sequencing under this lab's travel model. It does not replay the
-  slicer's own travel moves or retraction choices.
-- **Captured Cathedral layers** (10, `cathedral-*`): native web and roof
-  deposition on curved, concave and holed footprints, plus two four-band stacks
-  of 676 and 597 strokes. Captures retain physical intervals and per-edge widths,
-  check path-start order against emitted extrusion runs, and keep walls and
-  bridges directed. Headers bind the historical producer; these are routing
-  inputs, not current-engine or whole-part replay qualification.
-- The sealed cavity must still refuse.
+The independent judge reconstructs inventory, permitted entries, prerequisites,
+barriers, complete mandatory service groups, selection counts and the declared
+travel/service/swap/prewarm clock without calling library pricing/checking code.
+It rejects forged timing annotations as well as missing work. A prewarm lead
+that cannot precede an initial selection produces modeled waiting; this is not
+a measured heating law. Recorded `machine_time_s` excludes station approach,
+thermal dynamics, acceleration and finalization; it is a scheduling estimate,
+not physical print time. Current native product comparisons must use freshly
+emitted programs and their independent accounting.
 
-Each family has a held-out sibling with different dimensions or seed. Pin stacks
-declare a dependency on overlapping material one band below and use a declared
-nozzle-under-block head, so finishing one pin several bands high is admissible
-only where the judge finds clearance. That is a declared model, not a printer.
+Each family has a held-out sibling with different dimensions or seed. Pin stacks retain their captured prerequisites and physical top barriers; this cohort does not reorder production across fine layers or infer support from overlap.
 
 Regenerate captures only to begin a new cohort:
 `python3 tools/route-lab/capture.py` (needs `prusa-slicer`; shapes, slicer
@@ -97,7 +94,7 @@ headroom, not appearance.
 A trial passes formatting, the frozen adversarial tests and the entire matrix
 three times. Every positive must complete and the negative must refuse. The
 judge reconstructs original deposition, dimensions/permissions, dependencies and
-continuous head/box intersection without calling search or planner helpers.
+group/transition timing without calling search or planner helpers.
 The Rust matrix emits a complete census even when a candidate fails a case.
 Complete failed trials are `invalid`, with raw rows retained and no quality grade;
 build failures, timeouts or missing rows are `unknown`. Neither can score. A
@@ -111,27 +108,28 @@ candidate must preserve the matched parent's entire frozen baseline inventory.
 The cohort workspace exists only to isolate this research build from unrelated
 native work; it is not another application runtime.
 
-Grades retain geometric-mean candidate/baseline travel, uninterrupted starts,
-nominal machine time and motion lower bounds, plus every case's ratios and worst
-regression. Machine time is stop-to-stop travel under a declared acceleration plus
-a declared allowance per travel move; it shows when shorter travel does not buy
-time, and is not a firmware or printer model.
+Grades retain geometric-mean candidate/baseline travel, interrupted starts,
+modeled schedule seconds and motion lower bounds, plus every case's ratios and
+worst regression. Schedule seconds include the declared travel/retraction,
+deposition, service, selection and unmet prewarm lead costs. They exclude station
+approach and calibrated motion/thermal dynamics; this is not a firmware or
+printer model.
 
 `gap_to_bound` is absolute headroom, independent of any control: starts over a
 trail-cover bound and travel over a spanning-tree bound. Both are relaxations
-(they ignore widths, locked directions, prerequisites and obstacles), so 1.0
+(they ignore widths, locked directions and prerequisites), so 1.0
 proves optimality and a larger value need not be reachable. A judged route below
 either bound is a harness fault and stops the trial. `planning_us_min3` sums each
 case's least planning time over the three repetitions; the comparison reports its
 ratio to the parent. Charged work is voluntary for custom algorithm code and is
 not a cost measure. A parent
 comparison marks aggregate dominance/tradeoff/equality; that is not automatic
-promotion or a claim of per-case dominance. Longest chains, work counts and
+promotion or a claim of per-case dominance. Selection counts, work counts and
 planning time stay visible. Retain useful Pareto alternatives; no 5% gain gate.
-Timing excludes pressure, acceleration lookahead, tool switching and heating.
+The timing model excludes pressure and acceleration lookahead; swap and prewarm values remain declared estimates.
 
-These are declared planar route fixtures and FP64 envelope checks with permitted
-boundary contact. They do not prove native source occupancy, anchor construction,
+These are declared deposition scheduling fixtures with checked FP64 terminals
+and physical intervals. They do not prove native source occupancy, anchor construction,
 calibrated clearance or physical printability. Native-deposition capture,
 independent emitted-program replay and saved-return/export are mandatory before
 production adoption. Scarf/helical/new-connector construction is not enabled.

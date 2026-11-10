@@ -14,6 +14,7 @@ repository.workspace = true
 spiling-chunks.workspace = true
 spiling-contracts.workspace = true
 spiling-compute.workspace = true
+spiling-deposition-routing.workspace = true
 spiling-geometry.workspace = true
 spiling-surface-fields.workspace = true
 serde_json.workspace = true

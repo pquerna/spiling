@@ -964,7 +964,12 @@ export type NativeGeometryCoverageSummary = { requested_shape_error_mm: number, 
  */
 slab_count: number, certified_layer_count: number, event_count: number, geometry_work: bigint, evidence: PreflightEvidence, source_feature_coverage: NativeFeatureCoverageSummary, skin_coverage: SkinCoverageScope, support_clearance: SupportClearanceScope, };
 
-export type NormalizedPrintPlan = { interior_selection: InteriorSelection | null, functional_material_frame: FunctionalMaterialFrame | null, material_frames: Array<SurfaceColorFrame>, material_domains: Array<ResolvedMaterialDomain>, schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, };
+export type NormalizedPrintPlan = {
+/**
+ * Both mandatory service groups per actual layer for the bounded dual route.
+ * Single-tool plans retain an empty table. Entries are permutations of 0,1.
+ */
+routing_tool_orders: Array<[number, number]>, interior_selection: InteriorSelection | null, functional_material_frame: FunctionalMaterialFrame | null, material_frames: Array<SurfaceColorFrame>, material_domains: Array<ResolvedMaterialDomain>, schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, };
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 

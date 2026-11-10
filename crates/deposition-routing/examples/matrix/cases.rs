@@ -1,265 +1,248 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
+//! Frozen lab panel: declared fixtures, seeded lattices, captured slicer and
+//! native layers, and declared multi-tool machines. None is machine support.
 use spiling_deposition_routing::*;
 
+pub const DEPOSITION_MM_S: f64 = 40.;
+
+pub struct Stroke {
+    pub points: Vec<PointMm>,
+    pub reversible: bool,
+    /// Closed path whose seam may be any vertex.
+    pub free_seam: bool,
+    pub tool: u32,
+    pub barrier: u32,
+    pub prerequisites: Vec<u32>,
+    pub physical_z_mm: [f64; 2],
+}
+impl Stroke {
+    pub fn length(&self) -> f64 {
+        self.points.windows(2).map(|p| distance(p[0], p[1])).sum()
+    }
+}
+pub fn distance(a: PointMm, b: PointMm) -> f64 {
+    (a[0] - b[0]).hypot(a[1] - b[1]).hypot(a[2] - b[2])
+}
 pub struct Case {
     pub name: &'static str,
     pub split: &'static str,
-    pub problem: Problem,
+    pub strokes: Vec<Stroke>,
+    pub machine: Machine,
+    pub order: ToolOrder,
     pub feasible: bool,
 }
-pub fn point(x: f64, y: f64, z: f64) -> PointMm {
-    PointMm([x, y, z])
+impl Case {
+    pub fn tasks(&self) -> Vec<Task<'_>> {
+        self.strokes
+            .iter()
+            .map(|s| Task {
+                ends: if s.free_seam {
+                    Ends::Loop {
+                        seams: &s.points[..s.points.len() - 1],
+                    }
+                } else {
+                    Ends::Open {
+                        first: s.points[0],
+                        last: *s.points.last().unwrap(),
+                        reversible: s.reversible,
+                    }
+                },
+                tool: s.tool,
+                barrier: s.barrier,
+                prerequisites: &s.prerequisites,
+                duration_s: s.length() / DEPOSITION_MM_S,
+                seam_policy: None,
+                physical_z_mm: s.physical_z_mm,
+            })
+            .collect()
+    }
 }
-pub fn bounds(min: [f64; 3], max: [f64; 3]) -> BoundsMm {
-    BoundsMm { min, max }
-}
-fn stroke(id: u64, points: Vec<PointMm>, height: f64) -> Stroke {
-    let z = points[0].0[2];
-    let edges = points.len() - 1;
+
+fn stroke(points: Vec<PointMm>) -> Stroke {
+    let upper = points.first().map_or(0.2, |p| p[2]);
     Stroke {
-        id: StrokeId(id),
-        points_mm: points,
-        widths_mm: vec![0.6; edges],
-        physical_z_mm: [z - height, z],
-        process: ProcessKey {
-            tool: 0,
-            material: 0,
-            continuity_group: 0,
-        },
+        physical_z_mm: [upper - 0.2, upper],
+        points,
+        reversible: true,
+        free_seam: false,
+        tool: 0,
+        barrier: 0,
         prerequisites: vec![],
-        allow_reverse: true,
-        allow_seam_rotation: false,
     }
 }
-fn base() -> Problem {
-    Problem {
-        strokes: vec![],
-        start_mm: point(-4., -4., 1.),
-        envelope_mm: bounds([-5., -5., 0.], [60., 60., 20.]),
-        head_mm: vec![bounds([-0.3, -0.3, 0.], [0.3, 0.3, 2.])],
-        obstacles_mm: vec![],
-        waypoints_mm: vec![],
-        travel_speed_mm_s: 100.,
-        deposition_speed_mm_s: 40.,
+/// Declared single-tool lab machine with thresholded retraction.
+fn single(start: PointMm) -> Machine {
+    Machine {
+        start: Some(start),
+        initial_tool: Some(0),
+        tools: 1,
+        travel: Travel {
+            speed_mm_s: 150.,
+            lift_mm: 0.,
+            retraction: Some(Retraction {
+                minimum_mm: 2.,
+                seconds: 0.1,
+                lift_mm: 0.,
+            }),
+        },
+        change: ToolChange {
+            swap_s: 0.,
+            prewarm_lead_s: None,
+            service_s: 0.,
+            service: Service::WhenUsed,
+            stations_xy: vec![None],
+        },
     }
 }
-fn connected(n: usize) -> Problem {
-    let mut p = base();
-    // Input order is intentionally interleaved; geometry remains one chain.
-    for i in (0..n).step_by(2).chain((1..n).step_by(2)) {
-        p.strokes.push(stroke(
-            i as u64,
-            vec![
-                point(i as f64 * 2., 0., 0.2),
-                point((i + 1) as f64 * 2., 0., 0.2),
-            ],
-            0.2,
-        ));
-    }
-    p
+fn chain(n: usize) -> Vec<Stroke> {
+    // Input order is interleaved; geometry is one exact chain.
+    (0..n)
+        .step_by(2)
+        .chain((1..n).step_by(2))
+        .map(|i| {
+            stroke(vec![
+                [i as f64 * 2., 0., 0.2],
+                [(i + 1) as f64 * 2., 0., 0.2],
+            ])
+        })
+        .collect()
 }
-fn islands(n: usize) -> Problem {
-    let mut p = base();
-    for i in 0..n {
-        let x = if i % 2 == 0 { 0. } else { 30. };
-        let y = (i / 2) as f64 * 2.;
-        p.strokes.push(stroke(
-            i as u64,
-            vec![point(x, y, 0.2), point(x + 6., y, 0.2)],
-            0.2,
-        ));
-    }
-    p
+fn islands(n: usize) -> Vec<Stroke> {
+    (0..n)
+        .map(|i| {
+            let x = if i % 2 == 0 { 0. } else { 30. };
+            let y = (i / 2) as f64 * 2.;
+            stroke(vec![[x, y, 0.2], [x + 6., y, 0.2]])
+        })
+        .collect()
 }
-fn walls() -> Problem {
-    let mut p = base();
-    for (id, x, y, side) in [(0, 0., 0., 24.), (1, 4., 4., 16.), (2, 8., 8., 8.)] {
-        let mut s = stroke(
-            id,
-            vec![
-                point(x, y, 0.2),
-                point(x + side, y, 0.2),
-                point(x + side, y + side, 0.2),
-                point(x, y + side, 0.2),
-                point(x, y, 0.2),
-            ],
-            0.2,
-        );
-        s.allow_reverse = false;
-        s.allow_seam_rotation = id != 0;
-        s.widths_mm = vec![0.55, 0.65, 0.7, 0.6];
-        p.strokes.push(s);
-    }
-    p
+fn nested_loops() -> Vec<Stroke> {
+    [(0., 24.), (4., 16.), (8., 8.)]
+        .into_iter()
+        .map(|(o, side)| Stroke {
+            reversible: false,
+            free_seam: true,
+            ..stroke(vec![
+                [o, o, 0.2],
+                [o + side, o, 0.2],
+                [o + side, o + side, 0.2],
+                [o, o + side, 0.2],
+                [o, o, 0.2],
+            ])
+        })
+        .collect()
 }
-fn mixed() -> Problem {
-    let mut p = base();
-    for i in 0..4 {
-        let mut fine = stroke(
-            i,
-            vec![
-                point(0., i as f64 * 3., 0.2),
-                point(12., i as f64 * 3., 0.2),
-            ],
-            0.2,
-        );
-        fine.widths_mm[0] = 0.45;
-        p.strokes.push(fine);
-        let mut coarse = stroke(
-            10 + i,
-            vec![
-                point(0., i as f64 * 3., 0.6),
-                point(12., i as f64 * 3., 0.6),
-            ],
-            0.4,
-        );
-        coarse.prerequisites = vec![StrokeId(i)];
-        coarse.widths_mm[0] = 0.8;
-        p.strokes.push(coarse);
-    }
-    p
-}
-fn tall() -> Problem {
-    let mut p = base();
-    p.start_mm = point(0., 10., 0.2);
-    p.obstacles_mm.push(bounds([9., 0., 0.], [11., 20., 8.]));
-    p.strokes.push(stroke(
-        0,
-        vec![point(20., 10., 0.2), point(25., 10., 0.2)],
-        0.2,
-    ));
-    p
-}
-fn corridor() -> Problem {
-    let mut p = base();
-    p.start_mm = point(0., 2., 1.);
-    p.envelope_mm = bounds([-1., -1., 0.], [25., 21., 6.]);
-    // A ceiling prohibits lifting over the alternating walls.
-    p.obstacles_mm = vec![
-        bounds([-1., -1., 4.], [25., 21., 6.]),
-        bounds([6., -1., 0.], [8., 14., 4.]),
-        bounds([14., 6., 0.], [16., 21., 4.]),
-    ];
-    p.waypoints_mm = vec![
-        point(5., 16., 1.),
-        point(10., 16., 1.),
-        point(12., 3., 1.),
-        point(18., 3., 1.),
-    ];
-    p.strokes.push(stroke(
-        0,
-        vec![point(21., 16., 1.), point(23., 16., 1.)],
-        0.2,
-    ));
-    p
-}
-fn cavity(feasible: bool) -> Problem {
-    let mut p = base();
-    p.start_mm = point(0., 5., 0.2);
-    p.obstacles_mm = vec![
-        bounds([4., 0., 0.], [5., 10., 10.]),
-        bounds([4., 0., 0.], [16., 1., 10.]),
-        bounds([15., 0., 0.], [16., 10., 10.]),
-        bounds([4., 9., 0.], [16., 10., 10.]),
-    ];
-    if !feasible {
-        p.obstacles_mm.push(bounds([4., 0., 8.], [16., 10., 10.]));
-    }
-    p.strokes.push(stroke(
-        0,
-        vec![point(8., 5., 0.2), point(12., 5., 0.2)],
-        0.2,
-    ));
-    p
-}
-fn junction_cycle() -> Problem {
-    let mut p = base();
-    let edges = [
+fn locked_cycle() -> Vec<Stroke> {
+    [
         ((0., 0.), (-3., -3.)),
         ((0., 0.), (10., 0.)),
         ((10., 0.), (10., 10.)),
         ((10., 10.), (0., 10.)),
         ((0., 10.), (0., 0.)),
-    ];
-    for (i, (a, b)) in edges.into_iter().enumerate() {
-        let mut s = stroke(
-            i as u64,
-            vec![point(a.0, a.1, 0.2), point(b.0, b.1, 0.2)],
-            0.2,
-        );
-        s.allow_reverse = false;
-        p.strokes.push(s);
-    }
-    p
+    ]
+    .into_iter()
+    .map(|(a, b)| Stroke {
+        reversible: false,
+        ..stroke(vec![[a.0, a.1, 0.2], [b.0, b.1, 0.2]])
+    })
+    .collect()
 }
-fn incompatible() -> Problem {
-    let mut p = connected(5);
-    for (i, s) in p.strokes.iter_mut().enumerate() {
-        s.process.continuity_group = i as u32;
-        s.widths_mm[0] = 0.45 + i as f64 * 0.04;
+struct Random(u64);
+impl Random {
+    fn new(seed: u64) -> Self {
+        Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
     }
-    p
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
 }
-fn permuted(mut p: Problem) -> Problem {
-    // Mirror/translation in XY preserves explicit widths and actual Z bands.
-    let transform = |v: PointMm| point(40. - v.0[0], v.0[1] + 10., v.0[2]);
-    p.start_mm = transform(p.start_mm);
-    for s in &mut p.strokes {
-        for v in &mut s.points_mm {
-            *v = transform(*v);
+/// Seeded junction graph: every kept lattice edge is its own reversible stroke.
+fn lattice(n: usize, seed: u64) -> Vec<Stroke> {
+    let mut random = Random::new(seed);
+    let mut strokes = Vec::new();
+    for i in 0..n {
+        for j in 0..n {
+            let at = |i: usize, j: usize| [i as f64 * 4., j as f64 * 4., 0.2];
+            for (a, b) in [(i + 1, j), (i, j + 1)] {
+                if a < n && b < n && !random.next().is_multiple_of(5) {
+                    strokes.push(stroke(vec![at(i, j), at(a, b)]));
+                }
+            }
         }
     }
-    p.strokes.reverse();
-    p
+    strokes
 }
-fn access_trap() -> Problem {
-    let mut p = base();
-    p.start_mm = point(0., 0., 0.2);
-    p.head_mm = vec![bounds([-1., -1., 0.], [1., 1., 2.])];
-    let mut tall = stroke(0, vec![point(0., 0., 0.6), point(0., 6., 0.6)], 0.6);
-    tall.widths_mm[0] = 0.8;
-    let low = stroke(1, vec![point(1., 6., 0.2), point(1., 0., 0.2)], 0.2);
-    p.strokes = vec![tall, low];
-    p
+/// Seeded short strokes on several layers, spread over `tools` tools.
+fn field(
+    tools: u32,
+    layers: u32,
+    per_layer: usize,
+    seed: u64,
+    skip: Option<(u32, u32)>,
+) -> Vec<Stroke> {
+    let mut random = Random::new(seed);
+    let mut strokes = Vec::new();
+    for layer in 0..layers {
+        let z = 0.2 * (layer + 1) as f64;
+        for _ in 0..per_layer {
+            let tool = (random.next() % tools as u64) as u32;
+            let x = (random.next() % 400) as f64 * 0.1;
+            let y = (random.next() % 400) as f64 * 0.1;
+            if skip == Some((layer, tool)) {
+                continue;
+            }
+            strokes.push(Stroke {
+                tool,
+                barrier: layer,
+                ..stroke(vec![[x, y, z], [x + 3., y + 1., z]])
+            });
+        }
+    }
+    strokes
 }
-fn local_lift(shift: f64) -> Problem {
-    let mut p = base();
-    p.start_mm = point(0. + shift, 5., 0.2);
-    p.envelope_mm.max[2] = 6.;
-    p.obstacles_mm = vec![
-        bounds([4. + shift, 0., 0.], [6. + shift, 10., 1.]),
-        bounds([-5., -5., 4.], [60., 60., 6.]),
-    ];
-    p.strokes = vec![stroke(
-        0,
-        vec![point(12. + shift, 5., 0.2), point(16. + shift, 5., 0.2)],
-        0.2,
-    )];
-    p
+/// Declared rigid dual carriage: both tools serviced at their waste lane on
+/// every layer; a selection is modelled at two seconds.
+fn dual_carriage() -> Machine {
+    Machine {
+        start: None,
+        change: ToolChange {
+            swap_s: 2.,
+            prewarm_lead_s: None,
+            service_s: 0.5,
+            service: Service::EveryBarrier,
+            stations_xy: vec![Some([-6., 0.]), Some([-6., 12.])],
+        },
+        tools: 2,
+        travel: Travel {
+            speed_mm_s: 150.,
+            lift_mm: 0.,
+            retraction: None,
+        },
+        initial_tool: Some(0),
+    }
 }
-/// Declared reference head: a nozzle below a wider heater block. Not calibrated.
-fn captured(text: &str) -> Problem {
-    // PrusaSlicer roles, then native Spiling plan path kinds.
-    const ROLES: [&str; 11] = [
-        "Perimeter",
-        "External_perimeter",
-        "Overhang_perimeter",
-        "Internal_infill",
-        "Solid_infill",
-        "Top_solid_infill",
-        "perimeter",
-        "sparse_fill",
-        "bottom_skin",
-        "top_skin",
-        "bridge",
-    ];
-    let mut p = base();
-    p.head_mm = vec![
-        bounds([-0.3, -0.3, 0.], [0.3, 0.3, 2.]),
-        bounds([-8., -8., 2.], [8., 8., 12.]),
-    ];
-    p.travel_speed_mm_s = 150.;
+/// Declared three-tool changer: tools appear only when used, a swap is
+/// modelled at seven seconds and an incoming tool pre-warms twenty ahead.
+fn changer() -> Machine {
+    Machine {
+        tools: 3,
+        change: ToolChange {
+            swap_s: 7.,
+            prewarm_lead_s: Some(20.),
+            service_s: 0.,
+            service: Service::WhenUsed,
+            stations_xy: vec![None; 3],
+        },
+        ..single([-5., -5., 0.2])
+    }
+}
+fn captured(text: &str) -> Vec<Stroke> {
+    let mut strokes: Vec<Stroke> = Vec::new();
+    let mut tops: Vec<f64> = Vec::new();
     for line in text.lines().filter(|l| !l.starts_with('#')) {
         let mut words = line.split(' ');
         let kind = words.next().unwrap();
@@ -268,312 +251,269 @@ fn captured(text: &str) -> Problem {
         };
         match kind {
             "S" => {
-                let id = number(&mut words) as u64;
-                let z = [number(&mut words), number(&mut words)];
+                let _id = number(&mut words);
+                let low = number(&mut words);
+                let top = number(&mut words);
+                tops.push(top);
                 let locked = number(&mut words) != 0.;
-                let role = words.next().unwrap();
-                p.strokes.push(Stroke {
-                    id: StrokeId(id),
-                    points_mm: vec![],
-                    widths_mm: vec![],
-                    physical_z_mm: z,
-                    process: ProcessKey {
-                        tool: 0,
-                        material: 0,
-                        continuity_group: ROLES
-                            .iter()
-                            .position(|r| *r == role)
-                            .unwrap_or(ROLES.len())
-                            as u32,
-                    },
-                    prerequisites: vec![],
-                    allow_reverse: !locked,
-                    allow_seam_rotation: false,
+                strokes.push(Stroke {
+                    physical_z_mm: [low, top],
+                    reversible: !locked,
+                    ..stroke(vec![])
                 });
             }
             "P" => {
-                let s = p.strokes.last_mut().unwrap();
-                let v = point(number(&mut words), number(&mut words), s.physical_z_mm[1]);
-                let width = number(&mut words);
-                if s.points_mm.last() != Some(&v) {
-                    if !s.points_mm.is_empty() {
-                        s.widths_mm.push(width);
-                    }
-                    s.points_mm.push(v);
+                let z = *tops.last().unwrap();
+                let v = [number(&mut words), number(&mut words), z];
+                let s = strokes.last_mut().unwrap();
+                if s.points.last() != Some(&v) {
+                    s.points.push(v);
                 }
             }
             "R" => {
-                let id = StrokeId(number(&mut words) as u64);
-                let s = p.strokes.iter_mut().find(|s| s.id == id).unwrap();
-                s.prerequisites = words.map(|w| StrokeId(w.parse().unwrap())).collect();
+                let id = number(&mut words) as usize;
+                strokes[id].prerequisites = words.map(|w| w.parse().unwrap()).collect();
             }
             _ => panic!("unknown captured record"),
         }
     }
-    let all = || p.strokes.iter().flat_map(|s| &s.points_mm);
-    let low = |axis: usize| all().map(|v| v.0[axis]).fold(f64::INFINITY, f64::min);
-    let high = |axis: usize| all().map(|v| v.0[axis]).fold(f64::NEG_INFINITY, f64::max);
-    p.envelope_mm = bounds(
-        [low(0) - 10., low(1) - 10., 0.],
-        [high(0) + 10., high(1) + 10., 20.],
-    );
-    p.start_mm = point(low(0) - 5., low(1) - 5., p.strokes[0].physical_z_mm[1]);
-    p
-}
-/// Seeded junction graph: every lattice edge is its own reversible stroke.
-fn lattice(n: usize, seed: u64) -> Problem {
-    let mut p = base();
-    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    let mut keep = || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        !state.is_multiple_of(5)
-    };
-    for i in 0..n {
-        for j in 0..n {
-            let at = |i: usize, j: usize| point(i as f64 * 4., j as f64 * 4., 0.2);
-            for (a, b) in [(i + 1, j), (i, j + 1)] {
-                if a < n && b < n && keep() {
-                    let id = p.strokes.len() as u64;
-                    p.strokes.push(stroke(id, vec![at(i, j), at(a, b)], 0.2));
-                }
-            }
-        }
+    // One barrier per distinct physical top, as production schedules layers.
+    let mut levels = tops.clone();
+    levels.sort_by(f64::total_cmp);
+    levels.dedup();
+    for (s, top) in strokes.iter_mut().zip(&tops) {
+        s.barrier = levels.iter().position(|l| l == top).unwrap() as u32;
     }
-    p
+    strokes
+}
+fn start_of(strokes: &[Stroke]) -> PointMm {
+    let all = || strokes.iter().flat_map(|s| &s.points);
+    let low = |axis: usize| all().map(|v| v[axis]).fold(f64::INFINITY, f64::min);
+    [low(0) - 5., low(1) - 5., low(2)]
 }
 /// Sealed-panel isometry: axis swap, mirror and translation chosen by seed.
-/// Axis-aligned boxes and exact shared endpoints are preserved.
-fn sealed(mut p: Problem, seed: u64) -> Problem {
+fn sealed(case: &mut Case, seed: u64) {
     let swap = seed & 1 == 1;
     let mirror = seed & 2 == 2;
     let shift = [(seed >> 2) % 7, (seed >> 5) % 7].map(|v| v as f64 * 0.5);
-    let center = p.envelope_mm.min[0] + p.envelope_mm.max[0];
-    let turn = |v: [f64; 3]| {
-        let x = if mirror { center - v[0] } else { v[0] };
+    let turn = |v: PointMm| {
+        let x = if mirror { 100. - v[0] } else { v[0] };
         let (x, y) = if swap { (v[1], x) } else { (x, v[1]) };
         [x + shift[0], y + shift[1], v[2]]
     };
-    let turn_box = |b: BoundsMm, f: &dyn Fn([f64; 3]) -> [f64; 3]| {
-        let (a, c) = (f(b.min), f(b.max));
-        bounds(
-            std::array::from_fn(|i| a[i].min(c[i])),
-            std::array::from_fn(|i| a[i].max(c[i])),
-        )
-    };
-    let relative = |v: [f64; 3]| {
-        let x = if mirror { -v[0] } else { v[0] };
-        if swap {
-            [v[1], x, v[2]]
-        } else {
-            [x, v[1], v[2]]
-        }
-    };
-    p.start_mm = PointMm(turn(p.start_mm.0));
-    p.envelope_mm = turn_box(p.envelope_mm, &turn);
-    for b in &mut p.obstacles_mm {
-        *b = turn_box(*b, &turn);
-    }
-    for b in &mut p.head_mm {
-        *b = turn_box(*b, &relative);
-    }
-    for v in &mut p.waypoints_mm {
-        *v = PointMm(turn(v.0));
-    }
-    for s in &mut p.strokes {
-        for v in &mut s.points_mm {
-            *v = PointMm(turn(v.0));
+    for s in &mut case.strokes {
+        for v in &mut s.points {
+            *v = turn(*v);
         }
     }
-    p
+    case.machine.start = case.machine.start.map(turn);
+    for station in case.machine.change.stations_xy.iter_mut().flatten() {
+        let v = turn([station[0], station[1], 0.]);
+        *station = [v[0], v[1]];
+    }
 }
-fn case(name: &'static str, split: &'static str, problem: Problem, feasible: bool) -> Case {
+fn case(
+    name: &'static str,
+    split: &'static str,
+    strokes: Vec<Stroke>,
+    machine: Option<Machine>,
+) -> Case {
+    let machine = machine.unwrap_or_else(|| single(start_of(&strokes)));
+    let order = if machine.tools > 1 {
+        ToolOrder::Free
+    } else {
+        ToolOrder::Fixed
+    };
     Case {
         name,
         split,
-        problem,
-        feasible,
+        strokes,
+        machine,
+        order,
+        feasible: true,
     }
+}
+fn refused() -> Case {
+    // Each stroke requires the other: no order exists, and none may be invented.
+    let mut strokes = islands(2);
+    strokes[0].prerequisites = vec![1];
+    strokes[1].prerequisites = vec![0];
+    Case {
+        feasible: false,
+        ..case("prerequisite-cycle", "negative", strokes, None)
+    }
+}
+macro_rules! file {
+    ($name:literal) => {
+        captured(include_str!(concat!("captured/", $name, ".txt")))
+    };
 }
 /// `seed` 0 is the frozen visible panel. Any other value regenerates seeded
 /// families and applies an isometry, for promotion checks unseen by an editor.
+fn fine_coarse(scale: f64) -> Vec<Stroke> {
+    let mut paths = vec![
+        stroke(vec![[0., 0., 0.2], [12. * scale, 0., 0.2]]),
+        stroke(vec![[0., 0., 0.4], [12. * scale, 0., 0.4]]),
+        stroke(vec![[1., 1., 0.4], [11. * scale, 1., 0.4]]),
+        stroke(vec![[0., 0., 0.6], [12. * scale, 0., 0.6]]),
+    ];
+    paths[1].barrier = 1;
+    paths[1].prerequisites = vec![0];
+    paths[2].barrier = 1;
+    paths[2].tool = 1;
+    paths[2].physical_z_mm = [0., 0.4];
+    paths[2].prerequisites = vec![0];
+    paths[3].barrier = 2;
+    paths[3].prerequisites = vec![1, 2];
+    paths
+}
+
 pub fn panel(seed: u64) -> Vec<Case> {
     let mut cases = vec![
-        case("access-trap", "discovery", access_trap(), true),
-        case("local-lift", "discovery", local_lift(0.), true),
-        case("mirrored-access", "holdout", permuted(access_trap()), true),
-        case("translated-lift", "holdout", local_lift(7.), true),
-        case("junction-cycle", "discovery", junction_cycle(), true),
-        case("chain", "discovery", connected(12), true),
-        case("islands", "discovery", islands(12), true),
-        case("nested-walls", "discovery", walls(), true),
-        case("fine-coarse", "discovery", mixed(), true),
-        case("obstacle-lift", "discovery", tall(), true),
-        case("multi-hop", "discovery", corridor(), true),
-        case("inside-hole", "discovery", cavity(true), true),
-        case("incompatible-joins", "discovery", incompatible(), true),
-        case("dense-fragments", "holdout", islands(32), true),
-        case("mirrored-chain", "holdout", permuted(connected(17)), true),
-        case("mirrored-mixed", "holdout", permuted(mixed()), true),
-        case("mirrored-walls", "holdout", permuted(walls()), true),
-        case("sealed-hole", "negative", cavity(false), false),
-        case("lattice", "discovery", lattice(7, 11 ^ seed), true),
-        case("lattice-other", "holdout", lattice(8, 29 ^ seed), true),
         case(
-            "slicer-block",
+            "chain",
             "discovery",
-            captured(include_str!("captured/block.txt")),
-            true,
+            chain(12),
+            Some(single([-4., -4., 0.2])),
         ),
         case(
-            "slicer-grille",
-            "discovery",
-            captured(include_str!("captured/grille.txt")),
-            true,
-        ),
-        case(
-            "slicer-grille-wide",
+            "mirrored-chain",
             "holdout",
-            captured(include_str!("captured/grille-wide.txt")),
-            true,
+            chain(17).into_iter().rev().collect(),
+            Some(single([40., 6., 0.2])),
+        ),
+        case("islands", "discovery", islands(12), None),
+        case("dense-fragments", "holdout", islands(32), None),
+        case(
+            "nested-loops",
+            "discovery",
+            nested_loops(),
+            Some(single([30., 30., 0.2])),
+        ),
+        case("locked-cycle", "discovery", locked_cycle(), None),
+        case("lattice", "discovery", lattice(7, 11 ^ seed), None),
+        case("lattice-other", "holdout", lattice(8, 29 ^ seed), None),
+        case(
+            "dual-carriage",
+            "discovery",
+            field(2, 6, 14, 3 ^ seed, Some((2, 1))),
+            Some(dual_carriage()),
         ),
         case(
-            "slicer-grille-top",
-            "discovery",
-            captured(include_str!("captured/grille-top.txt")),
-            true,
+            "dual-carriage-other",
+            "holdout",
+            field(2, 9, 10, 17 ^ seed, Some((4, 0))),
+            Some(dual_carriage()),
         ),
+        case(
+            "changer-three",
+            "discovery",
+            field(3, 6, 12, 5 ^ seed, Some((3, 2))),
+            Some(changer()),
+        ),
+        case(
+            "changer-three-other",
+            "holdout",
+            field(3, 8, 9, 23 ^ seed, Some((1, 0))),
+            Some(changer()),
+        ),
+        case(
+            "fine-coarse-tools",
+            "discovery",
+            fine_coarse(1.),
+            Some(dual_carriage()),
+        ),
+        case(
+            "fine-coarse-tools-other",
+            "holdout",
+            fine_coarse(1.37),
+            Some(dual_carriage()),
+        ),
+        case("slicer-block", "discovery", file!("block"), None),
+        case("slicer-grille", "discovery", file!("grille"), None),
+        case("slicer-grille-wide", "holdout", file!("grille-wide"), None),
+        case("slicer-grille-top", "discovery", file!("grille-top"), None),
         case(
             "slicer-grille-top-wide",
             "holdout",
-            captured(include_str!("captured/grille-top-wide.txt")),
-            true,
+            file!("grille-top-wide"),
+            None,
         ),
-        case(
-            "slicer-bracket",
-            "discovery",
-            captured(include_str!("captured/bracket.txt")),
-            true,
-        ),
+        case("slicer-bracket", "discovery", file!("bracket"), None),
         case(
             "slicer-bracket-long",
             "holdout",
-            captured(include_str!("captured/bracket-long.txt")),
-            true,
+            file!("bracket-long"),
+            None,
         ),
-        case(
-            "slicer-pins",
-            "discovery",
-            captured(include_str!("captured/pins.txt")),
-            true,
-        ),
-        case(
-            "slicer-pins-wide",
-            "holdout",
-            captured(include_str!("captured/pins-wide.txt")),
-            true,
-        ),
-        case(
-            "slicer-pin-stack",
-            "discovery",
-            captured(include_str!("captured/pin-stack.txt")),
-            true,
-        ),
+        case("slicer-pins", "discovery", file!("pins"), None),
+        case("slicer-pins-wide", "holdout", file!("pins-wide"), None),
+        case("slicer-pin-stack", "discovery", file!("pin-stack"), None),
         case(
             "slicer-pin-stack-wide",
             "holdout",
-            captured(include_str!("captured/pin-stack-wide.txt")),
-            true,
+            file!("pin-stack-wide"),
+            None,
         ),
-        case(
-            "slicer-code",
-            "discovery",
-            captured(include_str!("captured/code.txt")),
-            true,
-        ),
-        case(
-            "slicer-code-other",
-            "holdout",
-            captured(include_str!("captured/code-other.txt")),
-            true,
-        ),
-        case(
-            "slicer-fins",
-            "discovery",
-            captured(include_str!("captured/fins.txt")),
-            true,
-        ),
-        case(
-            "slicer-fins-many",
-            "holdout",
-            captured(include_str!("captured/fins-many.txt")),
-            true,
-        ),
-        case(
-            "cathedral-web",
-            "discovery",
-            captured(include_str!("captured/cathedral-web.txt")),
-            true,
-        ),
+        case("slicer-code", "discovery", file!("code"), None),
+        case("slicer-code-other", "holdout", file!("code-other"), None),
+        case("slicer-fins", "discovery", file!("fins"), None),
+        case("slicer-fins-many", "holdout", file!("fins-many"), None),
+        case("cathedral-web", "discovery", file!("cathedral-web"), None),
         case(
             "cathedral-web-round",
             "holdout",
-            captured(include_str!("captured/cathedral-web-round.txt")),
-            true,
+            file!("cathedral-web-round"),
+            None,
         ),
-        case(
-            "cathedral-roof",
-            "discovery",
-            captured(include_str!("captured/cathedral-roof.txt")),
-            true,
-        ),
+        case("cathedral-roof", "discovery", file!("cathedral-roof"), None),
         case(
             "cathedral-roof-neck",
             "holdout",
-            captured(include_str!("captured/cathedral-roof-neck.txt")),
-            true,
+            file!("cathedral-roof-neck"),
+            None,
         ),
         case(
             "cathedral-roof-u",
             "discovery",
-            captured(include_str!("captured/cathedral-roof-u.txt")),
-            true,
+            file!("cathedral-roof-u"),
+            None,
         ),
         case(
             "cathedral-roof-l",
             "holdout",
-            captured(include_str!("captured/cathedral-roof-l.txt")),
-            true,
+            file!("cathedral-roof-l"),
+            None,
         ),
         case(
             "cathedral-roof-round",
             "discovery",
-            captured(include_str!("captured/cathedral-roof-round.txt")),
-            true,
+            file!("cathedral-roof-round"),
+            None,
         ),
         case(
             "cathedral-roof-annulus",
             "holdout",
-            captured(include_str!("captured/cathedral-roof-annulus.txt")),
-            true,
+            file!("cathedral-roof-annulus"),
+            None,
         ),
         case(
             "cathedral-stack",
             "discovery",
-            captured(include_str!("captured/cathedral-stack.txt")),
-            true,
+            file!("cathedral-stack"),
+            None,
         ),
         case(
             "cathedral-stack-u",
             "holdout",
-            captured(include_str!("captured/cathedral-stack-u.txt")),
-            true,
+            file!("cathedral-stack-u"),
+            None,
         ),
+        refused(),
     ];
     if seed != 0 {
         for c in &mut cases {
-            c.problem = sealed(c.problem.clone(), seed);
+            sealed(c, seed);
         }
     }
     cases

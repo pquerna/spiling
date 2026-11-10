@@ -552,6 +552,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             verifier_version: "5".into(),
         },
         plan: NormalizedPrintPlan {
+            routing_tool_orders: Vec::new(),
             interior_selection: None,
             functional_material_frame: None,
             material_frames: Vec::new(),
