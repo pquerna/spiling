@@ -11,22 +11,36 @@ geometry is unchanged; it never inserts extrusion across a gap. `continuous`
 means exact compatible endpoints without travel, not calibrated pressure or
 firmware lookahead. Physical Z intervals, not layer numbers, define compatibility.
 
-Travel uses a checked visibility graph over caller-supplied waypoints plus a high
-plane proposal. Clearance uses continuous FP64 segment intersection against the
-Minkowski-expanded declared head/obstacle boxes and earlier bead boxes. Boxes are
-conservative approximations; boundary-only contact is permitted by this model.
-This is not native material authority, a certified numerical predicate, calibrated
-head geometry, physical collision freedom or machine readiness. Dependency edges
-are supplied requirements, not an independently inferred deposition-anchor proof.
-`NoRoute` means this search did not find a complete route in the declared graph;
-it is not a proof that the part cannot be manufactured. Resource/cancel/input
-errors remain distinct. Greedy ordering can miss a feasible complete schedule.
+The editable algorithm owns a complete route. `Session` exposes immutable scene
+geometry, checked prefixes, ready orientation/seam choices, arbitrary proposed
+travel portals, segment-clearance queries and custom step admission. A candidate
+can build a graph, backtrack, use a beam/frontier, plan pockets or perform bounded
+local repair; it need not use the prepared choices. `src/search/` may contain new,
+changed or removed Rust helper modules. A fresh frozen replay checks every returned
+step before the independently implemented matrix judge checks it again.
 
-Caller-sized `Limits` and cancellation bound search. This first reference
-implementation intentionally scans candidates/obstacles directly; the benchmark
-records charged work and timing before spatial-index or lookahead changes.
-Scarf ramps, new connectors, flow/thermal/tool-change realization, helical paths
-and production integration need their own construction/verification contracts.
+The frozen input-order control uses bounded depth-first recovery and local-height
+portals. It is a reproducible reference, not an optimal or complete solver. Travel
+primitives use a checked visibility graph over caller and candidate portals plus a
+high plane proposal. Continuous FP64 intersection uses Minkowski-expanded declared
+head/obstacle boxes and earlier bead boxes. Boundary-only contact is permitted.
+These are conservative nominal boxes, not native material authority, a certified
+predicate, calibrated head geometry, physical collision freedom or machine
+readiness. Supplied dependencies are not inferred deposition-anchor proofs.
+`NoRoute` means the bounded search found no complete route; it is not global
+manufacturing impossibility. Resource/cancel/input errors remain distinct.
+
+Caller-sized `Limits` bound charged work, input edges, travel portals and requested
+live search prefixes. Search and final replay each have a `work` allowance; reported
+work includes both, at most twice that allowance. This reserve lets optional search
+return an incumbent after exhausting its own allowance. Cancellation still aborts.
+Candidate code is trusted Rust with process permissions, not a sandbox: external
+memory/tasks/time limits remain mandatory. Prefix clones copy route/occupancy
+metadata but borrow source geometry. Search charges structural work; work units
+are not elapsed CPU instructions or a hard allocation bound. This research
+implementation scans candidates/obstacles directly. Scarf ramps, new extrusion
+connectors, thermal/tool-change realization, helical paths and native integration
+need separate construction/verification contracts.
 
 Run `cargo test -p spiling-deposition-routing --all-targets` or
 `cargo run -p spiling-deposition-routing --example route_matrix --release`.
@@ -34,4 +48,5 @@ The matrix and independent judge live under `examples/matrix/`; they reconstruct
 inventory, permissions, dependencies, travel binding and complete segment/head
 clearance independently of planner helpers. They are declared Rust route fixtures,
 not accepted BREP imports. [The research harness](../../tools/route-lab/README.md)
-freezes these files and permits edits only to `src/search.rs`.
+freezes these files and permits edits only to `src/search.rs` and Rust modules
+under `src/search/`.

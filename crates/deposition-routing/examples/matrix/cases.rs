@@ -213,8 +213,57 @@ fn permuted(mut p: Problem) -> Problem {
     p.strokes.reverse();
     p
 }
+fn access_trap() -> Problem {
+    let mut p = base();
+    p.start_mm = point(0., 0., 0.2);
+    p.head_mm = vec![bounds([-1., -1., 0.], [1., 1., 2.])];
+    let mut tall = stroke(0, vec![point(0., 0., 0.6), point(0., 6., 0.6)], 0.6);
+    tall.widths_mm[0] = 0.8;
+    let low = stroke(1, vec![point(1., 6., 0.2), point(1., 0., 0.2)], 0.2);
+    p.strokes = vec![tall, low];
+    p
+}
+fn local_lift(shift: f64) -> Problem {
+    let mut p = base();
+    p.start_mm = point(0. + shift, 5., 0.2);
+    p.envelope_mm.max[2] = 6.;
+    p.obstacles_mm = vec![
+        bounds([4. + shift, 0., 0.], [6. + shift, 10., 1.]),
+        bounds([-5., -5., 4.], [60., 60., 6.]),
+    ];
+    p.strokes = vec![stroke(
+        0,
+        vec![point(12. + shift, 5., 0.2), point(16. + shift, 5., 0.2)],
+        0.2,
+    )];
+    p
+}
 pub fn matrix() -> Vec<Case> {
     vec![
+        Case {
+            name: "access-trap",
+            split: "discovery",
+            problem: access_trap(),
+            feasible: true,
+        },
+        Case {
+            name: "local-lift",
+            split: "discovery",
+            problem: local_lift(0.),
+            feasible: true,
+        },
+        Case {
+            name: "mirrored-access",
+            split: "holdout",
+            problem: permuted(access_trap()),
+            feasible: true,
+        },
+        Case {
+            name: "translated-lift",
+            split: "holdout",
+            problem: local_lift(7.),
+            feasible: true,
+        },
         Case {
             name: "junction-cycle",
             split: "discovery",

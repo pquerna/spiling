@@ -5,6 +5,7 @@
 
 mod clearance;
 mod planner;
+mod reference;
 mod search;
 mod travel;
 
@@ -93,6 +94,8 @@ pub struct Limits {
     pub work: u64,
     pub edges: usize,
     pub waypoints: usize,
+    /// Maximum live search prefixes requested by the caller; external memory limits remain required.
+    pub frontier_states: usize,
 }
 struct Meter<'a> {
     used: u64,
@@ -118,18 +121,21 @@ pub(crate) fn bead_boxes(stroke: &Stroke) -> impl Iterator<Item = BoundsMm> + '_
         .points_mm
         .windows(2)
         .zip(&stroke.widths_mm)
-        .map(|(p, w)| BoundsMm {
-            min: [
-                p[0].0[0].min(p[1].0[0]) - w / 2.,
-                p[0].0[1].min(p[1].0[1]) - w / 2.,
-                stroke.physical_z_mm[0],
-            ],
-            max: [
-                p[0].0[0].max(p[1].0[0]) + w / 2.,
-                p[0].0[1].max(p[1].0[1]) + w / 2.,
-                stroke.physical_z_mm[1],
-            ],
-        })
+        .map(|(p, w)| bead_bounds(p[0], p[1], *w, stroke.physical_z_mm))
+}
+pub(crate) fn bead_bounds(a: PointMm, b: PointMm, width: f64, z: [f64; 2]) -> BoundsMm {
+    BoundsMm {
+        min: [
+            a.0[0].min(b.0[0]) - width / 2.,
+            a.0[1].min(b.0[1]) - width / 2.,
+            z[0],
+        ],
+        max: [
+            a.0[0].max(b.0[0]) + width / 2.,
+            a.0[1].max(b.0[1]) + width / 2.,
+            z[1],
+        ],
+    }
 }
 /// Original edge indexes and ordered points; widths never detach from their edge.
 pub(crate) fn traversal(

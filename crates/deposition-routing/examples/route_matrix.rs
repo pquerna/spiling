@@ -11,6 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "case\tsplit\talgorithm\tstatus\ttravel_mm\tstarts\tdeposition_mm\tlongest_chain_mm\twaypoints\tmotion_lower_bound_s\twork\tplanning_us"
     );
     let cancel = AtomicBool::new(false);
+    let mut failed = false;
     for case in cases::matrix() {
         for (name, router) in [
             (
@@ -26,14 +27,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     work: 100_000_000,
                     edges: 100_000,
                     waypoints: 512,
+                    frontier_states: 128,
                 },
                 &cancel,
             );
             let us = start.elapsed().as_micros();
             match result {
                 Ok(route) if case.feasible => {
-                    let score = judge::inspect(&case.problem, &route)
-                        .map_err(|why| format!("{} {name}: {why}", case.name))?;
+                    let score = match judge::inspect(&case.problem, &route) {
+                        Ok(score) => score,
+                        Err(why) => {
+                            eprintln!("{} {name}: {why}", case.name);
+                            println!(
+                                "{}\t{}\t{name}\tinvalid_route\t0\t0\t0\t0\t0\t0\t{}\t{us}",
+                                case.name, case.split, route.work
+                            );
+                            failed = true;
+                            continue;
+                        }
+                    };
                     println!(
                         "{}\t{}\t{name}\tok\t{:.9}\t{}\t{:.9}\t{:.9}\t{}\t{:.9}\t{}\t{}",
                         case.name,
@@ -52,11 +64,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "{}\t{}\t{name}\texpected_refusal\t0\t0\t0\t0\t0\t0\t0\t{us}",
                     case.name, case.split
                 ),
-                other => return Err(format!("{} {name}: unexpected {other:?}", case.name).into()),
+                other => {
+                    let status = match &other {
+                        Err(Error::NoRoute) => "no_route",
+                        Err(Error::Resource) => "resource",
+                        Err(Error::Cancelled) => "cancelled",
+                        Err(Error::InvalidInput) => "invalid_input",
+                        Ok(_) => "unexpected_success",
+                    };
+                    eprintln!("{} {name}: {status}", case.name);
+                    println!(
+                        "{}\t{}\t{name}\t{status}\t0\t0\t0\t0\t0\t0\t0\t{us}",
+                        case.name, case.split
+                    );
+                    failed = true;
+                }
             }
         }
     }
-    Ok(())
+    if failed {
+        Err("matrix contains failed or unknown results".into())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -67,17 +97,25 @@ mod tests {
             work: 100_000_000,
             edges: 100_000,
             waypoints: 512,
+            frontier_states: 128,
         }
     }
     #[test]
     fn complete_matrix_and_inaccessible_boundary() {
-        main().unwrap();
+        for case in cases::matrix() {
+            let result = plan_input_order(&case.problem, limits(), &AtomicBool::new(false));
+            if case.feasible {
+                judge::inspect(&case.problem, &result.unwrap()).unwrap();
+            } else {
+                assert!(matches!(result, Err(Error::NoRoute)));
+            }
+        }
     }
     #[test]
     fn judge_rejects_deleted_duplicate_locked_and_false_continuation() {
         let cases = cases::matrix();
         let p = &cases.iter().find(|c| c.name == "chain").unwrap().problem;
-        let valid = plan(p, limits(), &AtomicBool::new(false)).unwrap();
+        let valid = plan_input_order(p, limits(), &AtomicBool::new(false)).unwrap();
         let mut bad = valid.clone();
         bad.steps.pop();
         assert!(judge::inspect(p, &bad).is_err());
@@ -92,7 +130,7 @@ mod tests {
             .find(|c| c.name == "nested-walls")
             .unwrap()
             .problem;
-        let mut bad = plan(p, limits(), &AtomicBool::new(false)).unwrap();
+        let mut bad = plan_input_order(p, limits(), &AtomicBool::new(false)).unwrap();
         bad.steps[0].reverse = true;
         assert!(judge::inspect(p, &bad).is_err());
     }
@@ -104,7 +142,7 @@ mod tests {
             .find(|c| c.name == "obstacle-lift")
             .unwrap()
             .problem;
-        let mut bad = plan(p, limits(), &AtomicBool::new(false)).unwrap();
+        let mut bad = plan_input_order(p, limits(), &AtomicBool::new(false)).unwrap();
         let step = &mut bad.steps[0];
         step.travel_mm = vec![step.travel_mm[0], *step.travel_mm.last().unwrap()];
         assert_eq!(
@@ -116,7 +154,7 @@ mod tests {
             .find(|c| c.name == "fine-coarse")
             .unwrap()
             .problem;
-        let mut bad = plan(p, limits(), &AtomicBool::new(false)).unwrap();
+        let mut bad = plan_input_order(p, limits(), &AtomicBool::new(false)).unwrap();
         let coarse = bad
             .steps
             .iter()

@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Spiling contributors
 # SPDX-License-Identifier: OSL-3.0
 import unittest
-from loop import verify_source, rows, grade, standalone_manifest
+from loop import verify_source, rows, grade, standalone_manifest, overlay_algorithm, trial_target
+from pathlib import Path
+import tempfile
 import tomllib
 
 
@@ -15,7 +17,10 @@ class FrozenJudgeTests(unittest.TestCase):
 
     def test_only_algorithm_may_change(self):
         original={'src/search.rs':'old','examples/matrix/judge.rs':'judge'}
-        verify_source(original,{**original,'src/search.rs':'new'})
+        verify_source(original,{**original,'src/search.rs':'new','src/search/beam.rs':'helper'})
+        verify_source({**original,'src/search/old.rs':'old'},original)
+        for name in ['Cargo.toml','src/search/config.json','src/travel.rs','src/search.py']:
+            with self.assertRaises(ValueError):verify_source(original,{**original,name:'changed'})
         with self.assertRaisesRegex(ValueError,'frozen'):
             verify_source(original,{**original,'examples/matrix/judge.rs':'weaker'})
         with self.assertRaises(ValueError):verify_source(original,{'src/search.rs':'new'})
@@ -38,6 +43,36 @@ class FrozenJudgeTests(unittest.TestCase):
         result=grade(panel)[-1]['metrics']['travel_mm']
         self.assertFalse(result['relative_comparison_complete'])
         self.assertIsNone(result['geometric_mean_ratio'])
+
+    def test_trial_targets_isolate_paths_and_source_even_with_old_timestamps(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);a=root/'a';b=root/'b';a.mkdir();b.mkdir()
+            (a/'search.rs').write_text('one');(b/'search.rs').write_text('one')
+            original=trial_target(root/'target',a)
+            self.assertNotEqual(original,trial_target(root/'target',b))
+            (a/'search.rs').write_text('two')
+            self.assertNotEqual(original,trial_target(root/'target',a))
+
+    def test_overlay_replaces_helper_inventory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source=Path(temporary)/'source';target=Path(temporary)/'target'
+            for root in (source,target):(root/'src/search').mkdir(parents=True)
+            (source/'src/search.rs').write_text('new')
+            (source/'src/search/beam.rs').write_text('beam')
+            (target/'src/search/stale.rs').write_text('stale')
+            (target/'src/lib.rs').write_text('protected')
+            overlay_algorithm(source,target)
+            self.assertFalse((target/'src/search/stale.rs').exists())
+            self.assertEqual((target/'src/search/beam.rs').read_text(),'beam')
+            self.assertEqual((target/'src/lib.rs').read_text(),'protected')
+
+    def test_failed_complete_census_is_retained_but_never_scored(self):
+        header='case\tsplit\talgorithm\tstatus\ttravel_mm\tstarts\tdeposition_mm\tlongest_chain_mm\twaypoints\tmotion_lower_bound_s\twork\tplanning_us\n'
+        text=header+'one\tdiscovery\tbaseline\tok\t10\t1\t5\t5\t0\t1\t10\t10\n'+'one\tdiscovery\tcandidate\tno_route\t0\t0\t0\t0\t0\t0\t0\t10\n'
+        parsed=rows(text,require_valid=False,expected=[('one','discovery')])
+        self.assertEqual(len(parsed),2)
+        with self.assertRaisesRegex(ValueError,'validity'):grade(parsed)
+        with self.assertRaisesRegex(ValueError,'omitted'):rows(text,require_valid=False,expected=[('one','discovery'),('two','holdout')])
 
     def test_directional_case_regression_remains_visible(self):
         panel=[]

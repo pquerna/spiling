@@ -7,6 +7,7 @@ pub(crate) fn path(
     built: &[BoundsMm],
     from: PointMm,
     to: PointMm,
+    portals: &[PointMm],
     meter: &mut Meter<'_>,
 ) -> Result<Option<Vec<PointMm>>, Error> {
     if clearance::clear(problem, built, from, to, meter)? {
@@ -19,7 +20,7 @@ pub(crate) fn path(
     // Checked visibility graph: supplied portals plus one conservative high
     // plane proposal. A ceiling can invalidate that plane; never teleport.
     let mut nodes = vec![from, to];
-    nodes.extend(problem.waypoints_mm.iter().copied());
+    nodes.extend(problem.waypoints_mm.iter().chain(portals).copied());
     let top = problem
         .obstacles_mm
         .iter()
