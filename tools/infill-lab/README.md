@@ -27,6 +27,7 @@ Production adoption requires a separately reviewed construction contract and
 complete engine/emitter/verifier journey, not a changed research badge.
 
 ```sh
+cargo build --locked -p spiling-engine -p spiling-cli -p spiling-workbench
 cargo build --locked -p spiling-manufacturing --example roof_support --features roof-research
 python tools/infill-lab/roof_support.py --root "$COHORT" capture --bin target/debug
 python tools/infill-lab/roof_support.py --root "$COHORT" freeze

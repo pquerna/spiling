@@ -28,6 +28,10 @@ def report(root):
                "frontier": [{key: row[key] for key in ("name", "volume_ratio", "motion_ratio", "starts_ratio", "policy")} for row in front],
                "final_audit": [row for row in rows if row["split"] == "holdout"],
                "all_trials": rows}
+    control_cases = {case["case"]: case for row in training if row["policy"]["family"] == "control" for case in row["cases"]}
+    support_tradeoffs = [{"name": row["name"], "extra_roof_span_mm": max(
+        (case["max_roof_bridge_mm"] - control_cases[case["case"]]["max_roof_bridge_mm"] for case in row["cases"]), default=0.0)} for row in training]
+    summary["support_tradeoffs"] = support_tradeoffs
     (root / "summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
     colors = {name: index for index, name in enumerate(sorted({row["policy"]["family"] for row in candidates}))}
     minimum_x = min(row["volume_ratio"] for row in candidates) - 0.012
@@ -53,6 +57,19 @@ def report(root):
     if len(ordered) > 1:
         points = " ".join(f"{point(row)[0]:.2f},{point(row)[1]:.2f}" for row in ordered)
         marks.insert(0, f'<polyline points="{points}" fill="none" stroke="var(--primary)" stroke-width="1.5"/>')
+    support_marks = []
+    maximum_extra = max(0.1, max(item["extra_roof_span_mm"] for item in support_tradeoffs)) * 1.12
+    support_by_name = {item["name"]: item["extra_roof_span_mm"] for item in support_tradeoffs}
+    for index in range(6):
+        value = maximum_extra * index / 5
+        support_marks.append(f'<text x="55" y="{354 - 58 * index}" text-anchor="end">{value:.2f}</text>')
+        support_marks.append(f'<text x="{65 + 116 * index}" y="374" text-anchor="middle">{100*(minimum_x + (1.015-minimum_x)*index/5):.1f}%</text>')
+    for row in training:
+        horizontal = point(row)[0]
+        vertical = 350 - 290 * support_by_name[row["name"]] / maximum_extra
+        color = f'var(--chart-{colors[row["policy"]["family"]] % 6 + 1})'
+        title = html.escape(f'{row["name"]}: worst extra roof span {support_by_name[row["name"]]:.6f} mm')
+        support_marks.append(f'<circle cx="{horizontal:.2f}" cy="{vertical:.2f}" r="5" fill="{color}" opacity=".75"><title>{title}</title></circle>')
     table = []
     seen = set()
     for row in sorted(front, key=lambda entry: (entry["volume_ratio"], entry["motion_ratio"])):
@@ -74,6 +91,8 @@ def report(root):
     page += '<svg viewBox="0 0 710 420" role="img" aria-label="Pareto frontier of Cathedral material and ideal motion"><path d="M65 55V350H650" fill="none" stroke="var(--border)"/>' + "".join(marks) + '<text x="355" y="406" text-anchor="middle">Complete-object deposited material (% of native control)</text><text transform="translate(16 215) rotate(-90)" text-anchor="middle">Ideal modeled motion (% of control)</text></svg>'
     page += '<div class="legend">' + "".join(f'<span><i class="key" style="background:var(--chart-{index % 6 + 1})"></i>{html.escape(family)}</span>' for family, index in colors.items()) + '</div>'
     page += '<table><thead><tr><th>Pareto policy</th><th>Material saved</th><th>Modeled time saved</th><th>Starts saved</th></tr></thead><tbody>' + "".join(table) + '</tbody></table>'
+    page += '<h3>Support margin is not free</h3><p>The cost frontier uses the fixed process bridge limit. This separate view exposes the largest increase in roof span versus each native control; it is <strong>not a stiffness or strength estimate</strong>.</p>'
+    page += '<svg viewBox="0 0 710 420" role="img" aria-label="Material saving versus consumed roof bridge margin"><path d="M65 55V350H650" fill="none" stroke="var(--border)"/>' + "".join(support_marks) + '<text x="355" y="406" text-anchor="middle">Complete-object deposited material (% of native control)</text><text transform="translate(16 215) rotate(-90)" text-anchor="middle">Worst additional roof span (mm)</text></svg>'
     page += '<div class="note">Frozen hard gates: retain every web/seed/joint, shell and skin; analytic complete-stroke lower support at actual physical Z; no new unauthorized bridge process or worsened inherited warning. No strength or machine-time claim. Modified subsets are research candidates, <strong>not native-replayed production artifacts</strong>. Lifecycle, acceleration, pressure and future routing changes are excluded from the motion model.</div>'
     page += '<h3>Reserved-shape final audit</h3><table><thead><tr><th>Finalist</th><th>Reserved case</th><th>Material saved</th><th>Modeled time saved</th><th>Worst roof bridge</th></tr></thead><tbody>' + "".join(details) + '</tbody></table>'
     page += f'<small>Judge {digest[:16]} · {len(summary["failed_trials"])} retained failed trials · ' + html.escape(", ".join(summary["failed_trials"]) or "no candidate failures") + '</small></body></html>'

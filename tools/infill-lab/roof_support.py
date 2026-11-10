@@ -145,13 +145,18 @@ def capture(root, binaries, only):
 
 def freeze(root):
     contexts = {}
+    producers = set()
     for name, *_, split in CASES:
         path = root / "captures" / name / "context.json"
         data = json.loads(path.read_text())
         if not data["baseline_native_replayed"]:
             raise ValueError("unverified native control")
+        producers.add(json.dumps({"engine_build": data["engine_build"], "bin_sha256": data["bin_sha256"]}, sort_keys=True))
         contexts[name] = {"sha256": file_hash(path), "split": split}
+    if len(producers) != 1:
+        raise ValueError("mixed native producers require separate cohorts")
     write(root / "freeze.json", {"schema": 1, "contexts": contexts, "sources": source_inventory(),
+                                 "producer": json.loads(next(iter(producers))),
                                  "build_environment": build_environment(),
                                  "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO).decode().strip(),
                                  "rustc": subprocess.check_output(["rustc", "-V"], cwd=REPO).decode().strip(),

@@ -136,3 +136,16 @@ def test_frozen_judge_change_is_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(roof_support, "source_inventory", lambda: {"judge.py": "changed"})
     with pytest.raises(ValueError, match="frozen judge"):
         roof_support.checked(tmp_path)
+
+
+def test_freeze_refuses_mixed_native_producers(tmp_path, monkeypatch):
+    import json
+    import roof_support
+    monkeypatch.setattr(roof_support, "CASES", [("first", "train"), ("second", "holdout")])
+    for name in ("first", "second"):
+        folder = tmp_path / "captures" / name
+        folder.mkdir(parents=True)
+        (folder / "context.json").write_text(json.dumps(dict(baseline_native_replayed=True, engine_build="same",
+            bin_sha256={"spiling-engine": name, "spiling-cli": "same"})))
+    with pytest.raises(ValueError, match="mixed native"):
+        roof_support.freeze(tmp_path)
